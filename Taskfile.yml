@@ -21,6 +21,10 @@ tasks:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
     cmd: cargo test --workspace
 
+  audit:
+    desc: Enforce crate dependency direction from the spec
+    cmd: bash scripts/audit-deps.sh
+
   ci:
     desc: The full local gate; CI mirrors exactly this
     cmds:
@@ -35,7 +39,3 @@ tasks:
       - task: ci
       - git add -A
       - git commit {{.CLI_ARGS}}
-
-  audit:
-    desc: Enforce crate dependency direction from the spec
-    cmd: bash scripts/audit-deps.sh
