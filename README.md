@@ -1,6 +1,6 @@
 # view
 
-A terminal-first modal editor with a modern, coherent UI — powered by an
+A terminal-first modal editor with a modern, coherent UI, powered by an
 embedded, pinned Neovim. Your `init.lua`, plugins, LSP servers, and treesitter
 setup run unmodified, because a real Neovim runs them.
 
@@ -8,11 +8,11 @@ setup run unmodified, because a real Neovim runs them.
 
 ## Why
 
-- **Painless migration** — real Neovim is the engine; compatibility is total
+- **Painless migration**: real Neovim is the engine; compatibility is total
   by construction, not reimplementation.
-- **Fast where you feel it** — native Rust rendering, pickers, and UI that
+- **Fast where you feel it**: native Rust rendering, pickers, and UI that
   never jank on plugin Lua; measured against Neovim, budgets enforced in CI.
-- **Modern out of the box** — one design system for messages, popups,
+- **Modern out of the box**: one design system for messages, popups,
   command line, statusline, and notifications. No plugin patchwork required
   (yours still works).
 
