@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/view",
+    "crates/view-core",
+    "crates/view-engine",
+    "crates/view-surface",
+    "crates/view-native",
+    "crates/view-ai",
+    "crates/view-tui",
+    "crates/view-oracle",
+    "crates/view-bench",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/tj-smith47/view"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"

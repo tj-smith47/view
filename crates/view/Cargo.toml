@@ -1,0 +1,13 @@
+[package]
+name = "view"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "view"
+path = "src/main.rs"
+
+[lints]
+workspace = true
