@@ -77,6 +77,22 @@ impl EngineHandle {
     ///
     /// Never panics. Errors on the internal reader thread (I/O, decode) cause
     /// the thread to exit cleanly, sending `Closed` to any pending requests.
+    ///
+    /// # Notification receiver lifetime
+    ///
+    /// The reader thread sends notifications to the returned `Receiver`
+    /// without buffering elsewhere. If the receiver is dropped, the next
+    /// `notif_tx.send` fails and the reader thread exits its loop — after
+    /// that, every in-flight and future [`request`](Self::request) call
+    /// fails with [`EngineError::Closed`] instead of hanging, since nothing
+    /// remains to read responses off the wire. Keep the receiver alive (or
+    /// drain it) for the lifetime of the handle.
+    ///
+    /// The reader and writer threads spawned here are detached: `start`
+    /// does not return join handles, and there is no shutdown signal beyond
+    /// dropping the notification receiver or closing the underlying
+    /// reader/writer. Orderly shutdown is the responsibility of the owning
+    /// Engine type, which controls the lifetime of the pipe endpoints.
     pub fn start(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
@@ -156,6 +172,14 @@ impl EngineHandle {
     ///
     /// This function blocks until the response is received. A response is
     /// never starved by a flood of notifications on the same connection.
+    ///
+    /// # msgid wraparound
+    ///
+    /// The correlation id is a `u32` allocated via a monotonically
+    /// increasing counter and wraps at `u32::MAX`. Wraparound is not
+    /// guarded against: it takes over four billion requests to occur, which
+    /// is acceptable for an interactive editor session and not worth the
+    /// extra bookkeeping to prevent.
     pub fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, EngineError> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
@@ -168,13 +192,24 @@ impl EngineHandle {
             method: method.to_owned(),
             params,
         };
-        {
-            let mut w = self.writer.lock().map_err(|_| EngineError::Closed)?;
-            rmpv::encode::write_value(&mut *w, &msg.to_value())
-                .map_err(|e| EngineError::Io(std::io::Error::other(e)))?;
-            w.flush()?;
+        if let Err(e) = self.write_request(&msg) {
+            // the reader thread will never see this msgid now, so nothing
+            // will ever remove the waiter; drop it ourselves or it leaks
+            // for the life of the handle
+            if let Ok(mut p) = self.pending.lock() {
+                p.remove(&msgid);
+            }
+            return Err(e);
         }
         rx.recv().map_err(|_| EngineError::Closed)?
+    }
+
+    fn write_request(&self, msg: &RpcMessage) -> Result<(), EngineError> {
+        let mut w = self.writer.lock().map_err(|_| EngineError::Closed)?;
+        rmpv::encode::write_value(&mut *w, &msg.to_value())
+            .map_err(|e| EngineError::Io(std::io::Error::other(e)))?;
+        w.flush()?;
+        Ok(())
     }
 }
 
@@ -260,22 +295,14 @@ mod tests {
             error: Value::Nil,
             result: Value::from(1),
         });
-        // Spawn a collector thread that will receive notifications while the
-        // request is being processed. This thread must receive all 10,000
-        // notifications even though a response is also being sent.
-        let flood = std::thread::spawn(move || {
-            let mut count = 0usize;
-            while let Ok(note) = n.recv_timeout(std::time::Duration::from_millis(500)) {
-                assert_eq!(note.method, "redraw");
-                count += 1;
-                if count == 10_000 {
-                    break;
-                }
-            }
-            count
-        });
-        // The request must return Ok within 2 seconds, even though 10k
-        // notifications are flooding in ahead of the response.
+        // Nobody drains `n` yet. The peer writes 10,000 notifications ahead
+        // of the response; they must all be buffered by the channel itself
+        // while unread, and the response must still arrive promptly. If the
+        // notification channel ever regresses to a bounded one, the peer's
+        // writer would block on a full channel and this request would stall
+        // past the 2s budget, failing the assertion below structurally
+        // rather than relying on a collector racing to keep the channel
+        // drained.
         let start = std::time::Instant::now();
         let result = h.request("test", vec![]);
         let elapsed = start.elapsed();
@@ -284,11 +311,16 @@ mod tests {
             "request() took {elapsed:?}, should be under 2s"
         );
         assert_eq!(result.unwrap(), Value::from(1));
-        // All 10,000 notifications must have arrived.
-        let notif_count = flood.join().unwrap();
-        assert_eq!(
-            notif_count, 10_000,
-            "expected 10,000 notifications, got {notif_count}"
-        );
+        // Only now do we drain the channel, proving all 10,000 notifications
+        // were fully buffered while unread.
+        let mut count = 0usize;
+        while let Ok(note) = n.recv_timeout(std::time::Duration::from_millis(500)) {
+            assert_eq!(note.method, "redraw");
+            count += 1;
+            if count == 10_000 {
+                break;
+            }
+        }
+        assert_eq!(count, 10_000, "expected 10,000 notifications, got {count}");
     }
 }
