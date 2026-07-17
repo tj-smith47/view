@@ -1,0 +1,41 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build the whole workspace
+    cmd: cargo build --workspace
+
+  fmt:
+    desc: Format all Rust code
+    cmd: cargo fmt --all
+
+  fmt-check:
+    desc: Verify formatting without writing
+    cmd: cargo fmt --all --check
+
+  lint:
+    desc: Clippy with warnings as errors
+    cmd: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    desc: Run the full test suite (requires nvim >= 0.11 on PATH)
+    cmd: cargo test --workspace
+
+  ci:
+    desc: The full local gate; CI mirrors exactly this
+    cmds:
+      - task: fmt-check
+      - task: lint
+      - task: audit
+      - task: test
+
+  commit:
+    desc: Gated commit — runs the ci chain first
+    cmds:
+      - task: ci
+      - git add -A
+      - git commit {{.CLI_ARGS}}
+
+  audit:
+    desc: Enforce crate dependency direction from the spec
+    cmd: bash scripts/audit-deps.sh
