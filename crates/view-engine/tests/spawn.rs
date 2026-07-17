@@ -35,7 +35,7 @@ fn handshake_failure_reaps_child() {
     ));
     let cfg = EngineConfig {
         nvim_bin: fixture.clone(),
-        handshake_timeout: Duration::from_millis(200),
+        handshake_timeout: Duration::from_millis(500),
         ..EngineConfig::default()
     };
 

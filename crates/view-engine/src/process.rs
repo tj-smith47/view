@@ -110,9 +110,19 @@ impl Engine {
                 .stderr(Stdio::null())
                 .spawn()?,
         ));
-        let child = guard.0.as_mut().ok_or(EngineError::Closed)?;
-        let stdout = child.stdout.take().ok_or(EngineError::Closed)?;
-        let stdin = child.stdin.take().ok_or(EngineError::Closed)?;
+        // unreachable ok_or: nothing clears guard.0 before this point
+        let child = guard
+            .0
+            .as_mut()
+            .ok_or_else(|| EngineError::Io(std::io::Error::other("child slot empty")))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| EngineError::Io(std::io::Error::other("stdout pipe not captured")))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| EngineError::Io(std::io::Error::other("stdin pipe not captured")))?;
         let (handle, notifications) = EngineHandle::start(stdout, stdin);
         let api_info = decode_api_info(handle.request_timeout(
             "nvim_get_api_info",
@@ -121,8 +131,9 @@ impl Engine {
         )?)?;
         // handshake succeeded: disarm the guard and hand the child to the
         // long-lived Engine, which now owns reaping it via its own Drop
+        // unreachable else: nothing clears guard.0 before this point
         let Some(child) = guard.0.take() else {
-            return Err(EngineError::Closed);
+            return Err(EngineError::Io(std::io::Error::other("child slot empty")));
         };
         Ok(Self {
             handle,
