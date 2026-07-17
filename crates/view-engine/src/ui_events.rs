@@ -121,7 +121,7 @@ fn as_i64(v: &Value) -> Option<i64> {
 }
 
 fn decode_grid_resize(args: &[Value]) -> Option<UiEvent> {
-    let [grid, width, height] = args else {
+    let [grid, width, height, ..] = args else {
         return None;
     };
     Some(UiEvent::GridResize {
@@ -132,7 +132,9 @@ fn decode_grid_resize(args: &[Value]) -> Option<UiEvent> {
 }
 
 fn decode_grid_cursor_goto(args: &[Value]) -> Option<UiEvent> {
-    let [grid, row, col] = args else { return None };
+    let [grid, row, col, ..] = args else {
+        return None;
+    };
     Some(UiEvent::GridCursorGoto {
         grid: as_u64(grid)?,
         row: as_u64(row)?,
@@ -141,7 +143,7 @@ fn decode_grid_cursor_goto(args: &[Value]) -> Option<UiEvent> {
 }
 
 fn decode_grid_scroll(args: &[Value]) -> Option<UiEvent> {
-    let [grid, top, bot, left, right, rows, _cols] = args else {
+    let [grid, top, bot, left, right, rows, ..] = args else {
         return None;
     };
     Some(UiEvent::GridScroll {
@@ -155,14 +157,18 @@ fn decode_grid_scroll(args: &[Value]) -> Option<UiEvent> {
 }
 
 fn decode_grid_clear(args: &[Value]) -> Option<UiEvent> {
-    let [grid] = args else { return None };
+    let [grid, ..] = args else { return None };
     Some(UiEvent::GridClear {
         grid: as_u64(grid)?,
     })
 }
 
 fn decode_grid_line(args: &[Value]) -> Option<UiEvent> {
-    let [grid, row, col_start, cells] = args else {
+    // nvim's wire tuple is [grid, row, col_start, cells, wrap]; `wrap` (and
+    // any future trailing field) is intentionally ignored via `..` rather
+    // than pattern-matched exactly, so a minor-version arity bump degrades
+    // gracefully instead of every real grid_line falling through to Unknown.
+    let [grid, row, col_start, cells, ..] = args else {
         return None;
     };
     let cell_tuples = cells.as_array()?;
@@ -246,6 +252,9 @@ mod tests {
 
     #[test]
     fn decodes_grid_line_with_hl_carryover_and_repeat() {
+        // real nvim's grid_line tuple is [grid, row, col_start, cells, wrap]
+        // (5 elements) -- the trailing `wrap` is mandatory on the wire even
+        // though this decoder doesn't consume it.
         let params = vec![arr(vec![
             Value::from("grid_line"),
             arr(vec![
@@ -257,18 +266,34 @@ mod tests {
                     arr(vec![Value::from("b")]), // carries hl 5
                     arr(vec![Value::from(" "), Value::from(0), Value::from(3)]),
                 ]),
+                Value::from(false),
             ]),
         ])];
         let evs = decode_redraw(&params);
-        let UiEvent::GridLine { cells, .. } = &evs[0] else {
-            unreachable!("wrong event")
-        };
         assert_eq!(
-            cells
-                .iter()
-                .map(|c| (c.text.as_str(), c.hl_id, c.repeat))
-                .collect::<Vec<_>>(),
-            vec![("a", 5, 1), ("b", 5, 1), (" ", 0, 3)]
+            evs,
+            vec![UiEvent::GridLine {
+                grid: 1,
+                row: 0,
+                col_start: 0,
+                cells: vec![
+                    GridCell {
+                        text: "a".to_string(),
+                        hl_id: 5,
+                        repeat: 1,
+                    },
+                    GridCell {
+                        text: "b".to_string(),
+                        hl_id: 5,
+                        repeat: 1,
+                    },
+                    GridCell {
+                        text: " ".to_string(),
+                        hl_id: 0,
+                        repeat: 3,
+                    },
+                ],
+            }]
         );
     }
 
@@ -321,5 +346,66 @@ mod tests {
         let params = vec![arr(vec![Value::from("win_viewport"), arr(vec![])])];
         let evs = decode_redraw(&params);
         assert!(matches!(&evs[0], UiEvent::Unknown { name } if name == "win_viewport"));
+    }
+
+    #[test]
+    fn decodes_hl_attr_define_with_partial_attrs() {
+        // real wire args are [id, rgb_attrs, cterm_attrs, info]; rgb_attrs
+        // only carries keys nvim actually set for this attribute, so the
+        // decoder must default absent keys rather than requiring all six.
+        let rgb_attrs = Value::Map(vec![
+            (Value::from("foreground"), Value::from(0x00_ff00_u32)),
+            (Value::from("bold"), Value::from(true)),
+            (Value::from("underline"), Value::from(true)),
+            // background, italic, reverse deliberately absent
+        ]);
+        let params = vec![arr(vec![
+            Value::from("hl_attr_define"),
+            arr(vec![
+                Value::from(3),
+                rgb_attrs,
+                Value::Map(vec![]),
+                arr(vec![]),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::HlAttrDefine {
+                id: 3,
+                fg: Some(0x00_ff00),
+                bg: None,
+                bold: true,
+                italic: false,
+                underline: true,
+                reverse: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn decodes_default_colors_set_with_unset_sentinel() {
+        // nvim sends -1 for an unset color; fg/bg/sp are i64 (not u32) so
+        // -1 is preserved distinguishably from any valid 24-bit RGB value
+        // (0..=0xff_ffff) instead of being coerced into a bogus color.
+        let params = vec![arr(vec![
+            Value::from("default_colors_set"),
+            arr(vec![
+                Value::from(-1),
+                Value::from(0x0000_0000_u32),
+                Value::from(0x00ff_ffff_u32),
+                Value::from(0),
+                Value::from(15),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::DefaultColorsSet {
+                fg: -1,
+                bg: 0,
+                sp: 0x00ff_ffff,
+            }]
+        );
     }
 }
