@@ -2,6 +2,7 @@ use rmpv::Value;
 
 /// Errors produced when decoding a msgpack `Value` into an `RpcMessage`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum RpcError {
     /// The value did not match any valid msgpack-RPC message shape
     /// (wrong type, unknown kind tag, or wrong array arity for its kind).
@@ -16,6 +17,7 @@ pub enum RpcError {
 /// and `Notification` is `[2, method, params]`. See `to_value`/`from_value`
 /// for the exact encode/decode rules.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum RpcMessage {
     /// An outbound call awaiting a `Response` with the same `msgid`.
     Request {
@@ -135,7 +137,7 @@ fn as_array(v: &Value) -> Result<Vec<Value>, RpcError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use rmpv::Value;
 
@@ -201,18 +203,14 @@ mod tests {
             Value::from("ok"),
         ]);
         let m = RpcMessage::from_value(v).unwrap();
-        match m {
+        assert_eq!(
+            m,
             RpcMessage::Response {
-                msgid,
-                error,
-                result,
-            } => {
-                assert_eq!(msgid, 9);
-                assert_eq!(error, Value::Nil);
-                assert_eq!(result, Value::from("ok"));
+                msgid: 9,
+                error: Value::Nil,
+                result: Value::from("ok"),
             }
-            other => panic!("expected Response, got {other:?}"),
-        }
+        );
     }
 
     #[test]
