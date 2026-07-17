@@ -11,10 +11,16 @@ if [ -d crates ]; then
   if grep -rnE '(//|#).*\b(we|I|Claude) (added|implemented|changed|fixed|removed)' crates --include='*.rs'; then
     echo "STYLE FAIL: assistant-citation comment"; fail=1
   fi
+else
+  echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi
-targets="README.md"
-[ -d docs ] && targets="$targets docs"
-if grep -rn -- '—' $targets; then
-  echo "STYLE FAIL: emdash in user docs"; fail=1
+if [ -f README.md ]; then
+  targets="README.md"
+  [ -d docs ] && targets="$targets docs"
+  if grep -rn -- '—' $targets; then
+    echo "STYLE FAIL: emdash in user docs"; fail=1
+  fi
+else
+  echo "STYLE FAIL: README.md missing"; fail=1
 fi
 exit $fail
