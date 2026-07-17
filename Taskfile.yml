@@ -25,12 +25,17 @@ tasks:
     desc: Enforce crate dependency direction from the spec
     cmd: bash scripts/audit-deps.sh
 
+  style:
+    desc: Enforce comment and doc style rules
+    cmd: bash scripts/check-style.sh
+
   ci:
     desc: The full local gate; CI mirrors exactly this
     cmds:
       - task: fmt-check
       - task: lint
       - task: audit
+      - task: style
       - task: test
 
   commit:
