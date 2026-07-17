@@ -43,8 +43,13 @@ pub enum UiEvent {
         underline: bool,
         reverse: bool,
     },
-    /// The default foreground/background/special colors changed.
-    DefaultColorsSet { fg: i64, bg: i64, sp: i64 },
+    /// The default foreground/background/special colors changed. `None`
+    /// means the color is unset (nvim's `-1` sentinel on the wire).
+    DefaultColorsSet {
+        fg: Option<u32>,
+        bg: Option<u32>,
+        sp: Option<u32>,
+    },
     /// nvim finished a batch of updates; safe to repaint.
     Flush,
     /// An event name this decoder does not yet model.
@@ -83,21 +88,18 @@ pub fn decode_redraw(params: &[Value]) -> Vec<UiEvent> {
             continue;
         };
         for tuple in arg_tuples {
-            let Some(args) = tuple.as_array() else {
-                events.push(UiEvent::Unknown {
-                    name: name.to_string(),
-                });
-                continue;
-            };
-            events.push(decode_event(name, args));
+            events.push(decode_event(name, tuple));
         }
     }
     events
 }
 
-fn decode_event(name: &str, args: &[Value]) -> UiEvent {
+fn decode_event(name: &str, tuple: &Value) -> UiEvent {
     let unknown = || UiEvent::Unknown {
         name: name.to_string(),
+    };
+    let Some(args) = tuple.as_array() else {
+        return unknown();
     };
     match name {
         "grid_resize" => decode_grid_resize(args).unwrap_or_else(unknown),
@@ -234,10 +236,18 @@ fn decode_default_colors_set(args: &[Value]) -> Option<UiEvent> {
         return None;
     };
     Some(UiEvent::DefaultColorsSet {
-        fg: as_i64(rgb_fg)?,
-        bg: as_i64(rgb_bg)?,
-        sp: as_i64(rgb_sp)?,
+        fg: as_color(rgb_fg)?,
+        bg: as_color(rgb_bg)?,
+        sp: as_color(rgb_sp)?,
     })
+}
+
+// Outer None = malformed (not an integer, event becomes Unknown); inner
+// None = unset color. nvim sends -1 for unset and every set value is
+// 24-bit RGB, so any negative maps to None rather than a bogus color.
+fn as_color(v: &Value) -> Option<Option<u32>> {
+    let n = as_i64(v)?;
+    Some(u32::try_from(n).ok())
 }
 
 #[cfg(test)]
@@ -385,9 +395,8 @@ mod tests {
 
     #[test]
     fn decodes_default_colors_set_with_unset_sentinel() {
-        // nvim sends -1 for an unset color; fg/bg/sp are i64 (not u32) so
-        // -1 is preserved distinguishably from any valid 24-bit RGB value
-        // (0..=0xff_ffff) instead of being coerced into a bogus color.
+        // nvim sends -1 for an unset color; the decoder maps it to None so
+        // no consumer can mistake it for a valid 24-bit RGB value.
         let params = vec![arr(vec![
             Value::from("default_colors_set"),
             arr(vec![
@@ -402,9 +411,9 @@ mod tests {
         assert_eq!(
             evs,
             vec![UiEvent::DefaultColorsSet {
-                fg: -1,
-                bg: 0,
-                sp: 0x00ff_ffff,
+                fg: None,
+                bg: Some(0),
+                sp: Some(0x00ff_ffff),
             }]
         );
     }
