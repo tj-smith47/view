@@ -39,7 +39,7 @@ fn handshake_failure_reaps_child() {
         ..EngineConfig::default()
     };
 
-    // spawn() blocks for ~200ms waiting on the handshake; race a pgrep
+    // spawn() blocks for ~500ms waiting on the handshake; race a pgrep
     // against it on another thread to prove the fake process was actually
     // alive mid-handshake, not just absent for lack of ever starting. All
     // `cargo test` tests in this binary are threads in one process, so the
