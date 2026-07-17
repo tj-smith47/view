@@ -4,8 +4,10 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
+use std::time::Duration;
 
 /// Errors produced by [`EngineHandle`] operations.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     /// RPC message encoding/decoding error.
@@ -20,6 +22,17 @@ pub enum EngineError {
     /// The engine connection was closed before the response arrived.
     #[error("engine connection closed")]
     Closed,
+    /// No response arrived within the caller-supplied timeout. Raised only
+    /// by [`EngineHandle::request_timeout`]; the plain
+    /// [`request`](EngineHandle::request) call has no timeout and cannot
+    /// produce this variant.
+    #[error("no response to {method} within {timeout:?}")]
+    Timeout {
+        /// The RPC method that timed out.
+        method: String,
+        /// The timeout duration that elapsed without a response.
+        timeout: Duration,
+    },
 }
 
 /// A notification received from the engine (e.g., a `redraw` event).
@@ -181,6 +194,64 @@ impl EngineHandle {
     /// is acceptable for an interactive editor session and not worth the
     /// extra bookkeeping to prevent.
     pub fn request(&self, method: &str, params: Vec<Value>) -> Result<Value, EngineError> {
+        let (_msgid, rx) = self.send_request(method, params)?;
+        rx.recv().map_err(|_| EngineError::Closed)?
+    }
+
+    /// Sends a synchronous RPC request and waits for the response, but gives
+    /// up after `timeout` instead of blocking forever.
+    ///
+    /// # Arguments
+    ///
+    /// * `method`, `params` - Same as [`request`](Self::request).
+    /// * `timeout` - Maximum time to wait for the response.
+    ///
+    /// # Returns
+    ///
+    /// Same as [`request`](Self::request), plus:
+    /// - `Err(EngineError::Timeout { method, timeout })` if no response
+    ///   arrives within `timeout`. The pending waiter is removed before
+    ///   returning, so a late response from the engine (if one ever arrives)
+    ///   is silently dropped by the reader thread rather than leaking the
+    ///   waiter for the handle's lifetime.
+    ///
+    /// Use this instead of [`request`](Self::request) for any call where an
+    /// unresponsive engine must not hang the caller — e.g. the
+    /// `nvim_get_api_info` handshake during [`Engine::spawn`](crate::process::Engine::spawn).
+    pub fn request_timeout(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        timeout: Duration,
+    ) -> Result<Value, EngineError> {
+        let (msgid, rx) = self.send_request(method, params)?;
+        match rx.recv_timeout(timeout) {
+            Ok(outcome) => outcome,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                // the reader thread may still resolve this msgid later; removing
+                // the waiter now means that late response is dropped instead of
+                // leaking the waiter for the handle's lifetime
+                if let Ok(mut p) = self.pending.lock() {
+                    p.remove(&msgid);
+                }
+                Err(EngineError::Timeout {
+                    method: method.to_owned(),
+                    timeout,
+                })
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => Err(EngineError::Closed),
+        }
+    }
+
+    /// Allocates a msgid, registers the pending waiter, and writes the
+    /// request. Shared by [`request`](Self::request) and
+    /// [`request_timeout`](Self::request_timeout), which differ only in how
+    /// they wait on the returned receiver.
+    fn send_request(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<(u32, mpsc::Receiver<Result<Value, EngineError>>), EngineError> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         self.pending
@@ -201,7 +272,7 @@ impl EngineHandle {
             }
             return Err(e);
         }
-        rx.recv().map_err(|_| EngineError::Closed)?
+        Ok((msgid, rx))
     }
 
     fn write_request(&self, msg: &RpcMessage) -> Result<(), EngineError> {
