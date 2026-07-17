@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  ci:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install neovim (linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -fsSL -o nvim.appimage https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.appimage
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Install neovim (macos)
+        if: runner.os == 'macOS'
+        run: brew install neovim
+
+      - name: Install neovim (windows)
+        if: runner.os == 'Windows'
+        run: choco install neovim -y --no-progress
+
+      - name: Add neovim to PATH (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "/c/tools/neovim/nvim-win64/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: nvim --version
+
+      - name: Run CI suite
+        run: task ci
