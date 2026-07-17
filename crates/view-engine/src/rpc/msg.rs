@@ -1,30 +1,56 @@
 use rmpv::Value;
 
+/// Errors produced when decoding a msgpack `Value` into an `RpcMessage`.
 #[derive(Debug, thiserror::Error)]
 pub enum RpcError {
+    /// The value did not match any valid msgpack-RPC message shape
+    /// (wrong type, unknown kind tag, or wrong array arity for its kind).
     #[error("malformed rpc message: {0}")]
     Malformed(String),
 }
 
+/// A single msgpack-RPC message exchanged with the embedded nvim process.
+///
+/// Each variant maps to a tagged msgpack array on the wire: `Request` is
+/// `[0, msgid, method, params]`, `Response` is `[1, msgid, error, result]`,
+/// and `Notification` is `[2, method, params]`. See `to_value`/`from_value`
+/// for the exact encode/decode rules.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RpcMessage {
+    /// An outbound call awaiting a `Response` with the same `msgid`.
     Request {
+        /// Correlates this request with its eventual `Response`.
         msgid: u32,
+        /// The nvim API method name to invoke.
         method: String,
+        /// Positional arguments for `method`.
         params: Vec<Value>,
     },
+    /// The reply to a `Request` with a matching `msgid`.
+    ///
+    /// Follows the nvim RPC convention: `error` is non-nil on failure and
+    /// `result` is non-nil on success — the two are mutually exclusive,
+    /// never both non-nil.
     Response {
+        /// The `msgid` of the `Request` this responds to.
         msgid: u32,
+        /// Non-nil (`Value::Nil` otherwise) when the call failed.
         error: Value,
+        /// Non-nil (`Value::Nil` otherwise) when the call succeeded.
         result: Value,
     },
+    /// A fire-and-forget call with no `Response` expected.
     Notification {
+        /// The nvim API method name to invoke.
         method: String,
+        /// Positional arguments for `method`.
         params: Vec<Value>,
     },
 }
 
 impl RpcMessage {
+    /// Encodes this message as its msgpack-RPC tagged array (see
+    /// [`RpcMessage`] for the per-variant array shape).
     pub fn to_value(&self) -> Value {
         match self {
             Self::Request {
@@ -55,6 +81,10 @@ impl RpcMessage {
         }
     }
 
+    /// Decodes a msgpack-RPC tagged array into an `RpcMessage`.
+    ///
+    /// Returns `RpcError::Malformed` if `v` is not an array, has an
+    /// unrecognized kind tag, or has the wrong arity for its kind.
     pub fn from_value(v: Value) -> Result<Self, RpcError> {
         let Value::Array(items) = v else {
             return Err(RpcError::Malformed("not an array".into()));
@@ -105,7 +135,7 @@ fn as_array(v: &Value) -> Result<Vec<Value>, RpcError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use rmpv::Value;
 
@@ -144,5 +174,58 @@ mod tests {
             RpcMessage::from_value(Value::from("nope")),
             Err(RpcError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn request_wire_shape_is_tagged_array() {
+        let m = RpcMessage::Request {
+            msgid: 7,
+            method: "nvim_get_api_info".into(),
+            params: vec![],
+        };
+        let expected = Value::Array(vec![
+            Value::from(0),
+            Value::from(7),
+            Value::from("nvim_get_api_info"),
+            Value::Array(vec![]),
+        ]);
+        assert_eq!(m.to_value(), expected);
+    }
+
+    #[test]
+    fn response_wire_slots_error_then_result() {
+        let v = Value::Array(vec![
+            Value::from(1),
+            Value::from(9),
+            Value::Nil,
+            Value::from("ok"),
+        ]);
+        let m = RpcMessage::from_value(v).unwrap();
+        match m {
+            RpcMessage::Response {
+                msgid,
+                error,
+                result,
+            } => {
+                assert_eq!(msgid, 9);
+                assert_eq!(error, Value::Nil);
+                assert_eq!(result, Value::from("ok"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn notification_wire_shape_is_tagged_array() {
+        let m = RpcMessage::Notification {
+            method: "redraw".into(),
+            params: vec![Value::from(1)],
+        };
+        let expected = Value::Array(vec![
+            Value::from(2),
+            Value::from("redraw"),
+            Value::Array(vec![Value::from(1)]),
+        ]);
+        assert_eq!(m.to_value(), expected);
     }
 }
