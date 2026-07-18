@@ -171,6 +171,10 @@ enum SoloReason {
     /// The prior entry is older than [`STALENESS_BOUND_MS`], so pairing it
     /// with a fresh run would silently mix data from unrelated invocations.
     Stale { age_ms: u64 },
+    /// The prior entry's timestamp is ahead of the current clock reading.
+    /// The wall clock stepped backwards between invocations, so the entry's
+    /// true age is unknowable and pairing it cannot be trusted.
+    FutureTimestamp { skew_ms: u64 },
 }
 
 /// Result of attempting to pair the current run against a previously staged
@@ -206,7 +210,15 @@ fn decide_pairing(prior: Option<ScratchEntry>, current: &Stats, now_ms: u64) -> 
     if prior.stats.label == current.label {
         return PairDecision::Solo(SoloReason::SameLabel);
     }
-    let age_ms = now_ms.saturating_sub(prior.written_at_ms);
+    // a saturating age would read a future-stamped entry as freshly written
+    // (age 0) and pair it; reject it instead, since a backwards clock step
+    // makes the entry's true age unknowable
+    if prior.written_at_ms > now_ms {
+        return PairDecision::Solo(SoloReason::FutureTimestamp {
+            skew_ms: prior.written_at_ms - now_ms,
+        });
+    }
+    let age_ms = now_ms - prior.written_at_ms;
     if age_ms > STALENESS_BOUND_MS {
         return PairDecision::Solo(SoloReason::Stale { age_ms });
     }
@@ -476,15 +488,22 @@ fn print_ratio(view: &Stats, nvim: &Stats) {
 }
 
 /// Prints a LOUD warning to stderr when the prior scratch entry was
-/// discarded for being stale, so a poisoned pairing never happens silently.
-fn warn_if_stale(reason: &SoloReason) {
-    if let SoloReason::Stale { age_ms } = reason {
-        eprintln!(
+/// discarded (stale or future-stamped), so a poisoned pairing never
+/// happens silently.
+fn warn_if_discarded(reason: &SoloReason) {
+    match reason {
+        SoloReason::Stale { age_ms } => eprintln!(
             "WARNING: discarding stale latency scratch entry ({age_ms}ms old, over the \
              {STALENESS_BOUND_MS}ms staleness bound). Pairing it with this run would \
              silently corrupt the comparison table; treating this run as a fresh solo \
              measurement instead."
-        );
+        ),
+        SoloReason::FutureTimestamp { skew_ms } => eprintln!(
+            "WARNING: discarding latency scratch entry stamped {skew_ms}ms in the future; \
+             the wall clock stepped backwards, so the entry's age is unknowable. Treating \
+             this run as a fresh solo measurement instead."
+        ),
+        SoloReason::NoPriorEntry | SoloReason::SameLabel => {}
     }
 }
 
@@ -503,9 +522,21 @@ fn warn_if_stale(reason: &SoloReason) {
 /// leftover debug invocation can never silently poison the next real pair.
 fn report(stats: &Stats) -> Result<()> {
     let path = scratch_path();
-    let prior = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| ScratchEntry::from_line(content.trim()));
+    let raw = std::fs::read_to_string(&path).ok();
+    let prior = match raw.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(content) => {
+            let parsed = ScratchEntry::from_line(content);
+            if parsed.is_none() {
+                eprintln!(
+                    "WARNING: ignoring unparseable latency scratch entry at \
+                     {}; treating this run as a fresh solo measurement.",
+                    path.display()
+                );
+            }
+            parsed
+        }
+        None => None,
+    };
     let now_ms = now_epoch_ms();
 
     match decide_pairing(prior, stats, now_ms) {
@@ -517,7 +548,7 @@ fn report(stats: &Stats) -> Result<()> {
             std::fs::remove_file(&path).context("failed to clear latency scratch file")?;
         }
         PairDecision::Solo(reason) => {
-            warn_if_stale(&reason);
+            warn_if_discarded(&reason);
             print_header();
             print_row(stats);
             std::fs::write(&path, ScratchEntry::now(stats.clone()).to_line())
@@ -566,13 +597,12 @@ mod tests {
         assert!((parsed.p99_ms - 6.5).abs() < f64::EPSILON);
     }
 
-    /// Unwraps a [`PairDecision::Paired`] for assertions; a non-`Paired`
-    /// result on this path is a broken test fixture, not a `panic!`-lint
-    /// production path, so `unreachable!` (unbanned) rather than `panic!`.
-    fn expect_paired(decision: PairDecision) -> (Stats, Stats) {
+    /// Extracts a [`PairDecision::Paired`] for assertions; callers
+    /// `.expect(...)` the result under the module-level allow.
+    fn paired(decision: PairDecision) -> Option<(Stats, Stats)> {
         match decision {
-            PairDecision::Paired(view, nvim) => (view, nvim),
-            other => unreachable!("expected a paired decision, got {other:?}"),
+            PairDecision::Paired(view, nvim) => Some((view, nvim)),
+            PairDecision::Solo(_) => None,
         }
     }
 
@@ -607,7 +637,7 @@ mod tests {
         };
         let current = sample_stats("view");
         let decision = decide_pairing(Some(prior), &current, now_ms);
-        let (view, nvim) = expect_paired(decision);
+        let (view, nvim) = paired(decision).expect("expected a paired decision");
         assert_eq!(view.label, "view");
         assert_eq!(nvim.label, "nvim");
 
@@ -618,7 +648,7 @@ mod tests {
         };
         let current = sample_stats("nvim");
         let decision = decide_pairing(Some(prior), &current, now_ms);
-        let (view, nvim) = expect_paired(decision);
+        let (view, nvim) = paired(decision).expect("expected a paired decision");
         assert_eq!(view.label, "view");
         assert_eq!(nvim.label, "nvim");
     }
@@ -637,6 +667,21 @@ mod tests {
             PairDecision::Solo(SoloReason::Stale {
                 age_ms: STALENESS_BOUND_MS + 1
             })
+        );
+    }
+
+    #[test]
+    fn future_stamped_entry_is_rejected_not_paired() {
+        let now_ms = 1_000_000;
+        let prior = ScratchEntry {
+            written_at_ms: now_ms + 30_000,
+            stats: sample_stats("nvim"),
+        };
+        let current = sample_stats("view");
+        let decision = decide_pairing(Some(prior), &current, now_ms);
+        assert_eq!(
+            decision,
+            PairDecision::Solo(SoloReason::FutureTimestamp { skew_ms: 30_000 })
         );
     }
 
