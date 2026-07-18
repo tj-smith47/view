@@ -1,4 +1,4 @@
-//! Finding 4: `EngineHandle` must be usable from multiple threads at once
+//! `EngineHandle` must be usable from multiple threads at once
 //! (issuing requests) while another thread owns the notification receiver.
 //! This drives that shape against a real nvim: several threads share one
 //! cloned handle and all their requests must complete with correct results.

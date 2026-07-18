@@ -11,6 +11,9 @@ if [ -d crates ]; then
   if grep -rnE '(//|#).*\b(we|I|Claude) (added|implemented|changed|fixed|removed)' crates --include='*.rs'; then
     echo "STYLE FAIL: assistant-citation comment"; fail=1
   fi
+  if grep -rnE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' crates --include='*.rs'; then
+    echo "STYLE FAIL: review-finding reference in comment"; fail=1
+  fi
   # banned outright, not just in comments: no current .rs file has a string
   # literal that legitimately needs one, so this is a plain content scan
   # rather than a comment-only grep
@@ -19,6 +22,16 @@ if [ -d crates ]; then
   fi
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
+fi
+if [ -d scripts ]; then
+  # file list built via find rather than a `grep --exclude` flag: exclude
+  # syntax and behavior differ across grep implementations, and this script
+  # must exclude itself since it names the banned phrases literally to
+  # define the patterns above, which would otherwise self-match
+  other_scripts=$(find scripts -name '*.sh' ! -name "$(basename "$0")")
+  if [ -n "$other_scripts" ] && echo "$other_scripts" | xargs grep -nE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]'; then
+    echo "STYLE FAIL: review-finding reference in script comment"; fail=1
+  fi
 fi
 if [ -f README.md ]; then
   targets="README.md"

@@ -522,9 +522,9 @@ mod tests {
         assert_eq!(count, 10_000, "expected 10,000 notifications, got {count}");
     }
 
-    /// Reproduces the critical hang found in review: the reader thread can
-    /// exit (here, because its notification receiver was dropped, causing
-    /// the very next `notif_tx.send` to fail) while the peer connection
+    /// Reproduces a critical hang: the reader thread can exit (here,
+    /// because its notification receiver was dropped, causing the very
+    /// next `notif_tx.send` to fail) while the peer connection
     /// itself is still open and healthy. A `request()` issued after that
     /// point must observe `Closed` instead of blocking forever waiting for
     /// a response nothing will ever deliver. Against the pre-fix code
@@ -572,7 +572,7 @@ mod tests {
         );
     }
 
-    /// Finding 3: an incoming `Request` from the peer (e.g. a blocking
+    /// An incoming `Request` from the peer (e.g. a blocking
     /// `rpcrequest` from nvim's init.lua) must get an immediate reply, or
     /// the peer's main loop blocks forever waiting for one and every
     /// subsequent call from our side deadlocks against it. Dispatching
