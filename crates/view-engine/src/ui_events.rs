@@ -5,7 +5,7 @@
 //! only part of this crate's job.
 
 use rmpv::Value;
-pub use view_core::events::{GridCell, UiEvent};
+pub use view_core::events::{GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent};
 
 /// Decodes a `redraw` notification's params into typed [`UiEvent`]s.
 ///
@@ -50,6 +50,19 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
         "flush" => UiEvent::Flush,
+        "mode_info_set" => decode_mode_info_set(args).unwrap_or_else(unknown),
+        "mode_change" => decode_mode_change(args).unwrap_or_else(unknown),
+        "cmdline_show" => decode_cmdline_show(args).unwrap_or_else(unknown),
+        "cmdline_pos" => decode_cmdline_pos(args).unwrap_or_else(unknown),
+        // level/abort carry no state this decoder models: any arity hides
+        // the cmdline, same as `flush`/`msg_clear`/`popupmenu_hide` below
+        "cmdline_hide" => UiEvent::CmdlineHide,
+        "msg_show" => decode_msg_show(args).unwrap_or_else(unknown),
+        "msg_clear" => UiEvent::MsgClear,
+        "tabline_update" => decode_tabline_update(args).unwrap_or_else(unknown),
+        "popupmenu_show" => decode_popupmenu_show(args).unwrap_or_else(unknown),
+        "popupmenu_select" => decode_popupmenu_select(args).unwrap_or_else(unknown),
+        "popupmenu_hide" => UiEvent::PopupmenuHide,
         _ => unknown(),
     }
 }
@@ -188,6 +201,179 @@ fn decode_default_colors_set(args: &[Value]) -> Option<UiEvent> {
 fn as_color(v: &Value) -> Option<Option<u32>> {
     let n = as_i64(v)?;
     Some(u32::try_from(n).ok())
+}
+
+fn decode_mode_info_set(args: &[Value]) -> Option<UiEvent> {
+    let [enabled, mode_maps, ..] = args else {
+        return None;
+    };
+    let cursor_style_enabled = enabled.as_bool()?;
+    let mode_maps = mode_maps.as_array()?;
+    let mut modes = Vec::with_capacity(mode_maps.len());
+    for entry in mode_maps {
+        let map = entry.as_map()?;
+        let lookup = |key: &str| {
+            map.iter()
+                .find(|(k, _)| k.as_str() == Some(key))
+                .map(|(_, v)| v)
+        };
+        let string_field = |key: &str| {
+            lookup(key)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let int_field = |key: &str| lookup(key).and_then(as_u64).unwrap_or(0);
+        modes.push(ModeInfo {
+            name: string_field("name"),
+            short_name: string_field("short_name"),
+            cursor_shape: string_field("cursor_shape"),
+            cell_percentage: int_field("cell_percentage"),
+            blinkwait: int_field("blinkwait"),
+            blinkon: int_field("blinkon"),
+            blinkoff: int_field("blinkoff"),
+            attr_id: int_field("attr_id"),
+        });
+    }
+    Some(UiEvent::ModeInfoSet {
+        cursor_style_enabled,
+        modes,
+    })
+}
+
+fn decode_mode_change(args: &[Value]) -> Option<UiEvent> {
+    let [mode, mode_idx, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::ModeChange {
+        mode: mode.as_str()?.to_string(),
+        mode_idx: as_u64(mode_idx)?,
+    })
+}
+
+// cmdline_show/msg_show content chunks are [attr_id, text, hl_id] on the
+// wire (confirmed against api-ui-events.txt and the live capture); only
+// the first two fields are modeled, per the tolerant trailing-field
+// convention used throughout this module.
+fn decode_content_chunks(v: &Value) -> Option<Vec<(u64, String)>> {
+    let chunks = v.as_array()?;
+    let mut out = Vec::with_capacity(chunks.len());
+    for chunk in chunks {
+        let fields = chunk.as_array()?;
+        let [attr_id, text, ..] = fields.as_slice() else {
+            return None;
+        };
+        out.push((as_u64(attr_id)?, text.as_str()?.to_string()));
+    }
+    Some(out)
+}
+
+fn decode_cmdline_show(args: &[Value]) -> Option<UiEvent> {
+    let [content, pos, firstc, prompt, indent, level, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::CmdlineShow {
+        content: decode_content_chunks(content)?,
+        pos: as_u64(pos)?,
+        firstc: firstc.as_str()?.to_string(),
+        prompt: prompt.as_str()?.to_string(),
+        indent: as_u64(indent)?,
+        level: as_u64(level)?,
+    })
+}
+
+fn decode_cmdline_pos(args: &[Value]) -> Option<UiEvent> {
+    let [pos, level, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::CmdlinePos {
+        pos: as_u64(pos)?,
+        level: as_u64(level)?,
+    })
+}
+
+fn decode_msg_show(args: &[Value]) -> Option<UiEvent> {
+    let [kind, content, replace_last, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::MsgShow {
+        kind: kind.as_str()?.to_string(),
+        content: decode_content_chunks(content)?,
+        replace_last: replace_last.as_bool()?,
+    })
+}
+
+// Tabpage/Buffer handles arrive as msgpack-RPC Ext values whose payload is
+// itself a msgpack-encoded integer; unwrapping it here keeps that Ext detail
+// out of view-core, which stays rmpv-free.
+fn decode_tab_handle(v: &Value) -> Option<TabHandle> {
+    let Value::Ext(_, data) = v else {
+        return None;
+    };
+    let mut cursor = &data[..];
+    let inner = rmpv::decode::read_value(&mut cursor).ok()?;
+    Some(TabHandle(inner.as_u64()?))
+}
+
+fn decode_tabline_update(args: &[Value]) -> Option<UiEvent> {
+    let [current, tabs, ..] = args else {
+        return None;
+    };
+    let current = decode_tab_handle(current)?;
+    let tab_maps = tabs.as_array()?;
+    let mut out = Vec::with_capacity(tab_maps.len());
+    for entry in tab_maps {
+        let map = entry.as_map()?;
+        let tab = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("tab"))
+            .map(|(_, v)| v)?;
+        let name = map
+            .iter()
+            .find(|(k, _)| k.as_str() == Some("name"))
+            .and_then(|(_, v)| v.as_str())?;
+        out.push(TabEntry {
+            tab: decode_tab_handle(tab)?,
+            name: name.to_string(),
+        });
+    }
+    Some(UiEvent::TablineUpdate { current, tabs: out })
+}
+
+fn decode_popupmenu_show(args: &[Value]) -> Option<UiEvent> {
+    let [items, selected, row, col, grid, ..] = args else {
+        return None;
+    };
+    let item_arrays = items.as_array()?;
+    let mut out = Vec::with_capacity(item_arrays.len());
+    for item in item_arrays {
+        let fields = item.as_array()?;
+        let [word, kind, menu, info, ..] = fields.as_slice() else {
+            return None;
+        };
+        out.push(PmItem {
+            word: word.as_str()?.to_string(),
+            kind: kind.as_str()?.to_string(),
+            menu: menu.as_str()?.to_string(),
+            info: info.as_str()?.to_string(),
+        });
+    }
+    Some(UiEvent::PopupmenuShow {
+        items: out,
+        selected: as_i64(selected)?,
+        row: as_u64(row)?,
+        col: as_u64(col)?,
+        grid: as_u64(grid)?,
+    })
+}
+
+fn decode_popupmenu_select(args: &[Value]) -> Option<UiEvent> {
+    let [selected, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::PopupmenuSelect {
+        selected: as_i64(selected)?,
+    })
 }
 
 #[cfg(test)]
@@ -356,5 +542,336 @@ mod tests {
                 sp: Some(0x00ff_ffff),
             }]
         );
+    }
+
+    // fixtures below are copied from a live `nvim --clean` capture
+    // (~/.claude/tmp/capture-{cmdline,tabline,popupmenu}.log), driven via
+    // crates/view-engine/tests/zz_capture_live.rs and cross-checked against
+    // nvim/runtime/doc/api-ui-events.txt's ui_events arities. That harness
+    // was scratch-only and is not part of this commit.
+
+    #[test]
+    fn decodes_mode_info_set_and_mode_change() {
+        // capture-cmdline.log, mode_info_set + mode_change("cmdline_normal")
+        // events (attach-time mode table, then entering `:`); the real
+        // table has 16 modes, only 2 are reproduced here since the decoder
+        // treats each dict identically.
+        let normal_mode = Value::Map(vec![
+            (Value::from("name"), Value::from("normal")),
+            (Value::from("short_name"), Value::from("n")),
+            (Value::from("mouse_shape"), Value::from(0)),
+            (Value::from("cursor_shape"), Value::from("block")),
+            (Value::from("cell_percentage"), Value::from(0)),
+            (Value::from("blinkwait"), Value::from(700)),
+            (Value::from("blinkon"), Value::from(400)),
+            (Value::from("blinkoff"), Value::from(250)),
+            (Value::from("hl_id"), Value::from(0)),
+            (Value::from("id_lm"), Value::from(0)),
+            (Value::from("attr_id"), Value::from(0)),
+            (Value::from("attr_id_lm"), Value::from(0)),
+        ]);
+        let insert_mode = Value::Map(vec![
+            (Value::from("name"), Value::from("insert")),
+            (Value::from("short_name"), Value::from("i")),
+            (Value::from("mouse_shape"), Value::from(0)),
+            (Value::from("cursor_shape"), Value::from("vertical")),
+            (Value::from("cell_percentage"), Value::from(25)),
+            (Value::from("blinkwait"), Value::from(0)),
+            (Value::from("blinkon"), Value::from(0)),
+            (Value::from("blinkoff"), Value::from(0)),
+            (Value::from("hl_id"), Value::from(0)),
+            (Value::from("id_lm"), Value::from(0)),
+            (Value::from("attr_id"), Value::from(0)),
+            (Value::from("attr_id_lm"), Value::from(0)),
+        ]);
+        let params = vec![
+            arr(vec![
+                Value::from("mode_info_set"),
+                arr(vec![Value::from(true), arr(vec![normal_mode, insert_mode])]),
+            ]),
+            arr(vec![
+                Value::from("mode_change"),
+                arr(vec![Value::from("cmdline_normal"), Value::from(4)]),
+            ]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::ModeInfoSet {
+                    cursor_style_enabled: true,
+                    modes: vec![
+                        ModeInfo {
+                            name: "normal".into(),
+                            short_name: "n".into(),
+                            cursor_shape: "block".into(),
+                            cell_percentage: 0,
+                            blinkwait: 700,
+                            blinkon: 400,
+                            blinkoff: 250,
+                            attr_id: 0,
+                        },
+                        ModeInfo {
+                            name: "insert".into(),
+                            short_name: "i".into(),
+                            cursor_shape: "vertical".into(),
+                            cell_percentage: 25,
+                            blinkwait: 0,
+                            blinkon: 0,
+                            blinkoff: 0,
+                            attr_id: 0,
+                        },
+                    ],
+                },
+                UiEvent::ModeChange {
+                    mode: "cmdline_normal".into(),
+                    mode_idx: 4,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn mode_info_entry_missing_cursor_fields_defaults_to_zero() {
+        // capture-popupmenu.log, mode_info_set: the mouse-only hover modes
+        // (e.g. "cmdline_hover") carry only name/short_name/mouse_shape, no
+        // cursor_shape or blink fields at all.
+        let hover_mode = Value::Map(vec![
+            (Value::from("name"), Value::from("cmdline_hover")),
+            (Value::from("short_name"), Value::from("e")),
+            (Value::from("mouse_shape"), Value::from(0)),
+        ]);
+        let params = vec![arr(vec![
+            Value::from("mode_info_set"),
+            arr(vec![Value::from(true), arr(vec![hover_mode])]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::ModeInfoSet {
+                cursor_style_enabled: true,
+                modes: vec![ModeInfo {
+                    name: "cmdline_hover".into(),
+                    short_name: "e".into(),
+                    cursor_shape: String::new(),
+                    cell_percentage: 0,
+                    blinkwait: 0,
+                    blinkon: 0,
+                    blinkoff: 0,
+                    attr_id: 0,
+                }],
+            }]
+        );
+    }
+
+    #[test]
+    fn decodes_cmdline_show_pos_and_hide() {
+        // capture-cmdline.log: cmdline_show(content=[[0,"q",0]], pos=1,
+        // firstc=":", prompt="", indent=0, level=1, hl_id=0), then
+        // cmdline_pos(pos=0, level=1) after <Left>, then
+        // cmdline_hide(level=1, abort=false) after <CR>. The wire's
+        // trailing hl_id (chunk-level and cmdline-level) and cmdline_hide's
+        // level/abort are intentionally undecoded, matching this module's
+        // existing tolerant-trailing-field convention.
+        let params = vec![
+            arr(vec![
+                Value::from("cmdline_show"),
+                arr(vec![
+                    arr(vec![arr(vec![
+                        Value::from(0),
+                        Value::from("q"),
+                        Value::from(0),
+                    ])]),
+                    Value::from(1),
+                    Value::from(":"),
+                    Value::from(""),
+                    Value::from(0),
+                    Value::from(1),
+                    Value::from(0),
+                ]),
+            ]),
+            arr(vec![
+                Value::from("cmdline_pos"),
+                arr(vec![Value::from(0), Value::from(1)]),
+            ]),
+            arr(vec![
+                Value::from("cmdline_hide"),
+                arr(vec![Value::from(1), Value::from(false)]),
+            ]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::CmdlineShow {
+                    content: vec![(0, "q".to_string())],
+                    pos: 1,
+                    firstc: ":".to_string(),
+                    prompt: String::new(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::CmdlinePos { pos: 0, level: 1 },
+                UiEvent::CmdlineHide,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_msg_show_and_msg_clear() {
+        // capture-tabline.log: msg_show(kind="echomsg",
+        // content=[[73,"...deprecated...",26]], replace_last=false,
+        // history=true, append=..., id=..., trigger=...); only kind,
+        // content, and replace_last are modeled, per this module's
+        // tolerant-trailing-field convention.
+        let params = vec![
+            arr(vec![
+                Value::from("msg_show"),
+                arr(vec![
+                    Value::from("echomsg"),
+                    arr(vec![arr(vec![
+                        Value::from(73),
+                        Value::from("deprecated"),
+                        Value::from(26),
+                    ])]),
+                    Value::from(false),
+                    Value::from(true),
+                    Value::from(false),
+                    Value::Nil,
+                    Value::from(""),
+                ]),
+            ]),
+            arr(vec![Value::from("msg_clear"), arr(vec![])]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::MsgShow {
+                    kind: "echomsg".to_string(),
+                    content: vec![(73, "deprecated".to_string())],
+                    replace_last: false,
+                },
+                UiEvent::MsgClear,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_tabline_update_with_ext_tab_handles() {
+        // capture-tabline.log, tabline_update after `:tabnew<CR>`: current
+        // is an Ext(2, [2]) Tabpage handle, tabs holds both tabs' {tab,
+        // name} dicts. Ext(2, ..) encodes nvim's Tabpage type; the payload
+        // bytes are themselves a msgpack-packed integer handle id.
+        let tab1 = Value::Map(vec![
+            (Value::from("tab"), Value::Ext(2, vec![1])),
+            (Value::from("name"), Value::from("[No Name]")),
+        ]);
+        let tab2 = Value::Map(vec![
+            (Value::from("tab"), Value::Ext(2, vec![2])),
+            (Value::from("name"), Value::from("[No Name]")),
+        ]);
+        let params = vec![arr(vec![
+            Value::from("tabline_update"),
+            arr(vec![
+                Value::Ext(2, vec![2]),
+                arr(vec![tab1, tab2]),
+                Value::Ext(0, vec![1]),
+                arr(vec![]),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::TablineUpdate {
+                current: TabHandle(2),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "[No Name]".to_string(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "[No Name]".to_string(),
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn decodes_popupmenu_show_select_and_hide() {
+        // capture-popupmenu.log: popupmenu_show(items=[["foobar","","",""],
+        // ["foo","","",""]], selected=0, row=0, col=11, grid=1), then
+        // popupmenu_select(selected=1) from a second <C-n>, then
+        // popupmenu_hide() after <Esc>.
+        let item1 = arr(vec![
+            Value::from("foobar"),
+            Value::from(""),
+            Value::from(""),
+            Value::from(""),
+        ]);
+        let item2 = arr(vec![
+            Value::from("foo"),
+            Value::from(""),
+            Value::from(""),
+            Value::from(""),
+        ]);
+        let params = vec![
+            arr(vec![
+                Value::from("popupmenu_show"),
+                arr(vec![
+                    arr(vec![item1, item2]),
+                    Value::from(0),
+                    Value::from(0),
+                    Value::from(11),
+                    Value::from(1),
+                ]),
+            ]),
+            arr(vec![
+                Value::from("popupmenu_select"),
+                arr(vec![Value::from(1)]),
+            ]),
+            arr(vec![Value::from("popupmenu_hide"), arr(vec![])]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::PopupmenuShow {
+                    items: vec![
+                        PmItem {
+                            word: "foobar".to_string(),
+                            kind: String::new(),
+                            menu: String::new(),
+                            info: String::new(),
+                        },
+                        PmItem {
+                            word: "foo".to_string(),
+                            kind: String::new(),
+                            menu: String::new(),
+                            info: String::new(),
+                        },
+                    ],
+                    selected: 0,
+                    row: 0,
+                    col: 11,
+                    grid: 1,
+                },
+                UiEvent::PopupmenuSelect { selected: 1 },
+                UiEvent::PopupmenuHide,
+            ]
+        );
+    }
+
+    #[test]
+    fn popupmenu_select_reports_negative_one_sentinel() {
+        // api-ui-events.txt: "selected is a zero-based index ... or -1"
+        let params = vec![arr(vec![
+            Value::from("popupmenu_select"),
+            arr(vec![Value::from(-1)]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(evs, vec![UiEvent::PopupmenuSelect { selected: -1 }]);
     }
 }

@@ -18,8 +18,15 @@ use std::time::Duration;
 const UI_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl EngineHandle {
-    /// Attaches this connection as nvim's UI at `width` x `height` cells with
-    /// the `ext_linegrid` extension enabled.
+    /// Attaches this connection as nvim's UI at `width` x `height` cells
+    /// with the full set of native-rendering extensions enabled:
+    /// `ext_linegrid`, `ext_cmdline`, `ext_popupmenu`, `ext_messages`, and
+    /// `ext_tabline`. Without these, nvim falls back to painting cmdline,
+    /// messages, popupmenu, and tabline content directly into the grid,
+    /// which this frontend has no way to distinguish from ordinary buffer
+    /// text; attaching all five up front is what makes
+    /// [`crate::ui_events::decode_redraw`]'s mode/cmdline/messages/tabline/
+    /// popupmenu variants reachable at all.
     ///
     /// A `request`, not a `notify`: the caller needs to know attach succeeded
     /// before entering the paint loop. This is the only request the paint
@@ -40,7 +47,13 @@ impl EngineHandle {
             vec![
                 Value::from(width),
                 Value::from(height),
-                Value::Map(vec![(Value::from("ext_linegrid"), Value::from(true))]),
+                Value::Map(vec![
+                    (Value::from("ext_linegrid"), Value::from(true)),
+                    (Value::from("ext_cmdline"), Value::from(true)),
+                    (Value::from("ext_popupmenu"), Value::from(true)),
+                    (Value::from("ext_messages"), Value::from(true)),
+                    (Value::from("ext_tabline"), Value::from(true)),
+                ]),
             ],
             UI_ATTACH_TIMEOUT,
         )?;

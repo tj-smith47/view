@@ -3,7 +3,7 @@
 use crate::events::{clamp_dim, saturate_u16, UiEvent};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
-use crate::model::{Focus, Model};
+use crate::model::{CmdlineState, Focus, MessageEntry, Model, PopupmenuState, TablineState};
 use crate::msg::{Effect, EngineRequest, Key, Msg, ReplyValue, RpcCall};
 
 /// Applies one message to `model`, returning the effects the executor must
@@ -115,6 +115,76 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
             model.engine.hl.default_bg = bg;
         }
         UiEvent::Flush => model.dirty = true,
+        UiEvent::ModeInfoSet {
+            cursor_style_enabled,
+            modes,
+        } => {
+            model.engine.mode.cursor_style_enabled = cursor_style_enabled;
+            model.engine.mode.modes = modes;
+        }
+        UiEvent::ModeChange { mode, mode_idx } => {
+            model.engine.mode.current = mode;
+            model.engine.mode.current_idx = mode_idx;
+        }
+        UiEvent::CmdlineShow {
+            content,
+            pos,
+            firstc,
+            prompt,
+            indent,
+            level,
+        } => {
+            model.engine.cmdline = Some(CmdlineState {
+                content,
+                pos,
+                firstc,
+                prompt,
+                indent,
+                level,
+            });
+        }
+        UiEvent::CmdlinePos { pos, level } => {
+            if let Some(cmdline) = &mut model.engine.cmdline {
+                cmdline.pos = pos;
+                cmdline.level = level;
+            }
+        }
+        UiEvent::CmdlineHide => model.engine.cmdline = None,
+        UiEvent::MsgShow {
+            kind,
+            content,
+            replace_last,
+        } => {
+            model
+                .engine
+                .messages
+                .push(MessageEntry { kind, content }, replace_last);
+        }
+        UiEvent::MsgClear => model.engine.messages.clear(),
+        UiEvent::TablineUpdate { current, tabs } => {
+            model.engine.tabline = Some(TablineState { current, tabs });
+        }
+        UiEvent::PopupmenuShow {
+            items,
+            selected,
+            row,
+            col,
+            grid,
+        } => {
+            model.engine.popupmenu = Some(PopupmenuState {
+                items,
+                selected,
+                row,
+                col,
+                grid,
+            });
+        }
+        UiEvent::PopupmenuSelect { selected } => {
+            if let Some(pm) = &mut model.engine.popupmenu {
+                pm.selected = selected;
+            }
+        }
+        UiEvent::PopupmenuHide => model.engine.popupmenu = None,
         UiEvent::Unknown { .. } => {}
     }
 }
@@ -249,5 +319,202 @@ mod tests {
                 height: 40
             })]
         ));
+    }
+
+    // fixtures below are shaped from crates/view-engine/src/ui_events.rs's
+    // decode test fixtures, which are themselves copied from the live
+    // capture at ~/.claude/tmp/capture-*.log (see that module's tests for
+    // the raw wire fixtures); these tests exercise state application only, not
+    // decoding.
+
+    #[test]
+    fn mode_events_update_state_without_dirty() {
+        use crate::events::ModeInfo;
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::ModeInfoSet {
+                    cursor_style_enabled: true,
+                    modes: vec![
+                        ModeInfo {
+                            name: "normal".into(),
+                            cursor_shape: "block".into(),
+                            ..ModeInfo::default()
+                        },
+                        ModeInfo {
+                            name: "insert".into(),
+                            cursor_shape: "vertical".into(),
+                            cell_percentage: 25,
+                            ..ModeInfo::default()
+                        },
+                    ],
+                },
+                UiEvent::ModeChange {
+                    mode: "insert".into(),
+                    mode_idx: 1,
+                },
+            ]),
+        );
+        assert!(effects.is_empty());
+        assert!(!m.dirty, "mode events alone must not request paint");
+        assert!(m.engine.mode.cursor_style_enabled);
+        assert_eq!(m.engine.mode.current, "insert");
+        assert_eq!(
+            m.engine
+                .mode
+                .active_cursor()
+                .map(|c| c.cursor_shape.as_str()),
+            Some("vertical")
+        );
+    }
+
+    #[test]
+    fn mode_state_active_cursor_is_none_before_mode_info_set() {
+        let m = model();
+        assert!(m.engine.mode.active_cursor().is_none());
+    }
+
+    #[test]
+    fn cmdline_show_pos_hide_set_and_clear_state() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineShow {
+                content: vec![(0, "q".into())],
+                pos: 1,
+                firstc: ":".into(),
+                prompt: "".into(),
+                indent: 0,
+                level: 1,
+            }]),
+        );
+        assert!(!m.dirty);
+        let cmdline = m.engine.cmdline.as_ref().expect("cmdline must be set");
+        assert_eq!(cmdline.content, vec![(0, "q".to_string())]);
+        assert_eq!(cmdline.firstc, ":");
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlinePos { pos: 2, level: 1 }]),
+        );
+        assert_eq!(m.engine.cmdline.as_ref().unwrap().pos, 2);
+
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+        assert!(m.engine.cmdline.is_none());
+    }
+
+    #[test]
+    fn cmdline_pos_without_prior_show_is_a_noop() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlinePos { pos: 3, level: 1 }]),
+        );
+        assert!(m.engine.cmdline.is_none());
+    }
+
+    #[test]
+    fn msg_show_appends_and_replace_last_overwrites() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(73, "first".into())],
+                replace_last: false,
+            }]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(73, "second".into())],
+                replace_last: false,
+            }]),
+        );
+        assert_eq!(m.engine.messages.entries.len(), 2);
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(73, "replaced".into())],
+                replace_last: true,
+            }]),
+        );
+        assert_eq!(m.engine.messages.entries.len(), 2);
+        assert_eq!(
+            m.engine.messages.entries.last().unwrap().content,
+            vec![(73, "replaced".to_string())]
+        );
+
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::MsgClear]));
+        assert!(m.engine.messages.entries.is_empty());
+    }
+
+    #[test]
+    fn tabline_update_sets_current_and_tabs() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(2),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "[No Name]".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "[No Name]".into(),
+                    },
+                ],
+            }]),
+        );
+        assert!(!m.dirty);
+        let tabline = m.engine.tabline.as_ref().expect("tabline must be set");
+        assert_eq!(tabline.current, TabHandle(2));
+        assert_eq!(tabline.tabs.len(), 2);
+    }
+
+    #[test]
+    fn popupmenu_show_select_hide_set_and_clear_state() {
+        use crate::events::PmItem;
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::PopupmenuShow {
+                items: vec![PmItem {
+                    word: "foobar".into(),
+                    ..PmItem::default()
+                }],
+                selected: 0,
+                row: 0,
+                col: 11,
+                grid: 1,
+            }]),
+        );
+        assert_eq!(m.engine.popupmenu.as_ref().unwrap().selected, 0);
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::PopupmenuSelect { selected: 1 }]),
+        );
+        assert_eq!(m.engine.popupmenu.as_ref().unwrap().selected, 1);
+
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::PopupmenuHide]));
+        assert!(m.engine.popupmenu.is_none());
+    }
+
+    #[test]
+    fn popupmenu_select_without_prior_show_is_a_noop() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::PopupmenuSelect { selected: 0 }]),
+        );
+        assert!(m.engine.popupmenu.is_none());
     }
 }
