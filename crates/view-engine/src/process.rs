@@ -1,12 +1,19 @@
 //! Spawning `nvim --embed` and performing the API-info handshake.
+//!
+//! `Engine` owns the child process, its RPC handle, and the notification
+//! channel for the process's lifetime. Its `Drop` impl attempts a graceful
+//! shutdown (`qa!` sent over the writer thread, then a bounded wait) before
+//! falling back to `SIGKILL`, so a normally-responsive nvim gets the chance
+//! to flush shada and remove its swap file instead of leaving behind a
+//! recovery prompt on the next open.
 
 use crate::handle::{EngineError, EngineHandle, EngineNotification};
 use rmpv::Value;
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::Receiver;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Configuration for spawning an embedded Neovim process.
 pub struct EngineConfig {
@@ -22,6 +29,11 @@ pub struct EngineConfig {
     /// blocking the caller forever; the child is reaped before the error
     /// is returned.
     pub handshake_timeout: Duration,
+    /// Maximum time to wait for the child to exit on its own after a
+    /// graceful `qa!` is sent during shutdown ([`Engine::shutdown`] or
+    /// `Drop`). Defaults to 500 milliseconds. A child still running once
+    /// this elapses is force-killed instead.
+    pub shutdown_timeout: Duration,
 }
 
 impl Default for EngineConfig {
@@ -30,6 +42,7 @@ impl Default for EngineConfig {
             nvim_bin: PathBuf::from("nvim"),
             extra_args: vec![],
             handshake_timeout: Duration::from_secs(5),
+            shutdown_timeout: Duration::from_millis(500),
         }
     }
 }
@@ -49,23 +62,21 @@ pub struct ApiInfo {
 /// receiver.
 ///
 /// `Engine` owns the child process for its entire lifetime: once
-/// `Engine::spawn` returns `Ok`, dropping the `Engine` always kills and
-/// reaps the child (`Drop` runs `kill()` then `wait()`, ignoring errors
-/// since the process may already have exited on its own, e.g. after a
-/// graceful `:q`). Callers that want the real exit status of a
-/// normally-exited process should call `child.wait()` themselves before
-/// the `Engine` drops; the subsequent `Drop`-driven `kill()`/`wait()` on an
-/// already-reaped child is a harmless no-op error that is discarded.
+/// `Engine::spawn` returns `Ok`, dropping the `Engine` always shuts the
+/// child down (`Drop` attempts a graceful `qa!` first, then force-kills and
+/// reaps; see [`shutdown`](Self::shutdown) for the same sequence with an
+/// observable exit status). The child itself is a private field: callers
+/// cannot block on it directly, only read its pid, take the notification
+/// receiver, or consume the `Engine` to shut it down explicitly.
 pub struct Engine {
-    /// The RPC client for issuing requests to the engine.
+    /// The RPC client for issuing requests to the engine. `Clone` and
+    /// `Send`, so requests can be issued from other threads while one
+    /// thread owns the receiver returned by
+    /// [`take_notifications`](Self::take_notifications).
     pub handle: EngineHandle,
-    /// Receiver for notifications (e.g., `redraw` events) from the engine.
-    pub notifications: Receiver<EngineNotification>,
-    /// The child process handle, for lifecycle control (e.g., reading the
-    /// exit status after a graceful `:q`). `Engine`'s `Drop` impl kills and
-    /// reaps this child unconditionally, so manual cleanup is only needed
-    /// to observe the exit code, never to prevent a zombie.
-    pub child: Child,
+    notifications: Option<Receiver<EngineNotification>>,
+    child: Child,
+    shutdown_timeout: Duration,
     /// The engine's API version and channel id, captured at handshake time.
     pub api_info: ApiInfo,
 }
@@ -74,6 +85,11 @@ pub struct Engine {
 /// (pipe capture failure, handshake error or timeout) reaps it instead of
 /// leaking a zombie. Disarmed via `.0.take()` once `spawn` has everything it
 /// needs to build the long-lived `Engine`, which then owns reaping itself.
+///
+/// This guard only covers the pre-handshake window, where the child has
+/// never answered anything, so there is no session state worth saving; it
+/// always force-kills rather than attempting the graceful shutdown
+/// `Engine`'s own `Drop` uses once a connection is actually live.
 struct ChildGuard(Option<Child>);
 
 impl Drop for ChildGuard {
@@ -137,23 +153,92 @@ impl Engine {
         };
         Ok(Self {
             handle,
-            notifications,
+            notifications: Some(notifications),
             child,
+            shutdown_timeout: cfg.shutdown_timeout,
             api_info,
         })
+    }
+
+    /// Takes ownership of the notification receiver, if it has not already
+    /// been taken (returns `None` on a second call).
+    ///
+    /// `Engine` cannot expose the receiver as a plain field: a borrowed
+    /// `Receiver<EngineNotification>` is `!Sync`, which would make `Engine`
+    /// itself `!Sync` and `Arc<Engine>` not even `Send` — inexpressible
+    /// against the intended usage of polling notifications on one thread
+    /// while issuing requests via a cloned [`EngineHandle`] from others.
+    /// Callers take the receiver once, up front, and hold onto it
+    /// themselves for the `Engine`'s lifetime.
+    pub fn take_notifications(&mut self) -> Option<Receiver<EngineNotification>> {
+        self.notifications.take()
+    }
+
+    /// The OS process id of the spawned child. For diagnostics and tests
+    /// that need to verify the process was actually reaped; does not block
+    /// or observe exit status (see [`shutdown`](Self::shutdown) for that).
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// Consumes the `Engine` and runs the same graceful-then-forced
+    /// shutdown sequence as `Drop`, returning the child's real exit status.
+    ///
+    /// `Drop` alone cannot surface this: it runs on every drop path
+    /// (including a panic unwinding through an `Engine`), discards errors,
+    /// and has no return value. Call `shutdown` explicitly to distinguish a
+    /// graceful exit from a forced kill (e.g. via `ExitStatusExt::signal`
+    /// on Unix) or to forward the real exit code, such as via
+    /// `std::process::exit`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if `try_wait`, `kill`, or
+    /// `wait` on the child process fails.
+    pub fn shutdown(mut self) -> std::io::Result<ExitStatus> {
+        graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout)
     }
 }
 
 impl Drop for Engine {
-    /// Kills and reaps the child on every drop path, mirroring
-    /// [`ChildGuard`]'s discipline for the pre-handshake window. Errors are
-    /// discarded: a `kill()` on an already-exited process (e.g. one whose
-    /// exit status a caller already collected via `child.wait()`) is not
+    /// Attempts a graceful shutdown (`qa!`, then a bounded wait) and falls
+    /// back to `SIGKILL` + reap on every drop path. Errors are discarded: a
+    /// `kill()` on an already-exited process (e.g. one whose exit status a
+    /// caller already collected via [`shutdown`](Self::shutdown)) is not
     /// actionable and must not panic or be surfaced from a `Drop` impl.
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout);
     }
+}
+
+/// Sends `qa!` as a fire-and-forget notification, polls `try_wait` until
+/// the child exits or `shutdown_timeout` elapses, then force-kills and
+/// reaps it. Shared by [`Engine::shutdown`] and `Engine`'s `Drop` impl so
+/// the two sequences can never drift apart.
+///
+/// The `notify` call is best-effort: if the writer thread is already gone
+/// (connection already closed, e.g. nvim crashed or the peer wrote garbage
+/// mid-session), sending `qa!` fails and this falls straight through to the
+/// poll loop, which sees the child has already exited on the very first
+/// `try_wait`.
+fn graceful_kill(
+    handle: &EngineHandle,
+    child: &mut Child,
+    shutdown_timeout: Duration,
+) -> std::io::Result<ExitStatus> {
+    let _ = handle.notify("nvim_command", vec![Value::from("qa!")]);
+    let deadline = Instant::now() + shutdown_timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.kill()?;
+    child.wait()
 }
 
 fn decode_api_info(v: Value) -> Result<ApiInfo, EngineError> {

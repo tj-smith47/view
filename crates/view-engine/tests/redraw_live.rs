@@ -11,7 +11,8 @@ use view_engine::ui_events::{decode_redraw, UiEvent};
 
 #[test]
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
-    let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let notifications = engine.take_notifications().unwrap();
 
     let options = Value::Map(vec![(Value::from("ext_linegrid"), Value::from(true))]);
     engine
@@ -28,7 +29,7 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let mut saw_flush = false;
     while Instant::now() < deadline && !(saw_grid_line && saw_flush) {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(note) = engine.notifications.recv_timeout(remaining) else {
+        let Ok(note) = notifications.recv_timeout(remaining) else {
             break;
         };
         if note.method != "redraw" {

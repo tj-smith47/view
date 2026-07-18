@@ -3,7 +3,7 @@ use rmpv::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -48,24 +48,67 @@ pub struct EngineNotification {
     pub params: Vec<Value>,
 }
 
-type Pending = Arc<Mutex<HashMap<u32, mpsc::Sender<Result<Value, EngineError>>>>>;
+/// The set of in-flight request waiters plus a `closed` flag, guarded by a
+/// single lock so a reader or writer thread that discovers the connection
+/// is gone can mark it closed and drain every waiter in one atomic step.
+/// Without sharing the lock, a request could insert itself into the map
+/// after the draining thread has already run, leaking a waiter that will
+/// never be resolved (the original hang this type exists to close).
+#[derive(Default)]
+struct PendingState {
+    waiters: HashMap<u32, mpsc::Sender<Result<Value, EngineError>>>,
+    closed: bool,
+}
+
+type Pending = Arc<Mutex<PendingState>>;
 
 /// An RPC client for the embedded Neovim process, with request correlation
 /// and a flood-proof notification reader.
 ///
-/// `EngineHandle` spawns two internal threads on creation:
-/// - A reader thread that decodes incoming messages, correlates responses to
-///   requests, and forwards notifications to a receiver.
-/// - The handle itself serializes outgoing requests and maintains pending
-///   response waiters.
+/// `EngineHandle` is cheap to clone (all state is `Arc`- or channel-backed)
+/// and `Send`, so requests can be issued from several threads while another
+/// thread owns the notification receiver. Cloning does not spawn new
+/// threads; every clone shares the same reader/writer pair created by
+/// [`start`](Self::start).
+///
+/// [`start`](Self::start) spawns two internal threads:
+/// - A reader thread that decodes incoming messages, correlates responses
+///   to requests, forwards notifications to a receiver, and immediately
+///   answers any incoming `Request` from the peer with a
+///   `"method not supported"` error (dispatching nvim-to-client requests is
+///   not implemented yet, but the msgpack-RPC contract still requires a
+///   reply or the peer's main loop blocks forever waiting for one).
+/// - A writer thread that owns the write half and serializes every
+///   outgoing message (requests, the auto-replies above, and fire-and-forget
+///   notifications) fed to it over an internal channel. Callers never touch
+///   the pipe directly, so a write that blocks on a full OS pipe buffer
+///   blocks only the writer thread, never the caller's timeout.
+///
+/// Both threads share one `closed` flag with the pending-waiters map (see
+/// `PendingState`): whichever thread notices the connection is gone first
+/// marks it closed and drains every waiter with
+/// [`EngineError::Closed`](EngineError::Closed) in the same critical
+/// section that flips the flag, so a request racing the shutdown either
+/// lands before the flag (and gets drained) or after it (and is rejected
+/// before it ever touches the pipe).
 ///
 /// The reader thread uses an unbounded channel for notifications, ensuring
 /// that a flood of notifications (e.g., a large `redraw` burst) never blocks
 /// the delivery of pending responses.
 pub struct EngineHandle {
-    next_msgid: AtomicU32,
+    next_msgid: Arc<AtomicU32>,
     pending: Pending,
-    writer: Mutex<Box<dyn Write + Send>>,
+    write_tx: mpsc::Sender<Vec<u8>>,
+}
+
+impl Clone for EngineHandle {
+    fn clone(&self) -> Self {
+        Self {
+            next_msgid: Arc::clone(&self.next_msgid),
+            pending: Arc::clone(&self.pending),
+            write_tx: self.write_tx.clone(),
+        }
+    }
 }
 
 impl EngineHandle {
@@ -76,7 +119,8 @@ impl EngineHandle {
     /// * `reader` - An unbuffered read source (typically one end of a pipe).
     ///   The handle wraps it in a `BufReader` internally.
     /// * `writer` - An unbuffered write sink (typically the other end of the
-    ///   pipe pair). Used by the handle thread to send requests.
+    ///   pipe pair). Owned entirely by the writer thread; nothing outside
+    ///   that thread ever calls into it.
     ///
     /// # Returns
     ///
@@ -88,8 +132,10 @@ impl EngineHandle {
     ///
     /// # Panics
     ///
-    /// Never panics. Errors on the internal reader thread (I/O, decode) cause
-    /// the thread to exit cleanly, sending `Closed` to any pending requests.
+    /// Never panics. Errors on the internal reader or writer thread (I/O,
+    /// decode, a broken pipe) cause the affected thread to exit cleanly,
+    /// marking the connection closed and sending `Closed` to any pending
+    /// requests.
     ///
     /// # Notification receiver lifetime
     ///
@@ -110,11 +156,30 @@ impl EngineHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
     ) -> (Self, mpsc::Receiver<EngineNotification>) {
-        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         // unbounded so the reader thread can never stall a pending response
         // behind a redraw flood; compaction lands with the surface damage model
         let (notif_tx, notif_rx) = mpsc::channel();
+        let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
+
+        let writer_pending = Arc::clone(&pending);
+        std::thread::spawn(move || {
+            let mut w = writer;
+            while let Ok(bytes) = write_rx.recv() {
+                let sent = w.write_all(&bytes).and_then(|()| w.flush());
+                if sent.is_err() {
+                    // the pipe is broken (peer gone, or wedged past
+                    // recovery): fail every pending waiter instead of
+                    // leaving them to hang on a response that can never
+                    // arrive, and reject every future request up front
+                    close_and_drain(&writer_pending);
+                    break;
+                }
+            }
+        });
+
         let reader_pending = Arc::clone(&pending);
+        let reader_write_tx = write_tx.clone();
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
             while let Ok(value) = rmpv::decode::read_value(&mut r) {
@@ -124,10 +189,12 @@ impl EngineHandle {
                         error,
                         result,
                     }) => {
-                        let waiter = reader_pending
-                            .lock()
-                            .ok()
-                            .and_then(|mut p| p.remove(&msgid));
+                        let waiter = {
+                            let mut p = reader_pending
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner);
+                            p.waiters.remove(&msgid)
+                        };
                         if let Some(tx) = waiter {
                             let outcome = if error == Value::Nil {
                                 Ok(result)
@@ -145,23 +212,34 @@ impl EngineHandle {
                             break;
                         }
                     }
-                    Ok(RpcMessage::Request { .. }) | Err(_) => {
-                        // nvim-to-client requests arrive in P2 (VimEnter
-                        // blocking rpcrequest); until then they are ignored
+                    Ok(RpcMessage::Request { msgid, .. }) => {
+                        // msgpack-RPC obliges a reply to every Request, or
+                        // the peer's main loop blocks forever waiting for
+                        // one; dispatching these to real handlers is not
+                        // implemented yet, so answer with a typed error
+                        let resp = RpcMessage::Response {
+                            msgid,
+                            error: Value::from("method not supported"),
+                            result: Value::Nil,
+                        };
+                        if let Ok(bytes) = encode_message(&resp) {
+                            let _ = reader_write_tx.send(bytes);
+                        }
+                    }
+                    Err(_) => {
+                        // malformed message shape: not fatal on its own: a
+                        // future well-formed message can still arrive on
+                        // the same connection
                     }
                 }
             }
             // engine is gone: fail every in-flight request instead of hanging
-            if let Ok(mut p) = reader_pending.lock() {
-                for (_, tx) in p.drain() {
-                    let _ = tx.send(Err(EngineError::Closed));
-                }
-            }
+            close_and_drain(&reader_pending);
         });
         let handle = Self {
-            next_msgid: AtomicU32::new(1),
+            next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
-            writer: Mutex::new(Box::new(writer)),
+            write_tx,
         };
         (handle, notif_rx)
     }
@@ -181,7 +259,8 @@ impl EngineHandle {
     ///   non-nil error.
     /// - `Err(EngineError::Io(_))` on write errors.
     /// - `Err(EngineError::Closed)` if the engine connection closes before
-    ///   the response arrives.
+    ///   the response arrives, including if it was already closed before
+    ///   this call started.
     ///
     /// This function blocks until the response is received. A response is
     /// never starved by a flood of notifications on the same connection.
@@ -204,7 +283,11 @@ impl EngineHandle {
     /// # Arguments
     ///
     /// * `method`, `params` - Same as [`request`](Self::request).
-    /// * `timeout` - Maximum time to wait for the response.
+    /// * `timeout` - Maximum time to wait for the response. Bounds the
+    ///   entire call, including the time spent writing the request: the
+    ///   write happens on a dedicated writer thread fed by a channel, so
+    ///   this call never blocks inside a `write()` syscall itself, even
+    ///   against a peer that never reads its end of the pipe.
     ///
     /// # Returns
     ///
@@ -231,9 +314,9 @@ impl EngineHandle {
                 // the reader thread may still resolve this msgid later; removing
                 // the waiter now means that late response is dropped instead of
                 // leaking the waiter for the handle's lifetime
-                if let Ok(mut p) = self.pending.lock() {
-                    p.remove(&msgid);
-                }
+                let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+                p.waiters.remove(&msgid);
+                drop(p);
                 Err(EngineError::Timeout {
                     method: method.to_owned(),
                     timeout,
@@ -243,8 +326,29 @@ impl EngineHandle {
         }
     }
 
-    /// Allocates a msgid, registers the pending waiter, and writes the
-    /// request. Shared by [`request`](Self::request) and
+    /// Sends a fire-and-forget notification: encodes and enqueues it on the
+    /// writer thread's channel, same as a request, but returns as soon as
+    /// it is queued rather than waiting for any reply (notifications have
+    /// none). Used for calls where the caller does not need to observe the
+    /// result, such as the `qa!` sent during [`Engine`](crate::process::Engine) shutdown.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the writer thread has already
+    /// exited (connection already closed), and any error from encoding the
+    /// message.
+    pub fn notify(&self, method: &str, params: Vec<Value>) -> Result<(), EngineError> {
+        let msg = RpcMessage::Notification {
+            method: method.to_owned(),
+            params,
+        };
+        let bytes = encode_message(&msg)?;
+        self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
+    }
+
+    /// Allocates a msgid, registers the pending waiter, and enqueues the
+    /// encoded request on the writer thread's channel. Shared by
+    /// [`request`](Self::request) and
     /// [`request_timeout`](Self::request_timeout), which differ only in how
     /// they wait on the returned receiver.
     fn send_request(
@@ -254,34 +358,47 @@ impl EngineHandle {
     ) -> Result<(u32, mpsc::Receiver<Result<Value, EngineError>>), EngineError> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        self.pending
-            .lock()
-            .map_err(|_| EngineError::Closed)?
-            .insert(msgid, tx);
+        {
+            let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if p.closed {
+                return Err(EngineError::Closed);
+            }
+            p.waiters.insert(msgid, tx);
+        }
         let msg = RpcMessage::Request {
             msgid,
             method: method.to_owned(),
             params,
         };
-        if let Err(e) = self.write_request(&msg) {
-            // the reader thread will never see this msgid now, so nothing
-            // will ever remove the waiter; drop it ourselves or it leaks
-            // for the life of the handle
-            if let Ok(mut p) = self.pending.lock() {
-                p.remove(&msgid);
-            }
-            return Err(e);
+        let bytes = encode_message(&msg)?;
+        if self.write_tx.send(bytes).is_err() {
+            // the writer thread is gone, so nothing will ever write this
+            // request or fail it on our behalf; undo the insert ourselves
+            let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            p.waiters.remove(&msgid);
+            return Err(EngineError::Closed);
         }
         Ok((msgid, rx))
     }
+}
 
-    fn write_request(&self, msg: &RpcMessage) -> Result<(), EngineError> {
-        let mut w = self.writer.lock().map_err(|_| EngineError::Closed)?;
-        rmpv::encode::write_value(&mut *w, &msg.to_value())
-            .map_err(|e| EngineError::Io(std::io::Error::other(e)))?;
-        w.flush()?;
-        Ok(())
+/// Marks the connection closed and drains every pending waiter with
+/// [`EngineError::Closed`] in one critical section, so a `send_request`
+/// racing this call either lands before the flag flips (and gets drained
+/// here) or observes `closed == true` and never inserts at all.
+fn close_and_drain(pending: &Pending) {
+    let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
+    p.closed = true;
+    for (_, tx) in p.waiters.drain() {
+        let _ = tx.send(Err(EngineError::Closed));
     }
+}
+
+fn encode_message(msg: &RpcMessage) -> Result<Vec<u8>, EngineError> {
+    let mut buf = Vec::new();
+    rmpv::encode::write_value(&mut buf, &msg.to_value())
+        .map_err(|e| EngineError::Io(std::io::Error::other(e)))?;
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -393,5 +510,134 @@ mod tests {
             }
         }
         assert_eq!(count, 10_000, "expected 10,000 notifications, got {count}");
+    }
+
+    /// Reproduces the critical hang found in review: the reader thread can
+    /// exit (here, because its notification receiver was dropped, causing
+    /// the very next `notif_tx.send` to fail) while the peer connection
+    /// itself is still open and healthy. A `request()` issued after that
+    /// point must observe `Closed` instead of blocking forever waiting for
+    /// a response nothing will ever deliver. Against the pre-fix code
+    /// (no `closed` flag shared with the pending map), this test hangs
+    /// past the 2s watchdog budget instead of failing normally.
+    #[test]
+    fn request_after_reader_exit_returns_closed_not_hang() {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, mut peer_write) = std::io::pipe().unwrap();
+        // peer thread: keep draining whatever the handle writes so that no
+        // write ever blocks on a full pipe; the peer never answers anything
+        std::thread::spawn(move || {
+            let mut r = std::io::BufReader::new(peer_read);
+            while rmpv::decode::read_value(&mut r).is_ok() {}
+        });
+
+        let (h, n) = EngineHandle::start(our_read, our_write);
+        // drop the receiver before any notification is ever sent, so the
+        // reader thread's first forwarding attempt after this point is
+        // guaranteed to observe a disconnected channel
+        drop(n);
+
+        let notif = RpcMessage::Notification {
+            method: "redraw".into(),
+            params: vec![],
+        };
+        rmpv::encode::write_value(&mut peer_write, &notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        // request() has no timeout of its own; run it on a watchdog thread
+        // so a regression to the old hang fails this test loudly (after 2s)
+        // instead of stalling the whole suite forever
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(h.request("nvim_get_api_info", vec![]));
+        });
+        let outcome = rx.recv_timeout(std::time::Duration::from_secs(2));
+        assert!(
+            outcome.is_ok(),
+            "request() hung after reader exit instead of returning Closed"
+        );
+        assert!(
+            matches!(outcome.unwrap(), Err(EngineError::Closed)),
+            "expected Closed after reader exit"
+        );
+    }
+
+    /// Finding 3: an incoming `Request` from the peer (e.g. a blocking
+    /// `rpcrequest` from nvim's init.lua) must get an immediate reply, or
+    /// the peer's main loop blocks forever waiting for one and every
+    /// subsequent call from our side deadlocks against it. Dispatching
+    /// these to real handlers is P2 work; until then, the reply is a typed
+    /// "method not supported" error.
+    #[test]
+    fn incoming_request_gets_method_not_supported_response() {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, mut peer_write) = std::io::pipe().unwrap();
+        let (h, _n) = EngineHandle::start(our_read, our_write);
+
+        let req = RpcMessage::Request {
+            msgid: 42,
+            method: "some_client_bound_call".into(),
+            params: vec![],
+        };
+        rmpv::encode::write_value(&mut peer_write, &req.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let resp = RpcMessage::from_value(v).unwrap();
+        assert_eq!(
+            resp,
+            RpcMessage::Response {
+                msgid: 42,
+                error: Value::from("method not supported"),
+                result: Value::Nil,
+            }
+        );
+        // keep the handle alive for the duration of the read above
+        drop(h);
+    }
+
+    /// Non-msgpack bytes on the wire make `rmpv::decode::read_value` return
+    /// `Err`, which the reader loop's `while let Ok(..)` already treats as
+    /// end-of-stream. Both an already-in-flight request and any request
+    /// issued afterward must resolve to `Closed` rather than hang.
+    #[test]
+    fn garbage_on_wire_closes_in_flight_and_future_requests() {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, mut peer_write) = std::io::pipe().unwrap();
+        // peer thread: drain writes but never answer, so the in-flight
+        // request below stays pending until the garbage bytes land
+        std::thread::spawn(move || {
+            let mut r = std::io::BufReader::new(peer_read);
+            while rmpv::decode::read_value(&mut r).is_ok() {}
+        });
+
+        let (h, _n) = EngineHandle::start(our_read, our_write);
+
+        let h2 = h.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(h2.request("nvim_eval", vec![]));
+        });
+
+        // give the in-flight request time to land before corrupting the
+        // wire: a str8 marker (0xd9) claims a 255-byte string that never
+        // follows, then closing the write end forces an EOF mid-read,
+        // which read_value surfaces as a decode Err rather than blocking
+        // forever waiting for bytes that will never arrive
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        peer_write.write_all(&[0xd9, 0xff]).unwrap();
+        peer_write.flush().unwrap();
+        drop(peer_write);
+
+        let in_flight = rx.recv_timeout(std::time::Duration::from_secs(2));
+        assert!(
+            in_flight.is_ok(),
+            "in-flight request() hung after garbage on the wire"
+        );
+        assert!(matches!(in_flight.unwrap(), Err(EngineError::Closed)));
+
+        let future = h.request("nvim_eval", vec![]);
+        assert!(matches!(future, Err(EngineError::Closed)));
     }
 }
