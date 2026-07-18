@@ -50,6 +50,7 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
             LayerKind::Messages(entries) => paint_messages(entries, &theme, area, frame),
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, frame),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, frame),
+            LayerKind::Shell => paint_shell(&theme, area, frame),
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
             _ => {}
@@ -213,6 +214,38 @@ fn paint_popupmenu(
         };
         paint_text_row(&item.display_text(), style, area, row, frame);
     }
+}
+
+/// Renders the pre-content startup shell: a themed statusline placeholder
+/// bar on the terminal's bottom row, plus a static "waiting for nvim"
+/// indicator centered in the remaining rows. Present only while
+/// `view_core::model::Model::content_painted` is `false` (see
+/// `view_surface::render`); `render()` stops including the
+/// [`LayerKind::Shell`] layer at all once real grid content has arrived, so
+/// this function has nothing left to overwrite it with.
+///
+/// No animation: the runtime loop is timer-free (no clock anywhere in its
+/// steady-state body), so this glyph is fixed rather than advancing frames
+/// on its own -- a real spinner would need a tick this architecture
+/// deliberately does not have.
+fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, frame: &mut ratatui::Frame<'_>) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+    let fill = " ".repeat(usize::from(area.width));
+    let bottom_row = area.height - 1;
+    paint_text_row(
+        &fill,
+        ratatui_style(theme.status_line),
+        area,
+        bottom_row,
+        frame,
+    );
+
+    let label = "view: waiting for nvim...";
+    let text: String = label.chars().take(usize::from(area.width)).collect();
+    let mid_row = area.height / 2;
+    paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, frame);
 }
 
 /// Intersects a [`view_surface::Rect`] with the frame's own area: a layer
@@ -803,6 +836,43 @@ mod tests {
             &buf[(3, 2)].symbol(),
             &" ",
             "popup menu must vanish once PopupmenuHide clears its state"
+        );
+    }
+
+    #[test]
+    fn shell_paints_a_themed_statusline_row_and_a_waiting_indicator() {
+        let mut model = Model::with_term_size(20, 4);
+        model.content_painted = false;
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // bottom row (3): the statusline placeholder fill, present even
+        // though nothing has painted real content there yet
+        assert_eq!(&buf[(0, 3)].symbol(), &" ");
+        // middle row (height/2 == 2): the waiting indicator's text
+        assert_eq!(&buf[(0, 2)].symbol(), &"v");
+        assert_eq!(&buf[(1, 2)].symbol(), &"i");
+    }
+
+    #[test]
+    fn shell_never_paints_once_content_painted_is_true() {
+        let model = Model::with_term_size(20, 4);
+        assert!(model.content_painted, "default must be the steady state");
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(20, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(
+            &buf[(0, 2)].symbol(),
+            &" ",
+            "no waiting indicator once content_painted is true"
         );
     }
 }

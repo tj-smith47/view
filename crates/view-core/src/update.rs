@@ -44,8 +44,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             effects
         }
         // loop plumbing tokens: the loop resolves these into Redraw/EngineDown
-        // before update() ever sees them, so both arms are no-ops here
-        Msg::RedrawReady | Msg::EngineStopped => Vec::new(),
+        // before update() ever sees them, so both arms are no-ops here;
+        // EngineReady is consumed even earlier, by startup's pre-attach
+        // draining loop, before the steady-state loop this match belongs to
+        // ever starts, so this arm is unreachable in practice but kept for
+        // the same defensive-totality reason
+        Msg::RedrawReady | Msg::EngineStopped | Msg::EngineReady => Vec::new(),
         Msg::EngineDown(exit) => {
             model.running = false;
             vec![Effect::Quit {
@@ -182,6 +186,9 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::Flush => {
             model.dirty = true;
+            // idempotent past the first Flush: see Model::content_painted's
+            // doc comment for why this never resets
+            model.content_painted = true;
             Vec::new()
         }
         UiEvent::ModeInfoSet {

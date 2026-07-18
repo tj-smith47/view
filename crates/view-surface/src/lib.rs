@@ -61,6 +61,14 @@ pub enum LayerKind {
     Tabline(TablineState),
     /// The completion popup menu, present while it is open.
     Popupmenu(PopupmenuState),
+    /// The pre-content startup shell: a themed statusline placeholder bar
+    /// plus a static "waiting for nvim" indicator, painted over the
+    /// (empty, pre-attach) `EngineGrid` layer. Present only while
+    /// `Model::content_painted` is `false`; `render()` drops it for good
+    /// once the first grid `Flush` arrives. No animation lives here or in
+    /// its `view-tui` painter: the runtime loop is timer-free, so this is a
+    /// fixed glyph, never a frame that advances on its own clock.
+    Shell,
 }
 
 /// The terminal cursor's shape, decoded from the active mode's
@@ -126,6 +134,22 @@ pub fn render(model: &Model) -> Surface {
         },
         kind: LayerKind::EngineGrid,
     }];
+
+    if !model.content_painted {
+        // sized from the real terminal, not the (still 0x0 pre-attach)
+        // engine grid: the very first shell paint happens before nvim has
+        // ever sent a grid_resize, so grid_w/grid_h are not yet meaningful
+        // dimensions to paint a placeholder into
+        layers.push(Layer {
+            rect: Rect {
+                row: 0,
+                col: 0,
+                width: model.term_width,
+                height: model.term_height,
+            },
+            kind: LayerKind::Shell,
+        });
+    }
 
     if let Some(tabline) = &engine.tabline {
         // matches bare nvim's default `showtabline`: a single tab shows no
@@ -679,5 +703,75 @@ mod tests {
         assert_eq!(popup.rect.height, 2);
         assert_eq!(popup.rect.row, 1);
         assert_eq!(popup.rect.col, 2);
+    }
+
+    #[test]
+    fn fresh_model_before_first_flush_renders_a_shell_layer_sized_to_the_terminal() {
+        let mut model = Model::with_term_size(80, 24);
+        // the opt-in only startup itself performs in production; every
+        // other consumer's Model::new()/with_term_size defaults to
+        // content_painted: true (ordinary steady state)
+        model.content_painted = false;
+        let surface = render(&model);
+
+        let shell = surface
+            .layers
+            .iter()
+            .find(|l| l.kind == LayerKind::Shell)
+            .expect("Shell layer present before the first grid Flush");
+        assert_eq!(
+            shell.rect,
+            Rect {
+                row: 0,
+                col: 0,
+                width: 80,
+                height: 24,
+            },
+            "Shell is sized to the real terminal, not the still-empty engine grid"
+        );
+    }
+
+    #[test]
+    fn shell_layer_is_dropped_for_good_once_content_painted_flips_true() {
+        // content_painted: true is the default already; this test pins that
+        // an ordinary model never renders Shell, symmetric with the
+        // opted-in false case above
+        let model = Model::with_term_size(80, 24);
+        let surface = render(&model);
+
+        assert!(
+            !surface.layers.iter().any(|l| l.kind == LayerKind::Shell),
+            "Shell must not render once real grid content has arrived"
+        );
+    }
+
+    #[test]
+    fn shell_layer_paints_underneath_a_native_toast_message() {
+        // z-order: EngineGrid, then Shell, then Messages -- a pre-attach
+        // overflow toast (pushed straight into engine.messages, see
+        // Messages::push_native) must land on top of the shell placeholder,
+        // never be hidden underneath it
+        let mut model = Model::with_term_size(80, 24);
+        model.content_painted = false;
+        model
+            .engine
+            .messages
+            .push_native("dropped a key".to_string(), false);
+        let surface = render(&model);
+
+        let shell_idx = surface
+            .layers
+            .iter()
+            .position(|l| l.kind == LayerKind::Shell)
+            .expect("Shell layer present");
+        let messages_idx = surface
+            .layers
+            .iter()
+            .position(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .expect("Messages layer present");
+        assert!(
+            shell_idx < messages_idx,
+            "Shell must paint before (underneath) Messages in z-order"
+        );
     }
 }

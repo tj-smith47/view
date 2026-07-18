@@ -1,15 +1,20 @@
 //! `view [FILE] --nvim-bin <path>`: CLI parsing and wiring for the terminal
-//! frontend over an embedded Neovim engine. The runtime loop itself lives in
-//! [`runtime`].
+//! frontend over an embedded Neovim engine. The startup sequence (shell
+//! paint, background attach, pre-attach key buffering) lives in
+//! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
 mod runtime;
+mod startup;
 mod theme_cache;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::sync::mpsc;
+use std::time::Instant;
 use view_core::model::{Model, Tier};
+use view_core::msg::Msg;
 use view_core::theme::Theme;
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::EngineConfig;
 use view_tui::terminal::Term;
 
 /// `--tier`'s value vocabulary. A separate `clap`-derived enum rather than
@@ -48,6 +53,11 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    // startup's own debug-build stderr log (see startup::paint_shell_frame)
+    // measures the shell-paint budget from this instant, not from
+    // Term::init: the capability probe that init() runs is itself startup
+    // work the design spec's 50ms target is meant to cover
+    let process_start = Instant::now();
     let cli = Cli::parse();
     let mut cfg = EngineConfig::default();
     if let Some(bin) = cli.nvim_bin {
@@ -56,36 +66,19 @@ fn main() -> Result<()> {
     if let Some(file) = &cli.file {
         cfg.extra_args.push(file.as_os_str().to_owned());
     }
-    let engine = Engine::spawn(cfg).context("failed to start nvim engine")?;
 
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
     let (width, height) = term.size()?;
     let residue = term.take_residue();
 
-    // the only request the setup path makes; once run() starts, every nvim
-    // call goes through notify so a slow response never stalls a frame or a
-    // keystroke
-    // the underlying EngineError::Timeout variant's Display already names
-    // the elapsed timeout, so this context only needs to name the call
-    engine
-        .handle
-        .ui_attach(width, height)
-        .context("ui attach failed or timed out")?;
-
-    // anything the user typed before or during the startup capability probe
-    // (see Term::take_residue) has to reach nvim before the runtime loop's
-    // own input thread starts, or it is lost for good; errors are ignored
-    // here rather than propagated, since a write failure on a
-    // freshly-attached connection means the engine is already gone, which
-    // run() below discovers and handles through its own EngineDown path
-    // moments later
-    for notation in view_tui::keys::encode_residue_bytes(&residue) {
-        let _ = engine.handle.input(&notation);
-    }
-
     let mut model = Model::with_term_size(width, height);
     model.caps = term.caps();
+    // opts into startup's placeholder shell (statusline bar plus a static
+    // "waiting for nvim" indicator) instead of Model's ordinary
+    // already-running default; update() flips this back to true for good
+    // on the first grid Flush
+    model.content_painted = false;
 
     // config loading itself lands with the config system (view.toml
     // sourcing is out of this crate's scope so far); resolving just the
@@ -105,7 +98,35 @@ fn main() -> Result<()> {
         }
     }
 
-    let (model, exit_code) = runtime::run(model, engine, &mut term)?;
+    // painted before the engine even spawns, themed from the cache just
+    // seeded above, so a slow-starting nvim can never delay the terminal's
+    // first visible content
+    startup::paint_shell_frame(&mut term, &model, process_start)
+        .context("failed to paint the startup shell frame")?;
+
+    // created here, not inside runtime::run: the input thread has to start
+    // capturing keystrokes immediately after the shell paints, well before
+    // the engine exists to send them to, or anything typed during attach
+    // would be lost to a not-yet-existing channel
+    let (msg_tx, msg_rx) = mpsc::sync_channel(64);
+    view_tui::terminal::spawn_input_thread(msg_tx.clone());
+
+    let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
+    let buffered_keys = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
+    let (engine, pump) = engine_rx
+        .recv()
+        .context("engine attach thread ended without a result")?
+        .context("ui attach failed or timed out")?;
+
+    // replayed through the ordinary Msg::Key -> update() -> Executor path:
+    // pushing them back onto msg_tx lets runtime::run's own loop process
+    // them with zero duplicate replay logic, identical EngineLost handling
+    // included
+    for key in buffered_keys {
+        let _ = msg_tx.send(Msg::Key(key));
+    }
+
+    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
     if let Some(path) = &config_path {
         theme_cache::store(Theme::from_hl(&model.engine.hl), path);
     }

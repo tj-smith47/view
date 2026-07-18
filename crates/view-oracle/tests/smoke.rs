@@ -169,19 +169,32 @@ impl PtySession {
             .expect("view child exposes a pid on this platform")
     }
 
-    /// Blocks (up to 5s) until the screen shows something, the same "wait
-    /// for the first redraw" step [`spawn_view_pty`] runs before handing a
-    /// session to most tests. Split out so
+    /// Blocks (up to 5s) until the screen shows nvim's own real content, the
+    /// same "wait for the first redraw" step [`spawn_view_pty`] runs before
+    /// handing a session to most tests. Split out so
     /// [`spawn_view_pty_raw`]-based tests can drive input *before* this
     /// point when that is exactly the race they need to exercise (see
     /// `view_forwards_keystrokes_typed_immediately_at_spawn_before_the_startup_probe_settles`).
+    ///
+    /// Waits specifically for a `~` (nvim's own empty-buffer-line marker,
+    /// painted the moment a fresh unnamed buffer's grid content actually
+    /// streams in), not merely "the screen is non-blank": since startup's
+    /// placeholder shell (`view_surface::LayerKind::Shell`, a themed
+    /// statusline bar plus a static "waiting for nvim" indicator) now
+    /// paints real, non-blank text of its own well before the engine
+    /// attaches, a bare blank-vs-non-blank check would return as soon as
+    /// that placeholder appears rather than once nvim is actually ready --
+    /// exactly the race that silently dropped a paste sent immediately
+    /// after this call in an earlier version of this fix (paste is not one
+    /// of the input kinds `startup::drain_pre_attach` buffers pre-attach;
+    /// see that module's doc comment for the deliberate keys-only scope).
     fn wait_for_startup_redraw(&mut self) {
         let startup_deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < startup_deadline {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => {
                     self.parser.process(&chunk);
-                    if !self.parser.screen().contents().trim().is_empty() {
+                    if self.parser.screen().contents().contains('~') {
                         break;
                     }
                 }
@@ -235,6 +248,13 @@ fn spawn_view_pty() -> PtySession {
 /// regression test) should call this directly; every other test wants
 /// [`spawn_view_pty`]'s settled screen, same as a human would get.
 fn spawn_view_pty_raw() -> PtySession {
+    spawn_view_pty_raw_with_args(&[])
+}
+
+/// Like [`spawn_view_pty_raw`], but with `extra_args` inserted before the
+/// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
+/// that need to control how slowly the embedded engine starts).
+fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> PtySession {
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -252,6 +272,9 @@ fn spawn_view_pty_raw() -> PtySession {
     std::fs::create_dir_all(&isolated_home).unwrap();
 
     let mut cmd = CommandBuilder::new(view_bin_path());
+    for arg in extra_args {
+        cmd.arg(arg);
+    }
     cmd.arg(&scratch);
     // isolate from any real nvim user config on the host running this test:
     // a dashboard plugin or custom keymap on a bare "i" would make the
@@ -650,4 +673,103 @@ fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
 
     session.send(b"\x1b:q!\r");
     let _ = session.child.wait();
+}
+
+/// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
+/// the real `nvim` (resolved via `which`, matching this file's other
+/// `nvim`-locating helpers) with every argument forwarded verbatim --
+/// standing in for a slow-starting engine without patching nvim itself.
+/// Marked executable directly (`portable_pty`/`Command` exec it, not a
+/// shell), and disambiguated by pid the same way this file's scratch paths
+/// are, since parallel tests in this binary could otherwise collide.
+fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
+    let real_nvim = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("nvim")
+            .output()
+            .expect("which nvim failed")
+            .stdout,
+    )
+    .expect("non-utf8 which output")
+    .trim()
+    .to_string();
+
+    let path = std::env::temp_dir().join(format!(
+        "view-oracle-delayed-nvim-{}.sh",
+        std::process::id()
+    ));
+    let script = format!(
+        "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
+        f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0
+    );
+    std::fs::write(&path, script).expect("failed to write delayed-nvim wrapper script");
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    path
+}
+
+/// The RED test for the startup sequence: the
+/// shell frame -- a themed statusline placeholder plus a static "waiting
+/// for nvim" indicator, painted before the engine even spawns -- must be
+/// visible well before a deliberately slow (500ms) embedded engine ever
+/// attaches, and keys typed during that gap must reach the real buffer, in
+/// order, once attach completes.
+///
+/// This is also the seam's liveness proof end to end: `view_vim_enter`'s
+/// blocking `rpcrequest` only ever resolves if `update()`'s
+/// `Msg::EngineRequest(EngineRequest::VimEnter)` arm replies via
+/// `Effect::Reply` and the reply actually reaches nvim over the wire -- a
+/// deadlock anywhere in that path would hang this test's `:wq` at the very
+/// end (nvim can never fully start, let alone quit) rather than merely
+/// fail an assertion.
+#[test]
+fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order() {
+    let wrapper = write_delayed_nvim_wrapper(500);
+
+    let mut session =
+        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+
+    assert!(
+        session.wait_for("waiting for nvim", Duration::from_millis(200)),
+        "shell frame did not appear within 200ms against a 500ms-delayed \
+         engine; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    // typed immediately, well before the delayed engine has attached: this
+    // is exactly the pre-attach window startup::drain_pre_attach buffers
+    session.send(b"ihello world");
+
+    // the wrapper sleeps 500ms before nvim even starts; wait comfortably
+    // past attach plus startup for the buffered keys to replay into the
+    // real buffer
+    assert!(
+        session.wait_for("hello world", Duration::from_secs(5)),
+        "pre-attach keys never replayed into the buffer after attach, or \
+         did not replay in order; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    session.send(b"\x1b:wq\r");
+    let exit = session
+        .child
+        .wait()
+        .expect("view never exited after :wq against the delayed engine");
+    assert!(
+        exit.success(),
+        "view did not exit cleanly after :wq; screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    let saved = session.read_saved_file();
+    assert!(
+        saved.contains("hello world"),
+        "saved file did not contain the pre-attach-typed text; contents:\n{saved:?}"
+    );
+
+    let _ = std::fs::remove_file(&wrapper);
 }

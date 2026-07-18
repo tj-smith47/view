@@ -17,6 +17,12 @@ use std::time::Duration;
 /// outside.
 const UI_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on how long [`EngineHandle::register_vim_enter_autocmd`]
+/// waits for nvim's reply. Same rationale as [`UI_ATTACH_TIMEOUT`]: this
+/// runs during startup, before the paint loop's own unbounded-notify regime
+/// begins, so it still needs a bound.
+const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl EngineHandle {
     /// Attaches this connection as nvim's UI at `width` x `height` cells
     /// with the full set of native-rendering extensions enabled:
@@ -56,6 +62,58 @@ impl EngineHandle {
                 ]),
             ],
             UI_ATTACH_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    /// Registers a one-shot `VimEnter` autocmd whose callback issues a
+    /// BLOCKING `rpcrequest(channel_id, 'view_vim_enter')` back to this
+    /// connection -- the end-to-end proof that `update()`'s
+    /// `Msg::EngineRequest(EngineRequest::VimEnter)` arm and its
+    /// `Effect::Reply` actually unblock nvim's own main loop, not merely
+    /// that the message decodes (a deadlock here hangs startup forever).
+    ///
+    /// # Ordering: call this BEFORE [`ui_attach`](Self::ui_attach), never
+    /// after
+    ///
+    /// Live-verified against a real `nvim --clean --embed` (see
+    /// `.superpowers/sdd/p2-task-10-report.md` for the captured transcript):
+    /// registering this autocmd immediately AFTER `ui_attach` returns loses
+    /// the race entirely -- a `--clean` startup's config sourcing and
+    /// `VimEnter` dispatch were both already complete (300+ redraw damage
+    /// events already staged) by the time the registration request even
+    /// reached nvim's main loop. The embed contract's "attach precedes
+    /// config sourcing" guarantee protects exactly the window BEFORE
+    /// `ui_attach`: nvim services ordinary requests on this connection
+    /// freely while blocked waiting for a UI to attach, but cannot begin
+    /// sourcing config (and thus cannot fire `VimEnter`) until `ui_attach`
+    /// itself returns. Registering here, before that call, is what actually
+    /// wins the race; after it is not "usually late", it is unconditionally
+    /// too late for a `--clean`-speed startup.
+    ///
+    /// `channel_id` is this connection's own id from `nvim_get_api_info`
+    /// (captured in [`crate::process::Engine::api_info`] at spawn time): a
+    /// self-targeted `rpcrequest` needs an explicit channel number, and nvim
+    /// has no "loopback" shorthand for dispatching a request back to the
+    /// very connection asking.
+    ///
+    /// A `request`, not a `notify`, for the same reason [`ui_attach`]
+    /// (Self::ui_attach) is: the caller needs to know the autocmd is live
+    /// before it dares call `ui_attach`, or config sourcing could start
+    /// racing an unregistered hook.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the command, or the reply does not arrive within
+    /// [`REGISTER_VIM_ENTER_TIMEOUT`].
+    pub fn register_vim_enter_autocmd(&self, channel_id: u64) -> Result<(), EngineError> {
+        let cmd =
+            format!("autocmd VimEnter * ++once call rpcrequest({channel_id}, 'view_vim_enter')");
+        self.request_timeout(
+            "nvim_command",
+            vec![Value::from(cmd)],
+            REGISTER_VIM_ENTER_TIMEOUT,
         )?;
         Ok(())
     }
@@ -152,5 +210,97 @@ impl EngineHandle {
                 Value::from(col),
             ],
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::rpc::RpcMessage;
+    use std::io::{BufReader, Write};
+
+    /// A minimal fake peer that answers every incoming request with a nil
+    /// success response and forwards `(method, params)` to the returned
+    /// channel, so a test can assert on the exact wire shape a typed
+    /// wrapper sends without a real nvim.
+    fn fake_peer_capturing_requests() -> (
+        EngineHandle,
+        std::sync::mpsc::Receiver<(String, Vec<Value>)>,
+    ) {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, mut peer_write) = std::io::pipe().unwrap();
+        let (cap_tx, cap_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(peer_read);
+            while let Ok(v) = rmpv::decode::read_value(&mut r) {
+                if let Ok(RpcMessage::Request {
+                    msgid,
+                    method,
+                    params,
+                }) = RpcMessage::from_value(v)
+                {
+                    let _ = cap_tx.send((method, params));
+                    let resp = RpcMessage::Response {
+                        msgid,
+                        error: Value::Nil,
+                        result: Value::Nil,
+                    };
+                    if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
+                        break;
+                    }
+                    if peer_write.flush().is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let (h, _notif_rx) = EngineHandle::start(our_read, our_write);
+        (h, cap_rx)
+    }
+
+    /// Pins the exact vimscript shape live-verified against a real `nvim
+    /// --clean --embed` (see `.superpowers/sdd/p2-task-10-report.md`):
+    /// `++once` (self-clearing, never fires twice), plain `rpcrequest` (not
+    /// `rpcnotify` -- the spec mandates blocking here), targeting
+    /// `channel_id` explicitly (nvim has no loopback shorthand).
+    #[test]
+    fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
+        let (h, cap_rx) = fake_peer_capturing_requests();
+        h.register_vim_enter_autocmd(7).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_command");
+        assert_eq!(
+            params,
+            vec![Value::from(
+                "autocmd VimEnter * ++once call rpcrequest(7, 'view_vim_enter')"
+            )]
+        );
+    }
+
+    #[test]
+    fn ui_attach_sends_the_full_ext_set() {
+        let (h, cap_rx) = fake_peer_capturing_requests();
+        h.ui_attach(80, 24).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_ui_attach");
+        assert_eq!(params[0], Value::from(80));
+        assert_eq!(params[1], Value::from(24));
+        let Value::Map(opts) = &params[2] else {
+            unreachable!("expected an options map, got {:?}", params[2]);
+        };
+        for ext in [
+            "ext_linegrid",
+            "ext_cmdline",
+            "ext_popupmenu",
+            "ext_messages",
+            "ext_tabline",
+        ] {
+            assert!(
+                opts.iter()
+                    .any(|(k, v)| k.as_str() == Some(ext) && v.as_bool() == Some(true)),
+                "missing or false {ext} in ui_attach options"
+            );
+        }
     }
 }

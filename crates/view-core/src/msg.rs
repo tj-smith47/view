@@ -26,6 +26,14 @@ pub enum Msg {
     RedrawReady,
     /// Reader token: engine stream ended; the loop resolves `ExitInfo`.
     EngineStopped,
+    /// Loop plumbing: startup's pre-attach key-buffering loop consumes this
+    /// the moment the background attach thread finishes `nvim_ui_attach`,
+    /// unblocking its `recv()` without a poll or a timer. Never reachable
+    /// once the steady-state loop in `runtime::run` begins (the sender side
+    /// only ever fires once, before that loop starts), but `update()` still
+    /// carries a no-op arm for it, mirroring `RedrawReady`/`EngineStopped`'s
+    /// contract.
+    EngineReady,
     EngineDown(ExitInfo),
     EngineRequest(EngineRequest),
     Resized {

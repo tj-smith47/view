@@ -172,11 +172,16 @@ impl<E: EngineOps> Executor<E> {
 /// `theme_cache` in `main.rs`).
 ///
 /// Takes ownership of `engine` for the whole call (see the module docs'
-/// ownership chain): the reader thread feeds `msg_tx` directly via
-/// [`Engine::start_pump`], a dedicated input thread feeds it key and resize
-/// events via [`view_tui::terminal::spawn_input_thread`], and the executor
-/// drives `engine.handle` through [`EngineOps`]. There is no timer anywhere
-/// in the loop body: painting fires immediately when `update()` marks
+/// ownership chain), plus the already-attached `pump` and the `msg_rx` end
+/// of the channel the caller's input thread and `pump`'s sink both already
+/// feed. Both are built by `startup` rather than here: the input thread
+/// starts (and `msg_tx`/`msg_rx` are created) right after the very first
+/// shell frame paints, well before this function is ever called, so a key
+/// typed while the engine is still attaching is never lost to a
+/// not-yet-existing channel -- see `startup::drain_pre_attach` for the
+/// buffering that covers exactly that window. The executor drives
+/// `engine.handle` through [`EngineOps`]. There is no timer anywhere in the
+/// loop body: painting fires immediately when `update()` marks
 /// `model.dirty`, and the loop's only blocking call is `msg_rx.recv()`,
 /// which a redraw, a keystroke, or an engine request wakes directly.
 ///
@@ -185,10 +190,13 @@ impl<E: EngineOps> Executor<E> {
 /// Returns the underlying `std::io::Error` if a terminal paint fails (the
 /// `Model` is dropped on this path along with everything else on the
 /// stack; an aborted session has no last-good theme worth persisting).
-pub fn run(mut model: Model, mut engine: Engine, term: &mut Term) -> anyhow::Result<(Model, i32)> {
-    let (msg_tx, msg_rx) = mpsc::sync_channel(64);
-    let pump = engine.start_pump(msg_tx.clone());
-    view_tui::terminal::spawn_input_thread(msg_tx);
+pub fn run(
+    mut model: Model,
+    mut engine: Engine,
+    pump: view_engine::DamagePump,
+    msg_rx: mpsc::Receiver<Msg>,
+    term: &mut Term,
+) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
 
     loop {

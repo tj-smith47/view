@@ -20,6 +20,18 @@ pub struct Model {
     pub term_width: u16,
     /// The real terminal's current height in cells; see `term_width`.
     pub term_height: u16,
+    /// Whether real grid content has ever arrived. Defaults `true` (an
+    /// ordinary already-running model, which is what every consumer other
+    /// than startup itself constructs and expects to render normally);
+    /// startup is the one caller that deliberately flips this to `false`
+    /// right after building its very first `Model`, to opt into painting
+    /// the placeholder shell (statusline bar plus a static "waiting"
+    /// indicator, see `view_surface::LayerKind::Shell`) instead of an
+    /// empty grid while the engine attaches. `update()` flips it back to
+    /// `true` on the first `Flush`, at which point `render()` drops the
+    /// `Shell` layer for good; never reset afterward, since a mid-session
+    /// redraw storm is not a second "waiting for nvim" state.
+    pub content_painted: bool,
 }
 
 impl Model {
@@ -50,6 +62,7 @@ impl Model {
             running: true,
             term_width: 0,
             term_height: 0,
+            content_painted: true,
         }
     }
 
@@ -196,6 +209,24 @@ impl Messages {
     /// Drops every recorded message, per `msg_clear`.
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// Appends a locally-originated notice -- never from nvim's own
+    /// `msg_show` wire event -- through the same overlay `msg_show`
+    /// populates, so a native warning (e.g. startup's pre-attach key ring
+    /// dropping a keystroke) reaches the user through the one message
+    /// surface that already exists rather than a parallel toast mechanism.
+    /// `replace_last` behaves exactly as it does for `push`: pass `true` to
+    /// update an in-place running count instead of stacking a new entry per
+    /// occurrence.
+    pub fn push_native(&mut self, text: String, replace_last: bool) {
+        self.push(
+            MessageEntry {
+                kind: "native".to_string(),
+                content: vec![(0, text)],
+            },
+            replace_last,
+        );
     }
 }
 
