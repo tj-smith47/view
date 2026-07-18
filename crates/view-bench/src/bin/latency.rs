@@ -4,14 +4,18 @@
 //! `task bench-latency` invokes this binary twice, once for `view` and once
 //! for `nvim`, so a single run only ever measures one target. Pairing the
 //! two runs into the comparison table happens across invocations via a
-//! scratch file in `target/`; see [`report`].
+//! timestamped scratch file in `target/`; a prior entry older than
+//! [`STALENESS_BOUND_MS`] is treated as unrelated leftover data rather than
+//! silently paired, and the paired table always prints `view` before
+//! `nvim` regardless of which one ran first. See [`report`] and
+//! [`decide_pairing`].
 
 use anyhow::{bail, Context, Result};
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Keystroke-to-paint samples collected per target, matching the brief's
 /// measurement protocol.
@@ -67,6 +71,7 @@ impl Samples {
 
 /// One target's measured stats, the unit both printed and staged across
 /// invocations for pairing.
+#[derive(Clone, Debug, PartialEq)]
 struct Stats {
     label: String,
     p50_ms: f64,
@@ -105,6 +110,108 @@ impl Stats {
             samples: parts.next()?.parse().ok()?,
         })
     }
+}
+
+/// How long a staged scratch entry may sit before it is treated as leftover
+/// data from an unrelated invocation rather than the other half of the
+/// current `task bench-latency` pair. The two paired invocations run
+/// seconds apart, so 60s is generous enough to never reject a real pair
+/// while still catching a stray solo run left over from manual debugging.
+const STALENESS_BOUND_MS: u64 = 60_000;
+
+/// Current wall-clock time in epoch milliseconds, used to stamp scratch
+/// entries on write and check their freshness on read.
+fn now_epoch_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// A [`Stats`] line staged in the pairing scratch file, stamped with the
+/// wall-clock time it was written so a stale entry can be detected on read
+/// instead of silently paired with an unrelated run.
+struct ScratchEntry {
+    stats: Stats,
+    written_at_ms: u64,
+}
+
+impl ScratchEntry {
+    fn now(stats: Stats) -> Self {
+        Self {
+            written_at_ms: now_epoch_ms(),
+            stats,
+        }
+    }
+
+    /// Plain-text scratch encoding: timestamp followed by the stats line,
+    /// whitespace separated. Kept dependency-free (no serde) for a bin this
+    /// small.
+    fn to_line(&self) -> String {
+        format!("{} {}", self.written_at_ms, self.stats.to_line())
+    }
+
+    fn from_line(line: &str) -> Option<Self> {
+        let (timestamp, rest) = line.split_once(char::is_whitespace)?;
+        Some(Self {
+            written_at_ms: timestamp.parse().ok()?,
+            stats: Stats::from_line(rest)?,
+        })
+    }
+}
+
+/// Why the current run stands alone rather than completing a pair.
+#[derive(Debug, PartialEq)]
+enum SoloReason {
+    /// No scratch entry was staged yet; this is genuinely the first half.
+    NoPriorEntry,
+    /// The prior entry belongs to a rerun of the same target; it is
+    /// overwritten rather than paired with itself.
+    SameLabel,
+    /// The prior entry is older than [`STALENESS_BOUND_MS`], so pairing it
+    /// with a fresh run would silently mix data from unrelated invocations.
+    Stale { age_ms: u64 },
+}
+
+/// Result of attempting to pair the current run against a previously staged
+/// [`ScratchEntry`]; pure so the pairing rules are unit-testable without
+/// touching the filesystem or the clock.
+#[derive(Debug, PartialEq)]
+enum PairDecision {
+    Solo(SoloReason),
+    /// Both halves of a completed pair, canonically ordered `view` first.
+    Paired(Stats, Stats),
+}
+
+/// Orders two paired stats with `view` first regardless of which half was
+/// staged first, so the printed table's row order never depends on which
+/// binary happened to finish first under `task bench-latency`.
+fn order_view_first(a: Stats, b: Stats) -> (Stats, Stats) {
+    if b.label == "view" && a.label != "view" {
+        (b, a)
+    } else {
+        (a, b)
+    }
+}
+
+/// Decides whether `current` completes a pair with `prior`, staying pure
+/// (no I/O, an injected clock reading) so every branch is directly
+/// unit-testable: a fresh different-label prior pairs; a same-label prior
+/// is an overwrite, not a pair; a prior older than [`STALENESS_BOUND_MS`]
+/// is discarded rather than silently pairing stale data with a fresh run.
+fn decide_pairing(prior: Option<ScratchEntry>, current: &Stats, now_ms: u64) -> PairDecision {
+    let Some(prior) = prior else {
+        return PairDecision::Solo(SoloReason::NoPriorEntry);
+    };
+    if prior.stats.label == current.label {
+        return PairDecision::Solo(SoloReason::SameLabel);
+    }
+    let age_ms = now_ms.saturating_sub(prior.written_at_ms);
+    if age_ms > STALENESS_BOUND_MS {
+        return PairDecision::Solo(SoloReason::Stale { age_ms });
+    }
+    let (view, nvim) = order_view_first(prior.stats, current.clone());
+    PairDecision::Paired(view, nvim)
 }
 
 /// Forwards every chunk read from `reader` onto a channel so the caller can
@@ -346,47 +453,74 @@ fn print_row(stats: &Stats) {
     );
 }
 
-fn print_ratio(first: &Stats, second: &Stats) {
-    let p50_ratio = if first.p50_ms == 0.0 {
+/// Prints the `view/nvim` ratio row: each column is `view`'s measured time
+/// divided by `nvim`'s, so the printed number matches the plain-English
+/// claim directly (e.g. `13.45` reads as "view is 13.45x slower than nvim
+/// at this percentile") instead of forcing the reader to invert an
+/// nvim-over-view fraction.
+fn print_ratio(view: &Stats, nvim: &Stats) {
+    let p50_ratio = if nvim.p50_ms == 0.0 {
         0.0
     } else {
-        second.p50_ms / first.p50_ms
+        view.p50_ms / nvim.p50_ms
     };
-    let p99_ratio = if first.p99_ms == 0.0 {
+    let p99_ratio = if nvim.p99_ms == 0.0 {
         0.0
     } else {
-        second.p99_ms / first.p99_ms
+        view.p99_ms / nvim.p99_ms
     };
-    println!("{:<7} {:>7.2} {:>7.2}", "ratio", p50_ratio, p99_ratio);
+    println!(
+        "{:<18} {:>7.2} {:>7.2}",
+        "ratio (view/nvim)", p50_ratio, p99_ratio
+    );
 }
 
-/// Prints this run's row and, if a prior run from a different label is
-/// staged in the scratch file, also prints the paired comparison table
-/// (both rows plus the ratio row) and clears the scratch file.
+/// Prints a LOUD warning to stderr when the prior scratch entry was
+/// discarded for being stale, so a poisoned pairing never happens silently.
+fn warn_if_stale(reason: &SoloReason) {
+    if let SoloReason::Stale { age_ms } = reason {
+        eprintln!(
+            "WARNING: discarding stale latency scratch entry ({age_ms}ms old, over the \
+             {STALENESS_BOUND_MS}ms staleness bound). Pairing it with this run would \
+             silently corrupt the comparison table; treating this run as a fresh solo \
+             measurement instead."
+        );
+    }
+}
+
+/// Prints this run's row and, if a fresh prior run from a different label
+/// is staged in the scratch file, also prints the paired comparison table
+/// (`view` row, `nvim` row, ratio row, canonically ordered regardless of
+/// which binary ran first) and clears the scratch file.
 ///
 /// The single-label CLI (`latency <label> <path>`) cannot itself produce a
 /// two-row table in one process, since `task bench-latency` runs this
-/// binary once per target. Staging the first run's stats in `target/` lets
-/// the second run complete the comparison without changing the CLI
-/// contract or introducing a supervising process.
+/// binary once per target. Staging the first run's stats in `target/`,
+/// timestamped, lets the second run complete the comparison without
+/// changing the CLI contract or introducing a supervising process. A
+/// staged entry older than [`STALENESS_BOUND_MS`] is never paired: it is
+/// discarded with a loud stderr warning and this run proceeds solo, so a
+/// leftover debug invocation can never silently poison the next real pair.
 fn report(stats: &Stats) -> Result<()> {
     let path = scratch_path();
     let prior = std::fs::read_to_string(&path)
         .ok()
-        .and_then(|content| Stats::from_line(content.trim()));
+        .and_then(|content| ScratchEntry::from_line(content.trim()));
+    let now_ms = now_epoch_ms();
 
-    match prior {
-        Some(prior) if prior.label != stats.label => {
+    match decide_pairing(prior, stats, now_ms) {
+        PairDecision::Paired(view, nvim) => {
             print_header();
-            print_row(&prior);
-            print_row(stats);
-            print_ratio(&prior, stats);
+            print_row(&view);
+            print_row(&nvim);
+            print_ratio(&view, &nvim);
             std::fs::remove_file(&path).context("failed to clear latency scratch file")?;
         }
-        _ => {
+        PairDecision::Solo(reason) => {
+            warn_if_stale(&reason);
             print_header();
             print_row(stats);
-            std::fs::write(&path, stats.to_line())
+            std::fs::write(&path, ScratchEntry::now(stats.clone()).to_line())
                 .context("failed to stage latency scratch file")?;
         }
     }
@@ -430,5 +564,98 @@ mod tests {
         assert_eq!(parsed.label, "view");
         assert_eq!(parsed.samples, 200);
         assert!((parsed.p99_ms - 6.5).abs() < f64::EPSILON);
+    }
+
+    /// Unwraps a [`PairDecision::Paired`] for assertions; a non-`Paired`
+    /// result on this path is a broken test fixture, not a `panic!`-lint
+    /// production path, so `unreachable!` (unbanned) rather than `panic!`.
+    fn expect_paired(decision: PairDecision) -> (Stats, Stats) {
+        match decision {
+            PairDecision::Paired(view, nvim) => (view, nvim),
+            other => unreachable!("expected a paired decision, got {other:?}"),
+        }
+    }
+
+    fn sample_stats(label: &str) -> Stats {
+        Stats {
+            label: label.to_string(),
+            p50_ms: 1.0,
+            p99_ms: 2.0,
+            max_ms: 3.0,
+            samples: 200,
+        }
+    }
+
+    #[test]
+    fn scratch_entry_line_round_trips() {
+        let entry = ScratchEntry {
+            written_at_ms: 1_753_000_000_123,
+            stats: sample_stats("nvim"),
+        };
+        let parsed = ScratchEntry::from_line(&entry.to_line()).expect("round trip must parse");
+        assert_eq!(parsed.written_at_ms, 1_753_000_000_123);
+        assert_eq!(parsed.stats.label, "nvim");
+        assert_eq!(parsed.stats.samples, 200);
+    }
+
+    #[test]
+    fn fresh_pair_pairs_and_orders_view_first() {
+        let now_ms = 1_000_000;
+        let prior = ScratchEntry {
+            written_at_ms: now_ms - 5_000,
+            stats: sample_stats("nvim"),
+        };
+        let current = sample_stats("view");
+        let decision = decide_pairing(Some(prior), &current, now_ms);
+        let (view, nvim) = expect_paired(decision);
+        assert_eq!(view.label, "view");
+        assert_eq!(nvim.label, "nvim");
+
+        // Order is canonical (view first) regardless of which half staged first.
+        let prior = ScratchEntry {
+            written_at_ms: now_ms - 5_000,
+            stats: sample_stats("view"),
+        };
+        let current = sample_stats("nvim");
+        let decision = decide_pairing(Some(prior), &current, now_ms);
+        let (view, nvim) = expect_paired(decision);
+        assert_eq!(view.label, "view");
+        assert_eq!(nvim.label, "nvim");
+    }
+
+    #[test]
+    fn stale_entry_is_rejected_not_paired() {
+        let now_ms = 1_000_000;
+        let prior = ScratchEntry {
+            written_at_ms: now_ms - (STALENESS_BOUND_MS + 1),
+            stats: sample_stats("nvim"),
+        };
+        let current = sample_stats("view");
+        let decision = decide_pairing(Some(prior), &current, now_ms);
+        assert_eq!(
+            decision,
+            PairDecision::Solo(SoloReason::Stale {
+                age_ms: STALENESS_BOUND_MS + 1
+            })
+        );
+    }
+
+    #[test]
+    fn same_label_overwrites_instead_of_pairing() {
+        let now_ms = 1_000_000;
+        let prior = ScratchEntry {
+            written_at_ms: now_ms - 1_000,
+            stats: sample_stats("nvim"),
+        };
+        let current = sample_stats("nvim");
+        let decision = decide_pairing(Some(prior), &current, now_ms);
+        assert_eq!(decision, PairDecision::Solo(SoloReason::SameLabel));
+    }
+
+    #[test]
+    fn no_prior_entry_is_solo() {
+        let current = sample_stats("view");
+        let decision = decide_pairing(None, &current, 1_000_000);
+        assert_eq!(decision, PairDecision::Solo(SoloReason::NoPriorEntry));
     }
 }
