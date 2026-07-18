@@ -1703,6 +1703,7 @@ version = "0.0.1"
 dependencies = [
  "rmpv",
  "thiserror 2.0.18",
+ "view-core",
 ]
 
 [[package]]

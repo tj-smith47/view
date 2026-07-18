@@ -1,57 +1,9 @@
-//! Renders a [`Grid`] into a ratatui [`Frame`], and the wire-value clamping
-//! helpers used to get untrusted `redraw` coordinates into `Grid`'s `u16`
-//! address space without a truncating cast.
+//! Renders a [`Grid`] into a ratatui [`Frame`], styled per a `view-core`
+//! [`HlTable`].
 
 use ratatui::style::{Color, Style};
 use view_core::grid::Grid;
-
-/// One highlight group's rendering attributes, decoded from `hl_attr_define`.
-pub struct HlAttr {
-    /// Foreground color, or `None` to fall back to the default.
-    pub fg: Option<u32>,
-    /// Background color, or `None` to fall back to the default.
-    pub bg: Option<u32>,
-    /// Whether the group renders bold.
-    pub bold: bool,
-    /// Whether the group renders italic.
-    pub italic: bool,
-    /// Whether the group renders underlined.
-    pub underline: bool,
-    /// Whether foreground and background swap for this group.
-    pub reverse: bool,
-}
-
-/// The highlight table: default colors plus every highlight group defined
-/// so far, keyed by the `hl_id` `grid_line` cells reference.
-pub struct HlTable {
-    /// Default foreground, or `None` if nvim has not set one yet.
-    pub default_fg: Option<u32>,
-    /// Default background, or `None` if nvim has not set one yet.
-    pub default_bg: Option<u32>,
-    /// Highlight groups by id.
-    pub attrs: std::collections::HashMap<u64, HlAttr>,
-}
-
-/// Largest grid dimension accepted from the wire. Far beyond any physical
-/// terminal, small enough that a malformed or desynced `grid_resize`
-/// cannot make the grid allocate unboundedly.
-const MAX_GRID_DIM: u16 = 2048;
-
-/// Saturates a wire dimension into `u16` and clamps it to [`MAX_GRID_DIM`].
-#[must_use]
-pub fn clamp_dim(dim: u64) -> u16 {
-    saturate_u16(dim).min(MAX_GRID_DIM)
-}
-
-// a plain `as u16` cast would wrap out-of-range wire values back into
-// range (65536 becomes 0), turning a malformed coordinate into a write at
-// a real cell; saturating keeps it out of range so Grid ignores it
-/// Saturates a wire `u64` coordinate into `u16`, clamping to `u16::MAX`
-/// instead of truncating.
-#[must_use]
-pub fn saturate_u16(v: u64) -> u16 {
-    u16::try_from(v).unwrap_or(u16::MAX)
-}
+pub use view_core::hl::{HlAttr, HlTable};
 
 /// Paints every visible `grid` cell into `frame`'s buffer, styled per `hl`.
 pub fn paint(grid: &Grid, hl: &HlTable, frame: &mut ratatui::Frame<'_>) {

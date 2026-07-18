@@ -12,6 +12,10 @@ check_absent() { # usage: check_absent <crate> <forbidden-dep>
     echo "AUDIT FAIL: $1 must not depend on $2"; fail=1
   fi
 }
+# view-engine depends on view-core (it decodes redraw batches into
+# view-core's UiEvent vocabulary) -- that edge is sanctioned and must stay
+# legal. This loop only forbids the reverse: view-core must never depend on
+# view-engine, so a later audit sweep must not "fix" the engine->core edge.
 for dep in view view-engine view-tui view-surface view-native view-ai view-oracle view-bench rmpv crossterm ratatui tokio async-std smol; do
   check_absent view-core "$dep"
 done

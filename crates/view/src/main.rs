@@ -5,10 +5,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
+use view_core::events::{clamp_dim, saturate_u16, UiEvent};
 use view_core::grid::{Grid, GridOp};
+use view_core::hl::{HlAttr, HlTable};
 use view_engine::process::{Engine, EngineConfig};
-use view_engine::ui_events::{decode_redraw, UiEvent};
-use view_tui::paint::{clamp_dim, saturate_u16, HlAttr, HlTable};
+use view_engine::ui_events::decode_redraw;
 use view_tui::terminal::{drain_input, InputEvent, Term};
 
 /// Upper bound on time spent in one pass of the notification-drain loop
