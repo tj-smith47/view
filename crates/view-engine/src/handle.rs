@@ -298,6 +298,12 @@ impl EngineHandle {
     ///   is silently dropped by the reader thread rather than leaking the
     ///   waiter for the handle's lifetime.
     ///
+    /// A `Timeout` does not mean the request was never sent: the encoded
+    /// bytes stay queued for the writer thread, so a peer that stops
+    /// reading and later recovers may still receive and execute the call
+    /// arbitrarily late. Do not retry side-effectful methods on `Timeout`
+    /// assuming the first attempt never happened.
+    ///
     /// Use this instead of [`request`](Self::request) for any call where an
     /// unresponsive engine must not hang the caller — e.g. the
     /// `nvim_get_api_info` handshake during [`Engine::spawn`](crate::process::Engine::spawn).
@@ -334,9 +340,11 @@ impl EngineHandle {
     ///
     /// # Errors
     ///
-    /// Returns `EngineError::Closed` if the writer thread has already
-    /// exited (connection already closed), and any error from encoding the
-    /// message.
+    /// Returns `EngineError::Closed` only if the writer thread itself has
+    /// exited, and any error from encoding the message. It can still
+    /// succeed after the reader thread has died (requests already fail with
+    /// `Closed` at that point) as long as the writer is alive: shutdown
+    /// relies on exactly that window to deliver its final `qa!`.
     pub fn notify(&self, method: &str, params: Vec<Value>) -> Result<(), EngineError> {
         let msg = RpcMessage::Notification {
             method: method.to_owned(),
@@ -357,6 +365,14 @@ impl EngineHandle {
         params: Vec<Value>,
     ) -> Result<(u32, mpsc::Receiver<Result<Value, EngineError>>), EngineError> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
+        let msg = RpcMessage::Request {
+            msgid,
+            method: method.to_owned(),
+            params,
+        };
+        // encode before registering the waiter: an encode error must not
+        // leave a map entry behind that only close_and_drain could reclaim
+        let bytes = encode_message(&msg)?;
         let (tx, rx) = mpsc::channel();
         {
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
@@ -365,12 +381,6 @@ impl EngineHandle {
             }
             p.waiters.insert(msgid, tx);
         }
-        let msg = RpcMessage::Request {
-            msgid,
-            method: method.to_owned(),
-            params,
-        };
-        let bytes = encode_message(&msg)?;
         if self.write_tx.send(bytes).is_err() {
             // the writer thread is gone, so nothing will ever write this
             // request or fail it on our behalf; undo the insert ourselves
