@@ -144,6 +144,21 @@ pub struct PmItem {
     pub info: String,
 }
 
+impl PmItem {
+    /// The label painted for one candidate: `word`, with `menu` appended
+    /// when present (nvim's convention for e.g. LSP source annotations).
+    /// Shared by the popup menu's content-based width calculation and its
+    /// row rendering, so the two never drift apart.
+    #[must_use]
+    pub fn display_text(&self) -> String {
+        if self.menu.is_empty() {
+            self.word.clone()
+        } else {
+            format!("{} {}", self.word, self.menu)
+        }
+    }
+}
+
 /// One cell in a [`UiEvent::GridLine`] run.
 ///
 /// `hl_id` carries over from the previous cell in the same line when the

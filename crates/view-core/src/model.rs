@@ -13,12 +13,19 @@ pub struct Model {
     /// Set by `update()` on `Flush`; cleared by the loop after paint.
     pub dirty: bool,
     pub running: bool,
+    /// The real terminal's current width in cells, fed by `Msg::Resized`
+    /// and startup wiring ([`Model::with_term_size`]). Independent of the
+    /// engine grid's own size: the grid is a chrome-reserved subregion of
+    /// this once persistent chrome (the tabline) is showing.
+    pub term_width: u16,
+    /// The real terminal's current height in cells; see `term_width`.
+    pub term_height: u16,
 }
 
 impl Model {
     /// A freshly started application: an empty grid, an empty highlight
-    /// table, engine focus, conservative terminal capabilities, and no
-    /// pending paint.
+    /// table, engine focus, conservative terminal capabilities, zero
+    /// terminal size, and no pending paint.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -39,7 +46,48 @@ impl Model {
             caps: TermCaps::default(),
             dirty: false,
             running: true,
+            term_width: 0,
+            term_height: 0,
         }
+    }
+
+    /// Like [`Model::new`], but with `term_width`/`term_height` pre-filled
+    /// from the real terminal size learned at startup, before any grid data
+    /// has arrived from the engine. Startup wires this in directly rather
+    /// than waiting for the first `Msg::Resized`, since a resize event only
+    /// fires on a *change* and the initial size never triggers one.
+    #[must_use]
+    pub fn with_term_size(width: u16, height: u16) -> Self {
+        Self {
+            term_width: width,
+            term_height: height,
+            ..Self::new()
+        }
+    }
+
+    /// Terminal rows reserved for persistent chrome outside the engine
+    /// grid: one row for the tabline once more than one tab is open
+    /// (matching bare nvim's default `showtabline` threshold), zero
+    /// otherwise. Transient overlays (cmdline, messages, popupmenu) paint
+    /// over the grid instead and never reserve rows.
+    #[must_use]
+    pub fn chrome_rows(&self) -> u16 {
+        match &self.engine.tabline {
+            Some(t) if t.tabs.len() > 1 => 1,
+            _ => 0,
+        }
+    }
+
+    /// The `(width, height)` the engine grid should be resized to, given
+    /// the current terminal size and reserved chrome rows. `update()` sends
+    /// this as `Effect::Rpc(RpcCall::TryResize)` whenever the terminal size
+    /// or the chrome reservation changes.
+    #[must_use]
+    pub fn grid_target(&self) -> (u16, u16) {
+        (
+            self.term_width,
+            self.term_height.saturating_sub(self.chrome_rows()),
+        )
     }
 }
 
@@ -202,4 +250,59 @@ pub enum Tier {
     Full,
     Standard,
     Basic,
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::events::{TabEntry, TabHandle};
+
+    #[test]
+    fn with_term_size_prefills_dims_and_new_defaults_to_zero() {
+        let m = Model::new();
+        assert_eq!((m.term_width, m.term_height), (0, 0));
+        let m = Model::with_term_size(80, 24);
+        assert_eq!((m.term_width, m.term_height), (80, 24));
+    }
+
+    #[test]
+    fn chrome_rows_is_zero_without_a_tabline_or_with_one_tab() {
+        let mut m = Model::with_term_size(80, 24);
+        assert_eq!(m.chrome_rows(), 0);
+        m.engine.tabline = Some(TablineState {
+            current: TabHandle(1),
+            tabs: vec![TabEntry {
+                tab: TabHandle(1),
+                name: "a".into(),
+            }],
+        });
+        assert_eq!(m.chrome_rows(), 0);
+    }
+
+    #[test]
+    fn chrome_rows_is_one_once_more_than_one_tab_is_open() {
+        let mut m = Model::with_term_size(80, 24);
+        m.engine.tabline = Some(TablineState {
+            current: TabHandle(1),
+            tabs: vec![
+                TabEntry {
+                    tab: TabHandle(1),
+                    name: "a".into(),
+                },
+                TabEntry {
+                    tab: TabHandle(2),
+                    name: "b".into(),
+                },
+            ],
+        });
+        assert_eq!(m.chrome_rows(), 1);
+        assert_eq!(m.grid_target(), (80, 23));
+    }
+
+    #[test]
+    fn grid_target_matches_term_size_with_no_chrome_reserved() {
+        let m = Model::with_term_size(80, 24);
+        assert_eq!(m.grid_target(), (80, 24));
+    }
 }

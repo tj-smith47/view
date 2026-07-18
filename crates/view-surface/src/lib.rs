@@ -5,7 +5,7 @@
 //! data, no drawing here; `view-tui` is the only crate that turns a
 //! `Surface` into pixels.
 
-use view_core::events::saturate_u16;
+use view_core::events::{saturate_u16, PmItem};
 use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
 
 /// A rectangular region in terminal cells, addressed the same way as
@@ -97,10 +97,16 @@ pub struct Surface {
     pub cursor: Option<CursorSpec>,
 }
 
-/// Fixed popup menu width in cells, pending real content-based sizing.
-const POPUP_WIDTH: u16 = 30;
-
 /// Builds the [`Surface`] for one frame from `model`.
+///
+/// The tabline is the only persistent chrome: when it is showing (more
+/// than one tab open), [`Model::chrome_rows`] reserves one row for it and
+/// this offsets the `EngineGrid` layer, the cursor, and every grid-space
+/// overlay (cmdline, messages, popupmenu) down by that many rows, so the
+/// tabline's row is never shared with buffer content. Overlays otherwise
+/// paint directly over the grid at rest: they are transient (present only
+/// while their originating state is `Some`/non-empty) and vanish the frame
+/// after nvim clears that state.
 ///
 /// Total: any `Model`, including a hostile or partially-initialized one,
 /// yields a valid `Surface` whose layers never exceed the grid's current
@@ -109,10 +115,11 @@ const POPUP_WIDTH: u16 = 30;
 pub fn render(model: &Model) -> Surface {
     let engine = &model.engine;
     let (grid_w, grid_h) = engine.grid.size();
+    let offset = model.chrome_rows();
 
     let mut layers = vec![Layer {
         rect: Rect {
-            row: 0,
+            row: offset,
             col: 0,
             width: grid_w,
             height: grid_h,
@@ -121,14 +128,20 @@ pub fn render(model: &Model) -> Surface {
     }];
 
     if let Some(tabline) = &engine.tabline {
-        layers.push(overlay_layer(
-            0,
-            0,
-            grid_w,
-            1,
-            (grid_w, grid_h),
-            LayerKind::Tabline(tabline.clone()),
-        ));
+        // matches bare nvim's default `showtabline`: a single tab shows no
+        // tabline row at all, so the grid keeps the full terminal height
+        if tabline.tabs.len() > 1 {
+            layers.push(Layer {
+                rect: Rect {
+                    row: 0,
+                    col: 0,
+                    width: grid_w,
+                    height: 1,
+                }
+                .clamp_to(grid_w, grid_h),
+                kind: LayerKind::Tabline(tabline.clone()),
+            });
+        }
     }
     if let Some(cmdline) = &engine.cmdline {
         layers.push(overlay_layer(
@@ -137,72 +150,116 @@ pub fn render(model: &Model) -> Surface {
             grid_w,
             1,
             (grid_w, grid_h),
+            offset,
             LayerKind::Cmdline(cmdline.clone()),
         ));
     }
     if !engine.messages.entries.is_empty() {
+        let width = messages_width(&engine.messages.entries).min(grid_w).max(1);
+        let height = u16::try_from(engine.messages.entries.len())
+            .unwrap_or(u16::MAX)
+            .min(grid_h)
+            .max(1);
+        let col = grid_w.saturating_sub(width);
         layers.push(overlay_layer(
-            grid_h.saturating_sub(1),
             0,
-            grid_w,
-            1,
+            col,
+            width,
+            height,
             (grid_w, grid_h),
+            offset,
             LayerKind::Messages(engine.messages.entries.clone()),
         ));
     }
     if let Some(pm) = &engine.popupmenu {
         let row = saturate_u16(pm.row);
         let col = saturate_u16(pm.col);
+        let width = popupmenu_width(&pm.items).min(grid_w).max(1);
         let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
         layers.push(overlay_layer(
             row,
             col,
-            POPUP_WIDTH,
+            width,
             height,
             (grid_w, grid_h),
+            offset,
             LayerKind::Popupmenu(pm.clone()),
         ));
     }
 
     Surface {
         layers,
-        cursor: cursor_spec(model),
+        cursor: cursor_spec(model, offset),
     }
 }
 
-/// Builds one overlay [`Layer`], clamping its rect to `bounds` so a hostile
-/// or stale position/size from wire-derived state can never place a layer
-/// outside the current grid.
+/// The widest message entry's rendered text, in characters. Shared by the
+/// messages layer's width calculation and (indirectly, via the same
+/// per-entry text join) its row rendering in `view-tui`, so sizing and
+/// painting can never disagree about what a message's text is.
+fn messages_width(entries: &[MessageEntry]) -> u16 {
+    entries
+        .iter()
+        .map(|e| {
+            e.content
+                .iter()
+                .map(|(_, text)| text.chars().count())
+                .sum::<usize>()
+        })
+        .max()
+        .and_then(|w| u16::try_from(w).ok())
+        .unwrap_or(u16::MAX)
+}
+
+/// The widest popup menu item's [`PmItem::display_text`], in characters.
+fn popupmenu_width(items: &[PmItem]) -> u16 {
+    items
+        .iter()
+        .map(|i| i.display_text().chars().count())
+        .max()
+        .and_then(|w| u16::try_from(w).ok())
+        .unwrap_or(u16::MAX)
+}
+
+/// Builds one grid-space overlay [`Layer`]: `row`/`col`/`width`/`height`
+/// are first clamped to `bounds` (the grid's own coordinate space, which is
+/// what wire-derived positions like a popup menu's `(row, col)` are
+/// expressed in), then translated down by `offset` (the reserved chrome
+/// rows) to land in the terminal's own coordinate space. Clamping before
+/// translating means a hostile or stale position/size from wire-derived
+/// state can never place a layer outside the current grid, regardless of
+/// whether chrome is currently reserved.
 fn overlay_layer(
     row: u16,
     col: u16,
     width: u16,
     height: u16,
     bounds: (u16, u16),
+    offset: u16,
     kind: LayerKind,
 ) -> Layer {
+    let clamped = Rect {
+        row,
+        col,
+        width,
+        height,
+    }
+    .clamp_to(bounds.0, bounds.1);
     Layer {
         rect: Rect {
-            row,
-            col,
-            width,
-            height,
-        }
-        .clamp_to(bounds.0, bounds.1),
+            row: clamped.row.saturating_add(offset),
+            ..clamped
+        },
         kind,
     }
 }
 
-/// The real terminal cursor: the grid cursor position, shaped by the active
-/// mode's cursor style. `None` when the grid has no cells to place it in
-/// (a freshly started `Model` before the first resize).
-fn cursor_spec(model: &Model) -> Option<CursorSpec> {
-    let (width, height) = model.engine.grid.size();
-    if width == 0 || height == 0 {
-        return None;
-    }
-    let (row, col) = model.engine.grid.cursor();
-    let shape = model
+/// The active mode's cursor shape, decoded from the last `mode_info_set`.
+/// Falls back to [`CursorShape::Block`] before the first `mode_info_set`
+/// arrives or for an unrecognized shape string, matching nvim's own
+/// fallback.
+fn shape_from_mode(model: &Model) -> CursorShape {
+    model
         .engine
         .mode
         .active_cursor()
@@ -213,8 +270,43 @@ fn cursor_spec(model: &Model) -> Option<CursorSpec> {
                 "vertical" => CursorShape::Vertical(pct),
                 _ => CursorShape::Block,
             }
-        });
-    Some(CursorSpec { row, col, shape })
+        })
+}
+
+/// The command line's cursor column, in grid space: `firstc` plus `pos`
+/// characters into the typed content (nvim's `pos` counts into the content
+/// only, not the `firstc` prefix rendered before it).
+fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
+    let prefix_len = cmdline.firstc.chars().count();
+    let pos = usize::try_from(cmdline.pos).unwrap_or(usize::MAX);
+    u16::try_from(prefix_len.saturating_add(pos)).unwrap_or(u16::MAX)
+}
+
+/// The real terminal cursor: position plus shape, offset by `offset`
+/// (reserved chrome rows) to land in the terminal's own coordinate space.
+/// While the command line is open, the cursor tracks its `pos` on the
+/// bottom grid row instead of the grid's own cursor (matching the
+/// cmdheight=0 floating UX external UIs give: the engine grid's cursor
+/// position is stale while the command line owns input). `None` when the
+/// grid has no cells to place it in (a freshly started `Model` before the
+/// first resize).
+fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
+    let (width, height) = model.engine.grid.size();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    let shape = shape_from_mode(model);
+    let (row, col) = if let Some(cmdline) = &model.engine.cmdline {
+        let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
+        (height.saturating_sub(1), col)
+    } else {
+        model.engine.grid.cursor()
+    };
+    Some(CursorSpec {
+        row: row.saturating_add(offset),
+        col,
+        shape,
+    })
 }
 
 #[cfg(test)]
@@ -400,8 +492,17 @@ mod tests {
         apply(
             &mut model,
             UiEvent::TablineUpdate {
-                current: view_core::events::TabHandle(0),
-                tabs: vec![],
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "a".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
             },
         );
 
@@ -414,5 +515,166 @@ mod tests {
             .expect("tabline layer present");
         assert!(tabline.rect.col + tabline.rect.width <= 3);
         assert!(tabline.rect.row + tabline.rect.height <= 4);
+    }
+
+    #[test]
+    fn single_tab_renders_no_tabline_layer_and_reserves_no_row() {
+        let mut model = model_with_grid(10, 5);
+        apply(
+            &mut model,
+            UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(1),
+                    name: "a".into(),
+                }],
+            },
+        );
+
+        let surface = render(&model);
+
+        assert!(!surface
+            .layers
+            .iter()
+            .any(|l| matches!(l.kind, LayerKind::Tabline(_))));
+        assert_eq!(surface.layers[0].rect.row, 0, "no chrome, no offset");
+    }
+
+    #[test]
+    fn more_than_one_tab_offsets_the_grid_and_cursor_below_the_reserved_row() {
+        let mut model = model_with_grid(10, 5);
+        model
+            .engine
+            .grid
+            .apply(GridOp::CursorGoto { row: 2, col: 4 });
+        apply(
+            &mut model,
+            UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "a".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            },
+        );
+
+        let surface = render(&model);
+
+        let grid_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::EngineGrid))
+            .expect("grid layer present");
+        assert_eq!(grid_layer.rect.row, 1, "grid offset below the tabline row");
+        let tabline_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Tabline(_)))
+            .expect("tabline layer present");
+        assert_eq!(tabline_layer.rect.row, 0);
+        assert_eq!(
+            surface.cursor.map(|c| (c.row, c.col)),
+            Some((3, 4)),
+            "cursor offset by the same reserved row as the grid"
+        );
+    }
+
+    #[test]
+    fn cmdline_cursor_tracks_pos_past_firstc_on_the_grids_bottom_row() {
+        let mut model = model_with_grid(20, 8);
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "e".to_string()), (0, "cho".to_string())],
+                pos: 4,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+
+        assert_eq!(
+            surface.cursor,
+            Some(CursorSpec {
+                row: 7,
+                col: 5, // ":" (1) + pos (4)
+                shape: CursorShape::Block,
+            })
+        );
+    }
+
+    #[test]
+    fn messages_layer_is_sized_to_content_width_and_anchored_top_right() {
+        let mut model = model_with_grid(20, 8);
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "hi".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = render(&model);
+
+        let messages = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .expect("messages layer present");
+        assert_eq!(messages.rect.row, 0);
+        assert_eq!(messages.rect.width, 2, "sized to \"hi\", not a fixed width");
+        assert_eq!(
+            messages.rect.col, 18,
+            "right-anchored: grid width (20) minus content width (2)"
+        );
+    }
+
+    #[test]
+    fn popupmenu_is_sized_to_the_widest_items_display_text() {
+        let mut model = model_with_grid(40, 10);
+        apply(
+            &mut model,
+            UiEvent::PopupmenuShow {
+                items: vec![
+                    view_core::events::PmItem {
+                        word: "foo".into(),
+                        ..Default::default()
+                    },
+                    view_core::events::PmItem {
+                        word: "foobarbaz".into(),
+                        ..Default::default()
+                    },
+                ],
+                selected: 0,
+                row: 1,
+                col: 2,
+                grid: 0,
+            },
+        );
+
+        let surface = render(&model);
+
+        let popup = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Popupmenu(_)))
+            .expect("popupmenu layer present");
+        assert_eq!(
+            popup.rect.width, 9,
+            "sized to \"foobarbaz\", not a fixed 30"
+        );
+        assert_eq!(popup.rect.height, 2);
+        assert_eq!(popup.rect.row, 1);
+        assert_eq!(popup.rect.col, 2);
     }
 }

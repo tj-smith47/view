@@ -16,10 +16,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
         },
         Msg::Redraw(events) => {
+            let mut effects = Vec::new();
             for ev in events {
-                apply_ui_event(model, ev);
+                effects.extend(apply_ui_event(model, ev));
             }
-            Vec::new()
+            effects
         }
         // loop plumbing tokens: the loop resolves these into Redraw/EngineDown
         // before update() ever sees them, so both arms are no-ops here
@@ -35,12 +36,23 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             value: ReplyValue::Nil,
         }],
         Msg::Resized { width, height } => {
-            vec![Effect::Rpc(RpcCall::TryResize { width, height })]
+            model.term_width = width;
+            model.term_height = height;
+            let (grid_width, grid_height) = model.grid_target();
+            vec![Effect::Rpc(RpcCall::TryResize {
+                width: grid_width,
+                height: grid_height,
+            })]
         }
     }
 }
 
-fn apply_ui_event(model: &mut Model, ev: UiEvent) {
+/// Applies one decoded redraw sub-event to `model`, returning any effects
+/// it produces. Only [`UiEvent::TablineUpdate`] can produce one: crossing
+/// the 1-tab chrome-reservation boundary (either direction) changes the
+/// grid target size, which the loop's executor must forward to the engine
+/// as a `TryResize` the same way a terminal resize does.
+fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
     match ev {
         UiEvent::GridResize { width, height, .. } => {
             // clamp untrusted wire dimensions: a desynced or malformed
@@ -50,6 +62,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                 width: clamp_dim(width),
                 height: clamp_dim(height),
             });
+            Vec::new()
         }
         UiEvent::GridLine {
             row,
@@ -65,12 +78,14 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                     .map(|c| (c.text, c.hl_id, c.repeat))
                     .collect(),
             });
+            Vec::new()
         }
         UiEvent::GridCursorGoto { row, col, .. } => {
             model.engine.grid.apply(GridOp::CursorGoto {
                 row: saturate_u16(row),
                 col: saturate_u16(col),
             });
+            Vec::new()
         }
         UiEvent::GridScroll {
             top,
@@ -87,8 +102,12 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                 right: saturate_u16(right),
                 rows: i32::try_from(rows).unwrap_or(if rows > 0 { i32::MAX } else { i32::MIN }),
             });
+            Vec::new()
         }
-        UiEvent::GridClear { .. } => model.engine.grid.apply(GridOp::Clear),
+        UiEvent::GridClear { .. } => {
+            model.engine.grid.apply(GridOp::Clear);
+            Vec::new()
+        }
         UiEvent::HlAttrDefine {
             id,
             fg,
@@ -109,22 +128,29 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                     reverse,
                 },
             );
+            Vec::new()
         }
         UiEvent::DefaultColorsSet { fg, bg, .. } => {
             model.engine.hl.default_fg = fg;
             model.engine.hl.default_bg = bg;
+            Vec::new()
         }
-        UiEvent::Flush => model.dirty = true,
+        UiEvent::Flush => {
+            model.dirty = true;
+            Vec::new()
+        }
         UiEvent::ModeInfoSet {
             cursor_style_enabled,
             modes,
         } => {
             model.engine.mode.cursor_style_enabled = cursor_style_enabled;
             model.engine.mode.modes = modes;
+            Vec::new()
         }
         UiEvent::ModeChange { mode, mode_idx } => {
             model.engine.mode.current = mode;
             model.engine.mode.current_idx = mode_idx;
+            Vec::new()
         }
         UiEvent::CmdlineShow {
             content,
@@ -142,14 +168,19 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                 indent,
                 level,
             });
+            Vec::new()
         }
         UiEvent::CmdlinePos { pos, level } => {
             if let Some(cmdline) = &mut model.engine.cmdline {
                 cmdline.pos = pos;
                 cmdline.level = level;
             }
+            Vec::new()
         }
-        UiEvent::CmdlineHide => model.engine.cmdline = None,
+        UiEvent::CmdlineHide => {
+            model.engine.cmdline = None;
+            Vec::new()
+        }
         UiEvent::MsgShow {
             kind,
             content,
@@ -159,10 +190,25 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                 .engine
                 .messages
                 .push(MessageEntry { kind, content }, replace_last);
+            Vec::new()
         }
-        UiEvent::MsgClear => model.engine.messages.clear(),
+        UiEvent::MsgClear => {
+            model.engine.messages.clear();
+            Vec::new()
+        }
         UiEvent::TablineUpdate { current, tabs } => {
+            let before = model.chrome_rows();
             model.engine.tabline = Some(TablineState { current, tabs });
+            let after = model.chrome_rows();
+            if before == after {
+                Vec::new()
+            } else {
+                let (grid_width, grid_height) = model.grid_target();
+                vec![Effect::Rpc(RpcCall::TryResize {
+                    width: grid_width,
+                    height: grid_height,
+                })]
+            }
         }
         UiEvent::PopupmenuShow {
             items,
@@ -178,14 +224,19 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) {
                 col,
                 grid,
             });
+            Vec::new()
         }
         UiEvent::PopupmenuSelect { selected } => {
             if let Some(pm) = &mut model.engine.popupmenu {
                 pm.selected = selected;
             }
+            Vec::new()
         }
-        UiEvent::PopupmenuHide => model.engine.popupmenu = None,
-        UiEvent::Unknown { .. } => {}
+        UiEvent::PopupmenuHide => {
+            model.engine.popupmenu = None;
+            Vec::new()
+        }
+        UiEvent::Unknown { .. } => Vec::new(),
     }
 }
 
@@ -516,5 +567,142 @@ mod tests {
             Msg::Redraw(vec![UiEvent::PopupmenuSelect { selected: 0 }]),
         );
         assert!(m.engine.popupmenu.is_none());
+    }
+
+    #[test]
+    fn resize_target_shrinks_by_chrome_rows_once_more_than_one_tab_is_open() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        let effects = update(
+            &mut m,
+            Msg::Resized {
+                width: 80,
+                height: 24,
+            },
+        );
+        assert!(matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::TryResize {
+                width: 80,
+                height: 23
+            })]
+        ));
+    }
+
+    #[test]
+    fn tabline_crossing_the_one_tab_boundary_round_trips_the_reserved_row() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Resized {
+                width: 80,
+                height: 24,
+            },
+        );
+
+        let opened = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        assert!(
+            matches!(
+                &opened[..],
+                [Effect::Rpc(RpcCall::TryResize {
+                    width: 80,
+                    height: 23
+                })]
+            ),
+            "opening a second tab must reserve the tabline row: {opened:?}"
+        );
+
+        let closed = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![TabEntry {
+                    tab: TabHandle(1),
+                    name: "a".into(),
+                }],
+            }]),
+        );
+        assert!(
+            matches!(
+                &closed[..],
+                [Effect::Rpc(RpcCall::TryResize {
+                    width: 80,
+                    height: 24
+                })]
+            ),
+            "closing back to one tab must release the reserved row: {closed:?}"
+        );
+    }
+
+    #[test]
+    fn tabline_update_within_the_same_tab_count_bucket_emits_no_resize() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        // renaming a tab (still 2 tabs) never crosses the boundary
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a-renamed".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        assert!(effects.is_empty());
     }
 }

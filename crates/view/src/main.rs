@@ -44,7 +44,7 @@ fn main() -> Result<()> {
         .ui_attach(width, height)
         .context("ui attach failed or timed out")?;
 
-    let model = Model::new();
+    let model = Model::with_term_size(width, height);
     let exit_code = runtime::run(model, engine, &mut term)?;
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error

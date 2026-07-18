@@ -111,6 +111,34 @@ impl PtySession {
         self.writer.flush().unwrap();
     }
 
+    /// Blocks (up to `timeout`) until the cell at `(row, col)` holds exactly
+    /// `expected`, returning whether it did. Unlike [`Self::wait_for`]
+    /// (whole-screen substring search), this pins content to a specific
+    /// cell, for assertions where position is the point (e.g. the cmdline's
+    /// `:` prefix belonging to the bottom row specifically, not appearing
+    /// anywhere on screen by coincidence).
+    fn wait_for_cell(&mut self, row: u16, col: u16, expected: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    self.parser.process(&chunk);
+                    if self
+                        .parser
+                        .screen()
+                        .cell(row, col)
+                        .is_some_and(|c| c.contents() == expected)
+                    {
+                        return true;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        false
+    }
+
     /// The OS pid of the `view` process itself (not its embedded nvim
     /// child).
     fn view_pid(&self) -> u32 {
@@ -329,14 +357,46 @@ fn view_exits_nonzero_when_engine_dies_by_signal() {
         .wait()
         .expect("view process never exited after its embedded nvim was killed");
     // 128 + SIGKILL(9): the conventional signal-death exit code (see
-    // exit_code_for in crates/view/src/main.rs), stronger than a bare
-    // nonzero check since it also pins the exact mapping formula
+    // exit_info_from_status in crates/view-engine/src/process.rs and the
+    // EngineDown arm of update() in crates/view-core/src/update.rs),
+    // stronger than a bare nonzero check since it also pins the exact
+    // mapping formula
     assert_eq!(
         exit.exit_code(),
         137,
         "view did not map its engine's signal death to 128+signal; screen:\n{}",
         session.parser.screen().contents()
     );
+}
+
+#[test]
+fn view_shows_an_echoed_message() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:echo \"hi\"\r");
+    assert!(
+        session.wait_for("hi", Duration::from_secs(5)),
+        "screen never showed the echoed message text; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
+}
+
+#[test]
+fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:");
+    assert!(
+        session.wait_for_cell(23, 0, ":", Duration::from_secs(5)),
+        "cmdline row never showed its \":\" prefix; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
 }
 
 #[test]

@@ -86,19 +86,30 @@ fn write_sync_bracket(begin: bool) -> std::io::Result<()> {
     out.flush()
 }
 
-/// Maps a [`CursorShape`] to the closest steady (non-blinking) crossterm
-/// cursor style. Steady rather than blinking: a deterministic cursor is
-/// safer to test against and avoids relying on terminal-side blink timing
-/// this phase has no capability probe for.
-fn cursor_style(shape: CursorShape) -> crossterm::cursor::SetCursorStyle {
+/// Maps a [`CursorShape`] to its DECSCUSR steady parameter: `2` (block),
+/// `4` (underline/horizontal), `6` (bar/vertical). Steady rather than
+/// blinking (`1`/`3`/`5`): a deterministic cursor is safer to test against
+/// and avoids relying on terminal-side blink timing this phase has no
+/// capability probe for; `CursorShape` itself carries no blink state to
+/// select a blinking variant from.
+fn decscusr_param(shape: CursorShape) -> u8 {
     match shape {
-        CursorShape::Block => crossterm::cursor::SetCursorStyle::SteadyBlock,
-        CursorShape::Horizontal(_) => crossterm::cursor::SetCursorStyle::SteadyUnderScore,
-        CursorShape::Vertical(_) => crossterm::cursor::SetCursorStyle::SteadyBar,
+        CursorShape::Block => 2,
+        CursorShape::Horizontal(_) => 4,
+        CursorShape::Vertical(_) => 6,
         // CursorShape is #[non_exhaustive]: a future shape falls back to the
         // steady block rather than failing to compile
-        _ => crossterm::cursor::SetCursorStyle::SteadyBlock,
+        _ => 2,
     }
+}
+
+/// Writes the DECSCUSR cursor-shape escape (`CSI n SP q`) for `shape` to
+/// `writer`. Generic over `Write` (rather than writing straight to stdout
+/// like [`write_sync_bracket`]) so the byte sequence itself is unit
+/// testable against an injected `Vec<u8>` writer instead of only being
+/// provable via a live terminal.
+fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::Result<()> {
+    write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
 /// The ratatui-backed terminal: draws grid frames and reports its size,
@@ -106,6 +117,10 @@ fn cursor_style(shape: CursorShape) -> crossterm::cursor::SetCursorStyle {
 pub struct Term {
     guard: TerminalGuard,
     inner: ratatui::DefaultTerminal,
+    /// The last DECSCUSR shape written, so `draw_surface` only re-emits the
+    /// escape when the `Surface` cursor's shape actually changed instead of
+    /// writing it unconditionally on every frame.
+    last_cursor_shape: Option<CursorShape>,
 }
 
 impl Term {
@@ -126,7 +141,11 @@ impl Term {
         let guard = TerminalGuard::enter()?;
         let inner =
             ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
-        Ok(Self { guard, inner })
+        Ok(Self {
+            guard,
+            inner,
+            last_cursor_shape: None,
+        })
     }
 
     /// Current terminal size in `(width, height)` cells.
@@ -159,6 +178,13 @@ impl Term {
     /// set (conservative by construction: `TermCaps::default()` keeps it
     /// false until capability detection lands).
     ///
+    /// The cursor's position is set every frame the cursor is visible
+    /// (cheap, and correctness-critical: a stale position is wrong the
+    /// instant the grid cursor moves), but its DECSCUSR shape escape is
+    /// only written when [`CursorShape`] actually changed since the last
+    /// frame, since re-emitting it unconditionally would be a needless
+    /// terminal write on every single paint.
+    ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
@@ -171,7 +197,12 @@ impl Term {
             Some(spec) => {
                 self.inner.set_cursor_position((spec.col, spec.row))?;
                 self.inner.show_cursor()?;
-                crossterm::execute!(std::io::stdout(), cursor_style(spec.shape))?;
+                if self.last_cursor_shape != Some(spec.shape) {
+                    let mut out = std::io::stdout();
+                    write_cursor_shape(&mut out, spec.shape)?;
+                    out.flush()?;
+                    self.last_cursor_shape = Some(spec.shape);
+                }
             }
             None => self.inner.hide_cursor()?,
         }
@@ -225,4 +256,25 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn write_cursor_shape_emits_decscusr_for_each_steady_variant() {
+        let mut buf = Vec::new();
+        write_cursor_shape(&mut buf, CursorShape::Block).unwrap();
+        assert_eq!(buf, b"\x1b[2 q", "block is DECSCUSR 2");
+
+        buf.clear();
+        write_cursor_shape(&mut buf, CursorShape::Horizontal(50)).unwrap();
+        assert_eq!(buf, b"\x1b[4 q", "horizontal/underline is DECSCUSR 4");
+
+        buf.clear();
+        write_cursor_shape(&mut buf, CursorShape::Vertical(25)).unwrap();
+        assert_eq!(buf, b"\x1b[6 q", "vertical/bar is DECSCUSR 6");
+    }
 }
