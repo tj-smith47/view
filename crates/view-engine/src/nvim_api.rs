@@ -91,4 +91,29 @@ impl EngineHandle {
             vec![Value::from(width), Value::from(height)],
         )
     }
+
+    /// Streams `text` into nvim via `nvim_paste` as a single non-streamed
+    /// call (`phase = -1`, per `nvim --api-info`'s
+    /// `nvim_paste(String data, Boolean crlf, Integer phase)` signature),
+    /// with no line-ending translation (`crlf = false`): terminal input
+    /// already arrives with the pty's own newline convention, so nvim must
+    /// not perform an additional CRLF fixup on top of it. Routing paste
+    /// through `nvim_paste` rather than replaying it as `nvim_input`
+    /// keystrokes avoids mid-paste mappings, autoindent mangling, and a
+    /// separate undo unit per line.
+    ///
+    /// Fire-and-forget for the same reason as [`input`](Self::input): a
+    /// bracketed paste must not block the paint loop waiting for nvim to
+    /// finish inserting it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn paste(&self, text: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_paste",
+            vec![Value::from(text), Value::from(false), Value::from(-1)],
+        )
+    }
 }

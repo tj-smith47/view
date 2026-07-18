@@ -3,22 +3,29 @@
 //! with the full ext set ([`view_engine::handle::EngineHandle::ui_attach`])
 //! and asserts its actual `redraw` traffic decodes to typed events instead
 //! of falling through to `Unknown`.
+//!
+//! All three tests here drain traffic through [`Engine::start_pump`], the
+//! same production path the runtime loop uses: `Engine` routes every
+//! connection through its damage pump exclusively (see
+//! `view_engine::handle::EngineHandle::start_pumped`'s docs), so there is no
+//! separate raw notification channel left on a live `Engine` to observe
+//! wire traffic through instead.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::Write as _;
-use std::sync::mpsc::RecvTimeoutError;
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
-use view_core::grid::Cell;
 use view_core::model::Model;
 use view_core::msg::Msg;
 use view_core::update::update;
 use view_engine::process::{Engine, EngineConfig};
-use view_engine::ui_events::{decode_redraw, UiEvent};
+use view_engine::ui_events::UiEvent;
 
 #[test]
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
-    let notifications = engine.take_notifications().unwrap();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let pump = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -26,13 +33,10 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let mut saw_flush = false;
     while Instant::now() < deadline && !(saw_grid_line && saw_flush) {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(note) = notifications.recv_timeout(remaining) else {
+        let Ok(Msg::RedrawReady) = rx.recv_timeout(remaining) else {
             break;
         };
-        if note.method != "redraw" {
-            continue;
-        }
-        for event in decode_redraw(&note.params) {
+        for event in pump.take_damage() {
             match event {
                 UiEvent::GridLine { .. } => saw_grid_line = true,
                 UiEvent::Flush => saw_flush = true,
@@ -56,7 +60,8 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
 #[test]
 fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
-    let notifications = engine.take_notifications().unwrap();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let pump = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
     // entering cmdline mode is what proves the full ext set actually took:
     // without ext_cmdline, nvim paints ":" straight into the grid instead
@@ -68,13 +73,10 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     let mut saw_cmdline_show = false;
     while Instant::now() < deadline && !(saw_mode_change && saw_cmdline_show) {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(note) = notifications.recv_timeout(remaining) else {
+        let Ok(Msg::RedrawReady) = rx.recv_timeout(remaining) else {
             break;
         };
-        if note.method != "redraw" {
-            continue;
-        }
-        for event in decode_redraw(&note.params) {
+        for event in pump.take_damage() {
             match event {
                 UiEvent::ModeChange { .. } => saw_mode_change = true,
                 UiEvent::CmdlineShow { .. } => saw_cmdline_show = true,
@@ -96,39 +98,38 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
 
 /// The captured-storm fixture for the damage compactor's property test
 /// (`view-engine/src/damage.rs`'s `compaction_preserves_final_grid_and_non_grid_subsequence`
-/// is the generative half; this is the real-captured-traffic half).
-/// Unlike `ui_events.rs`'s decode fixtures, which are hand-copied from a
-/// saved capture log, this test captures its own storm at run time: it
-/// spawns a real nvim, opens a generated multi-thousand-line file (a real
-/// `grid_line` burst with long runs, not the generator's synthetic ones)
-/// and pages through it (real `grid_scroll` traffic, plus whatever
+/// is the generative half; this is the real-captured-traffic half). Unlike
+/// `ui_events.rs`'s decode fixtures, which are hand-copied from a saved
+/// capture log, this test captures its own storm at run time: it spawns a
+/// real nvim, opens a generated multi-thousand-line file (a real `grid_line`
+/// burst with long runs, not the generator's synthetic ones) and pages
+/// through it (real `grid_scroll` traffic, plus whatever
 /// `win_viewport`/other `Unknown`-decoded noise nvim actually emits
 /// alongside it), then proves the damage compactor against that exact
-/// traffic: the same raw stream, folded through the real `Engine::start_pump`
-/// pipeline and drained via `DamagePump::take_damage`, must apply to a
-/// `Grid` identically to the uncompacted raw stream, and must preserve the
-/// non-`GridOp` event subsequence exactly. There is no separate capture
-/// file to cite; this test's setup section below is the capture.
+/// traffic.
+///
+/// Correctness is checked against nvim's own ground truth (its window's
+/// top-of-screen buffer line, read back via `line('w0')`/`getline`) rather
+/// than against a second, uncompacted copy of the same stream: `Engine`
+/// routes every connection through its damage pump exclusively (no dual
+/// raw+compacted path survives on a live connection, see this file's module
+/// docs), so there is no independent "raw" observation of the same traffic
+/// left to diff against. Comparing to nvim's actual displayed content is a
+/// strictly external check rather than a self-consistency check between two
+/// decode paths that could both be wrong the same way.
 #[test]
-fn compacted_damage_matches_raw_across_a_real_edit_and_scroll_storm() {
+fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_storm() {
     // `--clean` isolates this test from the host's real nvim config
-    // (plugins, statuslines, autocmds): this test's assertions depend on
-    // the exact shape of the redraw stream (a real GridScroll must appear),
-    // not just "at least one event of some kind", so host-specific config
-    // noise would make it nondeterministic across hosts, the same failure
-    // mode any live-capture harness against a real nvim is exposed to.
+    // (plugins, statuslines, autocmds): the ground-truth comparison below
+    // assumes row 0 of the grid is the window's first buffer line with no
+    // winbar/tabline chrome above it, which a plugin-loaded config is not
+    // guaranteed to preserve.
     let cfg = EngineConfig {
         extra_args: vec!["--clean".into()],
         ..EngineConfig::default()
     };
     let mut engine = Engine::spawn(cfg).unwrap();
-    let notifications = engine.take_notifications().unwrap();
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
-    // the reader thread folds into this pump for every redraw notification
-    // from here on, in parallel with the unchanged dual-path forward to
-    // `notifications` above: draining `notifications` below observes
-    // exactly the same events the pump already folded, since the fold
-    // happens strictly before the reader forwards to the deprecated channel
+    let (tx, rx) = mpsc::sync_channel(64);
     let pump = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
@@ -164,19 +165,23 @@ fn compacted_damage_matches_raw_across_a_real_edit_and_scroll_storm() {
         std::thread::sleep(Duration::from_millis(30));
     }
 
-    // drain the dual-path raw channel until it goes quiet for a full
-    // settle window, or an overall budget elapses; either way the pump has
-    // folded exactly the same notifications by the time this loop exits,
-    // since the fold always happens before the forward on the reader thread
+    // drain compacted damage into a running model until the storm settles
+    // (a full budget elapses with no further RedrawReady token), same
+    // production pattern the runtime loop uses
+    let mut model = Model::new();
+    let mut compacted: Vec<UiEvent> = Vec::new();
     let overall_deadline = Instant::now() + Duration::from_secs(10);
     let settle = Duration::from_millis(500);
-    let mut raw: Vec<UiEvent> = Vec::new();
     loop {
         if Instant::now() >= overall_deadline {
             break;
         }
-        match notifications.recv_timeout(settle) {
-            Ok(note) if note.method == "redraw" => raw.extend(decode_redraw(&note.params)),
+        match rx.recv_timeout(settle) {
+            Ok(Msg::RedrawReady) => {
+                let batch = pump.take_damage();
+                compacted.extend(batch.iter().cloned());
+                let _ = update(&mut model, Msg::Redraw(batch));
+            }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => break, // quiet: storm settled
             Err(RecvTimeoutError::Disconnected) => break,
@@ -185,63 +190,44 @@ fn compacted_damage_matches_raw_across_a_real_edit_and_scroll_storm() {
     let _ = std::fs::remove_dir_all(&dir);
 
     assert!(
-        !raw.is_empty(),
-        "captured no redraw traffic from the edit+scroll storm"
+        !compacted.is_empty(),
+        "captured no compacted damage from the edit+scroll storm"
     );
     assert!(
-        raw.iter().any(|e| matches!(e, UiEvent::GridScroll { .. })),
+        compacted
+            .iter()
+            .any(|e| matches!(e, UiEvent::GridScroll { .. })),
         "expected at least one real GridScroll from the paced <C-e> scrolling"
     );
 
-    // take_damage only ever drains up to its own last-staged Flush; trim
-    // the raw side to the same boundary so both sides compare the same
-    // fully-flushed prefix rather than raw's trailing unflushed tail
-    let Some(last_flush) = raw.iter().rposition(|e| matches!(e, UiEvent::Flush)) else {
-        unreachable!("no Flush observed in a real redraw storm");
-    };
-    let raw = raw[..=last_flush].to_vec();
-
-    let compacted = pump.take_damage();
-    assert!(
-        !compacted.is_empty(),
-        "compactor drained nothing from a real, non-empty, flushed storm"
-    );
-
-    assert_eq!(
-        grid_snapshot(raw.clone()),
-        grid_snapshot(compacted.clone()),
-        "compacted real storm produced a different final grid/cursor than the raw storm"
-    );
-    let is_grid_op = |e: &UiEvent| {
-        matches!(
-            e,
-            UiEvent::GridResize { .. }
-                | UiEvent::GridLine { .. }
-                | UiEvent::GridCursorGoto { .. }
-                | UiEvent::GridScroll { .. }
-                | UiEvent::GridClear { .. }
+    let top_line = engine
+        .handle
+        .request(
+            "nvim_call_function",
+            vec![
+                rmpv::Value::from("line"),
+                rmpv::Value::Array(vec![rmpv::Value::from("w0")]),
+            ],
         )
-    };
-    let raw_other: Vec<&UiEvent> = raw.iter().filter(|e| !is_grid_op(e)).collect();
-    let compacted_other: Vec<&UiEvent> = compacted.iter().filter(|e| !is_grid_op(e)).collect();
-    assert_eq!(
-        raw_other, compacted_other,
-        "non-GridOp subsequence diverged between raw and compacted real storm"
-    );
-}
+        .unwrap();
+    let expected = engine
+        .handle
+        .request(
+            "nvim_call_function",
+            vec![
+                rmpv::Value::from("getline"),
+                rmpv::Value::Array(vec![top_line]),
+            ],
+        )
+        .unwrap();
+    let expected_text = expected
+        .as_str()
+        .expect("getline must return a String result");
 
-/// Applies `events` through `update()` (the real `UiEvent` -> `GridOp`
-/// translation) and returns enough of the resulting `Grid` to compare final
-/// states: every cell plus the cursor, since `Grid` has no `PartialEq`.
-fn grid_snapshot(events: Vec<UiEvent>) -> (Vec<Cell>, (u16, u16), (u16, u16)) {
-    let mut model = Model::new();
-    let _ = update(&mut model, Msg::Redraw(events));
-    let (w, h) = model.engine.grid.size();
-    let mut cells = Vec::with_capacity(usize::from(w) * usize::from(h));
-    for r in 0..h {
-        for c in 0..w {
-            cells.push(model.engine.grid.cell(r, c).cloned().unwrap_or_default());
-        }
-    }
-    (cells, (w, h), model.engine.grid.cursor())
+    assert_eq!(
+        model.engine.grid.row_text(0).trim_end(),
+        expected_text,
+        "compacted damage's final grid row 0 does not match nvim's own \
+         reported top-of-window buffer line"
+    );
 }

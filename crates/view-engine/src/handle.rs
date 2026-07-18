@@ -95,9 +95,14 @@ type Pending = Arc<Mutex<PendingState>>;
 /// lands before the flag (and gets drained) or after it (and is rejected
 /// before it ever touches the pipe).
 ///
-/// The reader thread uses an unbounded channel for notifications, ensuring
-/// that a flood of notifications (e.g., a large `redraw` burst) never blocks
-/// the delivery of pending responses.
+/// A connection started via [`start`](Self::start) routes notifications
+/// through an unbounded channel, ensuring that a flood of notifications
+/// (e.g., a large `redraw` burst) never blocks the delivery of pending
+/// responses. A connection started via
+/// [`start_pumped`](Self::start_pumped) routes `redraw` notifications
+/// through the bounded, compacted [`PumpShared`] instead and allocates no
+/// notification channel at all; the two routing modes are mutually
+/// exclusive per connection.
 pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
@@ -159,7 +164,12 @@ impl EngineHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
     ) -> (Self, mpsc::Receiver<EngineNotification>) {
-        Self::start_inner(reader, writer, None)
+        // unbounded so the reader thread can never stall a pending response
+        // behind a redraw flood; the bounded, compacted path is `pump`,
+        // used instead of this channel by `start_pumped`
+        let (notif_tx, notif_rx) = mpsc::channel();
+        let handle = Self::start_inner(reader, writer, None, Some(notif_tx));
+        (handle, notif_rx)
     }
 
     /// Same as [`start`](Self::start), but the reader thread also decodes
@@ -167,10 +177,9 @@ impl EngineHandle {
     /// [`DamageBuffer`](crate::damage::DamageBuffer), and dispatches known
     /// engine-initiated requests (currently `view_vim_enter`) as
     /// `Msg::EngineRequest` through `pump` instead of auto-erroring them.
-    /// Every `redraw` notification is still forwarded unchanged to the
-    /// returned `Receiver` as well: until the last caller of
-    /// [`Engine::take_notifications`](crate::process::Engine::take_notifications)
-    /// is deleted, both paths must stay live.
+    /// A pumped connection routes every `redraw` notification through `pump`
+    /// exclusively: no unbounded notification channel is allocated for it at
+    /// all, since nothing consumes one.
     ///
     /// Crate-private: only [`Engine::spawn`](crate::process::Engine::spawn)
     /// needs the pump wired up. Direct `EngineHandle` construction (tests,
@@ -182,19 +191,17 @@ impl EngineHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         pump: Arc<PumpShared>,
-    ) -> (Self, mpsc::Receiver<EngineNotification>) {
-        Self::start_inner(reader, writer, Some(pump))
+    ) -> Self {
+        Self::start_inner(reader, writer, Some(pump), None)
     }
 
     fn start_inner(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         pump: Option<Arc<PumpShared>>,
-    ) -> (Self, mpsc::Receiver<EngineNotification>) {
+        notif_tx: Option<mpsc::Sender<EngineNotification>>,
+    ) -> Self {
         let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
-        // unbounded so the reader thread can never stall a pending response
-        // behind a redraw flood; the bounded, compacted path is `pump`
-        let (notif_tx, notif_rx) = mpsc::channel();
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
 
         let writer_pending = Arc::clone(&pending);
@@ -242,18 +249,18 @@ impl EngineHandle {
                     }
                     Ok(RpcMessage::Notification { method, params }) => {
                         if let Some(pump) = &reader_pump {
+                            // a pumped connection routes exclusively through
+                            // `pump`: nothing else consumes this connection's
+                            // notifications, so a non-`redraw` method (none
+                            // exist yet) is simply dropped rather than routed
+                            // anywhere
                             if method == "redraw" {
                                 pump.fold_redraw(decode_redraw(&params));
                             }
-                        }
-                        // dual-path: the deprecated unbounded channel still
-                        // gets every notification unchanged until its last
-                        // caller (the P1-shaped paint loop) is deleted
-                        if notif_tx
-                            .send(EngineNotification { method, params })
-                            .is_err()
-                        {
-                            break;
+                        } else if let Some(tx) = &notif_tx {
+                            if tx.send(EngineNotification { method, params }).is_err() {
+                                break;
+                            }
                         }
                     }
                     Ok(RpcMessage::Request { msgid, method, .. }) => {
@@ -312,12 +319,11 @@ impl EngineHandle {
             // engine is gone: fail every in-flight request instead of hanging
             close_and_drain(&reader_pending);
         });
-        let handle = Self {
+        Self {
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
             write_tx,
-        };
-        (handle, notif_rx)
+        }
     }
 
     /// Sends a synchronous RPC request to the engine and waits for the response.
@@ -562,7 +568,6 @@ mod tests {
     /// `peer_read`.
     fn pumped_peer() -> (
         EngineHandle,
-        mpsc::Receiver<EngineNotification>,
         Arc<PumpShared>,
         std::io::PipeReader,
         std::io::PipeWriter,
@@ -570,8 +575,8 @@ mod tests {
         let (peer_read, our_write) = std::io::pipe().unwrap();
         let (our_read, peer_write) = std::io::pipe().unwrap();
         let pump = PumpShared::new();
-        let (h, n) = EngineHandle::start_pumped(our_read, our_write, Arc::clone(&pump));
-        (h, n, pump, peer_read, peer_write)
+        let h = EngineHandle::start_pumped(our_read, our_write, Arc::clone(&pump));
+        (h, pump, peer_read, peer_write)
     }
 
     fn write_request(peer_write: &mut impl Write, msgid: u32, method: &str) {
@@ -586,7 +591,7 @@ mod tests {
 
     #[test]
     fn view_vim_enter_request_surfaces_as_engine_request_and_reply_correlates() {
-        let (h, _n, pump, peer_read, mut peer_write) = pumped_peer();
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
         let (tx, rx) = mpsc::sync_channel(64);
         let _dpump = pump.attach_sink(tx);
 
@@ -613,7 +618,7 @@ mod tests {
 
     #[test]
     fn unknown_method_still_auto_errors_with_a_pump_attached() {
-        let (_h, _n, pump, peer_read, mut peer_write) = pumped_peer();
+        let (_h, pump, peer_read, mut peer_write) = pumped_peer();
         let (tx, _rx) = mpsc::sync_channel::<Msg>(64);
         let _dpump = pump.attach_sink(tx);
 
@@ -633,7 +638,7 @@ mod tests {
 
     #[test]
     fn requests_before_start_pump_stage_and_drain_in_arrival_order() {
-        let (_h, _n, pump, _peer_read, mut peer_write) = pumped_peer();
+        let (_h, pump, _peer_read, mut peer_write) = pumped_peer();
 
         // both requests arrive before any sink is attached: startup
         // registers the VimEnter autocmd before the runtime loop starts,

@@ -1,19 +1,19 @@
 //! Spawning `nvim --embed` and performing the API-info handshake.
 //!
-//! `Engine` owns the child process, its RPC handle, and the notification
-//! channel for the process's lifetime. Its `Drop` impl attempts a graceful
+//! `Engine` owns the child process, its RPC handle, and the damage pump for
+//! the process's lifetime. Its `Drop` impl attempts a graceful
 //! shutdown (`qa!` sent over the writer thread, then a bounded wait) before
 //! falling back to `SIGKILL`, so a normally-responsive nvim gets the chance
 //! to flush shada and remove its swap file instead of leaving behind a
 //! recovery prompt on the next open.
 
 use crate::damage::{DamagePump, PumpShared};
-use crate::handle::{EngineError, EngineHandle, EngineNotification};
+use crate::handle::{EngineError, EngineHandle};
 use rmpv::Value;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use view_core::msg::{ExitInfo, Msg};
@@ -61,23 +61,21 @@ pub struct ApiInfo {
     pub version_minor: u64,
 }
 
-/// A spawned embedded Neovim process with its RPC handle and notification
-/// receiver.
+/// A spawned embedded Neovim process with its RPC handle and damage pump.
 ///
 /// `Engine` owns the child process for its entire lifetime: once
 /// `Engine::spawn` returns `Ok`, dropping the `Engine` always shuts the
 /// child down (`Drop` attempts a graceful `qa!` first, then force-kills and
 /// reaps; see [`shutdown`](Self::shutdown) for the same sequence with an
 /// observable exit status). The child itself is a private field: callers
-/// cannot block on it directly, only read its pid, take the notification
-/// receiver, or consume the `Engine` to shut it down explicitly.
+/// cannot block on it directly, only read its pid, attach the runtime
+/// loop's damage pump, or consume the `Engine` to shut it down explicitly.
 pub struct Engine {
     /// The RPC client for issuing requests to the engine. `Clone` and
-    /// `Send`, so requests can be issued from other threads while one
-    /// thread owns the receiver returned by
-    /// [`take_notifications`](Self::take_notifications).
+    /// `Send`, so requests can be issued from other threads while the
+    /// runtime loop owns the [`DamagePump`] returned by
+    /// [`start_pump`](Self::start_pump).
     pub handle: EngineHandle,
-    notifications: Option<Receiver<EngineNotification>>,
     child: Child,
     shutdown_timeout: Duration,
     /// The engine's API version and channel id, captured at handshake time.
@@ -151,7 +149,7 @@ impl Engine {
         // fold and stage from its very first message, before start_pump is
         // ever called
         let pump = PumpShared::new();
-        let (handle, notifications) = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
+        let handle = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
         let api_info = decode_api_info(handle.request_timeout(
             "nvim_get_api_info",
             vec![],
@@ -165,7 +163,6 @@ impl Engine {
         };
         Ok(Self {
             handle,
-            notifications: Some(notifications),
             child,
             shutdown_timeout: cfg.shutdown_timeout,
             api_info,
@@ -207,20 +204,6 @@ impl Engine {
                 by_signal: false,
             },
         }
-    }
-
-    /// Takes ownership of the notification receiver, if it has not already
-    /// been taken (returns `None` on a second call).
-    ///
-    /// `Engine` cannot expose the receiver as a plain field: a borrowed
-    /// `Receiver<EngineNotification>` is `!Sync`, which would make `Engine`
-    /// itself `!Sync` and `Arc<Engine>` not even `Send`, inexpressible
-    /// against the intended usage of polling notifications on one thread
-    /// while issuing requests via a cloned [`EngineHandle`] from others.
-    /// Callers take the receiver once, up front, and hold onto it
-    /// themselves for the `Engine`'s lifetime.
-    pub fn take_notifications(&mut self) -> Option<Receiver<EngineNotification>> {
-        self.notifications.take()
     }
 
     /// The OS process id of the spawned child. For diagnostics and tests

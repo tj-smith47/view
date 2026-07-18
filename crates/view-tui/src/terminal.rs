@@ -6,10 +6,12 @@
 
 use crate::keys::encode_key;
 use crate::paint::{paint, HlTable};
-use crossterm::event::{Event, KeyEventKind};
+use crossterm::event::Event;
 use std::io::Write;
-use std::time::Duration;
+use std::sync::mpsc::SyncSender;
 use view_core::grid::Grid;
+use view_core::model::Model;
+use view_core::msg::{Key, Msg};
 
 /// Enters raw mode and the alternate screen for the lifetime of the value,
 /// restoring both on drop and installing a panic hook that restores the
@@ -127,6 +129,21 @@ impl Term {
         self.inner.show_cursor()
     }
 
+    /// Paints one frame from `model`'s engine grid and highlight table, then
+    /// moves the cursor to match. The runtime loop's only paint call: it
+    /// wraps [`draw`](Self::draw) and [`set_cursor`](Self::set_cursor)
+    /// against the core [`Model`] type directly, so the loop never reaches
+    /// into `model.engine` itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the backend write fails.
+    pub fn draw_model(&mut self, model: &Model) -> std::io::Result<()> {
+        self.draw(&model.engine.grid, &model.engine.hl)?;
+        let (row, col) = model.engine.grid.cursor();
+        self.set_cursor(row, col)
+    }
+
     /// Restores the terminal immediately rather than waiting for [`Drop`].
     ///
     /// `std::process::exit` bypasses destructors, so the exit path that
@@ -140,37 +157,35 @@ impl Term {
     }
 }
 
-/// One decoded terminal input event, ready for the caller to forward to nvim
-/// without touching `crossterm` types itself.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputEvent {
-    /// A key event already encoded to nvim `nvim_input` notation.
-    Key(String),
-    /// The terminal was resized to `width` x `height` cells.
-    Resize(u16, u16),
-}
-
-/// Drains every terminal input event currently available without blocking,
-/// decoding key events via [`encode_key`](crate::keys::encode_key) and
-/// filtering out anything with no nvim equivalent (key releases, keys with
-/// no notation, event kinds this frontend does not act on).
+/// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
+/// forwards every key or resize event to `tx` as a core [`Msg`], translating
+/// key events via [`encode_key`](crate::keys::encode_key). Events with no
+/// nvim equivalent (key releases, keys with no notation) and event kinds
+/// this frontend does not act on yet (paste, mouse -- their `Msg` variants
+/// arrive in a later task) are dropped rather than forwarded. Exits once
+/// `crossterm::event::read()` errors or `tx`'s receiver is gone.
 ///
-/// # Errors
-///
-/// Returns the underlying `std::io::Error` if polling or reading the next
-/// event fails.
-pub fn drain_input() -> std::io::Result<Vec<InputEvent>> {
-    let mut events = Vec::new();
-    while crossterm::event::poll(Duration::ZERO)? {
-        match crossterm::event::read()? {
-            Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if let Some(notation) = encode_key(&k) {
-                    events.push(InputEvent::Key(notation));
+/// Blocking on a dedicated thread rather than polling on the runtime loop's
+/// own thread is what lets the loop's `recv()` wake immediately on a
+/// keystroke: a poll-based drain needs a timeout to bound how long it can go
+/// without checking input, which is exactly the structural latency this
+/// design removes. A blocking `send` (not `try_send`) is deliberate: a
+/// dropped keystroke is never an acceptable loss the way a coalescible
+/// redraw token is, so this thread blocks rather than discards when the
+/// channel is momentarily full.
+pub fn spawn_input_thread(tx: SyncSender<Msg>) {
+    std::thread::spawn(move || {
+        while let Ok(event) = crossterm::event::read() {
+            let msg = match event {
+                Event::Key(k) => encode_key(&k).map(|notation| Msg::Key(Key { notation })),
+                Event::Resize(width, height) => Some(Msg::Resized { width, height }),
+                _ => None,
+            };
+            if let Some(msg) = msg {
+                if tx.send(msg).is_err() {
+                    break;
                 }
             }
-            Event::Resize(width, height) => events.push(InputEvent::Resize(width, height)),
-            _ => {}
         }
-    }
-    Ok(events)
+    });
 }
