@@ -87,8 +87,14 @@ fn main() -> Result<()> {
     let config_path = theme_cache::resolved_config_path();
     match &config_path {
         Some(path) => {
-            let cached = theme_cache::load(path);
-            theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
+            // only seeds on a genuine cache hit: seeding from a miss's
+            // Theme::default() would register TabLineSel/PmenuSel with
+            // all-false attrs, permanently defeating Theme::from_hl's
+            // emphasis fallback for the pre-attach frame (see
+            // theme_cache::load's doc comment)
+            if let Some(cached) = theme_cache::load(path) {
+                theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
+            }
         }
         None => {
             eprintln!(
@@ -156,25 +162,46 @@ fn main() -> Result<()> {
         || engine.wait_exit(),
     );
     if let startup::CutoverOutcome::Quit(code) = outcome {
-        if let Some(path) = &config_path {
-            theme_cache::store(Theme::from_hl(&model.engine.hl), path);
-        }
+        persist_theme(&model, &config_path);
         // nvim already reported its own exit (a presink Msg::EngineStopped,
         // translated by run_cutover): drop explicitly so Engine's Drop
         // graceful-shutdown sequence still runs, since process::exit below
         // would otherwise skip every destructor on this stack
         drop(engine);
         term.restore_now();
+        report_fatal_reason(&model);
         std::process::exit(code);
     }
 
     let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
-    if let Some(path) = &config_path {
-        theme_cache::store(Theme::from_hl(&model.engine.hl), path);
-    }
+    persist_theme(&model, &config_path);
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error
     // propagated via `?` above) is covered by `Drop` on `term`.
     term.restore_now();
+    report_fatal_reason(&model);
     std::process::exit(exit_code);
+}
+
+/// Persists `model`'s current theme to `config_path`'s cache slot, on
+/// every exit path that reaches one (both quit shapes call this identically
+/// rather than each carrying its own copy, so a future third exit path
+/// cannot copy one and silently miss the store).
+fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
+    if let Some(path) = config_path {
+        theme_cache::store(Theme::from_hl(&model.engine.hl), path);
+    }
+}
+
+/// Reports `model.fatal_reason` (set by a `Msg::EngineStopped` whose reader
+/// thread stopped for a reason other than an ordinary process exit) to
+/// stderr. Called only after `term.restore_now()`: the reader thread that
+/// originates this reason never writes it directly itself, since it runs
+/// headless behind the terminal's raw-mode alternate screen, where a write
+/// would be invisible or corrupt the screen (see `Msg::EngineStopped`'s doc
+/// comment in `view-core`).
+fn report_fatal_reason(model: &Model) {
+    if let Some(reason) = &model.fatal_reason {
+        eprintln!("view: {reason}");
+    }
 }

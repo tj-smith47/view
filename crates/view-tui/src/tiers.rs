@@ -478,6 +478,15 @@ mod tests {
                 expect_kitty: false,
             },
             Case {
+                name: "decrpm permanently-reset state (4) is treated as unsupported",
+                replies: b"\x1b[?2026;4$y\x1b[?62c",
+                colorterm: Some("truecolor"),
+                expect_tier: "standard",
+                expect_sync: false,
+                expect_truecolor: true,
+                expect_kitty: false,
+            },
+            Case {
                 name: "colorterm 24bit also counts as truecolor",
                 replies: b"\x1b[?62c",
                 colorterm: Some("24bit"),

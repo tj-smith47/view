@@ -49,7 +49,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // draining loop, before the steady-state loop this match belongs to
         // ever starts, so this arm is unreachable in practice but kept for
         // the same defensive-totality reason
-        Msg::RedrawReady | Msg::EngineStopped | Msg::EngineReady => Vec::new(),
+        Msg::RedrawReady | Msg::EngineStopped(_) | Msg::EngineReady => Vec::new(),
         Msg::EngineDown(exit) => {
             model.running = false;
             vec![Effect::Quit {
@@ -609,7 +609,7 @@ mod tests {
     fn loop_tokens_are_noops_and_engine_request_always_replies() {
         let mut m = model();
         assert!(update(&mut m, Msg::RedrawReady).is_empty());
-        assert!(update(&mut m, Msg::EngineStopped).is_empty());
+        assert!(update(&mut m, Msg::EngineStopped(None)).is_empty());
         let effects = update(
             &mut m,
             Msg::EngineRequest(EngineRequest::VimEnter {

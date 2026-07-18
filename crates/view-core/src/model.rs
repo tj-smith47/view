@@ -32,6 +32,12 @@ pub struct Model {
     /// `Shell` layer for good; never reset afterward, since a mid-session
     /// redraw storm is not a second "waiting for nvim" state.
     pub content_painted: bool,
+    /// Set from `Msg::EngineStopped`'s payload when the engine's RPC reader
+    /// thread stopped reading for a reason other than an ordinary process
+    /// exit (see that variant's doc comment). The bin crate reports this to
+    /// the user after `runtime::run` returns and the terminal is restored;
+    /// nothing paints from it, so it carries no rendering contract.
+    pub fatal_reason: Option<String>,
 }
 
 impl Model {
@@ -63,6 +69,7 @@ impl Model {
             term_width: 0,
             term_height: 0,
             content_painted: true,
+            fatal_reason: None,
         }
     }
 
@@ -141,6 +148,10 @@ pub struct EngineModel {
 #[non_exhaustive]
 #[derive(Debug, Clone, Default)]
 pub struct ModeState {
+    /// nvim's own `mode_info_set` contract: when `false`, the UI must not
+    /// restyle the cursor per mode at all and should render a plain
+    /// (block) cursor regardless of what `modes`/`current_idx` describe.
+    /// Consumed by `view-surface`'s `shape_from_mode`.
     pub cursor_style_enabled: bool,
     pub modes: Vec<ModeInfo>,
     pub current: String,

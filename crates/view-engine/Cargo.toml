@@ -15,6 +15,14 @@ workspace = true
 # hot path damage.rs's own property tests exercise. Off by default: neither
 # belongs in view-engine's ordinary public surface.
 bench-support = []
+# Exposes EngineHandle::start (the unbounded-notification-channel
+# constructor) and the EngineNotification re-export, which have no
+# production caller: Engine::spawn always uses the crate-private, pumped,
+# bounded-channel start_pumped instead. Only test code (this crate's own
+# integration tests in tests/, and unit tests via the `test` cfg below)
+# needs the unbounded form. Enabled automatically for this crate's own test
+# session by the self dev-dependency below; off in every ordinary build.
+test-support = []
 
 [dependencies]
 rmpv = "1.3.1"
@@ -23,6 +31,12 @@ view-core = { version = "0.0.1", path = "../view-core" }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+# Self dev-dependency: Cargo's feature unification enables test-support for
+# every build of this package within a `cargo test` session (the lib target
+# included), so integration test binaries under tests/ see EngineHandle::start
+# without a manual --features flag. No normal (non-test) build depends on
+# view-engine as its own dev-dependency, so test-support never leaks in.
+view-engine = { path = ".", features = ["test-support"] }
 
 [[bench]]
 name = "damage_fold"

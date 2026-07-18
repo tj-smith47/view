@@ -22,7 +22,9 @@ pub enum UiEvent {
     },
     /// The cursor moved to `(row, col)` on `grid`.
     GridCursorGoto { grid: u64, row: u64, col: u64 },
-    /// A region of `grid` scrolled by `rows` (positive = down, negative = up).
+    /// A region of `grid` scrolled by `rows` (positive moves content up
+    /// toward row 0, negative moves it down), matching nvim's own
+    /// `grid_scroll` contract and [`crate::grid::GridOp::Scroll`]'s.
     GridScroll {
         grid: u64,
         top: u64,
@@ -44,7 +46,9 @@ pub enum UiEvent {
         reverse: bool,
     },
     /// The default foreground/background/special colors changed. `None`
-    /// means the color is unset (nvim's `-1` sentinel on the wire).
+    /// means the color is unset (nvim's `-1` sentinel on the wire). `fg`
+    /// and `bg` drive paint styling; `sp` (the special/underline color) is
+    /// decoded for wire completeness but no painter reads it yet.
     DefaultColorsSet {
         fg: Option<u32>,
         bg: Option<u32>,
@@ -125,7 +129,10 @@ pub enum UiEvent {
 /// One mode's cursor and highlight properties, from a `mode_info_set`
 /// dict. Fields absent on a given mode (e.g. the mouse-only hover modes
 /// carry no cursor fields at all) decode to their zero value rather than
-/// failing the whole event.
+/// failing the whole event. `blinkwait`/`blinkon`/`blinkoff` (cursor blink
+/// timing, in milliseconds) are decoded for wire completeness; no painter
+/// reads them, since the runtime's paint loop has no timer of its own to
+/// drive a blink cycle with.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ModeInfo {
     pub name: String,
@@ -151,6 +158,8 @@ pub struct TabEntry {
 }
 
 /// One completion candidate in [`UiEvent::PopupmenuShow`]'s `items` list.
+/// `word` and `menu` drive [`PmItem::display_text`]; `kind` and `info` are
+/// decoded for wire completeness but no painter reads them.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PmItem {
     pub word: String,

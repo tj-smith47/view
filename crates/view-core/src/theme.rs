@@ -49,11 +49,12 @@ pub struct Theme {
     pub fg: Option<u32>,
     /// The default/"Normal" background color.
     pub bg: Option<u32>,
-    /// The `StatusLine` builtin group. No `view-tui` layer paints a
-    /// statusline yet (the native statusline widget is unbuilt), but a
-    /// resolved value costs nothing to carry ahead of that consumer
-    /// existing, and `Theme`'s contract is to resolve every builtin group
-    /// nvim's own `hl_group_set` event names.
+    /// The `StatusLine` builtin group. Consumed today by `view-tui`'s
+    /// `paint_shell` (the startup placeholder's statusline bar, painted
+    /// before the engine attaches); a full native statusline widget over
+    /// live buffer state is still unbuilt, and `Theme`'s contract is to
+    /// resolve every builtin group nvim's own `hl_group_set` event names
+    /// regardless of how many consumers exist yet.
     pub status_line: ResolvedStyle,
     /// The `TabLine` builtin group: an unselected tab's label.
     pub tab_line: ResolvedStyle,
@@ -209,7 +210,10 @@ mod tests {
     /// Derivation stability: the same `HlTable` state always derives an
     /// identical `Theme`, whether re-derived once or many times -- the
     /// property `theme_cache`'s round trip and `paint`'s per-frame
-    /// re-derivation both depend on.
+    /// re-derivation both depend on. Asserts concrete field values (not
+    /// just that the three derivations match each other): a `from_hl` that
+    /// always returned the same wrong `Theme` would still pass a
+    /// three-way equality check alone.
     #[test]
     fn from_hl_is_stable_across_repeated_derivation() {
         let hl = table_with(Some(0x112233), Some(0x445566), 7, no_attrs());
@@ -218,6 +222,8 @@ mod tests {
         let third = Theme::from_hl(&hl);
         assert_eq!(first, second);
         assert_eq!(second, third);
+        assert_eq!(first.fg, Some(0x112233));
+        assert_eq!(first.bg, Some(0x445566));
     }
 
     /// Derivation reads live `Model.engine.hl` state built the same way

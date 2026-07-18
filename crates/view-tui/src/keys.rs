@@ -88,24 +88,27 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 /// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
 /// guessing at a replacement is worse than dropping a still-rare case).
 ///
-/// `ESC` immediately followed by `[` is the hard case: it is ambiguous
-/// between an `<Esc>` keypress followed by someone separately typing `[`,
-/// and a real CSI sequence (an arrow key, a function key). Disambiguating
-/// needs the same multi-byte lookahead grammar `crossterm`'s own parser
-/// uses, which is out of scope for a startup-only residue drain, so the
-/// policy here is to drop the rest of the buffer from that `ESC` onward
-/// rather than guess: forwarding a misdecoded fragment byte-by-byte would
-/// inject garbage keystrokes nvim then has to live with, while a dropped
-/// arrow key is a keystroke the user can simply press again once the
-/// editor is up. A bare `ESC` not followed by `[` is unambiguous and maps
-/// to `<Esc>`.
+/// `ESC` immediately followed by `[` or `O` is the hard case: it is
+/// ambiguous between an `<Esc>` keypress followed by someone separately
+/// typing `[`/`O`, and a real CSI or SS3 sequence (an arrow key, a function
+/// key -- SS3 is what a DECCKM application-cursor mode inherited from the
+/// spawning shell encodes arrow keys as, e.g. `ESC O A` for Up).
+/// Disambiguating needs the same multi-byte lookahead grammar `crossterm`'s
+/// own parser uses, which is out of scope for a startup-only residue drain,
+/// so the policy here is to drop the rest of the buffer from that `ESC`
+/// onward rather than guess: forwarding a misdecoded fragment byte-by-byte
+/// would inject garbage keystrokes nvim then has to live with (an
+/// undecoded SS3 arrow reaching normal mode as literal `O`+`A` opens a line
+/// and inserts text), while a dropped arrow key is a keystroke the user can
+/// simply press again once the editor is up. A bare `ESC` not followed by
+/// `[` or `O` is unambiguous and maps to `<Esc>`.
 #[must_use]
 pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < residue.len() {
         match residue[i] {
-            0x1b if residue.get(i + 1) == Some(&b'[') => break,
+            0x1b if matches!(residue.get(i + 1), Some(&b'[') | Some(&b'O')) => break,
             0x1b => {
                 out.push("<Esc>".to_string());
                 i += 1;
@@ -332,6 +335,15 @@ mod tests {
         // than guess, including bytes that would otherwise be perfectly
         // decodable if they followed the escape fragment
         assert_eq!(encode_residue_bytes(b"ok\x1b[Aignored"), vec!["o", "k"]);
+    }
+
+    #[test]
+    fn residue_esc_followed_by_ss3_drops_the_rest_of_the_buffer() {
+        // same ambiguity as the CSI case above but for SS3 (DECCKM
+        // application-cursor arrows, e.g. "ESC O A" for Up): undecoded, the
+        // fragment would forward as literal "O","A" and, in normal mode,
+        // open a line and insert text instead of moving the cursor
+        assert_eq!(encode_residue_bytes(b"ok\x1bOAignored"), vec!["o", "k"]);
     }
 
     #[test]

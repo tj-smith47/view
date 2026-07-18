@@ -376,7 +376,8 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
 
     for msg in presink {
         let msg = match msg {
-            Msg::EngineStopped => {
+            Msg::EngineStopped(reason) => {
+                model.fatal_reason = reason;
                 let exit = engine_stopped_exit.take().map_or(
                     view_core::msg::ExitInfo {
                         code: None,
@@ -649,7 +650,7 @@ mod tests {
             &mut model,
             &executor,
             CutoverInput {
-                presink: vec![Msg::EngineStopped],
+                presink: vec![Msg::EngineStopped(None)],
                 pending_redraw: vec![UiEvent::Flush],
                 resize: Some((100, 40)),
                 keys: vec![key("should-not-be-sent")],
@@ -669,6 +670,36 @@ mod tests {
         // update(): Quit short-circuits everything after it
         assert!(!model.content_painted);
         assert!(executor.into_ops().calls.into_inner().is_empty());
+    }
+
+    /// A presink `Msg::EngineStopped(Some(reason))` stashes the reason on
+    /// `model.fatal_reason` before translating to `Msg::EngineDown`, the
+    /// same as a live one does in `runtime::run`'s own loop: `main.rs`
+    /// reads it off the returned model after the terminal is restored,
+    /// never from a direct write inside the reader thread itself.
+    #[test]
+    fn run_cutover_stashes_a_presink_engine_stopped_reason_on_the_model() {
+        let ops = crate::runtime::FakeOps::default();
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            CutoverInput {
+                presink: vec![Msg::EngineStopped(Some("wedged reader".to_string()))],
+                pending_redraw: vec![],
+                resize: None,
+                keys: vec![],
+            },
+            || view_core::msg::ExitInfo {
+                code: Some(1),
+                by_signal: false,
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Quit(1)));
+        assert_eq!(model.fatal_reason.as_deref(), Some("wedged reader"));
     }
 
     /// Once a dispatch reports the engine connection lost, every later

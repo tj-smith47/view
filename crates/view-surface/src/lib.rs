@@ -5,6 +5,7 @@
 //! data, no drawing here; `view-tui` is the only crate that turns a
 //! `Surface` into pixels.
 
+use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
 use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
 
@@ -117,8 +118,16 @@ pub struct Surface {
 /// after nvim clears that state.
 ///
 /// Total: any `Model`, including a hostile or partially-initialized one,
-/// yields a valid `Surface` whose layers never exceed the grid's current
-/// bounds. Never panics.
+/// yields a valid `Surface`. Never panics.
+///
+/// "Valid" is bounded by the engine grid's own reported `(grid_w, grid_h)`,
+/// not by the terminal frame: the `EngineGrid` layer's rect is always
+/// exactly `grid_w`x`grid_h` at `chrome_rows()`'s offset, by construction,
+/// but for one transient frame -- a `TablineUpdate` crossing the 1-tab
+/// chrome-reservation boundary before nvim's matching `GridResize` round
+/// trips -- that offset rect can extend past `model.term_height`. This
+/// function does not clip to the frame; the paint layer's `clip_to_frame`
+/// is what keeps that transient from indexing past the terminal buffer.
 #[must_use]
 pub fn render(model: &Model) -> Surface {
     let engine = &model.engine;
@@ -152,9 +161,14 @@ pub fn render(model: &Model) -> Surface {
     }
 
     if let Some(tabline) = &engine.tabline {
-        // matches bare nvim's default `showtabline`: a single tab shows no
-        // tabline row at all, so the grid keeps the full terminal height
-        if tabline.tabs.len() > 1 {
+        // chrome_rows() is the single source for the tabline-visibility
+        // rule (bare nvim's default `showtabline`: a single tab shows no
+        // tabline row at all, so the grid keeps the full terminal height);
+        // this layer's placement must never disagree with the row
+        // reservation chrome_rows() feeds into grid_target(), or a row
+        // gets reserved with nothing painted into it or the tabline paints
+        // over buffer content
+        if offset > 0 {
             layers.push(Layer {
                 rect: Rect {
                     row: 0,
@@ -217,17 +231,20 @@ pub fn render(model: &Model) -> Surface {
     }
 }
 
-/// The widest message entry's rendered text, in characters. Shared by the
-/// messages layer's width calculation and (indirectly, via the same
-/// per-entry text join) its row rendering in `view-tui`, so sizing and
-/// painting can never disagree about what a message's text is.
+/// The widest message entry's rendered text, in terminal display cells (not
+/// characters: a wide character, e.g. a CJK ideograph, occupies two cells,
+/// and sizing this layer by char count instead would clip or misalign
+/// exactly that content). Shared by the messages layer's width calculation
+/// and (indirectly, via the same per-entry text join) its row rendering in
+/// `view-tui`, so sizing and painting can never disagree about what a
+/// message's text is.
 fn messages_width(entries: &[MessageEntry]) -> u16 {
     entries
         .iter()
         .map(|e| {
             e.content
                 .iter()
-                .map(|(_, text)| text.chars().count())
+                .map(|(_, text)| text.width())
                 .sum::<usize>()
         })
         .max()
@@ -235,11 +252,12 @@ fn messages_width(entries: &[MessageEntry]) -> u16 {
         .unwrap_or(u16::MAX)
 }
 
-/// The widest popup menu item's [`PmItem::display_text`], in characters.
+/// The widest popup menu item's [`PmItem::display_text`], in terminal
+/// display cells (see [`messages_width`] for why cells rather than chars).
 fn popupmenu_width(items: &[PmItem]) -> u16 {
     items
         .iter()
-        .map(|i| i.display_text().chars().count())
+        .map(|i| i.display_text().width())
         .max()
         .and_then(|w| u16::try_from(w).ok())
         .unwrap_or(u16::MAX)
@@ -280,9 +298,14 @@ fn overlay_layer(
 
 /// The active mode's cursor shape, decoded from the last `mode_info_set`.
 /// Falls back to [`CursorShape::Block`] before the first `mode_info_set`
-/// arrives or for an unrecognized shape string, matching nvim's own
-/// fallback.
+/// arrives, for an unrecognized shape string (matching nvim's own
+/// fallback), or whenever `cursor_style_enabled` is `false` -- nvim's own
+/// signal that per-mode cursor styling must not be applied at all, not
+/// merely a "no shape decoded yet" state.
 fn shape_from_mode(model: &Model) -> CursorShape {
+    if !model.engine.mode.cursor_style_enabled {
+        return CursorShape::Block;
+    }
     model
         .engine
         .mode
@@ -417,8 +440,37 @@ mod tests {
     }
 
     #[test]
+    fn cmdline_cursor_col_clamps_to_the_last_grid_column_when_pos_overruns_grid_width() {
+        let mut model = model_with_grid(10, 8);
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "a very long typed command line".to_string())],
+                pos: 30,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+
+        assert_eq!(
+            surface.cursor,
+            Some(CursorSpec {
+                row: 7,
+                col: 9,
+                shape: CursorShape::Block,
+            }),
+            "pos=30 into a 10-wide grid must clamp to the last column (9), not overrun it"
+        );
+    }
+
+    #[test]
     fn insert_mode_mode_info_yields_vertical_cursor_shape() {
         let mut model = model_with_grid(10, 5);
+        model.engine.mode.cursor_style_enabled = true;
         model.engine.mode.modes = vec![ModeInfo {
             name: "insert".to_string(),
             short_name: "i".to_string(),
@@ -439,6 +491,7 @@ mod tests {
     #[test]
     fn horizontal_mode_info_yields_horizontal_cursor_shape() {
         let mut model = model_with_grid(10, 5);
+        model.engine.mode.cursor_style_enabled = true;
         model.engine.mode.modes = vec![ModeInfo {
             name: "replace".to_string(),
             short_name: "r".to_string(),
@@ -459,6 +512,7 @@ mod tests {
     #[test]
     fn unrecognized_cursor_shape_string_falls_back_to_block() {
         let mut model = model_with_grid(10, 5);
+        model.engine.mode.cursor_style_enabled = true;
         model.engine.mode.modes = vec![ModeInfo {
             cursor_shape: "unknown-shape".to_string(),
             ..Default::default()
@@ -468,6 +522,30 @@ mod tests {
         let surface = render(&model);
 
         assert_eq!(surface.cursor.map(|c| c.shape), Some(CursorShape::Block));
+    }
+
+    #[test]
+    fn cursor_style_disabled_forces_block_regardless_of_mode_info() {
+        let mut model = model_with_grid(10, 5);
+        // cursor_style_enabled left false (the struct default): nvim's own
+        // contract for that flag is "do not restyle the cursor per mode at
+        // all", so a non-block mode_info must still be ignored
+        model.engine.mode.modes = vec![ModeInfo {
+            name: "insert".to_string(),
+            short_name: "i".to_string(),
+            cursor_shape: "vertical".to_string(),
+            cell_percentage: 25,
+            ..Default::default()
+        }];
+        model.engine.mode.current_idx = 0;
+
+        let surface = render(&model);
+
+        assert_eq!(
+            surface.cursor.map(|c| c.shape),
+            Some(CursorShape::Block),
+            "cursor_style_enabled=false must force Block even with a vertical mode_info present"
+        );
     }
 
     #[test]

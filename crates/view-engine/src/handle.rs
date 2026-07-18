@@ -76,11 +76,14 @@ type Pending = Arc<Mutex<PendingState>>;
 ///
 /// [`start`](Self::start) spawns two internal threads:
 /// - A reader thread that decodes incoming messages, correlates responses
-///   to requests, forwards notifications to a receiver, and immediately
-///   answers any incoming `Request` from the peer with a
-///   `"method not supported"` error (dispatching nvim-to-client requests is
-///   not implemented yet, but the msgpack-RPC contract still requires a
-///   reply or the peer's main loop blocks forever waiting for one).
+///   to requests, forwards notifications to a receiver, and dispatches the
+///   one nvim-to-client request the runtime understands
+///   (`view_vim_enter`, routed to the runtime loop as
+///   [`Msg::EngineRequest`](view_core::msg::Msg::EngineRequest) and answered
+///   once the runtime replies). Every other incoming `Request` gets an
+///   immediate `"method not supported"` error, since the msgpack-RPC
+///   contract requires a reply of some kind or the peer's main loop blocks
+///   forever waiting for one.
 /// - A writer thread that owns the write half and serializes every
 ///   outgoing message (requests, the auto-replies above, and fire-and-forget
 ///   notifications) fed to it over an internal channel. Callers never touch
@@ -159,6 +162,14 @@ impl EngineHandle {
     /// dropping the notification receiver or closing the underlying
     /// reader/writer. Orderly shutdown is the responsibility of the owning
     /// Engine type, which controls the lifetime of the pipe endpoints.
+    ///
+    /// Test-only: [`Engine::spawn`](crate::process::Engine::spawn) always
+    /// uses the crate-private, pumped [`start_pumped`](Self::start_pumped)
+    /// instead, so this unbounded-channel constructor has no production
+    /// caller. Gated behind the `test-support` feature (which this crate's
+    /// own `Cargo.toml` enables for itself during `cargo test` via a self
+    /// dev-dependency) so it never ships in an ordinary build.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn start(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
@@ -224,6 +235,7 @@ impl EngineHandle {
         let reader_pump = pump;
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
+            let mut fatal_reason: Option<String> = None;
             'read: while let Ok(value) = rmpv::decode::read_value(&mut r) {
                 match RpcMessage::from_value(value) {
                     Ok(RpcMessage::Response {
@@ -277,12 +289,18 @@ impl EngineHandle {
                                     // leaving it unanswered hangs nvim's
                                     // blocking rpcrequest forever, so stop
                                     // reading rather than keep queuing work
-                                    // nothing will ever consume
-                                    eprintln!(
-                                        "view-engine: dropping engine request \
-                                         {method:?}, runtime channel gone; \
-                                         reader exiting"
-                                    );
+                                    // nothing will ever consume. Carried out
+                                    // via Msg::EngineStopped's payload rather
+                                    // than a direct stderr write here: this
+                                    // thread runs headless behind the
+                                    // terminal's raw-mode alternate screen,
+                                    // where a write would be invisible or
+                                    // corrupt the screen; the caller reports
+                                    // it once the terminal is restored.
+                                    fatal_reason = Some(format!(
+                                        "dropping engine request {method:?}, \
+                                         runtime channel gone"
+                                    ));
                                     break 'read;
                                 }
                                 continue 'read;
@@ -313,7 +331,7 @@ impl EngineHandle {
                 // and a dropped EngineStopped is unrecoverable, not merely
                 // best-effort (see damage.rs module docs' bounded channel
                 // contract)
-                pump.route_terminal(Msg::EngineStopped);
+                pump.route_terminal(Msg::EngineStopped(fatal_reason));
             }
             // engine is gone: fail every in-flight request instead of hanging
             close_and_drain(&reader_pending);

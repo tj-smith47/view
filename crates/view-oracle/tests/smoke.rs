@@ -558,6 +558,61 @@ fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
     let _ = session.wait();
 }
 
+#[test]
+fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
+    let mut session = spawn_view_pty();
+
+    // opens a second tab first so the tabline's chrome row is already
+    // reserved (chrome_rows() > 0) going into the resize, exercising the
+    // row-reservation round trip together with the grid resize itself
+    // rather than a bare single-tab resize
+    session.send(b":tabnew\r").unwrap();
+    assert!(
+        session.wait_for_cell(0, 0, " ", Duration::from_secs(5)),
+        "tabline row never appeared after :tabnew; last screen:\n{}",
+        session.screen()
+    );
+
+    // grows from the 24-row spawn size to 48 rows: SIGWINCH (delivered by
+    // the kernel from the pty resize below) -> crossterm's Event::Resize
+    // -> Msg::Resized -> Effect::Rpc(RpcCall::TryResize) ->
+    // nvim_ui_try_resize -> nvim's own grid_resize redraw event -> repaint
+    session.resize(80, 48).unwrap();
+
+    // a line only reachable at the new height: with the pre-resize 24-row
+    // terminal, chrome_rows(1) + a global statusline leaves about 22
+    // buffer lines visible, so nvim would scroll rather than ever paint
+    // row 30 -- that row stays blank unless nvim's own window actually
+    // grew to the new height. Row 30 sits well inside both the old
+    // window's unreachable range and the new window's reachable one, so
+    // the assertion tolerates a few lines of slack around the exact
+    // tabline/statusline layout instead of pinning an off-by-one boundary.
+    let mut input = Vec::from(*b"i");
+    for _ in 0..29 {
+        input.extend_from_slice(b"\r");
+    }
+    input.extend_from_slice(b"MARKERX");
+    session.send(&input).unwrap();
+
+    assert!(
+        session.wait_for_cell(30, 0, "M", Duration::from_secs(5)),
+        "resize did not reach nvim: a marker typed 29 lines below the tab's first \
+         line never landed on row 30, only reachable once the window actually grew \
+         past its pre-resize 24-row height; last screen:\n{}",
+        session.screen()
+    );
+    assert_eq!(
+        session.screen_raw().size(),
+        (48, 80),
+        "pty/vt100 geometry itself never reached the resized dimensions"
+    );
+
+    // `:qa!` rather than `:q!`: `:tabnew` above left two tabs open, and
+    // `:q!` alone only closes the current window/tab, not the editor
+    session.send(b"\x1b:qa!\r").unwrap();
+    let _ = session.wait();
+}
+
 /// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
 /// the real `nvim` (resolved via `which`, matching this file's other
 /// `nvim`-locating helpers) with every argument forwarded verbatim --

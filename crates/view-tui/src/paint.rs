@@ -4,6 +4,7 @@
 //! `ratatui::Buffer` writes.
 
 use ratatui::style::{Color, Modifier, Style};
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::Grid;
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
@@ -58,10 +59,19 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
     }
 }
 
-/// Writes `text`, one character per cell, into row `row_offset` of `area`
-/// (styled `style`), truncating at the area's width or height rather than
-/// writing past it. The shared primitive every chrome renderer below uses,
-/// so column/row bounds-checking lives in exactly one place.
+/// Writes `text` into row `row_offset` of `area` (styled `style`),
+/// truncating at the area's width or height rather than writing past it.
+/// The shared primitive every chrome renderer below uses, so column/row
+/// bounds-checking lives in exactly one place.
+///
+/// Each character advances the column by its own display width (1 for
+/// ordinary text, 2 for wide characters like CJK ideographs) rather than
+/// unconditionally by one cell: a fixed one-column advance would place a
+/// wide character's glyph in a single cell it does not fit, misaligning
+/// every character painted after it on the row. A wide character's second
+/// (shadow) cell is reset so no later character in this same call can draw
+/// into it, matching the convention `ratatui::buffer::Buffer::set_stringn`
+/// itself uses for multi-width graphemes.
 fn paint_text_row(
     text: &str,
     style: Style,
@@ -73,14 +83,26 @@ fn paint_text_row(
         return;
     }
     let buf = frame.buffer_mut();
-    for (col, ch) in (0_u16..).zip(text.chars()) {
+    let mut col = 0_u16;
+    for ch in text.chars() {
         if col >= area.width {
             break;
         }
+        let ch = sanitized_char(ch);
+        // sanitized_char already replaced every control character with a
+        // plain space, so `width` is `None` here only for the handful of
+        // zero-width combining marks that survive sanitization; `.max(1)`
+        // still advances the column for those rather than looping forever
+        // painting into the same cell
+        let width = ch.width().unwrap_or(1).max(1) as u16;
         let mut encode_buf = [0_u8; 4];
         let cell = &mut buf[(area.x + col, area.y + row_offset)];
-        cell.set_symbol(sanitized_char(ch).encode_utf8(&mut encode_buf));
+        cell.set_symbol(ch.encode_utf8(&mut encode_buf));
         cell.set_style(style);
+        if width == 2 && col + 1 < area.width {
+            buf[(area.x + col + 1, area.y + row_offset)].reset();
+        }
+        col = col.saturating_add(width);
     }
 }
 
@@ -174,9 +196,13 @@ fn paint_tabline(
     let mut text = String::new();
     let mut current_range: Option<(u16, u16)> = None;
     for tab in &state.tabs {
-        let start = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+        // display-cell width, not char count: a tab name containing a wide
+        // (CJK) character occupies more columns than it has chars, and the
+        // selection-highlight range below must land on the same columns
+        // paint_text_row actually painted the label into
+        let start = u16::try_from(text.width()).unwrap_or(u16::MAX);
         text.push_str(&format!(" {} ", tab.name));
-        let end = u16::try_from(text.chars().count()).unwrap_or(u16::MAX);
+        let end = u16::try_from(text.width()).unwrap_or(u16::MAX);
         if tab.tab == state.current {
             current_range = Some((start, end));
         }
@@ -560,7 +586,7 @@ mod tests {
         // TablineUpdate crossing the 1-tab boundary shrinks the grid target;
         // the grid itself only reflects that once nvim's GridResize round
         // trips, which this test drives directly to exercise the settled
-        // (post-round-trip) frame the reviewer's contract describes.
+        // (post-round-trip) frame.
         model.engine.grid.apply(GridOp::Resize {
             width: 10,
             height: 2,
@@ -592,9 +618,9 @@ mod tests {
         assert_eq!(&buf[(1, 1)].symbol(), &"b");
     }
 
-    /// Pins the one-frame transient the reviewer flagged: `TablineUpdate`
-    /// crossing the 1-tab boundary reserves a chrome row immediately (the
-    /// same frame), but the grid itself keeps its pre-shrink height until
+    /// Pins the one-frame transient: `TablineUpdate` crossing the 1-tab
+    /// boundary reserves a chrome row immediately (the same frame), but
+    /// the grid itself keeps its pre-shrink height until
     /// nvim's corresponding `GridOp::Resize` round-trips on a later frame.
     /// For exactly that one frame, `render()`'s `EngineGrid` layer (now
     /// offset by the new chrome row, but still the old height) extends one
@@ -721,6 +747,46 @@ mod tests {
             &" ",
             "message toast must vanish once MsgClear empties the log"
         );
+    }
+
+    /// A CJK (wide, 2-cell) character in a message toast must not misalign
+    /// the character painted after it: `messages_width` sizes the layer by
+    /// display cells (3 for "中b": 2 for the wide glyph, 1 for "b"), not
+    /// char count (which would undercount to 2 and anchor the layer one
+    /// column too far right), and `paint_text_row` must advance past the
+    /// wide glyph's own shadow cell before placing "b" rather than writing
+    /// "b" directly over it.
+    #[test]
+    fn messages_overlay_wide_char_advances_two_columns_not_one() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "中b".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        // right-anchored at 3 display cells wide (10 - 3 = 7), not 2: a
+        // char-count-based width would anchor this one column further
+        // right and clip the wide glyph's leading edge
+        assert_eq!(&buf[(7, 0)].symbol(), &"中");
+        assert_eq!(
+            &buf[(8, 0)].symbol(),
+            &" ",
+            "the wide glyph's shadow cell must be empty, not overwritten by the next char"
+        );
+        assert_eq!(&buf[(9, 0)].symbol(), &"b");
     }
 
     /// Reproduces a real crash: a live nvim with user plugins fed an `emsg`

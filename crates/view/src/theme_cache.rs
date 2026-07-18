@@ -204,18 +204,27 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
         .join(format!("theme-{hash:016x}.toml"))
 }
 
-/// Loads the last-cached theme for `config_path`. Falls back to
-/// `Theme::default()`, loudly logged to stderr, when the state directory
-/// cannot be determined, the cache file is missing or unreadable, its
-/// contents fail to parse, or its schema is newer than this build
-/// understands -- every failure degrades instead of blocking startup.
+/// Loads the last-cached theme for `config_path`, or `None`, loudly logged
+/// to stderr, when the state directory cannot be determined, the cache file
+/// is missing or unreadable, its contents fail to parse, or its schema is
+/// newer than this build understands.
+///
+/// `None` rather than `Theme::default()`: the caller only seeds the engine's
+/// highlight table on `Some`, so a genuine cache miss leaves `hl.groups`
+/// empty and [`Theme::from_hl`](view_core::theme::Theme::from_hl)'s own
+/// per-group fallback (emphasis styling for `TabLineSel`/`PmenuSel`, so the
+/// selected/current row stays visually distinct) applies for the frame
+/// before nvim's own `hl_group_set` arrives. Returning a bare `Theme` here
+/// would make a cache miss indistinguishable from a *cached* all-default
+/// theme, and unconditionally seeding either one registers those two groups
+/// with all-false attributes, permanently defeating that fallback.
 #[must_use]
-pub fn load(config_path: &Path) -> Theme {
+pub fn load(config_path: &Path) -> Option<Theme> {
     let Some(state_dir) = state_dir_from_env() else {
         eprintln!(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
         );
-        return Theme::default();
+        return None;
     };
     load_from_path(&cache_path(&state_dir, config_path))
 }
@@ -224,7 +233,7 @@ pub fn load(config_path: &Path) -> Theme {
 /// tests can exercise missing/corrupt/version-mismatched-file behavior
 /// without mutating process environment.
 #[must_use]
-fn load_from_path(path: &Path) -> Theme {
+fn load_from_path(path: &Path) -> Option<Theme> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -232,14 +241,14 @@ fn load_from_path(path: &Path) -> Theme {
                 "view: no theme cache at {} yet, using built-in defaults",
                 path.display()
             );
-            return Theme::default();
+            return None;
         }
         Err(e) => {
             eprintln!(
                 "view: failed to read theme cache {}: {e}, using built-in defaults",
                 path.display()
             );
-            return Theme::default();
+            return None;
         }
     };
     match toml::from_str::<CachedTheme>(&contents) {
@@ -249,15 +258,15 @@ fn load_from_path(path: &Path) -> Theme {
                 path.display(),
                 cached.schema_version
             );
-            Theme::default()
+            None
         }
-        Ok(cached) => cached.into(),
+        Ok(cached) => Some(cached.into()),
         Err(e) => {
             eprintln!(
                 "view: corrupt theme cache {}: {e}, using built-in defaults",
                 path.display()
             );
-            Theme::default()
+            None
         }
     }
 }
@@ -383,11 +392,20 @@ mod tests {
         }
     }
 
-    /// The only test touching `XDG_CONFIG_HOME`/`HOME`/`APPDATA`; see
-    /// `load_and_store_round_trip_through_xdg_state_home`'s doc comment for
-    /// why exactly one test owns each env var this module reads.
+    /// Serializes every test in this module that calls `std::env::set_var`/
+    /// `remove_var`. `cargo test` runs a module's tests on multiple threads
+    /// by default, and concurrent mutation of the process environment from
+    /// separate threads races at the libc `environ` level (any thread's
+    /// concurrent `var()` read can observe a table another thread is
+    /// mid-reallocation on), not just at the logical "which var did I read"
+    /// level -- disjoint var names do not make two such tests safe to run
+    /// concurrently. Each env-touching test acquires this for its whole
+    /// body, including its own restore of the prior value.
+    static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn resolved_config_path_prefers_xdg_config_home_then_home_then_appdata() {
+        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
         let prev_appdata = std::env::var("APPDATA").ok();
@@ -473,7 +491,7 @@ mod tests {
         };
         store_to_path(theme, &path);
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, theme);
+        assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -484,12 +502,11 @@ mod tests {
         let theme = Theme::default();
         store_to_path(theme, &path);
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, theme);
+        assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The load-bearing property coordinator requirement 5 exists to prove:
-    /// every named group's full `ResolvedStyle` (colors and attributes
+    /// Every named group's full `ResolvedStyle` (colors and attributes
     /// alike) survives a store/load round trip, not just the base
     /// `fg`/`bg` pair the pre-amendment format carried.
     #[test]
@@ -525,26 +542,26 @@ mod tests {
         };
         store_to_path(theme, &path);
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, theme);
+        assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn missing_cache_file_falls_back_to_default_without_panicking() {
+    fn missing_cache_file_yields_none_without_panicking() {
         let dir = tmp_dir("missing");
         let path = dir.join("does-not-exist.toml");
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, Theme::default());
+        assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn corrupt_cache_file_falls_back_to_default_without_panicking() {
+    fn corrupt_cache_file_yields_none_without_panicking() {
         let dir = tmp_dir("corrupt");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "this is not valid { toml at all ]]]").unwrap();
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, Theme::default());
+        assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -559,7 +576,7 @@ mod tests {
         let dir = tmp_dir("legacy");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "fg = 16777215\nbg = 0\n").unwrap();
-        let loaded = load_from_path(&path);
+        let loaded = load_from_path(&path).expect("a successfully parsed legacy file is a hit");
         assert_eq!(loaded.fg, Some(16_777_215));
         assert_eq!(loaded.bg, Some(0));
         assert_eq!(loaded.status_line, ResolvedStyle::default());
@@ -567,17 +584,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Coordinator requirement 5's "falls back loudly" branch: a cache
-    /// schema newer than this build understands is never guessed at by
-    /// partially trusting whatever fields happen to still parse -- it is
-    /// rejected wholesale in favor of `Theme::default()`.
+    /// The "falls back loudly" branch: a cache schema newer than this build
+    /// understands is never guessed at by partially trusting whatever
+    /// fields happen to still parse -- it is rejected wholesale, yielding
+    /// `None` rather than a guessed `Theme`.
     #[test]
-    fn newer_schema_version_falls_back_to_default_instead_of_guessing() {
+    fn newer_schema_version_yields_none_instead_of_guessing() {
         let dir = tmp_dir("future-schema");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "schema_version = 999\nfg = 1\nbg = 2\n").unwrap();
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, Theme::default());
+        assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -587,12 +604,12 @@ mod tests {
     /// being dropped in silence while the recognized fields load as if
     /// nothing were missing.
     #[test]
-    fn unrecognized_field_falls_back_to_default_instead_of_being_silently_dropped() {
+    fn unrecognized_field_yields_none_instead_of_being_silently_dropped() {
         let dir = tmp_dir("unknown-field");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "fg = 1\nbg = 2\nsome_future_field = true\n").unwrap();
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, Theme::default());
+        assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -608,7 +625,7 @@ mod tests {
         store_to_path(theme, &path);
         assert!(path.exists());
         let loaded = load_from_path(&path);
-        assert_eq!(loaded, theme);
+        assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -661,13 +678,15 @@ mod tests {
         );
     }
 
-    /// The only test touching process environment; the state-dir env
-    /// precedence and the public `load`/`store` wiring both need at least
-    /// one end-to-end check that does not bypass `state_dir_from_env`, but
-    /// mutating shared process env is inherently racy against any other
-    /// test doing the same, so exactly one test owns that responsibility.
+    /// The state-dir env precedence and the public `load`/`store` wiring
+    /// both need at least one end-to-end check that does not bypass
+    /// `state_dir_from_env`; see `ENV_MUTATION_LOCK`'s doc comment for why
+    /// this and the `XDG_CONFIG_HOME`/`HOME`/`APPDATA` test above serialize
+    /// against each other via the shared lock rather than relying on
+    /// owning disjoint var names.
     #[test]
     fn load_and_store_round_trip_through_xdg_state_home() {
+        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
         let dir = tmp_dir("xdg-e2e");
         let prev = std::env::var("XDG_STATE_HOME").ok();
         std::env::set_var("XDG_STATE_HOME", &dir);
@@ -687,6 +706,6 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert_eq!(loaded, theme);
+        assert_eq!(loaded, Some(theme));
     }
 }

@@ -2023,6 +2023,7 @@ dependencies = [
  "rmpv",
  "thiserror 2.0.18",
  "view-core",
+ "view-engine",
 ]
 
 [[package]]
@@ -2046,6 +2047,7 @@ name = "view-surface"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "unicode-width",
  "view-core",
 ]
 
@@ -2056,6 +2058,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "rustix",
+ "unicode-width",
  "view-core",
  "view-surface",
 ]

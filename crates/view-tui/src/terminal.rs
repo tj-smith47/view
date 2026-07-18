@@ -15,9 +15,19 @@ use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::{Key, Msg};
 use view_surface::{CursorShape, Surface};
 
-/// Enters raw mode and the alternate screen for the lifetime of the value,
-/// restoring both on drop and installing a panic hook that restores the
-/// terminal before the default panic message prints.
+/// Owns raw mode and the alternate screen for the lifetime of the value,
+/// restoring both (plus mouse capture and bracketed paste) on drop.
+/// Entry is two phases, not one: [`enter_raw_mode`](Self::enter_raw_mode)
+/// constructs the guard, enabling raw mode and installing a panic hook that
+/// restores the terminal before the default panic message prints;
+/// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen) is
+/// called separately afterward to enter the alternate screen and enable
+/// bracketed paste, once capability detection has had a chance to run in
+/// between (see that method's own doc for why the split exists). Both
+/// phases restore together, whether entry finished or not: [`Drop`] and
+/// [`restore_now`](Self::restore_now) both call the same unconditional
+/// [`restore`] that undoes every phase's effects regardless of how far
+/// entry got.
 ///
 /// This is the only place in the crate that enables raw mode, enters the
 /// alternate screen, or installs a panic hook: [`Term::init`] holds one of

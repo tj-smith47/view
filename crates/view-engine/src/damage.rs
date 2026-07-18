@@ -980,7 +980,7 @@ mod tests {
 
         let blocked = Arc::clone(&shared);
         let sender = std::thread::spawn(move || {
-            blocked.route_terminal(Msg::EngineStopped);
+            blocked.route_terminal(Msg::EngineStopped(None));
         });
 
         // give the blocking send every chance to have wrongly returned
@@ -996,7 +996,7 @@ mod tests {
         sender.join().expect("blocked sender thread must not panic");
 
         assert!(
-            matches!(rx.recv(), Ok(Msg::EngineStopped)),
+            matches!(rx.recv(), Ok(Msg::EngineStopped(None))),
             "EngineStopped must arrive once the channel has room, not be dropped"
         );
     }

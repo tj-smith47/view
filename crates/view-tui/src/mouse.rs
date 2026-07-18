@@ -15,9 +15,11 @@ use view_core::msg::MouseInput;
 /// that model state; this function stays chrome-agnostic like
 /// [`crate::keys::encode_key`] stays engine-agnostic.
 ///
-/// Always returns `Some`: every [`MouseEventKind`] has an nvim button/action
-/// pair, unlike [`crate::keys::encode_key`], which can return `None` for key
-/// codes with no nvim equivalent.
+/// Total over every [`MouseEventKind`], unlike [`crate::keys::encode_key`]
+/// (which returns `None` for key codes with no nvim equivalent): every
+/// mouse event kind has an nvim button/action pair, so there is no "no
+/// encoding" case for this function to signal, and it returns a plain
+/// [`MouseInput`] rather than an `Option`.
 #[must_use]
 pub fn encode_mouse(ev: &MouseEvent) -> MouseInput {
     let (button, action) = match ev.kind {

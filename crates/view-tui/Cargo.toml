@@ -13,6 +13,12 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 view-core = { version = "0.0.1", path = "../view-core" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
+# Per-character display-cell width for paint_text_row's manual cell-by-cell
+# placement (a wide CJK character must advance the column by 2, and reset
+# its shadow cell, or later characters on the row misalign). Already
+# resolved transitively via ratatui's own use of it, but a transitive
+# dependency cannot be `use`d without also declaring it directly.
+unicode-width = "0.2.2"
 
 # Capability probing needs a bounded, non-blocking-style stdin read (VMIN=0/
 # VTIME=0 termios) so a terminal that never replies can't leave a dangling

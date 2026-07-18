@@ -5,7 +5,10 @@
 //! ```ignore
 //! let msg = match msg_rx.recv() {
 //!     Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
-//!     Ok(Msg::EngineStopped) => Msg::EngineDown(engine.wait_exit()),
+//!     Ok(Msg::EngineStopped(reason)) => {
+//!         model.fatal_reason = reason;
+//!         Msg::EngineDown(engine.wait_exit())
+//!     }
 //!     Ok(m) => m,
 //!     Err(_) => Msg::EngineDown(ExitInfo { code: None, by_signal: false }),
 //! };
@@ -25,7 +28,17 @@ pub enum Msg {
     /// before `update()` sees it (raw = silent no-op).
     RedrawReady,
     /// Reader token: engine stream ended; the loop resolves `ExitInfo`.
-    EngineStopped,
+    /// Carries the reader thread's own reason when it stopped reading for
+    /// a cause other than the engine process simply exiting (e.g. an
+    /// engine-initiated request it could not route because the runtime
+    /// channel was gone), or `None` for an ordinary stream-ended exit. The
+    /// reader thread never writes this to stderr itself: it runs headless
+    /// behind the terminal's raw-mode alternate screen, so a direct write
+    /// there would be invisible until an unrelated redraw scrolled past it
+    /// or corrupt the screen outright. The caller stashes it (see the
+    /// module doc's call site) and reports it only once the terminal is
+    /// restored.
+    EngineStopped(Option<String>),
     /// Loop plumbing: startup's pre-attach key-buffering loop consumes this
     /// the moment the background attach thread finishes `nvim_ui_attach`,
     /// unblocking its `recv()` without a poll or a timer. Never reachable
@@ -82,6 +95,10 @@ pub struct Key {
 #[derive(Debug, Clone)]
 pub struct ExitInfo {
     pub code: Option<i32>,
+    /// Whether `code` came from a signal death rather than a normal exit
+    /// status. Decoded for wire completeness; the process exit code the
+    /// bin crate reports is computed from `code` alone, so this does not
+    /// currently change any observable behavior.
     pub by_signal: bool,
 }
 

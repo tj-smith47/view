@@ -23,7 +23,7 @@ use std::io::{Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use crate::OracleError;
 
@@ -58,6 +58,7 @@ pub struct PtySession {
     rx: mpsc::Receiver<Vec<u8>>,
     writer: Box<dyn Write + Send>,
     parser: vt100::Parser,
+    master: Box<dyn MasterPty + Send>,
 }
 
 impl PtySession {
@@ -128,7 +129,29 @@ impl PtySession {
             rx,
             writer,
             parser,
+            master: pair.master,
         })
+    }
+
+    /// Resizes the pty to `cols`x`rows`: informs the kernel (which delivers
+    /// `SIGWINCH` to the child) and resizes the local `vt100` screen so
+    /// subsequent cursor-positioning escapes are interpreted against the
+    /// new dimensions rather than the ones the session was opened with.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Pty`] if the kernel resize call fails.
+    pub fn resize(&mut self, cols: u16, rows: u16) -> Result<(), OracleError> {
+        self.master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(|e| OracleError::Pty(e.to_string()))?;
+        self.parser.screen_mut().set_size(rows, cols);
+        Ok(())
     }
 
     /// Writes `bytes` to the pty as if a user typed them.

@@ -246,7 +246,14 @@ pub fn run(
         }
         let msg = match msg_rx.recv() {
             Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
-            Ok(Msg::EngineStopped) => Msg::EngineDown(engine.wait_exit()),
+            Ok(Msg::EngineStopped(reason)) => {
+                // stashed on the model rather than reported here: this loop
+                // runs behind the terminal's raw-mode alternate screen, so
+                // `main` reports it only after `run` returns and the
+                // terminal is restored (see Msg::EngineStopped's doc)
+                model.fatal_reason = reason;
+                Msg::EngineDown(engine.wait_exit())
+            }
             Ok(m) => m,
             Err(_) => Msg::EngineDown(ExitInfo {
                 code: None,

@@ -10,6 +10,13 @@ workspace = true
 
 [dependencies]
 view-core = { version = "0.0.1", path = "../view-core" }
+# Display-cell width for chrome text sizing (messages_width, popupmenu_width):
+# a char-count fallback misaligns a wide (CJK) character, which occupies two
+# terminal cells. Already resolved transitively via view-tui's ratatui, but
+# view-surface has no ratatui dependency of its own (backend-free by design),
+# so it needs this crate declared directly to `use` it. Pure Unicode data, no
+# terminal backend, so this does not compromise that design.
+unicode-width = "0.2.2"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
