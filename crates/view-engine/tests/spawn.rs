@@ -1,7 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 use view_engine::process::{Engine, EngineConfig};
+#[cfg(unix)]
 use view_engine::EngineError;
 
 #[test]
@@ -24,9 +27,13 @@ fn spawns_and_handshakes_with_real_nvim() {
     // runs even if an earlier assert above panics and unwinds through here
 }
 
-/// Reproduces the zombie found in review: `Engine::spawn` against a binary
-/// that accepts `--embed` without erroring but never replies must not leak
-/// the child when the handshake times out.
+/// `Engine::spawn` against a binary that accepts `--embed` without erroring
+/// but never replies must not leak the child when the handshake times out.
+///
+/// Unix-only: the fixture is a shell script, which Windows `CreateProcess`
+/// cannot exec directly, and the liveness check below shells out to
+/// `pgrep`, which has no Windows equivalent.
+#[cfg(unix)]
 #[test]
 fn handshake_failure_reaps_child() {
     let fixture = PathBuf::from(concat!(
@@ -64,11 +71,11 @@ fn handshake_failure_reaps_child() {
 
     // proof of no zombie: by the time spawn() returned to us, ChildGuard's
     // Drop had already run (it is a local in the now-returned spawn()
-    // stack frame), so kill()+wait() already happened. `exec sleep
-    // infinity` in the fixture replaces the shell's image in place (same
-    // pid, no grandchild), so Child::kill() targets the actual sleeping
-    // process directly and Child::wait() fully reaps it -- this assertion
-    // would fail for either a leaked zombie (pgrep still lists it) or a
+    // stack frame), so kill()+wait() already happened. `exec sleep 100000`
+    // in the fixture replaces the shell's image in place (same pid, no
+    // grandchild), so Child::kill() targets the actual sleeping process
+    // directly and Child::wait() fully reaps it -- this assertion would
+    // fail for either a leaked zombie (pgrep still lists it) or a
     // leaked-but-still-running child.
     assert!(
         !fake_child_alive(),
@@ -76,16 +83,12 @@ fn handshake_failure_reaps_child() {
     );
 }
 
-/// True if a `sleep infinity` process (the fixture's post-`exec` identity)
-/// is currently a child of this test binary's process.
+/// True if a `sleep 100000` process (the fixture's post-`exec` identity) is
+/// currently a child of this test binary's process.
+#[cfg(unix)]
 fn fake_child_alive() -> bool {
     std::process::Command::new("pgrep")
-        .args([
-            "-P",
-            &std::process::id().to_string(),
-            "-f",
-            "sleep infinity",
-        ])
+        .args(["-P", &std::process::id().to_string(), "-f", "sleep 100000"])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)

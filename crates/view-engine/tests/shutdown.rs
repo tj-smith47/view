@@ -1,8 +1,8 @@
 //! Engine lifecycle/shutdown tests: `Drop` must never deadlock even with a
-//! request in flight (test gap 6), and the graceful-shutdown mechanism (M4)
-//! must actually take the graceful path with a responsive child and fall
-//! back to `SIGKILL` with an unresponsive one, observable via the exit
-//! status's signal vs. its code.
+//! request in flight, and the graceful-shutdown mechanism must actually
+//! take the graceful path with a responsive child and fall back to
+//! `SIGKILL` with an unresponsive one, observable via the exit status's
+//! signal vs. its code.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
@@ -12,6 +12,11 @@ use view_engine::process::{Engine, EngineConfig};
 /// -0` rather than a name-based `pgrep`, since the pid is known exactly
 /// and unambiguously identifies the child (unlike matching by binary name,
 /// which risks colliding with unrelated processes on a shared host).
+///
+/// Unix-only: `kill -0` has no Windows equivalent, and shelling out to a
+/// nonexistent `kill` binary would make callers' liveness checks silently
+/// pass via `unwrap_or(false)` instead of actually observing the process.
+#[cfg(unix)]
 fn pid_alive(pid: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", &pid.to_string()])
@@ -23,6 +28,7 @@ fn pid_alive(pid: u32) -> bool {
 #[test]
 fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    #[cfg(unix)]
     let pid = engine.pid();
     let handle = engine.handle.clone();
 
@@ -45,6 +51,10 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     );
     let _ = in_flight.join();
 
+    // liveness re-check is unix-only (see pid_alive); the deadlock check
+    // above already exercises Drop's non-blocking behavior on every
+    // platform, so the reap proof is the only part narrowed here
+    #[cfg(unix)]
     assert!(
         !pid_alive(pid),
         "child pid {pid} still alive after Engine dropped: not reaped"
@@ -82,8 +92,9 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
     // blocking waitpid on the main thread, which genuinely stalls nvim's
     // event loop, so qa! cannot be processed until it returns; the SIGKILL
     // fallback must fire well before this 3s shell command finishes.
-    // request_timeout itself returns quickly regardless (Finding 2's fix)
-    // since the response can never arrive while nvim is blocked.
+    // request_timeout itself returns quickly regardless, bounded by its own
+    // timeout on the write phase, since the response can never arrive while
+    // nvim is blocked.
     let _ = engine.handle.request_timeout(
         "nvim_eval",
         vec![rmpv::Value::from("system('sleep 3')")],

@@ -1,9 +1,13 @@
-//! Reproduces the write-phase hang found in review (Finding 2): a peer that
-//! never reads its stdin, combined with a payload larger than the OS pipe
-//! buffer, used to block `request_timeout` inside the `write()` syscall
-//! itself, past its own timeout. The fix moves writes onto a dedicated
-//! writer thread fed by a channel, so the calling thread's `recv_timeout`
-//! bounds the whole call regardless of how long the write takes.
+//! Reproduces a write-phase hang: a peer that never reads its stdin,
+//! combined with a payload larger than the OS pipe buffer, used to block
+//! `request_timeout` inside the `write()` syscall itself, past its own
+//! timeout. The fix moves writes onto a dedicated writer thread fed by a
+//! channel, so the calling thread's `recv_timeout` bounds the whole call
+//! regardless of how long the write takes.
+//!
+//! Unix-only: the fixture is a shell script, which Windows `CreateProcess`
+//! cannot exec directly.
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
@@ -14,7 +18,7 @@ use view_engine::{EngineError, EngineHandle};
 #[test]
 fn request_timeout_bounds_write_phase_against_wedged_peer() {
     // fake_hang_nvim.sh ignores --embed, never touches stdin or stdout, and
-    // blocks forever: exactly the "peer never reads stdin" shape Finding 2
+    // blocks forever: exactly the "peer never reads stdin" shape this test
     // needs, reused rather than duplicated as a second fixture script.
     let fixture = PathBuf::from(concat!(
         env!("CARGO_MANIFEST_DIR"),
