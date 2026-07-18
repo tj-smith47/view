@@ -59,9 +59,9 @@ pub struct ExitInfo {
 ///
 /// The engine BLOCKS awaiting the reply, so every arm MUST produce exactly
 /// one `Effect::Reply`; the reply routes through the writer thread's
-/// channel and never blocks the loop. P4's modal prompts and clipboard
-/// provider extend this enum; the dispatch seam itself is this phase's
-/// contract.
+/// channel and never blocks the loop. Future request kinds (modal prompts,
+/// a clipboard provider) extend this enum; the one-reply-per-arm dispatch
+/// seam is the fixed contract any new variant must honor.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum EngineRequest {

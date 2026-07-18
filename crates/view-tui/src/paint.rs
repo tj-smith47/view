@@ -98,8 +98,14 @@ fn sanitized_char(ch: char) -> char {
     }
 }
 
-/// Renders the command line: `firstc` plus its content chunks, on the
-/// overlay's single row. The cursor itself is a separate concern
+/// Renders the command line: `firstc`, then `prompt`, then its content
+/// chunks, on the overlay's single row. In prompt mode (e.g.
+/// `:call input("name: ")`) nvim sends an empty `firstc` and puts the label
+/// in `prompt` instead, so concatenating both in this order reproduces
+/// nvim's own `:` prefix in the ordinary case and the prompt label in the
+/// input() case without a branch (live-verified against a real nvim's
+/// `cmdline_show` traffic for `:call input("name: ")`: `firstc=""`,
+/// `prompt="name: "`). The cursor itself is a separate concern
 /// (`view_surface::render`'s `CursorSpec`, applied by
 /// [`crate::terminal::Term::draw_surface`]), not painted here.
 fn paint_cmdline(
@@ -108,6 +114,7 @@ fn paint_cmdline(
     frame: &mut ratatui::Frame<'_>,
 ) {
     let mut text = state.firstc.clone();
+    text.push_str(&state.prompt);
     for (_, chunk) in &state.content {
         text.push_str(chunk);
     }
@@ -361,13 +368,12 @@ mod tests {
         let _ = view_core::update::update(model, view_core::msg::Msg::Redraw(vec![ev]));
     }
 
-    /// Invariant test superseding the prior phase's EngineGrid-only
-    /// regression test: the cmdline is a transient overlay, so it is
-    /// correct UX for it to paint over the grid's bottom row while it is
-    /// open (matching the cmdheight=0 floating UX external UIs give) -- the
-    /// invariant this phase pins instead is that the overlay vanishes with
-    /// its state, restoring the resting buffer text on the very next frame
-    /// that has no cmdline layer.
+    /// Supersedes an earlier EngineGrid-only regression test: the cmdline is
+    /// a transient overlay, so it is correct UX for it to paint over the
+    /// grid's bottom row while it is open (matching the cmdheight=0
+    /// floating UX external UIs give). The invariant pinned here instead is
+    /// that the overlay vanishes with its state, restoring the resting
+    /// buffer text on the very next frame that has no cmdline layer.
     #[test]
     fn cmdline_overlay_paints_while_shown_and_vanishes_with_cmdlinehide() {
         let mut model = Model::new();
@@ -415,9 +421,56 @@ mod tests {
         assert_eq!(&buf[(1, 2)].symbol(), &"y");
     }
 
-    /// New invariant this phase pins: persistent chrome (the tabline) may
-    /// never sit over resting buffer text. With more than one tab open the
-    /// grid is offset below the reserved top row, so the tabline and the
+    /// Regression for a real bug: nvim's prompt mode (`:call input("name:
+    /// ")`) sends an empty `firstc` and puts the label in `prompt` instead,
+    /// which `paint_cmdline` previously dropped entirely, rendering a blank
+    /// bottom row while keystrokes were silently accepted with no visible
+    /// label. Values match a live nvim capture of that exact command (see
+    /// `paint_cmdline`'s doc comment).
+    #[test]
+    fn cmdline_prompt_mode_renders_prompt_label_and_places_cursor_after_it() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 20,
+            height: 3,
+        });
+
+        apply(
+            &mut model,
+            view_core::events::UiEvent::CmdlineShow {
+                content: vec![(0, "X".to_string())],
+                pos: 1,
+                firstc: String::new(),
+                prompt: "name: ".to_string(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        for (col, ch) in "name: X".chars().enumerate() {
+            assert_eq!(
+                &buf[(col as u16, 2)].symbol(),
+                &ch.to_string(),
+                "prompt row column {col} must hold {ch:?}"
+            );
+        }
+
+        let cursor = surface.cursor.expect("prompt mode must place a cursor");
+        assert_eq!(
+            cursor.col, 7,
+            "cursor must land after \"name: \" (6 cols) plus pos=1 into the typed content"
+        );
+        assert_eq!(cursor.row, 2);
+    }
+
+    /// Invariant pinned here: persistent chrome (the tabline) may never sit
+    /// over resting buffer text. With more than one tab open the grid is
+    /// offset below the reserved top row, so the tabline and the
     /// grid's own content occupy disjoint rows in the same frame.
     #[test]
     fn tabline_reserves_the_top_row_and_never_covers_resting_grid_text() {
@@ -480,6 +533,81 @@ mod tests {
             "grid content must land one row below the reserved tabline row"
         );
         assert_eq!(&buf[(1, 1)].symbol(), &"b");
+    }
+
+    /// Pins the one-frame transient the reviewer flagged: `TablineUpdate`
+    /// crossing the 1-tab boundary reserves a chrome row immediately (the
+    /// same frame), but the grid itself keeps its pre-shrink height until
+    /// nvim's corresponding `GridOp::Resize` round-trips on a later frame.
+    /// For exactly that one frame, `render()`'s `EngineGrid` layer (now
+    /// offset by the new chrome row, but still the old height) extends one
+    /// row past the terminal's actual frame -- `clip_to_frame` must clip
+    /// it rather than let the draw call index past the buffer.
+    #[test]
+    fn tabline_update_without_matching_grid_resize_clips_the_transient_overflow_row() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![("a".into(), 0, 1)],
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 2,
+            col_start: 0,
+            cells: vec![("z".into(), 0, 1)],
+        });
+
+        apply(
+            &mut model,
+            view_core::events::UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "one".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "two".into(),
+                    },
+                ],
+            },
+        );
+        // deliberately no GridOp::Resize here: the grid is still 3 rows
+        // tall while the tabline already reserves row 0, the exact
+        // transient window under test
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        // must not panic despite the EngineGrid layer (row=1, height=3)
+        // extending one row past the frame's own 3 rows
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(
+            &buf[(0, 0)].symbol(),
+            &" ",
+            "tabline label starts with a space on the reserved row"
+        );
+        assert_eq!(
+            &buf[(0, 1)].symbol(),
+            &"a",
+            "grid row 0 shifted down by the reserved chrome row"
+        );
+        for row in 0..3 {
+            for col in 0..10 {
+                assert_ne!(
+                    buf[(col, row)].symbol(),
+                    "z",
+                    "grid row 2 (\"z\") is outside the clipped area and must not be painted"
+                );
+            }
+        }
     }
 
     #[test]

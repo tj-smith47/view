@@ -89,8 +89,8 @@ fn write_sync_bracket(begin: bool) -> std::io::Result<()> {
 /// Maps a [`CursorShape`] to its DECSCUSR steady parameter: `2` (block),
 /// `4` (underline/horizontal), `6` (bar/vertical). Steady rather than
 /// blinking (`1`/`3`/`5`): a deterministic cursor is safer to test against
-/// and avoids relying on terminal-side blink timing this phase has no
-/// capability probe for; `CursorShape` itself carries no blink state to
+/// and there is no terminal-side blink capability probe to key a choice of
+/// blinking variant on; `CursorShape` itself carries no blink state to
 /// select a blinking variant from.
 fn decscusr_param(shape: CursorShape) -> u8 {
     match shape {

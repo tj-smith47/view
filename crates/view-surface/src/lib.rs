@@ -273,11 +273,14 @@ fn shape_from_mode(model: &Model) -> CursorShape {
         })
 }
 
-/// The command line's cursor column, in grid space: `firstc` plus `pos`
-/// characters into the typed content (nvim's `pos` counts into the content
-/// only, not the `firstc` prefix rendered before it).
+/// The command line's cursor column, in grid space: `firstc` plus `prompt`
+/// plus `pos` characters into the typed content (nvim's `pos` counts into
+/// the content only, not the `firstc`/`prompt` prefix rendered before it).
+/// Live-verified against a real nvim's `cmdline_show` traffic for
+/// `:call input("name: ")`, whose `pos` came back counting from the start
+/// of the typed answer, not from the start of the `prompt` label.
 fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
-    let prefix_len = cmdline.firstc.chars().count();
+    let prefix_len = cmdline.firstc.chars().count() + cmdline.prompt.chars().count();
     let pos = usize::try_from(cmdline.pos).unwrap_or(usize::MAX);
     u16::try_from(prefix_len.saturating_add(pos)).unwrap_or(u16::MAX)
 }

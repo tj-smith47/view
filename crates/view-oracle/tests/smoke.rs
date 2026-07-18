@@ -400,6 +400,30 @@ fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
 }
 
 #[test]
+fn view_shows_the_prompt_label_on_the_bottom_row_during_call_input() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:call input('name: ')\r");
+    assert!(
+        session.wait_for("name: ", Duration::from_secs(5)),
+        "prompt label never appeared on the bottom row; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    session.send(b"X");
+    assert!(
+        session.wait_for("name: X", Duration::from_secs(5)),
+        "typed character never landed after the prompt label; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    // <CR> submits the input() prompt itself before quitting, or the
+    // pending prompt would swallow the following :q!
+    session.send(b"\r\x1b:q!\r");
+    let _ = session.child.wait();
+}
+
+#[test]
 fn view_propagates_cquit_exit_code() {
     let mut session = spawn_view_pty();
 
