@@ -147,7 +147,6 @@ fn main() -> Result<()> {
     let outcome = startup::run_cutover(
         &mut model,
         &executor,
-        &msg_tx,
         startup::CutoverInput {
             presink: cutover.presink,
             pending_redraw,

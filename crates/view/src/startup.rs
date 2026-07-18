@@ -347,29 +347,21 @@ pub(crate) enum CutoverOutcome {
 /// it is otherwise unreachable from the `Msg::Key`/`Msg::Resized` messages
 /// replay sends.
 ///
-/// `msg_tx` is threaded through as a parameter and never read from this
-/// function's body: it names the exact seam a regression would have to
-/// touch to reintroduce the hazard this function closes, and lets a test
-/// drive this literal function -- not a hand-recreated shape of it --
-/// against a channel with no consumer, to prove that seam stays untouched.
-///
 /// # Why nothing here can ever block on `msg_tx`
 ///
 /// Every stage resolves through `runtime::dispatch`, which drives
 /// `update()` -> `Executor` directly and never references `mpsc` at all
-/// (see `dispatch`'s own doc comment). As long as this function's body
-/// keeps making only `dispatch` calls -- never `msg_tx.send`/`try_send` --
-/// a full `msg_tx` with no consumer cannot block it, because there is no
-/// consumer needed for a call this function never makes. `main.rs` calls
-/// this strictly after `Engine::start_pump` has already returned its
-/// `SinkCutover` (never sent into `msg_tx`, see `attach_sink`'s doc
-/// comment) and strictly before `runtime::run`'s loop starts consuming
-/// `msg_tx`, so this is the one place in the whole process that resolves
-/// messages staged before a consumer of `msg_tx` existed.
+/// (see `dispatch`'s own doc comment). No channel end appears in this
+/// signature, so reintroducing a send here is a compile error, not a
+/// runtime hazard a test has to catch. `main.rs` calls this strictly
+/// after `Engine::start_pump` has already returned its `SinkCutover`
+/// (never sent into `msg_tx`, see `attach_sink`'s doc comment) and
+/// strictly before `runtime::run`'s loop starts consuming `msg_tx`, so
+/// this is the one place in the whole process that resolves messages
+/// staged before a consumer of `msg_tx` existed.
 pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     model: &mut Model,
     executor: &crate::runtime::Executor<E>,
-    _msg_tx: &SyncSender<Msg>,
     input: CutoverInput,
     engine_stopped_exit: impl FnOnce() -> view_core::msg::ExitInfo,
 ) -> CutoverOutcome {
@@ -593,7 +585,6 @@ mod tests {
             let outcome = run_cutover(
                 &mut model,
                 &executor,
-                &tx,
                 CutoverInput {
                     presink,
                     pending_redraw: vec![UiEvent::Flush],
@@ -648,7 +639,6 @@ mod tests {
     /// left to hand them to.
     #[test]
     fn run_cutover_translates_a_presink_engine_stopped_into_quit_and_skips_the_rest() {
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(4);
         let ops = crate::runtime::FakeOps::default();
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
@@ -658,7 +648,6 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &tx,
             CutoverInput {
                 presink: vec![Msg::EngineStopped],
                 pending_redraw: vec![UiEvent::Flush],
@@ -691,7 +680,6 @@ mod tests {
     fn run_cutover_stops_replaying_once_a_write_reports_the_engine_lost() {
         use view_core::msg::{EngineRequest, ReplyToken};
 
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(4);
         let ops = crate::runtime::FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = crate::runtime::Executor::new(ops);
@@ -701,7 +689,6 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &tx,
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },

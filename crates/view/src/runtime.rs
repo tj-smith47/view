@@ -233,6 +233,17 @@ pub fn run(
     let executor = Executor::new(engine.handle.clone());
 
     loop {
+        // paint before blocking, not after processing: state mutated ahead
+        // of the loop (the startup cutover replays staged messages straight
+        // through dispatch) would otherwise sit unpainted until the next
+        // message happens to arrive. Steady-state behavior is unchanged --
+        // each processed wakeup paints here on the next pass, immediately,
+        // with no timer, no recv_timeout, no tick anywhere in this loop.
+        if model.dirty {
+            let surface = view_surface::render(&model);
+            term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
+            model.dirty = false;
+        }
         let msg = match msg_rx.recv() {
             Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
             Ok(Msg::EngineStopped) => Msg::EngineDown(engine.wait_exit()),
@@ -271,13 +282,6 @@ pub fn run(
                     queue.push(Msg::Redraw(residue));
                 }
             }
-        }
-        // paint immediately when update marked dirty: there is no timer, no
-        // recv_timeout, no tick anywhere in this loop
-        if model.dirty {
-            let surface = view_surface::render(&model);
-            term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
-            model.dirty = false;
         }
     }
 }
