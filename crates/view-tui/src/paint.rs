@@ -126,8 +126,10 @@ fn sanitized_char(ch: char) -> char {
     }
 }
 
-/// Renders the command line: `firstc`, then `prompt`, then its content
-/// chunks, on the overlay's single row. In prompt mode (e.g.
+/// Renders the command line: first a full-row clear to the cmdline's own
+/// style (so no glyph the grid layer painted underneath -- a statusline,
+/// most commonly -- survives past the end of the typed text), then
+/// `firstc`, then `prompt`, then its content chunks. In prompt mode (e.g.
 /// `:call input("name: ")`) nvim sends an empty `firstc` and puts the label
 /// in `prompt` instead, so concatenating both in this order reproduces
 /// nvim's own `:` prefix in the ordinary case and the prompt label in the
@@ -142,17 +144,21 @@ fn paint_cmdline(
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
-    let mut text = state.firstc.clone();
-    text.push_str(&state.prompt);
-    for (_, chunk) in &state.content {
-        text.push_str(chunk);
-    }
     // a live `--clean` capture of nvim's `hl_group_set` batch (see
     // view-engine's ui_events tests) carries no builtin group naming the
     // cmdline row: nvim styles it from "Normal" itself, so `theme.normal()`
     // is not a fallback standing in for a missing mapping here, it is the
     // correct source
-    paint_text_row(&text, ratatui_style(theme.normal()), area, 0, frame);
+    let style = ratatui_style(theme.normal());
+    let blank = " ".repeat(usize::from(area.width));
+    paint_text_row(&blank, style, area, 0, frame);
+
+    let mut text = state.firstc.clone();
+    text.push_str(&state.prompt);
+    for (_, chunk) in &state.content {
+        text.push_str(chunk);
+    }
+    paint_text_row(&text, style, area, 0, frame);
 }
 
 /// Renders the message log as stacked toasts: `render()` already sized and
@@ -598,6 +604,49 @@ mod tests {
             "resting grid text must return once the overlay's state is gone"
         );
         assert_eq!(&buf[(1, 2)].symbol(), &"y");
+    }
+
+    /// Regression: while the cmdline is active, it must claim the *whole*
+    /// bottom row, not just the cells its own prompt+content text occupies.
+    /// Reproduces the reported bug shape (a statusline-bearing grid row
+    /// bleeding through past the typed command). Disconfirm: without the
+    /// row-claim fill in `paint_cmdline`, cell `(5, 2)` still reads a
+    /// statusline glyph instead of a blank space.
+    #[test]
+    fn cmdline_overlay_claims_the_full_bottom_row_no_grid_glyph_bleeds_through() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 2,
+            col_start: 0,
+            cells: "STATUSLIN".chars().map(|c| (c.to_string(), 0, 1)).collect(),
+        });
+
+        apply(
+            &mut model,
+            view_core::events::UiEvent::CmdlineShow {
+                content: vec![(0, "wq".to_string())],
+                pos: 2,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let row: String = (0..10).map(|c| buf[(c, 2)].symbol().to_string()).collect();
+        assert_eq!(
+            row, ":wq       ",
+            "cmdline overlay must claim the whole bottom row"
+        );
     }
 
     /// Regression for a real bug: nvim's prompt mode (`:call input("name:

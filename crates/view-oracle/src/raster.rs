@@ -110,6 +110,11 @@ fn paint_tabline(canvas: &mut [Vec<char>], layer: &Layer, state: &view_core::mod
 }
 
 fn paint_cmdline(canvas: &mut [Vec<char>], layer: &Layer, state: &view_core::model::CmdlineState) {
+    // claims the full row before writing content: without this, cells
+    // beyond the prompt+content's length still show whatever the grid layer
+    // beneath painted at this row (e.g. a statusline), since `paint_text`
+    // only overwrites as many cells as `text` occupies
+    blank_row(canvas, layer.rect.row, layer.rect.col, layer.rect.width);
     let text = format!(
         "{}{}{}",
         state.firstc,
@@ -117,6 +122,21 @@ fn paint_cmdline(canvas: &mut [Vec<char>], layer: &Layer, state: &view_core::mod
         joined_content(&state.content)
     );
     paint_text(canvas, layer.rect.row, layer.rect.col, &text);
+}
+
+/// Overwrites `width` cells of `row` starting at `col` with spaces, the
+/// row-claim primitive [`paint_cmdline`] uses to blank the row before
+/// writing its own content.
+fn blank_row(canvas: &mut [Vec<char>], row: u16, col: u16, width: u16) {
+    let Some(row_cells) = canvas.get_mut(usize::from(row)) else {
+        return;
+    };
+    let len = row_cells.len();
+    let start = usize::from(col).min(len);
+    let end = usize::from(col.saturating_add(width)).min(len);
+    for slot in &mut row_cells[start..end] {
+        *slot = ' ';
+    }
 }
 
 fn paint_messages(
@@ -215,6 +235,45 @@ mod tests {
         assert!(
             last_row.starts_with(":wq"),
             "expected cmdline text at start of bottom row, got {last_row:?}"
+        );
+    }
+
+    /// While the cmdline is active, it must own the full bottom row: no
+    /// glyph from whatever the grid painted at that row (a statusline, in
+    /// this reproduction of the reported bug) may survive past the
+    /// cmdline's own prompt+content text. Disconfirm: without the blank-row
+    /// claim in `paint_cmdline`, the tail of the row still reads the grid's
+    /// `NvimTree_1 [-] ... COMMAND ...`-shaped text instead of spaces.
+    #[test]
+    fn cmdline_overlay_claims_the_full_bottom_row() {
+        let mut model = model_with_grid(20, 3);
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 2,
+            col_start: 0,
+            cells: "NvimTree_1 [-] COMMAND"
+                .chars()
+                .map(|c| (c.to_string(), 0, 1))
+                .collect(),
+        });
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "wq".to_string())],
+                pos: 2,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        let surface = view_surface::render(&model);
+
+        let text = screen_text(&surface, &model.engine.grid);
+
+        let last_row = text.lines().next_back().unwrap();
+        assert_eq!(
+            last_row, ":wq                 ",
+            "cmdline overlay must blank the whole row, not just where it wrote text"
         );
     }
 
