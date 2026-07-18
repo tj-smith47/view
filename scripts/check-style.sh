@@ -21,6 +21,12 @@ if [ -d crates ]; then
   if grep -rniE '\bthis phase\b|\ba later (phase|task|session)\b|\bin a later\b' crates --include='*.rs'; then
     echo "STYLE FAIL: roadmap-phase comment marker"; fail=1
   fi
+  # session-narrative markers the phase/task-number check above doesn't
+  # catch: "this task" (no number attached, unlike "Task 10") and
+  # "the RED/GREEN test" (TDD-status narration, not a fact about the code)
+  if grep -rniE '\bthis task\b|\bthe (red|green) test\b' crates --include='*.rs'; then
+    echo "STYLE FAIL: task/TDD-status comment marker"; fail=1
+  fi
   if grep -rnE '\bP[0-9]\b' crates --include='*.rs'; then
     echo "STYLE FAIL: roadmap-phase tag in comment"; fail=1
   fi

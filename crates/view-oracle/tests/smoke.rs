@@ -15,7 +15,8 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 /// Locates the `view` binary next to this crate's own target directory,
-/// building it first if it is not already there.
+/// always invoking `cargo build -p view` first to guarantee it reflects
+/// the current source tree.
 ///
 /// `view` is a bin-only crate with no library target, so Cargo's
 /// `CARGO_BIN_EXE_<name>` mechanism is unavailable: Cargo only sets that
@@ -25,8 +26,19 @@ use std::time::{Duration, Instant};
 /// but emits "ignoring invalid dependency `view` which is missing a lib
 /// target", and `env!("CARGO_BIN_EXE_view")` then fails to compile). Falls
 /// back to locating the workspace `target/<profile>/view` executable
-/// directly, building it on demand so this test is self-sufficient under a
-/// direct `cargo test -p view-oracle` as well as under `task test`.
+/// directly.
+///
+/// The build call is unconditional, not gated on `!path.exists()`: an
+/// existence check only proves *some* binary was built once before, not
+/// that it reflects the source this test process just compiled against.
+/// A stale binary left over from an earlier build (e.g. one taken while
+/// iterating on `crates/view` itself with `git stash`) previously produced
+/// a false RED or a false GREEN under a direct `cargo test -p
+/// view-oracle`, indistinguishable from a real pass/fail until someone
+/// noticed the binary's mtime predated the source. `cargo build` is a
+/// no-op (a fast up-to-date check, not a recompile) when the binary is
+/// already current, so paying for the invocation on every run is cheap
+/// insurance against exactly that class of false result.
 fn view_bin_path() -> PathBuf {
     let profile_dir = if cfg!(debug_assertions) {
         "debug"
@@ -39,14 +51,12 @@ fn view_bin_path() -> PathBuf {
     path.push("target");
     path.push(profile_dir);
     path.push("view");
-    if !path.exists() {
-        let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-        let status = std::process::Command::new(cargo)
-            .args(["build", "-p", "view"])
-            .status()
-            .expect("failed to invoke cargo build -p view");
-        assert!(status.success(), "cargo build -p view failed");
-    }
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = std::process::Command::new(cargo)
+        .args(["build", "-p", "view"])
+        .status()
+        .expect("failed to invoke cargo build -p view");
+    assert!(status.success(), "cargo build -p view failed");
     path
 }
 
@@ -120,6 +130,27 @@ impl PtySession {
     fn send(&mut self, bytes: &[u8]) {
         self.writer.write_all(bytes).unwrap();
         self.writer.flush().unwrap();
+    }
+
+    /// Blocks (up to `timeout`), polling `Child::try_wait` rather than
+    /// `Child::wait`'s unbounded blocking form, until the child has
+    /// exited. Returns `None` -- after killing the child so it cannot
+    /// outlive this test -- if it is still running once `timeout`
+    /// elapses, so a real deadlock in the child under test fails this
+    /// assertion promptly instead of hanging the whole test binary (and,
+    /// with it, CI) the way `Child::wait` would.
+    fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                return Some(status);
+            }
+            if Instant::now() >= deadline {
+                let _ = self.child.kill();
+                return None;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Blocks (up to `timeout`) until the cell at `(row, col)` holds exactly
@@ -712,12 +743,11 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     path
 }
 
-/// The RED test for the startup sequence: the
-/// shell frame -- a themed statusline placeholder plus a static "waiting
-/// for nvim" indicator, painted before the engine even spawns -- must be
-/// visible well before a deliberately slow (500ms) embedded engine ever
-/// attaches, and keys typed during that gap must reach the real buffer, in
-/// order, once attach completes.
+/// The startup sequence's shell frame -- a themed statusline placeholder
+/// plus a static "waiting for nvim" indicator, painted before the engine
+/// even spawns -- must be visible well before a deliberately slow (500ms)
+/// embedded engine ever attaches, and keys typed during that gap must
+/// reach the real buffer, in order, once attach completes.
 ///
 /// This is also the seam's liveness proof end to end: `view_vim_enter`'s
 /// blocking `rpcrequest` only ever resolves if `update()`'s
@@ -769,6 +799,66 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     assert!(
         saved.contains("hello world"),
         "saved file did not contain the pre-attach-typed text; contents:\n{saved:?}"
+    );
+
+    let _ = std::fs::remove_file(&wrapper);
+}
+
+/// A flood of pre-attach keystrokes at (and somewhat past)
+/// `KEY_RING_CAPACITY` (64), overlapping a real embedded engine's attach
+/// window, must never freeze the session.
+///
+/// This is a supplementary, real-engine regression test; the primary
+/// RED/GREEN evidence for the fix this guards
+/// (`runtime::tests::re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
+/// and its paired GREEN test in `runtime.rs`) is a deterministic
+/// unit-level reproduction instead, for a reason worth recording here:
+/// the pre-image's actual hazard requires at least one extra `Msg::Key`
+/// to land in `msg_tx` in the microsecond-scale gap between
+/// `Msg::EngineReady` being read out of the channel and the replay loop's
+/// first `send` call -- both the ring and the channel share the exact
+/// same 64 capacity, so replaying exactly 64 buffered keys into an
+/// otherwise-empty channel fits without blocking. Driving this pty
+/// against the pre-image (a 300ms-delayed engine, 150 keystrokes sent one
+/// at a time over ~450ms to straddle attach completion) reliably filled
+/// the ring to its full 64-key capacity but never observed a leftover key
+/// landing in that microsecond-scale gap, so it passed even against the
+/// unfixed code -- the live race window is real (see C2's "near-certain"
+/// characterization for a paste-sized burst) but not reliably
+/// reproducible through this harness's timing. Kept here anyway as
+/// end-to-end coverage that a heavy, realistic flood against a real
+/// engine still behaves correctly under the fix.
+#[test]
+fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
+    let wrapper = write_delayed_nvim_wrapper(300);
+    let mut session =
+        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+
+    assert!(
+        session.wait_for("waiting for nvim", Duration::from_millis(200)),
+        "shell frame did not appear within 200ms against a 300ms-delayed \
+         engine; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    // 150 keystrokes, one at a time, over ~450ms: comfortably past
+    // KEY_RING_CAPACITY (64), and comfortably past the wrapper's 300ms
+    // delay plus ordinary attach time, so typing is still in flight right
+    // at the cutover instant
+    for _ in 0..150 {
+        session.send(b"x");
+        std::thread::sleep(Duration::from_millis(3));
+    }
+    session.send(b"\x1b:q!\r");
+
+    let exit = session.wait_for_exit(Duration::from_secs(15)).expect(
+        "view appears wedged (never exited) after a >64-key pre-attach flood \
+         spread across the engine's attach window -- see this test's doc \
+         comment for the replay-deadlock hazard it guards against",
+    );
+    assert!(
+        exit.success(),
+        "view did not exit cleanly after a >64-key pre-attach flood"
     );
 
     let _ = std::fs::remove_file(&wrapper);

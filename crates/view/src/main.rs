@@ -112,19 +112,55 @@ fn main() -> Result<()> {
     view_tui::terminal::spawn_input_thread(msg_tx.clone());
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
-    let buffered_keys = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
-    let (engine, pump) = engine_rx
+    let drained = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
+    let mut engine = engine_rx
         .recv()
         .context("engine attach thread ended without a result")?
-        .context("ui attach failed or timed out")?;
+        .map_err(|failure| match failure {
+            startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
+                .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
+            startup::AttachFailure::Attach(err) => anyhow::Error::new(err)
+                .context("engine attach failed or timed out after nvim started"),
+        })?;
 
-    // replayed through the ordinary Msg::Key -> update() -> Executor path:
-    // pushing them back onto msg_tx lets runtime::run's own loop process
-    // them with zero duplicate replay logic, identical EngineLost handling
-    // included
-    for key in buffered_keys {
-        let _ = msg_tx.send(Msg::Key(key));
+    // Delivered directly through update()/Executor, never by re-enqueuing
+    // onto msg_tx: msg_tx is a bounded sync_channel(64) with no consumer
+    // running yet (runtime::run's loop starts below), so pushing
+    // buffered-plus-still-queued keys back onto it can exceed capacity and
+    // block `send` forever -- a permanent freeze in raw mode. Total order
+    // survives without a second buffer: every key still sitting in msg_tx
+    // at this point was typed by the input thread after drain_pre_attach
+    // observed Msg::EngineReady (drain_pre_attach is msg_tx's only reader
+    // up to that point), which is after every key in `drained.keys` was
+    // already buffered -- so applying `drained` here, before anything
+    // reads from msg_tx again, reproduces arrival order exactly. The
+    // resize (if any) is applied first: nvim should see the final
+    // pre-attach terminal size before it sees the keys typed at that size.
+    let executor = runtime::Executor::new(engine.handle.clone());
+    let mut engine_alive = true;
+    if let Some((width, height)) = drained.resize {
+        engine_alive = runtime::dispatch(&mut model, &executor, Msg::Resized { width, height })
+            == runtime::Flow::Continue;
     }
+    // skipped entirely once the resize write itself already reported the
+    // engine gone: further replayed input would fail the same way, and
+    // runtime::run's own loop discovers the same failure cleanly once its
+    // pump is attached below
+    if engine_alive {
+        for key in drained.keys {
+            if runtime::dispatch(&mut model, &executor, Msg::Key(key)) != runtime::Flow::Continue {
+                break;
+            }
+        }
+    }
+
+    // attach_sink -- the only code path that connects the engine's pump to
+    // msg_tx at all -- runs here, strictly after EngineReady was already
+    // observed and the buffered window was already replayed above; see
+    // startup::attach_in_background's doc comment for why that makes a
+    // pump-originated message landing ahead of EngineReady structurally
+    // impossible rather than merely unobserved.
+    let pump = engine.start_pump(msg_tx.clone());
 
     let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
     if let Some(path) = &config_path {

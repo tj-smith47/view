@@ -165,6 +165,31 @@ impl<E: EngineOps> Executor<E> {
     }
 }
 
+/// Applies `msg` to `model` through the ordinary `update()` -> `Executor`
+/// path, stopping early on the first non-`Continue` flow. A pub(crate) seam
+/// so `main.rs`'s pre-run replay of the pre-attach buffer (see
+/// `startup::drain_pre_attach`) can drive the same dispatch `run()`'s loop
+/// uses, instead of hand-rolling a second copy of "call `update`, then run
+/// every effect through the executor." Deliberately does not replicate
+/// `run()`'s loop machinery for `Quit`, residue draining, or `EngineLost`
+/// requeueing: none of it is reachable from the `Msg::Key`/`Msg::Resized`
+/// messages replay ever sends (see `view_core::update::update`), so
+/// reproducing it here would be dead code, not defensive coverage.
+#[must_use]
+pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, msg: Msg) -> Flow {
+    let mut flow = Flow::Continue;
+    for eff in update(model, msg) {
+        match executor.run(eff) {
+            Flow::Continue => {}
+            other => {
+                flow = other;
+                break;
+            }
+        }
+    }
+    flow
+}
+
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
 /// terminal I/O error occurs, returning the final `Model` alongside the
 /// process exit code on the former (the caller persists the model's
@@ -393,5 +418,151 @@ mod tests {
             value: ReplyValue::Nil,
         });
         assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    #[test]
+    fn dispatch_a_key_forwards_input_and_returns_continue() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            Msg::Key(view_core::msg::Key {
+                notation: "x".into(),
+            }),
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "input(x)");
+    }
+
+    #[test]
+    fn dispatch_reports_engine_lost_without_a_second_send_when_the_write_fails() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            Msg::Key(view_core::msg::Key {
+                notation: "x".into(),
+            }),
+        );
+        assert!(matches!(flow, Flow::EngineLost));
+        assert_eq!(ops.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn dispatch_a_resize_forwards_try_resize() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            Msg::Resized {
+                width: 100,
+                height: 50,
+            },
+        );
+        assert!(matches!(flow, Flow::Continue));
+        assert!(ops.calls.borrow()[0].starts_with("try_resize("));
+    }
+
+    /// The RED half of C2's deterministic proof: recreates the exact
+    /// re-enqueue shape `fa54c7c`'s pre-attach replay used -- pushing
+    /// buffered keys back onto the same bounded `sync_channel` `main.rs`'s
+    /// `msg_tx` is (capacity 64, matching both `startup::KEY_RING_CAPACITY`
+    /// and the literal `mpsc::sync_channel(64)` in `main.rs`) while nothing
+    /// is consuming it yet (`runtime::run`'s loop starts only after
+    /// replay). 2 keys already resting in the channel stand in for
+    /// whatever the input thread queued in the narrow gap between
+    /// `Msg::EngineReady` landing and replay actually running (see this
+    /// fix's replay call site in `main.rs`); 64 more (the ring's full
+    /// capacity) is what a maximally-full pre-attach buffer replays. 66
+    /// sends against a capacity-64 channel with zero consumer must block
+    /// on the 65th.
+    ///
+    /// Proven with the literal channel primitive rather than by calling
+    /// deleted production code (the old replay loop no longer exists to
+    /// call): the hazard is a pure channel-capacity/no-consumer property,
+    /// independent of which code happens to perform the sends, so
+    /// recreating the same capacity and send pattern is a faithful,
+    /// deterministic, environment-independent reproduction -- unlike a
+    /// live pty race, whose window this crate's own
+    /// `view-oracle` pty test found unreliable to hit even at full ring
+    /// occupancy (see that test's doc comment).
+    #[test]
+    fn re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever() {
+        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        for _ in 0..2 {
+            tx.send(Msg::Key(view_core::msg::Key {
+                notation: "leftover".into(),
+            }))
+            .unwrap();
+        }
+        let buffered: Vec<Msg> = (0..64)
+            .map(|_| {
+                Msg::Key(view_core::msg::Key {
+                    notation: "x".into(),
+                })
+            })
+            .collect();
+
+        let handle = std::thread::spawn(move || {
+            for msg in buffered {
+                // fa54c7c's replay: `msg_tx.send(Msg::Key(key))`
+                tx.send(msg).unwrap();
+            }
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !handle.is_finished(),
+            "replay finished instead of blocking -- 2 leftover + 64 \
+             buffered is 66 sends against a channel of capacity 64 with \
+             zero consumer; if this now finishes on its own, the channel's \
+             capacity or this test's premise has changed and the hazard \
+             model this fix relies on needs revisiting"
+        );
+        // unblocks the deliberately-leaked sender thread so it can exit
+        // cleanly rather than being abandoned mid-block
+        drop(rx);
+        let _ = handle.join();
+    }
+
+    /// The GREEN half of C2's deterministic proof, paired with the RED
+    /// test above: the fix's `dispatch`-based replay delivers a flood far
+    /// larger than `KEY_RING_CAPACITY` (64) directly through
+    /// `update()`/`Executor`, touching no channel at all, so there is no
+    /// capacity to exceed regardless of flood size. `dispatch` itself
+    /// (see its definition above) never references `mpsc` -- this is a
+    /// structural guarantee, not a probabilistic one -- and this test
+    /// backs that reading with an observed bound: 1000 dispatches (15x
+    /// `KEY_RING_CAPACITY`) complete near-instantly rather than blocking.
+    #[test]
+    fn dispatching_a_flood_of_keys_directly_never_touches_any_channel_and_completes_immediately() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let start = std::time::Instant::now();
+        for i in 0..1000 {
+            let flow = dispatch(
+                &mut model,
+                &executor,
+                Msg::Key(view_core::msg::Key {
+                    notation: i.to_string(),
+                }),
+            );
+            assert!(matches!(flow, Flow::Continue));
+        }
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(500),
+            "1000 direct dispatches took {:?}, unexpectedly slow for a \
+             channel-free path",
+            start.elapsed()
+        );
+        assert_eq!(ops.calls.borrow().len(), 1000);
     }
 }

@@ -38,9 +38,9 @@ fn fake_flood_peer(
 /// A flood of notifications on the deprecated unbounded channel must never
 /// stall a pending response, and every notification must still be buffered
 /// for a caller that drains late. `EngineHandle::start` is the plain
-/// (non-pumped) constructor: this proves the legacy path this task's
-/// dual-write keeps alive is unaffected by the new fold/dispatch logic
-/// added alongside it in the reader thread.
+/// (non-pumped) constructor: this proves the legacy unbounded-notification
+/// path stays unaffected by the reader thread's fold/dispatch logic, which
+/// the pumped constructor's dual-write also feeds.
 #[test]
 fn response_is_not_starved_by_unbounded_notification_flood() {
     let (h, n) = fake_flood_peer(|msgid, _| RpcMessage::Response {
