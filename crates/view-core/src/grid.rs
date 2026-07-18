@@ -229,6 +229,9 @@ impl Grid {
             let shift = u16::try_from(rows).unwrap_or(u16::MAX);
             let mut dst = top;
             let mut src = top.saturating_add(shift);
+            // when shift >= bot - top the loop body never runs and dst is
+            // still top, so the fill below clears the whole region: the
+            // degenerate case needs no separate branch here
             while src < bot {
                 self.copy_row_range(src, dst, left, right);
                 dst = dst.saturating_add(1);
@@ -237,6 +240,9 @@ impl Grid {
             self.fill_row_range(dst, bot, left, right);
         } else {
             let shift = u16::try_from(rows.unsigned_abs()).unwrap_or(u16::MAX);
+            // unlike the upward path, the downward loop counts src down from
+            // bot - shift and would underflow-saturate into copying wrong
+            // rows for oversized shifts, so full-clear explicitly
             if shift >= bot.saturating_sub(top) {
                 self.fill_row_range(top, bot, left, right);
                 return;
