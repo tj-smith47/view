@@ -7,10 +7,11 @@
 use crate::keys::encode_key;
 use crate::mouse::encode_mouse;
 use crate::paint::composite;
+use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
 use std::io::Write;
 use std::sync::mpsc::SyncSender;
-use view_core::model::Model;
+use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::{Key, Msg};
 use view_surface::{CursorShape, Surface};
 
@@ -27,9 +28,38 @@ use view_surface::{CursorShape, Surface};
 pub struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enables raw mode, switches to the alternate screen, enables
-    /// bracketed-paste reporting, and installs a panic hook that restores
-    /// the terminal before delegating to the previous hook.
+    /// The first half of entry: enables raw mode and installs a panic hook
+    /// that restores the terminal before delegating to the previous hook.
+    ///
+    /// Split from alternate-screen entry (see
+    /// [`finish_entering_alt_screen`](Self::finish_entering_alt_screen)) so
+    /// [`Term::init`] can run capability detection in between: detection's
+    /// CSI replies are only readable once canonical mode's line buffering,
+    /// echo, and missing newline terminator are off, which raw mode alone
+    /// provides, and the detection log line must still print to the
+    /// visible screen rather than a not-yet-entered alternate buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if raw mode cannot be
+    /// enabled.
+    pub fn enter_raw_mode() -> std::io::Result<Self> {
+        crossterm::terminal::enable_raw_mode()?;
+        // a panic must restore the terminal before the message prints, or the
+        // user is left with a broken shell and an invisible error; installed
+        // right after raw mode rather than after the alternate screen so a
+        // panic during capability detection is covered too
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            restore();
+            prev(info);
+        }));
+        Ok(Self)
+    }
+
+    /// The second half of entry: switches to the alternate screen and
+    /// enables bracketed-paste reporting. Must be called exactly once,
+    /// after [`enter_raw_mode`](Self::enter_raw_mode).
     ///
     /// Bracketed paste is enabled unconditionally here (unlike mouse
     /// capture, which [`Term::draw_surface`] toggles only while nvim
@@ -40,23 +70,14 @@ impl TerminalGuard {
     ///
     /// # Errors
     ///
-    /// Returns the underlying `std::io::Error` if raw mode cannot be
-    /// enabled or the alternate screen cannot be entered.
-    pub fn enter() -> std::io::Result<Self> {
-        crossterm::terminal::enable_raw_mode()?;
+    /// Returns the underlying `std::io::Error` if the alternate screen
+    /// cannot be entered.
+    pub fn finish_entering_alt_screen(&self) -> std::io::Result<()> {
         crossterm::execute!(
             std::io::stdout(),
             crossterm::terminal::EnterAlternateScreen,
             crossterm::event::EnableBracketedPaste
-        )?;
-        // a panic must restore the terminal before the message prints, or the
-        // user is left with a broken shell and an invisible error
-        let prev = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |info| {
-            restore();
-            prev(info);
-        }));
-        Ok(Self)
+        )
     }
 
     /// Restores the terminal immediately rather than waiting for [`Drop`].
@@ -148,12 +169,19 @@ pub struct Term {
     /// paint. `None` before the first frame, matching `last_cursor_shape`'s
     /// convention.
     last_mouse_capture: Option<bool>,
+    /// The capabilities resolved during [`Term::init`], either probed or
+    /// from a `--tier` override. Stored so [`Term::caps`] can hand a copy
+    /// to the caller without re-running the (stdin-consuming, one-shot)
+    /// detection probe.
+    caps: TermCaps,
 }
 
 impl Term {
-    /// Initializes the backend terminal: [`TerminalGuard::enter`] performs
-    /// the one raw-mode/alternate-screen/panic-hook setup, then the ratatui
-    /// terminal is constructed directly over the now-prepared stdout.
+    /// Initializes the backend terminal: raw mode first, then capability
+    /// detection (or `tier_override` if given), then the alternate screen,
+    /// matching [`TerminalGuard::enter_raw_mode`]'s ordering contract; the
+    /// ratatui terminal is constructed last, directly over the now-prepared
+    /// stdout.
     ///
     /// Deliberately does not use `ratatui::try_init`: that function repeats
     /// the same raw-mode/alternate-screen/panic-hook setup `TerminalGuard`
@@ -163,9 +191,12 @@ impl Term {
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if raw mode or the alternate
-    /// screen cannot be entered, or the backend terminal cannot be built.
-    pub fn init() -> std::io::Result<Self> {
-        let guard = TerminalGuard::enter()?;
+    /// screen cannot be entered, if capability detection's I/O fails, or if
+    /// the backend terminal cannot be built.
+    pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
+        let guard = TerminalGuard::enter_raw_mode()?;
+        let caps = tiers::resolve(tier_override)?;
+        guard.finish_entering_alt_screen()?;
         let inner =
             ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
         Ok(Self {
@@ -173,7 +204,15 @@ impl Term {
             inner,
             last_cursor_shape: None,
             last_mouse_capture: None,
+            caps,
         })
+    }
+
+    /// The capabilities resolved at [`Term::init`], for the caller to wire
+    /// into `Model.caps`.
+    #[must_use]
+    pub fn caps(&self) -> TermCaps {
+        self.caps
     }
 
     /// Current terminal size in `(width, height)` cells.

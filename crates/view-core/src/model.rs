@@ -244,6 +244,7 @@ pub struct OverlayId(pub u64);
 /// `tier` is coarse UX vocabulary; the probed bits are what gates behavior
 /// (BSU/ESU gates on `caps.sync`, never on tier alone).
 #[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
 pub struct TermCaps {
     pub tier: Tier,
     pub sync: bool,
@@ -264,8 +265,39 @@ impl Default for TermCaps {
     }
 }
 
+impl TermCaps {
+    /// Builds capabilities from the three probed booleans, deriving `tier`
+    /// the same way for every caller (auto-detection and the `--tier`
+    /// override both funnel through this, so the derivation rule lives in
+    /// exactly one place): `sync && truecolor && kitty_kbd` is `Full`,
+    /// `truecolor` alone is `Standard`, anything else is `Basic`.
+    ///
+    /// `#[non_exhaustive]` keeps `TermCaps` from being struct-literal
+    /// constructed outside this crate, but the terminal probe that
+    /// discovers these booleans can only live in `view-tui` (only that
+    /// crate touches the terminal), so this constructor is the sanctioned
+    /// crossing point.
+    #[must_use]
+    pub fn from_probe(sync: bool, truecolor: bool, kitty_kbd: bool) -> Self {
+        let tier = if sync && truecolor && kitty_kbd {
+            Tier::Full
+        } else if truecolor {
+            Tier::Standard
+        } else {
+            Tier::Basic
+        };
+        Self {
+            tier,
+            sync,
+            truecolor,
+            kitty_kbd,
+        }
+    }
+}
+
 /// Coarse terminal capability tier.
 #[non_exhaustive]
+#[derive(Debug, Clone, Copy)]
 pub enum Tier {
     Full,
     Standard,

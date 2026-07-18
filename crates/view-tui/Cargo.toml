@@ -13,3 +13,12 @@ crossterm = "0.29.0"
 ratatui = "0.30.2"
 view-core = { version = "0.0.1", path = "../view-core" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
+
+# Capability probing needs a bounded, non-blocking-style stdin read (VMIN=0/
+# VTIME=0 termios) so a terminal that never replies can't leave a dangling
+# reader thread racing the real input reader started later; rustix is
+# already resolved transitively via crossterm's own unix backend (same
+# feature set crossterm itself enables), so this adds no new dependency
+# surface, just a direct edge to an already-vetted crate.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = ["std", "termios"] }

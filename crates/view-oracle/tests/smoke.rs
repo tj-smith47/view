@@ -302,6 +302,37 @@ fn view_paints_typed_text_in_a_pty() {
 }
 
 #[test]
+fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries() {
+    // portable-pty's slave side never emulates a real terminal's DECRQM/
+    // kitty/DA1 replies, so every test in this file already exercises the
+    // detection deadline path; this test names that scenario explicitly and
+    // pins the property the deadline path exists to protect: the startup
+    // probe (raw-mode-only, pre-alt-screen) must never leave the terminal
+    // unresponsive or swallow the first real keystroke once the alternate
+    // screen and nvim take over, even though every one of its queries goes
+    // unanswered and it has to run its full deadline out before giving up.
+    let start = Instant::now();
+    let mut session = spawn_view_pty();
+
+    session.send(b"ibasic tier still works");
+    assert!(
+        session.wait_for("basic tier still works", Duration::from_secs(5)),
+        "screen never showed typed text under a pty that answers no \
+         capability queries; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "startup took {:?}, far longer than the probe's bounded deadline \
+         plus ordinary nvim attach time should allow",
+        start.elapsed()
+    );
+
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
+}
+
+#[test]
 fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     let mut session = spawn_view_pty();
 
