@@ -303,10 +303,11 @@ impl EngineHandle {
                 }
             }
             if let Some(pump) = &reader_pump {
-                // best-effort: the reader is already exiting either way,
-                // and a runtime loop that is itself gone has nothing left
-                // to deliver EngineStopped to
-                let _ = pump.route_msg(Msg::EngineStopped);
+                // blocking send: the reader is already exiting either way,
+                // and a dropped EngineStopped is unrecoverable, not merely
+                // best-effort (see damage.rs module docs' bounded channel
+                // contract)
+                pump.route_terminal(Msg::EngineStopped);
             }
             // engine is gone: fail every in-flight request instead of hanging
             close_and_drain(&reader_pending);

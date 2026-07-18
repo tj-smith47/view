@@ -5,20 +5,36 @@
 //!
 //! # Bounded channel contract
 //!
-//! The runtime's `Msg` channel (created by the runtime, size 64) carries two
-//! kinds of traffic with different loss tolerances:
+//! The runtime's `Msg` channel (created by the runtime, size 64) carries
+//! three kinds of traffic with different loss tolerances:
 //!
 //! - **Coalescible**: `Msg::RedrawReady`. A `try_send` that fails because the
-//!   channel is full is safe to drop: either a token is already pending in
-//!   the channel (the consumer will drain every staged event once it reads
-//!   it), or [`DamageBuffer`]'s `pending` flag is still armed and the next
-//!   fold re-attempts the send.
-//! - **Non-coalescible**: `Msg::EngineStopped` and `Msg::EngineRequest`. A
-//!   failed send here means the runtime loop is gone or wedged behind a full
+//!   channel is full means this fold's token never reached the channel, so
+//!   [`PumpShared::fold_redraw`] disarms [`DamageBuffer`]'s `pending` flag
+//!   back to `false` instead of leaving it armed for a token that was never
+//!   sent. Staged damage is therefore always in exactly one of three states:
+//!   a token already queued in the channel, a disarmed flag that the next
+//!   fold will re-arm and retry, or an awake consumer already draining (once
+//!   the runtime loop's residue drain exists, it can pick up staged damage
+//!   with no token at all). No fold ever leaves damage staged with no path
+//!   left to reach the consumer.
+//! - **Non-coalescible, retriable-by-caller**: `Msg::EngineRequest`. A failed
+//!   `try_send` here means the runtime loop is gone or wedged behind a full
 //!   channel; there is no compaction that can recover a dropped request, and
 //!   a dropped `EngineRequest` leaves the peer (nvim) blocked on its
 //!   `rpcrequest` forever. The reader thread treats this as fatal: it stops
 //!   reading further messages from the wire.
+//! - **Non-coalescible, terminal**: `Msg::EngineStopped`. Sent with a
+//!   blocking `send`, not `try_send`: the reader thread is already exiting
+//!   when it sends this, so blocking costs nothing it was not already
+//!   paying, while dropping it on a momentarily-full channel would be an
+//!   unrecoverable correctness bug rather than a tolerable loss -- the pump
+//!   retains a `SyncSender` clone for the channel's lifetime, so a lost
+//!   `EngineStopped` also means the runtime's `recv()` never disconnects,
+//!   hanging forever with no message left to wake it. If the sink is already
+//!   disconnected, `send` returns `Err` immediately (nothing left to block
+//!   on); that failure is safe to ignore, since a disconnected receiver has
+//!   nothing left to signal.
 //!
 //! # Lock design
 //!
@@ -130,7 +146,21 @@ impl DamageBuffer {
         }
     }
 
+    /// Index of the first `staged` slot compaction is allowed to touch: the
+    /// slot after the most recently staged `Flush`, or `0` if nothing has
+    /// been flushed since the last drain. The flushed prefix (everything at
+    /// or before `flush_index`) is a batch [`take`](Self::take) may drain at
+    /// any time, on any thread, independent of what folds after it; letting
+    /// a later, still-unflushed event tombstone something in that prefix
+    /// would let `take()` return a frame that never existed on the wire (an
+    /// event dropped for a reason the drained batch itself gives no
+    /// evidence of).
+    fn compaction_start(&self) -> usize {
+        self.flush_index.map_or(0, |i| i + 1)
+    }
+
     fn fold_one(&mut self, ev: UiEvent) {
+        let boundary = self.compaction_start();
         match &ev {
             UiEvent::GridResize { grid, .. } => {
                 let e = self.grids.entry(*grid).or_default();
@@ -144,7 +174,7 @@ impl DamageBuffer {
             UiEvent::GridClear { grid } => {
                 let epochs = self.grids.entry(*grid).or_default();
                 let barrier = epochs.barrier_epoch;
-                for s in &mut self.staged {
+                for s in &mut self.staged[boundary..] {
                     if !s.alive || s.barrier_epoch != barrier {
                         // dead already, or staged before an intervening
                         // resize barrier that protects it from this clear
@@ -172,7 +202,7 @@ impl DamageBuffer {
                 let (barrier, scroll) = (epochs.barrier_epoch, epochs.scroll_epoch);
                 let new_start = *col_start;
                 let new_end = col_start.saturating_add(grid_line_span(cells));
-                for s in &mut self.staged {
+                for s in &mut self.staged[boundary..] {
                     if !s.alive || s.barrier_epoch != barrier || s.scroll_epoch != scroll {
                         // dead, or staged before an intervening resize/scroll
                         // barrier: a scroll or resize may have relocated the
@@ -244,6 +274,15 @@ impl DamageBuffer {
     pub(crate) fn is_pending(&self) -> bool {
         self.pending
     }
+
+    /// Folds the `pending` flag back to `false` after a fold's
+    /// `RedrawReady` token failed to reach the channel (see module docs'
+    /// bounded channel contract). Never touches `staged`: the damage itself
+    /// is not lost, only the wakeup for it, and a later fold re-arms the
+    /// flag and retries the send.
+    pub(crate) fn disarm_pending(&mut self) {
+        self.pending = false;
+    }
 }
 
 /// The sink half of [`PumpShared`]: the runtime's channel once installed,
@@ -292,15 +331,24 @@ impl PumpShared {
             let route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
             route.sink.clone()
         };
-        if let Some(sink) = sink {
-            // see module docs: dropping here is always safe, a token is
-            // already pending in the channel or the buffer will re-arm
-            let _ = sink.try_send(Msg::RedrawReady);
+        let Some(sink) = sink else {
+            return;
+        };
+        if sink.try_send(Msg::RedrawReady).is_err() {
+            // the token for this transition never reached the channel: fold
+            // the flag back to false so a later fold sees false -> true
+            // again and retries the send, instead of believing a token is
+            // already in flight for a send that never happened. Racing this
+            // against a concurrent take()/fold() that has since legitimately
+            // re-armed pending is safe: the worst case is one redundant
+            // extra send, which is always legal (see module docs).
+            let mut buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
+            buf.disarm_pending();
         }
     }
 
-    /// Routes a non-coalescible `Msg` (`EngineStopped` or `EngineRequest`)
-    /// to the sink if attached, or stages it in the arrival-order FIFO
+    /// Routes a non-coalescible, caller-retriable `Msg` (`EngineRequest`) to
+    /// the sink if attached, or stages it in the arrival-order FIFO
     /// otherwise. `Err` means the sink is attached but rejected the send
     /// (full or disconnected); see module docs for why the reader treats
     /// this as fatal.
@@ -313,6 +361,25 @@ impl PumpShared {
                 Ok(())
             }
         }
+    }
+
+    /// Routes the terminal `Msg::EngineStopped` signal with a blocking
+    /// `send` rather than `try_send` (see module docs' bounded channel
+    /// contract for why a dropped `EngineStopped` is unrecoverable, unlike a
+    /// dropped `RedrawReady`). Stages it in the arrival-order FIFO if no
+    /// sink is attached yet, same as [`route_msg`](Self::route_msg).
+    pub(crate) fn route_terminal(&self, msg: Msg) {
+        let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(sink) = route.sink.clone() else {
+            route.presink.push_back(msg);
+            return;
+        };
+        drop(route);
+        // blocks only if the channel is momentarily full; the reader thread
+        // calling this is already exiting and has nothing else left to do.
+        // Err means the receiver end is already gone, which has nothing
+        // left to signal either.
+        let _ = sink.send(msg);
     }
 
     /// Installs `sink`, drains the pre-sink FIFO into it in arrival order,
@@ -601,6 +668,77 @@ mod tests {
     }
 
     #[test]
+    fn unflushed_line_does_not_tear_an_already_flushed_same_row_write() {
+        // a later, still-unflushed GridLine must not elide an earlier run
+        // that already reached a Flush. Without the
+        // compaction_start() boundary, this fold's same-row full-coverage
+        // check has no reason to distinguish the two batches (no resize or
+        // scroll occurred between them) and would tombstone the flushed
+        // row's content -- a frame that never existed on the wire.
+        let mut buf = DamageBuffer::default();
+        let resize = UiEvent::GridResize {
+            grid: 1,
+            width: 20,
+            height: 20,
+        };
+        buf.fold_batch(vec![
+            resize.clone(),
+            line(0, 0, 5),
+            line(2, 0, 5),
+            UiEvent::Flush,
+        ]);
+        buf.fold_batch(vec![line(0, 0, 10)]); // fully covers row 0, but unflushed
+
+        let drained = buf.take();
+        assert_eq!(
+            drained,
+            vec![resize, line(0, 0, 5), line(2, 0, 5), UiEvent::Flush],
+            "the flushed row-0 write must survive the later unflushed same-row fold"
+        );
+
+        // the unflushed line is still staged, retained for the next flush
+        let drained2 = {
+            buf.fold_batch(vec![UiEvent::Flush]);
+            buf.take()
+        };
+        assert_eq!(drained2, vec![line(0, 0, 10), UiEvent::Flush]);
+    }
+
+    #[test]
+    fn unflushed_grid_clear_does_not_drop_an_already_flushed_line() {
+        // a later, still-unflushed GridClear must not drop an earlier run
+        // that already reached a Flush. GridClear's
+        // drop rule is barrier_epoch-gated, not flush-gated, so without the
+        // compaction_start() boundary it would tombstone the flushed line
+        // too (no resize happened between the two folds).
+        let mut buf = DamageBuffer::default();
+        let resize = UiEvent::GridResize {
+            grid: 1,
+            width: 20,
+            height: 20,
+        };
+        buf.fold_batch(vec![resize.clone(), line(0, 0, 5), UiEvent::Flush]);
+        buf.fold_batch(vec![UiEvent::GridClear { grid: 1 }]); // unflushed
+
+        let drained = buf.take();
+        assert_eq!(
+            drained,
+            vec![resize, line(0, 0, 5), UiEvent::Flush],
+            "the flushed line must survive the later unflushed GridClear"
+        );
+
+        // the unflushed clear is still staged, retained for the next flush
+        let drained2 = {
+            buf.fold_batch(vec![UiEvent::Flush]);
+            buf.take()
+        };
+        assert_eq!(
+            drained2,
+            vec![UiEvent::GridClear { grid: 1 }, UiEvent::Flush]
+        );
+    }
+
+    #[test]
     fn ten_thousand_undrained_folds_produce_at_most_one_channel_token() {
         // watchdog: the pending-flag dedup plus non-blocking try_send means
         // this loop cannot legitimately block; a regression that made
@@ -636,6 +774,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn failed_redraw_token_send_disarms_pending_flag_so_next_fold_retries() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let pump = shared.attach_sink(tx.clone());
+        // fill the channel's one slot with a dummy Msg so this fold's
+        // RedrawReady token has nowhere to land and try_send fails
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+        assert!(matches!(rx.try_recv(), Ok(Msg::Resized { .. })));
+        assert!(
+            rx.try_recv().is_err(),
+            "no RedrawReady token reached the channel from the failed send"
+        );
+
+        // a fold after the disarm must re-arm and retry, now there is room
+        shared.fold_redraw(vec![line(1, 0, 1), UiEvent::Flush]);
+        assert!(
+            matches!(rx.try_recv(), Ok(Msg::RedrawReady)),
+            "a fold after a disarmed flag must re-attempt the RedrawReady send"
+        );
+
+        // the damage from both folds was never lost, only its wakeup was
+        let drained = pump.take_damage();
+        assert_eq!(
+            drained,
+            vec![line(0, 0, 1), UiEvent::Flush, line(1, 0, 1), UiEvent::Flush]
+        );
+    }
+
+    #[test]
+    fn route_terminal_blocks_on_a_full_channel_then_still_delivers_engine_stopped() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let _pump = shared.attach_sink(tx.clone());
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        let blocked = Arc::clone(&shared);
+        let sender = std::thread::spawn(move || {
+            blocked.route_terminal(Msg::EngineStopped);
+        });
+
+        // give the blocking send every chance to have wrongly returned
+        // early on the full channel (a regression back to try_send)
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !sender.is_finished(),
+            "route_terminal must block while the channel has no room, not drop and return"
+        );
+
+        // drain the dummy, freeing the slot the blocked send is waiting for
+        assert!(matches!(rx.recv(), Ok(Msg::Resized { .. })));
+        sender.join().expect("blocked sender thread must not panic");
+
+        assert!(
+            matches!(rx.recv(), Ok(Msg::EngineStopped)),
+            "EngineStopped must arrive once the channel has room, not be dropped"
+        );
+    }
+
     // -- compaction property: generative, scroll-interleaved, subsequence-preserving --
 
     /// Minimal xorshift64: no external randomness dependency for a
@@ -660,7 +867,7 @@ mod tests {
     const GRID_H: u64 = 4;
 
     fn gen_event(rng: &mut Xorshift) -> UiEvent {
-        match rng.below(8) {
+        match rng.below(10) {
             0 => line(rng.below(GRID_H), rng.below(GRID_W), 1 + rng.below(GRID_W)),
             1 => UiEvent::GridScroll {
                 grid: 1,
@@ -694,11 +901,22 @@ mod tests {
                 mode: "insert".to_string(),
                 mode_idx: rng.below(3),
             },
-            _ => UiEvent::MsgShow {
+            7 => UiEvent::MsgShow {
                 kind: "echomsg".to_string(),
                 content: vec![(0, format!("m{}", rng.below(1000)))],
                 replace_last: rng.below(2) == 0,
             },
+            // deliberately a small range close to GRID_W/GRID_H rather than
+            // an unrelated size: out-of-bounds cell ops are safe no-ops
+            // (Grid::apply), but a resize wildly smaller than the row/col
+            // range GridLine/GridCursorGoto generate would make most of
+            // them land off-grid and exercise nothing
+            8 => UiEvent::GridResize {
+                grid: 1,
+                width: 1 + rng.below(GRID_W + 2),
+                height: 1 + rng.below(GRID_H + 2),
+            },
+            _ => UiEvent::Flush,
         }
     }
 
@@ -727,13 +945,9 @@ mod tests {
         )
     }
 
-    /// Applies `events` through `update()` (the same `UiEvent` -> `GridOp`
-    /// translation the runtime loop uses) and returns enough of the
-    /// resulting `Grid` to compare final states: every cell plus the
-    /// cursor, since `Grid` itself has no `PartialEq`.
-    fn grid_snapshot(events: Vec<UiEvent>) -> (Vec<view_core::grid::Cell>, (u16, u16), (u16, u16)) {
-        let mut model = Model::new();
-        let _ = update(&mut model, view_core::msg::Msg::Redraw(events));
+    /// Enough of `model`'s `Grid` to compare final states: every cell plus
+    /// size plus the cursor, since `Grid` itself has no `PartialEq`.
+    fn grid_state(model: &Model) -> (Vec<view_core::grid::Cell>, (u16, u16), (u16, u16)) {
         let (w, h) = model.engine.grid.size();
         let mut cells = Vec::with_capacity(usize::from(w) * usize::from(h));
         for r in 0..h {
@@ -742,6 +956,15 @@ mod tests {
             }
         }
         (cells, (w, h), model.engine.grid.cursor())
+    }
+
+    /// Applies `events` through `update()` (the same `UiEvent` -> `GridOp`
+    /// translation the runtime loop uses), from a fresh `Model`, and
+    /// returns its final [`grid_state`].
+    fn grid_snapshot(events: Vec<UiEvent>) -> (Vec<view_core::grid::Cell>, (u16, u16), (u16, u16)) {
+        let mut model = Model::new();
+        let _ = update(&mut model, Msg::Redraw(events));
+        grid_state(&model)
     }
 
     #[test]
@@ -767,6 +990,107 @@ mod tests {
             assert_eq!(
                 raw_other, compacted_other,
                 "seed {seed}: non-GridOp subsequence diverged in content or order"
+            );
+        }
+    }
+
+    /// A `DamageBuffer`-shaped shadow with zero compaction: stages every
+    /// event as-is and drains through the same flush-boundary rule as
+    /// `DamageBuffer::take`. Driven through the exact same fold/take call
+    /// schedule as a real `DamageBuffer` in the test below, so its
+    /// `flush_index` stays isomorphic to the real buffer's at every step
+    /// (neither ever removes or reorders a `Flush`), which makes any
+    /// divergence between what the two return from a given `take()` call
+    /// attributable only to compaction, not to a difference in which span
+    /// of the raw sequence each one thinks is flushed.
+    struct RawShadow {
+        staged: Vec<UiEvent>,
+        flush_index: Option<usize>,
+    }
+
+    impl RawShadow {
+        fn fold(&mut self, events: impl IntoIterator<Item = UiEvent>) {
+            for ev in events {
+                let is_flush = matches!(ev, UiEvent::Flush);
+                self.staged.push(ev);
+                if is_flush {
+                    self.flush_index = Some(self.staged.len() - 1);
+                }
+            }
+        }
+
+        fn take(&mut self) -> Vec<UiEvent> {
+            let Some(idx) = self.flush_index else {
+                return Vec::new();
+            };
+            self.flush_index = None;
+            self.staged.drain(..=idx).collect()
+        }
+    }
+
+    #[test]
+    fn compaction_multi_take_schedule_matches_raw_at_each_flush_boundary() {
+        // fold some events, take, fold more, take again, generatively: take()
+        // calls do not line up with fold_batch's own chunk boundaries, and
+        // gen_event is free to emit Flush and GridResize mid-sequence (not
+        // just the fixed leading resize / trailing flush gen_sequence itself
+        // appends).
+        for seed in 0..300u64 {
+            let raw = gen_sequence(seed, 60);
+
+            let mut buf = DamageBuffer::default();
+            let mut shadow = RawShadow {
+                staged: Vec::new(),
+                flush_index: None,
+            };
+            let mut sched_rng = Xorshift(seed.wrapping_mul(48_271) | 1);
+            let mut compacted_model = Model::new();
+            let mut raw_model = Model::new();
+            let mut any_take_verified = false;
+
+            let mut idx = 0usize;
+            while idx < raw.len() {
+                let chunk = (1 + sched_rng.below(4) as usize).min(raw.len() - idx);
+                let end = idx + chunk;
+                buf.fold_batch(raw[idx..end].iter().cloned());
+                shadow.fold(raw[idx..end].iter().cloned());
+                idx = end;
+
+                // take on roughly half of steps, and unconditionally on the
+                // last chunk so nothing generated is left unverified
+                if sched_rng.below(2) != 0 && idx != raw.len() {
+                    continue;
+                }
+                let compacted_batch = buf.take();
+                let raw_batch = shadow.take();
+                if compacted_batch.is_empty() && raw_batch.is_empty() {
+                    continue;
+                }
+                any_take_verified = true;
+
+                let _ = update(&mut compacted_model, Msg::Redraw(compacted_batch.clone()));
+                let _ = update(&mut raw_model, Msg::Redraw(raw_batch.clone()));
+                assert_eq!(
+                    grid_state(&compacted_model),
+                    grid_state(&raw_model),
+                    "seed {seed}: grid state diverged after a mid-schedule take(); \
+                     compacted batch={compacted_batch:?} raw batch={raw_batch:?}"
+                );
+
+                let compacted_other: Vec<&UiEvent> = compacted_batch
+                    .iter()
+                    .filter(|e| !is_grid_op_event(e))
+                    .collect();
+                let raw_other: Vec<&UiEvent> =
+                    raw_batch.iter().filter(|e| !is_grid_op_event(e)).collect();
+                assert_eq!(
+                    compacted_other, raw_other,
+                    "seed {seed}: non-GridOp subsequence diverged mid-schedule"
+                );
+            }
+            assert!(
+                any_take_verified,
+                "seed {seed}: schedule never actually drained anything"
             );
         }
     }
