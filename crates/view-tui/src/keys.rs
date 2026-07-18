@@ -15,6 +15,18 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// since crossterm already reports the shifted character itself (`A`
 /// rather than `a` with `SHIFT` set).
 ///
+/// `BackTab` (crossterm's dedicated code for Shift+Tab, always reachable
+/// on the legacy parser on both Unix and Windows) maps to `<S-Tab>`. The
+/// shift semantics are baked into that mapping already, so the `Shift`
+/// wrapper is never applied a second time even if crossterm also sets the
+/// `SHIFT` modifier bit alongside `BackTab`; the result is always
+/// `<S-Tab>` (or `<C-S-Tab>` with `Ctrl` held too), never `<S-S-Tab>`.
+///
+/// Plain, unmodified space passes through as a literal `" "`, byte-identical
+/// to typed input. Space held with `Ctrl` and/or `Alt` uses the named token
+/// `Space` instead of embedding the raw space character, producing
+/// `<C-Space>` / `<M-Space>` rather than the malformed `<C- >`.
+///
 /// Returns `None` for key data view does not forward to nvim: key-release
 /// events (only reported when a terminal's keyboard-enhancement protocol
 /// is enabled) and key codes with no nvim input equivalent, such as media
@@ -25,21 +37,33 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
         return None;
     }
 
-    let (bare, always_bracketed) = key_token(ev.code)?;
+    let (mut bare, always_bracketed) = key_token(ev.code)?;
     let is_plain_char = matches!(ev.code, KeyCode::Char(c) if c != '<');
+    // BackTab already means Shift+Tab; some terminals additionally set the
+    // SHIFT bit on the event, which would otherwise double up the prefix.
+    let shift_baked_in = matches!(ev.code, KeyCode::BackTab);
 
     let mut prefix = String::new();
     if ev.modifiers.contains(KeyModifiers::CONTROL) {
         prefix.push_str("C-");
     }
-    if !is_plain_char && ev.modifiers.contains(KeyModifiers::SHIFT) {
+    if shift_baked_in || (!is_plain_char && ev.modifiers.contains(KeyModifiers::SHIFT)) {
         prefix.push_str("S-");
     }
     if ev.modifiers.contains(KeyModifiers::ALT) {
         prefix.push_str("M-");
     }
 
-    Some(if always_bracketed || !prefix.is_empty() {
+    let wrap = always_bracketed || !prefix.is_empty();
+    // Space has no dedicated KeyCode; it arrives as Char(' '). Unmodified it
+    // must stay a literal space for byte-identical typing, but once wrapped
+    // in a modifier prefix the raw space would render as the malformed
+    // "<C- >", so swap in the named token only in the wrapped case.
+    if wrap && ev.code == KeyCode::Char(' ') {
+        bare = "Space".to_string();
+    }
+
+    Some(if wrap {
         format!("<{prefix}{bare}>")
     } else {
         bare
@@ -59,6 +83,7 @@ fn key_token(code: KeyCode) -> Option<(String, bool)> {
         KeyCode::Enter => ("CR".to_string(), true),
         KeyCode::Esc => ("Esc".to_string(), true),
         KeyCode::Tab => ("Tab".to_string(), true),
+        KeyCode::BackTab => ("Tab".to_string(), true),
         KeyCode::Up => ("Up".to_string(), true),
         KeyCode::Down => ("Down".to_string(), true),
         KeyCode::Left => ("Left".to_string(), true),
@@ -149,6 +174,46 @@ mod tests {
             ))
             .unwrap(),
             "<C-S-CR>"
+        );
+    }
+
+    #[test]
+    fn backtab_maps_to_shift_tab() {
+        assert_eq!(
+            encode_key(&key(KeyCode::BackTab, KeyModifiers::NONE)).unwrap(),
+            "<S-Tab>"
+        );
+    }
+
+    #[test]
+    fn backtab_with_shift_bit_does_not_double_wrap() {
+        assert_eq!(
+            encode_key(&key(KeyCode::BackTab, KeyModifiers::SHIFT)).unwrap(),
+            "<S-Tab>"
+        );
+    }
+
+    #[test]
+    fn ctrl_space_uses_named_token() {
+        assert_eq!(
+            encode_key(&key(KeyCode::Char(' '), KeyModifiers::CONTROL)).unwrap(),
+            "<C-Space>"
+        );
+    }
+
+    #[test]
+    fn alt_space_uses_named_token() {
+        assert_eq!(
+            encode_key(&key(KeyCode::Char(' '), KeyModifiers::ALT)).unwrap(),
+            "<M-Space>"
+        );
+    }
+
+    #[test]
+    fn plain_space_stays_literal() {
+        assert_eq!(
+            encode_key(&key(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap(),
+            " "
         );
     }
 }
