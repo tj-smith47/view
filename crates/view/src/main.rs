@@ -88,10 +88,12 @@ fn main() -> Result<()> {
     // the only request the setup path makes; once the loop below starts,
     // every nvim call goes through notify so a slow response never stalls a
     // frame or a keystroke
+    // the underlying EngineError::Timeout variant's Display already names
+    // the elapsed timeout, so this context only needs to name the call
     engine
         .handle
         .ui_attach(width, height)
-        .context("ui attach failed")?;
+        .context("ui attach failed or timed out")?;
 
     let mut grid = Grid::new();
     let mut hl = HlTable {
@@ -171,7 +173,7 @@ fn main() -> Result<()> {
                                 bg,
                                 bold,
                                 italic,
-                                underline: _,
+                                underline,
                                 reverse,
                             } => {
                                 hl.attrs.insert(
@@ -181,6 +183,7 @@ fn main() -> Result<()> {
                                         bg,
                                         bold,
                                         italic,
+                                        underline,
                                         reverse,
                                     },
                                 );

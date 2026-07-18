@@ -251,6 +251,63 @@ fn view_paints_typed_text_in_a_pty() {
     let _ = session.child.wait();
 }
 
+#[test]
+fn view_paints_wide_character_without_corrupting_neighbor_cell() {
+    let mut session = spawn_view_pty();
+
+    // "you", a double-width CJK character, immediately followed by an
+    // ASCII neighbor: if the grid's wide-cell handling is off by one, this
+    // is what would either overwrite or get overwritten by the adjacent
+    // narrow cell.
+    session.send("i你X".as_bytes());
+    assert!(
+        session.wait_for("你X", Duration::from_secs(5)),
+        "screen never showed the CJK character next to its neighbor; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    let screen = session.parser.screen();
+    let not_found_msg = format!(
+        "CJK character not found in any screen cell; last screen:\n{}",
+        screen.contents()
+    );
+    let (row, col) = (0..24)
+        .flat_map(|r| (0..78).map(move |c| (r, c)))
+        .find(|&(r, c)| {
+            screen
+                .cell(r, c)
+                .is_some_and(|cell| cell.contents() == "你")
+        })
+        .expect(&not_found_msg);
+
+    let wide = screen.cell(row, col).unwrap();
+    assert!(
+        wide.is_wide(),
+        "cell ({row},{col}) holding the CJK character was not flagged wide by the terminal parser"
+    );
+
+    let continuation = screen
+        .cell(row, col + 1)
+        .expect("wide character's continuation cell missing");
+    assert!(
+        continuation.is_wide_continuation(),
+        "cell ({row},{}) was not marked as the wide character's continuation",
+        col + 1
+    );
+
+    let neighbor = screen
+        .cell(row, col + 2)
+        .expect("neighbor cell after the wide character missing");
+    assert_eq!(
+        neighbor.contents(),
+        "X",
+        "neighbor cell corrupted by the adjacent wide character"
+    );
+
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn view_exits_nonzero_when_engine_dies_by_signal() {

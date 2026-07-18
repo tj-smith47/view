@@ -15,6 +15,8 @@ pub struct HlAttr {
     pub bold: bool,
     /// Whether the group renders italic.
     pub italic: bool,
+    /// Whether the group renders underlined.
+    pub underline: bool,
     /// Whether foreground and background swap for this group.
     pub reverse: bool,
 }
@@ -91,6 +93,9 @@ fn style_for(hl_id: u64, table: &HlTable) -> Style {
         if a.italic {
             style = style.add_modifier(ratatui::style::Modifier::ITALIC);
         }
+        if a.underline {
+            style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
+        }
     }
     if let Some(c) = fg {
         style = style.fg(rgb(c));
@@ -103,4 +108,51 @@ fn style_for(hl_id: u64, table: &HlTable) -> Style {
 
 fn rgb(c: u32) -> Color {
     Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn table_with(attr: HlAttr) -> HlTable {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert(1, attr);
+        HlTable {
+            default_fg: None,
+            default_bg: None,
+            attrs,
+        }
+    }
+
+    #[test]
+    fn underline_attr_sets_underlined_modifier() {
+        let table = table_with(HlAttr {
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: true,
+            reverse: false,
+        });
+        let style = style_for(1, &table);
+        assert!(style
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn no_underline_attr_leaves_modifier_unset() {
+        let table = table_with(HlAttr {
+            fg: None,
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        });
+        let style = style_for(1, &table);
+        assert!(!style
+            .add_modifier
+            .contains(ratatui::style::Modifier::UNDERLINED));
+    }
 }

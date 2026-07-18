@@ -33,4 +33,45 @@ done
 for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view; do
   check_absent "$crate" rmpv
 done
+
+# Resolved-graph check: cargo metadata --no-deps (used by check_absent above)
+# only sees each package's own declared manifest edges, so a forbidden
+# runtime crate pulled in transitively through some unrelated dependency
+# would be invisible to it. `cargo tree -i` walks the fully resolved
+# dependency graph in reverse from the forbidden crate, catching a leak
+# check_absent cannot.
+check_transitive_reach() { # usage: check_transitive_reach <forbidden-dep> [allowed-workspace-member ...]
+  local dep="$1"
+  shift
+  local allowed=("$@")
+  local out
+  out="$(cargo tree -i "$dep" -e normal --prefix none 2>/dev/null)" || true
+  # only local path+file packages are this workspace's members; an external
+  # crates.io dependent elsewhere in the same reverse tree isn't ours to
+  # gate
+  local reachers
+  # `|| true`: grep legitimately finds nothing when a forbidden crate is
+  # unreachable from the workspace at all (the desired outcome for the
+  # async-runtime crates), and pipefail must not treat that "no match" as a
+  # script-ending failure
+  reachers="$(grep -E ' \(/.*\)$' <<<"$out" | awk '{print $1}' | sort -u || true)"
+  local member
+  while IFS= read -r member; do
+    [ -z "$member" ] && continue
+    local ok=0
+    for a in "${allowed[@]}"; do
+      [ "$member" = "$a" ] && ok=1 && break
+    done
+    if [ "$ok" -eq 0 ]; then
+      echo "AUDIT FAIL: $dep is transitively reachable from $member (resolved graph); only [${allowed[*]:-nothing}] may reach it"
+      fail=1
+    fi
+  done <<<"$reachers"
+}
+check_transitive_reach rmpv view-engine view
+check_transitive_reach crossterm view-tui view
+check_transitive_reach ratatui view-tui view
+check_transitive_reach tokio
+check_transitive_reach async-std
+check_transitive_reach smol
 exit $fail

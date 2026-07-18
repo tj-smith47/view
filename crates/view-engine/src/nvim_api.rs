@@ -6,6 +6,16 @@
 
 use crate::handle::{EngineError, EngineHandle};
 use rmpv::Value;
+use std::time::Duration;
+
+/// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
+/// reply before giving up.
+///
+/// The caller issues this request after the terminal has already entered
+/// raw mode; an unbounded wait against a wedged engine would leave the
+/// terminal in that state with no way out short of killing the process from
+/// outside.
+const UI_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl EngineHandle {
     /// Attaches this connection as nvim's UI at `width` x `height` cells with
@@ -15,20 +25,24 @@ impl EngineHandle {
     /// before entering the paint loop. This is the only request the paint
     /// loop's setup makes; every nvim call issued once the loop is running
     /// goes through `notify` instead, so a slow response never stalls a
-    /// frame.
+    /// frame. Bounded by [`UI_ATTACH_TIMEOUT`] rather than unbounded, since
+    /// the caller has typically already put the terminal into raw mode by
+    /// this point, and an unresponsive engine must not freeze it forever.
     ///
     /// # Errors
     ///
-    /// Returns the `EngineError` from the underlying request if it fails or
-    /// nvim rejects the attach.
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the attach, or the reply does not arrive within
+    /// [`UI_ATTACH_TIMEOUT`].
     pub fn ui_attach(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        self.request(
+        self.request_timeout(
             "nvim_ui_attach",
             vec![
                 Value::from(width),
                 Value::from(height),
                 Value::Map(vec![(Value::from("ext_linegrid"), Value::from(true))]),
             ],
+            UI_ATTACH_TIMEOUT,
         )?;
         Ok(())
     }
