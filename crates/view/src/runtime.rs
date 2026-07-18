@@ -185,6 +185,7 @@ impl<E: EngineOps> Executor<E> {
 /// reproducing it here would be dead code, not defensive coverage.
 #[must_use]
 pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, msg: Msg) -> Flow {
+    crate::vlog::log_msg(&msg);
     let mut flow = Flow::Continue;
     for eff in update(model, msg) {
         match executor.run(eff) {
@@ -263,6 +264,7 @@ pub fn run(
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
+            crate::vlog::log_msg(&msg);
             for eff in update(&mut model, msg) {
                 match executor.run(eff) {
                     Flow::Continue => {}

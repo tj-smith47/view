@@ -6,6 +6,7 @@
 mod runtime;
 mod startup;
 mod theme_cache;
+mod vlog;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -57,6 +58,7 @@ fn main() -> Result<()> {
     // Term::init: the capability probe that init() runs is itself startup
     // work the design spec's 50ms target is meant to cover
     let process_start = Instant::now();
+    vlog::init(process_start);
     let cli = Cli::parse();
     let mut cfg = EngineConfig::default();
     if let Some(bin) = cli.nvim_bin {
@@ -73,6 +75,13 @@ fn main() -> Result<()> {
 
     let mut model = Model::with_term_size(width, height);
     model.caps = term.caps();
+    vlog::log(
+        "startup",
+        &format!(
+            "caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",
+            model.caps.tier, model.caps.sync, model.caps.truecolor, model.caps.kitty_kbd
+        ),
+    );
     // opts into startup's placeholder shell (statusline bar plus a static
     // "waiting for nvim" indicator) instead of Model's ordinary
     // already-running default; update() flips this back to true for good
@@ -87,12 +96,21 @@ fn main() -> Result<()> {
     let config_path = theme_cache::resolved_config_path();
     match &config_path {
         Some(path) => {
+            let cached = theme_cache::load(path);
+            vlog::log(
+                "theme",
+                &format!(
+                    "cache {} path={}",
+                    if cached.is_some() { "hit" } else { "miss" },
+                    path.display()
+                ),
+            );
             // only seeds on a genuine cache hit: seeding from a miss's
             // Theme::default() would register TabLineSel/PmenuSel with
             // all-false attrs, permanently defeating Theme::from_hl's
             // emphasis fallback for the pre-attach frame (see
             // theme_cache::load's doc comment)
-            if let Some(cached) = theme_cache::load(path) {
+            if let Some(cached) = cached {
                 theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
             }
         }
@@ -118,15 +136,29 @@ fn main() -> Result<()> {
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
     let drained = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
-    let mut engine = engine_rx
+    let attach_result = engine_rx
         .recv()
-        .context("engine attach thread ended without a result")?
-        .map_err(|failure| match failure {
-            startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
-                .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
-            startup::AttachFailure::Attach(err) => anyhow::Error::new(err)
-                .context("engine attach failed or timed out after nvim started"),
-        })?;
+        .context("engine attach thread ended without a result")?;
+    match &attach_result {
+        Ok(engine) => vlog::log(
+            "engine",
+            &format!(
+                "attach ok pid={} channel={} api={}.{}",
+                engine.pid(),
+                engine.api_info.channel_id,
+                engine.api_info.version_major,
+                engine.api_info.version_minor
+            ),
+        ),
+        Err(failure) => vlog::log("engine", &format!("attach failed: {failure:?}")),
+    }
+    let mut engine = attach_result.map_err(|failure| match failure {
+        startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
+            .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
+        startup::AttachFailure::Attach(err) => {
+            anyhow::Error::new(err).context("engine attach failed or timed out after nvim started")
+        }
+    })?;
 
     // attach_sink -- the only code path that connects the engine's pump to
     // msg_tx at all -- runs here, strictly after EngineReady was already
@@ -163,6 +195,7 @@ fn main() -> Result<()> {
     );
     if let startup::CutoverOutcome::Quit(code) = outcome {
         persist_theme(&model, &config_path);
+        vlog::log("engine", &format!("exit code={code}"));
         // nvim already reported its own exit (a presink Msg::EngineStopped,
         // translated by run_cutover): drop explicitly so Engine's Drop
         // graceful-shutdown sequence still runs, since process::exit below
@@ -175,6 +208,7 @@ fn main() -> Result<()> {
 
     let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
     persist_theme(&model, &config_path);
+    vlog::log("engine", &format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error
     // propagated via `?` above) is covered by `Drop` on `term`.
@@ -202,6 +236,7 @@ fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
 /// comment in `view-core`).
 fn report_fatal_reason(model: &Model) {
     if let Some(reason) = &model.fatal_reason {
+        vlog::log("fatal", reason);
         eprintln!("view: {reason}");
     }
 }
