@@ -7,7 +7,7 @@ pub mod process;
 pub mod rpc;
 pub mod ui_events;
 
-pub use damage::DamagePump;
+pub use damage::{DamagePump, SinkCutover};
 pub use handle::{EngineError, EngineHandle, EngineNotification};
 pub use process::{ApiInfo, Engine, EngineConfig};
 pub use rpc::{RpcError, RpcMessage};

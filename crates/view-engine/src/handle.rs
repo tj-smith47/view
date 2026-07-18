@@ -650,16 +650,26 @@ mod tests {
         std::thread::sleep(Duration::from_millis(50));
 
         let (tx, rx) = mpsc::sync_channel(64);
-        let _dpump = pump.attach_sink(tx);
+        let (_dpump, cutover) = pump.attach_sink(tx);
 
-        let first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
-        let second = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let msgid_of = |m: &Msg| match m {
             Msg::EngineRequest(EngineRequest::VimEnter { token }) => token.msgid,
             other => unreachable!("expected Msg::EngineRequest(VimEnter), got {other:?}"),
         };
-        assert_eq!(msgid_of(&first), 1, "arrival order not preserved");
-        assert_eq!(msgid_of(&second), 2, "arrival order not preserved");
+        assert_eq!(cutover.presink.len(), 2);
+        assert_eq!(
+            msgid_of(&cutover.presink[0]),
+            1,
+            "arrival order not preserved"
+        );
+        assert_eq!(
+            msgid_of(&cutover.presink[1]),
+            2,
+            "arrival order not preserved"
+        );
+        // attach_sink returns staged state instead of sending it: nothing
+        // ever reaches a channel with no consumer yet
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

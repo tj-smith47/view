@@ -7,7 +7,7 @@
 //! to flush shada and remove its swap file instead of leaving behind a
 //! recovery prompt on the next open.
 
-use crate::damage::{DamagePump, PumpShared};
+use crate::damage::{DamagePump, PumpShared, SinkCutover};
 use crate::handle::{EngineError, EngineHandle};
 use rmpv::Value;
 use std::ffi::OsString;
@@ -171,15 +171,17 @@ impl Engine {
     }
 
     /// Attaches the runtime loop's bounded `Msg` channel and returns the
-    /// [`DamagePump`] handle for draining compacted damage from it.
-    ///
-    /// Redraws and known engine-initiated requests that arrived between
-    /// `spawn` and this call are not lost: any damage already staged sends
-    /// one `Msg::RedrawReady` immediately, and any staged `Msg`s (a
-    /// `view_vim_enter` firing during the window before this call, most
-    /// notably) drain into `sink` in arrival order before that.
+    /// [`DamagePump`] handle for draining compacted damage from it, plus
+    /// [`SinkCutover`]: everything that arrived between `spawn` and this
+    /// call (a `view_vim_enter` firing during the window before this call,
+    /// most notably, plus whether damage was already pending), returned
+    /// rather than sent into `sink`. `sink` has no guaranteed consumer yet
+    /// at the moment this call is made, so nothing here performs a send at
+    /// all -- see [`PumpShared::attach_sink`]'s doc comment for why. The
+    /// caller resolves the returned state through its own dispatch path
+    /// once a consumer is guaranteed (see `view`'s `startup::run_cutover`).
     #[must_use]
-    pub fn start_pump(&mut self, sink: SyncSender<Msg>) -> DamagePump {
+    pub fn start_pump(&mut self, sink: SyncSender<Msg>) -> (DamagePump, SinkCutover) {
         self.pump.attach_sink(sink)
     }
 

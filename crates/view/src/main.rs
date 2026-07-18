@@ -12,7 +12,6 @@ use clap::Parser;
 use std::sync::mpsc;
 use std::time::Instant;
 use view_core::model::{Model, Tier};
-use view_core::msg::Msg;
 use view_core::theme::Theme;
 use view_engine::process::EngineConfig;
 use view_tui::terminal::Term;
@@ -123,44 +122,52 @@ fn main() -> Result<()> {
                 .context("engine attach failed or timed out after nvim started"),
         })?;
 
-    // Delivered directly through update()/Executor, never by re-enqueuing
-    // onto msg_tx: msg_tx is a bounded sync_channel(64) with no consumer
-    // running yet (runtime::run's loop starts below), so pushing
-    // buffered-plus-still-queued keys back onto it can exceed capacity and
-    // block `send` forever -- a permanent freeze in raw mode. Total order
-    // survives without a second buffer: every key still sitting in msg_tx
-    // at this point was typed by the input thread after drain_pre_attach
-    // observed Msg::EngineReady (drain_pre_attach is msg_tx's only reader
-    // up to that point), which is after every key in `drained.keys` was
-    // already buffered -- so applying `drained` here, before anything
-    // reads from msg_tx again, reproduces arrival order exactly. The
-    // resize (if any) is applied first: nvim should see the final
-    // pre-attach terminal size before it sees the keys typed at that size.
-    let executor = runtime::Executor::new(engine.handle.clone());
-    let mut engine_alive = true;
-    if let Some((width, height)) = drained.resize {
-        engine_alive = runtime::dispatch(&mut model, &executor, Msg::Resized { width, height })
-            == runtime::Flow::Continue;
-    }
-    // skipped entirely once the resize write itself already reported the
-    // engine gone: further replayed input would fail the same way, and
-    // runtime::run's own loop discovers the same failure cleanly once its
-    // pump is attached below
-    if engine_alive {
-        for key in drained.keys {
-            if runtime::dispatch(&mut model, &executor, Msg::Key(key)) != runtime::Flow::Continue {
-                break;
-            }
-        }
-    }
-
     // attach_sink -- the only code path that connects the engine's pump to
     // msg_tx at all -- runs here, strictly after EngineReady was already
-    // observed and the buffered window was already replayed above; see
-    // startup::attach_in_background's doc comment for why that makes a
-    // pump-originated message landing ahead of EngineReady structurally
-    // impossible rather than merely unobserved.
-    let pump = engine.start_pump(msg_tx.clone());
+    // observed above; see startup::attach_in_background's doc comment for
+    // why that makes a pump-originated message reaching msg_tx ahead of
+    // EngineReady structurally impossible rather than merely unobserved. It
+    // returns what it found staged instead of sending it: msg_tx has no
+    // guaranteed consumer yet at this point (runtime::run's loop starts
+    // below), so a send performed here has no bound on how long it could
+    // block -- see damage::PumpShared::attach_sink's doc comment.
+    let (pump, cutover) = engine.start_pump(msg_tx.clone());
+    let pending_redraw = if cutover.redraw_pending {
+        pump.take_damage()
+    } else {
+        Vec::new()
+    };
+
+    let executor = runtime::Executor::new(engine.handle.clone());
+    // Resolves the presink messages, the pending redraw, and the pre-attach
+    // input buffer directly through update()/Executor -- never by touching
+    // msg_tx, whose only reader (runtime::run's loop) has not started yet.
+    // See run_cutover's doc comment for the full ordering and
+    // no-blocking-send argument.
+    let outcome = startup::run_cutover(
+        &mut model,
+        &executor,
+        &msg_tx,
+        startup::CutoverInput {
+            presink: cutover.presink,
+            pending_redraw,
+            resize: drained.resize,
+            keys: drained.keys,
+        },
+        || engine.wait_exit(),
+    );
+    if let startup::CutoverOutcome::Quit(code) = outcome {
+        if let Some(path) = &config_path {
+            theme_cache::store(Theme::from_hl(&model.engine.hl), path);
+        }
+        // nvim already reported its own exit (a presink Msg::EngineStopped,
+        // translated by run_cutover): drop explicitly so Engine's Drop
+        // graceful-shutdown sequence still runs, since process::exit below
+        // would otherwise skip every destructor on this stack
+        drop(engine);
+        term.restore_now();
+        std::process::exit(code);
+    }
 
     let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
     if let Some(path) = &config_path {

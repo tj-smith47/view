@@ -14,14 +14,16 @@
 //! [`attach_in_background`] deliberately never calls
 //! [`Engine::start_pump`]: only `main.rs` does, strictly after
 //! [`drain_pre_attach`] has already observed the [`Msg::EngineReady`]
-//! marker this module sends and the buffered window has been replayed.
-//! See `attach_in_background`'s doc comment for the full ordering
-//! argument this depends on.
+//! marker this module sends. See `attach_in_background`'s doc comment for
+//! the full ordering argument this depends on, and [`run_cutover`]'s doc
+//! comment for how everything `Engine::start_pump` returns (rather than
+//! sends) is resolved once a consumer of `msg_tx` is guaranteed to exist.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::{Receiver, SyncSender};
 use std::time::Instant;
 
+use view_core::events::UiEvent;
 use view_core::model::Model;
 use view_core::msg::{Key, Msg};
 use view_engine::handle::EngineError;
@@ -170,22 +172,24 @@ fn spawn_and_attach(
 ///
 /// This function never calls [`Engine::start_pump`] -- `main.rs` is the
 /// only caller of `start_pump` in the whole process, and it only calls it
-/// after `drain_pre_attach` has already returned (having observed this
-/// exact `EngineReady` send, or a channel disconnect) and the buffered
-/// window has been fully replayed. `Engine::start_pump` -> `attach_sink`
-/// (`view-engine`'s `damage` module) is the *only* code path that connects
-/// the engine's pump (and therefore any `Msg::RedrawReady`,
-/// `Msg::EngineRequest`, or `Msg::EngineStopped`) to `msg_tx` at all --
-/// before it runs, those messages stay staged in the pump's own presink,
-/// untouched by anything reading `msg_tx`. Since that call cannot happen
-/// until strictly after this `EngineReady` send has already been consumed
-/// by `drain_pre_attach`, it is structurally impossible -- not merely
-/// unobserved in testing -- for a pump-routed message to land in `msg_tx`
-/// ahead of `EngineReady`. This is why `drain_pre_attach`'s catch-all match
-/// arm for "any other message kind" is correct rather than merely lucky:
-/// there is no other kind of message this loop could ever see before
-/// `EngineReady`, besides `Msg::Key` and `Msg::Resized` from the input
-/// thread.
+/// after `drain_pre_attach` has already returned, having observed this
+/// exact `EngineReady` send or a channel disconnect. `Engine::start_pump`
+/// -> `attach_sink` (`view-engine`'s `damage` module) is the *only* code
+/// path that connects the engine's pump (and therefore any
+/// `Msg::RedrawReady`, `Msg::EngineRequest`, or `Msg::EngineStopped`) to
+/// `msg_tx` at all -- before it runs, those messages stay staged in the
+/// pump's own presink, untouched by anything reading `msg_tx`; once it
+/// runs, it returns what was staged instead of sending it (see
+/// `attach_sink`'s doc comment), for [`run_cutover`] to resolve directly.
+/// Since `start_pump` cannot be called until strictly after this
+/// `EngineReady` send has already been consumed by `drain_pre_attach`, it
+/// is structurally impossible -- not merely unobserved in testing -- for a
+/// pump-routed message to reach `msg_tx` (by send or by being handed back
+/// through `SinkCutover`) ahead of `EngineReady`. This is why
+/// `drain_pre_attach`'s catch-all match arm for "any other message kind" is
+/// correct rather than merely lucky: there is no other kind of message this
+/// loop could ever see before `EngineReady`, besides `Msg::Key` and
+/// `Msg::Resized` from the input thread.
 pub fn attach_in_background(
     cfg: EngineConfig,
     width: u16,
@@ -206,9 +210,9 @@ pub fn attach_in_background(
     result_rx
 }
 
-/// The pre-attach window's buffered input, for the caller to replay
+/// The pre-attach window's buffered input, for [`run_cutover`] to replay
 /// directly through `update()`/`Executor` (never by re-enqueuing onto the
-/// bounded channel `msg_tx` -- see `main.rs`'s replay call site for why)
+/// bounded channel `msg_tx` -- see `run_cutover`'s doc comment for why)
 /// once attach completes.
 pub struct DrainedInput {
     /// The most recent terminal size observed during the window, if it was
@@ -290,6 +294,143 @@ fn drain_pre_attach_with(
         resize,
         keys: ring.drain(),
     }
+}
+
+/// Everything [`run_cutover`] needs to resolve, gathered by the caller from
+/// `Engine::start_pump`'s `SinkCutover` (`presink`, and `pending_redraw`
+/// once resolved via `DamagePump::take_damage`) and [`drain_pre_attach`]'s
+/// [`DrainedInput`] (`resize`, `keys`). A plain data bundle rather than
+/// separate parameters: `run_cutover` already takes the channel/executor
+/// seam alongside it, and folding the four staged-state fields into one
+/// struct keeps the call site self-describing instead of four
+/// same-shaped-looking positional arguments.
+pub(crate) struct CutoverInput {
+    pub presink: Vec<Msg>,
+    pub pending_redraw: Vec<UiEvent>,
+    pub resize: Option<(u16, u16)>,
+    pub keys: Vec<Key>,
+}
+
+/// What [`run_cutover`] decides once every staged message and buffered
+/// input has been resolved.
+pub(crate) enum CutoverOutcome {
+    /// Every stage resolved with `Flow::Continue`, or the engine connection
+    /// was lost partway through -- discovered cleanly by `runtime::run`'s
+    /// own loop once it starts, the same way a mid-loop write failure
+    /// already is. The caller proceeds to `runtime::run`.
+    Continue,
+    /// `update()` produced `Effect::Quit` while resolving a presink message
+    /// (nvim exited before the runtime loop ever started running). The
+    /// caller exits with this code without calling `runtime::run`.
+    Quit(i32),
+}
+
+/// Resolves everything staged at cutover -- presink messages, pending
+/// damage, then the pre-attach input buffer (latest resize, then every
+/// key, oldest first) -- directly through `runtime::dispatch`, in that
+/// order, then returns so the caller can start `runtime::run`. Never sends
+/// into `msg_tx`; see the "why nothing here can block" section below.
+///
+/// Order matches arrival: presink messages and pending damage were both
+/// staged before this call ever ran (see
+/// `view_engine::damage::PumpShared::attach_sink`'s doc comment), so they
+/// resolve first; every key still sitting in `msg_tx` after this call
+/// returns was typed by the input thread after `drain_pre_attach` observed
+/// `Msg::EngineReady`, which is after every key in `keys` was already
+/// buffered, so applying `keys` here, before `msg_tx` is read again by
+/// `runtime::run`'s loop, reproduces arrival order exactly. The resize (if
+/// any) is applied before the keys typed at that size, so nvim sees the
+/// final pre-attach terminal size first. A presink `Msg::EngineStopped` is
+/// translated to `Msg::EngineDown` exactly like `runtime::run`'s own loop
+/// translates a live one (see `view_core::msg`'s module doc comment):
+/// `dispatch` does not replicate that loop-specific mapping itself, since
+/// it is otherwise unreachable from the `Msg::Key`/`Msg::Resized` messages
+/// replay sends.
+///
+/// `msg_tx` is threaded through as a parameter and never read from this
+/// function's body: it names the exact seam a regression would have to
+/// touch to reintroduce the hazard this function closes, and lets a test
+/// drive this literal function -- not a hand-recreated shape of it --
+/// against a channel with no consumer, to prove that seam stays untouched.
+///
+/// # Why nothing here can ever block on `msg_tx`
+///
+/// Every stage resolves through `runtime::dispatch`, which drives
+/// `update()` -> `Executor` directly and never references `mpsc` at all
+/// (see `dispatch`'s own doc comment). As long as this function's body
+/// keeps making only `dispatch` calls -- never `msg_tx.send`/`try_send` --
+/// a full `msg_tx` with no consumer cannot block it, because there is no
+/// consumer needed for a call this function never makes. `main.rs` calls
+/// this strictly after `Engine::start_pump` has already returned its
+/// `SinkCutover` (never sent into `msg_tx`, see `attach_sink`'s doc
+/// comment) and strictly before `runtime::run`'s loop starts consuming
+/// `msg_tx`, so this is the one place in the whole process that resolves
+/// messages staged before a consumer of `msg_tx` existed.
+pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
+    model: &mut Model,
+    executor: &crate::runtime::Executor<E>,
+    _msg_tx: &SyncSender<Msg>,
+    input: CutoverInput,
+    engine_stopped_exit: impl FnOnce() -> view_core::msg::ExitInfo,
+) -> CutoverOutcome {
+    let CutoverInput {
+        presink,
+        pending_redraw,
+        resize,
+        keys,
+    } = input;
+    let mut engine_alive = true;
+    let mut engine_stopped_exit = Some(engine_stopped_exit);
+
+    for msg in presink {
+        let msg = match msg {
+            Msg::EngineStopped => {
+                let exit = engine_stopped_exit.take().map_or(
+                    view_core::msg::ExitInfo {
+                        code: None,
+                        by_signal: false,
+                    },
+                    |f| f(),
+                );
+                Msg::EngineDown(exit)
+            }
+            other => other,
+        };
+        match crate::runtime::dispatch(model, executor, msg) {
+            crate::runtime::Flow::Continue => {}
+            crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
+            crate::runtime::Flow::EngineLost => {
+                engine_alive = false;
+                break;
+            }
+        }
+    }
+
+    if engine_alive && !pending_redraw.is_empty() {
+        engine_alive = crate::runtime::dispatch(model, executor, Msg::Redraw(pending_redraw))
+            == crate::runtime::Flow::Continue;
+    }
+    if engine_alive {
+        if let Some((width, height)) = resize {
+            engine_alive =
+                crate::runtime::dispatch(model, executor, Msg::Resized { width, height })
+                    == crate::runtime::Flow::Continue;
+        }
+    }
+    // skipped entirely once an earlier write already reported the engine
+    // gone: further replayed input would fail the same way, and
+    // runtime::run's own loop discovers the same failure cleanly once its
+    // pump is attached
+    if engine_alive {
+        for key in keys {
+            if crate::runtime::dispatch(model, executor, Msg::Key(key))
+                != crate::runtime::Flow::Continue
+            {
+                break;
+            }
+        }
+    }
+    CutoverOutcome::Continue
 }
 
 #[cfg(test)]
@@ -414,5 +555,172 @@ mod tests {
         // the oldest ("0") was evicted to make room for the (KEY_RING_CAPACITY)-th key
         assert_eq!(drained.keys[0].notation, "1");
         assert_eq!(*repaints.borrow(), 1);
+    }
+
+    /// Drives the literal production `run_cutover` -- not a hand-recreated
+    /// shape of it -- against a `msg_tx` pre-filled to its full 64-slot
+    /// capacity with no consumer draining it, proving the whole cutover
+    /// (presink dispatch, pending-damage dispatch, resize replay, key
+    /// replay) completes without ever touching that channel. A version that
+    /// writes into `msg_tx` anywhere in this path deadlocks against this
+    /// setup instead of passing.
+    #[test]
+    fn run_cutover_against_a_pre_filled_channel_replays_everything_without_blocking() {
+        use view_core::msg::{EngineRequest, ReplyToken};
+
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(KEY_RING_CAPACITY);
+        for _ in 0..KEY_RING_CAPACITY {
+            tx.send(Msg::Key(key("filler"))).unwrap();
+        }
+        // the channel is now completely full with no consumer draining it --
+        // the exact state main.rs's real msg_tx can be in by the time
+        // cutover runs: the input thread's own blocking sends can fill it
+        // during attach, and runtime::run's loop has not started consuming
+        // yet
+
+        let presink = vec![Msg::EngineRequest(EngineRequest::VimEnter {
+            token: ReplyToken { msgid: 1 },
+        })];
+        let keys: Vec<Key> = (0..KEY_RING_CAPACITY)
+            .map(|i| key(&i.to_string()))
+            .collect();
+
+        let handle = std::thread::spawn(move || {
+            let ops = crate::runtime::FakeOps::default();
+            let executor = crate::runtime::Executor::new(ops);
+            let mut model = Model::with_term_size(80, 24);
+            model.content_painted = false;
+            let outcome = run_cutover(
+                &mut model,
+                &executor,
+                &tx,
+                CutoverInput {
+                    presink,
+                    pending_redraw: vec![UiEvent::Flush],
+                    resize: Some((100, 40)),
+                    keys,
+                },
+                || view_core::msg::ExitInfo {
+                    code: None,
+                    by_signal: false,
+                },
+            );
+            (
+                outcome,
+                model.content_painted,
+                executor.into_ops().calls.into_inner(),
+            )
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            handle.is_finished(),
+            "run_cutover blocked against a fully pre-filled channel with no \
+             consumer -- a channel send was likely reintroduced into the \
+             cutover path"
+        );
+        let (outcome, content_painted, calls) = handle.join().unwrap();
+        assert!(matches!(outcome, CutoverOutcome::Continue));
+        assert!(
+            content_painted,
+            "the pending-damage Flush was not dispatched"
+        );
+        // presink's VimEnter reply, then the resize, then every buffered
+        // key, in that exact order -- the arrival order run_cutover's doc
+        // comment claims
+        let expected_len = 2 + KEY_RING_CAPACITY;
+        assert_eq!(calls.len(), expected_len);
+        assert_eq!(calls[0], "reply(1,Nil)");
+        assert!(calls[1].starts_with("try_resize("));
+        assert_eq!(calls[2], "input(0)");
+        assert_eq!(
+            calls[expected_len - 1],
+            format!("input({})", KEY_RING_CAPACITY - 1)
+        );
+    }
+
+    /// A presink `Msg::EngineStopped` (nvim's reader thread detected the
+    /// connection close before `main.rs` ever called `start_pump`) is
+    /// translated to `Msg::EngineDown` and produces `Effect::Quit`, exactly
+    /// like a live `Msg::EngineStopped` does in `runtime::run`'s own loop.
+    /// Any later presink entries, the pending redraw, and the input replay
+    /// are all skipped once that happens: there is no steady-state loop
+    /// left to hand them to.
+    #[test]
+    fn run_cutover_translates_a_presink_engine_stopped_into_quit_and_skips_the_rest() {
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(4);
+        let ops = crate::runtime::FakeOps::default();
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.content_painted = false;
+
+        let exit_called = std::cell::Cell::new(false);
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &tx,
+            CutoverInput {
+                presink: vec![Msg::EngineStopped],
+                pending_redraw: vec![UiEvent::Flush],
+                resize: Some((100, 40)),
+                keys: vec![key("should-not-be-sent")],
+            },
+            || {
+                exit_called.set(true);
+                view_core::msg::ExitInfo {
+                    code: Some(3),
+                    by_signal: false,
+                }
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Quit(3)));
+        assert!(exit_called.get());
+        // neither the pending Flush nor the replayed key ever reached
+        // update(): Quit short-circuits everything after it
+        assert!(!model.content_painted);
+        assert!(executor.into_ops().calls.into_inner().is_empty());
+    }
+
+    /// Once a dispatch reports the engine connection lost, every later
+    /// stage (pending damage, resize, keys) is skipped rather than
+    /// attempted: a further write would fail the same way, and
+    /// `runtime::run`'s own loop discovers the same failure cleanly once
+    /// its pump is attached.
+    #[test]
+    fn run_cutover_stops_replaying_once_a_write_reports_the_engine_lost() {
+        use view_core::msg::{EngineRequest, ReplyToken};
+
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<Msg>(4);
+        let ops = crate::runtime::FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.content_painted = false;
+
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &tx,
+            CutoverInput {
+                presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
+                    token: ReplyToken { msgid: 1 },
+                })],
+                pending_redraw: vec![UiEvent::Flush],
+                resize: Some((100, 40)),
+                keys: vec![key("a")],
+            },
+            || view_core::msg::ExitInfo {
+                code: None,
+                by_signal: false,
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Continue));
+        // the failed reply is the only call made: pending damage, the
+        // resize, and the key are all skipped once the engine is lost
+        let calls = executor.into_ops().calls.into_inner();
+        assert_eq!(calls, vec!["reply(1,Nil)"]);
+        assert!(!model.content_painted);
     }
 }

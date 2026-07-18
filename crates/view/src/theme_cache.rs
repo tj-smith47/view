@@ -548,12 +548,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Coordinator requirement 5's "loads cleanly" branch: a cache written
-    /// by eae8542 (only `fg`/`bg` keys, no `schema_version`, no named
-    /// groups at all) must still parse successfully under the new schema,
-    /// with every named group correctly defaulting to
-    /// `ResolvedStyle::default()` -- that default is not a guess, it is the
-    /// literal truth for a file that never had named-group data to lose.
+    /// A cache written under an earlier schema version (only `fg`/`bg`
+    /// keys, no `schema_version`, no named groups at all) must still parse
+    /// successfully under the current schema, with every named group
+    /// correctly defaulting to `ResolvedStyle::default()` -- that default is
+    /// not a guess, it is the literal truth for a file that never had
+    /// named-group data to lose.
     #[test]
     fn pre_amendment_cache_without_named_groups_loads_cleanly_with_defaults() {
         let dir = tmp_dir("legacy");

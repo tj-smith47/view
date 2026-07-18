@@ -215,10 +215,10 @@ impl PtySession {
     /// paints real, non-blank text of its own well before the engine
     /// attaches, a bare blank-vs-non-blank check would return as soon as
     /// that placeholder appears rather than once nvim is actually ready --
-    /// exactly the race that silently dropped a paste sent immediately
-    /// after this call in an earlier version of this fix (paste is not one
-    /// of the input kinds `startup::drain_pre_attach` buffers pre-attach;
-    /// see that module's doc comment for the deliberate keys-only scope).
+    /// exactly the race that can silently drop a paste sent immediately
+    /// after this call returns (paste is not one of the input kinds
+    /// `startup::drain_pre_attach` buffers pre-attach; see that module's
+    /// doc comment for the deliberate keys-only scope).
     fn wait_for_startup_redraw(&mut self) {
         let startup_deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < startup_deadline {
@@ -808,26 +808,25 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 /// `KEY_RING_CAPACITY` (64), overlapping a real embedded engine's attach
 /// window, must never freeze the session.
 ///
-/// This is a supplementary, real-engine regression test; the primary
-/// RED/GREEN evidence for the fix this guards
-/// (`runtime::tests::re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
-/// and its paired GREEN test in `runtime.rs`) is a deterministic
-/// unit-level reproduction instead, for a reason worth recording here:
-/// the pre-image's actual hazard requires at least one extra `Msg::Key`
-/// to land in `msg_tx` in the microsecond-scale gap between
-/// `Msg::EngineReady` being read out of the channel and the replay loop's
-/// first `send` call -- both the ring and the channel share the exact
-/// same 64 capacity, so replaying exactly 64 buffered keys into an
-/// otherwise-empty channel fits without blocking. Driving this pty
-/// against the pre-image (a 300ms-delayed engine, 150 keystrokes sent one
-/// at a time over ~450ms to straddle attach completion) reliably filled
-/// the ring to its full 64-key capacity but never observed a leftover key
-/// landing in that microsecond-scale gap, so it passed even against the
-/// unfixed code -- the live race window is real (see C2's "near-certain"
-/// characterization for a paste-sized burst) but not reliably
+/// This is a supplementary, real-engine regression test; the deterministic
+/// unit-level coverage for the hazard shape it guards lives in
+/// `runtime::tests::re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
+/// (`runtime.rs`) and `startup::tests::run_cutover_against_a_pre_filled_channel_replays_everything_without_blocking`
+/// (`startup.rs`), for a reason worth recording here: the hazard this test
+/// aims at requires at least one extra `Msg` to land in `msg_tx` in a
+/// microsecond-scale gap during cutover -- both the ring and the channel
+/// share the exact same 64 capacity, so replaying exactly 64 buffered keys
+/// into an otherwise-empty channel fits without blocking regardless of
+/// whether the code under test still writes into that channel at cutover.
+/// Driving this pty with a 300ms-delayed engine and 150 keystrokes sent one
+/// at a time over ~450ms (to straddle attach completion) reliably fills the
+/// ring to its full 64-key capacity but has never observed a key landing in
+/// that microsecond-scale gap, so this harness cannot reliably distinguish
+/// a version that writes into the channel at cutover from one that does
+/// not -- the live race window is real for a paste-sized burst, just not
 /// reproducible through this harness's timing. Kept here anyway as
-/// end-to-end coverage that a heavy, realistic flood against a real
-/// engine still behaves correctly under the fix.
+/// end-to-end coverage that a heavy, realistic flood against a real engine
+/// still behaves correctly.
 #[test]
 fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let wrapper = write_delayed_nvim_wrapper(300);

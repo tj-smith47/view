@@ -25,7 +25,7 @@ use view_engine::ui_events::UiEvent;
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
-    let pump = engine.start_pump(tx);
+    let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -61,7 +61,7 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
 fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
-    let pump = engine.start_pump(tx);
+    let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
     // entering cmdline mode is what proves the full ext set actually took:
     // without ext_cmdline, nvim paints ":" straight into the grid instead
@@ -130,7 +130,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     };
     let mut engine = Engine::spawn(cfg).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
-    let pump = engine.start_pump(tx);
+    let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
     let dir = std::env::temp_dir().join(format!(

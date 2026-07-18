@@ -126,6 +126,14 @@ impl<E: EngineOps> Executor<E> {
         Self { ops }
     }
 
+    /// Unwraps back to the owned `ops`, so a test can inspect what a fake
+    /// recorded after driving `Executor` through a call it does not
+    /// otherwise expose a getter for.
+    #[cfg(test)]
+    pub(crate) fn into_ops(self) -> E {
+        self.ops
+    }
+
     /// Carries out one effect, infallibly by signature: an engine-write
     /// failure never becomes an `Err` that would abort the UI, since the
     /// `Flow::EngineLost` -> `Msg::EngineDown` path exists precisely to
@@ -274,60 +282,63 @@ pub fn run(
     }
 }
 
+/// Records every call `Executor::run` makes through [`EngineOps`] instead of
+/// touching a real engine connection, so the executor's effect-to-call
+/// mapping is provable without a live nvim. `pub(crate)` (not confined to
+/// this module's own `mod tests`) so `startup`'s cutover tests can drive the
+/// exact same fake through `runtime::dispatch` without a second, duplicate
+/// implementation.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FakeOps {
+    pub(crate) calls: std::cell::RefCell<Vec<String>>,
+    pub(crate) fail_next: std::cell::RefCell<bool>,
+}
+
+#[cfg(test)]
+impl FakeOps {
+    fn record(&self, call: String) -> Result<(), EngineError> {
+        self.calls.borrow_mut().push(call);
+        if *self.fail_next.borrow() {
+            Err(EngineError::Closed)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+impl EngineOps for FakeOps {
+    fn input(&self, notation: &str) -> Result<(), EngineError> {
+        self.record(format!("input({notation})"))
+    }
+    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        self.record(format!("try_resize({width},{height})"))
+    }
+    fn paste(&self, text: &str) -> Result<(), EngineError> {
+        self.record(format!("paste({text})"))
+    }
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "input_mouse({button},{action},{modifier},{row},{col})"
+        ))
+    }
+    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+        self.record(format!("reply({},{value:?})", token.msgid))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use std::cell::RefCell;
-    use view_core::msg::{Effect, ReplyToken, ReplyValue, RpcCall};
-    use view_engine::handle::EngineError;
-
-    /// Records every call `Executor::run` makes through [`EngineOps`]
-    /// instead of touching a real engine connection, so the executor's
-    /// effect-to-call mapping is provable without a live nvim.
-    #[derive(Default)]
-    struct FakeOps {
-        calls: RefCell<Vec<String>>,
-        fail_next: RefCell<bool>,
-    }
-
-    impl FakeOps {
-        fn record(&self, call: String) -> Result<(), EngineError> {
-            self.calls.borrow_mut().push(call);
-            if *self.fail_next.borrow() {
-                Err(EngineError::Closed)
-            } else {
-                Ok(())
-            }
-        }
-    }
-
-    impl EngineOps for FakeOps {
-        fn input(&self, notation: &str) -> Result<(), EngineError> {
-            self.record(format!("input({notation})"))
-        }
-        fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
-            self.record(format!("try_resize({width},{height})"))
-        }
-        fn paste(&self, text: &str) -> Result<(), EngineError> {
-            self.record(format!("paste({text})"))
-        }
-        fn input_mouse(
-            &self,
-            button: &str,
-            action: &str,
-            modifier: &str,
-            row: u16,
-            col: u16,
-        ) -> Result<(), EngineError> {
-            self.record(format!(
-                "input_mouse({button},{action},{modifier},{row},{col})"
-            ))
-        }
-        fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
-            self.record(format!("reply({},{value:?})", token.msgid))
-        }
-    }
 
     #[test]
     fn input_effect_maps_to_engine_ops_input() {
@@ -470,22 +481,20 @@ mod tests {
         assert!(ops.calls.borrow()[0].starts_with("try_resize("));
     }
 
-    /// The RED half of C2's deterministic proof: recreates the exact
-    /// re-enqueue shape `fa54c7c`'s pre-attach replay used -- pushing
-    /// buffered keys back onto the same bounded `sync_channel` `main.rs`'s
-    /// `msg_tx` is (capacity 64, matching both `startup::KEY_RING_CAPACITY`
-    /// and the literal `mpsc::sync_channel(64)` in `main.rs`) while nothing
-    /// is consuming it yet (`runtime::run`'s loop starts only after
-    /// replay). 2 keys already resting in the channel stand in for
-    /// whatever the input thread queued in the narrow gap between
-    /// `Msg::EngineReady` landing and replay actually running (see this
-    /// fix's replay call site in `main.rs`); 64 more (the ring's full
-    /// capacity) is what a maximally-full pre-attach buffer replays. 66
-    /// sends against a capacity-64 channel with zero consumer must block
-    /// on the 65th.
+    /// Recreates re-enqueueing buffered keys onto the same bounded
+    /// `sync_channel` `main.rs`'s `msg_tx` is (capacity 64, matching both
+    /// `startup::KEY_RING_CAPACITY` and the literal `mpsc::sync_channel(64)`
+    /// in `main.rs`) while nothing is consuming it yet (`runtime::run`'s
+    /// loop starts only after cutover). 2 keys already resting in the
+    /// channel stand in for whatever the input thread queued in the narrow
+    /// gap between attach completing and cutover actually running; 64 more
+    /// (the ring's full capacity) is what a maximally-full pre-attach buffer
+    /// replays. 66 sends against a capacity-64 channel with zero consumer
+    /// must block on the 65th.
     ///
     /// Proven with the literal channel primitive rather than by calling
-    /// deleted production code (the old replay loop no longer exists to
+    /// production code directly (`main.rs`'s cutover no longer re-enqueues
+    /// onto `msg_tx` at all, so there is nothing left in that shape to
     /// call): the hazard is a pure channel-capacity/no-consumer property,
     /// independent of which code happens to perform the sends, so
     /// recreating the same capacity and send pattern is a faithful,
@@ -512,7 +521,8 @@ mod tests {
 
         let handle = std::thread::spawn(move || {
             for msg in buffered {
-                // fa54c7c's replay: `msg_tx.send(Msg::Key(key))`
+                // the re-enqueue shape a channel-based replay would use:
+                // `msg_tx.send(Msg::Key(key))`
                 tx.send(msg).unwrap();
             }
         });
@@ -524,7 +534,7 @@ mod tests {
              buffered is 66 sends against a channel of capacity 64 with \
              zero consumer; if this now finishes on its own, the channel's \
              capacity or this test's premise has changed and the hazard \
-             model this fix relies on needs revisiting"
+             model this test's evidence relies on needs revisiting"
         );
         // unblocks the deliberately-leaked sender thread so it can exit
         // cleanly rather than being abandoned mid-block
@@ -532,14 +542,13 @@ mod tests {
         let _ = handle.join();
     }
 
-    /// The GREEN half of C2's deterministic proof, paired with the RED
-    /// test above: the fix's `dispatch`-based replay delivers a flood far
-    /// larger than `KEY_RING_CAPACITY` (64) directly through
-    /// `update()`/`Executor`, touching no channel at all, so there is no
-    /// capacity to exceed regardless of flood size. `dispatch` itself
+    /// Paired with the blocking test above: `dispatch`-based replay
+    /// delivers a flood far larger than `KEY_RING_CAPACITY` (64) directly
+    /// through `update()`/`Executor`, touching no channel at all, so there
+    /// is no capacity to exceed regardless of flood size. `dispatch` itself
     /// (see its definition above) never references `mpsc` -- this is a
-    /// structural guarantee, not a probabilistic one -- and this test
-    /// backs that reading with an observed bound: 1000 dispatches (15x
+    /// structural guarantee, not a probabilistic one -- and this test backs
+    /// that reading with an observed bound: 1000 dispatches (15x
     /// `KEY_RING_CAPACITY`) complete near-instantly rather than blocking.
     #[test]
     fn dispatching_a_flood_of_keys_directly_never_touches_any_channel_and_completes_immediately() {

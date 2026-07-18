@@ -382,36 +382,46 @@ impl PumpShared {
         let _ = sink.send(msg);
     }
 
-    /// Installs `sink`, drains the pre-sink FIFO into it in arrival order,
-    /// then sends one `Msg::RedrawReady` if damage was already staged
-    /// before this call, so nothing that arrived in the setup window is
-    /// lost. Returns the [`DamagePump`] handle for draining compacted
-    /// damage going forward.
-    ///
-    /// The FIFO drain uses a blocking `send` rather than `try_send`: it
-    /// only ever holds the handful of messages that can arrive in the brief
-    /// setup window before this call, on a channel nothing has read from
-    /// yet, so blocking here cannot practically stall the runtime loop, and
-    /// dropping a staged `EngineRequest` would leave nvim's blocking
-    /// `rpcrequest` hung forever.
-    pub(crate) fn attach_sink(self: &Arc<Self>, sink: SyncSender<Msg>) -> DamagePump {
-        {
+    /// Installs `sink` and returns what was already staged before this call
+    /// existed, instead of sending any of it: the presink FIFO's messages in
+    /// arrival order, and whether damage was already pending. `sink` is not
+    /// guaranteed to have a consumer draining it yet at the moment this call
+    /// is made -- the runtime loop that eventually reads it can start well
+    /// after this call returns -- so a send performed here has no bound on
+    /// how long it can block: an unconsumed channel already holding other
+    /// traffic (this project's input thread also sends into the same
+    /// channel, blocking, from a separate thread) can fill up and wedge both
+    /// senders permanently. Returning the staged state instead lets the
+    /// caller resolve it through its own dispatch path once it knows a
+    /// consumer exists, exactly the way [`DamagePump::take_damage`]'s
+    /// `Msg::RedrawReady` catch-up is resolved by `runtime::run`'s loop.
+    /// Routing installed by this call for *steady-state* traffic afterward
+    /// ([`fold_redraw`](Self::fold_redraw), [`route_msg`](Self::route_msg),
+    /// [`route_terminal`](Self::route_terminal)) is unchanged: those still
+    /// write into `sink` directly, because by the time they run, `sink`'s
+    /// real consumer is guaranteed to already be draining it.
+    pub(crate) fn attach_sink(
+        self: &Arc<Self>,
+        sink: SyncSender<Msg>,
+    ) -> (DamagePump, SinkCutover) {
+        let presink = {
             let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
-            route.sink = Some(sink.clone());
-            while let Some(m) = route.presink.pop_front() {
-                let _ = sink.send(m);
-            }
-        }
-        let pending = {
+            route.sink = Some(sink);
+            route.presink.drain(..).collect()
+        };
+        let redraw_pending = {
             let buf = self.damage.lock().unwrap_or_else(PoisonError::into_inner);
             buf.is_pending()
         };
-        if pending {
-            let _ = sink.send(Msg::RedrawReady);
-        }
-        DamagePump {
-            shared: Arc::clone(self),
-        }
+        (
+            DamagePump {
+                shared: Arc::clone(self),
+            },
+            SinkCutover {
+                presink,
+                redraw_pending,
+            },
+        )
     }
 
     fn take_damage(&self) -> Vec<UiEvent> {
@@ -426,6 +436,18 @@ impl PumpShared {
 /// one.
 pub struct DamagePump {
     shared: Arc<PumpShared>,
+}
+
+/// What [`PumpShared::attach_sink`] found already staged before `sink`
+/// existed, returned instead of sent so the caller can resolve it through
+/// its own dispatch path against a channel that may not have a consumer
+/// running yet. `presink` is in arrival order; `redraw_pending` mirrors
+/// [`DamageBuffer::is_pending`] at the moment of the call, for the caller to
+/// resolve via [`DamagePump::take_damage`] the same way `runtime::run`'s
+/// loop resolves a live `Msg::RedrawReady`.
+pub struct SinkCutover {
+    pub presink: Vec<Msg>,
+    pub redraw_pending: bool,
 }
 
 impl DamagePump {
@@ -746,7 +768,7 @@ mod tests {
         // budget instead of failing a normal assertion.
         let shared = PumpShared::new();
         let (tx, rx) = std::sync::mpsc::sync_channel(64);
-        let _pump = shared.attach_sink(tx);
+        let (_pump, _cutover) = shared.attach_sink(tx);
         let flood = std::thread::spawn(move || {
             for i in 0..10_000u64 {
                 shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
@@ -778,7 +800,7 @@ mod tests {
     fn failed_redraw_token_send_disarms_pending_flag_so_next_fold_retries() {
         let shared = PumpShared::new();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
-        let pump = shared.attach_sink(tx.clone());
+        let (pump, _cutover) = shared.attach_sink(tx.clone());
         // fill the channel's one slot with a dummy Msg so this fold's
         // RedrawReady token has nowhere to land and try_send fails
         tx.try_send(Msg::Resized {
@@ -813,7 +835,7 @@ mod tests {
     fn route_terminal_blocks_on_a_full_channel_then_still_delivers_engine_stopped() {
         let shared = PumpShared::new();
         let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
-        let _pump = shared.attach_sink(tx.clone());
+        let (_pump, _cutover) = shared.attach_sink(tx.clone());
         tx.try_send(Msg::Resized {
             width: 1,
             height: 1,
@@ -841,6 +863,54 @@ mod tests {
             matches!(rx.recv(), Ok(Msg::EngineStopped)),
             "EngineStopped must arrive once the channel has room, not be dropped"
         );
+    }
+
+    #[test]
+    fn attach_sink_against_a_full_channel_never_blocks_and_returns_staged_state_instead_of_sending()
+    {
+        let shared = PumpShared::new();
+        // stage a presink message and pending damage before any sink exists,
+        // the exact setup-window state attach_sink must hand back rather
+        // than write into a channel with no guaranteed consumer
+        let _ = shared.route_msg(Msg::Resized {
+            width: 1,
+            height: 1,
+        });
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        tx.try_send(Msg::Resized {
+            width: 9,
+            height: 9,
+        })
+        .expect("channel has capacity for the dummy fill");
+        // the channel is now full with no consumer draining it
+
+        let (_pump, cutover) = shared.attach_sink(tx);
+        assert!(
+            matches!(
+                cutover.presink.as_slice(),
+                [Msg::Resized {
+                    width: 1,
+                    height: 1
+                }]
+            ),
+            "expected the staged presink message returned to the caller, not sent"
+        );
+        assert!(
+            cutover.redraw_pending,
+            "expected the staged damage's pending flag returned as true"
+        );
+        // the dummy fill is still the only thing in the channel: attach_sink
+        // never wrote into it despite there being staged state to deliver
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Msg::Resized {
+                width: 9,
+                height: 9
+            })
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     // -- compaction property: generative, scroll-interleaved, subsequence-preserving --
