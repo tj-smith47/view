@@ -59,6 +59,23 @@ pub enum Msg {
     /// A terminal mouse event, decoded by the input thread from crossterm's
     /// `Event::Mouse` into nvim's button/action/modifier vocabulary.
     Mouse(MouseInput),
+    /// The async reply to an `nvim_get_hl(0, {name = "Normal"})` probe
+    /// issued by `Effect::Rpc(RpcCall::GetDefaultHl)` on every
+    /// `DefaultColorsSet` (see that effect's doc comment for why the probe
+    /// exists). `generation` must match `HlTable::probe_generation` at the
+    /// moment `update()` applies this or it is dropped as stale -- a reply
+    /// for a superseded `DefaultColorsSet` (a colorscheme change that landed
+    /// while an earlier probe was still in flight) must never clobber a
+    /// newer one. `fg`/`bg` are `None` exactly when the probe reply's wire
+    /// map had no `fg`/`bg` key at all, i.e. genuinely unset -- decoded by
+    /// `view-engine`, never re-derived from the wire-ambiguous
+    /// `default_colors_set` values already in `HlTable::default_fg`/
+    /// `default_bg`.
+    HlProbeReply {
+        generation: u64,
+        fg: Option<u32>,
+        bg: Option<u32>,
+    },
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -174,5 +191,19 @@ pub enum RpcCall {
         modifier: String,
         row: u16,
         col: u16,
+    },
+    /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe, tagged
+    /// with `generation` (`HlTable::probe_generation` at the moment
+    /// `update()` emitted this, from its `DefaultColorsSet` arm). Resolves
+    /// the wire ambiguity `default_colors_set` alone cannot: nvim sends
+    /// `rgb_bg = 0` both when `Normal` has no background at all and when a
+    /// colorscheme genuinely sets `guibg = #000000`, and a probe reply's
+    /// `fg`/`bg` map key presence disambiguates the two. Fire-and-forget
+    /// like every other `RpcCall`: the reply crosses back as
+    /// `Msg::HlProbeReply` through the same dispatch seam other
+    /// engine-originated traffic uses, never by blocking the caller that
+    /// emitted this effect.
+    GetDefaultHl {
+        generation: u64,
     },
 }

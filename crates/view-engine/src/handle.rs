@@ -51,6 +51,24 @@ pub struct EngineNotification {
     pub params: Vec<Value>,
 }
 
+/// What a pending request's `msgid` resolves to once its `Response` arrives.
+/// Two shapes share one map (rather than two separate maps keyed by the same
+/// `msgid` space) so `close_and_drain`'s single lock-and-drain step covers
+/// both kinds atomically: a connection loss must fail every synchronous
+/// waiter *and* silently drop every in-flight probe in the same critical
+/// section, or a probe registered between the drain and the flag flip could
+/// survive as a leaked map entry no future `Response` will ever remove.
+enum Waiter {
+    /// A synchronous [`EngineHandle::request`]/`request_timeout` caller
+    /// blocked on `rx.recv()`.
+    Reply(mpsc::Sender<Result<Value, EngineError>>),
+    /// An async `nvim_get_hl` default-colors probe (see
+    /// [`EngineHandle::request_probe`]): nothing is blocked on this `msgid`,
+    /// so its `Response` is decoded and routed to `pump` as
+    /// `Msg::HlProbeReply` instead of sent anywhere synchronous.
+    HlProbe { generation: u64 },
+}
+
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
 /// single lock so a reader or writer thread that discovers the connection
 /// is gone can mark it closed and drain every waiter in one atomic step.
@@ -59,7 +77,7 @@ pub struct EngineNotification {
 /// never be resolved (the original hang this type exists to close).
 #[derive(Default)]
 struct PendingState {
-    waiters: HashMap<u32, mpsc::Sender<Result<Value, EngineError>>>,
+    waiters: HashMap<u32, Waiter>,
     closed: bool,
 }
 
@@ -249,13 +267,34 @@ impl EngineHandle {
                                 .unwrap_or_else(PoisonError::into_inner);
                             p.waiters.remove(&msgid)
                         };
-                        if let Some(tx) = waiter {
-                            let outcome = if error == Value::Nil {
-                                Ok(result)
-                            } else {
-                                Err(EngineError::Remote(error))
-                            };
-                            let _ = tx.send(outcome);
+                        match waiter {
+                            Some(Waiter::Reply(tx)) => {
+                                let outcome = if error == Value::Nil {
+                                    Ok(result)
+                                } else {
+                                    Err(EngineError::Remote(error))
+                                };
+                                let _ = tx.send(outcome);
+                            }
+                            Some(Waiter::HlProbe { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply (e.g. a malformed probe
+                                    // params shape) degrades to "confirmed
+                                    // unset" rather than leaving this
+                                    // generation permanently unresolved: the
+                                    // safe default is the terminal's own
+                                    // background showing through, not a
+                                    // stuck-forever ambiguous state
+                                    let (fg, bg) = if error == Value::Nil {
+                                        decode_hl_probe_reply(&result)
+                                    } else {
+                                        (None, None)
+                                    };
+                                    let _ =
+                                        pump.route_msg(Msg::HlProbeReply { generation, fg, bg });
+                                }
+                            }
+                            None => {}
                         }
                     }
                     Ok(RpcMessage::Notification { method, params }) => {
@@ -510,7 +549,7 @@ impl EngineHandle {
             if p.closed {
                 return Err(EngineError::Closed);
             }
-            p.waiters.insert(msgid, tx);
+            p.waiters.insert(msgid, Waiter::Reply(tx));
         }
         if self.write_tx.send(bytes).is_err() {
             // the writer thread is gone, so nothing will ever write this
@@ -521,17 +560,94 @@ impl EngineHandle {
         }
         Ok((msgid, rx))
     }
+
+    /// Issues `method`/`params` as a request, but registers no synchronous
+    /// waiter and returns as soon as it is queued for the writer thread --
+    /// the async counterpart to [`send_request`](Self::send_request), used
+    /// where the caller must never block on a reply (the paint loop). The
+    /// eventual `Response` is decoded and routed to the connection's pump as
+    /// `Msg::HlProbeReply` (see [`Waiter::HlProbe`]), tagged with
+    /// `generation` so a stale reply can be dropped by `update()` rather
+    /// than clobbering a newer probe's result. Only meaningful on a pumped
+    /// connection ([`Engine::spawn`](crate::process::Engine::spawn)'s only
+    /// production connection kind); on a bare [`EngineHandle::start`]
+    /// connection (test-only), the reply is decoded but has nowhere to
+    /// route, so it is silently dropped once it arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_probe(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
+        let msg = RpcMessage::Request {
+            msgid,
+            method: method.to_owned(),
+            params,
+        };
+        let bytes = encode_message(&msg)?;
+        {
+            let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            if p.closed {
+                return Err(EngineError::Closed);
+            }
+            p.waiters.insert(msgid, Waiter::HlProbe { generation });
+        }
+        if self.write_tx.send(bytes).is_err() {
+            let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+            p.waiters.remove(&msgid);
+            return Err(EngineError::Closed);
+        }
+        Ok(())
+    }
+}
+
+/// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map
+/// keys, live-verified against a real `nvim --embed`: a transparent
+/// `Normal` (`hi Normal guifg=#f8f8f2`, no `guibg`) replies `{fg =
+/// 16316658}` with no `bg` key at all; an explicit background (`hi Normal
+/// guibg=#282a36`) replies `{fg = 16316658, bg = 2632246}` with both
+/// present. A key's absence, not a sentinel value, is what disambiguates
+/// "unset" from "genuinely zero" -- the exact ambiguity `default_colors_set`
+/// alone cannot resolve (see [`view_core::msg::RpcCall::GetDefaultHl`]).
+/// `result` shapes this crate has not seen from a real `nvim_get_hl`
+/// (non-map, or present keys of an unexpected wire type) degrade to `None`
+/// for that channel rather than erroring: a malformed reply is exactly as
+/// informative as an absent key for this probe's purposes.
+fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
+    let Some(map) = result.as_map() else {
+        return (None, None);
+    };
+    let get = |key: &str| {
+        crate::wire::map_find(map, key)
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+    (get("fg"), get("bg"))
 }
 
 /// Marks the connection closed and drains every pending waiter with
 /// [`EngineError::Closed`] in one critical section, so a `send_request`
 /// racing this call either lands before the flag flips (and gets drained
-/// here) or observes `closed == true` and never inserts at all.
+/// here) or observes `closed == true` and never inserts at all. An
+/// `HlProbe` waiter has nothing to send a `Closed` error to (nothing is
+/// blocked on it), so it is dropped silently -- its `Msg::HlProbeReply`
+/// simply never arrives, which `update()` already treats identically to any
+/// other reply that never lands (the pre-probe fallback in
+/// `Theme::from_hl`).
 fn close_and_drain(pending: &Pending) {
     let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
     p.closed = true;
-    for (_, tx) in p.waiters.drain() {
-        let _ = tx.send(Err(EngineError::Closed));
+    for (_, waiter) in p.waiters.drain() {
+        if let Waiter::Reply(tx) = waiter {
+            let _ = tx.send(Err(EngineError::Closed));
+        }
     }
 }
 
@@ -908,5 +1024,168 @@ mod tests {
 
         let future = h.request("nvim_eval", vec![]);
         assert!(matches!(future, Err(EngineError::Closed)));
+    }
+
+    #[test]
+    fn decode_hl_probe_reply_transparent_fixture_has_fg_only() {
+        // wire-verified against a real `nvim --embed`, `hi Normal
+        // guifg=#f8f8f2` with no `guibg` set (this machine's own config):
+        // `nvim_get_hl(0,{name='Normal'})` -> `{fg = 16316658}`
+        let result = Value::Map(vec![(Value::from("fg"), Value::from(16316658))]);
+        assert_eq!(decode_hl_probe_reply(&result), (Some(16316658), None));
+    }
+
+    #[test]
+    fn decode_hl_probe_reply_explicit_bg_fixture_has_both_keys() {
+        // wire-verified: `hi Normal guibg=#282a36` (on top of the same
+        // guifg) -> `{fg = 16316658, bg = 2632246}`; 2632246 == 0x282a36
+        let result = Value::Map(vec![
+            (Value::from("fg"), Value::from(16316658)),
+            (Value::from("bg"), Value::from(2632246)),
+        ]);
+        assert_eq!(
+            decode_hl_probe_reply(&result),
+            (Some(16316658), Some(2_632_246))
+        );
+    }
+
+    /// A genuinely-black theme (`guibg=#000000`) must decode `bg = Some(0)`,
+    /// not `None`: the probe's whole point is that key *presence*
+    /// disambiguates this from the transparent fixture above, not the
+    /// numeric value.
+    #[test]
+    fn decode_hl_probe_reply_bg_zero_key_present_decodes_to_some_zero() {
+        let result = Value::Map(vec![
+            (Value::from("fg"), Value::from(16316658)),
+            (Value::from("bg"), Value::from(0)),
+        ]);
+        assert_eq!(decode_hl_probe_reply(&result), (Some(16316658), Some(0)));
+    }
+
+    #[test]
+    fn decode_hl_probe_reply_non_map_result_decodes_to_none_none() {
+        assert_eq!(decode_hl_probe_reply(&Value::Nil), (None, None));
+    }
+
+    #[test]
+    fn probe_default_hl_sends_the_pinned_wire_shape() {
+        let (h, _pump, peer_read, _peer_write) = pumped_peer();
+        h.probe_default_hl(3).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { method, params, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        assert_eq!(method, "nvim_get_hl");
+        assert_eq!(params[0], Value::from(0));
+        let Value::Map(opts) = &params[1] else {
+            unreachable!("expected a map, got {:?}", params[1]);
+        };
+        assert_eq!(opts, &vec![(Value::from("name"), Value::from("Normal"))]);
+    }
+
+    /// End-to-end through the reader thread's own routing: a transparent-
+    /// config reply (fg-only, see `decode_hl_probe_reply`'s fixture doc)
+    /// arrives as a `Msg::HlProbeReply` with `bg: None` on the pump's sink,
+    /// tagged with the exact generation the probe was issued for.
+    #[test]
+    fn probe_reply_for_transparent_normal_routes_hlprobereply_with_no_bg() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.probe_default_hl(5).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![(Value::from("fg"), Value::from(16316658))]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HlProbeReply { generation, fg, bg } = msg else {
+            unreachable!("expected HlProbeReply, got {msg:?}");
+        };
+        assert_eq!(generation, 5);
+        assert_eq!(fg, Some(16316658));
+        assert_eq!(bg, None);
+    }
+
+    /// The counterpart fixture: an explicit-bg reply routes `bg:
+    /// Some(0x282a36)`, proving a genuinely-colored (including genuinely
+    /// black) background survives the round trip rather than being
+    /// conflated with the unset case.
+    #[test]
+    fn probe_reply_for_explicit_bg_routes_hlprobereply_with_bg_present() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.probe_default_hl(9).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("fg"), Value::from(16316658)),
+                (Value::from("bg"), Value::from(2_632_246)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HlProbeReply { generation, fg, bg } = msg else {
+            unreachable!("expected HlProbeReply, got {msg:?}");
+        };
+        assert_eq!(generation, 9);
+        assert_eq!(fg, Some(16316658));
+        assert_eq!(bg, Some(0x282a36));
+    }
+
+    /// A remote error on the probe request must resolve the generation
+    /// (never leave it permanently unconfirmed) by degrading to "confirmed
+    /// unset" -- the safe default -- rather than dropping the reply
+    /// entirely.
+    #[test]
+    fn probe_reply_with_remote_error_degrades_to_confirmed_unset() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.probe_default_hl(1).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::from("boom"),
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HlProbeReply { generation, fg, bg } = msg else {
+            unreachable!("expected HlProbeReply, got {msg:?}");
+        };
+        assert_eq!(generation, 1);
+        assert_eq!(fg, None);
+        assert_eq!(bg, None);
     }
 }

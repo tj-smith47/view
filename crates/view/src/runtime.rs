@@ -43,6 +43,10 @@ pub trait EngineOps {
     ) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
+    /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
+    /// with `generation`; never blocks, and never itself returns the reply
+    /// (see `Msg::HlProbeReply`).
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -67,6 +71,9 @@ impl EngineOps for EngineHandle {
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
+    }
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.probe_default_hl(generation)
     }
 }
 
@@ -96,6 +103,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
+    }
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_default_hl(generation)
     }
 }
 
@@ -153,6 +163,7 @@ impl<E: EngineOps> Executor<E> {
                         row,
                         col,
                     } => self.ops.input_mouse(&button, &action, &modifier, row, col),
+                    RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -346,6 +357,9 @@ impl EngineOps for FakeOps {
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.record(format!("reply({},{value:?})", token.msgid))
     }
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("probe_default_hl({generation})"))
+    }
 }
 
 #[cfg(test)]
@@ -410,6 +424,24 @@ mod tests {
         });
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "reply(9,Nil)");
+    }
+
+    #[test]
+    fn get_default_hl_effect_maps_to_engine_ops_probe_default_hl() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::GetDefaultHl { generation: 4 }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "probe_default_hl(4)");
+    }
+
+    #[test]
+    fn get_default_hl_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 }));
+        assert!(matches!(flow, Flow::EngineLost));
     }
 
     #[test]

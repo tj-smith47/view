@@ -382,6 +382,8 @@ mod tests {
             default_bg: None,
             attrs,
             groups: std::collections::HashMap::new(),
+            probe_generation: 0,
+            confirmed: None,
         }
     }
 
@@ -441,6 +443,100 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         assert_eq!(&buf[(0, 0)].symbol(), &"h");
         assert_eq!(&buf[(1, 0)].symbol(), &"i");
+    }
+
+    /// End-to-end regression at the rendering layer: once a probe reply
+    /// confirms `Normal` has no background at all (the transparent-config
+    /// fixture -- see `view-engine`'s `decode_hl_probe_reply` doc comment
+    /// for the wire-verified shape this mirrors), a default grid cell must
+    /// carry `Color::Reset` (ratatui's "no color set" default), never an
+    /// explicit RGB, so the real terminal's own background shows through.
+    /// Disconfirm: reverting `Theme::from_hl`'s generation-matched branch
+    /// (see `theme.rs`) makes this assert `Color::Rgb(0,0,0)` instead -- an
+    /// all-black paint where transparency was expected.
+    #[test]
+    fn transparent_confirmed_default_paints_grid_cells_with_no_bg_color() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 4,
+            height: 1,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![("x".into(), 0, 1)],
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0), // wire-ambiguous: nvim sends 0 for "unset"
+                sp: None,
+            },
+        );
+        let generation = model.engine.hl.probe_generation;
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::HlProbeReply {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: None, // the probe reply's map had no "bg" key
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(4, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(
+            buf[(0, 0)].bg,
+            ratatui::style::Color::Reset,
+            "confirmed-unset bg must paint with no color, letting the terminal default show through"
+        );
+    }
+
+    /// The counterpart: a probe reply that confirms `bg = 0` (a genuinely
+    /// black theme) keeps painting an explicit black cell rather than being
+    /// conflated with the unset case above.
+    #[test]
+    fn genuinely_black_confirmed_default_still_paints_black() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 4,
+            height: 1,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![("x".into(), 0, 1)],
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xFFFFFF),
+                bg: Some(0),
+                sp: None,
+            },
+        );
+        let generation = model.engine.hl.probe_generation;
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::HlProbeReply {
+                generation,
+                fg: Some(0xFFFFFF),
+                bg: Some(0), // the probe reply's map DID carry "bg": 0
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(4, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(buf[(0, 0)].bg, ratatui::style::Color::Rgb(0, 0, 0));
     }
 
     /// A helper for driving `view-core` events through `update()` the same

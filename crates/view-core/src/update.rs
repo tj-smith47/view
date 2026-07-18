@@ -69,6 +69,24 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 height: grid_height,
             })]
         }
+        Msg::HlProbeReply { generation, fg, bg } => {
+            // guards the write, not just the read: without this, a
+            // reordered stale reply (an older generation's probe answered
+            // after a newer one) would overwrite the newer reply's already-
+            // correct confirmed state, permanently losing it since only one
+            // slot is kept -- see HlTable::confirmed's doc comment
+            if generation == model.engine.hl.probe_generation {
+                model.engine.hl.confirmed = Some(crate::hl::ProbedDefaults { generation, fg, bg });
+                // the paint loop's `if model.dirty` gate is the only thing
+                // that triggers a repaint; without this, a probe reply that
+                // arrives after the frame it corrects has already painted
+                // (the paint loop never awaits RPC, so this is the common
+                // case) would sit applied-but-unpainted until some other,
+                // unrelated event happens to mark dirty next
+                model.dirty = true;
+            }
+            Vec::new()
+        }
     }
 }
 
@@ -178,7 +196,16 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         UiEvent::DefaultColorsSet { fg, bg, .. } => {
             model.engine.hl.default_fg = fg;
             model.engine.hl.default_bg = bg;
-            Vec::new()
+            // bumped before the effect is built so the emitted probe
+            // carries the exact generation this event owns; a stale reply
+            // for an older generation is dropped by the Msg::HlProbeReply
+            // arm below, and Theme::from_hl falls back to the (possibly
+            // still wire-ambiguous) raw values above until a matching reply
+            // lands
+            model.engine.hl.probe_generation = model.engine.hl.probe_generation.wrapping_add(1);
+            vec![Effect::Rpc(RpcCall::GetDefaultHl {
+                generation: model.engine.hl.probe_generation,
+            })]
         }
         UiEvent::HlGroupSet { name, hl_id } => {
             model.engine.hl.groups.insert(name, hl_id);
@@ -976,5 +1003,125 @@ mod tests {
             }]),
         );
         assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn default_colors_set_bumps_generation_and_emits_a_matching_probe_effect() {
+        let mut m = model();
+        assert_eq!(m.engine.hl.probe_generation, 0);
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0xFFFFFF),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        assert_eq!(m.engine.hl.probe_generation, 1);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 })]
+        ));
+    }
+
+    #[test]
+    fn a_second_default_colors_set_bumps_generation_again() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: None,
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: None,
+                bg: Some(0x282a36),
+                sp: None,
+            }]),
+        );
+        assert_eq!(m.engine.hl.probe_generation, 2);
+        assert!(matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::GetDefaultHl { generation: 2 })]
+        ));
+    }
+
+    #[test]
+    fn hl_probe_reply_matching_the_current_generation_is_accepted_and_marks_dirty() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0x111111),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        m.dirty = false;
+        let effects = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation: 1,
+                fg: Some(0x111111),
+                bg: None,
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(m.dirty, "an accepted probe reply must trigger a repaint");
+        let confirmed = m.engine.hl.confirmed.expect("reply must be recorded");
+        assert_eq!(confirmed.generation, 1);
+        assert_eq!(confirmed.fg, Some(0x111111));
+        assert_eq!(confirmed.bg, None);
+    }
+
+    /// The write-time half of the generation guard: a reply for a
+    /// superseded generation must never overwrite a newer (or absent)
+    /// confirmed value, even though nothing else has happened between the
+    /// two `DefaultColorsSet`s to make the stale reply's arrival implausible
+    /// on a real connection (out-of-order delivery is not assumed to be
+    /// impossible, only rare).
+    #[test]
+    fn hl_probe_reply_for_a_stale_generation_is_dropped_without_marking_dirty() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: None,
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        // a second DefaultColorsSet bumps the generation to 2 before the
+        // generation-1 probe's reply ever arrives
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: None,
+                bg: Some(0x282a36),
+                sp: None,
+            }]),
+        );
+        m.dirty = false;
+        let effects = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation: 1,
+                fg: None,
+                bg: None,
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(
+            !m.dirty,
+            "a stale-generation reply must not trigger a repaint"
+        );
+        assert!(
+            m.engine.hl.confirmed.is_none(),
+            "a stale-generation reply must not be recorded"
+        );
     }
 }

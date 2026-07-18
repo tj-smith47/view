@@ -65,10 +65,11 @@ pub fn log(topic: &str, payload: &str) {
 
 /// Logs the loggable slice of one `Msg` crossing the runtime loop's
 /// dispatch seam: theme events nested in a `Redraw` batch (`view-core` is
-/// pure and cannot log these itself -- see the module docs) and an
-/// engine-down transition. Every other `Msg` variant (`Key`, `Paste`,
-/// `Mouse`, `Resized`, loop plumbing) carries nothing this log's contract
-/// asks for and is a deliberate no-op here.
+/// pure and cannot log these itself -- see the module docs), the async
+/// `nvim_get_hl` default-colors probe's reply, and an engine-down
+/// transition. Every other `Msg` variant (`Key`, `Paste`, `Mouse`,
+/// `Resized`, loop plumbing) carries nothing this log's contract asks for
+/// and is a deliberate no-op here.
 pub fn log_msg(msg: &view_core::msg::Msg) {
     use view_core::msg::Msg;
     match msg {
@@ -76,6 +77,12 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
             for ev in events {
                 log_ui_event(ev);
             }
+        }
+        Msg::HlProbeReply { generation, fg, bg } => {
+            log(
+                "theme",
+                &format!("probe-reply generation={generation} fg={fg:?} bg={bg:?}"),
+            );
         }
         Msg::EngineDown(exit) => {
             log(

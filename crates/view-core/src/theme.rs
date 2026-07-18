@@ -84,9 +84,22 @@ impl Theme {
     /// information rather than degrading to indistinguishable-from-everything-else.
     #[must_use]
     pub fn from_hl(hl: &HlTable) -> Self {
+        // `confirmed` is trusted only when its generation matches the
+        // current `probe_generation`: a `DefaultColorsSet` bumps the
+        // generation immediately, so a still-in-flight probe for the new
+        // generation leaves `confirmed` one generation stale until its
+        // reply lands, and reading it during that window would paint a
+        // superseded colorscheme's disambiguated colors onto the new one's
+        // frame. Falling back to the raw (possibly wire-ambiguous) values
+        // for that window matches this crate's existing pre-probe-reply
+        // behavior, self-correcting the moment the fresh reply arrives.
+        let (fg, bg) = match hl.confirmed {
+            Some(p) if p.generation == hl.probe_generation => (p.fg, p.bg),
+            _ => (hl.default_fg, hl.default_bg),
+        };
         let mut theme = Self {
-            fg: hl.default_fg,
-            bg: hl.default_bg,
+            fg,
+            bg,
             ..Self::default()
         };
         let normal = theme.normal();
@@ -185,6 +198,8 @@ mod tests {
             default_bg,
             attrs,
             groups: HashMap::new(),
+            probe_generation: 0,
+            confirmed: None,
         }
     }
 
@@ -397,5 +412,80 @@ mod tests {
         assert_eq!(theme.tab_line_fill, theme.normal());
         assert_eq!(theme.pmenu, theme.normal());
         assert_eq!(theme.msg_area, theme.normal());
+    }
+
+    /// `default_colors_set` alone cannot tell "no background" from
+    /// "background is genuinely black" (nvim sends `rgb_bg = 0` for both),
+    /// so `default_bg = Some(0)` on the wire must not survive into
+    /// `Theme::bg` once a matching probe reply says the key was absent.
+    /// Disconfirm: reverting `from_hl`'s generation-matched branch back to
+    /// reading `hl.default_bg` unconditionally makes this assert `Some(0)`
+    /// instead of `None` -- an all-black paint where the terminal's own
+    /// background should show through instead.
+    #[test]
+    fn probe_confirmed_no_bg_overrides_the_wire_ambiguous_zero() {
+        let mut hl = table_with(Some(0xF8F8F2), Some(0), 1, no_attrs());
+        hl.probe_generation = 1;
+        hl.confirmed = Some(crate::hl::ProbedDefaults {
+            generation: 1,
+            fg: Some(0xF8F8F2),
+            bg: None,
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.bg, None, "confirmed-unset bg must never paint");
+        assert_eq!(theme.fg, Some(0xF8F8F2));
+    }
+
+    /// The other half of the same property: a probe reply that confirms
+    /// `bg = 0` (a genuinely-black theme, e.g. `guibg=#000000`) must keep
+    /// painting black rather than being conflated with the unset case.
+    #[test]
+    fn probe_confirmed_bg_zero_still_paints_black() {
+        let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
+        hl.probe_generation = 1;
+        hl.confirmed = Some(crate::hl::ProbedDefaults {
+            generation: 1,
+            fg: Some(0xFFFFFF),
+            bg: Some(0),
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.bg, Some(0));
+    }
+
+    /// Before any probe reply has ever landed (`confirmed: None`, the
+    /// startup/cold-start state), derivation falls back to the raw wire
+    /// value for the window between a `DefaultColorsSet` and its probe's
+    /// eventual reply, rather than blocking the first paint on an RPC round
+    /// trip.
+    #[test]
+    fn no_probe_reply_yet_falls_back_to_the_raw_wire_value() {
+        let hl = table_with(Some(0x123456), Some(0x0), 1, no_attrs());
+        assert_eq!(hl.confirmed, None);
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.bg, Some(0));
+    }
+
+    /// A `confirmed` value left over from a superseded `DefaultColorsSet`
+    /// (its generation no longer matches `probe_generation`, because a
+    /// newer `DefaultColorsSet` has since fired and bumped it) must not be
+    /// read as authoritative for the current frame: `Theme::from_hl` falls
+    /// back to the newer, still-wire-ambiguous raw value until a fresh
+    /// probe reply confirms it, rather than painting a stale theme's
+    /// disambiguated colors onto a new theme's frame.
+    #[test]
+    fn stale_generation_confirmed_value_is_not_read() {
+        let mut hl = table_with(Some(0x1), Some(0x282a36), 1, no_attrs());
+        hl.probe_generation = 2;
+        hl.confirmed = Some(crate::hl::ProbedDefaults {
+            generation: 1,
+            fg: Some(0x1),
+            bg: None,
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(
+            theme.bg,
+            Some(0x282a36),
+            "must read the fresh raw value, not the stale generation-1 confirmation"
+        );
     }
 }

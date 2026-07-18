@@ -54,6 +54,8 @@ impl Model {
                     default_bg: None,
                     attrs: std::collections::HashMap::new(),
                     groups: std::collections::HashMap::new(),
+                    probe_generation: 0,
+                    confirmed: None,
                 },
                 mode: ModeState::default(),
                 cmdline: None,

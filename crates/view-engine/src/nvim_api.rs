@@ -251,6 +251,32 @@ impl EngineHandle {
         let value = self.request_timeout("nvim_eval", vec![Value::from(expr)], EVAL_TIMEOUT)?;
         Ok(value_to_string(&value))
     }
+
+    /// Issues `nvim_get_hl(0, {name = "Normal"})` as an async probe tagged
+    /// with `generation`, resolving the wire ambiguity in
+    /// `default_colors_set`'s `rgb_bg`/`rgb_fg` (nvim sends `0` both for
+    /// "unset" and for "genuinely black/default-fg-colored"; a probe
+    /// reply's `fg`/`bg` map key presence is what disambiguates the two --
+    /// see [`crate::handle::EngineHandle::request_probe`]'s doc comment for
+    /// the live-verified reply shapes). Async by construction: this issues
+    /// the request via [`EngineHandle::request_probe`] and returns
+    /// immediately; the reply crosses back as `Msg::HlProbeReply` through
+    /// the connection's pump, never by blocking this call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_probe(
+            "nvim_get_hl",
+            vec![
+                Value::from(0),
+                Value::Map(vec![(Value::from("name"), Value::from("Normal"))]),
+            ],
+            generation,
+        )
+    }
 }
 
 /// Renders an `nvim_eval` result as plain text for [`EngineHandle::eval_str`].
