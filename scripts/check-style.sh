@@ -11,6 +11,12 @@ if [ -d crates ]; then
   if grep -rnE '(//|#).*\b(we|I|Claude) (added|implemented|changed|fixed|removed)' crates --include='*.rs'; then
     echo "STYLE FAIL: assistant-citation comment"; fail=1
   fi
+  # banned outright, not just in comments: no current .rs file has a string
+  # literal that legitimately needs one, so this is a plain content scan
+  # rather than a comment-only grep
+  if grep -rn '—' crates --include='*.rs'; then
+    echo "STYLE FAIL: emdash in Rust source"; fail=1
+  fi
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

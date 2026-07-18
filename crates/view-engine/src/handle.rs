@@ -141,7 +141,7 @@ impl EngineHandle {
     ///
     /// The reader thread sends notifications to the returned `Receiver`
     /// without buffering elsewhere. If the receiver is dropped, the next
-    /// `notif_tx.send` fails and the reader thread exits its loop — after
+    /// `notif_tx.send` fails and the reader thread exits its loop; after
     /// that, every in-flight and future [`request`](Self::request) call
     /// fails with [`EngineError::Closed`] instead of hanging, since nothing
     /// remains to read responses off the wire. Keep the receiver alive (or
@@ -305,7 +305,7 @@ impl EngineHandle {
     /// assuming the first attempt never happened.
     ///
     /// Use this instead of [`request`](Self::request) for any call where an
-    /// unresponsive engine must not hang the caller — e.g. the
+    /// unresponsive engine must not hang the caller, e.g. the
     /// `nvim_get_api_info` handshake during [`Engine::spawn`](crate::process::Engine::spawn).
     pub fn request_timeout(
         &self,

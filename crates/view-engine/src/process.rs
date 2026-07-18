@@ -165,7 +165,7 @@ impl Engine {
     ///
     /// `Engine` cannot expose the receiver as a plain field: a borrowed
     /// `Receiver<EngineNotification>` is `!Sync`, which would make `Engine`
-    /// itself `!Sync` and `Arc<Engine>` not even `Send` — inexpressible
+    /// itself `!Sync` and `Arc<Engine>` not even `Send`, inexpressible
     /// against the intended usage of polling notifications on one thread
     /// while issuing requests via a cloned [`EngineHandle`] from others.
     /// Callers take the receiver once, up front, and hold onto it

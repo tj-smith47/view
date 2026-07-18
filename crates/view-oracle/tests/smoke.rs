@@ -1,13 +1,15 @@
 //! End-to-end proof that the wired `view` binary starts nvim, paints typed
-//! text into a real terminal, and exits cleanly on `:q!`, driven through an
-//! actual pty rather than an in-process mock. The real quiesce protocol
-//! (deterministic "redraw settled" signaling instead of sleeps) arrives in
-//! P3; this is a smoke test.
+//! text into a real terminal, and exits with the right code on every exit
+//! path: a clean `:q!`, a signal-killed engine, and an explicit `:cq` exit
+//! code. All driven through an actual pty rather than an in-process mock.
+//! The real quiesce protocol (deterministic "redraw settled" signaling
+//! instead of sleeps) arrives in P3; these are smoke tests.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -69,10 +71,73 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
     rx
 }
 
-#[test]
-fn view_paints_typed_text_in_a_pty() {
-    let view_bin = view_bin_path();
+/// A `view` process running inside a real pty, with everything a test needs
+/// to drive it and observe its screen: the child handle (for exit-status
+/// assertions), a byte channel fed by a background reader thread, and a
+/// `vt100` parser that turns those bytes into a queryable screen.
+struct PtySession {
+    child: Box<dyn portable_pty::Child>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    writer: Box<dyn Write + Send>,
+    parser: vt100::Parser,
+    scratch: PathBuf,
+    isolated_home: PathBuf,
+}
 
+impl PtySession {
+    /// Blocks (up to `timeout`) until the screen contains `needle`,
+    /// returning whether it appeared.
+    fn wait_for(&mut self, needle: &str, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        while Instant::now() < deadline {
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    self.parser.process(&chunk);
+                    if self.parser.screen().contents().contains(needle) {
+                        return true;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        false
+    }
+
+    /// Writes `bytes` to the pty as if a user typed them, e.g. `Esc` plus a
+    /// command-line invocation.
+    fn send(&mut self, bytes: &[u8]) {
+        self.writer.write_all(bytes).unwrap();
+        self.writer.flush().unwrap();
+    }
+
+    /// The OS pid of the `view` process itself (not its embedded nvim
+    /// child).
+    fn view_pid(&self) -> u32 {
+        self.child
+            .process_id()
+            .expect("view child exposes a pid on this platform")
+    }
+}
+
+impl Drop for PtySession {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.scratch);
+        let _ = std::fs::remove_dir_all(&self.isolated_home);
+    }
+}
+
+static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Opens a pty sized 24x80 (nonzero: a 0x0 winsize makes nvim's UI attach
+/// fail during startup), spawns `view` against a scratch file with the
+/// host's real nvim config isolated out of the way, and waits for the first
+/// non-blank redraw so callers start from a settled screen.
+///
+/// Scratch paths are disambiguated by an atomic counter, not just the test
+/// process's pid: multiple tests in this file spawn a session concurrently
+/// within the same test binary process, so pid alone would collide.
+fn spawn_view_pty() -> PtySession {
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -84,11 +149,12 @@ fn view_paints_typed_text_in_a_pty() {
         .unwrap();
 
     let pid = std::process::id();
-    let scratch = std::env::temp_dir().join(format!("view-oracle-smoke-{pid}.txt"));
-    let isolated_home = std::env::temp_dir().join(format!("view-oracle-home-{pid}"));
+    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
+    let scratch = std::env::temp_dir().join(format!("view-oracle-smoke-{pid}-{session_id}.txt"));
+    let isolated_home = std::env::temp_dir().join(format!("view-oracle-home-{pid}-{session_id}"));
     std::fs::create_dir_all(&isolated_home).unwrap();
 
-    let mut cmd = CommandBuilder::new(view_bin);
+    let mut cmd = CommandBuilder::new(view_bin_path());
     cmd.arg(&scratch);
     // isolate from any real nvim user config on the host running this test:
     // a dashboard plugin or custom keymap on a bare "i" would make the
@@ -102,9 +168,9 @@ fn view_paints_typed_text_in_a_pty() {
         cmd.env(var, isolated_home.join(var.to_lowercase()));
     }
 
-    let mut child = pair.slave.spawn_command(cmd).unwrap();
+    let child = pair.slave.spawn_command(cmd).unwrap();
     let reader = pair.master.try_clone_reader().unwrap();
-    let mut writer = pair.master.take_writer().unwrap();
+    let writer = pair.master.take_writer().unwrap();
     // the slave fd must not outlive the child's own copy, or the master
     // never sees EOF once the child exits
     drop(pair.slave);
@@ -112,7 +178,8 @@ fn view_paints_typed_text_in_a_pty() {
     let rx = spawn_reader(reader);
     let mut parser = vt100::Parser::new(24, 80, 0);
 
-    // wait for nvim's startup redraw before typing, same as a human would
+    // wait for nvim's startup redraw before driving input, same as a human
+    // would
     let startup_deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < startup_deadline {
         match rx.recv_timeout(Duration::from_millis(200)) {
@@ -127,34 +194,108 @@ fn view_paints_typed_text_in_a_pty() {
         }
     }
 
-    writer.write_all(b"ihello from view").unwrap();
-    writer.flush().unwrap();
+    PtySession {
+        child,
+        rx,
+        writer,
+        parser,
+        scratch,
+        isolated_home,
+    }
+}
 
-    let type_deadline = Instant::now() + Duration::from_secs(5);
-    let mut found = false;
-    while Instant::now() < type_deadline {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(chunk) => {
-                parser.process(&chunk);
-                if parser.screen().contents().contains("hello from view") {
-                    found = true;
-                    break;
+/// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of
+/// `parent_pid` whose `/proc/<pid>/comm` equals `comm`, or `None` once
+/// `timeout` elapses.
+///
+/// `view` never exposes its embedded nvim's pid on its own API surface (by
+/// design: only `view-engine` speaks to the child at all), so a black-box
+/// pty test has no way to find it except by walking procfs from the
+/// outside. Linux-only: this file's only caller is gated the same way,
+/// since the other tests here don't need to reach into the process tree.
+#[cfg(target_os = "linux")]
+fn wait_for_child_pid(parent_pid: u32, comm: &str, timeout: Duration) -> Option<u32> {
+    let deadline = Instant::now() + timeout;
+    let children_path = format!("/proc/{parent_pid}/task/{parent_pid}/children");
+    while Instant::now() < deadline {
+        if let Ok(contents) = std::fs::read_to_string(&children_path) {
+            for tok in contents.split_whitespace() {
+                if let Ok(candidate) = tok.parse::<u32>() {
+                    let comm_path = format!("/proc/{candidate}/comm");
+                    if std::fs::read_to_string(&comm_path)
+                        .map(|c| c.trim() == comm)
+                        .unwrap_or(false)
+                    {
+                        return Some(candidate);
+                    }
                 }
             }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
         }
+        std::thread::sleep(Duration::from_millis(20));
     }
+    None
+}
+
+#[test]
+fn view_paints_typed_text_in_a_pty() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"ihello from view");
     assert!(
-        found,
+        session.wait_for("hello from view", Duration::from_secs(5)),
         "screen never showed typed text; last screen:\n{}",
-        parser.screen().contents()
+        session.parser.screen().contents()
     );
 
-    writer.write_all(b"\x1b:q!\r").unwrap();
-    writer.flush().unwrap();
-    let _ = child.wait();
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
+}
 
-    let _ = std::fs::remove_file(&scratch);
-    let _ = std::fs::remove_dir_all(&isolated_home);
+#[cfg(target_os = "linux")]
+#[test]
+fn view_exits_nonzero_when_engine_dies_by_signal() {
+    let mut session = spawn_view_pty();
+
+    let view_pid = session.view_pid();
+    let nvim_pid = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+
+    let kill_status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(nvim_pid.to_string())
+        .status()
+        .unwrap();
+    assert!(kill_status.success(), "kill -KILL {nvim_pid} failed");
+
+    let exit = session
+        .child
+        .wait()
+        .expect("view process never exited after its embedded nvim was killed");
+    // 128 + SIGKILL(9): the conventional signal-death exit code (see
+    // exit_code_for in crates/view/src/main.rs), stronger than a bare
+    // nonzero check since it also pins the exact mapping formula
+    assert_eq!(
+        exit.exit_code(),
+        137,
+        "view did not map its engine's signal death to 128+signal; screen:\n{}",
+        session.parser.screen().contents()
+    );
+}
+
+#[test]
+fn view_propagates_cquit_exit_code() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:cq 5\r");
+
+    let exit = session
+        .child
+        .wait()
+        .expect("view process never exited after :cq 5");
+    assert_eq!(
+        exit.exit_code(),
+        5,
+        "view did not propagate :cq's exit code; screen:\n{}",
+        session.parser.screen().contents()
+    );
 }

@@ -13,7 +13,7 @@ impl EngineHandle {
     ///
     /// A `request`, not a `notify`: the caller needs to know attach succeeded
     /// before entering the paint loop. This is the only request the paint
-    /// loop's setup makes — every nvim call issued once the loop is running
+    /// loop's setup makes; every nvim call issued once the loop is running
     /// goes through `notify` instead, so a slow response never stalls a
     /// frame.
     ///

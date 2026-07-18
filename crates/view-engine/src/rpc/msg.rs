@@ -31,7 +31,7 @@ pub enum RpcMessage {
     /// The reply to a `Request` with a matching `msgid`.
     ///
     /// Follows the nvim RPC convention: `error` is non-nil on failure and
-    /// `result` is non-nil on success — the two are mutually exclusive,
+    /// `result` is non-nil on success; the two are mutually exclusive,
     /// never both non-nil.
     Response {
         /// The `msgid` of the `Request` this responds to.
