@@ -108,6 +108,26 @@ fn engine_session_input_and_pump_until_flush_agree_with_eval_str_probe() {
     );
 }
 
+/// The deadline leg must return `false` rather than hang when the engine is
+/// quiescent: with no input queued there is no Flush coming, so this returns
+/// only because the deadline expired. Deleting the deadline check would turn
+/// this test into a hang, caught by the test runner's own timeout rather
+/// than silently passing.
+#[test]
+fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
+    let mut session = EngineSession::spawn(40, 6).expect("EngineSession::spawn against real nvim");
+
+    // drain every startup flush first so the timed pump below observes a
+    // genuinely quiescent engine, not attach-time redraw traffic
+    while session.pump_until_flush(Duration::from_millis(500)) {}
+
+    let flushed = session.pump_until_flush(Duration::from_millis(300));
+    assert!(
+        !flushed,
+        "pump_until_flush reported a Flush from a quiescent engine with no input queued"
+    );
+}
+
 /// leg (a) (pty-level injection) at the integration tier: a real `view`
 /// process inside a real pty shows a typed character on screen. Full stack,
 /// full fidelity, the slowest and least isolated of the three legs by

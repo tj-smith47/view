@@ -285,7 +285,7 @@ mod tests {
 
     #[test]
     fn spawn_and_send_shows_typed_output_on_screen() {
-        let mut session = PtySession::spawn("/bin/cat", &[], 24, 80).unwrap();
+        let mut session = PtySession::spawn("/bin/cat", &[], 80, 24).unwrap();
         session.send(b"hello-pty\n").unwrap();
         assert!(
             session.wait_for("hello-pty", Duration::from_secs(5)),
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn wait_for_returns_true_immediately_when_the_needle_is_already_on_screen() {
-        let mut session = PtySession::spawn("/bin/echo", &["already-there"], 24, 80).unwrap();
+        let mut session = PtySession::spawn("/bin/echo", &["already-there"], 80, 24).unwrap();
         // no send(): the text is already on screen from the process's own
         // startup output, the current-state-check-first path wait_for must
         // take rather than blocking for a chunk that may never arrive again
@@ -307,7 +307,7 @@ mod tests {
 
     #[test]
     fn wait_for_times_out_on_a_needle_that_never_appears() {
-        let mut session = PtySession::spawn("/bin/echo", &["hi"], 24, 80).unwrap();
+        let mut session = PtySession::spawn("/bin/echo", &["hi"], 80, 24).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
     }
 }
