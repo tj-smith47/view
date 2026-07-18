@@ -12,3 +12,4 @@ workspace = true
 crossterm = "0.29.0"
 ratatui = "0.30.2"
 view-core = { version = "0.0.1", path = "../view-core" }
+view-surface = { version = "0.0.1", path = "../view-surface" }

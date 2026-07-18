@@ -7,3 +7,6 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+view-core = { version = "0.0.1", path = "../view-core" }

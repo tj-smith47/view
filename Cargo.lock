@@ -1677,6 +1677,7 @@ dependencies = [
  "clap",
  "view-core",
  "view-engine",
+ "view-surface",
  "view-tui",
 ]
 
@@ -1721,6 +1722,9 @@ dependencies = [
 [[package]]
 name = "view-surface"
 version = "0.0.1"
+dependencies = [
+ "view-core",
+]
 
 [[package]]
 name = "view-tui"
@@ -1729,6 +1733,7 @@ dependencies = [
  "crossterm",
  "ratatui",
  "view-core",
+ "view-surface",
 ]
 
 [[package]]

@@ -195,7 +195,8 @@ pub fn run(mut model: Model, mut engine: Engine, term: &mut Term) -> anyhow::Res
         // paint immediately when update marked dirty: there is no timer, no
         // recv_timeout, no tick anywhere in this loop
         if model.dirty {
-            term.draw_model(&model)?; // terminal I/O errors abort; engine errors never do
+            let surface = view_surface::render(&model);
+            term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
     }

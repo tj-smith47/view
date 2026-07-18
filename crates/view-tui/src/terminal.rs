@@ -5,13 +5,13 @@
 //! terminal).
 
 use crate::keys::encode_key;
-use crate::paint::{paint, HlTable};
+use crate::paint::composite;
 use crossterm::event::Event;
 use std::io::Write;
 use std::sync::mpsc::SyncSender;
-use view_core::grid::Grid;
 use view_core::model::Model;
 use view_core::msg::{Key, Msg};
+use view_surface::{CursorShape, Surface};
 
 /// Enters raw mode and the alternate screen for the lifetime of the value,
 /// restoring both on drop and installing a panic hook that restores the
@@ -70,6 +70,37 @@ fn restore() {
     let _ = std::io::stdout().flush();
 }
 
+/// Writes a synchronized-update bracket escape (`CSI ? 2026 h` to begin,
+/// `CSI ? 2026 l` to end) directly to stdout, bypassing `ratatui`'s own
+/// buffered writer: the bracket must wrap the entire frame write including
+/// the cursor move that follows it, not just the buffer diff `ratatui`
+/// flushes internally.
+fn write_sync_bracket(begin: bool) -> std::io::Result<()> {
+    let seq: &[u8] = if begin {
+        b"\x1b[?2026h"
+    } else {
+        b"\x1b[?2026l"
+    };
+    let mut out = std::io::stdout();
+    out.write_all(seq)?;
+    out.flush()
+}
+
+/// Maps a [`CursorShape`] to the closest steady (non-blinking) crossterm
+/// cursor style. Steady rather than blinking: a deterministic cursor is
+/// safer to test against and avoids relying on terminal-side blink timing
+/// this phase has no capability probe for.
+fn cursor_style(shape: CursorShape) -> crossterm::cursor::SetCursorStyle {
+    match shape {
+        CursorShape::Block => crossterm::cursor::SetCursorStyle::SteadyBlock,
+        CursorShape::Horizontal(_) => crossterm::cursor::SetCursorStyle::SteadyUnderScore,
+        CursorShape::Vertical(_) => crossterm::cursor::SetCursorStyle::SteadyBar,
+        // CursorShape is #[non_exhaustive]: a future shape falls back to the
+        // steady block rather than failing to compile
+        _ => crossterm::cursor::SetCursorStyle::SteadyBlock,
+    }
+}
+
 /// The ratatui-backed terminal: draws grid frames and reports its size,
 /// without exposing `ratatui` types to callers outside this crate.
 pub struct Term {
@@ -109,39 +140,45 @@ impl Term {
         Ok((size.width, size.height))
     }
 
-    /// Paints one frame from `grid` and `hl` onto the terminal.
+    /// Paints one frame from `surface`, then moves the real terminal cursor
+    /// to `surface.cursor`'s position and shape (hiding it entirely when
+    /// `None`). The runtime loop's only paint call: it renders a
+    /// [`view_surface::Surface`] from the model first, then hands both the
+    /// model and that surface here.
+    ///
+    /// `surface` describes *where* to paint and *what kind* of content goes
+    /// there; the grid's own per-cell content still comes from `model`
+    /// directly (see [`composite`](crate::paint::composite)), so a `Surface`
+    /// never needs to clone the grid to be paintable.
+    ///
+    /// When `model.caps.sync` is set, the whole write (paint plus cursor
+    /// move) is wrapped in a terminal synchronized-update bracket
+    /// (`CSI ? 2026 h` / `l`) so the terminal applies it atomically instead
+    /// of showing a partially painted frame; this is two extra escape-code
+    /// writes with no other added per-frame cost, and only when `sync` is
+    /// set (conservative by construction: `TermCaps::default()` keeps it
+    /// false until capability detection lands).
     ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
-    pub fn draw(&mut self, grid: &Grid, hl: &HlTable) -> std::io::Result<()> {
-        self.inner.draw(|f| paint(grid, hl, f))?;
+    pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
+        if model.caps.sync {
+            write_sync_bracket(true)?;
+        }
+        self.inner.draw(|f| composite(model, surface, f))?;
+        match surface.cursor {
+            Some(spec) => {
+                self.inner.set_cursor_position((spec.col, spec.row))?;
+                self.inner.show_cursor()?;
+                crossterm::execute!(std::io::stdout(), cursor_style(spec.shape))?;
+            }
+            None => self.inner.hide_cursor()?,
+        }
+        if model.caps.sync {
+            write_sync_bracket(false)?;
+        }
         Ok(())
-    }
-
-    /// Moves the terminal cursor to `(row, col)` and shows it.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying `std::io::Error` if the backend write fails.
-    pub fn set_cursor(&mut self, row: u16, col: u16) -> std::io::Result<()> {
-        self.inner.set_cursor_position((col, row))?;
-        self.inner.show_cursor()
-    }
-
-    /// Paints one frame from `model`'s engine grid and highlight table, then
-    /// moves the cursor to match. The runtime loop's only paint call: it
-    /// wraps [`draw`](Self::draw) and [`set_cursor`](Self::set_cursor)
-    /// against the core [`Model`] type directly, so the loop never reaches
-    /// into `model.engine` itself.
-    ///
-    /// # Errors
-    ///
-    /// Returns the underlying `std::io::Error` if the backend write fails.
-    pub fn draw_model(&mut self, model: &Model) -> std::io::Result<()> {
-        self.draw(&model.engine.grid, &model.engine.hl)?;
-        let (row, col) = model.engine.grid.cursor();
-        self.set_cursor(row, col)
     }
 
     /// Restores the terminal immediately rather than waiting for [`Drop`].
