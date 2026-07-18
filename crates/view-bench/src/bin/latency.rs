@@ -20,8 +20,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 /// Keystroke-to-paint samples collected per target, matching the brief's
 /// measurement protocol.
 const SAMPLE_COUNT: usize = 200;
-/// Fixed settle time before driving input, per the v0 protocol; the
-/// deterministic redraw-settled signal arrives with the real P3 harness.
+/// Fixed settle time before driving input; this harness has no
+/// deterministic redraw-settled signal to wait on instead.
 const READY_WAIT: Duration = Duration::from_secs(2);
 /// Gap between samples so one measurement's tail doesn't bleed into the
 /// next keystroke's paint.
@@ -49,8 +49,8 @@ impl Samples {
         )
     }
 
-    /// Nearest-rank percentile; informational at this phase, so a simple
-    /// rank is sufficient without interpolation.
+    /// Nearest-rank percentile for informational reporting; a simple rank
+    /// is sufficient without interpolation.
     fn percentile(&self, pct: f64) -> f64 {
         let len = self.0.len();
         if len == 0 {

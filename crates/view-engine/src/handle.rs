@@ -740,8 +740,8 @@ mod tests {
     /// An incoming `Request` from the peer (e.g. a blocking
     /// `rpcrequest` from nvim's init.lua) must get an immediate reply, or
     /// the peer's main loop blocks forever waiting for one and every
-    /// subsequent call from our side deadlocks against it. Dispatching
-    /// these to real handlers is P2 work; until then, the reply is a typed
+    /// subsequent call from our side deadlocks against it. Incoming
+    /// requests are not dispatched to real handlers; the reply is a typed
     /// "method not supported" error.
     #[test]
     fn incoming_request_gets_method_not_supported_response() {

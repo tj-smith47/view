@@ -1,9 +1,8 @@
 //! The unified runtime loop: one blocking `recv()` wakes on damage, input,
-//! or engine-request tokens, with no timer anywhere in the loop body. This
-//! is what replaces the P1 scaffolding loop's 4ms post-redraw silence
-//! timeout and its input-drain budget: painting fires the instant `update()`
-//! marks the model dirty, and a keystroke wakes the loop directly instead of
-//! waiting for the next poll.
+//! or engine-request tokens, with no timer anywhere in the loop body. There
+//! is no fixed post-redraw silence timeout and no input-drain budget:
+//! painting fires the instant `update()` marks the model dirty, and a
+//! keystroke wakes the loop directly instead of waiting for the next poll.
 //!
 //! # Ownership chain
 //!

@@ -227,16 +227,15 @@ pub enum Focus {
     /// A native overlay identified by `OverlayId` owns input: keys, paste,
     /// and mouse are consumed by that overlay's own `update()` arm instead
     /// of reaching the engine, except `<Esc>` which always returns focus to
-    /// `Engine`. No overlay in this phase actually claims this focus (the
-    /// first native overlay arrives in a later phase); the variant exists
-    /// now so the routing seam is pinned by tests ahead of that consumer.
+    /// `Engine`. No native overlay currently claims this focus; the
+    /// variant exists so the routing seam is pinned by tests independent
+    /// of any concrete overlay consumer.
     Native(OverlayId),
 }
 
 /// Opaque identifier for a native overlay that can hold input focus.
-/// Construction is a later phase's concern (each overlay kind mints its own
-/// id); this phase only needs the newtype to exist so `Focus::Native` is
-/// representable.
+/// Nothing constructs this yet; the newtype exists so `Focus::Native`
+/// is representable and the focus vocabulary is stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayId(pub u64);
 
@@ -253,8 +252,8 @@ pub struct TermCaps {
 }
 
 impl Default for TermCaps {
-    /// Conservative until detection (a later task) fills this in: no probe
-    /// is assumed to have succeeded.
+    /// Conservative defaults used before any capability probe runs: no
+    /// probe is assumed to have succeeded.
     fn default() -> Self {
         Self {
             tier: Tier::Standard,

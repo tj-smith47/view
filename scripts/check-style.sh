@@ -14,6 +14,16 @@ if [ -d crates ]; then
   if grep -rnE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' crates --include='*.rs'; then
     echo "STYLE FAIL: review-finding reference in comment"; fail=1
   fi
+  # narrative/roadmap pointers: comments must state what the code does now,
+  # never when it changes. P[0-9] is intentionally case-sensitive (not -i):
+  # a lowercase p0/p1 reads as a coordinate or point variable, not a phase
+  # tag, and the tree has no such roadmap-tagged identifiers to catch.
+  if grep -rniE '\bthis phase\b|\ba later (phase|task|session)\b|\bin a later\b' crates --include='*.rs'; then
+    echo "STYLE FAIL: roadmap-phase comment marker"; fail=1
+  fi
+  if grep -rnE '\bP[0-9]\b' crates --include='*.rs'; then
+    echo "STYLE FAIL: roadmap-phase tag in comment"; fail=1
+  fi
   # banned outright, not just in comments: no current .rs file has a string
   # literal that legitimately needs one, so this is a plain content scan
   # rather than a comment-only grep

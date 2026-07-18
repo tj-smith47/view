@@ -14,10 +14,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(Key { notation }) => match model.focus {
             Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-            // no native overlay claims focus this phase: every key is
-            // consumed here rather than dispatched to an overlay update arm
-            // that does not exist yet, except <Esc> which always returns
-            // focus to Engine (P4's overlays inherit this same escape hatch)
+            // no native overlay currently claims focus: every key is
+            // consumed here rather than dispatched to an overlay update
+            // arm, except <Esc> which always returns focus to Engine. The
+            // routing seam exists so overlays can take focus without
+            // touching this key path.
             Focus::Native(_) => {
                 if notation == "<Esc>" {
                     model.focus = Focus::Engine;
@@ -346,9 +347,9 @@ mod tests {
         ));
     }
 
-    // routing table: focus x input-kind -> effect. Pins the seam P4's first
-    // native overlay builds on, per a test-only Focus::Native(OverlayId)
-    // since no real overlay exists yet this phase.
+    // routing table: focus x input-kind -> effect. Pins the seam native
+    // overlays build on, using a test-only Focus::Native(OverlayId)
+    // placeholder in the absence of a real overlay implementation.
 
     #[test]
     fn paste_in_engine_focus_becomes_rpc_paste_effect() {

@@ -2,8 +2,9 @@
 //! text into a real terminal, and exits with the right code on every exit
 //! path: a clean `:q!`, a signal-killed engine, and an explicit `:cq` exit
 //! code. All driven through an actual pty rather than an in-process mock.
-//! The real quiesce protocol (deterministic "redraw settled" signaling
-//! instead of sleeps) arrives in P3; these are smoke tests.
+//! These tests wait via fixed sleeps rather than a deterministic
+//! "redraw settled" signal; they are smoke tests, not exhaustive protocol
+//! coverage.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
