@@ -1,33 +1,40 @@
 #!/usr/bin/env bash
 set -euo pipefail
-fail=0
-if [ -d crates ]; then
-  if grep -rnE '(//|#).*\b(Phase|Task|Step|Wave|Cycle|Session) [0-9]' crates --include='*.rs'; then
+
+# All content-pattern checks against Rust source. Parameterized on a target
+# path so the same checks run tree-wide (default, scoped to crates/) or
+# against a single file (--file, used by the post-edit-rs.sh hook so an
+# editor-triggered check costs one grep pass per pattern instead of a
+# full-tree walk on every keystroke-adjacent save).
+check_rs_content() {
+  local target="$1"
+  local fail=0
+  if grep -rnE '(//|#).*\b(Phase|Task|Step|Wave|Cycle|Session) [0-9]' "$target" --include='*.rs'; then
     echo "STYLE FAIL: session-narrative comment marker"; fail=1
   fi
-  if grep -rn '§' crates --include='*.rs'; then
+  if grep -rn '§' "$target" --include='*.rs'; then
     echo "STYLE FAIL: section-symbol reference in code"; fail=1
   fi
-  if grep -rnE '(//|#).*\b(we|I|Claude) (added|implemented|changed|fixed|removed)' crates --include='*.rs'; then
+  if grep -rnE '(//|#).*\b(we|I|Claude) (added|implemented|changed|fixed|removed)' "$target" --include='*.rs'; then
     echo "STYLE FAIL: assistant-citation comment"; fail=1
   fi
-  if grep -rnE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' crates --include='*.rs'; then
+  if grep -rnE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' "$target" --include='*.rs'; then
     echo "STYLE FAIL: review-finding reference in comment"; fail=1
   fi
   # narrative/roadmap pointers: comments must state what the code does now,
   # never when it changes. P[0-9] is intentionally case-sensitive (not -i):
   # a lowercase p0/p1 reads as a coordinate or point variable, not a phase
   # tag, and the tree has no such roadmap-tagged identifiers to catch.
-  if grep -rniE '\bthis phase\b|\ba later (phase|task|session)\b|\bin a later\b' crates --include='*.rs'; then
+  if grep -rniE '\bthis phase\b|\ba later (phase|task|session)\b|\bin a later\b' "$target" --include='*.rs'; then
     echo "STYLE FAIL: roadmap-phase comment marker"; fail=1
   fi
   # session-narrative markers the phase/task-number check above doesn't
   # catch: "this task" (no number attached, unlike "Task 10") and
   # "the RED/GREEN test" (TDD-status narration, not a fact about the code)
-  if grep -rniE '\bthis task\b|\bthe (red|green) test\b' crates --include='*.rs'; then
+  if grep -rniE '\bthis task\b|\bthe (red|green) test\b' "$target" --include='*.rs'; then
     echo "STYLE FAIL: task/TDD-status comment marker"; fail=1
   fi
-  if grep -rnE '\bP[0-9]\b' crates --include='*.rs'; then
+  if grep -rnE '\bP[0-9]\b' "$target" --include='*.rs'; then
     echo "STYLE FAIL: roadmap-phase tag in comment"; fail=1
   fi
   # review-finding tags (C2, I1, M3, and their possessive form C2's): a
@@ -38,14 +45,14 @@ if [ -d crates ]; then
   # catch lowercase tokens like "i2"/"m1" that read as ordinary identifiers
   # rather than finding tags, with no matches like that anywhere in this
   # tree today.
-  if grep -rnE "\b[CIM][0-9]+\`?'s?\b" crates --include='*.rs'; then
+  if grep -rnE "\b[CIM][0-9]+\`?'s?\b" "$target" --include='*.rs'; then
     echo "STYLE FAIL: review-finding tag in comment"; fail=1
   fi
   # TDD/session-narrative markers one synonym past the existing "this task"/
   # "the red/green test" check: "the RED/GREEN half" (a paired-test label),
   # "this fix"/"the unfixed" (fix-narrative instead of a code fact), and
   # "pre-image" (git-diff jargon for "the code before this change")
-  if grep -rniE '\bthe (red|green) half\b|\bthis fix\b|\bthe unfixed\b|\bpre-image\b' crates --include='*.rs'; then
+  if grep -rniE '\bthe (red|green) half\b|\bthis fix\b|\bthe unfixed\b|\bpre-image\b' "$target" --include='*.rs'; then
     echo "STYLE FAIL: fix-narrative comment marker"; fail=1
   fi
   # bare git-style commit hashes cited in prose ("fa54c7c's replay", "by
@@ -53,15 +60,38 @@ if [ -d crates ]; then
   # constant (a color, a checksum, a magic number) with no possessive or
   # "by"-prefix reading, so this scopes to the two prose shapes this tree's
   # actual violations used instead of a blanket hex-token ban
-  if grep -rnE "\b[0-9a-f]{7}\`?'s\b|\bby [0-9a-f]{7}\b" crates --include='*.rs'; then
+  if grep -rnE "\b[0-9a-f]{7}\`?'s\b|\bby [0-9a-f]{7}\b" "$target" --include='*.rs'; then
     echo "STYLE FAIL: commit-hash reference in comment"; fail=1
+  fi
+  # a comment must state what the code does, never who found it lacking or
+  # what body prescribed it: "the reviewer flagged" / "coordinator
+  # requirement" name a person or process, not a fact about the code
+  if grep -rniE '\bthe (reviewer|coordinator|auditor)\b|\bcoordinator requirement\b' "$target" --include='*.rs'; then
+    echo "STYLE FAIL: reviewer/coordinator attribution in comment"; fail=1
   fi
   # banned outright, not just in comments: no current .rs file has a string
   # literal that legitimately needs one, so this is a plain content scan
   # rather than a comment-only grep
-  if grep -rn '—' crates --include='*.rs'; then
+  if grep -rn '—' "$target" --include='*.rs'; then
     echo "STYLE FAIL: emdash in Rust source"; fail=1
   fi
+  return $fail
+}
+
+if [ "${1:-}" = "--file" ]; then
+  FILE="${2:-}"
+  if [ -z "$FILE" ]; then
+    echo "usage: $0 --file FILE" >&2
+    exit 2
+  fi
+  [ -f "$FILE" ] || exit 0
+  check_rs_content "$FILE" || exit 1
+  exit 0
+fi
+
+fail=0
+if [ -d crates ]; then
+  check_rs_content crates || fail=1
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi

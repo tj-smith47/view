@@ -35,6 +35,15 @@ use view_tui::terminal::Term;
 /// spec's "bounded ring of 64".
 const KEY_RING_CAPACITY: usize = 64;
 
+/// `main.rs`'s `msg_tx`/`msg_rx` channel capacity. Deliberately tied to
+/// [`KEY_RING_CAPACITY`] rather than stated as its own literal: a
+/// maximally-full pre-attach key ring replays exactly `KEY_RING_CAPACITY`
+/// messages onto this channel during cutover, and the two numbers drifting
+/// apart would silently change the replay-hazard model
+/// `runtime`'s `re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever`
+/// test pins, with no compile error to catch it.
+pub(crate) const MSG_CHANNEL_CAPACITY: usize = KEY_RING_CAPACITY;
+
 /// A fixed-capacity FIFO of pre-attach keystrokes. [`push`](Self::push)
 /// evicts the oldest entry once full rather than rejecting the newest: a
 /// keystroke the user just typed is more likely to still matter than one

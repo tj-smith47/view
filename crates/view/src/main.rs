@@ -113,7 +113,7 @@ fn main() -> Result<()> {
     // capturing keystrokes immediately after the shell paints, well before
     // the engine exists to send them to, or anything typed during attach
     // would be lost to a not-yet-existing channel
-    let (msg_tx, msg_rx) = mpsc::sync_channel(64);
+    let (msg_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     view_tui::terminal::spawn_input_thread(msg_tx.clone());
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());

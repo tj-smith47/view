@@ -6,6 +6,7 @@ pub mod nvim_api;
 pub mod process;
 pub mod rpc;
 pub mod ui_events;
+mod wire;
 
 pub use damage::{DamagePump, SinkCutover};
 pub use handle::{EngineError, EngineHandle};

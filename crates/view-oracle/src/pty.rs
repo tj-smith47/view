@@ -190,18 +190,26 @@ impl PtySession {
         }
     }
 
-    /// Blocks (up to `timeout`) until the screen contains `needle`,
-    /// returning whether it appeared.
+    /// Blocks (up to `timeout`) until `predicate` holds against the current
+    /// screen state, returning whether it did. Shared by [`wait_for`]
+    /// (whole-screen substring search) and [`wait_for_cell`] (single-cell
+    /// match): both differ only in what they check, not in how they poll.
     ///
     /// Checks the already-processed screen state before blocking: a prior
     /// call (or another already-arrived chunk) may already have processed
-    /// the data that satisfies this condition, and blocking on the channel
+    /// the data that satisfies `predicate`, and blocking on the channel
     /// unconditionally would otherwise wait for a *new* chunk that never
     /// comes once the screen has settled, timing out despite the condition
     /// already being true.
-    #[must_use]
-    pub fn wait_for(&mut self, needle: &str, timeout: Duration) -> bool {
-        if self.parser.screen().contents().contains(needle) {
+    ///
+    /// [`wait_for`]: Self::wait_for
+    /// [`wait_for_cell`]: Self::wait_for_cell
+    fn wait_until(
+        &mut self,
+        timeout: Duration,
+        mut predicate: impl FnMut(&vt100::Screen) -> bool,
+    ) -> bool {
+        if predicate(self.parser.screen()) {
             return true;
         }
         let deadline = Instant::now() + timeout;
@@ -209,7 +217,7 @@ impl PtySession {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
                 Ok(chunk) => {
                     self.parser.process(&chunk);
-                    if self.parser.screen().contents().contains(needle) {
+                    if predicate(self.parser.screen()) {
                         return true;
                     }
                 }
@@ -220,42 +228,24 @@ impl PtySession {
         false
     }
 
+    /// Blocks (up to `timeout`) until the screen contains `needle`,
+    /// returning whether it appeared.
+    #[must_use]
+    pub fn wait_for(&mut self, needle: &str, timeout: Duration) -> bool {
+        self.wait_until(timeout, |screen| screen.contents().contains(needle))
+    }
+
     /// Blocks (up to `timeout`) until the cell at `(row, col)` holds exactly
     /// `expected`, returning whether it did. Unlike [`wait_for`](Self::wait_for)
     /// (whole-screen substring search), this pins content to a specific
     /// cell, for assertions where position is the point.
-    ///
-    /// Checks the already-processed screen state before blocking, for the
-    /// same reason [`wait_for`](Self::wait_for) does.
     #[must_use]
     pub fn wait_for_cell(&mut self, row: u16, col: u16, expected: &str, timeout: Duration) -> bool {
-        if self
-            .parser
-            .screen()
-            .cell(row, col)
-            .is_some_and(|c| c.contents() == expected)
-        {
-            return true;
-        }
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => {
-                    self.parser.process(&chunk);
-                    if self
-                        .parser
-                        .screen()
-                        .cell(row, col)
-                        .is_some_and(|c| c.contents() == expected)
-                    {
-                        return true;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        false
+        self.wait_until(timeout, |screen| {
+            screen
+                .cell(row, col)
+                .is_some_and(|c| c.contents() == expected)
+        })
     }
 
     /// Blocks until the child exits, per [`portable_pty::Child::wait`].

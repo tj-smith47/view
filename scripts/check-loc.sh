@@ -10,13 +10,21 @@
 # top-level `#[cfg(test)]` marker. Convention (enforced by review) keeps
 # all test-only items at the end of the file, so everything from the first
 # unindented #[cfg(test)] to EOF is test code.
+#
+# Usage: check-loc.sh              # tree-wide, walks crates/*/src/
+#        check-loc.sh FILE...      # scoped to the given files (used by the
+#                                   # post-edit-rs.sh hook so an editor save
+#                                   # costs one file's worth of awk, not a
+#                                   # full-tree walk)
 set -euo pipefail
 MAX_PROD_LOC=1000
-fail=0
-while IFS= read -r f; do
+
+check_one() {
+  local f="$1"
   case "$f" in
-    */tests/*|*/benches/*|*/tests.rs|*_test.rs|*_tests.rs) continue ;;
+    */tests/*|*/benches/*|*/tests.rs|*_test.rs|*_tests.rs) return 0 ;;
   esac
+  local prod_loc
   prod_loc="$(awk '
     /^#\[cfg\(test\)\]/ { exit }
     !/^[[:space:]]*$/ && !/^[[:space:]]*\/\// { n++ }
@@ -27,7 +35,20 @@ while IFS= read -r f; do
     echo "  Split it into focused modules, and move any inline #[cfg(test)]"
     echo "  tests to a separate tests.rs or *_tests.rs file (inline tests"
     echo "  inflate cargo-llvm-cov coverage)."
-    fail=1
+    return 1
   fi
-done < <(find crates -path '*/src/*' -name '*.rs' | sort -u)
+  return 0
+}
+
+fail=0
+if [ "$#" -gt 0 ]; then
+  for f in "$@"; do
+    [ -f "$f" ] || continue
+    check_one "$f" || fail=1
+  done
+else
+  while IFS= read -r f; do
+    check_one "$f" || fail=1
+  done < <(find crates -path '*/src/*' -name '*.rs' | sort -u)
+fi
 exit $fail

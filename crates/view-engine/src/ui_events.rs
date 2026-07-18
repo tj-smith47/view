@@ -4,6 +4,7 @@
 //! `view-core`: it is pure data consumed by `update()`, and decoding is the
 //! only part of this crate's job.
 
+use crate::wire::map_find;
 use rmpv::Value;
 pub use view_core::events::{GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent};
 
@@ -166,11 +167,7 @@ fn decode_hl_attr_define(args: &[Value]) -> Option<UiEvent> {
         return None;
     };
     let map = rgb_attrs.as_map()?;
-    let lookup = |key: &str| {
-        map.iter()
-            .find(|(k, _)| k.as_str() == Some(key))
-            .map(|(_, v)| v)
-    };
+    let lookup = |key: &str| map_find(map, key);
     let fg = lookup("foreground").and_then(as_u64).map(|v| v as u32);
     let bg = lookup("background").and_then(as_u64).map(|v| v as u32);
     let bold = lookup("bold").and_then(Value::as_bool).unwrap_or(false);
@@ -233,11 +230,7 @@ fn decode_mode_info_set(args: &[Value]) -> Option<UiEvent> {
     let mut modes = Vec::with_capacity(mode_maps.len());
     for entry in mode_maps {
         let map = entry.as_map()?;
-        let lookup = |key: &str| {
-            map.iter()
-                .find(|(k, _)| k.as_str() == Some(key))
-                .map(|(_, v)| v)
-        };
+        let lookup = |key: &str| map_find(map, key);
         let string_field = |key: &str| {
             lookup(key)
                 .and_then(Value::as_str)
@@ -345,14 +338,8 @@ fn decode_tabline_update(args: &[Value]) -> Option<UiEvent> {
     let mut out = Vec::with_capacity(tab_maps.len());
     for entry in tab_maps {
         let map = entry.as_map()?;
-        let tab = map
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("tab"))
-            .map(|(_, v)| v)?;
-        let name = map
-            .iter()
-            .find(|(k, _)| k.as_str() == Some("name"))
-            .and_then(|(_, v)| v.as_str())?;
+        let tab = map_find(map, "tab")?;
+        let name = map_find(map, "name").and_then(Value::as_str)?;
         out.push(TabEntry {
             tab: decode_tab_handle(tab)?,
             name: name.to_string(),

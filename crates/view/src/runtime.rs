@@ -493,10 +493,11 @@ mod tests {
     }
 
     /// Recreates re-enqueueing buffered keys onto the same bounded
-    /// `sync_channel` `main.rs`'s `msg_tx` is (capacity 64, matching both
-    /// `startup::KEY_RING_CAPACITY` and the literal `mpsc::sync_channel(64)`
-    /// in `main.rs`) while nothing is consuming it yet (`runtime::run`'s
-    /// loop starts only after cutover). 2 keys already resting in the
+    /// `sync_channel` `main.rs`'s `msg_tx` is (capacity
+    /// `startup::MSG_CHANNEL_CAPACITY`, tied by definition to
+    /// `startup::KEY_RING_CAPACITY`) while nothing is consuming it yet
+    /// (`runtime::run`'s loop starts only after cutover). 2 keys already
+    /// resting in the
     /// channel stand in for whatever the input thread queued in the narrow
     /// gap between attach completing and cutover actually running; 64 more
     /// (the ring's full capacity) is what a maximally-full pre-attach buffer
@@ -515,14 +516,14 @@ mod tests {
     /// occupancy (see that test's doc comment).
     #[test]
     fn re_enqueueing_replayed_keys_onto_a_full_bounded_channel_with_no_consumer_blocks_forever() {
-        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        let (tx, rx) = mpsc::sync_channel::<Msg>(crate::startup::MSG_CHANNEL_CAPACITY);
         for _ in 0..2 {
             tx.send(Msg::Key(view_core::msg::Key {
                 notation: "leftover".into(),
             }))
             .unwrap();
         }
-        let buffered: Vec<Msg> = (0..64)
+        let buffered: Vec<Msg> = (0..crate::startup::MSG_CHANNEL_CAPACITY)
             .map(|_| {
                 Msg::Key(view_core::msg::Key {
                     notation: "x".into(),

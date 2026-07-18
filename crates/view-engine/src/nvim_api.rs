@@ -30,6 +30,18 @@ const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
 /// still hang whatever harness is blocked on the answer.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
+/// so a corpus/oracle runner attaching its own reference connection can
+/// request the identical set nvim sees from the real paint loop, rather
+/// than restating the list and risking the two drifting apart.
+pub const UI_EXT_OPTIONS: &[&str] = &[
+    "ext_linegrid",
+    "ext_cmdline",
+    "ext_popupmenu",
+    "ext_messages",
+    "ext_tabline",
+];
+
 impl EngineHandle {
     /// Attaches this connection as nvim's UI at `width` x `height` cells
     /// with the full set of native-rendering extensions enabled:
@@ -55,19 +67,13 @@ impl EngineHandle {
     /// nvim rejects the attach, or the reply does not arrive within
     /// `UI_ATTACH_TIMEOUT`.
     pub fn ui_attach(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        let opts = UI_EXT_OPTIONS
+            .iter()
+            .map(|&name| (Value::from(name), Value::from(true)))
+            .collect();
         self.request_timeout(
             "nvim_ui_attach",
-            vec![
-                Value::from(width),
-                Value::from(height),
-                Value::Map(vec![
-                    (Value::from("ext_linegrid"), Value::from(true)),
-                    (Value::from("ext_cmdline"), Value::from(true)),
-                    (Value::from("ext_popupmenu"), Value::from(true)),
-                    (Value::from("ext_messages"), Value::from(true)),
-                    (Value::from("ext_tabline"), Value::from(true)),
-                ]),
-            ],
+            vec![Value::from(width), Value::from(height), Value::Map(opts)],
             UI_ATTACH_TIMEOUT,
         )?;
         Ok(())
@@ -280,48 +286,11 @@ mod tests {
     use crate::rpc::RpcMessage;
     use std::io::{BufReader, Write};
 
-    /// A minimal fake peer that answers every incoming request with a nil
-    /// success response and forwards `(method, params)` to the returned
-    /// channel, so a test can assert on the exact wire shape a typed
-    /// wrapper sends without a real nvim.
-    fn fake_peer_capturing_requests() -> (
-        EngineHandle,
-        std::sync::mpsc::Receiver<(String, Vec<Value>)>,
-    ) {
-        let (peer_read, our_write) = std::io::pipe().unwrap();
-        let (our_read, mut peer_write) = std::io::pipe().unwrap();
-        let (cap_tx, cap_rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut r = BufReader::new(peer_read);
-            while let Ok(v) = rmpv::decode::read_value(&mut r) {
-                if let Ok(RpcMessage::Request {
-                    msgid,
-                    method,
-                    params,
-                }) = RpcMessage::from_value(v)
-                {
-                    let _ = cap_tx.send((method, params));
-                    let resp = RpcMessage::Response {
-                        msgid,
-                        error: Value::Nil,
-                        result: Value::Nil,
-                    };
-                    if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
-                        break;
-                    }
-                    if peer_write.flush().is_err() {
-                        break;
-                    }
-                }
-            }
-        });
-        let (h, _notif_rx) = EngineHandle::start(our_read, our_write);
-        (h, cap_rx)
-    }
-
-    /// Like [`fake_peer_capturing_requests`], but answers every request with
-    /// `result` instead of `Nil`, so a caller can assert on how a typed
-    /// wrapper renders a specific reply value.
+    /// A minimal fake peer that answers every incoming request with
+    /// `result` and forwards `(method, params)` to the returned channel, so
+    /// a test can assert on the exact wire shape a typed wrapper sends
+    /// without a real nvim. Pass `Value::Nil` for tests that only care
+    /// about the outgoing request shape, not the reply.
     fn fake_peer_replying_with(
         result: Value,
     ) -> (
@@ -366,7 +335,7 @@ mod tests {
     /// `channel_id` explicitly (nvim has no loopback shorthand).
     #[test]
     fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
-        let (h, cap_rx) = fake_peer_capturing_requests();
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.register_vim_enter_autocmd(7).unwrap();
         let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(method, "nvim_command");
@@ -380,7 +349,7 @@ mod tests {
 
     #[test]
     fn ui_attach_sends_the_full_ext_set() {
-        let (h, cap_rx) = fake_peer_capturing_requests();
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         h.ui_attach(80, 24).unwrap();
         let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(method, "nvim_ui_attach");
@@ -406,7 +375,7 @@ mod tests {
 
     #[test]
     fn eval_str_sends_the_expression_as_a_single_positional_string() {
-        let (h, cap_rx) = fake_peer_capturing_requests();
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
         let _ = h.eval_str("getline(1)");
         let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(method, "nvim_eval");

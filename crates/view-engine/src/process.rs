@@ -327,10 +327,7 @@ fn decode_api_info(v: Value) -> Result<ApiInfo, EngineError> {
 
 fn map_get(v: &Value, key: &str) -> Option<Value> {
     let Value::Map(pairs) = v else { return None };
-    pairs
-        .iter()
-        .find(|(k, _)| k.as_str() == Some(key))
-        .map(|(_, val)| val.clone())
+    crate::wire::map_find(pairs, key).cloned()
 }
 
 #[cfg(all(test, unix))]

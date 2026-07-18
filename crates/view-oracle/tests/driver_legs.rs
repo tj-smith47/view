@@ -10,39 +10,11 @@
 //! the decoded screen and nvim's own buffer state must agree).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
+mod common;
+
 use std::time::Duration;
 use view_core::msg::{Key, Msg};
 use view_oracle::{EngineSession, PtySession, Session};
-
-/// Locates the `view` binary next to this crate's own target directory,
-/// always invoking `cargo build -p view` first to guarantee it reflects the
-/// current source tree rather than a stale binary left over from an
-/// earlier build (see `tests/smoke.rs`'s `view_bin_path` for the full
-/// rationale; duplicated here rather than shared, since Rust integration
-/// test binaries cannot import private items from one another without a
-/// `tests/common/mod.rs` module, disproportionate machinery for one
-/// ~15-line helper).
-fn view_bin_path() -> PathBuf {
-    let profile_dir = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // crates/
-    path.pop(); // workspace root
-    path.push("target");
-    path.push(profile_dir);
-    path.push("view");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = std::process::Command::new(cargo)
-        .args(["build", "-p", "view"])
-        .status()
-        .expect("failed to invoke cargo build -p view");
-    assert!(status.success(), "cargo build -p view failed");
-    path
-}
 
 /// leg (a) (Msg-level injection) + leg (b) (deterministic capture), driven
 /// through the pure `Session`: a scripted `Redraw` batch ending in `Flush`
@@ -134,25 +106,11 @@ fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
 /// design.
 #[test]
 fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
-    let bin = view_bin_path();
-    let pid = std::process::id();
-    let scratch = std::env::temp_dir().join(format!("view-oracle-driver-legs-{pid}.txt"));
-    let isolated_home = std::env::temp_dir().join(format!("view-oracle-driver-legs-home-{pid}"));
-    std::fs::create_dir_all(&isolated_home).unwrap();
+    let paths = common::ScratchPaths::new("driver-legs");
 
-    let mut cmd = portable_pty::CommandBuilder::new(&bin);
-    cmd.arg(&scratch);
-    // isolates this test from the host's real nvim config, the same fix
-    // tests/smoke.rs's pty tests use: a dashboard plugin or custom keymap
-    // on a bare "i" would make the typed-character assertion nondeterministic
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, isolated_home.join(var.to_lowercase()));
-    }
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg(&mut cmd, &paths.isolated_home);
 
     let mut session = PtySession::spawn_configured(cmd, 80, 24)
         .expect("PtySession::spawn_configured against target/debug/view");
@@ -172,8 +130,6 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
 
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait_for_exit(Duration::from_secs(5));
-    let _ = std::fs::remove_file(&scratch);
-    let _ = std::fs::remove_dir_all(&isolated_home);
 }
 
 /// A sanity check on `Session::feed`'s total-and-lossy contract for a

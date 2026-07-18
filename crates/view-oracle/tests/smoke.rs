@@ -16,56 +16,11 @@
 //! `screen_raw`, `pid`, `wait`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+mod common;
+
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use view_oracle::PtySession;
-
-/// Locates the `view` binary next to this crate's own target directory,
-/// always invoking `cargo build -p view` first to guarantee it reflects
-/// the current source tree.
-///
-/// `view` is a bin-only crate with no library target, so Cargo's
-/// `CARGO_BIN_EXE_<name>` mechanism is unavailable: Cargo only sets that
-/// variable for binaries reachable via a package's own dependency graph, and
-/// it refuses to add a lib-less crate as a dependency at all (confirmed by
-/// attempting exactly that: `cargo add view -p view-oracle --dev` succeeds
-/// but emits "ignoring invalid dependency `view` which is missing a lib
-/// target", and `env!("CARGO_BIN_EXE_view")` then fails to compile). Falls
-/// back to locating the workspace `target/<profile>/view` executable
-/// directly.
-///
-/// The build call is unconditional, not gated on `!path.exists()`: an
-/// existence check only proves *some* binary was built once before, not
-/// that it reflects the source this test process just compiled against.
-/// A stale binary left over from an earlier build (e.g. one taken while
-/// iterating on `crates/view` itself with `git stash`) previously produced
-/// a false RED or a false GREEN under a direct `cargo test -p
-/// view-oracle`, indistinguishable from a real pass/fail until someone
-/// noticed the binary's mtime predated the source. `cargo build` is a
-/// no-op (a fast up-to-date check, not a recompile) when the binary is
-/// already current, so paying for the invocation on every run is cheap
-/// insurance against exactly that class of false result.
-fn view_bin_path() -> PathBuf {
-    let profile_dir = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // crates/
-    path.pop(); // workspace root
-    path.push("target");
-    path.push(profile_dir);
-    path.push("view");
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = std::process::Command::new(cargo)
-        .args(["build", "-p", "view"])
-        .status()
-        .expect("failed to invoke cargo build -p view");
-    assert!(status.success(), "cargo build -p view failed");
-    path
-}
 
 /// Wraps the promoted `view_oracle::PtySession` with the `view`-binary
 /// concerns that promotion deliberately left behind: an isolated scratch
@@ -76,8 +31,7 @@ fn view_bin_path() -> PathBuf {
 /// `screen_raw`, `pid`, `wait`) straight to the promoted type.
 struct ViewPtySession {
     session: PtySession,
-    scratch: PathBuf,
-    isolated_home: PathBuf,
+    paths: common::ScratchPaths,
 }
 
 impl std::ops::Deref for ViewPtySession {
@@ -90,13 +44,6 @@ impl std::ops::Deref for ViewPtySession {
 impl std::ops::DerefMut for ViewPtySession {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.session
-    }
-}
-
-impl Drop for ViewPtySession {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.scratch);
-        let _ = std::fs::remove_dir_all(&self.isolated_home);
     }
 }
 
@@ -120,20 +67,15 @@ impl ViewPtySession {
     /// contents instead proves the text reached nvim's buffer through
     /// `nvim_input`, not just the terminal's own echo.
     fn read_saved_file(&self) -> String {
-        std::fs::read_to_string(&self.scratch).expect("saved file should exist and be readable")
+        std::fs::read_to_string(&self.paths.scratch)
+            .expect("saved file should exist and be readable")
     }
 }
-
-static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Opens a pty sized 24x80 (nonzero: a 0x0 winsize makes nvim's UI attach
 /// fail during startup), spawns `view` against a scratch file with the
 /// host's real nvim config isolated out of the way, and waits for the first
 /// non-blank redraw so callers start from a settled screen.
-///
-/// Scratch paths are disambiguated by an atomic counter, not just the test
-/// process's pid: multiple tests in this file spawn a session concurrently
-/// within the same test binary process, so pid alone would collide.
 fn spawn_view_pty() -> ViewPtySession {
     let mut session = spawn_view_pty_raw();
     // waits specifically for a `~` (nvim's own empty-buffer-line marker,
@@ -161,36 +103,18 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
 fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySession {
-    let pid = std::process::id();
-    let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
-    let scratch = std::env::temp_dir().join(format!("view-oracle-smoke-{pid}-{session_id}.txt"));
-    let isolated_home = std::env::temp_dir().join(format!("view-oracle-home-{pid}-{session_id}"));
-    std::fs::create_dir_all(&isolated_home).unwrap();
+    let paths = common::ScratchPaths::new("smoke");
 
-    let mut cmd = portable_pty::CommandBuilder::new(view_bin_path());
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     for arg in extra_args {
         cmd.arg(arg);
     }
-    cmd.arg(&scratch);
-    // isolate from any real nvim user config on the host running this test:
-    // a dashboard plugin or custom keymap on a bare "i" would make the
-    // typed-text assertion below nondeterministic
-    for var in [
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "XDG_CACHE_HOME",
-    ] {
-        cmd.env(var, isolated_home.join(var.to_lowercase()));
-    }
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg(&mut cmd, &paths.isolated_home);
 
     let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
 
-    ViewPtySession {
-        session,
-        scratch,
-        isolated_home,
-    }
+    ViewPtySession { session, paths }
 }
 
 /// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of

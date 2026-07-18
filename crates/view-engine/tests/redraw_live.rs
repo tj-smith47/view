@@ -18,8 +18,32 @@ use std::time::{Duration, Instant};
 use view_core::model::Model;
 use view_core::msg::Msg;
 use view_core::update::update;
+use view_engine::damage::DamagePump;
 use view_engine::process::{Engine, EngineConfig};
 use view_engine::ui_events::UiEvent;
+
+/// Drains `rx`'s `RedrawReady` tokens through `pump.take_damage()`,
+/// checking each decoded event against `mark`, until every flag `mark` can
+/// set is set or `deadline` passes. Shared by the two live-decode tests
+/// below, which differ only in which `UiEvent` variants they watch for.
+fn drain_until<const N: usize>(
+    rx: &mpsc::Receiver<Msg>,
+    pump: &DamagePump,
+    deadline: Instant,
+    mut flags: [bool; N],
+    mark: impl Fn(&UiEvent, &mut [bool; N]),
+) -> [bool; N] {
+    while Instant::now() < deadline && flags.iter().any(|&f| !f) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let Ok(Msg::RedrawReady) = rx.recv_timeout(remaining) else {
+            break;
+        };
+        for event in pump.take_damage() {
+            mark(&event, &mut flags);
+        }
+    }
+    flags
+}
 
 #[test]
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
@@ -29,21 +53,17 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
     engine.handle.ui_attach(80, 24).unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_grid_line = false;
-    let mut saw_flush = false;
-    while Instant::now() < deadline && !(saw_grid_line && saw_flush) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(Msg::RedrawReady) = rx.recv_timeout(remaining) else {
-            break;
-        };
-        for event in pump.take_damage() {
-            match event {
-                UiEvent::GridLine { .. } => saw_grid_line = true,
-                UiEvent::Flush => saw_flush = true,
-                _ => {}
-            }
-        }
-    }
+    let [saw_grid_line, saw_flush] = drain_until(
+        &rx,
+        &pump,
+        deadline,
+        [false, false],
+        |event, flags| match event {
+            UiEvent::GridLine { .. } => flags[0] = true,
+            UiEvent::Flush => flags[1] = true,
+            _ => {}
+        },
+    );
 
     assert!(
         saw_grid_line,
@@ -69,21 +89,17 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     engine.handle.input(":").unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let mut saw_mode_change = false;
-    let mut saw_cmdline_show = false;
-    while Instant::now() < deadline && !(saw_mode_change && saw_cmdline_show) {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        let Ok(Msg::RedrawReady) = rx.recv_timeout(remaining) else {
-            break;
-        };
-        for event in pump.take_damage() {
-            match event {
-                UiEvent::ModeChange { .. } => saw_mode_change = true,
-                UiEvent::CmdlineShow { .. } => saw_cmdline_show = true,
-                _ => {}
-            }
-        }
-    }
+    let [saw_mode_change, saw_cmdline_show] = drain_until(
+        &rx,
+        &pump,
+        deadline,
+        [false, false],
+        |event, flags| match event {
+            UiEvent::ModeChange { .. } => flags[0] = true,
+            UiEvent::CmdlineShow { .. } => flags[1] = true,
+            _ => {}
+        },
+    );
 
     assert!(
         saw_mode_change,
