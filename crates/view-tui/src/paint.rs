@@ -124,6 +124,11 @@ fn paint_cmdline(
     for (_, chunk) in &state.content {
         text.push_str(chunk);
     }
+    // a live `--clean` capture of nvim's `hl_group_set` batch (see
+    // view-engine's ui_events tests) carries no builtin group naming the
+    // cmdline row: nvim styles it from "Normal" itself, so `theme.normal()`
+    // is not a fallback standing in for a missing mapping here, it is the
+    // correct source
     paint_text_row(&text, ratatui_style(theme.normal()), area, 0, frame);
 }
 
@@ -139,7 +144,7 @@ fn paint_messages(
 ) {
     let visible = usize::from(area.height);
     let start = entries.len().saturating_sub(visible);
-    let style = ratatui_style(theme.normal());
+    let style = ratatui_style(theme.msg_area);
     for (i, entry) in entries[start..].iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
@@ -158,6 +163,13 @@ fn paint_tabline(
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
+    // painted before the tab labels themselves so `TabLineFill` shows
+    // through any column the labels below do not reach (a short tab list
+    // in a wide terminal), matching what that builtin group names: the
+    // row's background beyond the tabs
+    let fill = " ".repeat(usize::from(area.width));
+    paint_text_row(&fill, ratatui_style(theme.tab_line_fill), area, 0, frame);
+
     let mut text = String::new();
     let mut current_range: Option<(u16, u16)> = None;
     for tab in &state.tabs {
@@ -168,11 +180,11 @@ fn paint_tabline(
             current_range = Some((start, end));
         }
     }
-    paint_text_row(&text, ratatui_style(theme.normal()), area, 0, frame);
+    paint_text_row(&text, ratatui_style(theme.tab_line), area, 0, frame);
     if let Some((start, end)) = current_range {
         let buf = frame.buffer_mut();
         for col in start..end.min(area.width) {
-            buf[(area.x + col, area.y)].set_style(emphasis_style(theme));
+            buf[(area.x + col, area.y)].set_style(ratatui_style(theme.tab_line_sel));
         }
     }
 }
@@ -195,9 +207,9 @@ fn paint_popupmenu(
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
         let style = if is_selected {
-            emphasis_style(theme)
+            ratatui_style(theme.pmenu_sel)
         } else {
-            ratatui_style(theme.normal())
+            ratatui_style(theme.pmenu)
         };
         paint_text_row(&item.display_text(), style, area, row, frame);
     }
@@ -285,17 +297,10 @@ fn ratatui_style(resolved: ResolvedStyle) -> Style {
     if resolved.underline {
         style = style.add_modifier(Modifier::UNDERLINED);
     }
+    if resolved.reverse {
+        style = style.add_modifier(Modifier::REVERSED);
+    }
     style
-}
-
-/// Chrome's "this row stands out" style (the current tab, a selected popup
-/// item): `theme`'s base colors plus `ratatui`'s own reverse-video
-/// modifier, which -- unlike swapping resolved color values -- stays
-/// visibly distinct even before any theme color is known (an unset
-/// `fg`/`bg` still inverts against whatever the terminal's own default
-/// colors are).
-fn emphasis_style(theme: &Theme) -> Style {
-    ratatui_style(theme.normal()).add_modifier(Modifier::REVERSED)
 }
 
 fn rgb(c: u32) -> Color {
@@ -317,6 +322,7 @@ mod tests {
             default_fg: None,
             default_bg: None,
             attrs,
+            groups: std::collections::HashMap::new(),
         }
     }
 

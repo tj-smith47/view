@@ -96,8 +96,7 @@ fn main() -> Result<()> {
     match &config_path {
         Some(path) => {
             let cached = theme_cache::load(path);
-            model.engine.hl.default_fg = cached.fg;
-            model.engine.hl.default_bg = cached.bg;
+            theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
         }
         None => {
             eprintln!(

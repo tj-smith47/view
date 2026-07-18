@@ -35,6 +35,7 @@ impl Model {
                     default_fg: None,
                     default_bg: None,
                     attrs: std::collections::HashMap::new(),
+                    groups: std::collections::HashMap::new(),
                 },
                 mode: ModeState::default(),
                 cmdline: None,

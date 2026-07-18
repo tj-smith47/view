@@ -50,6 +50,14 @@ pub enum UiEvent {
         bg: Option<u32>,
         sp: Option<u32>,
     },
+    /// Associates a builtin UI element's highlight group name (`"StatusLine"`,
+    /// `"TabLineSel"`, `"Pmenu"`, and so on -- confirmed via a live
+    /// `--clean` capture: nvim sends one batch of these per grid attach and
+    /// again whenever the color table is recomputed, e.g. `:colorscheme`)
+    /// with the `hl_id` external UIs already resolve grid cells through, so
+    /// chrome elements with no cell of their own can still match the active
+    /// colorscheme.
+    HlGroupSet { name: String, hl_id: u64 },
     /// nvim finished a batch of updates; safe to repaint.
     Flush,
     /// The set of editor modes and their cursor/highlight properties

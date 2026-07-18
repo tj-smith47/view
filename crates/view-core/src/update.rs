@@ -176,6 +176,10 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             model.engine.hl.default_bg = bg;
             Vec::new()
         }
+        UiEvent::HlGroupSet { name, hl_id } => {
+            model.engine.hl.groups.insert(name, hl_id);
+            Vec::new()
+        }
         UiEvent::Flush => {
             model.dirty = true;
             Vec::new()
@@ -330,6 +334,40 @@ mod tests {
         assert!(effects.is_empty());
         assert!(m.dirty);
         assert_eq!(m.engine.grid.row_text(0).trim_end(), "h");
+    }
+
+    #[test]
+    fn hl_group_set_records_the_name_to_hl_id_mapping() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::HlGroupSet {
+                name: "StatusLine".to_string(),
+                hl_id: 41,
+            }]),
+        );
+        assert!(effects.is_empty());
+        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&41));
+    }
+
+    #[test]
+    fn hl_group_set_overwrites_a_prior_mapping_for_the_same_name() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::HlGroupSet {
+                name: "StatusLine".to_string(),
+                hl_id: 1,
+            }]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::HlGroupSet {
+                name: "StatusLine".to_string(),
+                hl_id: 168,
+            }]),
+        );
+        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&168));
     }
 
     #[test]

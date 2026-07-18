@@ -49,6 +49,7 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "grid_clear" => decode_grid_clear(args).unwrap_or_else(unknown),
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
+        "hl_group_set" => decode_hl_group_set(args).unwrap_or_else(unknown),
         "flush" => UiEvent::Flush,
         "mode_info_set" => decode_mode_info_set(args).unwrap_or_else(unknown),
         "mode_change" => decode_mode_change(args).unwrap_or_else(unknown),
@@ -206,6 +207,21 @@ fn decode_default_colors_set(args: &[Value]) -> Option<UiEvent> {
 fn as_color(v: &Value) -> Option<Option<u32>> {
     let n = as_i64(v)?;
     Some(u32::try_from(n).ok())
+}
+
+// wire tuple is [name, hl_id] (confirmed via a live `--clean` capture:
+// `nvim --embed`, ui_attach with ext_linegrid, dump the raw redraw params
+// for the "hl_group_set" batch before decoding) -- the same 2-element
+// shape as `mode_change`'s `[mode, mode_idx]`, so this follows that
+// decoder's pattern rather than `hl_attr_define`'s map-lookup one.
+fn decode_hl_group_set(args: &[Value]) -> Option<UiEvent> {
+    let [name, hl_id, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::HlGroupSet {
+        name: name.as_str()?.to_string(),
+        hl_id: as_u64(hl_id)?,
+    })
 }
 
 fn decode_mode_info_set(args: &[Value]) -> Option<UiEvent> {
@@ -546,6 +562,46 @@ mod tests {
                 bg: Some(0),
                 sp: Some(0x00ff_ffff),
             }]
+        );
+    }
+
+    /// Fixture copied from a live `nvim --embed --clean` capture: `nvim_ui_attach`
+    /// with `ext_linegrid`, dumping the raw redraw params for the
+    /// `hl_group_set` batch before any decoding. One real batch carries
+    /// ~72 `[name, hl_id]` tuples in one call (every builtin UI element
+    /// group at once); this fixture keeps the ones this decoder's chrome
+    /// consumers actually resolve by name, plus the always-present empty-name
+    /// sentinel entry real nvim sends first in every batch.
+    #[test]
+    fn decodes_hl_group_set_batch() {
+        let params = vec![arr(vec![
+            Value::from("hl_group_set"),
+            arr(vec![Value::from(""), Value::from(0)]),
+            arr(vec![Value::from("StatusLine"), Value::from(41)]),
+            arr(vec![Value::from("TabLineSel"), Value::from(42)]),
+            arr(vec![Value::from("Pmenu"), Value::from(31)]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::HlGroupSet {
+                    name: String::new(),
+                    hl_id: 0,
+                },
+                UiEvent::HlGroupSet {
+                    name: "StatusLine".to_string(),
+                    hl_id: 41,
+                },
+                UiEvent::HlGroupSet {
+                    name: "TabLineSel".to_string(),
+                    hl_id: 42,
+                },
+                UiEvent::HlGroupSet {
+                    name: "Pmenu".to_string(),
+                    hl_id: 31,
+                },
+            ]
         );
     }
 

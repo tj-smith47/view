@@ -27,4 +27,12 @@ pub struct HlTable {
     pub default_bg: Option<u32>,
     /// Highlight groups by id.
     pub attrs: std::collections::HashMap<u64, HlAttr>,
+    /// Builtin UI element highlight group names (`"StatusLine"`,
+    /// `"TabLineSel"`, `"Pmenu"`, ...) to the `hl_id` they currently
+    /// resolve through `attrs`, populated by `hl_group_set` events. Chrome
+    /// with no grid cell of its own (the tabline, the popup menu, ...)
+    /// looks its style up here instead of holding a per-element `hl_id`
+    /// directly, the same way a grid cell's `hl_id` looks itself up in
+    /// `attrs`.
+    pub groups: std::collections::HashMap<String, u64>,
 }
