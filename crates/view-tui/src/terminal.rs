@@ -161,8 +161,8 @@ impl Term {
 /// forwards every key or resize event to `tx` as a core [`Msg`], translating
 /// key events via [`encode_key`](crate::keys::encode_key). Events with no
 /// nvim equivalent (key releases, keys with no notation) and event kinds
-/// this frontend does not act on yet (paste, mouse -- their `Msg` variants
-/// arrive in a later task) are dropped rather than forwarded. Exits once
+/// this frontend does not act on yet (paste and mouse are not yet
+/// forwarded) are dropped rather than forwarded. Exits once
 /// `crossterm::event::read()` errors or `tx`'s receiver is gone.
 ///
 /// Blocking on a dedicated thread rather than polling on the runtime loop's

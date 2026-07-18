@@ -199,8 +199,14 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
             .any(|e| matches!(e, UiEvent::GridScroll { .. })),
         "expected at least one real GridScroll from the paced <C-e> scrolling"
     );
+    // grid content and cursor position are checked against nvim's own ground
+    // truth below; the non-GridOp subsequence (event ordering/types besides
+    // grid content) has no external oracle to check it against here, so that
+    // property stays covered by the generative
+    // compaction_preserves_final_grid_and_non_grid_subsequence test in
+    // damage.rs instead.
 
-    let top_line = engine
+    let top_line_value = engine
         .handle
         .request(
             "nvim_call_function",
@@ -210,24 +216,67 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
             ],
         )
         .unwrap();
-    let expected = engine
+    let top_line = top_line_value
+        .as_i64()
+        .expect("line('w0') must return an integer");
+
+    // rows 0..=10 stay clear of the 24-row grid's bottom chrome (statusline,
+    // cmdline) while still covering more than the single top row a
+    // row-0-tombstoning epoch bug could otherwise hide behind.
+    for i in 0..=10i64 {
+        let expected = engine
+            .handle
+            .request(
+                "nvim_call_function",
+                vec![
+                    rmpv::Value::from("getline"),
+                    rmpv::Value::Array(vec![rmpv::Value::from(top_line + i)]),
+                ],
+            )
+            .unwrap();
+        let expected_text = expected
+            .as_str()
+            .expect("getline must return a String result");
+
+        assert_eq!(
+            model.engine.grid.row_text(i as u16).trim_end(),
+            expected_text,
+            "compacted damage's final grid row {i} does not match nvim's own \
+             reported buffer line (top_line={top_line})"
+        );
+    }
+
+    let cursor_value = engine
         .handle
-        .request(
-            "nvim_call_function",
-            vec![
-                rmpv::Value::from("getline"),
-                rmpv::Value::Array(vec![top_line]),
-            ],
-        )
+        .request("nvim_win_get_cursor", vec![rmpv::Value::from(0)])
         .unwrap();
-    let expected_text = expected
-        .as_str()
-        .expect("getline must return a String result");
+    let cursor_array = cursor_value
+        .as_array()
+        .expect("nvim_win_get_cursor must return a [row, col] array");
+    let nvim_cursor_line = cursor_array[0]
+        .as_i64()
+        .expect("cursor row must be an integer");
+    let nvim_cursor_col = cursor_array[1]
+        .as_i64()
+        .expect("cursor col must be an integer");
+    // nvim_win_get_cursor reports a 1-based buffer line and 0-based byte
+    // column; the grid's cursor is 0-based on both axes and measured from
+    // the window's top row, so the buffer line needs an explicit conversion
+    // (offset from top_line, also 1-based) while the column carries over
+    // directly.
+    let expected_cursor_row = nvim_cursor_line - top_line;
+    let (grid_cursor_row, grid_cursor_col) = model.engine.grid.cursor();
 
     assert_eq!(
-        model.engine.grid.row_text(0).trim_end(),
-        expected_text,
-        "compacted damage's final grid row 0 does not match nvim's own \
-         reported top-of-window buffer line"
+        i64::from(grid_cursor_row),
+        expected_cursor_row,
+        "compacted damage's final grid cursor row does not match nvim's own \
+         reported cursor line (nvim_cursor_line={nvim_cursor_line}, top_line={top_line})"
+    );
+    assert_eq!(
+        i64::from(grid_cursor_col),
+        nvim_cursor_col,
+        "compacted damage's final grid cursor col does not match nvim's own \
+         reported cursor column"
     );
 }
