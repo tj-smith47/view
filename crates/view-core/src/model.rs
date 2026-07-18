@@ -254,14 +254,13 @@ pub struct TermCaps {
 
 impl Default for TermCaps {
     /// Conservative defaults used before any capability probe runs: no
-    /// probe is assumed to have succeeded.
+    /// probe is assumed to have succeeded. Routed through [`Self::from_probe`]
+    /// (all-false) rather than hand-coded, so the tier-derivation formula
+    /// still lives in exactly one place and a default of all-false booleans
+    /// can never disagree with what `from_probe(false, false, false)` would
+    /// derive for `tier`.
     fn default() -> Self {
-        Self {
-            tier: Tier::Standard,
-            sync: false,
-            truecolor: false,
-            kitty_kbd: false,
-        }
+        Self::from_probe(false, false, false)
     }
 }
 

@@ -174,6 +174,11 @@ pub struct Term {
     /// to the caller without re-running the (stdin-consuming, one-shot)
     /// detection probe.
     caps: TermCaps,
+    /// Bytes the capability probe read that were not part of a recognized
+    /// reply -- almost always keystrokes the user typed before or during
+    /// the probe window. [`Term::take_residue`] hands this to the caller
+    /// exactly once so nothing typed at startup is silently lost.
+    residue: Vec<u8>,
 }
 
 impl Term {
@@ -195,7 +200,7 @@ impl Term {
     /// the backend terminal cannot be built.
     pub fn init(tier_override: Option<Tier>) -> std::io::Result<Self> {
         let guard = TerminalGuard::enter_raw_mode()?;
-        let caps = tiers::resolve(tier_override)?;
+        let (caps, residue) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen()?;
         let inner =
             ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
@@ -205,6 +210,7 @@ impl Term {
             last_cursor_shape: None,
             last_mouse_capture: None,
             caps,
+            residue,
         })
     }
 
@@ -213,6 +219,21 @@ impl Term {
     #[must_use]
     pub fn caps(&self) -> TermCaps {
         self.caps
+    }
+
+    /// Takes ownership of the capability probe's residue bytes, leaving an
+    /// empty buffer behind. Callable exactly once per [`Term::init`] with a
+    /// meaningful result -- a second call returns an empty `Vec`, which is
+    /// correct rather than surprising, since there is nothing left to take.
+    ///
+    /// The caller (`main.rs`, right after `ui_attach`) is expected to
+    /// translate this into nvim input notation (see
+    /// [`encode_residue_bytes`](crate::keys::encode_residue_bytes)) and
+    /// forward it before the runtime loop starts, so a keystroke queued
+    /// ahead of or during the startup probe is never silently dropped.
+    #[must_use]
+    pub fn take_residue(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.residue)
     }
 
     /// Current terminal size in `(width, height)` cells.
@@ -234,8 +255,8 @@ impl Term {
     ///
     /// `surface` describes *where* to paint and *what kind* of content goes
     /// there; the grid's own per-cell content still comes from `model`
-    /// directly (see [`composite`](crate::paint::composite)), so a `Surface`
-    /// never needs to clone the grid to be paintable.
+    /// directly (see [`composite`]), so a `Surface` never needs to clone the
+    /// grid to be paintable.
     ///
     /// When `model.caps.sync` is set, the whole write (paint plus cursor
     /// move) is wrapped in a terminal synchronized-update bracket
@@ -311,11 +332,10 @@ impl Term {
 
 /// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
 /// forwards every key, resize, paste, or mouse event to `tx` as a core
-/// [`Msg`], translating key events via [`encode_key`](crate::keys::encode_key)
-/// and mouse events via [`encode_mouse`](crate::mouse::encode_mouse). Events
-/// with no nvim equivalent (key releases, keys with no notation) are dropped
-/// rather than forwarded. Exits once `crossterm::event::read()` errors or
-/// `tx`'s receiver is gone.
+/// [`Msg`], translating key events via [`encode_key`] and mouse events via
+/// [`encode_mouse`]. Events with no nvim equivalent (key releases, keys
+/// with no notation) are dropped rather than forwarded. Exits once
+/// `crossterm::event::read()` errors or `tx`'s receiver is gone.
 ///
 /// Blocking on a dedicated thread rather than polling on the runtime loop's
 /// own thread is what lets the loop's `recv()` wake immediately on a

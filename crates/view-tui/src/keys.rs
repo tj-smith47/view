@@ -70,6 +70,84 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
     })
 }
 
+/// Translates raw bytes read during the startup capability probe (before
+/// [`spawn_input_thread`](crate::terminal::spawn_input_thread)'s own reader
+/// exists) into nvim input notation strings, so [`Term::init`](crate::terminal::Term::init)'s
+/// caller can forward anything the user typed at spawn instead of losing
+/// it (see [`tiers::detect`](crate::tiers::detect) for how this residue is
+/// separated from the probe's own capability replies).
+///
+/// This is not a general terminal-input decoder: it only has to cover what
+/// a person can type inside the probe's ~50ms window, not the full grammar
+/// [`crossterm::event::read`] already owns for every keystroke after
+/// startup. Printable ASCII passes through as literal characters (matching
+/// [`encode_key`]'s plain-char case, including `<` becoming `<lt>`);
+/// `\r`/`\n` map to `<CR>`, `\t` to `<Tab>`, backspace (`0x08`/`0x7f`) to
+/// `<BS>`. A run of continuous non-ASCII bytes (`0x80..`) is decoded as one
+/// UTF-8 str and forwarded char-by-char if valid, dropped if not (a
+/// mid-codepoint chunk boundary can produce invalid UTF-8 here, and
+/// guessing at a replacement is worse than dropping a still-rare case).
+///
+/// `ESC` immediately followed by `[` is the hard case: it is ambiguous
+/// between an `<Esc>` keypress followed by someone separately typing `[`,
+/// and a real CSI sequence (an arrow key, a function key). Disambiguating
+/// needs the same multi-byte lookahead grammar `crossterm`'s own parser
+/// uses, which is out of scope for a startup-only residue drain, so the
+/// policy here is to drop the rest of the buffer from that `ESC` onward
+/// rather than guess: forwarding a misdecoded fragment byte-by-byte would
+/// inject garbage keystrokes nvim then has to live with, while a dropped
+/// arrow key is a keystroke the user can simply press again once the
+/// editor is up. A bare `ESC` not followed by `[` is unambiguous and maps
+/// to `<Esc>`.
+#[must_use]
+pub fn encode_residue_bytes(residue: &[u8]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < residue.len() {
+        match residue[i] {
+            0x1b if residue.get(i + 1) == Some(&b'[') => break,
+            0x1b => {
+                out.push("<Esc>".to_string());
+                i += 1;
+            }
+            b'\r' | b'\n' => {
+                out.push("<CR>".to_string());
+                i += 1;
+            }
+            b'\t' => {
+                out.push("<Tab>".to_string());
+                i += 1;
+            }
+            0x7f | 0x08 => {
+                out.push("<BS>".to_string());
+                i += 1;
+            }
+            b'<' => {
+                out.push("<lt>".to_string());
+                i += 1;
+            }
+            b if (0x20..=0x7e).contains(&b) => {
+                out.push((b as char).to_string());
+                i += 1;
+            }
+            b if b >= 0x80 => {
+                let start = i;
+                i += 1;
+                while residue.get(i).is_some_and(|&b| b >= 0x80) {
+                    i += 1;
+                }
+                if let Ok(s) = std::str::from_utf8(&residue[start..i]) {
+                    out.extend(s.chars().map(String::from));
+                }
+            }
+            // any other control byte (bell, null, ...) has no sensible nvim
+            // notation and is dropped rather than guessed at
+            _ => i += 1,
+        }
+    }
+    out
+}
+
 /// Maps a [`KeyCode`] to its bare nvim notation name and whether that name
 /// must always render inside `<...>` even without modifiers.
 ///
@@ -215,5 +293,72 @@ mod tests {
             encode_key(&key(KeyCode::Char(' '), KeyModifiers::NONE)).unwrap(),
             " "
         );
+    }
+
+    #[test]
+    fn residue_printable_ascii_passes_through_as_literal_chars() {
+        assert_eq!(
+            encode_residue_bytes(b"itypeahead-marker"),
+            vec![
+                "i", "t", "y", "p", "e", "a", "h", "e", "a", "d", "-", "m", "a", "r", "k", "e", "r"
+            ]
+        );
+    }
+
+    #[test]
+    fn residue_lt_byte_is_escaped_like_encode_key_does() {
+        assert_eq!(encode_residue_bytes(b"<"), vec!["<lt>"]);
+    }
+
+    #[test]
+    fn residue_cr_lf_tab_backspace_map_to_named_tokens() {
+        assert_eq!(encode_residue_bytes(b"\r"), vec!["<CR>"]);
+        assert_eq!(encode_residue_bytes(b"\n"), vec!["<CR>"]);
+        assert_eq!(encode_residue_bytes(b"\t"), vec!["<Tab>"]);
+        assert_eq!(encode_residue_bytes(b"\x7f"), vec!["<BS>"]);
+        assert_eq!(encode_residue_bytes(b"\x08"), vec!["<BS>"]);
+    }
+
+    #[test]
+    fn residue_bare_esc_not_followed_by_bracket_maps_to_esc_token() {
+        assert_eq!(encode_residue_bytes(b"\x1b"), vec!["<Esc>"]);
+        assert_eq!(encode_residue_bytes(b"\x1bx"), vec!["<Esc>", "x"]);
+    }
+
+    #[test]
+    fn residue_esc_followed_by_bracket_drops_the_rest_of_the_buffer() {
+        // ambiguous between "Esc then someone typed [" and a real CSI
+        // sequence (an arrow key); the documented policy is to drop rather
+        // than guess, including bytes that would otherwise be perfectly
+        // decodable if they followed the escape fragment
+        assert_eq!(encode_residue_bytes(b"ok\x1b[Aignored"), vec!["o", "k"]);
+    }
+
+    #[test]
+    fn residue_valid_utf8_multibyte_run_decodes_char_by_char() {
+        assert_eq!(
+            encode_residue_bytes("caf\u{e9}".as_bytes()),
+            vec!["c", "a", "f", "\u{e9}"]
+        );
+    }
+
+    #[test]
+    fn residue_invalid_utf8_tail_is_dropped_not_guessed_at() {
+        // a lone continuation byte with no valid leading byte: not valid
+        // UTF-8 on its own, so it must be dropped rather than produce a
+        // replacement character or panic
+        let mut bytes = b"ok".to_vec();
+        bytes.push(0x80);
+        assert_eq!(encode_residue_bytes(&bytes), vec!["o", "k"]);
+    }
+
+    #[test]
+    fn residue_unrecognized_control_bytes_are_dropped() {
+        assert_eq!(encode_residue_bytes(b"a\x00b\x07c"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn residue_empty_input_yields_empty_output() {
+        assert!(encode_residue_bytes(b"").is_empty());
     }
 }

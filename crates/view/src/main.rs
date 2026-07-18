@@ -59,6 +59,7 @@ fn main() -> Result<()> {
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
     let (width, height) = term.size()?;
+    let residue = term.take_residue();
 
     // the only request the setup path makes; once run() starts, every nvim
     // call goes through notify so a slow response never stalls a frame or a
@@ -69,6 +70,17 @@ fn main() -> Result<()> {
         .handle
         .ui_attach(width, height)
         .context("ui attach failed or timed out")?;
+
+    // anything the user typed before or during the startup capability probe
+    // (see Term::take_residue) has to reach nvim before the runtime loop's
+    // own input thread starts, or it is lost for good; errors are ignored
+    // here rather than propagated, since a write failure on a
+    // freshly-attached connection means the engine is already gone, which
+    // run() below discovers and handles through its own EngineDown path
+    // moments later
+    for notation in view_tui::keys::encode_residue_bytes(&residue) {
+        let _ = engine.handle.input(&notation);
+    }
 
     let mut model = Model::with_term_size(width, height);
     model.caps = term.caps();

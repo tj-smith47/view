@@ -168,6 +168,42 @@ impl PtySession {
             .process_id()
             .expect("view child exposes a pid on this platform")
     }
+
+    /// Blocks (up to 5s) until the screen shows something, the same "wait
+    /// for the first redraw" step [`spawn_view_pty`] runs before handing a
+    /// session to most tests. Split out so
+    /// [`spawn_view_pty_raw`]-based tests can drive input *before* this
+    /// point when that is exactly the race they need to exercise (see
+    /// `view_forwards_keystrokes_typed_immediately_at_spawn_before_the_startup_probe_settles`).
+    fn wait_for_startup_redraw(&mut self) {
+        let startup_deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < startup_deadline {
+            match self.rx.recv_timeout(Duration::from_millis(200)) {
+                Ok(chunk) => {
+                    self.parser.process(&chunk);
+                    if !self.parser.screen().contents().trim().is_empty() {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+    }
+
+    /// Reads the scratch file `view` was launched against back off disk,
+    /// after a `:wq` (or equivalent) has saved it.
+    ///
+    /// An echo-immune oracle: the pty master stream can show text that was
+    /// never actually processed by nvim at all, since a real terminal's
+    /// canonical-mode line discipline echoes back whatever the test itself
+    /// wrote to the master, independent of whether the child process (or
+    /// nvim inside it) ever read those bytes. Reading the saved file's real
+    /// contents instead proves the text reached nvim's buffer through
+    /// `nvim_input`, not just the terminal's own echo.
+    fn read_saved_file(&self) -> String {
+        std::fs::read_to_string(&self.scratch).expect("saved file should exist and be readable")
+    }
 }
 
 impl Drop for PtySession {
@@ -188,6 +224,17 @@ static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 /// process's pid: multiple tests in this file spawn a session concurrently
 /// within the same test binary process, so pid alone would collide.
 fn spawn_view_pty() -> PtySession {
+    let mut session = spawn_view_pty_raw();
+    session.wait_for_startup_redraw();
+    session
+}
+
+/// Like [`spawn_view_pty`], but returns as soon as the child is spawned
+/// instead of waiting for the first redraw. Only tests that need to drive
+/// input inside that startup window itself (the capability-probe residue
+/// regression test) should call this directly; every other test wants
+/// [`spawn_view_pty`]'s settled screen, same as a human would get.
+fn spawn_view_pty_raw() -> PtySession {
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {
@@ -226,23 +273,7 @@ fn spawn_view_pty() -> PtySession {
     drop(pair.slave);
 
     let rx = spawn_reader(reader);
-    let mut parser = vt100::Parser::new(24, 80, 0);
-
-    // wait for nvim's startup redraw before driving input, same as a human
-    // would
-    let startup_deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < startup_deadline {
-        match rx.recv_timeout(Duration::from_millis(200)) {
-            Ok(chunk) => {
-                parser.process(&chunk);
-                if !parser.screen().contents().trim().is_empty() {
-                    break;
-                }
-            }
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
+    let parser = vt100::Parser::new(24, 80, 0);
 
     PtySession {
         child,
@@ -291,14 +322,21 @@ fn view_paints_typed_text_in_a_pty() {
     let mut session = spawn_view_pty();
 
     session.send(b"ihello from view");
-    assert!(
-        session.wait_for("hello from view", Duration::from_secs(5)),
-        "screen never showed typed text; last screen:\n{}",
-        session.parser.screen().contents()
-    );
+    session.send(b"\x1b:wq\r");
+    let exit = session.child.wait().expect("view never exited after :wq");
+    assert!(exit.success(), "view did not exit cleanly after :wq");
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    // an echo-immune oracle: a screen-content assertion here would also
+    // pass if the canonical-mode pty echoed these bytes back without nvim
+    // ever processing them, since the vt100 parser can't tell the
+    // difference between the terminal's own echo and a real redraw. The
+    // saved file's contents can only be right if nvim_input actually
+    // reached nvim's buffer.
+    let saved = session.read_saved_file();
+    assert!(
+        saved.contains("hello from view"),
+        "saved file did not contain the typed text; contents:\n{saved:?}"
+    );
 }
 
 #[test]
@@ -311,25 +349,47 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // unresponsive or swallow the first real keystroke once the alternate
     // screen and nvim take over, even though every one of its queries goes
     // unanswered and it has to run its full deadline out before giving up.
+    //
+    // Typing is sent with zero delay, straight after the pty is opened
+    // (`spawn_view_pty_raw`, skipping `spawn_view_pty`'s own "wait for the
+    // first redraw" step): that is the actual race the startup probe's
+    // residue handling has to survive. Asserting only after a redraw has
+    // already happened would let the race close before this test ever gets
+    // to drive it, which is exactly how the original version of this test
+    // stayed green even while the probe was silently discarding this input.
+    //
+    // The oracle is the saved file's real contents, not the pty's screen:
+    // see `view_paints_typed_text_in_a_pty`'s comment for why a
+    // screen-content assertion here would be vacuous.
     let start = Instant::now();
-    let mut session = spawn_view_pty();
+    let mut session = spawn_view_pty_raw();
 
     session.send(b"ibasic tier still works");
-    assert!(
-        session.wait_for("basic tier still works", Duration::from_secs(5)),
-        "screen never showed typed text under a pty that answers no \
-         capability queries; last screen:\n{}",
-        session.parser.screen().contents()
-    );
+    // A fixed sleep, not a screen-content wait, bridges to the save: the
+    // canonical-mode echo of the bytes just sent would satisfy a
+    // "screen is non-blank" check almost instantly, well before raw mode is
+    // actually entered, making that signal itself part of the race rather
+    // than a fix for it. This file's own module doc already documents fixed
+    // sleeps over a deterministic "settled" signal as this suite's
+    // tradeoff.
+    std::thread::sleep(Duration::from_millis(500));
+    session.send(b"\x1b:wq\r");
+
+    let exit = session.child.wait().expect("view never exited after :wq");
+    assert!(exit.success(), "view did not exit cleanly after :wq");
     assert!(
         start.elapsed() < Duration::from_secs(3),
-        "startup took {:?}, far longer than the probe's bounded deadline \
-         plus ordinary nvim attach time should allow",
+        "startup+save took {:?}, far longer than the probe's bounded \
+         deadline plus ordinary nvim attach/save time should allow",
         start.elapsed()
     );
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    let saved = session.read_saved_file();
+    assert!(
+        saved.contains("basic tier still works"),
+        "saved file did not contain text typed immediately at spawn -- \
+         startup-probe residue was silently dropped; contents:\n{saved:?}"
+    );
 }
 
 #[test]
