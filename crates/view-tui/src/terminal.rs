@@ -107,19 +107,38 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn restore() {
-    // disabled unconditionally, even though mouse capture is only ever
+/// Writes every teardown escape to `out`: the synchronized-update close
+/// first, then mouse capture, bracketed paste, and the alternate screen.
+/// Generic over `Write` (mirrors [`write_cursor_shape`]) so the byte
+/// sequence and ordering are unit-testable against a `Vec<u8>` instead of
+/// only provable via a live terminal.
+///
+/// The ESU close (`CSI ?2026l`) is written unconditionally, with no check
+/// for whether `draw_surface`'s bracket is believed open: `restore` runs on
+/// every exit path, including a panic or fatal engine exit mid-frame, where
+/// `draw_surface` may have opened the bracket and never reached its own
+/// closing write. Ordered before [`LeaveAlternateScreen`] deliberately: the
+/// bracket must close while still on the screen that opened it, not after
+/// switching back to the one the host shell was showing.
+fn restore_bytes<W: Write>(out: &mut W) -> std::io::Result<()> {
+    out.write_all(b"\x1b[?2026l")?;
+    // mouse capture disabled unconditionally, even though it is only ever
     // turned on dynamically (see Term::draw_surface): leaving it enabled
     // across process exit would swallow the host shell's own mouse
     // gestures until the terminal emulator itself is reset
-    let _ = crossterm::execute!(
-        std::io::stdout(),
+    crossterm::execute!(
+        out,
         DisableMouseCapture,
         crossterm::event::DisableBracketedPaste,
         crossterm::terminal::LeaveAlternateScreen
-    );
+    )
+}
+
+fn restore() {
+    let mut out = std::io::stdout();
+    let _ = restore_bytes(&mut out);
     let _ = crossterm::terminal::disable_raw_mode();
-    let _ = std::io::stdout().flush();
+    let _ = out.flush();
 }
 
 /// Writes a synchronized-update bracket escape (`CSI ? 2026 h` to begin,
@@ -378,6 +397,28 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn restore_bytes_closes_the_sync_bracket_before_leaving_the_alternate_screen() {
+        let mut buf = Vec::new();
+        restore_bytes(&mut buf).unwrap();
+
+        let esu_close = find_subslice(&buf, b"\x1b[?2026l")
+            .expect("restore must write the ESU close unconditionally");
+        let leave_alt = find_subslice(&buf, b"\x1b[?1049l")
+            .expect("restore must still leave the alternate screen");
+        assert!(
+            esu_close < leave_alt,
+            "ESU close must be written before leaving the alternate screen, so the bracket \
+             closes on the screen that opened it"
+        );
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
 
     #[test]
     fn write_cursor_shape_emits_decscusr_for_each_steady_variant() {

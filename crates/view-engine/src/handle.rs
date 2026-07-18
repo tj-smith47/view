@@ -653,6 +653,73 @@ mod tests {
         );
     }
 
+    /// Every other test in this module exercises the reader thread's
+    /// `route_msg` success path; this one forces the fallible branch a real
+    /// `view_vim_enter` request hits when the runtime channel has no room,
+    /// so a regression that stopped constructing `fatal_reason` there would
+    /// fail this test instead of only ever taking the untested `None` path.
+    ///
+    /// Fullness is test-owned: an ordinary barrier request/reply round trip
+    /// first proves the reader thread is alive and blocked in
+    /// `read_value()` waiting for the next message (not merely spawned and
+    /// not yet scheduled), then the dummy fill and the `view_vim_enter`
+    /// write happen in the test thread's own program order, so the channel
+    /// is guaranteed full at the moment the reader thread starts decoding
+    /// the new bytes. The one gap this cannot close mechanically is the
+    /// reader thread's own decode-plus-`try_send` versus this test's
+    /// drain: nothing in `std::sync::mpsc` exposes "is a receiver about to
+    /// call `recv`", so the brief wait below (this file's own established
+    /// pattern, see `requests_before_start_pump_stage_and_drain_in_arrival_order`)
+    /// gives that near-instant attempt (one decode, one mutex, one
+    /// `try_send`) a wide, deliberately generous margin before the drain
+    /// can free the slot back up.
+    #[test]
+    fn full_channel_on_view_vim_enter_delivers_fatal_reason_naming_the_method() {
+        let (_h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let _dpump = pump.attach_sink(tx.clone());
+
+        write_request(&mut peer_write, 1, "barrier_method");
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 1,
+                error: Value::from("method not supported"),
+                result: Value::Nil,
+            },
+            "barrier request must get the ordinary auto-reply before the reader is trusted \
+             to be idle and waiting for the next message"
+        );
+
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+        write_request(&mut peer_write, 99, "view_vim_enter");
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Msg::Resized { .. }
+            ),
+            "dummy fill must be the first message drained"
+        );
+        let stopped = rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("EngineStopped must arrive once the dummy is drained");
+        let Msg::EngineStopped(Some(reason)) = stopped else {
+            unreachable!("expected EngineStopped(Some(reason)), got {stopped:?}");
+        };
+        assert!(
+            reason.contains("view_vim_enter"),
+            "fatal reason must name the method that could not be routed: {reason}"
+        );
+    }
+
     #[test]
     fn requests_before_start_pump_stage_and_drain_in_arrival_order() {
         let (_h, pump, _peer_read, mut peer_write) = pumped_peer();
