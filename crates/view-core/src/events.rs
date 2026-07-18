@@ -103,6 +103,13 @@ pub enum UiEvent {
     PopupmenuSelect { selected: i64 },
     /// The popup menu closed.
     PopupmenuHide,
+    /// nvim wants terminal mouse reporting enabled (`'mouse'` option covers
+    /// the current mode). Carries no fields on the wire (confirmed via
+    /// `nvim --api-info`'s `mouse_on()` entry).
+    MouseOn,
+    /// nvim wants terminal mouse reporting disabled. No fields, matching
+    /// `MouseOn`.
+    MouseOff,
     /// An event name this decoder does not yet model.
     Unknown { name: String },
 }

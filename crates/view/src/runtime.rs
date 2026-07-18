@@ -33,6 +33,15 @@ pub trait EngineOps {
     fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError>;
     /// Streams pasted text via `nvim_paste`.
     fn paste(&self, text: &str) -> Result<(), EngineError>;
+    /// Forwards one mouse event via `nvim_input_mouse`.
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
 }
@@ -46,6 +55,16 @@ impl EngineOps for EngineHandle {
     }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         self.paste(text)
+    }
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        self.input_mouse(button, action, modifier, row, col)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
@@ -65,6 +84,16 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn paste(&self, text: &str) -> Result<(), EngineError> {
         (**self).paste(text)
+    }
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        (**self).input_mouse(button, action, modifier, row, col)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -110,6 +139,13 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::Input { notation } => self.ops.input(&notation),
                     RpcCall::TryResize { width, height } => self.ops.try_resize(width, height),
                     RpcCall::Paste { text } => self.ops.paste(&text),
+                    RpcCall::InputMouse {
+                        button,
+                        action,
+                        modifier,
+                        row,
+                        col,
+                    } => self.ops.input_mouse(&button, &action, &modifier, row, col),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -240,6 +276,18 @@ mod tests {
         fn paste(&self, text: &str) -> Result<(), EngineError> {
             self.record(format!("paste({text})"))
         }
+        fn input_mouse(
+            &self,
+            button: &str,
+            action: &str,
+            modifier: &str,
+            row: u16,
+            col: u16,
+        ) -> Result<(), EngineError> {
+            self.record(format!(
+                "input_mouse({button},{action},{modifier},{row},{col})"
+            ))
+        }
         fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
             self.record(format!("reply({},{value:?})", token.msgid))
         }
@@ -275,6 +323,21 @@ mod tests {
         let flow = executor.run(Effect::Rpc(RpcCall::Paste { text: "hi".into() }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "paste(hi)");
+    }
+
+    #[test]
+    fn input_mouse_effect_maps_to_engine_ops_input_mouse() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::InputMouse {
+            button: "left".into(),
+            action: "press".into(),
+            modifier: "C-".into(),
+            row: 3,
+            col: 7,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "input_mouse(left,press,C-,3,7)");
     }
 
     #[test]

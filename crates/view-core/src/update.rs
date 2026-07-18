@@ -4,7 +4,7 @@ use crate::events::{clamp_dim, saturate_u16, UiEvent};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, Focus, MessageEntry, Model, PopupmenuState, TablineState};
-use crate::msg::{Effect, EngineRequest, Key, Msg, ReplyValue, RpcCall};
+use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
@@ -14,6 +14,26 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(Key { notation }) => match model.focus {
             Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
+            // no native overlay claims focus this phase: every key is
+            // consumed here rather than dispatched to an overlay update arm
+            // that does not exist yet, except <Esc> which always returns
+            // focus to Engine (P4's overlays inherit this same escape hatch)
+            Focus::Native(_) => {
+                if notation == "<Esc>" {
+                    model.focus = Focus::Engine;
+                }
+                Vec::new()
+            }
+        },
+        Msg::Paste(text) => match model.focus {
+            // never replayed as nvim_input keystrokes: one undo unit, no
+            // mapping interference, matching nvim_paste's own contract
+            Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
+            Focus::Native(_) => Vec::new(),
+        },
+        Msg::Mouse(input) => match model.focus {
+            Focus::Engine => mouse_effect(model, input),
+            Focus::Native(_) => Vec::new(),
         },
         Msg::Redraw(events) => {
             let mut effects = Vec::new();
@@ -45,6 +65,26 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             })]
         }
     }
+}
+
+/// Maps one terminal mouse event to an `RpcCall::InputMouse` effect,
+/// translating `input.row` from raw terminal cell coordinates into engine
+/// grid coordinates by subtracting [`Model::chrome_rows`]. A row that lands
+/// inside the reserved chrome (the tabline) belongs to that chrome, not the
+/// grid; no native chrome click handling exists yet, so such a click is
+/// dropped rather than forwarded at a wrapped-around row.
+fn mouse_effect(model: &Model, input: MouseInput) -> Vec<Effect> {
+    let chrome = model.chrome_rows();
+    if input.row < chrome {
+        return Vec::new();
+    }
+    vec![Effect::Rpc(RpcCall::InputMouse {
+        button: input.button,
+        action: input.action,
+        modifier: input.modifier,
+        row: input.row - chrome,
+        col: input.col,
+    })]
 }
 
 /// Applies one decoded redraw sub-event to `model`, returning any effects
@@ -236,6 +276,14 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             model.engine.popupmenu = None;
             Vec::new()
         }
+        UiEvent::MouseOn => {
+            model.engine.mouse_on = true;
+            Vec::new()
+        }
+        UiEvent::MouseOff => {
+            model.engine.mouse_on = false;
+            Vec::new()
+        }
         UiEvent::Unknown { .. } => Vec::new(),
     }
 }
@@ -245,6 +293,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::UiEvent;
+    use crate::model::OverlayId;
     use crate::msg::{ExitInfo, ReplyToken};
 
     fn model() -> Model {
@@ -295,6 +344,183 @@ mod tests {
             &effects[..],
             [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-x>"
         ));
+    }
+
+    // routing table: focus x input-kind -> effect. Pins the seam P4's first
+    // native overlay builds on, per a test-only Focus::Native(OverlayId)
+    // since no real overlay exists yet this phase.
+
+    #[test]
+    fn paste_in_engine_focus_becomes_rpc_paste_effect() {
+        let mut m = model();
+        let effects = update(&mut m, Msg::Paste("hello\nworld".into()));
+        assert!(matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::Paste { text })] if text == "hello\nworld"
+        ));
+    }
+
+    #[test]
+    fn mouse_in_engine_focus_becomes_rpc_input_mouse_effect() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::Mouse(MouseInput {
+                button: "left".into(),
+                action: "press".into(),
+                modifier: String::new(),
+                row: 5,
+                col: 10,
+            }),
+        );
+        assert!(matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse {
+                button,
+                action,
+                modifier,
+                row: 5,
+                col: 10,
+            })] if button == "left" && action == "press" && modifier.is_empty()
+        ));
+    }
+
+    #[test]
+    fn mouse_row_is_offset_by_reserved_chrome_rows_before_reaching_the_engine() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        // opening a second tab reserves one chrome row for the tabline
+        // (Model::chrome_rows), so a click on terminal row 3 must land on
+        // grid row 2, not grid row 3.
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        let effects = update(
+            &mut m,
+            Msg::Mouse(MouseInput {
+                button: "left".into(),
+                action: "press".into(),
+                modifier: String::new(),
+                row: 3,
+                col: 0,
+            }),
+        );
+        assert!(matches!(
+            &effects[..],
+            [Effect::Rpc(RpcCall::InputMouse { row: 2, .. })]
+        ));
+    }
+
+    #[test]
+    fn mouse_click_on_a_reserved_chrome_row_is_dropped_not_forwarded() {
+        use crate::events::{TabEntry, TabHandle};
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::TablineUpdate {
+                current: TabHandle(1),
+                tabs: vec![
+                    TabEntry {
+                        tab: TabHandle(1),
+                        name: "a".into(),
+                    },
+                    TabEntry {
+                        tab: TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            }]),
+        );
+        let effects = update(
+            &mut m,
+            Msg::Mouse(MouseInput {
+                button: "left".into(),
+                action: "press".into(),
+                modifier: String::new(),
+                row: 0,
+                col: 0,
+            }),
+        );
+        assert!(
+            effects.is_empty(),
+            "click on the tabline row must not reach the engine grid"
+        );
+    }
+
+    #[test]
+    fn key_in_native_focus_is_consumed_and_esc_returns_engine_focus() {
+        let mut m = model();
+        m.focus = Focus::Native(OverlayId(1));
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "x".into(),
+            }),
+        );
+        assert!(
+            effects.is_empty(),
+            "native focus consumes keys, never forwards to the engine"
+        );
+        assert!(
+            matches!(m.focus, Focus::Native(_)),
+            "a non-Esc key must not change focus"
+        );
+
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "<Esc>".into(),
+            }),
+        );
+        assert!(
+            effects.is_empty(),
+            "Esc returns focus without forwarding to the engine"
+        );
+        assert!(
+            matches!(m.focus, Focus::Engine),
+            "Esc must return focus to Engine"
+        );
+    }
+
+    #[test]
+    fn paste_and_mouse_in_native_focus_are_consumed_not_forwarded() {
+        let mut m = model();
+        m.focus = Focus::Native(OverlayId(1));
+        assert!(update(&mut m, Msg::Paste("x".into())).is_empty());
+        assert!(update(
+            &mut m,
+            Msg::Mouse(MouseInput {
+                button: "left".into(),
+                action: "press".into(),
+                modifier: String::new(),
+                row: 0,
+                col: 0,
+            })
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn mouse_on_off_events_set_the_model_flag_the_terminal_reads_for_capture() {
+        let mut m = model();
+        assert!(!m.engine.mouse_on, "mouse capture must default off");
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::MouseOn]));
+        assert!(m.engine.mouse_on);
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::MouseOff]));
+        assert!(!m.engine.mouse_on);
     }
 
     #[test]

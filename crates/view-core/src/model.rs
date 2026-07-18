@@ -41,6 +41,7 @@ impl Model {
                 messages: Messages::default(),
                 tabline: None,
                 popupmenu: None,
+                mouse_on: false,
             },
             focus: Focus::Engine,
             caps: TermCaps::default(),
@@ -113,6 +114,12 @@ pub struct EngineModel {
     pub messages: Messages,
     pub tabline: Option<TablineState>,
     pub popupmenu: Option<PopupmenuState>,
+    /// Whether nvim currently wants terminal mouse reporting on, from the
+    /// last `mouse_on`/`mouse_off` redraw event. The terminal only enables
+    /// mouse capture while this is `true`: capturing unconditionally would
+    /// swallow the host terminal's own selection/scrollback gestures even
+    /// when nvim's `'mouse'` option is off.
+    pub mouse_on: bool,
 }
 
 /// nvim mode state: the cursor/highlight property table from the last
@@ -214,10 +221,24 @@ pub struct PopupmenuState {
 /// Which surface currently owns input focus.
 #[non_exhaustive]
 pub enum Focus {
-    /// The embedded nvim engine's grid.
+    /// The embedded nvim engine's grid: keys, paste, and mouse route to
+    /// `RpcCall`s.
     Engine,
-    // Native(id) arrives with the first native overlay.
+    /// A native overlay identified by `OverlayId` owns input: keys, paste,
+    /// and mouse are consumed by that overlay's own `update()` arm instead
+    /// of reaching the engine, except `<Esc>` which always returns focus to
+    /// `Engine`. No overlay in this phase actually claims this focus (the
+    /// first native overlay arrives in a later phase); the variant exists
+    /// now so the routing seam is pinned by tests ahead of that consumer.
+    Native(OverlayId),
 }
+
+/// Opaque identifier for a native overlay that can hold input focus.
+/// Construction is a later phase's concern (each overlay kind mints its own
+/// id); this phase only needs the newtype to exist so `Focus::Native` is
+/// representable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayId(pub u64);
 
 /// Detected terminal capabilities.
 ///

@@ -63,6 +63,11 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "popupmenu_show" => decode_popupmenu_show(args).unwrap_or_else(unknown),
         "popupmenu_select" => decode_popupmenu_select(args).unwrap_or_else(unknown),
         "popupmenu_hide" => UiEvent::PopupmenuHide,
+        // no fields on the wire (confirmed via `nvim --api-info`'s
+        // `mouse_on()`/`mouse_off()` entries and a live `:set mouse=a`
+        // capture), same unconditional mapping as `flush`/`msg_clear` above
+        "mouse_on" => UiEvent::MouseOn,
+        "mouse_off" => UiEvent::MouseOff,
         _ => unknown(),
     }
 }
@@ -873,5 +878,19 @@ mod tests {
         ])];
         let evs = decode_redraw(&params);
         assert_eq!(evs, vec![UiEvent::PopupmenuSelect { selected: -1 }]);
+    }
+
+    #[test]
+    fn decodes_mouse_on_and_mouse_off() {
+        // shape confirmed via `nvim --api-info`'s `mouse_on()`/`mouse_off()`
+        // entries (both zero-parameter) and a live capture: driving
+        // `nvim_input(":set mouse=a<CR>")` through a real spawned nvim
+        // produced `[["mouse_on"]]` in the following redraw batch.
+        let params = vec![
+            arr(vec![Value::from("mouse_on"), arr(vec![])]),
+            arr(vec![Value::from("mouse_off"), arr(vec![])]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(evs, vec![UiEvent::MouseOn, UiEvent::MouseOff]);
     }
 }

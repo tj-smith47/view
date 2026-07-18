@@ -5,8 +5,9 @@
 //! terminal).
 
 use crate::keys::encode_key;
+use crate::mouse::encode_mouse;
 use crate::paint::composite;
-use crossterm::event::Event;
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
 use std::io::Write;
 use std::sync::mpsc::SyncSender;
 use view_core::model::Model;
@@ -26,9 +27,16 @@ use view_surface::{CursorShape, Surface};
 pub struct TerminalGuard;
 
 impl TerminalGuard {
-    /// Enables raw mode, switches to the alternate screen, and installs a
-    /// panic hook that restores the terminal before delegating to the
-    /// previous hook.
+    /// Enables raw mode, switches to the alternate screen, enables
+    /// bracketed-paste reporting, and installs a panic hook that restores
+    /// the terminal before delegating to the previous hook.
+    ///
+    /// Bracketed paste is enabled unconditionally here (unlike mouse
+    /// capture, which [`Term::draw_surface`] toggles only while nvim
+    /// reports `mouse_on`): a paste is never ambiguous with ordinary typed
+    /// input the way raw mouse tracking would be with the host terminal's
+    /// own selection/scrollback gestures, so there is no reason to gate it
+    /// behind engine state.
     ///
     /// # Errors
     ///
@@ -36,7 +44,11 @@ impl TerminalGuard {
     /// enabled or the alternate screen cannot be entered.
     pub fn enter() -> std::io::Result<Self> {
         crossterm::terminal::enable_raw_mode()?;
-        crossterm::execute!(std::io::stdout(), crossterm::terminal::EnterAlternateScreen)?;
+        crossterm::execute!(
+            std::io::stdout(),
+            crossterm::terminal::EnterAlternateScreen,
+            crossterm::event::EnableBracketedPaste
+        )?;
         // a panic must restore the terminal before the message prints, or the
         // user is left with a broken shell and an invisible error
         let prev = std::panic::take_hook();
@@ -65,7 +77,16 @@ impl Drop for TerminalGuard {
 }
 
 fn restore() {
-    let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::LeaveAlternateScreen);
+    // disabled unconditionally, even though mouse capture is only ever
+    // turned on dynamically (see Term::draw_surface): leaving it enabled
+    // across process exit would swallow the host shell's own mouse
+    // gestures until the terminal emulator itself is reset
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        crossterm::event::DisableBracketedPaste,
+        crossterm::terminal::LeaveAlternateScreen
+    );
     let _ = crossterm::terminal::disable_raw_mode();
     let _ = std::io::stdout().flush();
 }
@@ -121,6 +142,12 @@ pub struct Term {
     /// escape when the `Surface` cursor's shape actually changed instead of
     /// writing it unconditionally on every frame.
     last_cursor_shape: Option<CursorShape>,
+    /// The last mouse-capture state written, so `draw_surface` only toggles
+    /// crossterm's mouse capture when `model.engine.mouse_on` actually
+    /// changed since the last frame instead of writing the escape on every
+    /// paint. `None` before the first frame, matching `last_cursor_shape`'s
+    /// convention.
+    last_mouse_capture: Option<bool>,
 }
 
 impl Term {
@@ -145,6 +172,7 @@ impl Term {
             guard,
             inner,
             last_cursor_shape: None,
+            last_mouse_capture: None,
         })
     }
 
@@ -185,10 +213,27 @@ impl Term {
     /// frame, since re-emitting it unconditionally would be a needless
     /// terminal write on every single paint.
     ///
+    /// Terminal mouse capture (`EnableMouseCapture`/`DisableMouseCapture`)
+    /// tracks `model.engine.mouse_on` the same way: written once when it
+    /// changes, never unconditionally. Capture is off by default and only
+    /// turns on once nvim's own `redraw` stream reports `mouse_on`, so a
+    /// buffer with `'mouse'` unset never steals the host terminal's
+    /// selection/scrollback gestures.
+    ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
     pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
+        if self.last_mouse_capture != Some(model.engine.mouse_on) {
+            let mut out = std::io::stdout();
+            if model.engine.mouse_on {
+                crossterm::execute!(out, EnableMouseCapture)?;
+            } else {
+                crossterm::execute!(out, DisableMouseCapture)?;
+            }
+            out.flush()?;
+            self.last_mouse_capture = Some(model.engine.mouse_on);
+        }
         if model.caps.sync {
             write_sync_bracket(true)?;
         }
@@ -226,12 +271,12 @@ impl Term {
 }
 
 /// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
-/// forwards every key or resize event to `tx` as a core [`Msg`], translating
-/// key events via [`encode_key`](crate::keys::encode_key). Events with no
-/// nvim equivalent (key releases, keys with no notation) and event kinds
-/// this frontend does not act on yet (paste and mouse are not yet
-/// forwarded) are dropped rather than forwarded. Exits once
-/// `crossterm::event::read()` errors or `tx`'s receiver is gone.
+/// forwards every key, resize, paste, or mouse event to `tx` as a core
+/// [`Msg`], translating key events via [`encode_key`](crate::keys::encode_key)
+/// and mouse events via [`encode_mouse`](crate::mouse::encode_mouse). Events
+/// with no nvim equivalent (key releases, keys with no notation) are dropped
+/// rather than forwarded. Exits once `crossterm::event::read()` errors or
+/// `tx`'s receiver is gone.
 ///
 /// Blocking on a dedicated thread rather than polling on the runtime loop's
 /// own thread is what lets the loop's `recv()` wake immediately on a
@@ -247,6 +292,8 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
             let msg = match event {
                 Event::Key(k) => encode_key(&k).map(|notation| Msg::Key(Key { notation })),
                 Event::Resize(width, height) => Some(Msg::Resized { width, height }),
+                Event::Paste(text) => Some(Msg::Paste(text)),
+                Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),
                 _ => None,
             };
             if let Some(msg) = msg {

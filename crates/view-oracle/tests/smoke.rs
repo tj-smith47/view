@@ -87,7 +87,17 @@ struct PtySession {
 impl PtySession {
     /// Blocks (up to `timeout`) until the screen contains `needle`,
     /// returning whether it appeared.
+    ///
+    /// Checks the already-processed screen state before blocking on the
+    /// channel: a prior call (or the startup drain) may already have
+    /// processed the chunk that satisfies this condition, and this
+    /// function would otherwise wait for a *new* chunk that never comes
+    /// once the screen has settled, timing out despite the condition
+    /// already being true.
     fn wait_for(&mut self, needle: &str, timeout: Duration) -> bool {
+        if self.parser.screen().contents().contains(needle) {
+            return true;
+        }
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
@@ -117,7 +127,18 @@ impl PtySession {
     /// cell, for assertions where position is the point (e.g. the cmdline's
     /// `:` prefix belonging to the bottom row specifically, not appearing
     /// anywhere on screen by coincidence).
+    ///
+    /// Checks the already-processed screen state before blocking, for the
+    /// same reason [`Self::wait_for`] does.
     fn wait_for_cell(&mut self, row: u16, col: u16, expected: &str, timeout: Duration) -> bool {
+        if self
+            .parser
+            .screen()
+            .cell(row, col)
+            .is_some_and(|c| c.contents() == expected)
+        {
+            return true;
+        }
         let deadline = Instant::now() + timeout;
         while Instant::now() < deadline {
             match self.rx.recv_timeout(Duration::from_millis(200)) {
@@ -439,4 +460,42 @@ fn view_propagates_cquit_exit_code() {
         "view did not propagate :cq's exit code; screen:\n{}",
         session.parser.screen().contents()
     );
+}
+
+#[test]
+fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
+    let mut session = spawn_view_pty();
+
+    // a real terminal's bracketed-paste report (`ESC[200~ ... ESC[201~`
+    // wrapping the pasted bytes), written straight to the pty master
+    // instead of typed: this exercises the terminal input thread's
+    // `Event::Paste` decode path end to end (crossterm -> Msg::Paste ->
+    // RpcCall::Paste -> nvim_paste), never `nvim_input` keystroke replay.
+    session.send(b"\x1b[200~alpha\nbeta\x1b[201~");
+    assert!(
+        session.wait_for("alpha", Duration::from_secs(5)),
+        "first pasted line never landed; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+    assert!(
+        session.wait_for_cell(1, 0, "b", Duration::from_secs(5)),
+        "second pasted line never landed on its own row (both lines collapsed onto \
+         one, or newline-splitting broke); last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    // nvim_paste's contract: the whole multi-line paste is one undo unit.
+    // A single "u" must remove both lines at once: row 1 reverting all the
+    // way back to nvim's "~" empty-line marker (not just an empty line)
+    // proves the buffer returned to its pre-paste single-empty-line state,
+    // not merely that the second pasted line alone was undone.
+    session.send(b"u");
+    assert!(
+        session.wait_for_cell(1, 0, "~", Duration::from_secs(5)),
+        "a single undo did not remove the whole two-line paste as one unit; last screen:\n{}",
+        session.parser.screen().contents()
+    );
+
+    session.send(b"\x1b:q!\r");
+    let _ = session.child.wait();
 }

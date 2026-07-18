@@ -116,4 +116,41 @@ impl EngineHandle {
             vec![Value::from(text), Value::from(false), Value::from(-1)],
         )
     }
+
+    /// Forwards one mouse event to nvim via `nvim_input_mouse`, per
+    /// `nvim --api-info`'s `nvim_input_mouse(String button, String action,
+    /// String modifier, Integer grid, Integer row, Integer col)` signature
+    /// (verified with a live capture, not memory: the parameter order and
+    /// names come straight from that decode). `grid` is hardcoded to `0`
+    /// (single-grid semantics per the same doc: "0 to let Nvim decide
+    /// positioning of windows"), since this frontend has no multigrid
+    /// window layout of its own to report.
+    ///
+    /// Fire-and-forget for the same reason as [`input`](Self::input): a
+    /// mouse event arrives inside the paint loop and must not block it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_input_mouse",
+            vec![
+                Value::from(button),
+                Value::from(action),
+                Value::from(modifier),
+                Value::from(0),
+                Value::from(row),
+                Value::from(col),
+            ],
+        )
+    }
 }

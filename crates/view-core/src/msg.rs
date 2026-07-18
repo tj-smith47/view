@@ -32,6 +32,30 @@ pub enum Msg {
         width: u16,
         height: u16,
     },
+    /// A terminal bracketed-paste payload, decoded by the input thread from
+    /// crossterm's `Event::Paste`.
+    Paste(String),
+    /// A terminal mouse event, decoded by the input thread from crossterm's
+    /// `Event::Mouse` into nvim's button/action/modifier vocabulary.
+    Mouse(MouseInput),
+}
+
+/// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
+/// is one of `"left"`/`"right"`/`"middle"`/`"wheel"`/`"move"`; `action` is
+/// `"press"`/`"drag"`/`"release"` for ordinary buttons, `"up"`/`"down"`/
+/// `"left"`/`"right"` for the wheel, and ignored for `"move"`; `modifier` is
+/// a string of single-char modifier prefixes (`"C-"`, `"S-"`, `"M-"`, in
+/// that order, matching `view_tui::keys::encode_key`'s convention).
+/// `row`/`col` are the raw terminal cell position the input thread
+/// observed, zero-based; `update()` is what maps them into engine grid
+/// coordinates, since only it has the chrome-reservation state to do so.
+#[derive(Debug, Clone)]
+pub struct MouseInput {
+    pub button: String,
+    pub action: String,
+    pub modifier: String,
+    pub row: u16,
+    pub col: u16,
 }
 
 /// A key event already encoded to nvim `nvim_input` notation.
@@ -104,7 +128,26 @@ pub enum Effect {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum RpcCall {
-    Input { notation: String },
-    TryResize { width: u16, height: u16 },
-    Paste { text: String },
+    Input {
+        notation: String,
+    },
+    TryResize {
+        width: u16,
+        height: u16,
+    },
+    Paste {
+        text: String,
+    },
+    /// Forwards one mouse event via `nvim_input_mouse`. `grid` is not a
+    /// field here: single-grid semantics hardcode it to `0` at the call
+    /// site in `view-engine`'s `input_mouse`, letting nvim itself resolve
+    /// window positioning rather than this frontend tracking multigrid
+    /// window layout.
+    InputMouse {
+        button: String,
+        action: String,
+        modifier: String,
+        row: u16,
+        col: u16,
+    },
 }
