@@ -5,14 +5,21 @@
 //! These tests wait via fixed sleeps rather than a deterministic
 //! "redraw settled" signal; they are smoke tests, not exhaustive protocol
 //! coverage.
+//!
+//! Drives the pty through `view_oracle::PtySession` (promoted from what
+//! used to be this file's own private scaffolding): [`ViewPtySession`] is a
+//! thin wrapper adding only the `view`-binary-specific concerns the lib
+//! type deliberately does not know about (an isolated scratch file and
+//! `XDG_*_HOME`, and reading the scratch file back as an echo-immune
+//! oracle), `Deref`/`DerefMut` to the promoted type for everything else
+//! (`send`, `wait_for`, `wait_for_cell`, `wait_for_exit`, `screen`,
+//! `screen_raw`, `pid`, `wait`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
+use view_oracle::PtySession;
 
 /// Locates the `view` binary next to this crate's own target directory,
 /// always invoking `cargo build -p view` first to guarantee it reflects
@@ -60,179 +67,46 @@ fn view_bin_path() -> PathBuf {
     path
 }
 
-/// Spawns a background thread that forwards every chunk read from `reader`
-/// onto the returned channel, so the test thread can poll with a bounded
-/// timeout instead of blocking on a single `read` call that may return only
-/// part of the child's output.
-fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 65536];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    rx
-}
-
-/// A `view` process running inside a real pty, with everything a test needs
-/// to drive it and observe its screen: the child handle (for exit-status
-/// assertions), a byte channel fed by a background reader thread, and a
-/// `vt100` parser that turns those bytes into a queryable screen.
-struct PtySession {
-    child: Box<dyn portable_pty::Child>,
-    rx: mpsc::Receiver<Vec<u8>>,
-    writer: Box<dyn Write + Send>,
-    parser: vt100::Parser,
+/// Wraps the promoted `view_oracle::PtySession` with the `view`-binary
+/// concerns that promotion deliberately left behind: an isolated scratch
+/// file and `XDG_*_HOME` (the lib type's `spawn`/`spawn_configured` have no
+/// env/cwd-free way to express those), plus reading the scratch file back
+/// as an echo-immune oracle. `Deref`/`DerefMut` forward everything else
+/// (`send`, `wait_for`, `wait_for_cell`, `wait_for_exit`, `screen`,
+/// `screen_raw`, `pid`, `wait`) straight to the promoted type.
+struct ViewPtySession {
+    session: PtySession,
     scratch: PathBuf,
     isolated_home: PathBuf,
 }
 
-impl PtySession {
-    /// Blocks (up to `timeout`) until the screen contains `needle`,
-    /// returning whether it appeared.
-    ///
-    /// Checks the already-processed screen state before blocking on the
-    /// channel: a prior call (or the startup drain) may already have
-    /// processed the chunk that satisfies this condition, and this
-    /// function would otherwise wait for a *new* chunk that never comes
-    /// once the screen has settled, timing out despite the condition
-    /// already being true.
-    fn wait_for(&mut self, needle: &str, timeout: Duration) -> bool {
-        if self.parser.screen().contents().contains(needle) {
-            return true;
-        }
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => {
-                    self.parser.process(&chunk);
-                    if self.parser.screen().contents().contains(needle) {
-                        return true;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        false
+impl std::ops::Deref for ViewPtySession {
+    type Target = PtySession;
+    fn deref(&self) -> &Self::Target {
+        &self.session
     }
+}
 
-    /// Writes `bytes` to the pty as if a user typed them, e.g. `Esc` plus a
-    /// command-line invocation.
-    fn send(&mut self, bytes: &[u8]) {
-        self.writer.write_all(bytes).unwrap();
-        self.writer.flush().unwrap();
+impl std::ops::DerefMut for ViewPtySession {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.session
     }
+}
 
-    /// Blocks (up to `timeout`), polling `Child::try_wait` rather than
-    /// `Child::wait`'s unbounded blocking form, until the child has
-    /// exited. Returns `None` -- after killing the child so it cannot
-    /// outlive this test -- if it is still running once `timeout`
-    /// elapses, so a real deadlock in the child under test fails this
-    /// assertion promptly instead of hanging the whole test binary (and,
-    /// with it, CI) the way `Child::wait` would.
-    fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            if let Ok(Some(status)) = self.child.try_wait() {
-                return Some(status);
-            }
-            if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+impl Drop for ViewPtySession {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.scratch);
+        let _ = std::fs::remove_dir_all(&self.isolated_home);
     }
+}
 
-    /// Blocks (up to `timeout`) until the cell at `(row, col)` holds exactly
-    /// `expected`, returning whether it did. Unlike [`Self::wait_for`]
-    /// (whole-screen substring search), this pins content to a specific
-    /// cell, for assertions where position is the point (e.g. the cmdline's
-    /// `:` prefix belonging to the bottom row specifically, not appearing
-    /// anywhere on screen by coincidence).
-    ///
-    /// Checks the already-processed screen state before blocking, for the
-    /// same reason [`Self::wait_for`] does.
-    fn wait_for_cell(&mut self, row: u16, col: u16, expected: &str, timeout: Duration) -> bool {
-        if self
-            .parser
-            .screen()
-            .cell(row, col)
-            .is_some_and(|c| c.contents() == expected)
-        {
-            return true;
-        }
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => {
-                    self.parser.process(&chunk);
-                    if self
-                        .parser
-                        .screen()
-                        .cell(row, col)
-                        .is_some_and(|c| c.contents() == expected)
-                    {
-                        return true;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
-        false
-    }
-
+impl ViewPtySession {
     /// The OS pid of the `view` process itself (not its embedded nvim
     /// child).
     fn view_pid(&self) -> u32 {
-        self.child
-            .process_id()
+        self.session
+            .pid()
             .expect("view child exposes a pid on this platform")
-    }
-
-    /// Blocks (up to 5s) until the screen shows nvim's own real content, the
-    /// same "wait for the first redraw" step [`spawn_view_pty`] runs before
-    /// handing a session to most tests. Split out so
-    /// [`spawn_view_pty_raw`]-based tests can drive input *before* this
-    /// point when that is exactly the race they need to exercise (see
-    /// `view_forwards_keystrokes_typed_immediately_at_spawn_before_the_startup_probe_settles`).
-    ///
-    /// Waits specifically for a `~` (nvim's own empty-buffer-line marker,
-    /// painted the moment a fresh unnamed buffer's grid content actually
-    /// streams in), not merely "the screen is non-blank": since startup's
-    /// placeholder shell (`view_surface::LayerKind::Shell`, a themed
-    /// statusline bar plus a static "waiting for nvim" indicator) now
-    /// paints real, non-blank text of its own well before the engine
-    /// attaches, a bare blank-vs-non-blank check would return as soon as
-    /// that placeholder appears rather than once nvim is actually ready --
-    /// exactly the race that can silently drop a paste sent immediately
-    /// after this call returns (paste is not one of the input kinds
-    /// `startup::drain_pre_attach` buffers pre-attach; see that module's
-    /// doc comment for the deliberate keys-only scope).
-    fn wait_for_startup_redraw(&mut self) {
-        let startup_deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < startup_deadline {
-            match self.rx.recv_timeout(Duration::from_millis(200)) {
-                Ok(chunk) => {
-                    self.parser.process(&chunk);
-                    if self.parser.screen().contents().contains('~') {
-                        break;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
-            }
-        }
     }
 
     /// Reads the scratch file `view` was launched against back off disk,
@@ -250,13 +124,6 @@ impl PtySession {
     }
 }
 
-impl Drop for PtySession {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.scratch);
-        let _ = std::fs::remove_dir_all(&self.isolated_home);
-    }
-}
-
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Opens a pty sized 24x80 (nonzero: a 0x0 winsize makes nvim's UI attach
@@ -267,9 +134,17 @@ static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(0);
 /// Scratch paths are disambiguated by an atomic counter, not just the test
 /// process's pid: multiple tests in this file spawn a session concurrently
 /// within the same test binary process, so pid alone would collide.
-fn spawn_view_pty() -> PtySession {
+fn spawn_view_pty() -> ViewPtySession {
     let mut session = spawn_view_pty_raw();
-    session.wait_for_startup_redraw();
+    // waits specifically for a `~` (nvim's own empty-buffer-line marker,
+    // painted the moment a fresh unnamed buffer's grid content actually
+    // streams in), not merely "the screen is non-blank": since startup's
+    // placeholder shell (`view_surface::LayerKind::Shell`, a themed
+    // statusline bar plus a static "waiting for nvim" indicator) now paints
+    // real, non-blank text of its own well before the engine attaches, a
+    // bare blank-vs-non-blank check would return as soon as that
+    // placeholder appears rather than once nvim is actually ready
+    let _ = session.wait_for("~", Duration::from_secs(5));
     session
 }
 
@@ -278,31 +153,21 @@ fn spawn_view_pty() -> PtySession {
 /// input inside that startup window itself (the capability-probe residue
 /// regression test) should call this directly; every other test wants
 /// [`spawn_view_pty`]'s settled screen, same as a human would get.
-fn spawn_view_pty_raw() -> PtySession {
+fn spawn_view_pty_raw() -> ViewPtySession {
     spawn_view_pty_raw_with_args(&[])
 }
 
 /// Like [`spawn_view_pty_raw`], but with `extra_args` inserted before the
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
-fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> PtySession {
-    let pty = native_pty_system();
-    let pair = pty
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .unwrap();
-
+fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySession {
     let pid = std::process::id();
     let session_id = NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed);
     let scratch = std::env::temp_dir().join(format!("view-oracle-smoke-{pid}-{session_id}.txt"));
     let isolated_home = std::env::temp_dir().join(format!("view-oracle-home-{pid}-{session_id}"));
     std::fs::create_dir_all(&isolated_home).unwrap();
 
-    let mut cmd = CommandBuilder::new(view_bin_path());
+    let mut cmd = portable_pty::CommandBuilder::new(view_bin_path());
     for arg in extra_args {
         cmd.arg(arg);
     }
@@ -319,21 +184,10 @@ fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> PtySession {
         cmd.env(var, isolated_home.join(var.to_lowercase()));
     }
 
-    let child = pair.slave.spawn_command(cmd).unwrap();
-    let reader = pair.master.try_clone_reader().unwrap();
-    let writer = pair.master.take_writer().unwrap();
-    // the slave fd must not outlive the child's own copy, or the master
-    // never sees EOF once the child exits
-    drop(pair.slave);
+    let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
 
-    let rx = spawn_reader(reader);
-    let parser = vt100::Parser::new(24, 80, 0);
-
-    PtySession {
-        child,
-        rx,
-        writer,
-        parser,
+    ViewPtySession {
+        session,
         scratch,
         isolated_home,
     }
@@ -375,9 +229,9 @@ fn wait_for_child_pid(parent_pid: u32, comm: &str, timeout: Duration) -> Option<
 fn view_paints_typed_text_in_a_pty() {
     let mut session = spawn_view_pty();
 
-    session.send(b"ihello from view");
-    session.send(b"\x1b:wq\r");
-    let exit = session.child.wait().expect("view never exited after :wq");
+    session.send(b"ihello from view").unwrap();
+    session.send(b"\x1b:wq\r").unwrap();
+    let exit = session.wait().expect("view never exited after :wq");
     assert!(exit.success(), "view did not exit cleanly after :wq");
 
     // an echo-immune oracle: a screen-content assertion here would also
@@ -418,7 +272,7 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     let start = Instant::now();
     let mut session = spawn_view_pty_raw();
 
-    session.send(b"ibasic tier still works");
+    session.send(b"ibasic tier still works").unwrap();
     // A fixed sleep, not a screen-content wait, bridges to the save: the
     // canonical-mode echo of the bytes just sent would satisfy a
     // "screen is non-blank" check almost instantly, well before raw mode is
@@ -427,9 +281,9 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // sleeps over a deterministic "settled" signal as this suite's
     // tradeoff.
     std::thread::sleep(Duration::from_millis(500));
-    session.send(b"\x1b:wq\r");
+    session.send(b"\x1b:wq\r").unwrap();
 
-    let exit = session.child.wait().expect("view never exited after :wq");
+    let exit = session.wait().expect("view never exited after :wq");
     assert!(exit.success(), "view did not exit cleanly after :wq");
     assert!(
         start.elapsed() < Duration::from_secs(3),
@@ -478,15 +332,15 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
          exercise the multi-chunk path, got {} bytes",
         burst.len()
     );
-    session.send(&burst);
+    session.send(&burst).unwrap();
 
     // A fixed sleep, not a screen-content wait, bridges to the save: see
     // the deadline-path test above for why a screen-content signal would
     // itself become part of the race here.
     std::thread::sleep(Duration::from_millis(500));
-    session.send(b"\x1b:wq\r");
+    session.send(b"\x1b:wq\r").unwrap();
 
-    let exit = session.child.wait().expect("view never exited after :wq");
+    let exit = session.wait().expect("view never exited after :wq");
     assert!(exit.success(), "view did not exit cleanly after :wq");
     assert!(
         start.elapsed() < Duration::from_secs(3),
@@ -514,14 +368,14 @@ fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     // ASCII neighbor: if the grid's wide-cell handling is off by one, this
     // is what would either overwrite or get overwritten by the adjacent
     // narrow cell.
-    session.send("i你X".as_bytes());
+    session.send("i你X".as_bytes()).unwrap();
     assert!(
         session.wait_for("你X", Duration::from_secs(5)),
         "screen never showed the CJK character next to its neighbor; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    let screen = session.parser.screen();
+    let screen = session.screen_raw();
     let not_found_msg = format!(
         "CJK character not found in any screen cell; last screen:\n{}",
         screen.contents()
@@ -559,8 +413,8 @@ fn view_paints_wide_character_without_corrupting_neighbor_cell() {
         "neighbor cell corrupted by the adjacent wide character"
     );
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
 }
 
 #[cfg(target_os = "linux")]
@@ -580,7 +434,6 @@ fn view_exits_nonzero_when_engine_dies_by_signal() {
     assert!(kill_status.success(), "kill -KILL {nvim_pid} failed");
 
     let exit = session
-        .child
         .wait()
         .expect("view process never exited after its embedded nvim was killed");
     // 128 + SIGKILL(9): the conventional signal-death exit code (see
@@ -592,7 +445,7 @@ fn view_exits_nonzero_when_engine_dies_by_signal() {
         exit.exit_code(),
         137,
         "view did not map its engine's signal death to 128+signal; screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 }
 
@@ -600,71 +453,70 @@ fn view_exits_nonzero_when_engine_dies_by_signal() {
 fn view_shows_an_echoed_message() {
     let mut session = spawn_view_pty();
 
-    session.send(b"\x1b:echo \"hi\"\r");
+    session.send(b"\x1b:echo \"hi\"\r").unwrap();
     assert!(
         session.wait_for("hi", Duration::from_secs(5)),
         "screen never showed the echoed message text; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
 }
 
 #[test]
 fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
     let mut session = spawn_view_pty();
 
-    session.send(b"\x1b:");
+    session.send(b"\x1b:").unwrap();
     assert!(
         session.wait_for_cell(23, 0, ":", Duration::from_secs(5)),
         "cmdline row never showed its \":\" prefix; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
 }
 
 #[test]
 fn view_shows_the_prompt_label_on_the_bottom_row_during_call_input() {
     let mut session = spawn_view_pty();
 
-    session.send(b"\x1b:call input('name: ')\r");
+    session.send(b"\x1b:call input('name: ')\r").unwrap();
     assert!(
         session.wait_for("name: ", Duration::from_secs(5)),
         "prompt label never appeared on the bottom row; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    session.send(b"X");
+    session.send(b"X").unwrap();
     assert!(
         session.wait_for("name: X", Duration::from_secs(5)),
         "typed character never landed after the prompt label; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
     // <CR> submits the input() prompt itself before quitting, or the
     // pending prompt would swallow the following :q!
-    session.send(b"\r\x1b:q!\r");
-    let _ = session.child.wait();
+    session.send(b"\r\x1b:q!\r").unwrap();
+    let _ = session.wait();
 }
 
 #[test]
 fn view_propagates_cquit_exit_code() {
     let mut session = spawn_view_pty();
 
-    session.send(b"\x1b:cq 5\r");
+    session.send(b"\x1b:cq 5\r").unwrap();
 
     let exit = session
-        .child
         .wait()
         .expect("view process never exited after :cq 5");
     assert_eq!(
         exit.exit_code(),
         5,
         "view did not propagate :cq's exit code; screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 }
 
@@ -677,17 +529,17 @@ fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
     // instead of typed: this exercises the terminal input thread's
     // `Event::Paste` decode path end to end (crossterm -> Msg::Paste ->
     // RpcCall::Paste -> nvim_paste), never `nvim_input` keystroke replay.
-    session.send(b"\x1b[200~alpha\nbeta\x1b[201~");
+    session.send(b"\x1b[200~alpha\nbeta\x1b[201~").unwrap();
     assert!(
         session.wait_for("alpha", Duration::from_secs(5)),
         "first pasted line never landed; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
     assert!(
         session.wait_for_cell(1, 0, "b", Duration::from_secs(5)),
         "second pasted line never landed on its own row (both lines collapsed onto \
          one, or newline-splitting broke); last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
     // nvim_paste's contract: the whole multi-line paste is one undo unit.
@@ -695,15 +547,15 @@ fn view_pastes_a_two_line_bracketed_paste_as_one_undo_unit() {
     // way back to nvim's "~" empty-line marker (not just an empty line)
     // proves the buffer returned to its pre-paste single-empty-line state,
     // not merely that the second pasted line alone was undone.
-    session.send(b"u");
+    session.send(b"u").unwrap();
     assert!(
         session.wait_for_cell(1, 0, "~", Duration::from_secs(5)),
         "a single undo did not remove the whole two-line paste as one unit; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    session.send(b"\x1b:q!\r");
-    let _ = session.child.wait();
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
 }
 
 /// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
@@ -767,12 +619,12 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
         session.wait_for("waiting for nvim", Duration::from_millis(200)),
         "shell frame did not appear within 200ms against a 500ms-delayed \
          engine; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
     // typed immediately, well before the delayed engine has attached: this
     // is exactly the pre-attach window startup::drain_pre_attach buffers
-    session.send(b"ihello world");
+    session.send(b"ihello world").unwrap();
 
     // the wrapper sleeps 500ms before nvim even starts; wait comfortably
     // past attach plus startup for the buffered keys to replay into the
@@ -781,18 +633,17 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
         session.wait_for("hello world", Duration::from_secs(5)),
         "pre-attach keys never replayed into the buffer after attach, or \
          did not replay in order; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
-    session.send(b"\x1b:wq\r");
+    session.send(b"\x1b:wq\r").unwrap();
     let exit = session
-        .child
         .wait()
         .expect("view never exited after :wq against the delayed engine");
     assert!(
         exit.success(),
         "view did not exit cleanly after :wq; screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
     let saved = session.read_saved_file();
@@ -837,7 +688,7 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         session.wait_for("waiting for nvim", Duration::from_millis(200)),
         "shell frame did not appear within 200ms against a 300ms-delayed \
          engine; last screen:\n{}",
-        session.parser.screen().contents()
+        session.screen()
     );
 
     // 150 keystrokes, one at a time, over ~450ms: comfortably past
@@ -845,10 +696,10 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     // delay plus ordinary attach time, so typing is still in flight right
     // at the cutover instant
     for _ in 0..150 {
-        session.send(b"x");
+        session.send(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(3));
     }
-    session.send(b"\x1b:q!\r");
+    session.send(b"\x1b:q!\r").unwrap();
 
     let exit = session.wait_for_exit(Duration::from_secs(15)).expect(
         "view appears wedged (never exited) after a >64-key pre-attach flood \

@@ -50,6 +50,14 @@ tasks:
       - cargo run --release -p view-bench --bin latency -- view target/release/view
       - cargo run --release -p view-bench --bin latency -- nvim nvim
 
+  bench-micro:
+    desc: Hot-path micro-benches (grid apply, key dispatch, damage fold, render)
+    cmds:
+      - cargo bench -p view-core --bench grid_apply
+      - cargo bench -p view-core --bench update_key
+      - cargo bench -p view-engine --bench damage_fold --features bench-support
+      - cargo bench -p view-surface --bench render_frame
+
   commit:
     desc: Gated commit — runs the ci chain first
     cmds:

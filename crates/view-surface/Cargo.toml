@@ -10,3 +10,10 @@ workspace = true
 
 [dependencies]
 view-core = { version = "0.0.1", path = "../view-core" }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "render_frame"
+harness = false

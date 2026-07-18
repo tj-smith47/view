@@ -460,13 +460,20 @@ impl DamagePump {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
-    use view_core::events::GridCell;
-    use view_core::model::Model;
-    use view_core::update::update;
+/// Deterministic synthetic "redraw storm" generator, and the fold+drain
+/// entry point that exercises it against a real [`DamageBuffer`] -- the
+/// hot path `benches/damage_fold.rs` measures. Gated behind the
+/// `bench-support` feature as well as `cfg(test)`: an external bench binary
+/// only ever sees this crate's `pub` items (the same boundary a downstream
+/// consumer crosses), so benching the fold hot path against its own
+/// generator needs *some* public surface, but neither belongs in
+/// view-engine's default API -- only this module's own `#[cfg(test)]`
+/// property tests (`compaction_preserves_final_grid_and_non_grid_subsequence`
+/// and its multi-take sibling) and the `bench-support`-gated bench need it.
+#[cfg(any(test, feature = "bench-support"))]
+pub mod storm {
+    use super::DamageBuffer;
+    use view_core::events::{GridCell, UiEvent};
 
     fn cell(text: &str, repeat: u64) -> GridCell {
         GridCell {
@@ -476,7 +483,12 @@ mod tests {
         }
     }
 
-    fn line(row: u64, col_start: u64, len: u64) -> UiEvent {
+    /// A single-run `GridLine` covering `len` cells of `"x"` starting at
+    /// `(row, col_start)` on grid 1: the storm generator's and the ordinary
+    /// unit tests' shared building block for "some cell content changed
+    /// here."
+    #[must_use]
+    pub fn line(row: u64, col_start: u64, len: u64) -> UiEvent {
         UiEvent::GridLine {
             grid: 1,
             row,
@@ -484,6 +496,130 @@ mod tests {
             cells: vec![cell("x", len)],
         }
     }
+
+    /// Minimal xorshift64: no external randomness dependency for a
+    /// hand-rolled generative test, deterministic per seed for reproducible
+    /// failures (and reproducible bench inputs). `pub(super)`: this
+    /// module's sibling `mod tests` reuses it (with its own, differently
+    /// mixed seed) to schedule `fold`/`take` calls in
+    /// `compaction_multi_take_schedule_matches_raw_at_each_flush_boundary`,
+    /// a generative concern unrelated to the storm generator itself but
+    /// sharing the same "no external randomness dependency" tradeoff.
+    pub(super) struct Xorshift(u64);
+    impl Xorshift {
+        pub(super) fn new(seed: u64) -> Self {
+            Self(seed)
+        }
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        pub(super) fn below(&mut self, n: u64) -> u64 {
+            self.next_u64() % n.max(1)
+        }
+    }
+
+    const GRID_W: u64 = 6;
+    const GRID_H: u64 = 4;
+
+    fn gen_event(rng: &mut Xorshift) -> UiEvent {
+        match rng.below(10) {
+            0 => line(rng.below(GRID_H), rng.below(GRID_W), 1 + rng.below(GRID_W)),
+            1 => UiEvent::GridScroll {
+                grid: 1,
+                top: 0,
+                bot: GRID_H,
+                left: 0,
+                right: GRID_W,
+                rows: if rng.below(2) == 0 { 1 } else { -1 },
+            },
+            2 => UiEvent::GridClear { grid: 1 },
+            3 => UiEvent::GridCursorGoto {
+                grid: 1,
+                row: rng.below(GRID_H),
+                col: rng.below(GRID_W),
+            },
+            4 => UiEvent::HlAttrDefine {
+                id: rng.below(4),
+                fg: Some(rng.below(0xff_ffff) as u32),
+                bg: None,
+                bold: rng.below(2) == 0,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            5 => UiEvent::DefaultColorsSet {
+                fg: Some(rng.below(0xff_ffff) as u32),
+                bg: Some(rng.below(0xff_ffff) as u32),
+                sp: None,
+            },
+            6 => UiEvent::ModeChange {
+                mode: "insert".to_string(),
+                mode_idx: rng.below(3),
+            },
+            7 => UiEvent::MsgShow {
+                kind: "echomsg".to_string(),
+                content: vec![(0, format!("m{}", rng.below(1000)))],
+                replace_last: rng.below(2) == 0,
+            },
+            // deliberately a small range close to GRID_W/GRID_H rather than
+            // an unrelated size: out-of-bounds cell ops are safe no-ops
+            // (Grid::apply), but a resize wildly smaller than the row/col
+            // range GridLine/GridCursorGoto generate would make most of
+            // them land off-grid and exercise nothing
+            8 => UiEvent::GridResize {
+                grid: 1,
+                width: 1 + rng.below(GRID_W + 2),
+                height: 1 + rng.below(GRID_H + 2),
+            },
+            _ => UiEvent::Flush,
+        }
+    }
+
+    /// Generates one deterministic synthetic redraw storm: a leading full
+    /// grid resize, `len` random cell/scroll/clear/cursor/highlight/mode/
+    /// message events, then a trailing `Flush` -- the same shape (mixed
+    /// event kinds, scroll-interleaved, occasionally resize-barriered) a
+    /// real edit-and-scroll session produces, without spawning nvim.
+    #[must_use]
+    pub fn gen_sequence(seed: u64, len: usize) -> Vec<UiEvent> {
+        let mut rng = Xorshift::new(seed.wrapping_mul(2_685_821_657) | 1);
+        let mut out = vec![UiEvent::GridResize {
+            grid: 1,
+            width: GRID_W,
+            height: GRID_H,
+        }];
+        for _ in 0..len {
+            out.push(gen_event(&mut rng));
+        }
+        out.push(UiEvent::Flush);
+        out
+    }
+
+    /// Folds `events` through a fresh [`DamageBuffer`] and drains the
+    /// compacted result: the fold+take pair `PumpShared::fold_redraw` and
+    /// `DamagePump::take_damage` drive in production, exposed here since a
+    /// bench binary (an external compilation unit) only ever reaches this
+    /// crate's `pub` items -- `DamageBuffer` itself stays crate-private.
+    #[must_use]
+    pub fn fold_and_take(events: Vec<UiEvent>) -> Vec<UiEvent> {
+        let mut buf = DamageBuffer::default();
+        buf.fold_batch(events);
+        buf.take()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::storm::{gen_sequence, line};
+    use super::*;
+    use view_core::model::Model;
+    use view_core::update::update;
 
     #[test]
     fn take_damage_drains_up_to_last_flush_and_leaves_partial_staged() {
@@ -914,95 +1050,8 @@ mod tests {
     }
 
     // -- compaction property: generative, scroll-interleaved, subsequence-preserving --
-
-    /// Minimal xorshift64: no external randomness dependency for a
-    /// hand-rolled generative test, deterministic per seed for reproducible
-    /// failures.
-    struct Xorshift(u64);
-    impl Xorshift {
-        fn next_u64(&mut self) -> u64 {
-            let mut x = self.0;
-            x ^= x << 13;
-            x ^= x >> 7;
-            x ^= x << 17;
-            self.0 = x;
-            x
-        }
-        fn below(&mut self, n: u64) -> u64 {
-            self.next_u64() % n.max(1)
-        }
-    }
-
-    const GRID_W: u64 = 6;
-    const GRID_H: u64 = 4;
-
-    fn gen_event(rng: &mut Xorshift) -> UiEvent {
-        match rng.below(10) {
-            0 => line(rng.below(GRID_H), rng.below(GRID_W), 1 + rng.below(GRID_W)),
-            1 => UiEvent::GridScroll {
-                grid: 1,
-                top: 0,
-                bot: GRID_H,
-                left: 0,
-                right: GRID_W,
-                rows: if rng.below(2) == 0 { 1 } else { -1 },
-            },
-            2 => UiEvent::GridClear { grid: 1 },
-            3 => UiEvent::GridCursorGoto {
-                grid: 1,
-                row: rng.below(GRID_H),
-                col: rng.below(GRID_W),
-            },
-            4 => UiEvent::HlAttrDefine {
-                id: rng.below(4),
-                fg: Some(rng.below(0xff_ffff) as u32),
-                bg: None,
-                bold: rng.below(2) == 0,
-                italic: false,
-                underline: false,
-                reverse: false,
-            },
-            5 => UiEvent::DefaultColorsSet {
-                fg: Some(rng.below(0xff_ffff) as u32),
-                bg: Some(rng.below(0xff_ffff) as u32),
-                sp: None,
-            },
-            6 => UiEvent::ModeChange {
-                mode: "insert".to_string(),
-                mode_idx: rng.below(3),
-            },
-            7 => UiEvent::MsgShow {
-                kind: "echomsg".to_string(),
-                content: vec![(0, format!("m{}", rng.below(1000)))],
-                replace_last: rng.below(2) == 0,
-            },
-            // deliberately a small range close to GRID_W/GRID_H rather than
-            // an unrelated size: out-of-bounds cell ops are safe no-ops
-            // (Grid::apply), but a resize wildly smaller than the row/col
-            // range GridLine/GridCursorGoto generate would make most of
-            // them land off-grid and exercise nothing
-            8 => UiEvent::GridResize {
-                grid: 1,
-                width: 1 + rng.below(GRID_W + 2),
-                height: 1 + rng.below(GRID_H + 2),
-            },
-            _ => UiEvent::Flush,
-        }
-    }
-
-    fn gen_sequence(seed: u64, len: usize) -> Vec<UiEvent> {
-        let mut rng = Xorshift(seed.wrapping_mul(2_685_821_657) | 1);
-        let mut out = vec![UiEvent::GridResize {
-            grid: 1,
-            width: GRID_W,
-            height: GRID_H,
-        }];
-        for _ in 0..len {
-            out.push(gen_event(&mut rng));
-        }
-        out.push(UiEvent::Flush);
-        out
-    }
+    // gen_sequence/line are the storm module above, shared with
+    // benches/damage_fold.rs (see this file's storm module doc comment).
 
     fn is_grid_op_event(ev: &UiEvent) -> bool {
         matches!(
@@ -1113,7 +1162,7 @@ mod tests {
                 staged: Vec::new(),
                 flush_index: None,
             };
-            let mut sched_rng = Xorshift(seed.wrapping_mul(48_271) | 1);
+            let mut sched_rng = storm::Xorshift::new(seed.wrapping_mul(48_271) | 1);
             let mut compacted_model = Model::new();
             let mut raw_model = Model::new();
             let mut any_take_verified = false;

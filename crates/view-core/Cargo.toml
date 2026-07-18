@@ -7,3 +7,14 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "grid_apply"
+harness = false
+
+[[bench]]
+name = "update_key"
+harness = false

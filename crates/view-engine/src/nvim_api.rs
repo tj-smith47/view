@@ -23,6 +23,13 @@ const UI_ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 /// begins, so it still needs a bound.
 const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Upper bound on how long [`EngineHandle::eval_str`] waits for nvim's
+/// reply. Callers of this probe are test/oracle harnesses driving their own
+/// bounded polling loops (see `view-oracle`'s `EngineSession`), never the
+/// paint loop itself, but an unbounded wait against a wedged engine would
+/// still hang whatever harness is blocked on the answer.
+const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
 impl EngineHandle {
     /// Attaches this connection as nvim's UI at `width` x `height` cells
     /// with the full set of native-rendering extensions enabled:
@@ -211,6 +218,59 @@ impl EngineHandle {
             ],
         )
     }
+
+    /// Evaluates `expr` via `nvim_eval` and renders the result as a string,
+    /// the state-parity probe engine-attached oracles use to compare their
+    /// decoded screen state against nvim's own ground truth (buffer text,
+    /// cursor position, mode, register contents -- any vimscript expression
+    /// a probe needs to read back).
+    ///
+    /// `nvim_eval(String expr) -> Object` (verified via a live `nvim
+    /// --api-info` capture, decoded with `rmpv`: a single positional string
+    /// argument, a msgpack `Object` result of whatever type the expression
+    /// itself evaluates to -- `getline(1)` returns a String, `line('.')`
+    /// returns an Integer, `mode()` returns a String). Rendered by
+    /// [`value_to_string`] into a plain `String` rather than leaking
+    /// `rmpv::Value` past the engine boundary: `scripts/audit-deps.sh`
+    /// confines `rmpv` to `view-engine`, and this is the sanctioned way a
+    /// typed caller (the oracle's `EngineSession`) reaches the same result
+    /// without constructing or matching on a wire value itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the expression (a vimscript error), or the reply does
+    /// not arrive within [`EVAL_TIMEOUT`].
+    pub fn eval_str(&self, expr: &str) -> Result<String, EngineError> {
+        let value = self.request_timeout("nvim_eval", vec![Value::from(expr)], EVAL_TIMEOUT)?;
+        Ok(value_to_string(&value))
+    }
+}
+
+/// Renders an `nvim_eval` result as plain text for [`EngineHandle::eval_str`].
+///
+/// `Value`'s own `Display` impl is unsuitable: `rmpv::Utf8String::fmt`
+/// formats through `Debug`, so a vimscript string result like `getline(1)`'s
+/// `"hello"` would round-trip as the quoted literal `"\"hello\""` rather
+/// than the bare `hello` a text-comparison oracle needs (`s.as_str()`
+/// returning `None`, an ill-formed UTF-8 string on the wire, falls back to
+/// a lossy conversion rather than silently dropping the reply). `Array`/
+/// `Map`/`Binary`/`Ext` results (no probe this crate exposes evaluates to
+/// one today) fall through to `Value`'s own `Display` rendering, which is
+/// still total -- just not this function's primary concern.
+fn value_to_string(value: &Value) -> String {
+    match value {
+        Value::Nil => "nil".to_string(),
+        Value::Boolean(b) => b.to_string(),
+        Value::String(s) => s.as_str().map_or_else(
+            || String::from_utf8_lossy(s.as_bytes()).into_owned(),
+            str::to_string,
+        ),
+        Value::Integer(i) => i.to_string(),
+        Value::F32(f) => f.to_string(),
+        Value::F64(f) => f.to_string(),
+        other => other.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -245,6 +305,46 @@ mod tests {
                         msgid,
                         error: Value::Nil,
                         result: Value::Nil,
+                    };
+                    if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
+                        break;
+                    }
+                    if peer_write.flush().is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let (h, _notif_rx) = EngineHandle::start(our_read, our_write);
+        (h, cap_rx)
+    }
+
+    /// Like [`fake_peer_capturing_requests`], but answers every request with
+    /// `result` instead of `Nil`, so a caller can assert on how a typed
+    /// wrapper renders a specific reply value.
+    fn fake_peer_replying_with(
+        result: Value,
+    ) -> (
+        EngineHandle,
+        std::sync::mpsc::Receiver<(String, Vec<Value>)>,
+    ) {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, mut peer_write) = std::io::pipe().unwrap();
+        let (cap_tx, cap_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut r = BufReader::new(peer_read);
+            while let Ok(v) = rmpv::decode::read_value(&mut r) {
+                if let Ok(RpcMessage::Request {
+                    msgid,
+                    method,
+                    params,
+                }) = RpcMessage::from_value(v)
+                {
+                    let _ = cap_tx.send((method, params));
+                    let resp = RpcMessage::Response {
+                        msgid,
+                        error: Value::Nil,
+                        result: result.clone(),
                     };
                     if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
                         break;
@@ -302,5 +402,26 @@ mod tests {
                 "missing or false {ext} in ui_attach options"
             );
         }
+    }
+
+    #[test]
+    fn eval_str_sends_the_expression_as_a_single_positional_string() {
+        let (h, cap_rx) = fake_peer_capturing_requests();
+        let _ = h.eval_str("getline(1)");
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_eval");
+        assert_eq!(params, vec![Value::from("getline(1)")]);
+    }
+
+    #[test]
+    fn eval_str_renders_a_string_result_bare() {
+        let (h, _cap_rx) = fake_peer_replying_with(Value::from("hello"));
+        assert_eq!(h.eval_str("getline(1)").unwrap(), "hello");
+    }
+
+    #[test]
+    fn eval_str_renders_an_integer_result_as_decimal() {
+        let (h, _cap_rx) = fake_peer_replying_with(Value::from(42));
+        assert_eq!(h.eval_str("line('.')").unwrap(), "42");
     }
 }

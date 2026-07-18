@@ -8,7 +8,23 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Exposes the damage compactor's fold+take entry point and its seeded storm
+# generator (crate-private otherwise) so benches/damage_fold.rs -- an
+# external compilation unit with only pub-API access -- can bench the same
+# hot path damage.rs's own property tests exercise. Off by default: neither
+# belongs in view-engine's ordinary public surface.
+bench-support = []
+
 [dependencies]
 rmpv = "1.3.1"
 thiserror = "2.0.18"
 view-core = { version = "0.0.1", path = "../view-core" }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "damage_fold"
+harness = false
+required-features = ["bench-support"]

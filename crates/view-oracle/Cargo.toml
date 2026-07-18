@@ -8,6 +8,10 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[dev-dependencies]
+[dependencies]
 portable-pty = "0.9.0"
+thiserror = "2.0.18"
+view-core = { version = "0.0.1", path = "../view-core" }
+view-engine = { version = "0.0.1", path = "../view-engine" }
+view-surface = { version = "0.0.1", path = "../view-surface" }
 vt100 = "0.16.2"

@@ -79,7 +79,12 @@ check_transitive_reach() { # usage: check_transitive_reach <forbidden-dep> [allo
     fi
   done <<<"$reachers"
 }
-check_transitive_reach rmpv view-engine view
+# view-oracle reaches rmpv transitively through view-engine (Engine,
+# EngineHandle, eval_str): a deliberate, named policy change -- the oracle's
+# own API stays rmpv-free (typed probes only, see src/lib.rs's module
+# docs), but its Cargo.toml now has a normal (not dev) dependency edge to
+# view-engine, so the resolved graph legitimately reaches rmpv through it.
+check_transitive_reach rmpv view-engine view view-oracle
 check_transitive_reach serde view
 check_transitive_reach toml view
 check_transitive_reach crossterm view-tui view
