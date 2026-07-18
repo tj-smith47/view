@@ -182,7 +182,7 @@ pub struct GridCell {
 /// cannot make the grid allocate unboundedly.
 const MAX_GRID_DIM: u16 = 2048;
 
-/// Saturates a wire dimension into `u16` and clamps it to [`MAX_GRID_DIM`].
+/// Saturates a wire dimension into `u16` and clamps it to `MAX_GRID_DIM`.
 #[must_use]
 pub fn clamp_dim(dim: u64) -> u16 {
     saturate_u16(dim).min(MAX_GRID_DIM)
