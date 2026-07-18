@@ -37,6 +37,13 @@ done
 for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view; do
   check_absent "$crate" rmpv
 done
+# serde + toml exist for the theme cache file and are confined to the bin
+# crate; a lib crate gaining either would let wire/config concerns leak
+# into the pure layers
+for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench; do
+  check_absent "$crate" serde
+  check_absent "$crate" toml
+done
 
 # Resolved-graph check: cargo metadata --no-deps (used by check_absent above)
 # only sees each package's own declared manifest edges, so a forbidden
@@ -73,6 +80,8 @@ check_transitive_reach() { # usage: check_transitive_reach <forbidden-dep> [allo
   done <<<"$reachers"
 }
 check_transitive_reach rmpv view-engine view
+check_transitive_reach serde view
+check_transitive_reach toml view
 check_transitive_reach crossterm view-tui view
 check_transitive_reach ratatui view-tui view
 check_transitive_reach tokio

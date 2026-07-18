@@ -161,22 +161,20 @@ fn fnv1a(bytes: &[u8]) -> u64 {
 /// than an error.
 #[must_use]
 fn state_dir_from_env() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("XDG_STATE_HOME") {
-        if !v.is_empty() {
-            return Some(PathBuf::from(v));
-        }
+    env_dir("XDG_STATE_HOME")
+        .or_else(|| env_dir("HOME").map(|h| h.join(".local").join("state")))
+        .or_else(|| env_dir("LOCALAPPDATA"))
+}
+
+/// A directory path from environment variable `var`, treating unset and
+/// empty identically: shells routinely export empty XDG vars, and an empty
+/// base would silently anchor cache paths at the filesystem root.
+#[must_use]
+fn env_dir(var: &str) -> Option<PathBuf> {
+    match std::env::var(var) {
+        Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
+        _ => None,
     }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Some(PathBuf::from(home).join(".local").join("state"));
-        }
-    }
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        if !local.is_empty() {
-            return Some(PathBuf::from(local));
-        }
-    }
-    None
 }
 
 /// Resolves the config file path the cache is keyed on:
@@ -189,27 +187,10 @@ fn state_dir_from_env() -> Option<PathBuf> {
 /// "caching unavailable this run" condition [`state_dir_from_env`] signals.
 #[must_use]
 pub fn resolved_config_path() -> Option<PathBuf> {
-    if let Ok(v) = std::env::var("XDG_CONFIG_HOME") {
-        if !v.is_empty() {
-            return Some(PathBuf::from(v).join("view").join("view.toml"));
-        }
-    }
-    if let Ok(home) = std::env::var("HOME") {
-        if !home.is_empty() {
-            return Some(
-                PathBuf::from(home)
-                    .join(".config")
-                    .join("view")
-                    .join("view.toml"),
-            );
-        }
-    }
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        if !appdata.is_empty() {
-            return Some(PathBuf::from(appdata).join("view").join("view.toml"));
-        }
-    }
-    None
+    env_dir("XDG_CONFIG_HOME")
+        .or_else(|| env_dir("HOME").map(|h| h.join(".config")))
+        .or_else(|| env_dir("APPDATA"))
+        .map(|base| base.join("view").join("view.toml"))
 }
 
 /// The cache file path for `config_path` under `state_dir`: pure and
@@ -340,13 +321,20 @@ const SEED_HL_ID_BASE: u64 = u64::MAX;
 pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
     hl.default_fg = theme.fg;
     hl.default_bg = theme.bg;
-    seed_named(hl, "StatusLine", theme.status_line, 0);
-    seed_named(hl, "TabLine", theme.tab_line, 1);
-    seed_named(hl, "TabLineSel", theme.tab_line_sel, 2);
-    seed_named(hl, "TabLineFill", theme.tab_line_fill, 3);
-    seed_named(hl, "Pmenu", theme.pmenu, 4);
-    seed_named(hl, "PmenuSel", theme.pmenu_sel, 5);
-    seed_named(hl, "MsgArea", theme.msg_area, 6);
+    let entries: [(&str, ResolvedStyle); 7] = [
+        ("StatusLine", theme.status_line),
+        ("TabLine", theme.tab_line),
+        ("TabLineSel", theme.tab_line_sel),
+        ("TabLineFill", theme.tab_line_fill),
+        ("Pmenu", theme.pmenu),
+        ("PmenuSel", theme.pmenu_sel),
+        ("MsgArea", theme.msg_area),
+    ];
+    // offsets come from enumeration, not hand-written literals, so two
+    // groups can never collide on a synthetic hl_id
+    for (offset, (name, style)) in entries.into_iter().enumerate() {
+        seed_named(hl, name, style, offset as u64);
+    }
 }
 
 /// One [`seed_hl_table`] entry: reserves `SEED_HL_ID_BASE - offset` as
