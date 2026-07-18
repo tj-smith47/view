@@ -29,6 +29,10 @@ tasks:
     desc: Enforce comment and doc style rules
     cmd: bash scripts/check-style.sh
 
+  loc:
+    desc: Enforce the production-LOC ceiling per file (split modules, separate tests)
+    cmd: bash scripts/check-loc.sh
+
   ci:
     desc: The full local gate; CI mirrors exactly this
     cmds:
@@ -36,6 +40,7 @@ tasks:
       - task: lint
       - task: audit
       - task: style
+      - task: loc
       - task: test
 
   bench-latency:
