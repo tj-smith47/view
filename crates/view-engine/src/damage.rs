@@ -10,7 +10,7 @@
 //!
 //! - **Coalescible**: `Msg::RedrawReady`. A `try_send` that fails because the
 //!   channel is full means this fold's token never reached the channel, so
-//!   [`PumpShared::fold_redraw`] disarms [`DamageBuffer`]'s `pending` flag
+//!   `PumpShared::fold_redraw` disarms `DamageBuffer`'s `pending` flag
 //!   back to `false` instead of leaving it armed for a token that was never
 //!   sent. Staged damage is therefore always in exactly one of three states:
 //!   a token already queued in the channel, a disarmed flag that the next
@@ -40,9 +40,9 @@
 //!
 //! The `pending` wakeup flag lives inside the same [`Mutex`] as the staged
 //! events, not in a separate atomic. Folding and arming the flag happen
-//! under one lock hold ([`DamageBuffer::fold_batch`]); clearing the flag and
+//! under one lock hold (`DamageBuffer::fold_batch`); clearing the flag and
 //! draining the buffer happen under another single lock hold
-//! ([`DamageBuffer::take`]). A design with the flag outside the buffer's
+//! (`DamageBuffer::take`). A design with the flag outside the buffer's
 //! lock can lose a wakeup: a fold landing between the drain and the flag
 //! clear would see `pending == true` already and skip sending a token, yet
 //! the drain that already ran never observed that fold's event, leaving it

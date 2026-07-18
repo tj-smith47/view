@@ -90,7 +90,7 @@ type Pending = Arc<Mutex<PendingState>>;
 /// Both threads share one `closed` flag with the pending-waiters map (see
 /// `PendingState`): whichever thread notices the connection is gone first
 /// marks it closed and drains every waiter with
-/// [`EngineError::Closed`](EngineError::Closed) in the same critical
+/// [`EngineError::Closed`] in the same critical
 /// section that flips the flag, so a request racing the shutdown either
 /// lands before the flag (and gets drained) or after it (and is rejected
 /// before it ever touches the pipe).
@@ -98,11 +98,10 @@ type Pending = Arc<Mutex<PendingState>>;
 /// A connection started via [`start`](Self::start) routes notifications
 /// through an unbounded channel, ensuring that a flood of notifications
 /// (e.g., a large `redraw` burst) never blocks the delivery of pending
-/// responses. A connection started via
-/// [`start_pumped`](Self::start_pumped) routes `redraw` notifications
-/// through the bounded, compacted [`PumpShared`] instead and allocates no
-/// notification channel at all; the two routing modes are mutually
-/// exclusive per connection.
+/// responses. A connection started via `start_pumped` routes `redraw`
+/// notifications through the bounded, compacted `PumpShared` instead and
+/// allocates no notification channel at all; the two routing modes are
+/// mutually exclusive per connection.
 pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
@@ -442,7 +441,7 @@ impl EngineHandle {
     /// happens on the writer thread.
     ///
     /// `token` identifies which pending request this answers (see
-    /// [`Msg::EngineRequest`](view_core::msg::Msg::EngineRequest)): it
+    /// [`Msg::EngineRequest`]): it
     /// carries the msgid the reader thread captured when it dispatched the
     /// request instead of auto-erroring it. nvim's `rpcrequest` blocks the
     /// engine's main loop until this reply arrives, so a request routed to

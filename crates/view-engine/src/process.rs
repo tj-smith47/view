@@ -188,7 +188,7 @@ impl Engine {
     /// (the reader thread's stream ended, so the connection is already
     /// gone; this determines the child's real exit status).
     ///
-    /// Reuses [`graceful_kill`]'s bounded-wait-then-kill sequence rather
+    /// Reuses `graceful_kill`'s bounded-wait-then-kill sequence rather
     /// than duplicating it: sending `qa!` again here is a harmless no-op
     /// once the connection is already closed (`notify` just fails silently
     /// and the very next `try_wait` typically finds the child already

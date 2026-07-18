@@ -393,6 +393,66 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
 }
 
 #[test]
+fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_size() {
+    // Models a terminal that answers DA1 quickly, with the reply and a fast
+    // typed/pasted burst landing together on the same fd inside the probe
+    // window: exactly the shape `StdinReplySource::next_chunk`'s raw-fd
+    // read exists to survive. `std::io::stdin()`'s shared, process-global
+    // buffered handle can pull an entire multi-hundred-byte burst out of
+    // the kernel in one syscall to satisfy a 256-byte-sized read, then
+    // strand everything beyond those 256 bytes in its own userspace buffer
+    // once `detect()`'s scan loop breaks on seeing the DA1 reply -- bytes a
+    // raw fd read leaves sitting in the kernel's tty queue instead, still
+    // visible to the real input path once `Term::init` hands off. The
+    // burst below (276 bytes: a 6-byte DA1 reply, `i`, 260 `A`s, then a
+    // distinct end marker) exceeds the 256-byte chunk size, so surviving it
+    // intact proves the tail isn't getting orphaned in a buffered handle.
+    let start = Instant::now();
+    let mut session = spawn_view_pty_raw();
+
+    let da1_reply = b"\x1b[?62c";
+    let payload = "A".repeat(260);
+    let end_marker = "ENDMARKER";
+    let mut burst = Vec::new();
+    burst.extend_from_slice(da1_reply);
+    burst.push(b'i');
+    burst.extend_from_slice(payload.as_bytes());
+    burst.extend_from_slice(end_marker.as_bytes());
+    assert!(
+        burst.len() > 256,
+        "test burst must exceed the probe's 256-byte chunk size to actually \
+         exercise the multi-chunk path, got {} bytes",
+        burst.len()
+    );
+    session.send(&burst);
+
+    // A fixed sleep, not a screen-content wait, bridges to the save: see
+    // the deadline-path test above for why a screen-content signal would
+    // itself become part of the race here.
+    std::thread::sleep(Duration::from_millis(500));
+    session.send(b"\x1b:wq\r");
+
+    let exit = session.child.wait().expect("view never exited after :wq");
+    assert!(exit.success(), "view did not exit cleanly after :wq");
+    assert!(
+        start.elapsed() < Duration::from_secs(3),
+        "startup+save took {:?}, far longer than the probe's bounded \
+         deadline plus ordinary nvim attach/save time should allow",
+        start.elapsed()
+    );
+
+    let saved = session.read_saved_file();
+    let expected_tail = format!("{payload}{end_marker}");
+    assert!(
+        saved.contains(&expected_tail),
+        "saved file did not contain the full burst payload including the \
+         end marker -- the burst's tail was likely stranded in a buffered \
+         stdin handle instead of staying visible in the kernel for the \
+         real input path to pick up; contents:\n{saved:?}"
+    );
+}
+
+#[test]
 fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     let mut session = spawn_view_pty();
 

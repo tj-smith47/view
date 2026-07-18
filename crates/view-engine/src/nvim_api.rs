@@ -32,7 +32,7 @@ impl EngineHandle {
     /// before entering the paint loop. This is the only request the paint
     /// loop's setup makes; every nvim call issued once the loop is running
     /// goes through `notify` instead, so a slow response never stalls a
-    /// frame. Bounded by [`UI_ATTACH_TIMEOUT`] rather than unbounded, since
+    /// frame. Bounded by `UI_ATTACH_TIMEOUT` rather than unbounded, since
     /// the caller has typically already put the terminal into raw mode by
     /// this point, and an unresponsive engine must not freeze it forever.
     ///
@@ -40,7 +40,7 @@ impl EngineHandle {
     ///
     /// Returns the `EngineError` from the underlying request if it fails,
     /// nvim rejects the attach, or the reply does not arrive within
-    /// [`UI_ATTACH_TIMEOUT`].
+    /// `UI_ATTACH_TIMEOUT`.
     pub fn ui_attach(&self, width: u16, height: u16) -> Result<(), EngineError> {
         self.request_timeout(
             "nvim_ui_attach",

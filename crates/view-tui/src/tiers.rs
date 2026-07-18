@@ -237,9 +237,17 @@ impl Drop for StdinReplySource {
 #[cfg(unix)]
 impl ReplySource for StdinReplySource {
     fn next_chunk(&mut self, _budget: Duration) -> Option<Vec<u8>> {
-        use std::io::Read;
+        // Reads the fd directly via `rustix::io::read`, deliberately
+        // bypassing std's locking, internally-buffered handle to this same
+        // fd: that handle can pull more than 256 bytes out of the kernel in
+        // one call and strand the remainder in its own userspace buffer,
+        // where crossterm's own direct-fd reader can never see it once the
+        // probe hands off to `spawn_input_thread`. A raw read leaves every
+        // byte beyond what this call consumes still sitting in the kernel's
+        // tty input queue for the next reader to pick up.
+        use std::os::fd::AsFd;
         let mut buf = [0_u8; 256];
-        match io::stdin().lock().read(&mut buf) {
+        match rustix::io::read(io::stdin().as_fd(), &mut buf) {
             Ok(0) => {
                 // VMIN=0/VTIME=0 returns immediately with nothing rather
                 // than blocking; a short sleep keeps the caller's deadline
@@ -298,14 +306,17 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Vec<u8>)> {
     let colorterm = std::env::var("COLORTERM").ok();
     // A `tcgetattr` failure means stdin is not a real tty (e.g. redirected
     // from `/dev/null`, as a headless launch or a test harness might do):
-    // there is no raw-mode state to probe through and no reply will ever
-    // arrive, but that is not a reason to abort startup. Degrading to the
-    // same all-false Basic floor an unanswered probe already produces keeps
-    // this a non-fatal, silent-by-design outcome rather than a hard
-    // failure the caller must special-case.
+    // there is no raw-mode state to probe through and no escape reply will
+    // ever arrive, but that is not a reason to abort startup, nor to ignore
+    // `COLORTERM`: stdout can still be a real truecolor tty in this launch
+    // shape (stdin and stdout are independent fds) even though stdin isn't
+    // one, exactly like the `cfg(not(unix))` arm below already does.
+    // Degrading sync/kitty_kbd to the same false floor an unanswered probe
+    // already produces keeps this a non-fatal, silent-by-design outcome
+    // rather than a hard failure the caller must special-case.
     let mut source = match StdinReplySource::new() {
         Ok(source) => source,
-        Err(_) => return Ok((TermCaps::from_probe(false, false, false), Vec::new())),
+        Err(_) => return Ok((no_probe_caps(colorterm.as_deref()), Vec::new())),
     };
     detect(
         &mut source,
@@ -323,10 +334,19 @@ fn probe_real_terminal() -> io::Result<(TermCaps, Vec<u8>)> {
     // env read, not an escape probe. No stdin read happens here at all, so
     // there is no residue to return either.
     let colorterm = std::env::var("COLORTERM").ok();
-    Ok((
-        TermCaps::from_probe(false, truecolor_from_colorterm(colorterm.as_deref()), false),
-        Vec::new(),
-    ))
+    Ok((no_probe_caps(colorterm.as_deref()), Vec::new()))
+}
+
+/// The capabilities floor for a launch shape where no escape-sequence probe
+/// can run at all: sync and kitty_kbd are always false (both need a real
+/// reply), but truecolor still honors `COLORTERM` -- stdout can be a real
+/// truecolor tty independent of whether stdin is probeable, since the two
+/// are independent fds. Shared by both `probe_real_terminal` arms: the
+/// unix arm's `tcgetattr`-failure fallback (non-tty stdin, e.g.
+/// `/dev/null`) and the `cfg(not(unix))` arm (no termios equivalent to
+/// bound a raw read with at all).
+fn no_probe_caps(colorterm: Option<&str>) -> TermCaps {
+    TermCaps::from_probe(false, truecolor_from_colorterm(colorterm), false)
 }
 
 fn log_caps(caps: &TermCaps, source: &str) {
@@ -613,5 +633,26 @@ mod tests {
         let mut sink = Vec::new();
         let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
         assert_eq!(residue, b"typed");
+    }
+
+    #[test]
+    fn no_probe_caps_honors_colorterm_even_though_sync_and_kitty_stay_false() {
+        // covers both `probe_real_terminal` arms that can never get a real
+        // escape reply (unix tcgetattr failure on a non-tty stdin, and the
+        // cfg(not(unix)) arm): truecolor must still reflect COLORTERM since
+        // stdout can be a real truecolor tty independent of stdin.
+        let none = no_probe_caps(None);
+        assert!(!none.sync && !none.truecolor && !none.kitty_kbd);
+        assert_eq!(tier_name(none.tier), "basic");
+
+        let truecolor = no_probe_caps(Some("truecolor"));
+        assert!(!truecolor.sync && truecolor.truecolor && !truecolor.kitty_kbd);
+        assert_eq!(tier_name(truecolor.tier), "standard");
+
+        let bit24 = no_probe_caps(Some("24bit"));
+        assert!(bit24.truecolor);
+
+        let unrecognized = no_probe_caps(Some("bogus"));
+        assert!(!unrecognized.truecolor);
     }
 }
