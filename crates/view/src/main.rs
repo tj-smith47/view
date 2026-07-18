@@ -3,10 +3,12 @@
 //! [`runtime`].
 
 mod runtime;
+mod theme_cache;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use view_core::model::{Model, Tier};
+use view_core::theme::Theme;
 use view_engine::process::{Engine, EngineConfig};
 use view_tui::terminal::Term;
 
@@ -84,7 +86,30 @@ fn main() -> Result<()> {
 
     let mut model = Model::with_term_size(width, height);
     model.caps = term.caps();
-    let exit_code = runtime::run(model, engine, &mut term)?;
+
+    // config loading itself lands with the config system (view.toml
+    // sourcing is out of this crate's scope so far); resolving just the
+    // path identity here is enough to key the theme cache, so cold start
+    // can already paint last session's colors before nvim answers
+    // `ui_attach` with its own `default_colors_set`.
+    let config_path = theme_cache::resolved_config_path();
+    match &config_path {
+        Some(path) => {
+            let cached = theme_cache::load(path);
+            model.engine.hl.default_fg = cached.fg;
+            model.engine.hl.default_bg = cached.bg;
+        }
+        None => {
+            eprintln!(
+                "view: cannot resolve a config path (no XDG_CONFIG_HOME, HOME, or APPDATA set); theme cache disabled this run"
+            );
+        }
+    }
+
+    let (model, exit_code) = runtime::run(model, engine, &mut term)?;
+    if let Some(path) = &config_path {
+        theme_cache::store(Theme::from_hl(&model.engine.hl), path);
+    }
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error
     // propagated via `?` above) is covered by `Drop` on `term`.

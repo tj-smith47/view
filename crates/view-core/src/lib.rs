@@ -5,4 +5,5 @@ pub mod grid;
 pub mod hl;
 pub mod model;
 pub mod msg;
+pub mod theme;
 pub mod update;

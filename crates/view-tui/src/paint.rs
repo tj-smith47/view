@@ -7,6 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use view_core::grid::Grid;
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
+use view_core::theme::{ResolvedStyle, Theme};
 use view_surface::{LayerKind, Rect, Surface};
 
 /// Paints every layer in `surface`, in order (z ascending), into `frame`.
@@ -32,6 +33,10 @@ use view_surface::{LayerKind, Rect, Surface};
 /// resting text underneath).
 pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_>) {
     let frame_area = frame.area();
+    // derived once per frame from the engine's live highlight state: a
+    // lookup over already-decoded fields, not an RPC round trip, so
+    // re-deriving on every paint costs nothing beyond this struct copy
+    let theme = Theme::from_hl(&model.engine.hl);
     for layer in &surface.layers {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
@@ -39,12 +44,12 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
         }
         match &layer.kind {
             LayerKind::EngineGrid => {
-                paint_grid(&model.engine.grid, &model.engine.hl, area, frame);
+                paint_grid(&model.engine.grid, &theme, &model.engine.hl, area, frame);
             }
-            LayerKind::Cmdline(state) => paint_cmdline(state, area, frame),
-            LayerKind::Messages(entries) => paint_messages(entries, area, frame),
-            LayerKind::Tabline(state) => paint_tabline(state, area, frame),
-            LayerKind::Popupmenu(state) => paint_popupmenu(state, area, frame),
+            LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, frame),
+            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, frame),
+            LayerKind::Tabline(state) => paint_tabline(state, &theme, area, frame),
+            LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, frame),
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
             _ => {}
@@ -110,6 +115,7 @@ fn sanitized_char(ch: char) -> char {
 /// [`crate::terminal::Term::draw_surface`]), not painted here.
 fn paint_cmdline(
     state: &CmdlineState,
+    theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
@@ -118,7 +124,7 @@ fn paint_cmdline(
     for (_, chunk) in &state.content {
         text.push_str(chunk);
     }
-    paint_text_row(&text, Style::default(), area, 0, frame);
+    paint_text_row(&text, ratatui_style(theme.normal()), area, 0, frame);
 }
 
 /// Renders the message log as stacked toasts: `render()` already sized and
@@ -127,17 +133,19 @@ fn paint_cmdline(
 /// ones, oldest of that visible set on top) and writes each on its own row.
 fn paint_messages(
     entries: &[MessageEntry],
+    theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
     let visible = usize::from(area.height);
     let start = entries.len().saturating_sub(visible);
+    let style = ratatui_style(theme.normal());
     for (i, entry) in entries[start..].iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };
         let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
-        paint_text_row(&text, Style::default(), area, row, frame);
+        paint_text_row(&text, style, area, row, frame);
     }
 }
 
@@ -146,6 +154,7 @@ fn paint_messages(
 /// bracket characters that would shift every other tab's column.
 fn paint_tabline(
     state: &TablineState,
+    theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
@@ -159,12 +168,11 @@ fn paint_tabline(
             current_range = Some((start, end));
         }
     }
-    paint_text_row(&text, Style::default(), area, 0, frame);
+    paint_text_row(&text, ratatui_style(theme.normal()), area, 0, frame);
     if let Some((start, end)) = current_range {
         let buf = frame.buffer_mut();
         for col in start..end.min(area.width) {
-            buf[(area.x + col, area.y)]
-                .set_style(Style::default().add_modifier(Modifier::REVERSED));
+            buf[(area.x + col, area.y)].set_style(emphasis_style(theme));
         }
     }
 }
@@ -174,6 +182,7 @@ fn paint_tabline(
 /// sized `area` to the event's `(row, col)` and the widest item.
 fn paint_popupmenu(
     state: &PopupmenuState,
+    theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
@@ -186,9 +195,9 @@ fn paint_popupmenu(
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
         let style = if is_selected {
-            Style::default().add_modifier(Modifier::REVERSED)
+            emphasis_style(theme)
         } else {
-            Style::default()
+            ratatui_style(theme.normal())
         };
         paint_text_row(&item.display_text(), style, area, row, frame);
     }
@@ -213,9 +222,11 @@ fn clip_to_frame(rect: Rect, frame_area: ratatui::layout::Rect) -> ratatui::layo
     }
 }
 
-/// Paints every visible `grid` cell within `area`, styled per `hl`.
+/// Paints every visible `grid` cell within `area`, styled per `hl` through
+/// `theme`.
 fn paint_grid(
     grid: &Grid,
+    theme: &Theme,
     hl: &HlTable,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
@@ -227,7 +238,7 @@ fn paint_grid(
             if let Some(cell) = grid.cell(row, col) {
                 let out = &mut buf[(area.x + col, area.y + row)];
                 out.set_symbol(&sanitized_symbol(&cell.text));
-                out.set_style(style_for(cell.hl_id, hl));
+                out.set_style(style_for(theme, cell.hl_id, hl));
             }
         }
     }
@@ -249,37 +260,42 @@ fn sanitized_symbol(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-fn style_for(hl_id: u64, table: &HlTable) -> Style {
-    let mut fg = table.default_fg;
-    let mut bg = table.default_bg;
+/// One grid cell's resolved style, converted to `ratatui`: derivation
+/// itself lives in [`Theme::style_for`] (backend-free, in `view-core`), so
+/// this is purely the `ResolvedStyle` -> `ratatui::style::Style` mapping.
+fn style_for(theme: &Theme, hl_id: u64, table: &HlTable) -> Style {
+    ratatui_style(theme.style_for(hl_id, table))
+}
+
+/// Converts a backend-free [`ResolvedStyle`] into a `ratatui::style::Style`.
+fn ratatui_style(resolved: ResolvedStyle) -> Style {
     let mut style = Style::default();
-    if let Some(a) = table.attrs.get(&hl_id) {
-        if a.fg.is_some() {
-            fg = a.fg;
-        }
-        if a.bg.is_some() {
-            bg = a.bg;
-        }
-        if a.reverse {
-            std::mem::swap(&mut fg, &mut bg);
-        }
-        if a.bold {
-            style = style.add_modifier(ratatui::style::Modifier::BOLD);
-        }
-        if a.italic {
-            style = style.add_modifier(ratatui::style::Modifier::ITALIC);
-        }
-        if a.underline {
-            style = style.add_modifier(ratatui::style::Modifier::UNDERLINED);
-        }
-    }
-    if let Some(c) = fg {
+    if let Some(c) = resolved.fg {
         style = style.fg(rgb(c));
     }
-    if let Some(c) = bg {
+    if let Some(c) = resolved.bg {
         style = style.bg(rgb(c));
     }
+    if resolved.bold {
+        style = style.add_modifier(Modifier::BOLD);
+    }
+    if resolved.italic {
+        style = style.add_modifier(Modifier::ITALIC);
+    }
+    if resolved.underline {
+        style = style.add_modifier(Modifier::UNDERLINED);
+    }
     style
+}
+
+/// Chrome's "this row stands out" style (the current tab, a selected popup
+/// item): `theme`'s base colors plus `ratatui`'s own reverse-video
+/// modifier, which -- unlike swapping resolved color values -- stays
+/// visibly distinct even before any theme color is known (an unset
+/// `fg`/`bg` still inverts against whatever the terminal's own default
+/// colors are).
+fn emphasis_style(theme: &Theme) -> Style {
+    ratatui_style(theme.normal()).add_modifier(Modifier::REVERSED)
 }
 
 fn rgb(c: u32) -> Color {
@@ -314,7 +330,8 @@ mod tests {
             underline: true,
             reverse: false,
         });
-        let style = style_for(1, &table);
+        let theme = Theme::from_hl(&table);
+        let style = style_for(&theme, 1, &table);
         assert!(style
             .add_modifier
             .contains(ratatui::style::Modifier::UNDERLINED));
@@ -330,7 +347,8 @@ mod tests {
             underline: false,
             reverse: false,
         });
-        let style = style_for(1, &table);
+        let theme = Theme::from_hl(&table);
+        let style = style_for(&theme, 1, &table);
         assert!(!style
             .add_modifier
             .contains(ratatui::style::Modifier::UNDERLINED));

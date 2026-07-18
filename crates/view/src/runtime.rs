@@ -166,8 +166,10 @@ impl<E: EngineOps> Executor<E> {
 }
 
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
-/// terminal I/O error occurs, returning the process exit code on the
-/// former.
+/// terminal I/O error occurs, returning the final `Model` alongside the
+/// process exit code on the former (the caller persists the model's
+/// last-derived theme for the next startup's cold-start cache; see
+/// `theme_cache` in `main.rs`).
 ///
 /// Takes ownership of `engine` for the whole call (see the module docs'
 /// ownership chain): the reader thread feeds `msg_tx` directly via
@@ -180,8 +182,10 @@ impl<E: EngineOps> Executor<E> {
 ///
 /// # Errors
 ///
-/// Returns the underlying `std::io::Error` if a terminal paint fails.
-pub fn run(mut model: Model, mut engine: Engine, term: &mut Term) -> anyhow::Result<i32> {
+/// Returns the underlying `std::io::Error` if a terminal paint fails (the
+/// `Model` is dropped on this path along with everything else on the
+/// stack; an aborted session has no last-good theme worth persisting).
+pub fn run(mut model: Model, mut engine: Engine, term: &mut Term) -> anyhow::Result<(Model, i32)> {
     let (msg_tx, msg_rx) = mpsc::sync_channel(64);
     let pump = engine.start_pump(msg_tx.clone());
     view_tui::terminal::spawn_input_thread(msg_tx);
@@ -205,7 +209,7 @@ pub fn run(mut model: Model, mut engine: Engine, term: &mut Term) -> anyhow::Res
                     Flow::Continue => {}
                     // run() owns engine: returning here runs Drop (graceful
                     // qa! then kill)
-                    Flow::Quit(code) => return Ok(code),
+                    Flow::Quit(code) => return Ok((model, code)),
                     // an engine write failed: the engine is gone, not the
                     // UI; resolve the real exit status and let update()
                     // decide
