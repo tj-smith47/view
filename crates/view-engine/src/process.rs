@@ -7,13 +7,16 @@
 //! to flush shada and remove its swap file instead of leaving behind a
 //! recovery prompt on the next open.
 
+use crate::damage::{DamagePump, PumpShared};
 use crate::handle::{EngineError, EngineHandle, EngineNotification};
 use rmpv::Value;
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use view_core::msg::{ExitInfo, Msg};
 
 /// Configuration for spawning an embedded Neovim process.
 pub struct EngineConfig {
@@ -79,6 +82,11 @@ pub struct Engine {
     shutdown_timeout: Duration,
     /// The engine's API version and channel id, captured at handshake time.
     pub api_info: ApiInfo,
+    /// Damage/request pump state, live from `spawn` so redraws and known
+    /// requests arriving before [`start_pump`](Self::start_pump) attaches a
+    /// sink are staged rather than lost. See `crate::damage` for the full
+    /// contract.
+    pump: Arc<PumpShared>,
 }
 
 /// Owns a spawned child during [`Engine::spawn`] so every early-return path
@@ -139,7 +147,11 @@ impl Engine {
             .stdin
             .take()
             .ok_or_else(|| EngineError::Io(std::io::Error::other("stdin pipe not captured")))?;
-        let (handle, notifications) = EngineHandle::start(stdout, stdin);
+        // built before EngineHandle::start_pumped so the reader thread can
+        // fold and stage from its very first message, before start_pump is
+        // ever called
+        let pump = PumpShared::new();
+        let (handle, notifications) = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
         let api_info = decode_api_info(handle.request_timeout(
             "nvim_get_api_info",
             vec![],
@@ -157,7 +169,44 @@ impl Engine {
             child,
             shutdown_timeout: cfg.shutdown_timeout,
             api_info,
+            pump,
         })
+    }
+
+    /// Attaches the runtime loop's bounded `Msg` channel and returns the
+    /// [`DamagePump`] handle for draining compacted damage from it.
+    ///
+    /// Redraws and known engine-initiated requests that arrived between
+    /// `spawn` and this call are not lost: any damage already staged sends
+    /// one `Msg::RedrawReady` immediately, and any staged `Msg`s (a
+    /// `view_vim_enter` firing during the window before this call, most
+    /// notably) drain into `sink` in arrival order before that.
+    #[must_use]
+    pub fn start_pump(&mut self, sink: SyncSender<Msg>) -> DamagePump {
+        self.pump.attach_sink(sink)
+    }
+
+    /// Resolves the engine's exit status into an [`ExitInfo`], for the
+    /// runtime loop to call once its reader signals `Msg::EngineStopped`
+    /// (the reader thread's stream ended, so the connection is already
+    /// gone; this determines the child's real exit status).
+    ///
+    /// Reuses [`graceful_kill`]'s bounded-wait-then-kill sequence rather
+    /// than duplicating it: sending `qa!` again here is a harmless no-op
+    /// once the connection is already closed (`notify` just fails silently
+    /// and the very next `try_wait` typically finds the child already
+    /// exited). `code: None` means the exit status itself was unreadable
+    /// (a `std::io::Error` from `try_wait`/`kill`/`wait`), which `update()`
+    /// maps to exit code 1 rather than treating as success.
+    #[must_use]
+    pub fn wait_exit(&mut self) -> ExitInfo {
+        match graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout) {
+            Ok(status) => exit_info_from_status(status),
+            Err(_) => ExitInfo {
+                code: None,
+                by_signal: false,
+            },
+        }
     }
 
     /// Takes ownership of the notification receiver, if it has not already
@@ -241,6 +290,37 @@ fn graceful_kill(
     child.wait()
 }
 
+/// Maps a child's raw `ExitStatus` to [`ExitInfo`]: a normal exit passes its
+/// code through unchanged; a signal death (no exit code at all on Unix) maps
+/// to `128 + signal`, the conventional mapping shells already use (`$?`
+/// after a `SIGKILL`ed process is 137), so `update()`'s `Effect::Quit` exit
+/// code matches what a caller's shell would report for the same death.
+#[cfg(unix)]
+fn exit_info_from_status(status: ExitStatus) -> ExitInfo {
+    use std::os::unix::process::ExitStatusExt;
+    match status.code() {
+        Some(code) => ExitInfo {
+            code: Some(code),
+            by_signal: false,
+        },
+        None => ExitInfo {
+            code: status.signal().map(|sig| 128 + sig),
+            by_signal: true,
+        },
+    }
+}
+
+/// Non-Unix fallback: there is no signal concept to map, so a missing exit
+/// code becomes `None` (unreadable) rather than the misleading default of
+/// success.
+#[cfg(not(unix))]
+fn exit_info_from_status(status: ExitStatus) -> ExitInfo {
+    ExitInfo {
+        code: status.code(),
+        by_signal: false,
+    }
+}
+
 fn decode_api_info(v: Value) -> Result<ApiInfo, EngineError> {
     let bad = || EngineError::Remote(Value::from("unexpected api_info shape"));
     let Value::Array(parts) = v else {
@@ -266,4 +346,30 @@ fn map_get(v: &Value, key: &str) -> Option<Value> {
         .iter()
         .find(|(k, _)| k.as_str() == Some(key))
         .map(|(_, val)| val.clone())
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    #[test]
+    fn wait_exit_mapping_passes_normal_exit_code_through() {
+        // raw wait-status encoding: exit code lives in bits 8-15
+        let status = ExitStatus::from_raw(5 << 8);
+        let info = exit_info_from_status(status);
+        assert_eq!(info.code, Some(5));
+        assert!(!info.by_signal);
+    }
+
+    #[test]
+    fn wait_exit_mapping_maps_signal_death_to_128_plus_signal() {
+        // raw wait-status encoding: a nonzero low 7 bits with no exit code
+        // means "terminated by signal N", here SIGKILL (9)
+        let status = ExitStatus::from_raw(9);
+        let info = exit_info_from_status(status);
+        assert_eq!(info.code, Some(137));
+        assert!(info.by_signal);
+    }
 }

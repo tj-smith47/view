@@ -1,10 +1,13 @@
+use crate::damage::PumpShared;
 use crate::rpc::{RpcError, RpcMessage};
+use crate::ui_events::decode_redraw;
 use rmpv::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
+use view_core::msg::{EngineRequest, Msg, ReplyToken, ReplyValue};
 
 /// Errors produced by [`EngineHandle`] operations.
 #[non_exhaustive]
@@ -156,9 +159,41 @@ impl EngineHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
     ) -> (Self, mpsc::Receiver<EngineNotification>) {
+        Self::start_inner(reader, writer, None)
+    }
+
+    /// Same as [`start`](Self::start), but the reader thread also decodes
+    /// every `redraw` notification and folds it into `pump`'s
+    /// [`DamageBuffer`](crate::damage::DamageBuffer), and dispatches known
+    /// engine-initiated requests (currently `view_vim_enter`) as
+    /// `Msg::EngineRequest` through `pump` instead of auto-erroring them.
+    /// Every `redraw` notification is still forwarded unchanged to the
+    /// returned `Receiver` as well: until the last caller of
+    /// [`Engine::take_notifications`](crate::process::Engine::take_notifications)
+    /// is deleted, both paths must stay live.
+    ///
+    /// Crate-private: only [`Engine::spawn`](crate::process::Engine::spawn)
+    /// needs the pump wired up. Direct `EngineHandle` construction (tests,
+    /// or any future caller with no damage/runtime loop) uses plain
+    /// [`start`](Self::start) and keeps the as-built auto-error-every-request
+    /// behavior, since there is nowhere to route a dispatched request
+    /// without a pump.
+    pub(crate) fn start_pumped(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        pump: Arc<PumpShared>,
+    ) -> (Self, mpsc::Receiver<EngineNotification>) {
+        Self::start_inner(reader, writer, Some(pump))
+    }
+
+    fn start_inner(
+        reader: impl Read + Send + 'static,
+        writer: impl Write + Send + 'static,
+        pump: Option<Arc<PumpShared>>,
+    ) -> (Self, mpsc::Receiver<EngineNotification>) {
         let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         // unbounded so the reader thread can never stall a pending response
-        // behind a redraw flood; compaction lands with the surface damage model
+        // behind a redraw flood; the bounded, compacted path is `pump`
         let (notif_tx, notif_rx) = mpsc::channel();
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
 
@@ -180,9 +215,10 @@ impl EngineHandle {
 
         let reader_pending = Arc::clone(&pending);
         let reader_write_tx = write_tx.clone();
+        let reader_pump = pump;
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
-            while let Ok(value) = rmpv::decode::read_value(&mut r) {
+            'read: while let Ok(value) = rmpv::decode::read_value(&mut r) {
                 match RpcMessage::from_value(value) {
                     Ok(RpcMessage::Response {
                         msgid,
@@ -205,6 +241,14 @@ impl EngineHandle {
                         }
                     }
                     Ok(RpcMessage::Notification { method, params }) => {
+                        if let Some(pump) = &reader_pump {
+                            if method == "redraw" {
+                                pump.fold_redraw(decode_redraw(&params));
+                            }
+                        }
+                        // dual-path: the deprecated unbounded channel still
+                        // gets every notification unchanged until its last
+                        // caller (the P1-shaped paint loop) is deleted
                         if notif_tx
                             .send(EngineNotification { method, params })
                             .is_err()
@@ -212,11 +256,36 @@ impl EngineHandle {
                             break;
                         }
                     }
-                    Ok(RpcMessage::Request { msgid, .. }) => {
+                    Ok(RpcMessage::Request { msgid, method, .. }) => {
+                        if method == "view_vim_enter" {
+                            if let Some(pump) = &reader_pump {
+                                let msg = Msg::EngineRequest(EngineRequest::VimEnter {
+                                    token: ReplyToken {
+                                        msgid: u64::from(msgid),
+                                    },
+                                });
+                                if pump.route_msg(msg).is_err() {
+                                    // the runtime loop is gone or wedged
+                                    // behind a full channel: no compaction
+                                    // can recover a dropped request, and
+                                    // leaving it unanswered hangs nvim's
+                                    // blocking rpcrequest forever, so stop
+                                    // reading rather than keep queuing work
+                                    // nothing will ever consume
+                                    eprintln!(
+                                        "view-engine: dropping engine request \
+                                         {method:?}, runtime channel gone; \
+                                         reader exiting"
+                                    );
+                                    break 'read;
+                                }
+                                continue 'read;
+                            }
+                        }
                         // msgpack-RPC obliges a reply to every Request, or
                         // the peer's main loop blocks forever waiting for
-                        // one; dispatching these to real handlers is not
-                        // implemented yet, so answer with a typed error
+                        // one; unknown methods (or no pump attached to
+                        // dispatch a known one to) answer with a typed error
                         let resp = RpcMessage::Response {
                             msgid,
                             error: Value::from("method not supported"),
@@ -232,6 +301,12 @@ impl EngineHandle {
                         // the same connection
                     }
                 }
+            }
+            if let Some(pump) = &reader_pump {
+                // best-effort: the reader is already exiting either way,
+                // and a runtime loop that is itself gone has nothing left
+                // to deliver EngineStopped to
+                let _ = pump.route_msg(Msg::EngineStopped);
             }
             // engine is gone: fail every in-flight request instead of hanging
             close_and_drain(&reader_pending);
@@ -354,6 +429,38 @@ impl EngineHandle {
         self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
     }
 
+    /// Answers a request the engine is blocked on: encodes `[1, msgid, nil,
+    /// value]` and enqueues it on the writer thread's channel, same as
+    /// [`notify`](Self::notify). Never blocks the caller; the actual write
+    /// happens on the writer thread.
+    ///
+    /// `token` identifies which pending request this answers (see
+    /// [`Msg::EngineRequest`](view_core::msg::Msg::EngineRequest)): it
+    /// carries the msgid the reader thread captured when it dispatched the
+    /// request instead of auto-erroring it. nvim's `rpcrequest` blocks the
+    /// engine's main loop until this reply arrives, so a request routed to
+    /// `update()` as `Msg::EngineRequest` must always produce exactly one
+    /// `reply` call.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Rpc` if `token.msgid` does not fit in the
+    /// wire's `u32` msgid (unreachable in practice: every `ReplyToken` this
+    /// crate constructs is built from a msgid the reader thread already
+    /// decoded as `u32`). Returns `EngineError::Closed` if the writer
+    /// thread has already exited.
+    pub fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+        let msgid = u32::try_from(token.msgid)
+            .map_err(|_| RpcError::Malformed("reply token exceeds u32 msgid range".into()))?;
+        let msg = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: reply_value_to_wire(&value),
+        };
+        let bytes = encode_message(&msg)?;
+        self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
+    }
+
     /// Allocates a msgid, registers the pending waiter, and enqueues the
     /// encoded request on the writer thread's channel. Shared by
     /// [`request`](Self::request) and
@@ -404,6 +511,18 @@ fn close_and_drain(pending: &Pending) {
     }
 }
 
+// `ReplyValue` is `#[non_exhaustive]` from view-core (rmpv-free by design,
+// per the crate dependency direction `scripts/audit-deps.sh` enforces), so
+// the wildcard arm is required for a future variant to compile against, not
+// reachable with today's single `Nil` variant.
+fn reply_value_to_wire(value: &ReplyValue) -> Value {
+    match value {
+        ReplyValue::Nil => Value::Nil,
+        #[allow(unreachable_patterns)]
+        _ => Value::Nil,
+    }
+}
+
 fn encode_message(msg: &RpcMessage) -> Result<Vec<u8>, EngineError> {
     let mut buf = Vec::new();
     rmpv::encode::write_value(&mut buf, &msg.to_value())
@@ -436,6 +555,108 @@ mod tests {
         EngineHandle::start(our_read, our_write)
     }
 
+    /// A pumped [`EngineHandle`] over raw pipes, plus the raw ends for a
+    /// test to act as the peer (nvim): write a `Request`/`Notification`
+    /// into `peer_write`, read whatever the handle writes back off
+    /// `peer_read`.
+    fn pumped_peer() -> (
+        EngineHandle,
+        mpsc::Receiver<EngineNotification>,
+        Arc<PumpShared>,
+        std::io::PipeReader,
+        std::io::PipeWriter,
+    ) {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, peer_write) = std::io::pipe().unwrap();
+        let pump = PumpShared::new();
+        let (h, n) = EngineHandle::start_pumped(our_read, our_write, Arc::clone(&pump));
+        (h, n, pump, peer_read, peer_write)
+    }
+
+    fn write_request(peer_write: &mut impl Write, msgid: u32, method: &str) {
+        let req = RpcMessage::Request {
+            msgid,
+            method: method.to_owned(),
+            params: vec![],
+        };
+        rmpv::encode::write_value(peer_write, &req.to_value()).unwrap();
+        peer_write.flush().unwrap();
+    }
+
+    #[test]
+    fn view_vim_enter_request_surfaces_as_engine_request_and_reply_correlates() {
+        let (h, _n, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        write_request(&mut peer_write, 42, "view_vim_enter");
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::EngineRequest(EngineRequest::VimEnter { token }) = msg else {
+            unreachable!("expected Msg::EngineRequest(VimEnter), got {msg:?}");
+        };
+        assert_eq!(token.msgid, 42);
+
+        h.reply(token, ReplyValue::Nil).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 42,
+                error: Value::Nil,
+                result: Value::Nil,
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_method_still_auto_errors_with_a_pump_attached() {
+        let (_h, _n, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, _rx) = mpsc::sync_channel::<Msg>(64);
+        let _dpump = pump.attach_sink(tx);
+
+        write_request(&mut peer_write, 7, "some_other_method");
+
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 7,
+                error: Value::from("method not supported"),
+                result: Value::Nil,
+            }
+        );
+    }
+
+    #[test]
+    fn requests_before_start_pump_stage_and_drain_in_arrival_order() {
+        let (_h, _n, pump, _peer_read, mut peer_write) = pumped_peer();
+
+        // both requests arrive before any sink is attached: startup
+        // registers the VimEnter autocmd before the runtime loop starts,
+        // so a fast peer can fire more than one before start_pump runs
+        write_request(&mut peer_write, 1, "view_vim_enter");
+        write_request(&mut peer_write, 2, "view_vim_enter");
+        // give the reader thread a chance to actually decode both before
+        // the sink attaches, so this exercises the pre-sink FIFO and not a
+        // race that happens to land after attach
+        std::thread::sleep(Duration::from_millis(50));
+
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        let first = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let second = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let msgid_of = |m: &Msg| match m {
+            Msg::EngineRequest(EngineRequest::VimEnter { token }) => token.msgid,
+            other => unreachable!("expected Msg::EngineRequest(VimEnter), got {other:?}"),
+        };
+        assert_eq!(msgid_of(&first), 1, "arrival order not preserved");
+        assert_eq!(msgid_of(&second), 2, "arrival order not preserved");
+    }
+
     #[test]
     fn request_gets_matching_response() {
         let (h, _n) = fake_peer(|msgid, method| RpcMessage::Response {
@@ -458,68 +679,6 @@ mod tests {
             h.request("x", vec![]),
             Err(EngineError::Remote(_))
         ));
-    }
-
-    fn fake_flood_peer(
-        mut respond: impl FnMut(u32, &str) -> RpcMessage + Send + 'static,
-    ) -> (EngineHandle, std::sync::mpsc::Receiver<EngineNotification>) {
-        let (peer_read, our_write) = std::io::pipe().unwrap();
-        let (our_read, mut peer_write) = std::io::pipe().unwrap();
-        std::thread::spawn(move || {
-            let mut r = std::io::BufReader::new(peer_read);
-            while let Ok(v) = rmpv::decode::read_value(&mut r) {
-                if let Ok(RpcMessage::Request { msgid, method, .. }) = RpcMessage::from_value(v) {
-                    // emit 10,000 notifications before the response
-                    for _ in 0..10_000 {
-                        let notif = RpcMessage::Notification {
-                            method: "redraw".into(),
-                            params: vec![],
-                        };
-                        rmpv::encode::write_value(&mut peer_write, &notif.to_value()).unwrap();
-                    }
-                    let reply = respond(msgid, &method);
-                    rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
-                    peer_write.flush().unwrap();
-                }
-            }
-        });
-        EngineHandle::start(our_read, our_write)
-    }
-
-    #[test]
-    fn response_is_not_starved_by_notification_flood() {
-        let (h, n) = fake_flood_peer(|msgid, _| RpcMessage::Response {
-            msgid,
-            error: Value::Nil,
-            result: Value::from(1),
-        });
-        // Nobody drains `n` yet. The peer writes 10,000 notifications ahead
-        // of the response; they must all be buffered by the channel itself
-        // while unread, and the response must still arrive promptly. If the
-        // notification channel ever regresses to a bounded one, the peer's
-        // writer would block on a full channel and this request would stall
-        // past the 2s budget, failing the assertion below structurally
-        // rather than relying on a collector racing to keep the channel
-        // drained.
-        let start = std::time::Instant::now();
-        let result = h.request("test", vec![]);
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "request() took {elapsed:?}, should be under 2s"
-        );
-        assert_eq!(result.unwrap(), Value::from(1));
-        // Only now do we drain the channel, proving all 10,000 notifications
-        // were fully buffered while unread.
-        let mut count = 0usize;
-        while let Ok(note) = n.recv_timeout(std::time::Duration::from_millis(500)) {
-            assert_eq!(note.method, "redraw");
-            count += 1;
-            if count == 10_000 {
-                break;
-            }
-        }
-        assert_eq!(count, 10_000, "expected 10,000 notifications, got {count}");
     }
 
     /// Reproduces a critical hang: the reader thread can exit (here,

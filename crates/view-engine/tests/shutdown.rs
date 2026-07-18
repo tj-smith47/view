@@ -108,3 +108,42 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
         "expected SIGKILL (signal 9), got {status:?}"
     );
 }
+
+/// `wait_exit` is what the runtime loop calls in response to
+/// `Msg::EngineStopped` (the reader thread already saw the connection end);
+/// it must still resolve a real exit status via the same graceful-kill
+/// machinery `shutdown`/`Drop` use, not hang or fabricate one.
+#[test]
+fn wait_exit_resolves_a_normally_exiting_child() {
+    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    // ask nvim to exit on its own, independent of wait_exit's own qa!, so
+    // this proves wait_exit correctly observes a child that is already
+    // exiting rather than being the sole cause of the exit
+    engine
+        .handle
+        .notify("nvim_command", vec![rmpv::Value::from("qa!")])
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let info = engine.wait_exit();
+    assert_eq!(
+        info.code,
+        Some(0),
+        "expected a clean exit code, got {info:?}"
+    );
+    assert!(!info.by_signal);
+}
+
+#[cfg(unix)]
+#[test]
+fn wait_exit_maps_external_signal_kill_to_128_plus_signal() {
+    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let pid = engine.pid();
+    std::process::Command::new("kill")
+        .args(["-KILL", &pid.to_string()])
+        .status()
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let info = engine.wait_exit();
+    assert_eq!(info.code, Some(137), "expected 128+SIGKILL, got {info:?}");
+    assert!(info.by_signal);
+}
