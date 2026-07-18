@@ -1687,6 +1687,11 @@ version = "0.0.1"
 [[package]]
 name = "view-bench"
 version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+ "vt100",
+]
 
 [[package]]
 name = "view-core"

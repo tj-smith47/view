@@ -38,6 +38,13 @@ tasks:
       - task: style
       - task: test
 
+  bench-latency:
+    desc: Paired keypress-to-paint latency, view vs nvim
+    cmds:
+      - cargo build --release -p view
+      - cargo run --release -p view-bench --bin latency -- view target/release/view
+      - cargo run --release -p view-bench --bin latency -- nvim nvim
+
   commit:
     desc: Gated commit — runs the ci chain first
     cmds:
