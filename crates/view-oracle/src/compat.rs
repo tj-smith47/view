@@ -731,6 +731,8 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
         "bar" => return Ok(Some(b"|".to_vec())),
         "bslash" => return Ok(Some(b"\\".to_vec())),
         "nul" => return Ok(Some(b"\x00".to_vec())),
+        "nl" | "linefeed" => return Ok(Some(b"\n".to_vec())),
+        "ff" => return Ok(Some(b"\x0c".to_vec())),
         "s-tab" => return Ok(Some(b"\x1b[Z".to_vec())),
         _ => {}
     }
@@ -799,21 +801,43 @@ fn resolve_alt_notation(body: &str, original: &str) -> Result<Option<Vec<u8>>, C
 /// implements. Distinguishes that case from a token that merely looks
 /// unfamiliar (an author's own literal `<...>` text): only the former must
 /// hard-error rather than pass through as literal characters, per
-/// [`resolve_key_token`]'s own doc. The `d-` (super/cmd) prefix is here
-/// permanently, not pending implementation: the legacy VT100/xterm
-/// encoding this translator's byte sequences target has no super-modifier
-/// representation at all, so a `<D-...>` token can never be typed
-/// faithfully through the pty and must always fail loud.
+/// [`resolve_key_token`]'s own doc. The `d-` (super/cmd) and `t-`
+/// (termcap) prefixes are here permanently, not pending implementation:
+/// the legacy VT100/xterm encoding this translator's byte sequences
+/// target has no super-modifier representation at all, and a termcap
+/// entry names a terminal capability rather than a keypress, so neither
+/// token can ever be typed faithfully through the pty and both must
+/// always fail loud.
 fn is_notation_shaped(lower: &str) -> bool {
     lower.starts_with("c-")
         || lower.starts_with("s-")
         || lower.starts_with("m-")
         || lower.starts_with("a-")
         || lower.starts_with("d-")
+        || lower.starts_with("t-")
         || is_keypad_name(lower)
+        || is_untypeable_name(lower)
         || (lower.starts_with('f')
             && lower.len() > 1
             && lower[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// True if `lower` (already lowercased) is a vim key-notation name with no
+/// faithful pty byte sequence at all. `<Cmd>`, `<Ignore>`, and `<NOP>` are
+/// mapping-side pseudo-keys nvim synthesizes internally -- no terminal ever
+/// emits them as input bytes. `<Help>` and `<Undo>` are dedicated keys the
+/// legacy VT100/xterm encoding never assigned sequences to. `<EOL>` is
+/// platform-dependent (CR, LF, or CR-LF), so no single byte sequence types
+/// it faithfully. `<CSI>` is the raw 8-bit 0x9b control, which is not
+/// valid standalone UTF-8 and would corrupt the pty's input stream rather
+/// than arrive as the key. All are notation-shaped and must fail loud
+/// instead of passing through as literal text, per
+/// [`is_notation_shaped`]'s contract.
+fn is_untypeable_name(lower: &str) -> bool {
+    matches!(
+        lower,
+        "cmd" | "ignore" | "nop" | "help" | "undo" | "eol" | "csi"
+    )
 }
 
 /// True if `lower` (already lowercased) is one of vim's keypad key names
@@ -1061,6 +1085,44 @@ mod tests {
                 "{token} must hard-error, not pass through as literal text"
             );
         }
+    }
+
+    #[test]
+    fn resolve_send_keys_translates_nl_and_ff_to_their_control_bytes() {
+        assert_eq!(resolve_send_keys("<NL>").unwrap(), b"\n".to_vec());
+        assert_eq!(resolve_send_keys("<FF>").unwrap(), vec![0x0c]);
+    }
+
+    #[test]
+    fn resolve_send_keys_hard_errors_on_untypeable_named_keys() {
+        for token in [
+            "<Cmd>", "<Ignore>", "<NOP>", "<Help>", "<Undo>", "<EOL>", "<CSI>",
+        ] {
+            let err = resolve_send_keys(token)
+                .expect_err("a named key with no faithful pty byte sequence");
+            assert!(
+                matches!(err, CompatError::UnsupportedKeyNotation { .. }),
+                "{token} must hard-error, not pass through as literal text"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_send_keys_hard_errors_on_termcap_notation() {
+        let err = resolve_send_keys("<t-ku>")
+            .expect_err("a termcap entry names a capability, not a typeable key");
+        assert!(matches!(err, CompatError::UnsupportedKeyNotation { .. }));
+    }
+
+    #[test]
+    fn resolve_send_keys_passes_literal_text_sharing_an_untypeable_prefix_through() {
+        // <command> starts with the same letters as the <Cmd> pseudo-key but
+        // is an author's own literal text; the untypeable-name reject set is
+        // an exact match, not a prefix heuristic, and must not swallow it
+        assert_eq!(
+            resolve_send_keys("<command>").unwrap(),
+            b"<command>".to_vec()
+        );
     }
 
     #[test]
