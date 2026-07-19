@@ -1,0 +1,39 @@
+# telescope is ui-adjacent: it draws its picker chrome (prompt, results
+# list) as floating windows in the grid while search state stays its own.
+# help_tags is the corpus queried because nvim's own help tag set ships
+# with the pinned engine, making the candidate list machine-independent --
+# no dependence on whatever directory the harness happens to run from.
+schema = 1
+plugin = "telescope"
+class = "ui-adjacent"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.telescope ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":Telescope help_tags<CR>" },
+  # The picker opens in insert mode with focus in its prompt buffer; the
+  # query below is typed there, not into the editing buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 15000 },
+  { send = "nvim_buf_atta" },
+  # The full matched tag, parentheses included, only ever appears as a
+  # rendered results-list candidate: the prompt line holds just the typed
+  # query ("nvim_buf_atta"), which this needle is not a substring of, so
+  # a picker that opened but never produced candidates cannot pass.
+  { wait_for = "nvim_buf_attach()", timeout_ms = 15000 },
+  # telescope's default <Esc> drops from the prompt's insert mode to its
+  # normal mode; a second <Esc> from there dismisses the picker.
+  { send = "<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, the session stays in the
+  # prompt's insert mode while later assertions keep passing
+  { probe = "mode()", expect = "n" },
+  { send = "<Esc>" },
+  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"TelescopePrompt\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]

@@ -98,6 +98,20 @@ require("lazy").setup({
       opts = { filesystem = { hijack_netrw_behavior = "disabled" } },
     },
     { "j-hui/fidget.nvim", opts = {} },
+    {
+      "folke/which-key.nvim",
+      opts = {},
+      config = function(_, opts)
+        local wk = require("which-key")
+        wk.setup(opts)
+        -- Registered through which-key itself so the mapping (and its
+        -- popup description, the scenario's grid marker) exists exactly
+        -- when the plugin does. Lives under the default backslash leader.
+        wk.add({
+          { "<leader>m", "<cmd>echo 'whichkey-target'<CR>", desc = "whichkey-compat-marker" },
+        })
+      end,
+    },
     { "nvim-lua/plenary.nvim" },
     {
       "nvim-telescope/telescope.nvim",

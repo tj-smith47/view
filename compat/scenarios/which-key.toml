@@ -1,0 +1,31 @@
+# which-key is ui-adjacent: after a prefix keypress it pops up a panel of
+# the mappings reachable from that prefix. The fixture registers one
+# mapping under the default backslash leader through which-key's own add()
+# with a distinctive description; that description renders only inside the
+# popup, so its appearance pins the popup actually drawing (and the
+# mapping registration disappears together with the plugin, making the
+# marker fail honestly when which-key is absent).
+schema = 1
+plugin = "which-key"
+class = "ui-adjacent"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded[\"which-key\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # Backslash is nvim's default leader; the fixture leaves it unchanged.
+  { send = "\\" },
+  # The registered mapping's description, rendered in which-key's popup
+  # once its delay elapses.
+  { wait_for = "whichkey-compat-marker", timeout_ms = 15000 },
+  { send = "<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, a pending-operator state
+  # would linger while later assertions keep passing
+  { probe = "mode()", expect = "n" },
+]
