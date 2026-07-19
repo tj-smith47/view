@@ -66,7 +66,17 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
 fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    // the property under test is graceful-vs-forced shutdown, not deadline
+    // tightness (that belongs to shutdown_force_kills_when_unresponsive):
+    // inheriting the 500ms production default here coupled this assertion
+    // to scheduler latency, so a loaded host could force-kill a genuinely
+    // responsive nvim before it got a timeslice to process qa!, flipping a
+    // correct graceful exit into a false SIGKILL failure
+    let cfg = EngineConfig {
+        shutdown_timeout: Duration::from_secs(5),
+        ..EngineConfig::default()
+    };
+    let engine = Engine::spawn(cfg).unwrap();
     let status = engine.shutdown().unwrap();
     assert!(
         status.signal().is_none(),
