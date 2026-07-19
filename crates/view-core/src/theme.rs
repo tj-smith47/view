@@ -103,11 +103,11 @@ impl Theme {
         // in-flight (generation-mismatched) ambiguous zero is held back
         // rather than painted: it prefers the last confirmed value this
         // session has ever seen (a stale-but-real prior probe reply, or a
-        // value the theme cache seeded with a matching generation) over the
-        // raw wire zero, and only degrades to "unset" when no confirmed
-        // value has ever existed at all (a true cold start with no cache
-        // hit). A non-zero wire value carries no such ambiguity and keeps
-        // applying immediately, exactly like `fg`.
+        // value seeded from persisted state before attach, carrying a
+        // matching generation) over the raw wire zero, and only degrades to
+        // "unset" when no confirmed value has ever existed at all (a true
+        // cold start with no seeded state). A non-zero wire value carries no
+        // such ambiguity and keeps applying immediately, exactly like `fg`.
         let bg = match hl.confirmed {
             Some(p) if p.generation == hl.probe_generation => p.bg,
             _ if hl.default_bg == Some(0) => hl.confirmed.and_then(|p| p.bg),
@@ -489,8 +489,8 @@ mod tests {
     }
 
     /// Warm start: a confirmed value already exists from earlier this
-    /// session (or, in production, from a cache seed carrying a matching
-    /// generation -- see `theme_cache::seed_hl_table`), but it is now stale
+    /// session (or, in production, from persisted state seeded before
+    /// attach, carrying a matching generation), but it is now stale
     /// relative to a fresh `DefaultColorsSet`'s bumped generation, whose own
     /// probe reply has not landed yet. An ambiguous wire zero in that window
     /// prefers the stale-but-real confirmed value over the raw wire zero,
@@ -539,11 +539,14 @@ mod tests {
     /// (its generation no longer matches `probe_generation`, because a
     /// newer `DefaultColorsSet` has since fired and bumped it) must not be
     /// read as authoritative for the current frame: `Theme::from_hl` falls
-    /// back to the newer, still-wire-ambiguous raw value until a fresh
-    /// probe reply confirms it, rather than painting a stale theme's
+    /// back to the newer raw value, rather than painting a stale theme's
     /// disambiguated colors onto a new theme's frame.
     #[test]
     fn stale_generation_confirmed_value_is_not_read() {
+        // bg is deliberately non-zero here: an unambiguous raw value beats
+        // a stale confirmed value outright, with no fallback-to-confirmed
+        // involved. The wire-ambiguous (zero) case is covered by the
+        // warm_start_* tests above.
         let mut hl = table_with(Some(0x1), Some(0x282a36), 1, no_attrs());
         hl.probe_generation = 2;
         hl.confirmed = Some(crate::hl::ProbedDefaults {

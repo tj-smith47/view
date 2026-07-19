@@ -746,6 +746,48 @@ mod tests {
         );
     }
 
+    /// Black twin of the transparent case above: a cached theme that is
+    /// genuinely black (confirmed bg `Some(0)`, not absent) must also
+    /// survive attach's own ambiguous `default_colors_set` and keep
+    /// deriving black -- pinning that seeding does not special-case a zero
+    /// bg differently from any other confirmed value. Without the confirmed
+    /// seed (reverting to a raw-pair-only seed), the very first assertion
+    /// below would already read `None` instead of `Some(0)`, before attach
+    /// ever runs.
+    #[test]
+    fn a_seeded_black_theme_survives_attachs_own_ambiguous_default_colors_set() {
+        let cached_theme = Theme {
+            fg: Some(0xF8F8F2),
+            bg: Some(0),
+            ..Theme::default()
+        };
+        let mut hl = empty_hl_table();
+        seed_hl_table(&mut hl, &cached_theme);
+        assert_eq!(
+            Theme::from_hl(&hl).bg,
+            Some(0),
+            "seeded black state must paint pre-attach"
+        );
+
+        // attach's own default_colors_set resends the same wire-ambiguous
+        // zero every single startup, black theme or not
+        let mut model = view_core::model::Model::new();
+        model.engine.hl = hl;
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        assert_eq!(
+            Theme::from_hl(&model.engine.hl).bg,
+            Some(0),
+            "the seeded confirmed black value must hold while attach's probe is in flight"
+        );
+    }
+
     #[test]
     fn seed_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
         let mut hl = empty_hl_table();
