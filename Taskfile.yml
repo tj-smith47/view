@@ -53,6 +53,12 @@ tasks:
     desc: Run the plugin compat harness against the pinned nvim (task compat -- compat/scenarios/lualine.toml for one scenario)
     cmd: cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
 
+  bench:
+    desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
+    cmds:
+      - cargo build --release -p view
+      - cargo run --release -p view-harness --bin bench -- {{.CLI_ARGS}}
+
   bench-latency:
     desc: Paired keypress-to-paint latency, view vs nvim
     cmds:

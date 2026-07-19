@@ -2004,8 +2004,10 @@ name = "view-bench"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "portable-pty",
  "thiserror 2.0.18",
  "view-oracle",
+ "vt100",
 ]
 
 [[package]]
@@ -2037,6 +2039,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "toml",
+ "view-bench",
  "view-oracle",
 ]
 

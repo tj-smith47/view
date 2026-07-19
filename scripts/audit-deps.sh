@@ -57,9 +57,12 @@ for crate in view-core view-engine view-surface view-native view-ai view-tui vie
   check_absent "$crate" toml
 done
 
-# view-harness is bin-only (the corpus loader + oracle runner CLI); the
-# dependency graph only ever points into it (view-harness -> view-oracle,
-# later -> view-bench), never out. Nothing else may depend on it.
+# view-harness is bin-only (the corpus loader + oracle/bench runner CLIs);
+# the dependency graph only ever points into it (view-harness ->
+# view-oracle, view-harness -> view-bench -- the bench bin drives
+# view-bench's scenario matrix while owning the TOML baseline I/O
+# view-bench itself must stay free of), never out. Nothing else may
+# depend on it.
 for crate in view view-core view-engine view-tui view-surface view-native view-ai view-oracle view-bench; do
   check_absent "$crate" view-harness
 done

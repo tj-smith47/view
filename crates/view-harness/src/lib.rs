@@ -11,7 +11,9 @@
 //! workspace dependency edge itself; nothing else in the workspace may
 //! depend on the `view-harness` package.
 
+pub mod baselines;
 pub mod corpus;
+pub mod fixture;
 pub mod fuzz;
 pub mod page;
 pub mod results;

@@ -3,9 +3,12 @@
 //! baseline file I/O lives in `view-harness` (the one package sanctioned
 //! to parse TOML); this crate only measures and computes.
 
+pub mod boundaries;
 pub mod pairing;
 pub mod report;
 pub mod sampling;
+pub mod scenarios;
+pub mod session;
 
 use thiserror::Error;
 
@@ -26,4 +29,8 @@ pub enum BenchError {
     SampleCountMismatch { view: usize, nvim: usize },
     #[error("nvim-side p99 is {p99}, not a positive finite number; ratio would be meaningless")]
     DegenerateBaselineSide { p99: f64 },
+    #[error("pty session error: {0}")]
+    Session(#[from] view_oracle::OracleError),
+    #[error("measurement desync (a harness fault, not a latency reading): {context}")]
+    Desync { context: String },
 }

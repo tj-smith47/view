@@ -21,8 +21,6 @@
 //! spawn/drain/quiesce/compare engine the plain corpus run above uses, so
 //! all three modes see identical parity semantics.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -31,6 +29,10 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use portable_pty::CommandBuilder;
 use view_harness::corpus::{self, CorpusEntry};
+use view_harness::fixture::{
+    cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
+    verify_nvim_matches_pin, workspace_root,
+};
 use view_harness::fuzz;
 use view_harness::page;
 use view_harness::results::{
@@ -211,71 +213,6 @@ fn collect_entries(path: &Path) -> Result<Vec<(PathBuf, CorpusEntry)>> {
             Ok((path, entry))
         })
         .collect()
-}
-
-/// Resolved from this binary's own manifest dir rather than the caller's
-/// cwd (mirroring `view-bench`'s `latency` bin's `scratch_path` helper):
-/// `task oracle`/`task compat` always run from the repo root today, but a
-/// direct `cargo run -p view-harness` invocation from a subdirectory must
-/// not silently read a stale or absent path instead.
-fn workspace_root() -> PathBuf {
-    let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    path.pop(); // crates/
-    path.pop(); // workspace root
-    path
-}
-
-/// Path to the repo-root `.engine-pin` file.
-fn engine_pin_path() -> PathBuf {
-    workspace_root().join(".engine-pin")
-}
-
-/// Reads and trims the current `.engine-pin` value -- the single source of
-/// truth `scripts/check-engine-pin.sh` gates CI against -- never a
-/// hardcoded version literal here, so a pin bump does not require an
-/// oracle-runner code change to stay accurate.
-///
-/// # Errors
-///
-/// Returns an error if `.engine-pin` cannot be read.
-fn current_engine_pin() -> Result<String> {
-    let path = engine_pin_path();
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading engine pin from {}", path.display()))?;
-    Ok(raw.trim().to_string())
-}
-
-/// Confirms `nvim_bin` (resolved via `PATH` unless overridden) actually
-/// reports the version `.engine-pin` names, before any run stamps a result
-/// row or a corpus entry with that pin. `.engine-pin` alone only says what
-/// version a run is *supposed* to use; nothing before this call ever
-/// confirmed the binary this run is actually about to spawn agrees, so a
-/// stale or wrong `nvim` on `PATH` could otherwise silently produce
-/// evidence rows claiming a pin the run never really exercised.
-///
-/// # Errors
-///
-/// Returns an error if `nvim_bin --version` cannot be run, or if its
-/// reported version does not match `pin`.
-fn verify_nvim_matches_pin(nvim_bin: &Path, pin: &str) -> Result<()> {
-    let output = std::process::Command::new(nvim_bin)
-        .arg("--version")
-        .output()
-        .with_context(|| format!("running {} --version", nvim_bin.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let reported = stdout
-        .lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .unwrap_or("");
-    if reported != pin {
-        bail!(
-            "nvim binary {} reports version {reported:?} but .engine-pin \
-             names {pin:?}; install/select the pinned nvim before running",
-            nvim_bin.display()
-        );
-    }
-    Ok(())
 }
 
 /// One run's result: whether each side reached quiescence independently,
@@ -807,33 +744,6 @@ fn quarantine_entry(
     Ok(path)
 }
 
-/// `compat/fixtures/`, the directory each scenario's `fixture` field names
-/// a subdirectory of.
-fn fixtures_root() -> PathBuf {
-    workspace_root().join("compat").join("fixtures")
-}
-
-/// `compat/.cache/`, the shared, persistent (never per-run-hermetic) plugin
-/// install cache a heavy-style fixture's `XDG_DATA_HOME` is pointed at,
-/// keyed by its own `lazy-lock.json` hash. Gitignored: this is a build/test
-/// cache, not a durable artifact the way `corpus/quarantine/` is.
-fn cache_root() -> PathBuf {
-    workspace_root().join("compat").join(".cache")
-}
-
-/// Hashes `bytes` (a fixture's `lazy-lock.json` content) into a stable,
-/// filesystem-safe cache-directory name. [`DefaultHasher`] rather than a
-/// cryptographic hash: this key only has to agree with itself across runs
-/// of the *same* compiled `oracle` binary (a toolchain upgrade invalidating
-/// the cache and forcing one re-clone is an acceptable, self-healing cost,
-/// not a correctness bug -- lazy.nvim's own "already installed?" check
-/// still governs whether that re-clone actually happens).
-fn lockfile_cache_key(bytes: &[u8]) -> String {
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
-}
-
 /// Builds the `view` binary (always, not gated on an existence check -- see
 /// `view-oracle/tests/common::view_bin_path`'s own doc comment for why a
 /// stale binary is worse than one extra up-to-date `cargo build`) and
@@ -938,41 +848,6 @@ struct ReadyFixture {
 enum FixtureResolution {
     Ready(ReadyFixture),
     Skipped { notice: String },
-}
-
-/// Recursively copies `src` into `dst`, creating `dst` and any needed
-/// subdirectories. Regular files only: none of the committed fixture trees
-/// contain a symlink, so one found unexpectedly is skipped rather than
-/// copied as a symlink or followed, to avoid silently escaping `src`.
-///
-/// # Errors
-///
-/// Returns an error if any file or directory under `src` cannot be read, or
-/// cannot be created/written under `dst`.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
-    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
-    for entry in
-        std::fs::read_dir(src).with_context(|| format!("reading directory {}", src.display()))?
-    {
-        let entry =
-            entry.with_context(|| format!("reading a directory entry under {}", src.display()))?;
-        let file_type = entry
-            .file_type()
-            .with_context(|| format!("reading file type for {}", entry.path().display()))?;
-        let dst_path = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &dst_path)?;
-        } else if file_type.is_file() {
-            std::fs::copy(entry.path(), &dst_path).with_context(|| {
-                format!(
-                    "copying {} to {}",
-                    entry.path().display(),
-                    dst_path.display()
-                )
-            })?;
-        }
-    }
-    Ok(())
 }
 
 /// Resolves `scenario`'s `fixture` field (or its absence) into a
@@ -1521,22 +1396,6 @@ mod tests {
             version.as_deref(),
             Some("4213bd6"),
             "heavy fixture's lazy-lock.json pins nvim-tree.lua at 4213bd6..."
-        );
-    }
-
-    #[test]
-    fn lockfile_cache_key_is_stable_for_identical_bytes() {
-        let bytes = b"{\"lualine.nvim\": {\"commit\": \"abc123\"}}";
-        assert_eq!(lockfile_cache_key(bytes), lockfile_cache_key(bytes));
-    }
-
-    #[test]
-    fn lockfile_cache_key_differs_for_different_bytes() {
-        let a = lockfile_cache_key(b"{\"a\": 1}");
-        let b = lockfile_cache_key(b"{\"a\": 2}");
-        assert_ne!(
-            a, b,
-            "different lockfile content must key different cache dirs"
         );
     }
 
