@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use view_bench::report;
-use view_bench::scenarios::{echo, Protocol};
+use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, Protocol};
 use view_bench::session::SpawnSpec;
 use view_harness::baselines::{self, BaselineFile, CellMetrics};
 use view_harness::fixture::{
@@ -30,13 +30,29 @@ use view_harness::fixture::{
 };
 
 /// Every measurable cell of the matrix, in run order.
-const MATRIX: &[(&str, &str)] = &[("echo", "minimal"), ("echo", "heavy")];
+const MATRIX: &[(&str, &str)] = &[
+    ("echo", "minimal"),
+    ("echo", "heavy"),
+    ("scroll", "minimal"),
+    ("scroll", "heavy"),
+    ("first_paint", "minimal"),
+    ("first_paint", "heavy"),
+    ("memory", "minimal"),
+    ("flood", "minimal"),
+];
 
 /// Minimum sampling discipline for a number that may be recorded or
 /// gated, per the measurement protocol; ad hoc smaller runs are allowed
 /// only for report-only invocations.
 const MIN_RECORDED_SAMPLES: usize = 1000;
 const MIN_RECORDED_WARMUP: usize = 100;
+
+/// Lines one `:terminal` flood produces. Sized from measurement, not
+/// guessed: a 200k-line flood drained in ~850ms with only ~70 observed
+/// frame changes (the UI coalesces to roughly a 12ms cadence), so the
+/// cadence percentile needs a drain long enough for 1000+ painted
+/// frames.
+const FLOOD_LINES: usize = 3_000_000;
 
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -196,6 +212,22 @@ fn settle_deadline(fixture: &str) -> Duration {
     }
 }
 
+/// Builds the view-side spawn spec against one resolved side setup; the
+/// engine binary is always passed explicitly so both halves of a pair
+/// exercise the same pin-verified nvim.
+fn view_spec_from(side: SideSetup, view_bin: &Path, nvim_bin: &Path) -> SpawnSpec {
+    SpawnSpec {
+        program: view_bin.to_path_buf(),
+        args: vec![
+            side.scratch_file.into_os_string(),
+            OsString::from("--nvim-bin"),
+            nvim_bin.as_os_str().to_os_string(),
+        ],
+        env: side.env,
+        cwd: Some(side.cwd),
+    }
+}
+
 /// Builds the paired view/nvim spawn specs for one cell.
 fn paired_specs(
     world: &CellWorld,
@@ -205,16 +237,7 @@ fn paired_specs(
 ) -> Result<(SpawnSpec, SpawnSpec)> {
     let view_side = world.side(fixture, "view")?;
     let nvim_side = world.side(fixture, "nvim")?;
-    let view_spec = SpawnSpec {
-        program: view_bin.to_path_buf(),
-        args: vec![
-            view_side.scratch_file.clone().into_os_string(),
-            OsString::from("--nvim-bin"),
-            nvim_bin.as_os_str().to_os_string(),
-        ],
-        env: view_side.env,
-        cwd: Some(view_side.cwd),
-    };
+    let view_spec = view_spec_from(view_side, view_bin, nvim_bin);
     let nvim_spec = SpawnSpec {
         program: nvim_bin.to_path_buf(),
         args: vec![nvim_side.scratch_file.clone().into_os_string()],
@@ -265,11 +288,195 @@ fn run_cell(
             );
             Ok(metrics)
         }
+        "scroll" => {
+            let (mut view_spec, mut nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
+            for spec in [&mut view_spec, &mut nvim_spec] {
+                let file = spec
+                    .args
+                    .first()
+                    .map(PathBuf::from)
+                    .context("scroll spec has no file argument")?;
+                std::fs::write(&file, scroll::fixture_content())
+                    .with_context(|| format!("writing scroll fixture {}", file.display()))?;
+            }
+            let outcome = scroll::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
+                .with_context(|| format!("scroll/{fixture} run failed"))?;
+            for summary in &outcome.trials {
+                println!(
+                    "{}",
+                    report::paired_cell(scenario, fixture, summary, protocol.warmup)
+                );
+            }
+            println!(
+                "{}",
+                report::aggregate_line(
+                    "staleness_p99_ms",
+                    outcome.gated_staleness_p99_ms,
+                    outcome.trials.len()
+                )
+            );
+            println!(
+                "{}",
+                report::aggregate_line("ratio_p99", outcome.gated_ratio_p99, outcome.trials.len())
+            );
+            let mut metrics = CellMetrics::new();
+            metrics.insert(
+                "staleness_p99_ms".to_string(),
+                outcome.gated_staleness_p99_ms,
+            );
+            metrics.insert("ratio_p99".to_string(), outcome.gated_ratio_p99);
+            Ok(metrics)
+        }
+        "first_paint" => {
+            let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
+            let outcome = first_paint::run(&view_spec, &nvim_spec, protocol)
+                .with_context(|| format!("first_paint/{fixture} run failed"))?;
+            println!(
+                "{}",
+                report::paired_cell(scenario, fixture, &outcome.summary, protocol.warmup)
+            );
+            println!(
+                "{}",
+                report::aggregate_line("cold_ms", outcome.gated_cold_ms, 1)
+            );
+            println!(
+                "{}",
+                report::aggregate_line("ratio_vs_nvim", outcome.gated_ratio_vs_nvim, 1)
+            );
+            verify_fixture_copies_untouched(&world, fixture)?;
+            let mut metrics = CellMetrics::new();
+            metrics.insert("cold_ms".to_string(), outcome.gated_cold_ms);
+            metrics.insert("ratio_vs_nvim".to_string(), outcome.gated_ratio_vs_nvim);
+            Ok(metrics)
+        }
+        "memory" => {
+            let side = world.side(fixture, "view")?;
+            for (index, name) in memory::workload_files().iter().enumerate() {
+                std::fs::write(side.cwd.join(name), memory::workload_content(index + 1))
+                    .with_context(|| format!("writing workload buffer {name}"))?;
+            }
+            let view_spec = view_spec_from(side, view_bin, nvim_bin);
+            let outcome = memory::run(&view_spec, protocol)
+                .with_context(|| format!("memory/{fixture} run failed"))?;
+            println!(
+                "{}",
+                report::absolute_cell(
+                    scenario,
+                    fixture,
+                    "view-pss",
+                    report::AbsoluteStats {
+                        p50: outcome.distribution.p50(),
+                        p99: outcome.gated_pss_mb,
+                        unit: "MB",
+                        samples: outcome.distribution.len(),
+                        warmup: protocol.warmup,
+                    }
+                )
+            );
+            println!(
+                "{}",
+                report::aggregate_line("pss_mb", outcome.gated_pss_mb, 1)
+            );
+            let mut metrics = CellMetrics::new();
+            metrics.insert("pss_mb".to_string(), outcome.gated_pss_mb);
+            Ok(metrics)
+        }
+        "flood" => {
+            let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
+            let outcome = flood::run(
+                &view_spec,
+                &nvim_spec,
+                protocol.trials,
+                protocol.samples,
+                settle_deadline(fixture),
+                FLOOD_LINES,
+            )
+            .with_context(|| format!("flood/{fixture} run failed"))?;
+            for (view_side, nvim_side) in outcome.view_trials.iter().zip(&outcome.nvim_trials) {
+                println!(
+                    "flood/{fixture}: view drain {:.0}ms ({} frame gaps) | nvim drain {:.0}ms  \
+                     ratio {:.2}",
+                    view_side.drain_ms,
+                    view_side.cadence_gaps_ms.len(),
+                    nvim_side.drain_ms,
+                    view_side.drain_ms / nvim_side.drain_ms
+                );
+            }
+            println!(
+                "{}",
+                report::aggregate_line("drain_ratio", outcome.gated_drain_ratio, protocol.trials)
+            );
+            println!(
+                "{}",
+                report::aggregate_line(
+                    "cadence_p99_ms",
+                    outcome.gated_cadence_p99_ms,
+                    protocol.trials
+                )
+            );
+            println!(
+                "      view worst no-paint gap {:.2}ms (reported, not gated)",
+                outcome.view_stall_max_ms
+            );
+            let mut metrics = CellMetrics::new();
+            metrics.insert("drain_ratio".to_string(), outcome.gated_drain_ratio);
+            metrics.insert("cadence_p99_ms".to_string(), outcome.gated_cadence_p99_ms);
+            Ok(metrics)
+        }
         other => bail!(
             "unknown scenario {other:?}; known: {}",
             known_scenarios().join(", ")
         ),
     }
+}
+
+/// Confirms the per-side fixture config copies still match the committed
+/// fixture byte for byte after a run that reuses one copy across many
+/// cold spawns: "untouched fixture" is part of the cold definition, and a
+/// plugin manager rewriting its lockfile mid-run would silently change
+/// what later samples measured.
+fn verify_fixture_copies_untouched(world: &CellWorld, fixture: &str) -> Result<()> {
+    let source = fixtures_root().join(fixture);
+    for side_tag in ["view", "nvim"] {
+        let copy = world.hermetic_dir.join(side_tag).join("xdg_config_home");
+        for entry in walk_files(&source)? {
+            let rel = entry
+                .strip_prefix(&source)
+                .context("fixture walk escaped its root")?;
+            let original =
+                std::fs::read(&entry).with_context(|| format!("reading {}", entry.display()))?;
+            let copied = std::fs::read(copy.join(rel))
+                .with_context(|| format!("reading {}", copy.join(rel).display()))?;
+            if original != copied {
+                bail!(
+                    "fixture copy for the {side_tag} side diverged from {} during the run \
+                     (cold samples after the change measured a different config)",
+                    entry.display()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every regular file under `root`, recursively.
+fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))?
+        {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                stack.push(path);
+            } else if entry.file_type()?.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
 }
 
 fn known_scenarios() -> Vec<&'static str> {

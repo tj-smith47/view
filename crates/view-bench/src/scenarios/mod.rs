@@ -5,6 +5,10 @@
 //! those represent is the caller's concern.
 
 pub mod echo;
+pub mod first_paint;
+pub mod flood;
+pub mod memory;
+pub mod scroll;
 
 use std::time::Duration;
 

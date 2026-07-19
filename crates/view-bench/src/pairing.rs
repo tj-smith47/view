@@ -40,8 +40,8 @@ pub fn paired_summary(
             nvim: nvim_raw.len(),
         });
     }
-    let view = Distribution::from_ms(view_raw, warmup)?;
-    let nvim = Distribution::from_ms(nvim_raw, warmup)?;
+    let view = Distribution::from_samples(view_raw, warmup)?;
+    let nvim = Distribution::from_samples(nvim_raw, warmup)?;
 
     let nvim_p99 = nvim.p99();
     if !(nvim_p99.is_finite() && nvim_p99 > 0.0) {
@@ -57,7 +57,7 @@ pub fn paired_summary(
         .zip(&nvim_raw[warmup..])
         .map(|(v, n)| v - n)
         .collect();
-    let delta_dist = Distribution::from_ms(&deltas, 0)?;
+    let delta_dist = Distribution::from_samples(&deltas, 0)?;
 
     Ok(PairedSummary {
         view,

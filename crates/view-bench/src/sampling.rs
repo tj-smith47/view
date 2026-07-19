@@ -66,16 +66,17 @@ pub fn interleave_schedule(samples_per_side: usize, block_size: usize, start: Si
     blocks
 }
 
-/// Sorted measured samples in milliseconds with warmup already excluded;
+/// Sorted measured sample values (unit is the caller's: ms, us, MB) with
+/// warmup already excluded;
 /// the only object percentiles are ever read from, so no call site can
 /// accidentally include warmup samples in a reported number.
 #[derive(Debug, Clone)]
 pub struct Distribution {
-    sorted_ms: Vec<f64>,
+    sorted: Vec<f64>,
 }
 
 impl Distribution {
-    /// Builds a distribution from raw per-sample milliseconds, dropping the
+    /// Builds a distribution from raw per-sample values, dropping the
     /// first `warmup` samples.
     ///
     /// # Errors
@@ -83,16 +84,16 @@ impl Distribution {
     /// Returns [`BenchError::NotEnoughSamples`] if fewer than
     /// `warmup + 1` samples were collected: percentiles over an empty
     /// measured set would silently report 0.0 and pass any gate.
-    pub fn from_ms(raw: &[f64], warmup: usize) -> Result<Self, BenchError> {
+    pub fn from_samples(raw: &[f64], warmup: usize) -> Result<Self, BenchError> {
         if raw.len() <= warmup {
             return Err(BenchError::NotEnoughSamples {
                 collected: raw.len(),
                 warmup,
             });
         }
-        let mut sorted_ms: Vec<f64> = raw[warmup..].to_vec();
-        sorted_ms.sort_by(f64::total_cmp);
-        Ok(Self { sorted_ms })
+        let mut sorted: Vec<f64> = raw[warmup..].to_vec();
+        sorted.sort_by(f64::total_cmp);
+        Ok(Self { sorted })
     }
 
     /// Linear-rank percentile over the sorted measured samples:
@@ -101,13 +102,13 @@ impl Distribution {
     /// measured.
     #[must_use]
     pub fn percentile(&self, pct: f64) -> f64 {
-        let n = self.sorted_ms.len();
+        let n = self.sorted.len();
         let idx = ((pct / 100.0) * ((n - 1) as f64)).round();
         // the index is clamped from a finite pct in [0,100], so the cast
         // cannot lose meaningful range
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let idx = (idx.max(0.0) as usize).min(n - 1);
-        self.sorted_ms[idx]
+        self.sorted[idx]
     }
 
     #[must_use]
@@ -122,24 +123,24 @@ impl Distribution {
 
     #[must_use]
     pub fn max(&self) -> f64 {
-        *self.sorted_ms.last().unwrap_or(&0.0)
+        *self.sorted.last().unwrap_or(&0.0)
     }
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.sorted_ms.len()
+        self.sorted.len()
     }
 
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.sorted_ms.is_empty()
+        self.sorted.is_empty()
     }
 
     /// The measured samples in sorted order, for pooling several trials
     /// into one distribution.
     #[must_use]
     pub fn samples(&self) -> &[f64] {
-        &self.sorted_ms
+        &self.sorted
     }
 }
 
@@ -174,7 +175,7 @@ mod tests {
         // 1.0..=1000.0 ms: p50 must land mid-range and p99 near the top,
         // by the documented linear-rank rule idx = round(pct/100 * (n-1))
         let raw: Vec<f64> = (1..=1000).map(f64::from).collect();
-        let dist = Distribution::from_ms(&raw, 0).unwrap();
+        let dist = Distribution::from_samples(&raw, 0).unwrap();
         assert_eq!(dist.len(), 1000);
         assert_eq!(dist.p50(), 501.0); // round(0.50 * 999) = 500 -> value 501
         assert_eq!(dist.p99(), 990.0); // round(0.99 * 999) = 989 -> value 990
@@ -189,7 +190,7 @@ mod tests {
         // report 5000.0 instead of the measured range's top
         let mut raw = vec![5000.0, 4000.0, 3000.0];
         raw.extend((1..=100).map(f64::from));
-        let dist = Distribution::from_ms(&raw, 3).unwrap();
+        let dist = Distribution::from_samples(&raw, 3).unwrap();
         assert_eq!(dist.len(), 100);
         assert_eq!(dist.max(), 100.0);
         assert_eq!(dist.p99(), 99.0);
@@ -198,7 +199,7 @@ mod tests {
     #[test]
     fn a_run_with_no_measured_samples_is_an_error_not_a_zero() {
         let raw = vec![1.0, 2.0];
-        let err = Distribution::from_ms(&raw, 2).unwrap_err();
+        let err = Distribution::from_samples(&raw, 2).unwrap_err();
         assert!(matches!(
             err,
             BenchError::NotEnoughSamples {
@@ -211,7 +212,7 @@ mod tests {
     #[test]
     fn unsorted_input_still_yields_sorted_percentiles() {
         let raw = vec![9.0, 1.0, 5.0, 3.0, 7.0];
-        let dist = Distribution::from_ms(&raw, 0).unwrap();
+        let dist = Distribution::from_samples(&raw, 0).unwrap();
         assert_eq!(dist.p50(), 5.0);
         assert_eq!(dist.max(), 9.0);
     }
