@@ -62,14 +62,28 @@ const MIN_RECORDED_WARMUP: usize = 100;
 /// frames.
 const FLOOD_LINES: usize = 3_000_000;
 
+/// Null-pair calibration sampling: two instances of the pinned nvim
+/// interleaved per-sample under the echo driver. 200 measured samples is
+/// enough for a stable median (the gated statistic is a p50) while
+/// keeping the calibration to seconds, not a full protocol run.
+const NULL_CAL_SAMPLES: usize = 200;
+const NULL_CAL_WARMUP: usize = 20;
+
+/// Refusal floor for the null-pair calibration, applied to the median
+/// ratio's symmetric deviation from 1.0 (`max(r, 1/r)`; a null pair at
+/// 0.87 is exactly as noisy as one at 1.15). Pinned from measurement,
+/// not guessed: six calibration runs on a quiet host measured ratios
+/// 0.9357..1.0652 (deviations 1.013..1.069), so 1.15 doubles the worst
+/// observed quiet excess while still refusing the ambient noise that
+/// moved identical-pair medians past 1.14 under load.
+const NULL_RATIO_FLOOR: f64 = 1.15;
+
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// Parent of every per-cell scratch world. Lives under `target/` rather
-/// than the system temp dir because /tmp is commonly a RAM-backed tmpfs
-/// (a leaked fixture copy would cost memory, not disk) and `target/` is
-/// already the disk-backed, gitignored home of build byproducts.
+/// Parent of every per-cell scratch world; why `target/` and not the
+/// system temp dir is documented on [`view_harness::fixture::scratch_root`].
 fn scratch_root() -> PathBuf {
-    workspace_root().join("target").join("bench-scratch")
+    view_harness::fixture::scratch_root("bench-scratch")
 }
 
 #[derive(Parser)]
@@ -247,6 +261,16 @@ fn view_spec_from(side: SideSetup, view_bin: &Path, nvim_bin: &Path) -> SpawnSpe
     }
 }
 
+/// Builds a bare-nvim spawn spec against one resolved side setup.
+fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
+    SpawnSpec {
+        program: nvim_bin.to_path_buf(),
+        args: vec![side.scratch_file.into_os_string()],
+        env: side.env,
+        cwd: Some(side.cwd),
+    }
+}
+
 /// Builds the paired view/nvim spawn specs for one cell.
 fn paired_specs(
     world: &CellWorld,
@@ -257,13 +281,29 @@ fn paired_specs(
     let view_side = world.side(fixture, "view")?;
     let nvim_side = world.side(fixture, "nvim")?;
     let view_spec = view_spec_from(view_side, view_bin, nvim_bin);
-    let nvim_spec = SpawnSpec {
-        program: nvim_bin.to_path_buf(),
-        args: vec![nvim_side.scratch_file.clone().into_os_string()],
-        env: nvim_side.env,
-        cwd: Some(nvim_side.cwd),
-    };
+    let nvim_spec = nvim_spec_from(nvim_side, nvim_bin);
     Ok((view_spec, nvim_spec))
+}
+
+/// Measures the host's ambient pairing noise before any cell is recorded
+/// or gated: the pinned nvim interleaved against itself under the echo
+/// driver. A null pair's median ratio is 1.0 by construction, so its
+/// deviation from 1.0 is a direct read of exactly the noise every real
+/// gated ratio is exposed to on this host, measured by the same
+/// machinery.
+fn null_calibration(bins: &Bins) -> Result<f64> {
+    let world = CellWorld::create("minimal")?;
+    let spec_a = nvim_spec_from(world.side("minimal", "null-a")?, &bins.nvim);
+    let spec_b = nvim_spec_from(world.side("minimal", "null-b")?, &bins.nvim);
+    let protocol = Protocol {
+        samples: NULL_CAL_SAMPLES,
+        warmup: NULL_CAL_WARMUP,
+        trials: 1,
+        ..Protocol::default()
+    };
+    let outcome = echo::run(&spec_a, &spec_b, &protocol, settle_deadline("minimal"))
+        .context("null-pair calibration run failed")?;
+    Ok(outcome.gated_ratio_p50)
 }
 
 /// The resolved binaries one invocation measures with.
@@ -419,6 +459,14 @@ fn run_cell(
                     outcome.trials.len()
                 )
             );
+            println!(
+                "{}",
+                report::aggregate_line(
+                    "view_p99_ms",
+                    outcome.gated_view_p99_ms,
+                    outcome.trials.len()
+                )
+            );
             let mut metrics = CellMetrics::new();
             metrics.insert("ratio_p50".to_string(), outcome.gated_ratio_p50);
             metrics.insert("ratio_p99".to_string(), outcome.gated_ratio_p99);
@@ -426,6 +474,7 @@ fn run_cell(
                 "paired_delta_p99_ms".to_string(),
                 outcome.gated_paired_delta_p99_ms,
             );
+            metrics.insert("view_p99_ms".to_string(), outcome.gated_view_p99_ms);
             Ok(metrics)
         }
         "scroll" => {
@@ -721,6 +770,26 @@ fn main() -> Result<()> {
         ..Protocol::default()
     };
 
+    // gating on a noisy host produces false verdicts, and recording on
+    // one poisons the baseline every later quiet run is judged against;
+    // both therefore verify their own precondition before any cell runs
+    if cli.record || cli.gate {
+        let ratio = null_calibration(&bins)?;
+        let deviation = ratio.max(1.0 / ratio);
+        println!(
+            "null-pair calibration: ratio_p50 {ratio:.4} (deviation {deviation:.4}, floor \
+             {NULL_RATIO_FLOOR})"
+        );
+        if deviation > NULL_RATIO_FLOOR {
+            bail!(
+                "host too noisy to {}: null-pair (nvim vs nvim) ratio_p50 measured {ratio:.4}, \
+                 deviation {deviation:.4} from 1.0 exceeds the calibration floor \
+                 {NULL_RATIO_FLOOR}; re-run when the host is quiet",
+                if cli.record { "record" } else { "gate" }
+            );
+        }
+    }
+
     let mut measured: Vec<(String, String, CellMetrics)> = Vec::new();
     for (scenario, fixture) in &cells {
         let metrics = run_cell(scenario, fixture, &bins, &protocol)?;
@@ -737,6 +806,7 @@ fn main() -> Result<()> {
         } else {
             let existing = baselines::load(&path)?;
             baselines::require_pin_match(&existing, &pin, &path)?;
+            baselines::require_class_match(&existing, &cli.class, &path)?;
             existing
         };
         for (scenario, fixture, metrics) in &measured {
@@ -755,6 +825,7 @@ fn main() -> Result<()> {
             format!("gating requires a recorded baseline at {}", path.display())
         })?;
         baselines::require_pin_match(&file, &pin, &path)?;
+        baselines::require_class_match(&file, &cli.class, &path)?;
         let mut breaches = Vec::new();
         for (scenario, fixture, metrics) in &measured {
             let Some(recorded) = file.cell(scenario, fixture) else {
@@ -763,7 +834,9 @@ fn main() -> Result<()> {
                     path.display()
                 );
             };
-            breaches.extend(baselines::gate_cell(scenario, fixture, metrics, recorded));
+            breaches.extend(baselines::gate_cell(
+                scenario, fixture, metrics, recorded, &cli.class,
+            ));
         }
         if breaches.is_empty() {
             println!("gate OK: {} cell(s) within recorded bars", measured.len());

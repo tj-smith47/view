@@ -53,6 +53,16 @@ pub fn workspace_root() -> PathBuf {
     path
 }
 
+/// Parent directory for one harness bin's scratch worlds (`name` keeps
+/// the bins' scratch trees apart). Lives under `target/` rather than the
+/// system temp dir because /tmp is commonly a RAM-backed tmpfs (a leaked
+/// fixture copy would cost memory, not disk) and `target/` is already the
+/// disk-backed, gitignored home of build byproducts.
+#[must_use]
+pub fn scratch_root(name: &str) -> PathBuf {
+    workspace_root().join("target").join(name)
+}
+
 /// Path to the repo-root `.engine-pin` file.
 #[must_use]
 pub fn engine_pin_path() -> PathBuf {

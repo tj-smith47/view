@@ -3,14 +3,16 @@ engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
 [echo.heavy]
-paired_delta_p99_ms = 1.5213690000000004
-ratio_p50 = 1.3770425767221848
-ratio_p99 = 1.2561188315409826
+paired_delta_p99_ms = 1.219048
+ratio_p50 = 1.4531289497893012
+ratio_p99 = 1.1958135336832538
+view_p99_ms = 1.974935
 
 [echo.minimal]
-paired_delta_p99_ms = 0.749083
-ratio_p50 = 1.5276782987701618
-ratio_p99 = 1.3773419008752568
+paired_delta_p99_ms = 0.619578
+ratio_p50 = 1.5361783517569096
+ratio_p99 = 1.4190206491933215
+view_p99_ms = 1.1865949999999998
 
 [first_paint.heavy]
 cold_ms = 53.689061

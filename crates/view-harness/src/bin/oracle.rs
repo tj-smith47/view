@@ -31,7 +31,7 @@ use portable_pty::CommandBuilder;
 use view_harness::corpus::{self, CorpusEntry};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
-    verify_nvim_matches_pin, workspace_root,
+    scratch_root, verify_nvim_matches_pin, workspace_root,
 };
 use view_harness::fuzz;
 use view_harness::page;
@@ -106,6 +106,13 @@ const SCREEN_QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
 /// a probe socket) within one process, the same role
 /// `view-oracle/tests/common::ScratchPaths`' own atomic counter plays.
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Parent of every compat scenario's scratch world and probe socket; why
+/// `target/` and not the system temp dir is documented on
+/// [`view_harness::fixture::scratch_root`].
+fn compat_scratch_root() -> PathBuf {
+    scratch_root("compat-scratch")
+}
 
 #[derive(Parser)]
 #[command(
@@ -878,7 +885,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
         std::process::id(),
         SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
-    let hermetic_dir = std::env::temp_dir().join(format!("view-compat-{scratch_id}"));
+    let hermetic_dir = compat_scratch_root().join(format!("view-compat-{scratch_id}"));
     std::fs::create_dir_all(&hermetic_dir)
         .with_context(|| format!("creating scratch dir {}", hermetic_dir.display()))?;
     let xdg_state_home = hermetic_dir.join("xdg_state_home");
@@ -1080,7 +1087,7 @@ fn run_scenario(
     nvim_bin: &Path,
 ) -> Result<ScenarioResult> {
     let start = Instant::now();
-    let sock_path = std::env::temp_dir().join(format!(
+    let sock_path = compat_scratch_root().join(format!(
         "view-compat-{}-{}.sock",
         std::process::id(),
         SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
@@ -1287,6 +1294,15 @@ fn compat_command(path: &Path) -> Result<()> {
     verify_nvim_matches_pin(&nvim_bin, &pin)?;
     let view_bin = ensure_view_bin()?;
     std::fs::create_dir_all(cache_root()).context("creating compat/.cache")?;
+
+    // Drop-based cleanup is skipped when a run is killed by a signal, so
+    // stale scratch worlds from interrupted runs would otherwise pile up
+    // silently. Clearing the whole parent is safe because concurrent
+    // compat runs are already out of contract: both would rewrite
+    // compat/results.json wholesale, clobbering each other's evidence.
+    let _ = std::fs::remove_dir_all(compat_scratch_root());
+    std::fs::create_dir_all(compat_scratch_root())
+        .with_context(|| format!("creating scratch root {}", compat_scratch_root().display()))?;
 
     let mut results = ResultsFile::default();
     let mut any_failed = false;

@@ -17,7 +17,12 @@
 //!
 //! Every metric is lower-is-better, so one gate rule covers all cells:
 //! a breach is a measured value above `baseline * headroom`, with the
-//! headroom chosen per metric kind by [`gate_headroom`].
+//! headroom chosen per metric kind and machine class by [`gate_headroom`].
+//!
+//! Machine classes split into two gate policies, encoded in the class
+//! name itself (see [`is_controlled_class`]): a `controlled-` prefixed
+//! class runs on a dedicated, load-controlled box and additionally gates
+//! the paired tail statistics; every other class records them ungated.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -43,22 +48,37 @@ pub const RATIO_HEADROOM: f64 = 1.25;
 /// regression (2x) still cannot hide inside it.
 pub const ABSOLUTE_HEADROOM: f64 = 1.5;
 
-/// The gate policy for one metric: `None` means recorded for reference
-/// but never gated on this mechanism.
+/// Whether `class` names a dedicated, load-controlled bench runner. The
+/// policy lives in the class name itself (a `controlled-` prefix) rather
+/// than a separate metadata field so a baseline file can never disagree
+/// with its own class about which gate policy applies: there is no
+/// second value to drift, hand-edit, or forget when recording a fresh
+/// class.
+#[must_use]
+pub fn is_controlled_class(class: &str) -> bool {
+    class.starts_with("controlled-")
+}
+
+/// The gate policy for one metric on one machine class: `None` means
+/// recorded for reference but never gated on this mechanism.
 ///
-/// Both ungated metrics earned it by measurement of one unchanged binary
-/// pair across host-load regimes:
+/// The paired tail statistics gate only on controlled classes. Both
+/// earned the shared-class exemption by measurement of one unchanged
+/// binary pair across host-load regimes:
 /// - `paired_delta_p99_ms` tracked ambient load x149 (0.62ms..92.5ms);
 ///   its regression protection is duplicated by the ratio from the same
 ///   paired run.
 /// - `ratio_p99` has a +/-50% ambient noise floor (invocation medians
 ///   1.05..1.95): shared tails are scheduler-dominated, and load
-///   compresses the ratio toward 1. It stays recorded because the spec
-///   budget is stated at p99; a controlled machine class can gate it.
+///   compresses the ratio toward 1.
+///
+/// On a dedicated runner those load regimes cannot occur, so the same
+/// statistics gate there under the standard ratio headroom, and the spec
+/// p99 budget gets a real bar instead of a reference number.
 #[must_use]
-pub fn gate_headroom(metric: &str) -> Option<f64> {
+pub fn gate_headroom(metric: &str, controlled: bool) -> Option<f64> {
     if metric == "paired_delta_p99_ms" || metric == "ratio_p99" {
-        return None;
+        return controlled.then_some(RATIO_HEADROOM);
     }
     if metric.contains("ratio") {
         Some(RATIO_HEADROOM)
@@ -98,6 +118,15 @@ pub enum BaselineError {
          {current:?}; re-record the baseline before gating or recording single cells"
     )]
     PinDrift {
+        path: String,
+        recorded: String,
+        current: String,
+    },
+    #[error(
+        "baseline {path} declares machine_class {recorded:?} but this run named class \
+         {current:?}; the gate policy is derived from the class, so the two must agree"
+    )]
+    ClassMismatch {
         path: String,
         recorded: String,
         current: String,
@@ -180,19 +209,23 @@ impl std::fmt::Display for Breach {
 /// Only metrics present in the baseline gate (a newly added metric cannot
 /// retroactively fail old baselines); every gated metric is
 /// lower-is-better, with per-metric headroom from [`gate_headroom`].
+/// Takes the machine class name, not a pre-derived flag, so no caller can
+/// pair one class's cells with another class's gate policy.
 #[must_use]
 pub fn gate_cell(
     scenario: &str,
     fixture: &str,
     measured: &CellMetrics,
     recorded: &CellMetrics,
+    class: &str,
 ) -> Vec<Breach> {
+    let controlled = is_controlled_class(class);
     let mut breaches = Vec::new();
     for (metric, recorded_value) in recorded {
         let Some(&measured_value) = measured.get(metric) else {
             continue;
         };
-        let Some(headroom) = gate_headroom(metric) else {
+        let Some(headroom) = gate_headroom(metric, controlled) else {
             continue;
         };
         let bar = recorded_value * headroom;
@@ -281,6 +314,29 @@ pub fn require_pin_match(
     Ok(())
 }
 
+/// Rejects using a baseline file whose recorded `machine_class` differs
+/// from the class this invocation named: the gate policy (controlled vs
+/// shared) is derived from the class, so a mismatch would silently apply
+/// one class's policy to another class's numbers.
+///
+/// # Errors
+///
+/// Returns [`BaselineError::ClassMismatch`] when the classes differ.
+pub fn require_class_match(
+    file: &BaselineFile,
+    current_class: &str,
+    path: &Path,
+) -> Result<(), BaselineError> {
+    if file.machine_class != current_class {
+        return Err(BaselineError::ClassMismatch {
+            path: path.display().to_string(),
+            recorded: file.machine_class.clone(),
+            current: current_class.to_string(),
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
@@ -323,6 +379,7 @@ mod tests {
             "minimal",
             &metrics(&[("ratio_p50", 1.20)]),
             &recorded,
+            "dev-linux",
         );
         assert!(ok.is_empty(), "1.20 sits inside 1.0 x {RATIO_HEADROOM}");
         let bad = gate_cell(
@@ -330,6 +387,7 @@ mod tests {
             "minimal",
             &metrics(&[("ratio_p50", 1.30)]),
             &recorded,
+            "dev-linux",
         );
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].metric, "ratio_p50");
@@ -342,31 +400,84 @@ mod tests {
     }
 
     #[test]
-    fn headroom_policy_maps_metric_kinds() {
-        assert_eq!(gate_headroom("ratio_p50"), Some(RATIO_HEADROOM));
-        assert_eq!(gate_headroom("drain_ratio"), Some(RATIO_HEADROOM));
-        assert_eq!(gate_headroom("ratio_vs_nvim"), Some(RATIO_HEADROOM));
-        assert_eq!(gate_headroom("staleness_p99_ms"), Some(ABSOLUTE_HEADROOM));
-        assert_eq!(gate_headroom("pss_mb"), Some(ABSOLUTE_HEADROOM));
-        assert_eq!(gate_headroom("paired_delta_p99_ms"), None);
-        assert_eq!(gate_headroom("ratio_p99"), None);
+    fn controlled_class_is_a_naming_convention() {
+        assert!(is_controlled_class("controlled-linux-x86"));
+        assert!(!is_controlled_class("dev-linux"));
+        assert!(!is_controlled_class("shared-ci"));
+        assert!(!is_controlled_class("linux-controlled"));
     }
 
     #[test]
-    fn ungated_metrics_never_breach() {
+    fn headroom_policy_maps_metric_kinds() {
+        for controlled in [false, true] {
+            assert_eq!(gate_headroom("ratio_p50", controlled), Some(RATIO_HEADROOM));
+            assert_eq!(
+                gate_headroom("drain_ratio", controlled),
+                Some(RATIO_HEADROOM)
+            );
+            assert_eq!(
+                gate_headroom("ratio_vs_nvim", controlled),
+                Some(RATIO_HEADROOM)
+            );
+            assert_eq!(
+                gate_headroom("staleness_p99_ms", controlled),
+                Some(ABSOLUTE_HEADROOM)
+            );
+            assert_eq!(
+                gate_headroom("view_p99_ms", controlled),
+                Some(ABSOLUTE_HEADROOM)
+            );
+            assert_eq!(gate_headroom("pss_mb", controlled), Some(ABSOLUTE_HEADROOM));
+        }
+        assert_eq!(gate_headroom("paired_delta_p99_ms", false), None);
+        assert_eq!(gate_headroom("ratio_p99", false), None);
+        assert_eq!(
+            gate_headroom("paired_delta_p99_ms", true),
+            Some(RATIO_HEADROOM)
+        );
+        assert_eq!(gate_headroom("ratio_p99", true), Some(RATIO_HEADROOM));
+    }
+
+    #[test]
+    fn tail_metrics_never_breach_on_a_shared_class() {
         let recorded = metrics(&[("paired_delta_p99_ms", 0.6), ("ratio_p99", 1.05)]);
         let measured = metrics(&[("paired_delta_p99_ms", 92.5), ("ratio_p99", 1.95)]);
         assert!(
-            gate_cell("echo", "minimal", &measured, &recorded).is_empty(),
+            gate_cell("echo", "minimal", &measured, &recorded, "dev-linux").is_empty(),
             "reference-only metrics must not gate even far above their recorded values"
         );
     }
 
     #[test]
+    fn tail_metrics_gate_on_a_controlled_class() {
+        let recorded = metrics(&[("paired_delta_p99_ms", 0.6), ("ratio_p99", 1.05)]);
+        let measured = metrics(&[("paired_delta_p99_ms", 92.5), ("ratio_p99", 1.95)]);
+        let breaches = gate_cell("echo", "minimal", &measured, &recorded, "controlled-linux");
+        assert_eq!(
+            breaches.len(),
+            2,
+            "both tail statistics must gate on a controlled class; got {breaches:?}"
+        );
+        for breach in &breaches {
+            assert_eq!(breach.headroom, RATIO_HEADROOM);
+        }
+        let within = metrics(&[("paired_delta_p99_ms", 0.7), ("ratio_p99", 1.2)]);
+        assert!(gate_cell("echo", "minimal", &within, &recorded, "controlled-linux").is_empty());
+    }
+
+    #[test]
     fn gate_ignores_metrics_absent_from_the_baseline() {
-        let recorded = metrics(&[("ratio_p99", 1.0)]);
-        let measured = metrics(&[("ratio_p99", 0.9), ("new_metric", 99.0)]);
-        assert!(gate_cell("echo", "minimal", &measured, &recorded).is_empty());
+        let recorded = metrics(&[("ratio_p50", 1.0)]);
+        let measured = metrics(&[("ratio_p50", 0.9), ("new_metric", 99.0)]);
+        assert!(gate_cell("echo", "minimal", &measured, &recorded, "dev-linux").is_empty());
+    }
+
+    #[test]
+    fn class_mismatch_is_rejected() {
+        let file = BaselineFile::new("dev-linux", "v0.12.4");
+        let err = require_class_match(&file, "controlled-linux", Path::new("x.toml")).unwrap_err();
+        assert!(matches!(err, BaselineError::ClassMismatch { .. }));
+        assert!(require_class_match(&file, "dev-linux", Path::new("x.toml")).is_ok());
     }
 
     #[test]
