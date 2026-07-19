@@ -216,6 +216,7 @@ impl EngineSession {
     /// the chrome-reservation boundary produces) when nothing was ever
     /// sent, leaving the model's own idea of the engine's grid size
     /// disagree with the real nvim process underneath it.
+    #[must_use]
     pub fn pump_until_flush(&mut self, deadline: Duration) -> bool {
         let start = Instant::now();
         loop {

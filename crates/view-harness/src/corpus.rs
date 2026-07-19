@@ -83,7 +83,7 @@ pub enum CorpusError {
     /// The file's content is not valid TOML for the [`RawEntry`] shape --
     /// covers both a malformed document and a `deny_unknown_fields`
     /// rejection of an unrecognized key.
-    #[error("failed to parse corpus TOML: {0}")]
+    #[error("failed to parse corpus TOML")]
     Toml(#[from] toml::de::Error),
     /// `schema` named a version this loader has not been taught to read.
     #[error("unsupported corpus schema {0} (only schema = 1 is recognized)")]

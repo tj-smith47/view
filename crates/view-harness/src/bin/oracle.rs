@@ -144,13 +144,17 @@ fn current_engine_pin() -> Result<String> {
     Ok(raw.trim().to_string())
 }
 
-/// One entry's run result: whether both sides reached quiescence, how long
-/// the whole drive-and-compare took, and every [`Divergence`] found (state
-/// or grid). Kept as data rather than printed immediately inside
-/// [`run_entry`], so [`print_outcome`] is the single place that decides
-/// PARITY vs DIVERGENCE vs TIMEOUT wording.
+/// One entry's run result: whether each side reached quiescence
+/// independently, how long the whole drive-and-compare took, and every
+/// [`Divergence`] found (state or grid). Tracked per side rather than as a
+/// single merged bool: a wedged engine side must fail the entry even when
+/// the reference side happens to settle (and vice versa), and the report
+/// line needs to say which side timed out. Kept as data rather than printed
+/// immediately inside [`run_entry`], so [`print_outcome`] is the single
+/// place that decides PARITY vs DIVERGENCE vs TIMEOUT wording.
 struct EntryOutcome {
-    settled: bool,
+    engine_settled: bool,
+    reference_settled: bool,
     elapsed_ms: u128,
     divergences: Vec<Divergence>,
 }
@@ -161,7 +165,22 @@ impl EntryOutcome {
     /// settled is not evidence either way, so a lucky empty divergence
     /// list on an unsettled run must not report success.
     fn is_success(&self) -> bool {
-        self.settled && self.divergences.is_empty()
+        self.engine_settled && self.reference_settled && self.divergences.is_empty()
+    }
+}
+
+/// Derives the report-line status word from both sides' settle results and
+/// whether any divergence was found. A free function rather than inlined in
+/// [`print_outcome`] so the merge decision -- an unsettled side always wins
+/// over an empty divergence list, on either side, never falling through to
+/// PARITY or DIVERGENCE -- is checkable without spawning a real engine.
+fn settle_status(engine_settled: bool, reference_settled: bool, divergences_empty: bool) -> String {
+    match (engine_settled, reference_settled) {
+        (true, true) if divergences_empty => "PARITY".to_string(),
+        (true, true) => "DIVERGENCE".to_string(),
+        (false, true) => "TIMEOUT (engine)".to_string(),
+        (true, false) => "TIMEOUT (reference)".to_string(),
+        (false, false) => "TIMEOUT (engine, reference)".to_string(),
     }
 }
 
@@ -186,9 +205,9 @@ fn run_entry(entry: &CorpusEntry) -> Result<EntryOutcome, view_oracle::OracleErr
     engine.input(&entry.input)?;
     reference.input(&entry.input)?;
 
-    engine.pump_until_flush(deadline);
+    let engine_settled = engine.pump_until_flush(deadline);
     while engine.pump_until_flush(STARTUP_DRAIN) {}
-    let settled = reference.quiesce(silence, deadline);
+    let reference_settled = reference.quiesce(silence, deadline);
 
     let surface = engine.surface();
     let view_rows = engine.screen_rows();
@@ -201,7 +220,8 @@ fn run_entry(entry: &CorpusEntry) -> Result<EntryOutcome, view_oracle::OracleErr
     let divergences = compare(&view_state, &ref_state, &view_rows, &ref_rows, &mask);
 
     Ok(EntryOutcome {
-        settled,
+        engine_settled,
+        reference_settled,
         elapsed_ms: start.elapsed().as_millis(),
         divergences,
     })
@@ -211,12 +231,12 @@ fn run_entry(entry: &CorpusEntry) -> Result<EntryOutcome, view_oracle::OracleErr
 /// every [`Divergence`] found -- the exit-contract report shape the corpus
 /// runner's own interface (see this crate's module docs) commits to.
 fn print_outcome(name: &str, outcome: &EntryOutcome) {
-    let status = match (outcome.settled, outcome.divergences.is_empty()) {
-        (true, true) => "PARITY",
-        (true, false) => "DIVERGENCE",
-        (false, _) => "TIMEOUT",
-    };
-    let settle_word = if outcome.settled {
+    let status = settle_status(
+        outcome.engine_settled,
+        outcome.reference_settled,
+        outcome.divergences.is_empty(),
+    );
+    let settle_word = if outcome.engine_settled && outcome.reference_settled {
         "settled"
     } else {
         "unsettled"
@@ -227,5 +247,68 @@ fn print_outcome(name: &str, outcome: &EntryOutcome) {
     );
     for divergence in &outcome.divergences {
         println!("  {divergence:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scenario the merge logic exists for: an engine side that never
+    /// saw a Flush must report TIMEOUT even when the reference side
+    /// happened to settle with an empty divergence list. Spawning a real
+    /// wedged `EngineSession` against a settling `ReferenceSession` is not
+    /// reproducible through the corpus/CLI surface (both sides share one
+    /// `deadline`), so this exercises `settle_status` directly rather than
+    /// live -- the seam the merge decision actually lives behind.
+    #[test]
+    fn engine_side_timeout_is_not_masked_by_a_settled_reference() {
+        assert_eq!(
+            settle_status(false, true, true),
+            "TIMEOUT (engine)",
+            "an unsettled engine side with no divergences must not read as PARITY"
+        );
+        assert_eq!(
+            settle_status(false, true, false),
+            "TIMEOUT (engine)",
+            "an unsettled engine side must not read as DIVERGENCE"
+        );
+    }
+
+    #[test]
+    fn reference_side_timeout_is_reported_distinctly() {
+        assert_eq!(settle_status(true, false, true), "TIMEOUT (reference)");
+        assert_eq!(settle_status(true, false, false), "TIMEOUT (reference)");
+    }
+
+    #[test]
+    fn both_sides_unsettled_names_both() {
+        assert_eq!(
+            settle_status(false, false, true),
+            "TIMEOUT (engine, reference)"
+        );
+    }
+
+    #[test]
+    fn both_settled_falls_through_to_parity_or_divergence() {
+        assert_eq!(settle_status(true, true, true), "PARITY");
+        assert_eq!(settle_status(true, true, false), "DIVERGENCE");
+    }
+
+    #[test]
+    fn is_success_requires_both_sides_settled() {
+        let base = EntryOutcome {
+            engine_settled: true,
+            reference_settled: true,
+            elapsed_ms: 0,
+            divergences: Vec::new(),
+        };
+        assert!(base.is_success());
+
+        let engine_wedged = EntryOutcome {
+            engine_settled: false,
+            ..base
+        };
+        assert!(!engine_wedged.is_success());
     }
 }

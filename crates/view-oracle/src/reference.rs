@@ -696,8 +696,11 @@ mod tests {
         // startup batch: draining startup traffic first (the same guard
         // pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives
         // uses in driver_legs.rs) is what ReferenceSession's quiesce needs
-        // no equivalent for, since its sequence-numbered marker only
-        // satisfies step 2 with a marker issued after the real input below.
+        // no equivalent for, since each call arms a freshly
+        // sequence-numbered marker at call time: the marker the later,
+        // post-input quiesce call below arms is issued after the real
+        // input is queued, so a stale pre-input idle period can never
+        // satisfy it.
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
         assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
 
