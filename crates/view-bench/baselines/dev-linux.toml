@@ -1,0 +1,44 @@
+schema = 1
+engine_pin = "v0.12.4"
+machine_class = "dev-linux"
+
+[echo.heavy]
+paired_delta_p99_ms = 1.5213690000000004
+ratio_p50 = 1.3770425767221848
+ratio_p99 = 1.2561188315409826
+
+[echo.minimal]
+paired_delta_p99_ms = 0.749083
+ratio_p50 = 1.5276782987701618
+ratio_p99 = 1.3773419008752568
+
+[first_paint.heavy]
+cold_ms = 53.689061
+ratio_vs_nvim = 0.25868678951344914
+
+[first_paint.minimal]
+cold_ms = 54.727285
+ratio_vs_nvim = 0.40164204374093704
+
+[flood.minimal]
+cadence_p99_ms = 15.042596
+drain_ratio = 0.9698268972474688
+
+[input_path.minimal]
+p99_us = 313.227
+
+[memory.minimal]
+pss_mb = 3.3662109375
+
+[output_path.minimal]
+p99_ms = 0.385234
+
+[scroll.heavy]
+ratio_p50 = 2.069900317311322
+ratio_p99 = 1.860085501016538
+staleness_p99_ms = 2.130729
+
+[scroll.minimal]
+ratio_p50 = 1.787486357083215
+ratio_p99 = 1.7520987453318817
+staleness_p99_ms = 2.238392

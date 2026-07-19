@@ -27,8 +27,11 @@ pub enum BenchError {
     NoTrials,
     #[error("paired sides collected different sample counts (view {view}, nvim {nvim})")]
     SampleCountMismatch { view: usize, nvim: usize },
-    #[error("nvim-side p99 is {p99}, not a positive finite number; ratio would be meaningless")]
-    DegenerateBaselineSide { p99: f64 },
+    #[error(
+        "nvim-side {statistic} is {value}, not a positive finite number; \
+         ratio would be meaningless"
+    )]
+    DegenerateBaselineSide { statistic: &'static str, value: f64 },
     #[error("pty session error: {0}")]
     Session(#[from] view_oracle::OracleError),
     #[error("measurement desync (a harness fault, not a latency reading): {context}")]

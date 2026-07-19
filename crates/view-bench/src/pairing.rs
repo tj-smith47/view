@@ -11,6 +11,10 @@ use crate::BenchError;
 pub struct PairedSummary {
     pub view: Distribution,
     pub nvim: Distribution,
+    /// view p50 divided by nvim p50. Medians are robust to ambient tail
+    /// noise, so this is the statistic stable enough to gate on shared
+    /// hosts; the tail ratio below tracks the spec budget instead.
+    pub ratio_p50: f64,
     /// view p99 divided by nvim p99.
     pub ratio_p99: f64,
     /// p99 of per-sample `view[i] - nvim[i]` deltas, in milliseconds.
@@ -43,10 +47,21 @@ pub fn paired_summary(
     let view = Distribution::from_samples(view_raw, warmup)?;
     let nvim = Distribution::from_samples(nvim_raw, warmup)?;
 
+    let nvim_p50 = nvim.p50();
+    if !(nvim_p50.is_finite() && nvim_p50 > 0.0) {
+        return Err(BenchError::DegenerateBaselineSide {
+            statistic: "p50",
+            value: nvim_p50,
+        });
+    }
     let nvim_p99 = nvim.p99();
     if !(nvim_p99.is_finite() && nvim_p99 > 0.0) {
-        return Err(BenchError::DegenerateBaselineSide { p99: nvim_p99 });
+        return Err(BenchError::DegenerateBaselineSide {
+            statistic: "p99",
+            value: nvim_p99,
+        });
     }
+    let ratio_p50 = view.p50() / nvim_p50;
     let ratio_p99 = view.p99() / nvim_p99;
 
     // deltas pair sample i with sample i: the interleaved schedule takes
@@ -62,6 +77,7 @@ pub fn paired_summary(
     Ok(PairedSummary {
         view,
         nvim,
+        ratio_p50,
         ratio_p99,
         paired_delta_p99_ms: delta_dist.p99(),
     })
@@ -83,8 +99,26 @@ mod tests {
         let summary = paired_summary(&view, &nvim, 100).unwrap();
         assert_eq!(summary.view.len(), 100);
         assert_eq!(summary.nvim.len(), 100);
+        assert_eq!(summary.ratio_p50, 2.0);
         assert_eq!(summary.ratio_p99, 2.0);
         assert_eq!(summary.paired_delta_p99_ms, 1.0);
+    }
+
+    #[test]
+    fn median_ratio_is_untouched_by_a_tail_spike() {
+        // tail spikes move the p99 but not the median; the p50 ratio must
+        // reflect only the bulk behavior
+        let mut view = constant(98, 2.0);
+        view.extend([50.0, 50.0]);
+        let mut nvim = constant(98, 1.0);
+        nvim.extend([80.0, 80.0]);
+        let summary = paired_summary(&view, &nvim, 0).unwrap();
+        assert_eq!(summary.ratio_p50, 2.0);
+        assert_eq!(
+            summary.ratio_p99,
+            50.0 / 80.0,
+            "tail ratio follows the spikes"
+        );
     }
 
     #[test]

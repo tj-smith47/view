@@ -195,6 +195,7 @@ fn label(side: &str, err: BenchError) -> BenchError {
 #[derive(Debug)]
 pub struct EchoOutcome {
     pub trials: Vec<PairedSummary>,
+    pub gated_ratio_p50: f64,
     pub gated_ratio_p99: f64,
     pub gated_paired_delta_p99_ms: f64,
 }
@@ -254,9 +255,11 @@ pub fn run(
     view_state.session.shutdown();
     nvim_state.session.shutdown();
 
+    let median_ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p50).collect();
     let ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p99).collect();
     let deltas: Vec<f64> = trials.iter().map(|t| t.paired_delta_p99_ms).collect();
     Ok(EchoOutcome {
+        gated_ratio_p50: median_of_trials(&median_ratios)?,
         gated_ratio_p99: median_of_trials(&ratios)?,
         gated_paired_delta_p99_ms: median_of_trials(&deltas)?,
         trials,

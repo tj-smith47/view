@@ -16,7 +16,8 @@
 //! ```
 //!
 //! Every metric is lower-is-better, so one gate rule covers all cells:
-//! a breach is a measured value above `baseline * GATE_HEADROOM`.
+//! a breach is a measured value above `baseline * headroom`, with the
+//! headroom chosen per metric kind by [`gate_headroom`].
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -27,12 +28,44 @@ use thiserror::Error;
 /// The one schema this loader understands.
 pub const SUPPORTED_SCHEMA: u32 = 1;
 
-/// Multiplier applied to every recorded baseline value before comparison.
-/// The gated statistics are already medians over repeated interleaved
-/// trials, but even the median retains run-to-run spread on a shared dev
-/// host; the headroom absorbs that spread while still failing on a real
-/// regression well below the doctored-baseline detection bar.
-pub const GATE_HEADROOM: f64 = 1.15;
+/// Headroom for gated ratio metrics (view vs nvim from one interleaved
+/// run). Medians are robust to ambient tail noise, and per-sample
+/// alternation keeps both sides under the same ambient median shift:
+/// measured echo ratio_p50 stayed inside a x1.07 band (1.51..1.62)
+/// across host-load regimes whose absolute tails swung x300. 1.25
+/// covers that band with margin while a real regression still breaches.
+pub const RATIO_HEADROOM: f64 = 1.25;
+
+/// Headroom for absolute metrics (ms/us/MB budgets). Absolute tails on a
+/// shared dev host move with ambient load (taps p99 varied x1.5 between
+/// quiet invocations), so the band is wider than for ratios; a breach
+/// under heavy host load is loud and explainable, while a gross
+/// regression (2x) still cannot hide inside it.
+pub const ABSOLUTE_HEADROOM: f64 = 1.5;
+
+/// The gate policy for one metric: `None` means recorded for reference
+/// but never gated on this mechanism.
+///
+/// Both ungated metrics earned it by measurement of one unchanged binary
+/// pair across host-load regimes:
+/// - `paired_delta_p99_ms` tracked ambient load x149 (0.62ms..92.5ms);
+///   its regression protection is duplicated by the ratio from the same
+///   paired run.
+/// - `ratio_p99` has a +/-50% ambient noise floor (invocation medians
+///   1.05..1.95): shared tails are scheduler-dominated, and load
+///   compresses the ratio toward 1. It stays recorded because the spec
+///   budget is stated at p99; a controlled machine class can gate it.
+#[must_use]
+pub fn gate_headroom(metric: &str) -> Option<f64> {
+    if metric == "paired_delta_p99_ms" || metric == "ratio_p99" {
+        return None;
+    }
+    if metric.contains("ratio") {
+        Some(RATIO_HEADROOM)
+    } else {
+        Some(ABSOLUTE_HEADROOM)
+    }
+}
 
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
@@ -123,6 +156,7 @@ pub struct Breach {
     pub metric: String,
     pub measured: f64,
     pub recorded: f64,
+    pub headroom: f64,
     pub bar: f64,
 }
 
@@ -130,8 +164,14 @@ impl std::fmt::Display for Breach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "GATE BREACH [{}.{}] {}: measured {:.4} > bar {:.4} (recorded {:.4} x headroom {GATE_HEADROOM})",
-            self.scenario, self.fixture, self.metric, self.measured, self.bar, self.recorded
+            "GATE BREACH [{}.{}] {}: measured {:.4} > bar {:.4} (recorded {:.4} x headroom {})",
+            self.scenario,
+            self.fixture,
+            self.metric,
+            self.measured,
+            self.bar,
+            self.recorded,
+            self.headroom
         )
     }
 }
@@ -139,7 +179,7 @@ impl std::fmt::Display for Breach {
 /// Compares one cell's measured metrics against the recorded baseline.
 /// Only metrics present in the baseline gate (a newly added metric cannot
 /// retroactively fail old baselines); every gated metric is
-/// lower-is-better.
+/// lower-is-better, with per-metric headroom from [`gate_headroom`].
 #[must_use]
 pub fn gate_cell(
     scenario: &str,
@@ -152,7 +192,10 @@ pub fn gate_cell(
         let Some(&measured_value) = measured.get(metric) else {
             continue;
         };
-        let bar = recorded_value * GATE_HEADROOM;
+        let Some(headroom) = gate_headroom(metric) else {
+            continue;
+        };
+        let bar = recorded_value * headroom;
         if measured_value > bar {
             breaches.push(Breach {
                 scenario: scenario.to_string(),
@@ -160,6 +203,7 @@ pub fn gate_cell(
                 metric: metric.clone(),
                 measured: measured_value,
                 recorded: *recorded_value,
+                headroom,
                 bar,
             });
         }
@@ -273,26 +317,48 @@ mod tests {
 
     #[test]
     fn gate_passes_within_headroom_and_breaches_above_it() {
-        let recorded = metrics(&[("ratio_p99", 1.0)]);
+        let recorded = metrics(&[("ratio_p50", 1.0)]);
         let ok = gate_cell(
             "echo",
             "minimal",
-            &metrics(&[("ratio_p99", 1.10)]),
+            &metrics(&[("ratio_p50", 1.20)]),
             &recorded,
         );
-        assert!(ok.is_empty(), "1.10 sits inside 1.0 x {GATE_HEADROOM}");
+        assert!(ok.is_empty(), "1.20 sits inside 1.0 x {RATIO_HEADROOM}");
         let bad = gate_cell(
             "echo",
             "minimal",
-            &metrics(&[("ratio_p99", 1.20)]),
+            &metrics(&[("ratio_p50", 1.30)]),
             &recorded,
         );
         assert_eq!(bad.len(), 1);
-        assert_eq!(bad[0].metric, "ratio_p99");
+        assert_eq!(bad[0].metric, "ratio_p50");
+        assert_eq!(bad[0].headroom, RATIO_HEADROOM);
         let rendered = bad[0].to_string();
         assert!(
             rendered.contains("[echo.minimal]"),
             "breach must name the cell; actual: {rendered}"
+        );
+    }
+
+    #[test]
+    fn headroom_policy_maps_metric_kinds() {
+        assert_eq!(gate_headroom("ratio_p50"), Some(RATIO_HEADROOM));
+        assert_eq!(gate_headroom("drain_ratio"), Some(RATIO_HEADROOM));
+        assert_eq!(gate_headroom("ratio_vs_nvim"), Some(RATIO_HEADROOM));
+        assert_eq!(gate_headroom("staleness_p99_ms"), Some(ABSOLUTE_HEADROOM));
+        assert_eq!(gate_headroom("pss_mb"), Some(ABSOLUTE_HEADROOM));
+        assert_eq!(gate_headroom("paired_delta_p99_ms"), None);
+        assert_eq!(gate_headroom("ratio_p99"), None);
+    }
+
+    #[test]
+    fn ungated_metrics_never_breach() {
+        let recorded = metrics(&[("paired_delta_p99_ms", 0.6), ("ratio_p99", 1.05)]);
+        let measured = metrics(&[("paired_delta_p99_ms", 92.5), ("ratio_p99", 1.95)]);
+        assert!(
+            gate_cell("echo", "minimal", &measured, &recorded).is_empty(),
+            "reference-only metrics must not gate even far above their recorded values"
         );
     }
 

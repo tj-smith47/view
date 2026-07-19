@@ -394,6 +394,10 @@ fn run_cell(
             }
             println!(
                 "{}",
+                report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+            );
+            println!(
+                "{}",
                 report::aggregate_line("ratio_p99", outcome.gated_ratio_p99, outcome.trials.len())
             );
             println!(
@@ -405,6 +409,7 @@ fn run_cell(
                 )
             );
             let mut metrics = CellMetrics::new();
+            metrics.insert("ratio_p50".to_string(), outcome.gated_ratio_p50);
             metrics.insert("ratio_p99".to_string(), outcome.gated_ratio_p99);
             metrics.insert(
                 "paired_delta_p99_ms".to_string(),
@@ -441,6 +446,10 @@ fn run_cell(
             );
             println!(
                 "{}",
+                report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+            );
+            println!(
+                "{}",
                 report::aggregate_line("ratio_p99", outcome.gated_ratio_p99, outcome.trials.len())
             );
             let mut metrics = CellMetrics::new();
@@ -448,6 +457,7 @@ fn run_cell(
                 "staleness_p99_ms".to_string(),
                 outcome.gated_staleness_p99_ms,
             );
+            metrics.insert("ratio_p50".to_string(), outcome.gated_ratio_p50);
             metrics.insert("ratio_p99".to_string(), outcome.gated_ratio_p99);
             Ok(metrics)
         }

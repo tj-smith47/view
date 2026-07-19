@@ -169,7 +169,8 @@ pub fn run(
     for (view_side, nvim_side) in view_trials.iter().zip(&nvim_trials) {
         if !(nvim_side.drain_ms.is_finite() && nvim_side.drain_ms > 0.0) {
             return Err(BenchError::DegenerateBaselineSide {
-                p99: nvim_side.drain_ms,
+                statistic: "drain_ms",
+                value: nvim_side.drain_ms,
             });
         }
         ratios.push(view_side.drain_ms / nvim_side.drain_ms);

@@ -21,6 +21,10 @@ pub struct Protocol {
     /// Warmup samples per side per trial, excluded from every statistic.
     pub warmup: usize,
     /// Samples taken from one side before switching to the other.
+    /// Per-sample alternation (block = 1) couples ambient noise bursts
+    /// into both sides' tail percentiles equally, which is what keeps
+    /// the gated ratio stable across host-load regimes; larger blocks
+    /// let a burst shorter than one block inflate a single side.
     pub block: usize,
     /// Full interleaved trials per invocation; the gated statistic is the
     /// median across trials.
@@ -37,7 +41,7 @@ impl Default for Protocol {
         Self {
             samples: 1000,
             warmup: 100,
-            block: 25,
+            block: 1,
             trials: 3,
             sample_timeout: Duration::from_secs(5),
             inter_sample: Duration::from_millis(10),

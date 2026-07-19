@@ -2003,7 +2003,6 @@ version = "0.0.1"
 name = "view-bench"
 version = "0.0.1"
 dependencies = [
- "anyhow",
  "portable-pty",
  "rustix",
  "thiserror 2.0.18",

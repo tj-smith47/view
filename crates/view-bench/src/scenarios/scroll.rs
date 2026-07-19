@@ -70,21 +70,31 @@ struct SideState {
 impl SideState {
     fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
         let mut session = BenchSession::spawn(spec)?;
-        if !session.settle(Duration::from_secs(2), settle_deadline) {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "startup never went quiet within {settle_deadline:?}; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
-        }
-        let Some((label_row, label_col, top_line)) = find_label_origin(&mut session) else {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "no L-numbered fixture line visible on screen; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
+        // Quiescence alone is not readiness: view's startup splash is a
+        // static screen, so one settle pass can succeed before the engine
+        // attaches and the fixture renders. Readiness here is the fixture
+        // label actually being on screen, re-settling until the deadline.
+        let deadline = Instant::now() + settle_deadline;
+        let (label_row, label_col, top_line) = loop {
+            if !session.settle(Duration::from_secs(2), settle_deadline) {
+                return Err(BenchError::Desync {
+                    context: format!(
+                        "startup never went quiet within {settle_deadline:?}; screen:\n{}",
+                        session.screen_text()
+                    ),
+                });
+            }
+            if let Some(origin) = find_label_origin(&mut session) {
+                break origin;
+            }
+            if Instant::now() >= deadline {
+                return Err(BenchError::Desync {
+                    context: format!(
+                        "no L-numbered fixture line visible within {settle_deadline:?}; screen:\n{}",
+                        session.screen_text()
+                    ),
+                });
+            }
         };
         Ok(Self {
             session,
@@ -177,6 +187,8 @@ pub struct ScrollOutcome {
     pub trials: Vec<PairedSummary>,
     /// Median across trials of the view side's staleness p99.
     pub gated_staleness_p99_ms: f64,
+    /// Median across trials of the per-trial p50 ratio.
+    pub gated_ratio_p50: f64,
     /// Median across trials of the per-trial p99 ratio.
     pub gated_ratio_p99: f64,
 }
@@ -246,9 +258,11 @@ pub fn run(
     nvim_state.session.shutdown();
 
     let stalenesses: Vec<f64> = trials.iter().map(|t| t.view.p99()).collect();
+    let median_ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p50).collect();
     let ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p99).collect();
     Ok(ScrollOutcome {
         gated_staleness_p99_ms: median_of_trials(&stalenesses)?,
+        gated_ratio_p50: median_of_trials(&median_ratios)?,
         gated_ratio_p99: median_of_trials(&ratios)?,
         trials,
     })
