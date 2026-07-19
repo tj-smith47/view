@@ -4,7 +4,8 @@
 # compat/.cache/<lockfile-hash>/ directory the warm heavy-fixture scenario
 # reuses), so this scenario always drives a genuinely from-scratch
 # lazy.nvim bootstrap: cloning lazy.nvim itself over the network, then
-# lazy.nvim cloning all 8 pinned plugins, then loading them -- exactly the
+# lazy.nvim cloning every pinned plugin in the lockfile, then loading them
+# -- exactly the
 # first-run experience a real user hits once, proven here on every run
 # instead of only historically when the fixture was first authored.
 #
@@ -16,8 +17,8 @@
 # cursor-down no-op, so it is safe to send unconditionally rather than
 # needing to first detect whether a prompt actually appeared.
 #
-# Runs real network I/O (cloning lazy.nvim plus 8 plugin repos); slow by
-# nature of the work it does, not by any fixed sleep in the driver.
+# Runs real network I/O (cloning lazy.nvim plus every pinned plugin repo);
+# slow by nature of the work it does, not by any fixed sleep in the driver.
 schema = 1
 plugin = "lualine"
 class = "ui-owning"
@@ -27,12 +28,20 @@ cold_bootstrap = true
 steps = [
   { send = "<CR>" },
   { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  # lualine can finish loading while lazy.nvim's install window still holds
+  # input focus (it stays open until every plugin is in and LazyDone has
+  # fired), so the load probe alone is not a safe gate for the keystroke
+  # below -- it must also wait for the install window to actually close.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   { send = "ihello<Esc>" },
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { probe = "mode()", expect = "n" },
-  { wait_for = "hello", timeout_ms = 5000 },
+  # noice's startup health notifications overlay the upper grid rows
+  # (including buffer line 1, where this text renders) for the first few
+  # seconds after launch; the timeout must outlast their dismissal.
+  { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
 ]

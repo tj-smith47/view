@@ -1,10 +1,10 @@
 -- The compat harness's LazyVim-style fixture: a real lazy.nvim-managed
 -- plugin stack, pinned by the committed lazy-lock.json next to this file.
--- Slice of the design spec's own compat matrix chosen to cover both named
--- classes without pulling in the full plugin matrix (that is future work's
--- job, filling the matrix this harness drives): lualine, nvim-notify, and
--- dressing are ui-owning; telescope, nvim-treesitter, and nvim-cmp are
--- semantic.
+-- Carries the compat matrix's named plugin floor across all three
+-- config-reconciliation classes in one shared stack rather than one
+-- fixture per plugin, so every scenario also runs against the
+-- cross-plugin interactions (noice rerouting messages through
+-- nvim-notify, for instance) a real plugin-heavy config has.
 --
 -- Plugin installs land under `stdpath("data") .. "/lazy"`, which the
 -- driver (crates/view-harness/src/bin/oracle.rs's compat_command) points
@@ -69,6 +69,35 @@ require("lazy").setup({
     { "nvim-lualine/lualine.nvim", opts = {} },
     { "rcarriga/nvim-notify", opts = {} },
     { "stevearc/dressing.nvim", opts = {} },
+    {
+      "folke/noice.nvim",
+      dependencies = { "MunifTanjim/nui.nvim" },
+      -- view attaches to nvim with ext_cmdline/ext_messages/ext_popupmenu
+      -- externalized, and noice refuses to take over a surface the GUI has
+      -- already externalized (it raises one error notification per ext and
+      -- disables itself). Disabling those three components is noice's own
+      -- supported configuration for such GUIs; its message router (the
+      -- vim.notify path) still runs, which is what the noice scenario
+      -- asserts on.
+      opts = {
+        cmdline = { enabled = false },
+        messages = { enabled = false },
+        popupmenu = { enabled = false },
+      },
+    },
+    -- Both tree plugins default to hijacking netrw via
+    -- `silent! autocmd! FileExplorer *`, which runs before netrw's own
+    -- plugin phase has created that augroup: `silent!` hides the E216 but
+    -- still writes it into v:errmsg, where the harness's zero-error
+    -- epilogue reads it. Hijacking netrw is irrelevant to what these rows
+    -- assert (sidebar rendering), so both hijacks stay off.
+    { "nvim-tree/nvim-tree.lua", opts = { hijack_netrw = false } },
+    {
+      "nvim-neo-tree/neo-tree.nvim",
+      dependencies = { "nvim-lua/plenary.nvim", "MunifTanjim/nui.nvim" },
+      opts = { filesystem = { hijack_netrw_behavior = "disabled" } },
+    },
+    { "j-hui/fidget.nvim", opts = {} },
     { "nvim-lua/plenary.nvim" },
     {
       "nvim-telescope/telescope.nvim",

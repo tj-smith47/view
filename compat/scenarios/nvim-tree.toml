@@ -1,0 +1,29 @@
+# nvim-tree is ui-owning: it draws a file-explorer sidebar as a regular
+# window in the grid. The scenario cd's into the hermetic fixture config
+# dir first so the sidebar's rendered content is fully deterministic --
+# that directory holds exactly init.lua and lazy-lock.json regardless of
+# which machine or working directory the harness itself was started from.
+schema = 1
+plugin = "nvim-tree"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded[\"nvim-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # $XDG_CONFIG_HOME is expanded by nvim itself, so this resolves to the
+  # per-run hermetic copy of the fixture, never a real user directory.
+  { send = ":cd $XDG_CONFIG_HOME/nvim<CR>" },
+  { send = ":NvimTreeOpen<CR>" },
+  # lazy-lock.json appears nowhere on screen except as a sidebar entry, so
+  # this pins nvim-tree actually rendering the directory listing, not just
+  # a window existing. Timeout covers noice's startup health notifications,
+  # which overlay the upper grid rows for the first few seconds.
+  { wait_for = "lazy-lock.json", timeout_ms = 15000 },
+  { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"NvimTree\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
+]

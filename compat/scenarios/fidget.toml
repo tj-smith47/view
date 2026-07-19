@@ -1,0 +1,27 @@
+# fidget is ui-owning: it draws LSP progress as floating text in the
+# bottom-right corner of the grid. No LSP server runs in this fixture, so
+# the progress event is scripted through fidget's own public progress API
+# (a synthetic handle standing in for an LSP client), which renders through
+# the exact same notification pipeline a real server's $/progress would.
+schema = 1
+plugin = "fidget"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.fidget ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # The handle is parked in a global so the finish step below can reach
+  # it; without fidget installed this require fails loudly with E5108.
+  { send = ":lua _G.compat_fidget = require('fidget.progress').handle.create({ title = 'compat-sync', message = 'fidget-compat-marker', lsp_client = { name = 'compatlsp' } })<CR>" },
+  # The progress message rendered by fidget's floating notification view.
+  { wait_for = "fidget-compat-marker", timeout_ms = 15000 },
+  # Completing the handle lets the progress float decay normally instead
+  # of leaving a perpetual spinner behind for the epilogue probes.
+  { send = ":lua _G.compat_fidget:finish()<CR>" },
+]

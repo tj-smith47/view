@@ -1,0 +1,33 @@
+# noice is ui-owning in spirit (it exists to take over cmdline, messages,
+# and the completion popup) but view already externalizes all three of
+# those surfaces, and noice refuses to claim a surface the attached GUI
+# has externalized. The fixture therefore runs noice in its own supported
+# GUI configuration -- cmdline/messages/popupmenu components off -- and
+# this scenario asserts on the part of noice that still owns UI there: its
+# message router, which intercepts vim.notify and both records the message
+# in noice's own history and displays it through the nvim-notify backend.
+schema = 1
+plugin = "noice"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+steps = [
+  # noice defers its real setup until after VimEnter, so package.loaded
+  # alone is not proof the router is running; is_running() only reports
+  # true once the deferred load actually completed. Generous timeout: the
+  # first heavy scenario to run on a cold shared cache pays for the full
+  # plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.noice ~= nil and require(\"noice.config\").is_running()')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua vim.notify('noice-compat-marker')<CR>" },
+  # The routed message rendered through the nvim-notify backend as a
+  # floating window whose body text lands in the grid.
+  { wait_for = "noice-compat-marker", timeout_ms = 15000 },
+  # nvim-notify alone would also float this text, so grid presence does
+  # not by itself prove noice routed it; the message sitting in noice's
+  # own manager history is the noice-specific fact.
+  { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },
+]

@@ -12,13 +12,21 @@ steps = [
   # is up; wait_for_probe (not a one-shot probe) polls until the plugin
   # actually finishes loading before any editing keystroke is sent, so this
   # scenario is correct whether it lands on a warm or a cold cache.
-  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 120000 },
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  # lualine can finish loading while lazy.nvim's install window still holds
+  # input focus (it stays open until every plugin is in and LazyDone has
+  # fired), so the load probe alone is not a safe gate for the keystroke
+  # below -- it must also wait for the install window to actually close.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   { send = "ihello<Esc>" },
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { probe = "mode()", expect = "n" },
-  { wait_for = "hello", timeout_ms = 5000 },
+  # noice's startup health notifications overlay the upper grid rows
+  # (including buffer line 1, where this text renders) for the first few
+  # seconds after launch; the timeout must outlast their dismissal.
+  { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
   # lualine loading (the probe below) is not the same fact as lualine
   # rendering: a plugin that loaded but crashed before drawing, or whose
