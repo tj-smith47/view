@@ -1,0 +1,5 @@
+schema = 1
+name = "scroll"
+input = "99o<Esc>gg<C-d><C-d>"
+engine_pin = "v0.12.4"
+ext_set = "default"

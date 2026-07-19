@@ -709,6 +709,67 @@ mod tests {
         );
     }
 
+    /// Regression pin for the `view-harness` `tab-cycle` corpus entry: a
+    /// second tab crosses `Model::chrome_rows`' one-tab threshold, which
+    /// production resolves with an `nvim_ui_try_resize` down by one row to
+    /// make room for the tabline (see `TablineUpdate`'s handling in
+    /// `view_core::update::update`). Both `EngineSession` (via
+    /// `pump_until_flush`'s effect forwarding) and `ReferenceSession` (via
+    /// its own `chrome_rows`/`TablineUpdate` handling) must carry out that
+    /// same resize against their own nvim process, and `ReferenceSession`
+    /// must reserve a matching placeholder row in `screen_rows`, or the two
+    /// sides' rows desync the moment the tabline appears -- caught live
+    /// once, before this test existed, as a three-row `Divergence::Grid`
+    /// mismatch when either half of that plumbing was missing.
+    #[test]
+    fn engine_and_reference_sessions_agree_when_a_second_tab_opens() {
+        let mut engine_side =
+            EngineSession::spawn(60, 12).expect("EngineSession::spawn against real nvim");
+        let mut reference_side =
+            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+
+        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        engine_side
+            .input(":tabnew<CR>gt")
+            .expect("input against EngineSession");
+        reference_side
+            .input(":tabnew<CR>gt")
+            .expect("input against ReferenceSession");
+
+        assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
+        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        let view_surface = engine_side.surface();
+        let view_rows = engine_side.screen_rows();
+        let mask = masked_rows(&view_surface);
+        let ref_rows = reference_side.screen_rows();
+
+        assert_eq!(
+            mask,
+            vec![0],
+            "expected exactly the tabline row masked once a second tab is open, got {mask:?}"
+        );
+        assert_eq!(
+            view_rows.len(),
+            ref_rows.len(),
+            "expected both sides' canvases to agree on total row count once the tabline \
+             reserves a row: view {view_rows:?}\nreference {ref_rows:?}"
+        );
+
+        let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
+        let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
+        let divergences = compare(&view_state, &ref_state, &view_rows, &ref_rows, &mask);
+
+        assert!(
+            divergences.is_empty(),
+            "engine/reference parity check found divergences after a second tab opened: \
+             {divergences:?}\nview rows: {view_rows:?}\nreference rows: {ref_rows:?}\nmask: {mask:?}"
+        );
+    }
+
     /// Spawns a real `EngineSession` against the pinned nvim, moves the
     /// cursor to a known position and sets a known buffer-local mark plus a
     /// known global mark, then asserts `snapshot()` reads back those exact

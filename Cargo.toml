@@ -10,6 +10,7 @@ members = [
     "crates/view-tui",
     "crates/view-oracle",
     "crates/view-bench",
+    "crates/view-harness",
 ]
 
 [workspace.package]

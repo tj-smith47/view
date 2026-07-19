@@ -1,0 +1,21 @@
+[package]
+name = "view-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "oracle"
+path = "src/bin/oracle.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.2", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "0.8"
+view-oracle = { version = "0.0.1", path = "../view-oracle" }

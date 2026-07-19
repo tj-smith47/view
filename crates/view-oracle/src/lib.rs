@@ -41,7 +41,7 @@ use std::time::{Duration, Instant};
 
 use view_core::events::UiEvent;
 use view_core::model::Model;
-use view_core::msg::Msg;
+use view_core::msg::{Effect, Msg, RpcCall};
 use view_core::update::update;
 use view_engine::handle::EngineError;
 use view_engine::process::{Engine, EngineConfig};
@@ -207,13 +207,23 @@ impl EngineSession {
     /// which has a clock of its own (see `crates/view/src/runtime.rs`'s
     /// module docs: the production runtime loop's only wait is one
     /// blocking `recv`, with no timer anywhere in its body).
+    ///
+    /// Every `Effect::Rpc` `update` returns is forwarded back to the real
+    /// engine via [`apply_effects`](Self::apply_effects), the same way the
+    /// production runtime's `Executor` closes the loop -- a headless
+    /// driver that discarded these would let `Model` silently believe an
+    /// RPC fired (e.g. the `nvim_ui_try_resize` a `TablineUpdate` crossing
+    /// the chrome-reservation boundary produces) when nothing was ever
+    /// sent, leaving the model's own idea of the engine's grid size
+    /// disagree with the real nvim process underneath it.
     pub fn pump_until_flush(&mut self, deadline: Duration) -> bool {
         let start = Instant::now();
         loop {
             let events = self.pump.take_damage();
             let saw_flush = events.iter().any(|e| matches!(e, UiEvent::Flush));
             if !events.is_empty() {
-                let _ = update(&mut self.model, Msg::Redraw(events));
+                let effects = update(&mut self.model, Msg::Redraw(events));
+                self.apply_effects(effects);
             }
             if saw_flush {
                 return true;
@@ -222,6 +232,47 @@ impl EngineSession {
                 return false;
             }
             std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// Forwards every [`Effect::Rpc`] to the real engine, mirroring the
+    /// production runtime's `Executor::run` dispatch
+    /// (`crates/view/src/runtime.rs`) for the subset of [`RpcCall`]
+    /// variants a redraw-only driver (no key input, no mouse, no paint
+    /// loop to reply to a blocked request) can ever actually produce from
+    /// [`update`]. A write failure is dropped rather than surfaced: this
+    /// driver has no `Flow::EngineLost`/`Msg::EngineDown` recovery path to
+    /// hand it to, and the caller's own `deadline` bound already covers a
+    /// wedged connection.
+    fn apply_effects(&mut self, effects: Vec<Effect>) {
+        for effect in effects {
+            let Effect::Rpc(call) = effect else {
+                continue;
+            };
+            let _ = match call {
+                RpcCall::TryResize { width, height } => {
+                    self.engine.handle.try_resize(width, height)
+                }
+                RpcCall::Input { notation } => self.engine.handle.input(&notation),
+                RpcCall::Paste { text } => self.engine.handle.paste(&text),
+                RpcCall::InputMouse {
+                    button,
+                    action,
+                    modifier,
+                    row,
+                    col,
+                } => self
+                    .engine
+                    .handle
+                    .input_mouse(&button, &action, &modifier, row, col),
+                RpcCall::GetDefaultHl { generation } => {
+                    self.engine.handle.probe_default_hl(generation)
+                }
+                // RpcCall is #[non_exhaustive]: a future call kind degrades
+                // to a no-op here rather than fail to compile, matching
+                // Executor::run's own fallback arm.
+                _ => Ok(()),
+            };
         }
     }
 

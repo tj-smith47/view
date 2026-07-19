@@ -257,6 +257,18 @@ pub struct ReferenceSession {
     /// filtered view novelty-checking code should read instead.
     unknown_events_raw: Vec<String>,
     next_marker_seq: u64,
+    /// The terminal size this session attached at, held separately from
+    /// `grid`'s own (possibly chrome-reduced) dimensions: [`chrome_rows`](Self::chrome_rows)
+    /// needs the constant full-terminal size to recompute a resize target
+    /// from, the same way `view_core::model::Model::grid_target` reads
+    /// `term_width`/`term_height` rather than the engine grid's current
+    /// size.
+    term_width: u16,
+    term_height: u16,
+    /// The tab count last reported by a `TablineUpdate`; `0` before the
+    /// first one arrives, matching `view_core::model::EngineModel::tabline`
+    /// starting `None` (both mean "no tabline reservation yet").
+    tab_count: usize,
 }
 
 impl ReferenceSession {
@@ -312,6 +324,9 @@ impl ReferenceSession {
             mode: String::new(),
             unknown_events_raw: Vec::new(),
             next_marker_seq: 0,
+            term_width: cols,
+            term_height: rows,
+            tab_count: 0,
         };
         session.install_quiesce_hooks()?;
         Ok(session)
@@ -445,11 +460,22 @@ impl ReferenceSession {
     /// [`EngineSession::screen_rows`](crate::EngineSession::screen_rows)'s
     /// shape on the view side so a [`crate::masked_rows`] row index lines up
     /// against both sides' row vectors identically.
+    ///
+    /// Prepends [`chrome_rows`](Self::chrome_rows) empty placeholder rows
+    /// ahead of `grid`'s own content: `view_surface::render` offsets its
+    /// `EngineGrid` layer down by the same count to make room for the
+    /// tabline (see that function's doc comment), so without a matching
+    /// placeholder here every row from the tabline down would be off by
+    /// one between the two sides. The placeholder's own text is never
+    /// compared -- row 0 is exactly the row [`crate::masked_rows`] excludes
+    /// whenever the tabline is showing -- only its presence as an
+    /// index-shifting slot matters.
     #[must_use]
     pub fn screen_rows(&self) -> Vec<String> {
-        (0..self.grid.height)
-            .map(|r| self.grid.row_text(r))
-            .collect()
+        let chrome = self.chrome_rows();
+        let mut rows: Vec<String> = (0..chrome).map(|_| String::new()).collect();
+        rows.extend((0..self.grid.height).map(|r| self.grid.row_text(r)));
+        rows
     }
 
     /// Evaluates `expr` against the real engine, identical to
@@ -571,6 +597,32 @@ impl ReferenceSession {
             UiEvent::Unknown { name } => {
                 self.unknown_events_raw.push(name);
             }
+            // tab count is tracked (not discarded, unlike the rest of this
+            // arm's chrome events) purely to re-derive the same
+            // one-row-for-the-tabline reservation decision
+            // `view_core::model::Model::chrome_rows`/`grid_target` makes in
+            // production: a correctly-behaved UI resizes its grid down by
+            // one row the moment a second tab opens, so this session's own
+            // nvim process must receive that same `nvim_ui_try_resize` or
+            // its grid stays a row taller than `EngineSession`'s -- not a
+            // grid-apply bug this differential exists to catch, just the
+            // UI-attach-policy plumbing every `ext_tabline`-attached UI
+            // (including this one) must carry out for the two sides to stay
+            // comparable at all. See this fn's doc comment's ext-event
+            // policy paragraph for why the tabline's *content* is still
+            // never painted into `grid`.
+            UiEvent::TablineUpdate { tabs, .. } => {
+                let before = self.chrome_rows();
+                self.tab_count = tabs.len();
+                let after = self.chrome_rows();
+                if before != after {
+                    let target_height = self.term_height.saturating_sub(after);
+                    let _ = self
+                        .engine
+                        .handle
+                        .try_resize(self.term_width, target_height);
+                }
+            }
             // discarded for grid purposes: no cell content of theirs ever
             // reaches the grid while ext_hlstate/ext_cmdline/ext_messages/
             // ext_tabline/ext_popupmenu are attached (see this fn's doc
@@ -585,12 +637,26 @@ impl ReferenceSession {
             | UiEvent::CmdlineHide
             | UiEvent::MsgShow { .. }
             | UiEvent::MsgClear
-            | UiEvent::TablineUpdate { .. }
             | UiEvent::PopupmenuShow { .. }
             | UiEvent::PopupmenuSelect { .. }
             | UiEvent::PopupmenuHide
             | UiEvent::MouseOn
             | UiEvent::MouseOff => {}
+        }
+    }
+
+    /// Terminal rows reserved for the tabline: `1` once more than one tab
+    /// is open, `0` otherwise. Mirrors
+    /// `view_core::model::Model::chrome_rows`'s threshold exactly (bare
+    /// nvim's own default `showtabline` rule), re-derived here rather than
+    /// imported so this session's UI-attach-policy decision comes from its
+    /// own bookkeeping (`tab_count`), the same independence
+    /// [`RefGrid`]'s grid-apply logic keeps from `view_core::grid::Grid`.
+    fn chrome_rows(&self) -> u16 {
+        if self.tab_count > 1 {
+            1
+        } else {
+            0
         }
     }
 }

@@ -1,0 +1,5 @@
+schema = 1
+name = "insert-basic"
+input = "ihello world<Esc>0x"
+engine_pin = "v0.12.4"
+ext_set = "default"

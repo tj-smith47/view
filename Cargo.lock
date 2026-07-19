@@ -2026,6 +2026,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "view-harness"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
+ "view-oracle",
+]
+
+[[package]]
 name = "view-native"
 version = "0.0.1"
 

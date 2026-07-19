@@ -45,6 +45,10 @@ tasks:
       - task: loc
       - task: test
 
+  oracle:
+    desc: Run the differential oracle corpus against the pinned nvim (task oracle -- corpus/insert-basic.toml for one entry)
+    cmd: cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
+
   bench-latency:
     desc: Paired keypress-to-paint latency, view vs nvim
     cmds:
