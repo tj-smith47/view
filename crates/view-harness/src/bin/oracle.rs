@@ -1138,11 +1138,15 @@ fn resolve_plugin_version(scenario: &ScenarioFile) -> Option<String> {
     let text = std::fs::read_to_string(lockfile_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let obj = json.as_object()?;
+    // candidates probed in a fixed preference order (exact name first, then
+    // the common repo-naming suffixes) so that a lockfile holding more than
+    // one candidate key for a plugin resolves by intent, not map iteration
+    // order
     let suffixed_nvim = format!("{}.nvim", scenario.plugin);
     let suffixed_lua = format!("{}.lua", scenario.plugin);
-    let key = obj.keys().find(|k| {
-        k.as_str() == scenario.plugin || k.as_str() == suffixed_nvim || k.as_str() == suffixed_lua
-    })?;
+    let key = [scenario.plugin.as_str(), &suffixed_nvim, &suffixed_lua]
+        .into_iter()
+        .find(|candidate| obj.contains_key(*candidate))?;
     let commit = obj.get(key)?.get("commit")?.as_str()?;
     Some(commit.get(..7).unwrap_or(commit).to_string())
 }
