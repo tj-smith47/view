@@ -31,6 +31,7 @@
 //! `String`), never a raw wire `Value`. `scripts/audit-deps.sh` enforces
 //! both.
 
+mod minimize;
 mod parity;
 pub mod pty;
 mod raster;
@@ -48,7 +49,10 @@ use view_engine::process::{Engine, EngineConfig};
 use view_engine::DamagePump;
 use view_surface::Surface;
 
-pub use parity::{compare, masked_rows, snapshot, Divergence, Probe, StateSnapshot};
+pub use minimize::{ddmin, join_tokens, tokenize};
+pub use parity::{
+    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, StateSnapshot,
+};
 pub use pty::PtySession;
 pub use reference::ReferenceSession;
 

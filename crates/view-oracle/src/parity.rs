@@ -271,6 +271,31 @@ pub enum Divergence {
     },
 }
 
+/// [`Divergence`]'s variant, stripped of its payload: the granularity a
+/// minimizer's reproduction predicate needs, since two
+/// [`compare`]-produced divergence lists count as "the same failure" when
+/// their first entries share this tag, regardless of which buffer line or
+/// grid row the payload happens to name (a minimized script's exact row
+/// index or buffer content is expected to shift as tokens drop out; the
+/// variant it fails on is not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DivergenceKind {
+    State,
+    Grid,
+}
+
+impl Divergence {
+    /// This divergence's [`DivergenceKind`], discarding the field/row and
+    /// view/reference payload.
+    #[must_use]
+    pub fn kind(&self) -> DivergenceKind {
+        match self {
+            Self::State { .. } => DivergenceKind::State,
+            Self::Grid { .. } => DivergenceKind::Grid,
+        }
+    }
+}
+
 /// Diffs `view_state` against `ref_state` field by field, then
 /// `view_rows`/`ref_rows` row by row, skipping any row index present in
 /// `mask` (see [`masked_rows`]) -- the ordering (state first, then grid) is
@@ -465,6 +490,27 @@ mod tests {
             divergences.is_empty(),
             "masked row still produced a divergence: {divergences:?}"
         );
+    }
+
+    /// [`Divergence::kind`] is the granularity a minimizer's reproduction
+    /// predicate reads: a `State` divergence must report `DivergenceKind::State`
+    /// regardless of which field it names, and a `Grid` divergence must
+    /// report `DivergenceKind::Grid` regardless of which row -- the payload
+    /// is exactly what `kind` discards.
+    #[test]
+    fn kind_reports_the_variant_not_the_payload() {
+        let state_divergence = Divergence::State {
+            field: "cursor".to_string(),
+            view: "(1, 0)".to_string(),
+            reference: "(2, 0)".to_string(),
+        };
+        let grid_divergence = Divergence::Grid {
+            row: 3,
+            view: "a".to_string(),
+            reference: "b".to_string(),
+        };
+        assert_eq!(state_divergence.kind(), DivergenceKind::State);
+        assert_eq!(grid_divergence.kind(), DivergenceKind::Grid);
     }
 
     /// Arm 4: identical state and rows on both sides, no mask, must produce
