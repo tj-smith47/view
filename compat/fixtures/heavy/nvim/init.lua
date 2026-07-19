@@ -61,10 +61,10 @@ vim.api.nvim_create_autocmd("User", {
 
 require("lazy").setup({
   -- No custom `name =` aliases: lazy.nvim's default name (the repo name,
-  -- e.g. "lualine.nvim") is what a `dependencies` reference must match too,
-  -- and an alias on one spec entry but not its dependency reference (tried
-  -- first, reverted) silently produced two separate clones of the same
-  -- plugin under two different lazy-managed directories.
+  -- e.g. "lualine.nvim") is what a `dependencies` reference must match too;
+  -- an alias on one spec entry but not its dependency reference silently
+  -- produces two separate clones of the same plugin under two different
+  -- lazy-managed directories.
   spec = {
     { "nvim-lualine/lualine.nvim", opts = {} },
     { "rcarriga/nvim-notify", opts = {} },

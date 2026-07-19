@@ -48,9 +48,9 @@ pub enum ScenarioStatus {
     Ok,
     Failed,
     /// A fixture-less scenario with `$VIEW_DAILY_CONFIG` unset (the
-    /// maintainer's standing daily-config scenario, reported
-    /// SKIPPED-with-notice per the design brief rather than failing a CI
-    /// run that has no daily config to test against).
+    /// maintainer's standing daily-config scenario), reported
+    /// SKIPPED-with-notice rather than failing a CI run that has no daily
+    /// config to test against.
     Skipped,
 }
 

@@ -1,4 +1,4 @@
-# Mandatory daily-config scenario (task-7-brief.md Step 6): the standing
+# Mandatory daily-config scenario: the standing
 # scenario that runs against the maintainer's own live nvim config via
 # $VIEW_DAILY_CONFIG, so this is the one scenario in the suite with no
 # `fixture` field. resolve_fixture reports it SKIPPED-with-notice, exit
@@ -20,6 +20,10 @@ class = "semantic"
 state = "present"
 steps = [
   { send = "ihello from daily-config<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every substring assertion below keeps passing against the literal text
+  { probe = "mode()", expect = "n" },
   { wait_for = "hello from daily-config", timeout_ms = 5000 },
   { assert_absent = "E5108" },
   { probe = "1+1", expect = "2" },

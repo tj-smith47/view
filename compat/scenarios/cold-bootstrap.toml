@@ -1,4 +1,4 @@
-# Mandatory cold-bootstrap scenario (task-7-brief.md Step 4): `cold_bootstrap
+# Mandatory cold-bootstrap scenario: `cold_bootstrap
 # = true` makes resolve_fixture key this run's XDG_DATA_HOME by a fresh
 # scratch id every single invocation (never the shared
 # compat/.cache/<lockfile-hash>/ directory the warm heavy-fixture scenario
@@ -28,6 +28,10 @@ steps = [
   { send = "<CR>" },
   { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
   { send = "ihello<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every substring assertion below keeps passing against the literal text
+  { probe = "mode()", expect = "n" },
   { wait_for = "hello", timeout_ms = 5000 },
   { assert_absent = "E5108" },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },

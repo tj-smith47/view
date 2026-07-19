@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
-use view_oracle::compat::{PluginClass, ScenarioState, Step};
+use view_oracle::compat::{resolve_send_keys, CompatError, PluginClass, ScenarioState, Step};
 
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -140,10 +140,24 @@ pub enum ScenarioError {
     /// `expect` was set on a step whose action is not `probe`.
     #[error("step {index} sets expect but is not a probe step")]
     ExpectWithoutProbe { index: usize },
-    /// `timeout_ms` was set on a step whose action is neither `wait_for` nor
-    /// `wait_for_cell` (the only two steps that poll toward a deadline).
-    #[error("step {index} sets timeout_ms but is not a wait_for/wait_for_cell step")]
+    /// `timeout_ms` was set on a step whose action is none of `wait_for`,
+    /// `wait_for_cell`, or `wait_for_probe` (the only three steps that poll
+    /// toward a deadline).
+    #[error(
+        "step {index} sets timeout_ms but is not a wait_for/wait_for_cell/wait_for_probe step"
+    )]
     TimeoutOnNonWaitingStep { index: usize },
+    /// A `send` step's key text contains a `<...>` token this translator
+    /// does not know how to turn into real keypress bytes -- caught here,
+    /// at load time, rather than first discovered mid-run: see
+    /// [`resolve_send_keys`]'s own doc comment for which tokens are
+    /// recognized.
+    #[error("step {index}: {source}")]
+    UnsupportedKeyNotation {
+        index: usize,
+        #[source]
+        source: CompatError,
+    },
 }
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
@@ -181,6 +195,8 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
     let timeout = Duration::from_millis(raw.timeout_ms.unwrap_or(DEFAULT_STEP_TIMEOUT_MS));
 
     if let Some(keys) = raw.send {
+        resolve_send_keys(&keys)
+            .map_err(|source| ScenarioError::UnsupportedKeyNotation { index, source })?;
         return Ok(Step::Send(keys));
     }
     if let Some(needle) = raw.wait_for {
@@ -469,6 +485,33 @@ steps = [
         assert!(
             matches!(err, ScenarioError::TimeoutOnNonWaitingStep { index: 0 }),
             "expected TimeoutOnNonWaitingStep{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_send_step_with_supported_key_notation_parses() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \"ihello<Esc><C-w>\" },",
+        );
+        let scenario = parse(&toml).expect("a send step using only supported notation must parse");
+        assert_eq!(
+            scenario.steps[0],
+            Step::Send("ihello<Esc><C-w>".to_string())
+        );
+    }
+
+    #[test]
+    fn a_send_step_with_unsupported_key_notation_is_rejected_at_load_time() {
+        let toml = VALID.replace("{ send = \"ihello<Esc>\" },", "{ send = \"<C-Up>\" },");
+        let err = parse(&toml).expect_err(
+            "a send step whose key text contains a notation-shaped but \
+             untranslatable token must be a hard error at load time, not \
+             a silent literal-text scenario that only fails at drive time",
+        );
+        assert!(
+            matches!(err, ScenarioError::UnsupportedKeyNotation { index: 0, .. }),
+            "expected UnsupportedKeyNotation{{index: 0}}, got {err:?}"
         );
     }
 

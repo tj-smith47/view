@@ -31,6 +31,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 /// events (only reported when a terminal's keyboard-enhancement protocol
 /// is enabled) and key codes with no nvim input equivalent, such as media
 /// keys and bare modifier keys.
+///
+/// `view-oracle`'s compat harness (`crates/view-oracle/src/compat.rs`'s
+/// `resolve_key_token`) maintains its own independent, hardcoded inverse of
+/// this table to type notation into a pty as real keypress bytes;
+/// dependency direction keeps the two crates from sharing the table
+/// directly, so a change here that is not mirrored there would silently
+/// desync what a compat scenario types from what this encoder actually
+/// forwards, undetected by either crate's own tests.
 #[must_use]
 pub fn encode_key(ev: &KeyEvent) -> Option<String> {
     if ev.kind == KeyEventKind::Release {

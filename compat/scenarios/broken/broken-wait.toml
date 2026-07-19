@@ -1,6 +1,5 @@
-# Deliberately-wrong wait_for (the compat harness brief's own falsifiable
-# check): must fail this scenario's own row and exit `task compat` 1,
-# naming the scenario and the exact step index that failed. Never expected
+# Deliberately-wrong wait_for: must fail this scenario's own row and exit
+# `task compat` 1, naming the scenario and the exact step index that failed. Never expected
 # to pass -- kept committed as a permanent, always-red regression check on
 # the runner's own failure-reporting path, the same role
 # `corpus/quarantine/`'s entries play for the differential oracle. Lives in

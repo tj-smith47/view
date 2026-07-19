@@ -1,7 +1,6 @@
-# The heavy fixture's own smoke scenario, matching the compat harness
-# brief's own worked example: lualine is ui-owning (occupies the
-# statusline, a surface `view` renders natively) and is the illustrative
-# case the probe-channel design itself was written against.
+# The heavy fixture's own smoke scenario: lualine is ui-owning (occupies
+# the statusline, a surface `view` renders natively) and is the
+# illustrative case the probe-channel design itself was written against.
 schema = 1
 plugin = "lualine"
 class = "ui-owning"
@@ -15,7 +14,22 @@ steps = [
   # scenario is correct whether it lands on a warm or a cold cache.
   { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 120000 },
   { send = "ihello<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every substring assertion below keeps passing against the literal text
+  { probe = "mode()", expect = "n" },
   { wait_for = "hello", timeout_ms = 5000 },
   { assert_absent = "E5108" },
+  # lualine loading (the probe below) is not the same fact as lualine
+  # rendering: a plugin that loaded but crashed before drawing, or whose
+  # statusline is empty/garbled, would still pass a load-only check. These
+  # two cells were read live off this fixture's own rendered 100x30 screen
+  # (COMPAT_COLS x COMPAT_ROWS) at its default theme: column 1 of the
+  # bottom row holds the start of the "NORMAL" mode component, and column
+  # 85 holds one of lualine's own powerline section-separator glyphs --
+  # neither appears in view's own plain default statusline, so together
+  # they pin lualine's actual rendered output, not just its loaded state.
+  { wait_for_cell = { row = 29, col = 1, expected = "N" }, timeout_ms = 5000 },
+  { wait_for_cell = { row = 29, col = 85, expected = "" }, timeout_ms = 5000 },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
 ]

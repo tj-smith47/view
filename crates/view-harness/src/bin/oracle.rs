@@ -235,6 +235,39 @@ fn current_engine_pin() -> Result<String> {
     Ok(raw.trim().to_string())
 }
 
+/// Confirms `nvim_bin` (resolved via `PATH` unless overridden) actually
+/// reports the version `.engine-pin` names, before any run stamps a result
+/// row or a corpus entry with that pin. `.engine-pin` alone only says what
+/// version a run is *supposed* to use; nothing before this call ever
+/// confirmed the binary this run is actually about to spawn agrees, so a
+/// stale or wrong `nvim` on `PATH` could otherwise silently produce
+/// evidence rows claiming a pin the run never really exercised.
+///
+/// # Errors
+///
+/// Returns an error if `nvim_bin --version` cannot be run, or if its
+/// reported version does not match `pin`.
+fn verify_nvim_matches_pin(nvim_bin: &Path, pin: &str) -> Result<()> {
+    let output = std::process::Command::new(nvim_bin)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("running {} --version", nvim_bin.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let reported = stdout
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("");
+    if reported != pin {
+        bail!(
+            "nvim binary {} reports version {reported:?} but .engine-pin \
+             names {pin:?}; install/select the pinned nvim before running",
+            nvim_bin.display()
+        );
+    }
+    Ok(())
+}
+
 /// One run's result: whether each side reached quiescence independently,
 /// how long the whole drive-and-compare took, and every [`Divergence`]
 /// found (state or grid). Tracked per side rather than as a single merged
@@ -392,6 +425,7 @@ fn run_command(path: &Path) -> Result<()> {
     }
 
     let pin = current_engine_pin()?;
+    verify_nvim_matches_pin(Path::new("nvim"), &pin)?;
     let mut any_failed = false;
     for (entry_path, entry) in entries {
         if entry.engine_pin != pin {
@@ -689,7 +723,8 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error if `.engine-pin` cannot be read or a quarantine entry
+/// Returns an error if `.engine-pin` cannot be read, the `nvim` on `PATH`
+/// does not report the version `.engine-pin` names, or a quarantine entry
 /// cannot be written.
 fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
     let quiesce = QuiesceWindow {
@@ -697,6 +732,7 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
         deadline: Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS),
     };
     let pin = current_engine_pin()?;
+    verify_nvim_matches_pin(Path::new("nvim"), &pin)?;
 
     let summary = fuzz_rounds(
         seed,
@@ -883,6 +919,41 @@ enum FixtureResolution {
     Skipped { notice: String },
 }
 
+/// Recursively copies `src` into `dst`, creating `dst` and any needed
+/// subdirectories. Regular files only: none of the committed fixture trees
+/// contain a symlink, so one found unexpectedly is skipped rather than
+/// copied as a symlink or followed, to avoid silently escaping `src`.
+///
+/// # Errors
+///
+/// Returns an error if any file or directory under `src` cannot be read, or
+/// cannot be created/written under `dst`.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst).with_context(|| format!("creating {}", dst.display()))?;
+    for entry in
+        std::fs::read_dir(src).with_context(|| format!("reading directory {}", src.display()))?
+    {
+        let entry =
+            entry.with_context(|| format!("reading a directory entry under {}", src.display()))?;
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("reading file type for {}", entry.path().display()))?;
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &dst_path).with_context(|| {
+                format!(
+                    "copying {} to {}",
+                    entry.path().display(),
+                    dst_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Resolves `scenario`'s `fixture` field (or its absence) into a
 /// [`FixtureResolution`]: XDG homes to spawn `view` against, plus a
 /// [`ScenarioScratch`] guard that cleans up every scratch path this
@@ -891,12 +962,20 @@ enum FixtureResolution {
 /// own `CompatSession::spawn_configured` and this resolution agree on
 /// exactly one socket path.
 ///
+/// A named fixture's `XDG_CONFIG_HOME` always points at a per-run copy
+/// under `hermetic_dir`, never `compat/fixtures/<name>` itself: a plugin
+/// manager sourced from its own config directory can rewrite files inside
+/// it in place (lazy.nvim's own lockfile, in particular), so spawning
+/// `view` with the checked-in fixture tree itself as its config home would
+/// leave the committed fixture modified on disk after every run.
+///
 /// # Errors
 ///
 /// Returns an error if a named fixture has no `nvim/init.lua`, its
-/// `lazy-lock.json` cannot be read, `$VIEW_DAILY_CONFIG` names a directory
-/// with no `init.lua`/`init.vim`, or (fixture-less, non-Unix host) the
-/// isolated config symlink cannot be created.
+/// `lazy-lock.json` cannot be read, the fixture cannot be copied into a
+/// hermetic config dir, `$VIEW_DAILY_CONFIG` names a directory with no
+/// `init.lua`/`init.vim`, or (fixture-less, non-Unix host) the isolated
+/// config symlink cannot be created.
 fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureResolution> {
     let scratch_id = format!(
         "{}-{}",
@@ -933,8 +1012,13 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
                 hermetic_dir.join("xdg_data_home")
             };
             let cold_cache_dir = scenario.cold_bootstrap.then(|| xdg_data_home.clone());
+
+            let xdg_config_home = hermetic_dir.join("xdg_config_home");
+            copy_dir_recursive(&fixture_dir, &xdg_config_home)
+                .with_context(|| format!("copying fixture {name:?} into a hermetic config dir"))?;
+
             Ok(FixtureResolution::Ready(ReadyFixture {
-                xdg_config_home: fixture_dir,
+                xdg_config_home,
                 xdg_data_home,
                 xdg_state_home,
                 xdg_cache_home,
@@ -1155,7 +1239,12 @@ fn run_scenario(
         session.await_probe_channel(PROBE_CHANNEL_TIMEOUT)
     };
     if let Err(err) = channel_result {
+        // kill alone only requests termination; reaping (bounded, matching
+        // PtySession::wait_for_exit's own kill-then-wait standard) is what
+        // keeps a channel-failure exit from leaving a zombie entry in the
+        // process table for the rest of this run
         session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(2));
         return Ok(scenario_result(
             scenario_path,
             scenario,
@@ -1231,32 +1320,37 @@ fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
         .collect()
 }
 
-/// Prints one scenario's report line, in the shape the design brief's own
-/// worked example commits to (`compat: lualine (heavy, present) ... OK (4
-/// steps, 2.1s)`).
+/// Prints one scenario's report line in a fixed shape:
+/// `compat: lualine (heavy, present) ... OK (4 steps, 2.1s)`.
 fn print_scenario_result(result: &ScenarioResult) {
     let fixture = result.fixture.as_deref().unwrap_or("none");
+    // the scenario file's own stem, not result.plugin: more than one
+    // scenario file can share a plugin name (lualine.toml and
+    // cold-bootstrap.toml are both "lualine"), which would otherwise make
+    // the two indistinguishable in the report
+    let scenario = Path::new(&result.scenario_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(result.scenario_path.as_str());
+    let secs = result.elapsed_ms as f64 / 1000.0;
     match result.status {
         ScenarioStatus::Ok => println!(
-            "compat: {} ({fixture}, {}) ... OK ({} steps, {}ms)",
-            result.plugin, result.state, result.steps_total, result.elapsed_ms
+            "compat: {scenario} ({fixture}, {}) ... OK ({} steps, {secs:.1}s)",
+            result.state, result.steps_total
         ),
         ScenarioStatus::Failed => {
             let step_label = result
                 .failing_step
                 .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
             println!(
-                "compat: {} ({fixture}, {}) ... FAILED at step {step_label} ({} steps total, {}ms): {}",
-                result.plugin,
+                "compat: {scenario} ({fixture}, {}) ... FAILED at step {step_label} ({} steps total, {secs:.1}s): {}",
                 result.state,
                 result.steps_total,
-                result.elapsed_ms,
                 result.detail.as_deref().unwrap_or("unknown failure")
             );
         }
         ScenarioStatus::Skipped => println!(
-            "compat: {} ({fixture}, {}) ... SKIPPED: {}",
-            result.plugin,
+            "compat: {scenario} ({fixture}, {}) ... SKIPPED: {}",
             result.state,
             result.detail.as_deref().unwrap_or("")
         ),
@@ -1267,14 +1361,15 @@ fn print_scenario_result(result: &ScenarioResult) {
 /// `compat/scenarios`), reported per [`print_scenario_result`] and written
 /// to `compat/results.json` for a future matrix/evidence-page consumer.
 /// Exit code: 0 unless at least one scenario reports
-/// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no
-/// daily config on this host) does not fail the run, matching the design
-/// brief's "reported SKIPPED-with-notice when unset" contract.
+/// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no daily config on
+/// this host, the expected state in CI) does not fail the run, since there
+/// is no daily config on that host for the scenario to actually exercise.
 ///
 /// # Errors
 ///
 /// Returns an error if no scenario files are found under `path`, a
-/// scenario file fails to parse, `.engine-pin` cannot be read, `view`
+/// scenario file fails to parse, `.engine-pin` cannot be read, the `nvim`
+/// on `PATH` does not report the version `.engine-pin` names, `view`
 /// cannot be built, or `compat/results.json` cannot be written.
 fn compat_command(path: &Path) -> Result<()> {
     let scenarios = collect_scenarios(path)?;
@@ -1286,8 +1381,9 @@ fn compat_command(path: &Path) -> Result<()> {
     }
 
     let pin = current_engine_pin()?;
-    let view_bin = ensure_view_bin()?;
     let nvim_bin = PathBuf::from("nvim");
+    verify_nvim_matches_pin(&nvim_bin, &pin)?;
+    let view_bin = ensure_view_bin()?;
     std::fs::create_dir_all(cache_root()).context("creating compat/.cache")?;
 
     let mut results = ResultsFile::default();
