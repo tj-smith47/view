@@ -48,6 +48,21 @@ check_rs_content() {
   if grep -rnE "\b[CIM][0-9]+\`?'s?\b" "$target" --include='*.rs'; then
     echo "STYLE FAIL: review-finding tag in comment"; fail=1
   fi
+  # spec-task tags (T4/T5/T6): a comment must state what the code does,
+  # never which spec task produced it. Two shapes: a slash-joined sequence
+  # (T4/T5/T6, T10/T11), which has no legitimate non-task-tag reading
+  # anywhere in Rust syntax or prose, and a single tag standing alone in a
+  # comment surrounded by whitespace ("the T4 brief", "done in T7."). Not a
+  # blanket \bT[0-9]+\b ban, which would flag far more. Backtick-wrapped
+  # type parameters never match (a backtick, not whitespace, precedes the
+  # T); a BARE prose mention of a T1-style name in a comment still trips
+  # the standalone pattern, so backtick type params in rustdoc prose.
+  if grep -rnE '(//|#).*\bT[0-9]+/T[0-9]+' "$target" --include='*.rs'; then
+    echo "STYLE FAIL: spec-task tag sequence in comment"; fail=1
+  fi
+  if grep -rnE '(//|#).*[[:space:]]T[0-9]+[.,:]?([[:space:]]|$)' "$target" --include='*.rs'; then
+    echo "STYLE FAIL: spec-task tag in comment"; fail=1
+  fi
   # TDD/session-narrative markers one synonym past the existing "this task"/
   # "the red/green test" check: "the RED/GREEN half" (a paired-test label),
   # "this fix"/"the unfixed" (fix-narrative instead of a code fact), and
