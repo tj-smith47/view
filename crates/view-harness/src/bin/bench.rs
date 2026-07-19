@@ -102,7 +102,9 @@ struct Cli {
     #[arg(long)]
     all: bool,
     /// Machine class the numbers belong to (e.g. dev-linux); baselines
-    /// are stored and gated per class
+    /// are stored and gated per class. A "controlled-" name prefix opts
+    /// the class into tail-metric gating (ratio_p99, paired-delta p99);
+    /// any other name records tails without gating them
     #[arg(long)]
     class: String,
     /// Record measured values into baselines/<class>.toml
@@ -774,6 +776,18 @@ fn main() -> Result<()> {
     // one poisons the baseline every later quiet run is judged against;
     // both therefore verify their own precondition before any cell runs
     if cli.record || cli.gate {
+        // the class name alone selects the tail-gating policy, so a
+        // mis-typed class silently weakens the gate unless every run
+        // states the policy it derived
+        println!(
+            "class {}: {}",
+            cli.class,
+            if baselines::is_controlled_class(&cli.class) {
+                "controlled policy, tail metrics gated"
+            } else {
+                "shared policy, tail metrics recorded but not gated"
+            }
+        );
         let ratio = null_calibration(&bins)?;
         let deviation = ratio.max(1.0 / ratio);
         println!(
