@@ -2004,8 +2004,7 @@ name = "view-bench"
 version = "0.0.1"
 dependencies = [
  "anyhow",
- "portable-pty",
- "vt100",
+ "view-oracle",
 ]
 
 [[package]]

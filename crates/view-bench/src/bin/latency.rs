@@ -11,11 +11,9 @@
 //! [`decide_pairing`].
 
 use anyhow::{bail, Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use view_oracle::PtySession;
 
 /// Keystroke-to-paint samples collected per target, matching the brief's
 /// measurement protocol.
@@ -226,34 +224,16 @@ fn decide_pairing(prior: Option<ScratchEntry>, current: &Stats, now_ms: u64) -> 
     PairDecision::Paired(view, nvim)
 }
 
-/// Forwards every chunk read from `reader` onto a channel so the caller can
-/// poll with a bounded timeout instead of blocking on a single `read` that
-/// may return only part of the child's output.
-fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let mut buf = [0_u8; 65536];
-        loop {
-            match reader.read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if tx.send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
-    rx
-}
-
 /// A target process running inside a real pty, with everything needed to
-/// drive it and observe its screen.
+/// drive it and observe its screen. Delegates the pty-level mechanics
+/// (spawn, write, screen text, bounded shutdown) to `view-oracle`'s shared
+/// [`PtySession`] so this bench and the oracle's own tests drive
+/// byte-identical sessions, keeping only the bench-specific concerns
+/// [`PtySession`] deliberately doesn't know about: an isolated scratch
+/// file, isolated `XDG_*_HOME` variables, and a sample-character
+/// occurrence count.
 struct PtyTarget {
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    rx: mpsc::Receiver<Vec<u8>>,
-    writer: Box<dyn Write + Send>,
-    parser: vt100::Parser,
+    session: PtySession,
     scratch: PathBuf,
     isolated_home: PathBuf,
 }
@@ -261,11 +241,12 @@ struct PtyTarget {
 /// Resolves `bin_path` to an absolute path when it names an existing file,
 /// leaving bare command names (e.g. `nvim`) untouched.
 ///
-/// `portable_pty`'s spawn only treats a relative path as cwd-relative when
-/// it explicitly starts with `./` or `../`; a plain `target/release/view`
-/// argument falls through to a PATH search and fails to spawn even though
-/// the file exists relative to the current directory. Canonicalizing first
-/// sidesteps that without requiring every caller to spell the `./` prefix.
+/// The underlying pty spawn only treats a relative path as cwd-relative
+/// when it explicitly starts with `./` or `../`; a plain
+/// `target/release/view` argument falls through to a PATH search and fails
+/// to spawn even though the file exists relative to the current directory.
+/// Canonicalizing first sidesteps that without requiring every caller to
+/// spell the `./` prefix.
 fn resolve_bin_path(bin_path: &str) -> String {
     std::fs::canonicalize(bin_path)
         .map(|abs| abs.to_string_lossy().into_owned())
@@ -273,8 +254,9 @@ fn resolve_bin_path(bin_path: &str) -> String {
 }
 
 impl PtyTarget {
-    /// Opens a 24x80 pty and spawns `bin_path` against a scratch file, with
-    /// the host's real editor config isolated out of the way.
+    /// Opens a 24x80 pty (via [`PtySession::spawn`]) and spawns `bin_path`
+    /// against a scratch file, with the host's real editor config isolated
+    /// out of the way.
     ///
     /// Without a file argument, both `view` and `nvim` fall back to
     /// whatever startup UI the host's own config wires up (a dashboard, a
@@ -284,83 +266,62 @@ impl PtyTarget {
     /// harness expects it. A scratch file argument plus isolated
     /// `XDG_*_HOME` variables (the same fix `view-oracle`'s pty smoke tests
     /// use) guarantees a plain buffer regardless of the host's config.
+    ///
+    /// `PtySession::spawn` takes a bare `cmd`/`args` pair with no env-var
+    /// hook, so the isolation is expressed by wrapping the real command in
+    /// coreutils `env NAME=VALUE... cmd args...` rather than reaching past
+    /// the shared session type for its lower-level configured-command
+    /// entry point.
     fn spawn(bin_path: &str) -> Result<Self> {
-        let pty = native_pty_system();
-        let pair = pty
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .context("failed to open pty")?;
-
         let pid = std::process::id();
         let scratch = std::env::temp_dir().join(format!("view-bench-latency-{pid}.txt"));
         let isolated_home = std::env::temp_dir().join(format!("view-bench-latency-home-{pid}"));
         std::fs::create_dir_all(&isolated_home)
             .context("failed to create isolated XDG home for bench target")?;
 
-        let mut cmd = CommandBuilder::new(resolve_bin_path(bin_path));
-        cmd.arg(&scratch);
-        for var in [
+        let mut env_args: Vec<String> = [
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
             "XDG_CACHE_HOME",
-        ] {
-            cmd.env(var, isolated_home.join(var.to_lowercase()));
-        }
+        ]
+        .into_iter()
+        .map(|var| {
+            format!(
+                "{var}={}",
+                isolated_home.join(var.to_lowercase()).to_string_lossy()
+            )
+        })
+        .collect();
+        env_args.push(resolve_bin_path(bin_path));
+        env_args.push(scratch.to_string_lossy().into_owned());
+        let arg_refs: Vec<&str> = env_args.iter().map(String::as_str).collect();
 
-        let child = pair
-            .slave
-            .spawn_command(cmd)
-            .with_context(|| format!("failed to spawn {bin_path}"))?;
-        let reader = pair
-            .master
-            .try_clone_reader()
-            .context("failed to clone pty reader")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("failed to take pty writer")?;
-        // the slave fd must not outlive the child's own copy, or the master
-        // never sees EOF once the child exits
-        drop(pair.slave);
-
-        let rx = spawn_reader(reader);
-        let parser = vt100::Parser::new(24, 80, 0);
+        let session = PtySession::spawn("env", &arg_refs, 80, 24)
+            .with_context(|| format!("failed to spawn {bin_path} inside a pty"))?;
 
         Ok(Self {
-            child,
-            rx,
-            writer,
-            parser,
+            session,
             scratch,
             isolated_home,
         })
     }
 
-    /// Pulls every chunk already buffered on the channel into the parser
-    /// without blocking, so a stale count from before the settle wait never
-    /// pollutes the baseline the sampling loop starts from.
-    fn drain_available(&mut self) {
-        while let Ok(chunk) = self.rx.try_recv() {
-            self.parser.process(&chunk);
-        }
+    /// Pulls every chunk already buffered from the pty into the screen
+    /// state without inspecting it, so a stale count from before the
+    /// settle wait never pollutes the baseline the sampling loop starts
+    /// from.
+    fn drain(&mut self) {
+        let _ = self.session.screen();
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer
-            .write_all(bytes)
-            .context("failed to write to pty")?;
-        self.writer.flush().context("failed to flush pty writer")
+        self.session.send(bytes).context("failed to write to pty")
     }
 
-    fn count_char(&self, target: u8) -> usize {
-        self.parser
+    fn count_char(&mut self, target: u8) -> usize {
+        self.session
             .screen()
-            .contents()
             .bytes()
             .filter(|&b| b == target)
             .count()
@@ -368,36 +329,36 @@ impl PtyTarget {
 
     /// Blocks (up to `timeout`) until at least `expected` occurrences of
     /// `target` are visible on screen, returning whether that happened.
+    ///
+    /// A tight spin (no sleep between polls) rather than a fixed-interval
+    /// poll: [`PtySession::screen`] has no lower-level channel-blocking
+    /// entry point exposed to a caller outside the oracle crate, and this
+    /// bench measures sub-millisecond keypress-to-paint latency, well below
+    /// the OS scheduler's sleep-wakeup granularity -- a periodic sleep
+    /// there was confirmed (by running the measurement) to inject its own
+    /// poll interval directly into every sample, flattening view and nvim
+    /// to indistinguishable ~20ms readings instead of the real sub-2ms
+    /// figures.
     fn wait_for_count(&mut self, target: u8, expected: usize, timeout: Duration) -> bool {
-        if self.count_char(target) >= expected {
-            return true;
-        }
         let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            match self.rx.recv_timeout(Duration::from_millis(20)) {
-                Ok(chunk) => {
-                    self.parser.process(&chunk);
-                    if self.count_char(target) >= expected {
-                        return true;
-                    }
-                }
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => break,
+        loop {
+            if self.count_char(target) >= expected {
+                return true;
             }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            std::hint::spin_loop();
         }
-        false
     }
 
-    /// Best-effort shutdown: ask nicely, then kill if the process hasn't
-    /// exited quickly. A hung measurement target must never hang the bench
-    /// task itself.
+    /// Best-effort shutdown: ask nicely, then let
+    /// [`PtySession::wait_for_exit`] kill the child if it hasn't exited
+    /// quickly. A hung measurement target must never hang the bench task
+    /// itself.
     fn shutdown(&mut self) {
         let _ = self.write(b"\x1b:qa!\r");
-        std::thread::sleep(Duration::from_millis(200));
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-        }
-        let _ = self.child.wait();
+        let _ = self.session.wait_for_exit(Duration::from_millis(200));
     }
 }
 
@@ -414,12 +375,12 @@ fn measure(bin_path: &str) -> Result<Samples> {
     let mut target = PtyTarget::spawn(bin_path)?;
 
     std::thread::sleep(READY_WAIT);
-    target.drain_available();
+    target.drain();
     target.write(b"i")?;
     // let insert-mode entry settle before the baseline count is taken, or a
     // slow-starting target's own redraw could be mistaken for a sample
     std::thread::sleep(Duration::from_millis(200));
-    target.drain_available();
+    target.drain();
 
     let mut elapsed = Vec::with_capacity(SAMPLE_COUNT);
     let mut expected = target.count_char(SAMPLE_CHAR);
@@ -432,7 +393,7 @@ fn measure(bin_path: &str) -> Result<Samples> {
             bail!(
                 "sample {i} of {SAMPLE_COUNT} never appeared on screen for {bin_path} \
                  (harness desync, not a real latency reading); last screen:\n{}",
-                target.parser.screen().contents()
+                target.session.screen()
             );
         }
         elapsed.push(start.elapsed());

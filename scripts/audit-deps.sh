@@ -19,6 +19,12 @@ check_absent() { # usage: check_absent <crate> <forbidden-dep>
 for dep in view view-engine view-tui view-surface view-native view-ai view-oracle view-bench rmpv crossterm ratatui tokio async-std smol; do
   check_absent view-core "$dep"
 done
+# view-bench depends on view-oracle (the latency bench drives the same
+# PtySession the oracle's own tests use, instead of a second copy of the
+# spawn/read/write scaffolding) -- that edge is sanctioned and must stay
+# legal. This check only forbids the reverse: view-oracle must never depend
+# on view-bench, so a later audit sweep must not "fix" the bench->oracle edge.
+check_absent view-oracle view-bench
 for dep in view view-engine view-tui view-native view-ai view-oracle view-bench tokio async-std smol; do
   check_absent view-surface "$dep"
 done
@@ -84,7 +90,10 @@ check_transitive_reach() { # usage: check_transitive_reach <forbidden-dep> [allo
 # own API stays rmpv-free (typed probes only, see src/lib.rs's module
 # docs), but its Cargo.toml now has a normal (not dev) dependency edge to
 # view-engine, so the resolved graph legitimately reaches rmpv through it.
-check_transitive_reach rmpv view-engine view view-oracle
+# view-bench reaches the same rmpv edge one hop further out, through its
+# own sanctioned dependency on view-oracle; view-bench's own API stays
+# rmpv-free the same way view-oracle's does.
+check_transitive_reach rmpv view-engine view view-oracle view-bench
 check_transitive_reach serde view
 check_transitive_reach toml view
 check_transitive_reach crossterm view-tui view
