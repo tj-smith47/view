@@ -23,6 +23,20 @@
 //! `ReferenceSession::apply`'s own doc comment), so any row view's real
 //! `Surface` paints one of those overlays into is not a real behavioral
 //! disagreement, just an artifact of the reference applier's own scope.
+//!
+//! Registers, marks, and the cursor all ride one shared set of vimscript
+//! probe expressions and one shared Rust parser ([`parse_cursor`],
+//! [`parse_marks`]) across both sides of [`compare`]: a capture bug in
+//! that shared expression or shared parser is common-mode between `view`'s
+//! side and [`ReferenceSession`]'s side and so invisible to this module's
+//! differential, which only ever proves the two sides agree, not that
+//! either captured the underlying nvim state correctly in the first place
+//! (the same limit [`ReferenceSession::apply`](crate::ReferenceSession)'s
+//! own doc comment names for `clamp_dim`/`saturate_u16`). [`snapshot`]
+//! narrows what it can: a probe reply that does not parse fails loudly as
+//! an [`OracleError`] instead of degrading to a placeholder that would
+//! compare equal against an identically malformed reply from the other
+//! side.
 
 use view_surface::{LayerKind, Surface};
 
@@ -100,20 +114,25 @@ pub struct StateSnapshot {
 
 /// Probes `probe` for a full [`StateSnapshot`]: one `nvim_eval` round trip
 /// for the buffer, one for the cursor, one for the mode, one per
-/// [`REGISTER_NAMES`] entry, and one for marks. Every list-shaped probe
-/// (buffer lines, marks) is joined vimscript-side with [`FIELD_SEP`]/
-/// [`RECORD_SEP`] (or, for buffer lines, a literal newline -- no nvim buffer
-/// line can ever contain an embedded `\n`, since that byte is exactly what
-/// separates lines in nvim's own model) rather than shipped as a raw
-/// `nvim_eval` array/dict result: `EngineHandle::eval_str` renders a
-/// structured `Value` through `rmpv`'s own `Display`, a format this crate's
-/// dependency-direction audit (`scripts/audit-deps.sh`) forbids parsing here
-/// (no `serde`/`serde_json` allowed in `view-oracle`), so the join happens
-/// on the nvim side instead, in a delimiter this code controls end to end.
+/// [`REGISTER_NAMES`] entry, and two for marks (buffer-local, then global --
+/// see [`marks_expr`]). Every list-shaped probe (buffer lines, marks) is
+/// joined vimscript-side with [`FIELD_SEP`]/[`RECORD_SEP`] (or, for buffer
+/// lines, a literal newline -- no nvim buffer line can ever contain an
+/// embedded `\n`, since that byte is exactly what separates lines in nvim's
+/// own model) rather than shipped as a raw `nvim_eval` array/dict result:
+/// `EngineHandle::eval_str` renders a structured `Value` through `rmpv`'s
+/// own `Display`, a format this crate's dependency-direction audit
+/// (`scripts/audit-deps.sh`) forbids parsing here (no `serde`/`serde_json`
+/// allowed in `view-oracle`), so the join happens on the nvim side instead,
+/// in a delimiter this code controls end to end.
 ///
 /// # Errors
 ///
-/// Returns [`OracleError`] if any of the underlying `eval_str` calls fail.
+/// Returns [`OracleError`] if any of the underlying `eval_str` calls fail,
+/// or if a cursor/marks reply does not parse (see [`parse_cursor`],
+/// [`parse_marks`]) -- a malformed reply is now a loud probe failure, not a
+/// value degraded to a placeholder that could compare equal against an
+/// identically malformed reply from the other side.
 pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
     let buffer_lines = probe
         .eval_str("join(getline(1,'$'), \"\\n\")")?
@@ -122,7 +141,7 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
         .collect();
 
     let cursor_raw = probe.eval_str(&format!("join(getpos('.'), \"{FIELD_SEP}\")"))?;
-    let cursor = parse_cursor(&cursor_raw);
+    let cursor = parse_cursor(&cursor_raw)?;
 
     let mode = probe.eval_str("mode(1)")?;
 
@@ -132,10 +151,10 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
         registers.push((name, value));
     }
 
-    let marks_raw = probe.eval_str(&format!(
-        "join(map(getmarklist(bufnr('%')), 'v:val.mark . \"{FIELD_SEP}\" . v:val.pos[1] . \"{FIELD_SEP}\" . v:val.pos[2]'), \"{RECORD_SEP}\")"
-    ))?;
-    let marks = parse_marks(&marks_raw);
+    let local_marks_raw = probe.eval_str(&marks_expr("bufnr('%')"))?;
+    let mut marks = parse_marks(&local_marks_raw)?;
+    let global_marks_raw = probe.eval_str(&marks_expr(""))?;
+    marks.extend(parse_marks(&global_marks_raw)?);
 
     Ok(StateSnapshot {
         buffer_lines,
@@ -146,18 +165,45 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
     })
 }
 
+/// Builds a `getmarklist(...)` probe expression, `buf_arg` either
+/// `"bufnr('%')"` (buffer-local marks: `a`-`z`, `'`, `"`, `[`, `]`, `.`, `^`)
+/// or `""` (global marks: `A`-`Z`, `0`-`9`) -- per `:help getmarklist()`,
+/// the no-argument form returns the global list, not an empty/duplicate
+/// view of the buffer-local one. Live-verified against the pinned nvim: a
+/// mark set with `mA` shows up in the no-arg form and nowhere in the
+/// buffer-arg form, confirming the two calls are genuinely disjoint rather
+/// than redundant.
+fn marks_expr(buf_arg: &str) -> String {
+    format!(
+        "join(map(getmarklist({buf_arg}), 'v:val.mark . \"{FIELD_SEP}\" . v:val.pos[1] . \"{FIELD_SEP}\" . v:val.pos[2]'), \"{RECORD_SEP}\")"
+    )
+}
+
 /// Parses a `join(getpos('.'), FIELD_SEP)` reply (`bufnum, lnum, col, off`)
 /// into `(lnum, col)`: [`StateSnapshot::cursor`] only ever needs the
-/// position, not which buffer or the virtualedit offset. An unparseable or
-/// short reply degrades to `(0, 0)` rather than panicking: a live-engine
-/// probe returning a malformed reply is a real divergence for [`compare`]
-/// to report, not a reason to abort the whole snapshot.
-fn parse_cursor(raw: &str) -> (u64, u64) {
+/// position, not which buffer or the virtualedit offset.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Parse`] if `raw` does not split into at least
+/// three [`FIELD_SEP`]-delimited numeric fields. Fails loudly rather than
+/// degrading to `(0, 0)`: both sides of [`compare`] share this expression
+/// and this parser (see this module's own doc comment), so a silent
+/// placeholder here would let a malformed reply on both sides compare
+/// equal and vanish instead of surfacing as a broken probe.
+fn parse_cursor(raw: &str) -> Result<(u64, u64), OracleError> {
     let mut fields = raw.split(FIELD_SEP);
     let _bufnum = fields.next();
-    let line = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let col = fields.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (line, col)
+    let malformed = || OracleError::Parse(format!("malformed getpos reply: {raw:?}"));
+    let line = fields
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(malformed)?;
+    let col = fields
+        .next()
+        .and_then(|s| s.parse().ok())
+        .ok_or_else(malformed)?;
+    Ok((line, col))
 }
 
 /// Parses a `join(map(getmarklist(...), ...), RECORD_SEP)` reply into
@@ -165,21 +211,38 @@ fn parse_cursor(raw: &str) -> (u64, u64) {
 /// cannot happen once nvim has set its own automatic marks but is the
 /// correct degenerate case) yields an empty `Vec` rather than a one-element
 /// `Vec` holding an empty record: `"".split(RECORD_SEP)` would otherwise
-/// yield one empty string, which `parse_marks`'s inner field split would
-/// then fail to parse into a row/col and silently `filter_map` away anyway
-/// -- checking `is_empty()` up front says so directly instead of relying on
-/// that fallthrough.
-fn parse_marks(raw: &str) -> Vec<(String, u64, u64)> {
+/// yield one empty string, which the inner field split below would then
+/// fail to parse -- checking `is_empty()` up front says the degenerate case
+/// is expected instead of routing it through the same path a genuine
+/// parse failure takes.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Parse`] on the first record that does not split
+/// into a name plus two [`FIELD_SEP`]-delimited numeric fields. Fails
+/// loudly rather than `filter_map`-ing the bad record away: silently
+/// dropping one record out of a shared probe/parser both sides of
+/// [`compare`] ride (see this module's own doc comment) is exactly the
+/// kind of common-mode coverage loss a differential oracle must not hide.
+fn parse_marks(raw: &str) -> Result<Vec<(String, u64, u64)>, OracleError> {
     if raw.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     raw.split(RECORD_SEP)
-        .filter_map(|record| {
+        .map(|record| {
+            let malformed =
+                || OracleError::Parse(format!("malformed getmarklist record: {record:?}"));
             let mut fields = record.split(FIELD_SEP);
-            let name = fields.next()?.to_string();
-            let row = fields.next().and_then(|s| s.parse().ok())?;
-            let col = fields.next().and_then(|s| s.parse().ok())?;
-            Some((name, row, col))
+            let name = fields.next().ok_or_else(malformed)?.to_string();
+            let row = fields
+                .next()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(malformed)?;
+            let col = fields
+                .next()
+                .and_then(|s| s.parse().ok())
+                .ok_or_else(malformed)?;
+            Ok((name, row, col))
         })
         .collect()
 }
@@ -268,6 +331,10 @@ pub fn compare(
 
     let row_count = view_rows.len().max(ref_rows.len());
     for index in 0..row_count {
+        // Unreachable in practice: both sides' canvases are u16-bounded
+        // (view_surface::Rect/Grid dimensions), so row_count never exceeds
+        // u16::MAX. Skip rather than panic if that invariant is ever
+        // violated, since this loop is the honesty-critical comparison path.
         let Ok(row) = u16::try_from(index) else {
             continue;
         };
@@ -444,13 +511,19 @@ mod tests {
     #[test]
     fn parse_cursor_reads_lnum_and_col_from_a_getpos_shaped_reply() {
         let raw = ["0", "3", "5", "0"].join(FIELD_SEP);
-        assert_eq!(parse_cursor(&raw), (3, 5));
+        assert_eq!(parse_cursor(&raw).unwrap(), (3, 5));
     }
 
+    /// A malformed `getpos` reply must fail loudly through `Err`, not
+    /// degrade to a placeholder tuple that could compare equal against an
+    /// identically malformed reply on the other side of a differential.
     #[test]
-    fn parse_cursor_degrades_to_zero_zero_on_a_malformed_reply() {
-        assert_eq!(parse_cursor(""), (0, 0));
-        assert_eq!(parse_cursor("not-a-number"), (0, 0));
+    fn parse_cursor_fails_loudly_on_a_malformed_reply() {
+        assert!(matches!(parse_cursor(""), Err(OracleError::Parse(_))));
+        assert!(matches!(
+            parse_cursor("not-a-number"),
+            Err(OracleError::Parse(_))
+        ));
     }
 
     /// Pins `parse_marks`'s expected reply shape: `RECORD_SEP`-joined
@@ -463,7 +536,7 @@ mod tests {
         ]
         .join(RECORD_SEP);
 
-        let marks = parse_marks(&raw);
+        let marks = parse_marks(&raw).unwrap();
 
         assert_eq!(
             marks,
@@ -473,7 +546,23 @@ mod tests {
 
     #[test]
     fn parse_marks_reads_an_empty_reply_as_no_marks() {
-        assert!(parse_marks("").is_empty());
+        assert!(parse_marks("").unwrap().is_empty());
+    }
+
+    /// One malformed record inside an otherwise well-formed reply must fail
+    /// the whole probe through `Err`, not `filter_map` the bad record away
+    /// and return the good ones -- a partial-but-silent drop is exactly the
+    /// coverage loss a shared probe/parser must not hide from a
+    /// differential.
+    #[test]
+    fn parse_marks_fails_loudly_on_a_malformed_record() {
+        let raw = [
+            ["'a", "2", "3"].join(FIELD_SEP),
+            "not-enough-fields".to_string(),
+        ]
+        .join(RECORD_SEP);
+
+        assert!(matches!(parse_marks(&raw), Err(OracleError::Parse(_))));
     }
 
     fn model_with_grid(width: u16, height: u16) -> Model {
@@ -555,6 +644,16 @@ mod tests {
         let mask = masked_rows(&view_surface);
         let ref_rows = reference_side.screen_rows();
 
+        // This scenario never opens the cmdline, a message, or
+        // any other chrome layer, so the mask must be empty. An over-masking
+        // regression (e.g. a `Shell` layer left painted post-attach) would
+        // otherwise silently empty out every row `compare` ever looks at,
+        // passing this test for the wrong reason.
+        assert!(
+            mask.is_empty(),
+            "expected no masked rows with no chrome active, got {mask:?}"
+        );
+
         let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
         let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
 
@@ -575,6 +674,86 @@ mod tests {
                 >= 2,
             "yy+p should have left at least two 'hello' lines: {:?}",
             view_state.buffer_lines
+        );
+        // `compare`'s empty result already proves the two sides
+        // agree, but agreement transfers non-triviality to the reference
+        // side rather than proving it -- a probe that always returns the
+        // same placeholder on both sides would compare empty too. These
+        // pin the actual post-`ihello<Esc>yyp` state on the view side
+        // against values captured live against the pinned nvim (see the
+        // task report's live-probe transcript): cursor on line 2 column 1
+        // (`p` lands the cursor on the pasted line), the unnamed register
+        // holding the linewise yank, and at least one mark set by the
+        // yank/paste.
+        assert_eq!(
+            view_state.cursor,
+            (2, 1),
+            "expected cursor on the pasted line after yy+p: {:?}",
+            view_state.cursor
+        );
+        assert!(
+            view_state
+                .registers
+                .iter()
+                .any(|(name, value)| *name == '"' && value == "hello\n"),
+            "expected the unnamed register to hold the linewise yank: {:?}",
+            view_state.registers
+        );
+        assert!(
+            !view_state.marks.is_empty(),
+            "expected yy+p to have set at least one mark"
+        );
+    }
+
+    /// Spawns a real `EngineSession` against the pinned nvim, moves the
+    /// cursor to a known position and sets a known buffer-local mark plus a
+    /// known global mark, then asserts `snapshot()` reads back those exact
+    /// values through `parse_cursor`/`parse_marks`. An nvim pin bump that
+    /// changes the `getpos`/`getmarklist` reply shape (a field reordered, a
+    /// type changed) fails this test loudly instead of silently degrading
+    /// through a placeholder value a differential could compare away. The
+    /// global mark also proves live that `snapshot`'s no-arg
+    /// `getmarklist()` call actually merges global marks into the same
+    /// result, not just buffer-local ones. Expected values captured live
+    /// against the pinned nvim before this test was written: after
+    /// `ihello<Esc>mamA`, the cursor and both the `a` and `A` marks land on
+    /// line 1, column 5 (1-indexed byte column, past the typed `hello`).
+    #[test]
+    fn parse_cursor_and_parse_marks_match_a_live_getpos_and_getmarklist_reply() {
+        let mut session =
+            EngineSession::spawn(40, 10).expect("EngineSession::spawn against real nvim");
+        while session.pump_until_flush(Duration::from_millis(500)) {}
+
+        session
+            .input("ihello<Esc>mamA")
+            .expect("input against EngineSession");
+        assert!(session.pump_until_flush(QUIESCE_DEADLINE));
+        while session.pump_until_flush(Duration::from_millis(500)) {}
+
+        let state = snapshot(&mut session).expect("snapshot EngineSession");
+
+        assert_eq!(
+            state.cursor,
+            (1, 5),
+            "expected cursor at line 1 col 5 after ihello<Esc>mamA: {:?}",
+            state.cursor
+        );
+        assert!(
+            state
+                .marks
+                .iter()
+                .any(|(name, row, col)| name == "'a" && *row == 1 && *col == 5),
+            "expected buffer-local mark 'a at (1, 5): {:?}",
+            state.marks
+        );
+        assert!(
+            state
+                .marks
+                .iter()
+                .any(|(name, row, col)| name == "'A" && *row == 1 && *col == 5),
+            "expected global mark 'A at (1, 5), merged in by the no-arg \
+             getmarklist() probe: {:?}",
+            state.marks
         );
     }
 }

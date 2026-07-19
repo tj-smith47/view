@@ -65,6 +65,16 @@ pub enum OracleError {
     /// An I/O error writing to or reading from a pty.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A state-probe reply did not match the shape its parser requires
+    /// (the cursor or marks parsers behind [`snapshot`]). Surfaced as an
+    /// error rather than degraded to a placeholder value: registers,
+    /// marks, and the cursor all ride one shared probe expression and one
+    /// shared parser across both sides of a differential comparison, so a
+    /// malformation there is common-mode -- both sides would degrade
+    /// identically and compare equal, silently erasing coverage instead of
+    /// reporting a broken probe.
+    #[error("state probe parse error: {0}")]
+    Parse(String),
 }
 
 /// Msg-level headless driver: pure, no engine, no terminal. The fast oracle
