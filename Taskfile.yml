@@ -22,8 +22,10 @@ tasks:
     cmd: cargo test --workspace
 
   audit:
-    desc: Enforce crate dependency direction from the spec
-    cmd: bash scripts/audit-deps.sh
+    desc: Enforce crate dependency direction and the pinned engine version
+    cmds:
+      - bash scripts/audit-deps.sh
+      - bash scripts/check-engine-pin.sh
 
   style:
     desc: Enforce comment and doc style rules

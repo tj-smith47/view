@@ -36,26 +36,34 @@ jobs:
       - name: Install neovim (linux)
         if: runner.os == 'Linux'
         run: |
-          curl -fsSL -o nvim.appimage https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.appimage
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x nvim.appimage
           ./nvim.appimage --appimage-extract >/dev/null
           echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
 
       - name: Install neovim (macos)
         if: runner.os == 'macOS'
-        run: brew install neovim
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf nvim-macos.tar.gz
+          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
       - name: Install neovim (windows)
         if: runner.os == 'Windows'
-        run: choco install neovim -y --no-progress
-
-      - name: Add neovim to PATH (windows)
-        if: runner.os == 'Windows'
         shell: bash
-        run: echo "/c/tools/neovim/nvim-win64/bin" >> "$GITHUB_PATH"
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-win64.zip "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-win64.zip"
+          unzip -q nvim-win64.zip
+          echo "$PWD/nvim-win64/bin" >> "$GITHUB_PATH"
 
       - name: Check neovim version
-        run: nvim --version
+        shell: bash
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
       - name: Run CI suite
         run: task ci
