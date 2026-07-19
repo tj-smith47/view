@@ -692,3 +692,50 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
 
     let _ = std::fs::remove_file(&wrapper);
 }
+
+/// Spawns `view` with `VIEW_LOG` pointed at a path whose parent directory
+/// does not exist, reproducing the unwritable-path degrade `vlog::init`
+/// documents: the open fails, one line goes to stderr, and the sink stays
+/// `None` for the rest of the session rather than the session refusing to
+/// start. Duplicates `spawn_view_pty_raw`'s setup instead of threading an
+/// env override through it: this is the only test in the file that needs a
+/// `VIEW_LOG` override, and adding a parameter for one caller would reshape
+/// every other caller's signature for no benefit.
+fn spawn_view_pty_with_unwritable_view_log() -> ViewPtySession {
+    let paths = common::ScratchPaths::new("smoke-view-log");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", "/nonexistent-dir-xyz/log.txt");
+
+    let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
+    ViewPtySession { session, paths }
+}
+
+/// Regression: an unwritable `VIEW_LOG` path must degrade to no diagnostic
+/// logging, never to a broken or refused session. The oracle is the saved
+/// file's real contents (echo-immune, per `view_paints_typed_text_in_a_pty`'s
+/// comment), not the pty's screen -- proving the keystroke actually reached
+/// nvim's buffer, not just that the terminal echoed it back.
+#[test]
+fn view_degrades_gracefully_when_view_log_path_is_unwritable() {
+    let mut session = spawn_view_pty_with_unwritable_view_log();
+    let _ = session.wait_for("~", Duration::from_secs(5));
+
+    session.send(b"ihello from an unwritable VIEW_LOG").unwrap();
+    session.send(b"\x1b:wq\r").unwrap();
+    let exit = session
+        .wait()
+        .expect("view never exited after :wq with an unwritable VIEW_LOG path");
+    assert!(
+        exit.success(),
+        "view did not exit cleanly when VIEW_LOG named an unopenable path"
+    );
+
+    let saved = session.read_saved_file();
+    assert!(
+        saved.contains("hello from an unwritable VIEW_LOG"),
+        "saved file did not contain the typed text; an unwritable VIEW_LOG \
+         path must never take the session down with it; contents:\n{saved:?}"
+    );
+}

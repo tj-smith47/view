@@ -1,9 +1,15 @@
 //! `VIEW_LOG=<path>` diagnostic capture: a structured, line-oriented
 //! append log for triage flows that today mean asking the user to paste an
 //! `asciinema` recording. Absent the env var, [`init`] leaves the process-wide
-//! sink at `None` and every [`log`] call after that is a single `Option`
-//! check with no allocation and no file I/O -- the zero-overhead contract an
-//! interactive keystroke-to-paint loop needs even when nobody is capturing.
+//! sink at `None` and every [`log`]/[`log_with`] call after that is a single
+//! `Option` check with no allocation and no file I/O -- the zero-overhead
+//! contract an interactive keystroke-to-paint loop needs even when nobody is
+//! capturing. [`log_with`] is what makes that contract hold for a *computed*
+//! payload (a `format!` call, a `Vec` collected into a `String`): its closure
+//! runs only after the sink check, so a caller building a payload from
+//! several fields never pays for that work on the no-`VIEW_LOG` path. Call
+//! sites with an already-owned `&str` (no formatting needed either way) use
+//! plain [`log`] instead.
 //!
 //! Deliberately lives in the bin crate, not `view-core`: `view-core` is pure
 //! (no I/O, no env access -- see this repo's hard rules), so every log call
@@ -54,10 +60,31 @@ pub fn init(process_start: Instant) {
 /// this module's docs promise. `topic` is a short fixed tag (`"startup"`,
 /// `"theme"`, `"msg"`, `"engine"`, `"fatal"`); `payload` is caller-formatted
 /// free text, never parsed back by this module.
+///
+/// For a `payload` that already exists as a `&str`/`&String` (nothing to
+/// compute). A caller whose payload requires `format!` or a collect wants
+/// [`log_with`] instead, so that work is skipped entirely when the sink is
+/// absent.
 pub fn log(topic: &str, payload: &str) {
     let Some(Some(file)) = SINK.get() else {
         return;
     };
+    write_line(file, topic, payload);
+}
+
+/// Like [`log`], but `payload` is a closure run only once the sink check
+/// above has confirmed a sink exists -- the shape that keeps a `format!`-
+/// or collect-built payload out of the no-`VIEW_LOG` path entirely, rather
+/// than building the `String` and then discarding it against an `Option`
+/// check that already knew nobody would read it.
+pub fn log_with(topic: &str, payload: impl FnOnce() -> String) {
+    let Some(Some(file)) = SINK.get() else {
+        return;
+    };
+    write_line(file, topic, &payload());
+}
+
+fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
     let ms = START.get().map_or(0, |start| start.elapsed().as_millis());
     let mut f = file.lock().unwrap_or_else(PoisonError::into_inner);
     let _ = writeln!(f, "{ms} {topic} {payload}");
@@ -79,16 +106,14 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
             }
         }
         Msg::HlProbeReply { generation, fg, bg } => {
-            log(
-                "theme",
-                &format!("probe-reply generation={generation} fg={fg:?} bg={bg:?}"),
-            );
+            log_with("theme", || {
+                format!("probe-reply generation={generation} fg={fg:?} bg={bg:?}")
+            });
         }
         Msg::EngineDown(exit) => {
-            log(
-                "engine",
-                &format!("down code={:?} by_signal={}", exit.code, exit.by_signal),
-            );
+            log_with("engine", || {
+                format!("down code={:?} by_signal={}", exit.code, exit.by_signal)
+            });
         }
         _ => {}
     }
@@ -98,21 +123,22 @@ fn log_ui_event(ev: &view_core::events::UiEvent) {
     use view_core::events::UiEvent;
     match ev {
         UiEvent::DefaultColorsSet { fg, bg, sp } => {
-            log(
-                "theme",
-                &format!("default_colors_set fg={fg:?} bg={bg:?} sp={sp:?}"),
-            );
+            log_with("theme", || {
+                format!("default_colors_set fg={fg:?} bg={bg:?} sp={sp:?}")
+            });
         }
         UiEvent::MsgShow {
             kind,
             content,
             replace_last,
         } => {
-            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
-            log(
-                "msg",
-                &format!("show kind={kind} replace_last={replace_last} text={text:?}"),
-            );
+            // the `content` collect used to run unconditionally ahead of the
+            // sink check; folding it into the closure means a no-`VIEW_LOG`
+            // run never allocates the joined text at all
+            log_with("msg", || {
+                let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
+                format!("show kind={kind} replace_last={replace_last} text={text:?}")
+            });
         }
         UiEvent::MsgClear => log("msg", "clear"),
         _ => {}

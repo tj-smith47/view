@@ -655,12 +655,27 @@ mod tests {
     /// bottom row while keystrokes were silently accepted with no visible
     /// label. Values match a live nvim capture of that exact command (see
     /// `paint_cmdline`'s doc comment).
+    ///
+    /// Also pins that `paint_cmdline`'s full-row claim (see
+    /// `cmdline_overlay_claims_the_full_bottom_row_no_grid_glyph_bleeds_through`)
+    /// covers prompt mode too, not just the `firstc` mode that regression
+    /// test drives: row 2 is seeded with statusline-shaped glyphs first, so
+    /// the full-row assertion below disconfirms unless the blank-row fill
+    /// actually runs ahead of the prompt label and content.
     #[test]
     fn cmdline_prompt_mode_renders_prompt_label_and_places_cursor_after_it() {
         let mut model = Model::new();
         model.engine.grid.apply(GridOp::Resize {
             width: 20,
             height: 3,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 2,
+            col_start: 0,
+            cells: "STATUSLINESTATUSLINE"
+                .chars()
+                .map(|c| (c.to_string(), 0, 1))
+                .collect(),
         });
 
         apply(
@@ -694,6 +709,14 @@ mod tests {
             "cursor must land after \"name: \" (6 cols) plus pos=1 into the typed content"
         );
         assert_eq!(cursor.row, 2);
+
+        let full_row: String = (0..20).map(|c| buf[(c, 2)].symbol().to_string()).collect();
+        assert_eq!(
+            full_row,
+            format!("{:<20}", "name: X"),
+            "prompt-mode cmdline must claim the whole bottom row; the seeded \
+             statusline glyphs past column 6 must not bleed through"
+        );
     }
 
     /// Invariant pinned here: persistent chrome (the tabline) may never sit
