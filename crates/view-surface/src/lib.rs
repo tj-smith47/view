@@ -214,11 +214,21 @@ pub fn render(model: &Model) -> Surface {
         // before the engine's first `GridResize`) still reserves its one
         // row rather than vanishing until real grid content arrives.
         let visible = engine.messages.visible_lines(usize::from(grid_h).max(1));
-        let width = messages_width(&visible).min(grid_w).max(1);
-        let height = u16::try_from(visible.len())
+        let content_width = messages_width(&visible).min(grid_w).max(1);
+        let content_height = u16::try_from(visible.len())
             .unwrap_or(u16::MAX)
             .min(grid_h)
             .max(1);
+        // the border frame (paint_messages) adds one cell on every edge
+        // around the content `visible_lines` already selected -- grown
+        // here, not in `visible_lines` itself, so the row/column budget
+        // that decides *what* text is visible never changes shape depending
+        // on whether the frame around it fits; `overlay_layer`'s own
+        // `clamp_to` still caps the grown rect to the live grid so the
+        // frame can never paint past the terminal even when content_width/
+        // content_height already used the full grid budget
+        let width = content_width.saturating_add(2);
+        let height = content_height.saturating_add(2);
         let col = grid_w.saturating_sub(width);
         layers.push(overlay_layer(
             0,
@@ -753,10 +763,13 @@ mod tests {
             .find(|l| matches!(l.kind, LayerKind::Messages(_)))
             .expect("messages layer present");
         assert_eq!(messages.rect.row, 0);
-        assert_eq!(messages.rect.width, 2, "sized to \"hi\", not a fixed width");
         assert_eq!(
-            messages.rect.col, 18,
-            "right-anchored: grid width (20) minus content width (2)"
+            messages.rect.width, 4,
+            "sized to \"hi\" (2) plus the 2-cell border frame, not a fixed width"
+        );
+        assert_eq!(
+            messages.rect.col, 16,
+            "right-anchored: grid width (20) minus framed width (2 content + 2 border)"
         );
     }
 

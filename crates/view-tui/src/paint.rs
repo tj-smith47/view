@@ -161,38 +161,143 @@ fn paint_cmdline(
     paint_text_row(&text, style, area, 0, frame);
 }
 
-/// Renders the message log as stacked toasts: `render()` already picked
-/// exactly the visible physical lines (`Messages::visible_lines` --
+/// Renders the message log as a bordered toast box: `render()` already
+/// picked exactly the visible physical lines (`Messages::visible_lines` --
 /// persistent error/warn lines always kept, the most recent transient
-/// lines filling the rest) and sized/right-anchored `area` to them, so
-/// painting only has to write one line per row, in the order given (oldest
-/// of the visible set on top).
+/// lines filling the rest) and grew/right-anchored `area` to them plus a
+/// one-cell frame on every edge, so painting only has to draw the border
+/// around `area` and write one line per interior row, in the order given
+/// (oldest of the visible set on top). A truly empty `lines` paints nothing
+/// at all -- no clear, no border -- matching `render()`'s own contract of
+/// never emitting a `Messages` layer for an empty log; a caller that hands
+/// this an empty slice with a stale nonzero `area` (only possible by
+/// bypassing `render()`, e.g. directly in tests) must still see no bleed
+/// from a frame that has no content to frame.
 ///
-/// The whole rect is cleared to the toast's own style first, before any
-/// text: without this, a row -- or the columns past a line's own text on a
-/// row -- keeps showing whatever the `EngineGrid` layer painted underneath
-/// (real nvim content, e.g. a floating window's cells composited into the
-/// base grid when the frontend has no `ext_multigrid` support), which is
-/// what a live repro showed as foreign glyphs bleeding through at a toast
-/// row's right edge.
+/// The whole rect -- border cells included -- is cleared to the toast's own
+/// `msg_area` style first, before any text or border glyph: without this, a
+/// row, a border cell, or the columns past a line's own text on a row keeps
+/// showing whatever the `EngineGrid` layer painted underneath (real nvim
+/// content, e.g. a floating window's cells composited into the base grid
+/// when the frontend has no `ext_multigrid` support), which is what a live
+/// repro showed as foreign glyphs bleeding through at a toast row's right
+/// edge.
 fn paint_messages(
     lines: &[String],
     theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
+    if lines.is_empty() {
+        return;
+    }
+
     let style = ratatui_style(theme.msg_area);
     let blank = " ".repeat(usize::from(area.width));
     for row in 0..area.height {
         paint_text_row(&blank, style, area, row, frame);
     }
 
+    let border_style = ratatui_style(ResolvedStyle {
+        fg: Some(message_border_color(theme)),
+        bg: theme.msg_area.bg,
+        ..ResolvedStyle::default()
+    });
+    paint_message_border(area, border_style, frame);
+
+    let inner = inset_by_one(area);
     for (i, line) in lines.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };
-        paint_text_row(line, style, area, row, frame);
+        paint_text_row(line, style, inner, row, frame);
     }
+}
+
+/// `area` shrunk by one cell on every edge: the interior the border frame
+/// leaves for `Messages::visible_lines`' own content, matching exactly the
+/// unframed rect `view-surface` grew by two cols/two rows to make room for
+/// the border this module draws around it.
+fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
+    ratatui::layout::Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
+    }
+}
+
+/// Draws box-drawing glyphs on all four edges of `area`, styled `style`.
+/// A degenerate area narrower or shorter than 2 cells has no distinct edge
+/// cells to draw (the frame `view-surface` builds is never this small in
+/// practice, since it always adds a full 2-cell frame around at least a
+/// 1x1 content rect, but a direct unit-test caller could still construct
+/// one) and paints nothing rather than writing corner glyphs on top of
+/// each other.
+fn paint_message_border(area: ratatui::layout::Rect, style: Style, frame: &mut ratatui::Frame<'_>) {
+    if area.width < 2 || area.height < 2 {
+        return;
+    }
+    let last_col = area.width - 1;
+    let last_row = area.height - 1;
+    let buf = frame.buffer_mut();
+    for col in 0..area.width {
+        let top = match col {
+            0 => '┌',
+            c if c == last_col => '┐',
+            _ => '─',
+        };
+        let bottom = match col {
+            0 => '└',
+            c if c == last_col => '┘',
+            _ => '─',
+        };
+        set_border_cell(buf, area.x + col, area.y, top, style);
+        set_border_cell(buf, area.x + col, area.y + last_row, bottom, style);
+    }
+    for row in 1..last_row {
+        set_border_cell(buf, area.x, area.y + row, '│', style);
+        set_border_cell(buf, area.x + last_col, area.y + row, '│', style);
+    }
+}
+
+/// Writes one border glyph directly into `buf`, bypassing [`paint_text_row`]:
+/// its column-advance-by-display-width logic exists for laying out a whole
+/// string of arbitrary (possibly wide/control) characters across a row,
+/// which a single fixed-width box-drawing character never needs.
+fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, style: Style) {
+    let mut encode_buf = [0_u8; 4];
+    let cell = &mut buf[(x, y)];
+    cell.set_symbol(ch.encode_utf8(&mut encode_buf));
+    cell.set_style(style);
+}
+
+/// The message toast border's foreground. `Theme` resolves no builtin
+/// group carrying a genuinely muted/comment tone -- `from_hl` maps only
+/// `StatusLine`, the tabline and popup-menu families, and `MsgArea`, none
+/// of which plays the role real nvim's own `Comment`/`NonText`/
+/// `FloatBorder` groups would (an unobtrusive chrome color distinct from
+/// both emphasis and interior-text colors), and this module never probes
+/// nvim for a group it does not already resolve -- so the border derives a
+/// dimmed variant of the interior's own `msg_area` color instead: visibly
+/// distinct from the full-brightness interior text with no further
+/// highlight lookup or RPC round trip.
+fn message_border_color(theme: &Theme) -> u32 {
+    let base = theme
+        .msg_area
+        .fg
+        .or(theme.msg_area.bg)
+        .or(theme.fg)
+        .unwrap_or(0x0080_8080);
+    dim(base)
+}
+
+/// Scales each RGB channel of `c` to 60% of its original value, the muted
+/// transform [`message_border_color`] applies when no themed group already
+/// carries one.
+fn dim(c: u32) -> u32 {
+    let channel = |shift: u32| -> u32 { ((c >> shift) & 0xFF) * 3 / 5 };
+    (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Renders the tabline into its reserved row: each tab as ` name `, the
@@ -972,15 +1077,18 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        assert_eq!(&buf[(8, 0)].symbol(), &"h");
-        assert_eq!(&buf[(9, 0)].symbol(), &"i");
+        // framed box: "hi" (2) + the 2-cell border = 4 wide, 3 tall,
+        // right-anchored at col 6 (10 - 4), so the interior text row lands
+        // at (7..9, 1)
+        assert_eq!(&buf[(7, 1)].symbol(), &"h");
+        assert_eq!(&buf[(8, 1)].symbol(), &"i");
 
         apply(&mut model, view_core::events::UiEvent::MsgClear);
         let surface = view_surface::render(&model);
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert_eq!(
-            &buf[(8, 0)].symbol(),
+            &buf[(7, 1)].symbol(),
             &" ",
             "message toast must vanish once MsgClear empties the log"
         );
@@ -1014,16 +1122,18 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        // right-anchored at 3 display cells wide (10 - 3 = 7), not 2: a
-        // char-count-based width would anchor this one column further
-        // right and clip the wide glyph's leading edge
-        assert_eq!(&buf[(7, 0)].symbol(), &"中");
+        // interior content is 3 display cells wide ("中" = 2, "b" = 1); the
+        // framed box adds the 2-cell border (5 wide total), right-anchored
+        // at col 5 (10 - 5), so the interior text row lands at (6..9, 1) --
+        // one column further left than an unframed box, not the same
+        // columns the border now occupies
+        assert_eq!(&buf[(6, 1)].symbol(), &"中");
         assert_eq!(
-            &buf[(8, 0)].symbol(),
+            &buf[(7, 1)].symbol(),
             &" ",
             "the wide glyph's shadow cell must be empty, not overwritten by the next char"
         );
-        assert_eq!(&buf[(9, 0)].symbol(), &"b");
+        assert_eq!(&buf[(8, 1)].symbol(), &"b");
     }
 
     /// Reproduces a real repro: a startup `emsg` autocommand error carries
@@ -1067,24 +1177,155 @@ mod tests {
         let row_text =
             |r: u16| -> String { (0..26).map(|c| buf[(c, r)].symbol().to_string()).collect() };
 
-        // box width = the longer physical line (23 cells), not the sum of
-        // both lines (28): right-anchored at column 3, so columns 0-2 stay
-        // real grid content (outside the toast's own rect) on both rows,
-        // and the second line exactly fills its row with no leftover to
-        // clear, while the first line's row has 18 cells of clear past
-        // "short" that must not still show the grid's "X" stand-in
-        let expected_first_line = format!("XXX{:<23}", "short");
-        let expected_second_line = format!("XXX{}", "much longer second line");
+        // interior width = the longer physical line (23 cells), not the sum
+        // of both lines (28); the framed box adds the 2-cell border (25
+        // wide, 4 tall total), right-anchored at col 1 (26 - 25), so the
+        // interior's two text rows land at y=1 and y=2, columns 2..25, with
+        // the border's own left/right edge glyphs at columns 1 and 25 --
+        // column 0 alone stays real grid content, and the second line
+        // exactly fills its row with no leftover to clear, while the first
+        // line's row has 18 cells of clear past "short" that must not
+        // still show the grid's "X" stand-in
+        let expected_first_line = format!("X│{:<23}│", "short");
+        let expected_second_line = format!(" │{}│", "much longer second line");
         assert_eq!(
-            row_text(0),
+            row_text(1),
             expected_first_line,
             "first physical line's row must be cleared past its own text, not left showing the grid underneath"
         );
         assert_eq!(
-            row_text(1),
+            row_text(2),
             expected_second_line,
             "second physical line must land on its own row, right-anchored to the wider line's width"
         );
+    }
+
+    #[test]
+    fn framed_toast_renders_border_glyphs_on_all_four_edges() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 5,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "hi".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // interior "hi" (2 wide, 1 tall) framed with a 2-cell border: box
+        // is 4 wide x 3 tall, right-anchored at col 6 (10 - 4), top-
+        // anchored at row 0 -- corners, horizontal edges, and vertical
+        // edges must all be distinct border glyphs, not blank/text cells
+        assert_eq!(&buf[(6, 0)].symbol(), &"┌", "top-left corner");
+        assert_eq!(&buf[(9, 0)].symbol(), &"┐", "top-right corner");
+        assert_eq!(&buf[(6, 2)].symbol(), &"└", "bottom-left corner");
+        assert_eq!(&buf[(9, 2)].symbol(), &"┘", "bottom-right corner");
+        assert_eq!(&buf[(7, 0)].symbol(), &"─", "top edge");
+        assert_eq!(&buf[(8, 0)].symbol(), &"─", "top edge");
+        assert_eq!(&buf[(7, 2)].symbol(), &"─", "bottom edge");
+        assert_eq!(&buf[(8, 2)].symbol(), &"─", "bottom edge");
+        assert_eq!(&buf[(6, 1)].symbol(), &"│", "left edge");
+        assert_eq!(&buf[(9, 1)].symbol(), &"│", "right edge");
+    }
+
+    #[test]
+    fn empty_message_log_paints_nothing() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 8,
+            height: 4,
+        });
+        for row in 0..4u16 {
+            model.engine.grid.apply(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![("Z".into(), 0, 8)],
+            });
+        }
+        let theme = Theme::from_hl(&model.engine.hl);
+        // an area shaped like a real toast rect would occupy, handed
+        // straight to paint_messages with an empty slice: render()'s own
+        // contract never emits a Messages layer for an empty log, but this
+        // exercises paint_messages' own guard directly rather than relying
+        // solely on that upstream omission
+        let area = ratatui::layout::Rect {
+            x: 2,
+            y: 0,
+            width: 6,
+            height: 3,
+        };
+        let backend = TestBackend::new(8, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                paint_grid(&model.engine.grid, &theme, &model.engine.hl, f.area(), f);
+                paint_messages(&[], &theme, area, f);
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer().clone();
+        for row in 0..4u16 {
+            for col in 0..8u16 {
+                assert_eq!(
+                    &buf[(col, row)].symbol(),
+                    &"Z",
+                    "empty message log must clear, border, or write nothing at ({col}, {row})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn clear_under_frame_overwrites_grid_content_across_the_whole_framed_rect_including_border_cells(
+    ) {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 5,
+        });
+        for row in 0..5u16 {
+            model.engine.grid.apply(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![("Z".into(), 0, 10)],
+            });
+        }
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "hi".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        // framed box: cols 6..10, rows 0..3 (4 wide x 3 tall) -- every cell
+        // in that rect, border cells included, must have been overwritten;
+        // none may still show the grid's "Z" stand-in
+        for row in 0..3u16 {
+            for col in 6..10u16 {
+                assert_ne!(
+                    &buf[(col, row)].symbol(),
+                    &"Z",
+                    "grid stand-in must not bleed through the framed rect at ({col}, {row}), border cells included"
+                );
+            }
+        }
     }
 
     /// Reproduces a real crash: a live nvim with user plugins fed an `emsg`
@@ -1114,13 +1355,16 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
-        assert_eq!(&buf[(7, 0)].symbol(), &"a");
+        // interior content "a\u{7}b" is 3 cells wide; the framed box adds
+        // the 2-cell border (5 wide total), right-anchored at col 5
+        // (10 - 5), so the interior text row lands at (6..9, 1)
+        assert_eq!(&buf[(6, 1)].symbol(), &"a");
         assert_eq!(
-            &buf[(8, 0)].symbol(),
+            &buf[(7, 1)].symbol(),
             &" ",
             "control byte sanitized to a space"
         );
-        assert_eq!(&buf[(9, 0)].symbol(), &"b");
+        assert_eq!(&buf[(8, 1)].symbol(), &"b");
     }
 
     #[test]
