@@ -279,17 +279,17 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
 /// `FloatBorder` groups would (an unobtrusive chrome color distinct from
 /// both emphasis and interior-text colors), and this module never probes
 /// nvim for a group it does not already resolve -- so the border derives a
-/// dimmed variant of the interior's own `msg_area` color instead: visibly
-/// distinct from the full-brightness interior text with no further
-/// highlight lookup or RPC round trip.
+/// dimmed variant of the interior's own `msg_area` foreground when one is
+/// set, visibly distinct from the full-brightness interior text with no
+/// further highlight lookup or RPC round trip. Never falls back to a
+/// dimmed `msg_area.bg`: the border sits ON that background, so dimming it
+/// paints a frame that is merely a darker shade of the surface it is
+/// supposed to stand out from -- on a black-bg/no-fg theme this dims pure
+/// black to itself, an invisible border around a box the user cannot tell
+/// apart from empty screen. The floor is the plain (undimmed) neutral grey
+/// constant instead, which stays visible against any background.
 fn message_border_color(theme: &Theme) -> u32 {
-    let base = theme
-        .msg_area
-        .fg
-        .or(theme.msg_area.bg)
-        .or(theme.fg)
-        .unwrap_or(0x0080_8080);
-    dim(base)
+    theme.msg_area.fg.map_or(0x0080_8080, dim)
 }
 
 /// Scales each RGB channel of `c` to 60% of its original value, the muted
@@ -620,10 +620,11 @@ mod tests {
         );
     }
 
-    /// The warm-start counterpart to the test above: a theme cache seeded a
-    /// confirmed transparent bg *before* attach (mirrored here by setting
-    /// `hl.confirmed` directly, the same state `theme_cache::seed_hl_table`
-    /// produces), and attach's own `default_colors_set` then resends the
+    /// The warm-start counterpart to the test above: a confirmed
+    /// transparent bg, seeded from persisted state *before* attach
+    /// (mirrored here by setting `hl.confirmed` directly, the same state
+    /// that seeding produces), and attach's own `default_colors_set` then
+    /// resends the
     /// same wire-ambiguous zero the real bug report always reproduces with
     /// -- before its own probe reply has landed. The frame must still carry
     /// `Color::Reset`, never an explicit black, for that entire in-flight
@@ -645,9 +646,9 @@ mod tests {
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
         });
-        // mirrors theme_cache::seed_hl_table's pre-attach state: a confirmed
-        // value at the table's starting generation, from a prior session's
-        // cached, already-disambiguated theme
+        // mirrors the pre-attach state seeded from persisted state: a
+        // confirmed value at the table's starting generation, from a prior
+        // session's cached, already-disambiguated theme
         model.engine.hl.confirmed = Some(view_core::hl::ProbedDefaults {
             generation: model.engine.hl.probe_generation,
             fg: Some(0xF8F8F2),
@@ -1200,6 +1201,148 @@ mod tests {
         );
     }
 
+    /// Clamp-boundary regression: five physical lines exactly fill a
+    /// 5-row grid (no eviction `Messages::visible_lines` itself would ever
+    /// perform against a full `grid_h` budget), but the framed interior
+    /// only has 3 rows once the border's own top/bottom edge is
+    /// subtracted. Before `render()` shrank the selection budget by the
+    /// frame's 2 rows, `visible_lines` kept all 5 lines (nothing to evict
+    /// at max_rows == total lines) and the interior clamp then silently
+    /// dropped the tail of that `Vec` -- the two newest lines, including
+    /// the persistent `echoerr` -- without `visible_lines`'s own
+    /// persistent-line-priority eviction ever getting a say. Disconfirm:
+    /// reverting `render()`'s two `.saturating_sub(2)` budget lines back
+    /// to the raw `grid_h`/`grid_w` reproduces exactly this -- `cargo test
+    /// -p view-tui messages_toast_paints_the_newest_persistent_line`
+    /// fails with the interior's last row reading blank border-fill
+    /// instead of "critical error", confirmed by running it against the
+    /// reverted budget before restoring the fix.
+    #[test]
+    fn messages_toast_paints_the_newest_persistent_line_at_the_clamp_boundary_instead_of_silently_dropping_it(
+    ) {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 20,
+            height: 5,
+        });
+        for kind_and_text in [
+            ("echomsg", "info0"),
+            ("echomsg", "info1"),
+            ("echomsg", "info2"),
+            ("echomsg", "info3"),
+            ("echoerr", "critical error"),
+        ] {
+            apply(
+                &mut model,
+                view_core::events::UiEvent::MsgShow {
+                    kind: kind_and_text.0.into(),
+                    content: vec![(0, kind_and_text.1.into())],
+                    replace_last: false,
+                },
+            );
+        }
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let messages = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .expect("messages layer present");
+        // the frame still closes: a full 5-row box (3-row interior + 2
+        // border rows), not clamped shorter than the grid it fits inside
+        assert_eq!(
+            messages.rect.height, 5,
+            "frame must fit the grid exactly, not overflow and get clamped"
+        );
+        let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
+        assert_eq!(
+            &buf[(x, y)].symbol(),
+            &"┌",
+            "top-left corner still closes the frame"
+        );
+        assert_eq!(
+            &buf[(x + w - 1, y + messages.rect.height - 1)].symbol(),
+            &"┘",
+            "bottom-right corner still closes the frame"
+        );
+
+        // the interior's last row (y + 1 + 2, the third and final interior
+        // row) must carry the persistent, newest line -- not blank border
+        // fill left over from a silently dropped selection
+        let last_row: String = (x + 1..x + w - 1)
+            .map(|c| buf[(c, y + 3)].symbol().to_string())
+            .collect();
+        assert_eq!(
+            last_row, "critical error",
+            "the persistent error, as the newest selected line, must be painted on the interior's last row"
+        );
+    }
+
+    /// Width analogue of the clamp-boundary test above: a single 9-cell
+    /// line in a 10-wide grid leaves only 8 interior cells once the
+    /// border's own left/right edge is subtracted, so the interior must
+    /// show exactly the widest line's first 8 cells -- never fewer, which
+    /// is what happens if `render()`'s width budget is measured against
+    /// the raw `grid_w` instead of `grid_w` shrunk by the frame's own 2
+    /// columns first. (This specific right-anchored geometry -- `col =
+    /// grid_w.saturating_sub(width)` saturates to 0 the moment `width`
+    /// exceeds `grid_w`, and the subsequent `clamp_to` then caps `width`
+    /// back to exactly `grid_w` regardless of how large the unclamped
+    /// request was -- means the final interior width converges to the
+    /// same `grid_w - 2` whether or not the budget was pre-shrunk, so
+    /// reverting the width leg of the fix alone does not fail this
+    /// particular assertion; the row leg above is what the disconfirm run
+    /// actually falsifies. The width leg is still correct to keep: it
+    /// makes the selected budget equal the interior by construction
+    /// rather than by this clamp's saturating-arithmetic coincidence, so
+    /// it stays correct if that anchor formula ever changes.)
+    #[test]
+    fn messages_toast_shows_the_widest_lines_final_interior_cell_at_the_width_clamp_boundary() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 10,
+            height: 5,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "123456789".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(10, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        let messages = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .expect("messages layer present");
+        let (x, y, w) = (messages.rect.col, messages.rect.row, messages.rect.width);
+        assert_eq!(
+            w, 10,
+            "box must span the full grid width, not overflow past it"
+        );
+
+        let interior_row: String = (x + 1..x + w - 1)
+            .map(|c| buf[(c, y + 1)].symbol().to_string())
+            .collect();
+        assert_eq!(
+            interior_row, "12345678",
+            "the interior's 8 cells must show the line's own first 8 characters, ending at '8', not fewer"
+        );
+    }
+
     #[test]
     fn framed_toast_renders_border_glyphs_on_all_four_edges() {
         let mut model = Model::new();
@@ -1236,6 +1379,53 @@ mod tests {
         assert_eq!(&buf[(8, 2)].symbol(), &"─", "bottom edge");
         assert_eq!(&buf[(6, 1)].symbol(), &"│", "left edge");
         assert_eq!(&buf[(9, 1)].symbol(), &"│", "right edge");
+    }
+
+    /// A theme with no `MsgArea` foreground -- e.g. a colorscheme that
+    /// only sets `guibg` on `MsgArea`, or a pre-attach/no-colorscheme
+    /// `Theme::default()` -- must still get a visible border. Disconfirm:
+    /// reverting `message_border_color` to its pre-fix `.or(msg_area.bg)`
+    /// chain and setting `msg_area.bg` to black here makes this assert
+    /// `0` instead of the grey constant -- an invisible black-on-black
+    /// frame around a black background.
+    #[test]
+    fn message_border_color_falls_back_to_neutral_grey_never_a_dimmed_background() {
+        let theme = Theme::default();
+        assert_eq!(
+            message_border_color(&theme),
+            0x0080_8080,
+            "no msg_area foreground at all must fall back to the plain (undimmed) grey constant"
+        );
+
+        let bg_only = Theme {
+            msg_area: ResolvedStyle {
+                bg: Some(0x0000_0000),
+                ..ResolvedStyle::default()
+            },
+            ..Theme::default()
+        };
+        assert_eq!(
+            message_border_color(&bg_only),
+            0x0080_8080,
+            "a background-only theme must not derive the border from a dimmed bg -- \
+             dimming black yields black, an invisible frame on its own background"
+        );
+    }
+
+    #[test]
+    fn message_border_color_dims_a_set_msg_area_foreground() {
+        let theme = Theme {
+            msg_area: ResolvedStyle {
+                fg: Some(0x00FF_0000),
+                ..ResolvedStyle::default()
+            },
+            ..Theme::default()
+        };
+        assert_eq!(
+            message_border_color(&theme),
+            0x0099_0000,
+            "a set msg_area foreground must still dim to 60%, distinct from the full-brightness interior text"
+        );
     }
 
     #[test]

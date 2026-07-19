@@ -208,25 +208,42 @@ pub fn render(model: &Model) -> Surface {
         // have occupied showing whatever the grid layer painted
         // underneath. Both the layer's geometry and its painted content
         // come from this exact `Vec<String>`, so sizing and painting can
-        // never disagree about what is visible. `.max(1)` on the row
+        // never disagree about what is visible -- which requires handing
+        // `visible_lines` a budget already shrunk by the two rows
+        // `paint_messages` reserves for its own top/bottom border edge:
+        // selecting against the full `grid_h` and growing the frame
+        // around the result afterward let the row count `visible_lines`
+        // chose exceed what the framed interior can hold, so the interior
+        // clamp below silently dropped whatever the tail of the selected
+        // `Vec` happened to be -- the newest lines, including the
+        // always-kept persistent error/warn line -- while
+        // `visible_lines`'s own persistent-line-priority eviction never
+        // got the chance to make that call itself. `.max(1)` on the row
         // budget matches this block's own width/height floor below: a
         // pre-attach frame (`grid_h` still 0, e.g. a native toast pushed
         // before the engine's first `GridResize`) still reserves its one
-        // row rather than vanishing until real grid content arrives.
-        let visible = engine.messages.visible_lines(usize::from(grid_h).max(1));
-        let content_width = messages_width(&visible).min(grid_w).max(1);
+        // row rather than vanishing until real grid content arrives, and
+        // a grid too short to fit even a bordered single line still
+        // selects one physical line -- `paint_message_border`'s own
+        // width/height-under-2 guard is what degrades that case to a
+        // blank (borderless) fill instead of a panic.
+        let visible = engine
+            .messages
+            .visible_lines(usize::from(grid_h.saturating_sub(2)).max(1));
+        let content_width = messages_width(&visible)
+            .min(grid_w.saturating_sub(2))
+            .max(1);
         let content_height = u16::try_from(visible.len())
             .unwrap_or(u16::MAX)
-            .min(grid_h)
+            .min(grid_h.saturating_sub(2))
             .max(1);
         // the border frame (paint_messages) adds one cell on every edge
         // around the content `visible_lines` already selected -- grown
-        // here, not in `visible_lines` itself, so the row/column budget
-        // that decides *what* text is visible never changes shape depending
-        // on whether the frame around it fits; `overlay_layer`'s own
-        // `clamp_to` still caps the grown rect to the live grid so the
-        // frame can never paint past the terminal even when content_width/
-        // content_height already used the full grid budget
+        // here, not in `visible_lines` itself, so the selection logic
+        // above stays free of layout math; `overlay_layer`'s own
+        // `clamp_to` still caps the grown rect to the live grid, which by
+        // construction never has to remove more than the frame it just
+        // added since the budget above already left room for it
         let width = content_width.saturating_add(2);
         let height = content_height.saturating_add(2);
         let col = grid_w.saturating_sub(width);
@@ -775,7 +792,12 @@ mod tests {
 
     #[test]
     fn messages_layer_keeps_a_persistent_error_line_when_transient_lines_overflow_the_box() {
-        let mut model = model_with_grid(20, 2);
+        // height 4, not 2: the framed interior is 2 rows shy of grid_h, so
+        // a 2-line selection budget needs a 4-row grid to actually reach
+        // `visible_lines` (a 2-row grid would floor the budget at 1 via
+        // the saturating shrink below, testing the floor instead of the
+        // eviction-priority behavior this test targets)
+        let mut model = model_with_grid(20, 4);
         apply(
             &mut model,
             UiEvent::MsgShow {

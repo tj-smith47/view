@@ -42,7 +42,7 @@ pub struct ResolvedStyle {
 /// set of `Theme` fields could never cover every cell), but the fixed
 /// chrome vocabulary below is cheap to resolve once per frame and
 /// correspondingly cheap to persist to disk for a themed first paint before
-/// that live state exists (see `theme_cache` in the `view` bin crate).
+/// that live state exists, seeded from persisted state before attach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Theme {
     /// The default/"Normal" foreground color.
@@ -243,8 +243,9 @@ mod tests {
 
     /// Derivation stability: the same `HlTable` state always derives an
     /// identical `Theme`, whether re-derived once or many times -- the
-    /// property `theme_cache`'s round trip and `paint`'s per-frame
-    /// re-derivation both depend on. Asserts concrete field values (not
+    /// property both a persisted-state round trip into a themed first
+    /// paint and `paint`'s per-frame re-derivation depend on. Asserts
+    /// concrete field values (not
     /// just that the three derivations match each other): a `from_hl` that
     /// always returned the same wrong `Theme` would still pass a
     /// three-way equality check alone.
