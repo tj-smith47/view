@@ -88,14 +88,30 @@ impl Theme {
         // current `probe_generation`: a `DefaultColorsSet` bumps the
         // generation immediately, so a still-in-flight probe for the new
         // generation leaves `confirmed` one generation stale until its
-        // reply lands, and reading it during that window would paint a
-        // superseded colorscheme's disambiguated colors onto the new one's
-        // frame. Falling back to the raw (possibly wire-ambiguous) values
-        // for that window matches this crate's existing pre-probe-reply
-        // behavior, self-correcting the moment the fresh reply arrives.
-        let (fg, bg) = match hl.confirmed {
-            Some(p) if p.generation == hl.probe_generation => (p.fg, p.bg),
-            _ => (hl.default_fg, hl.default_bg),
+        // reply lands. `fg`'s wire value carries no equivalent ambiguity
+        // (nvim always sends a genuine color or -1/None for it, decoded
+        // upstream), so it falls straight back to the raw wire value for
+        // that window, self-correcting the moment the fresh reply arrives.
+        let fg = match hl.confirmed {
+            Some(p) if p.generation == hl.probe_generation => p.fg,
+            _ => hl.default_fg,
+        };
+        // `bg`, unlike `fg`, has a genuinely ambiguous wire encoding: nvim
+        // sends 0 both for "Normal has no background" and for a real
+        // `guibg=#000000`. Painting that 0 before it is disambiguated is
+        // exactly the black-flash this branch exists to prevent, so an
+        // in-flight (generation-mismatched) ambiguous zero is held back
+        // rather than painted: it prefers the last confirmed value this
+        // session has ever seen (a stale-but-real prior probe reply, or a
+        // value the theme cache seeded with a matching generation) over the
+        // raw wire zero, and only degrades to "unset" when no confirmed
+        // value has ever existed at all (a true cold start with no cache
+        // hit). A non-zero wire value carries no such ambiguity and keeps
+        // applying immediately, exactly like `fg`.
+        let bg = match hl.confirmed {
+            Some(p) if p.generation == hl.probe_generation => p.bg,
+            _ if hl.default_bg == Some(0) => hl.confirmed.and_then(|p| p.bg),
+            _ => hl.default_bg,
         };
         let mut theme = Self {
             fg,
@@ -216,10 +232,13 @@ mod tests {
 
     #[test]
     fn from_hl_derives_default_colors_as_normal() {
-        let hl = table_with(Some(0xFFFFFF), Some(0x000000), 1, no_attrs());
+        // bg is deliberately non-zero here: 0 is the wire-ambiguous case
+        // covered by its own dedicated tests below, not this plain
+        // straight-line-derivation one.
+        let hl = table_with(Some(0xFFFFFF), Some(0x123456), 1, no_attrs());
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.fg, Some(0xFFFFFF));
-        assert_eq!(theme.bg, Some(0x000000));
+        assert_eq!(theme.bg, Some(0x123456));
     }
 
     /// Derivation stability: the same `HlTable` state always derives an
@@ -452,15 +471,66 @@ mod tests {
         assert_eq!(theme.bg, Some(0));
     }
 
-    /// Before any probe reply has ever landed (`confirmed: None`, the
-    /// startup/cold-start state), derivation falls back to the raw wire
-    /// value for the window between a `DefaultColorsSet` and its probe's
-    /// eventual reply, rather than blocking the first paint on an RPC round
-    /// trip.
+    /// Cold start: no probe reply has ever landed for this session
+    /// (`confirmed: None`) and no theme cache seeded one either, so an
+    /// ambiguous wire zero has no confirmed value to fall back to at all.
+    /// Derivation treats it as unset rather than painting the raw wire
+    /// zero, so a transparent config never flashes black on its very first
+    /// `DefaultColorsSet` while the disambiguating probe is still in
+    /// flight. `fg` carries no such ambiguity and still reads the raw wire
+    /// value immediately.
     #[test]
-    fn no_probe_reply_yet_falls_back_to_the_raw_wire_value() {
+    fn cold_start_ambiguous_wire_zero_with_no_confirmed_history_stays_unset() {
         let hl = table_with(Some(0x123456), Some(0x0), 1, no_attrs());
         assert_eq!(hl.confirmed, None);
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(theme.bg, None);
+        assert_eq!(theme.fg, Some(0x123456));
+    }
+
+    /// Warm start: a confirmed value already exists from earlier this
+    /// session (or, in production, from a cache seed carrying a matching
+    /// generation -- see `theme_cache::seed_hl_table`), but it is now stale
+    /// relative to a fresh `DefaultColorsSet`'s bumped generation, whose own
+    /// probe reply has not landed yet. An ambiguous wire zero in that window
+    /// prefers the stale-but-real confirmed value over the raw wire zero,
+    /// so a colorscheme that was already known to be transparent never
+    /// flashes black while its new probe is in flight.
+    /// Disconfirm: reverting to the raw-wire fallback for this branch makes
+    /// this assert `Some(0)` instead of `None` -- exactly the black flash
+    /// this branch exists to remove.
+    #[test]
+    fn warm_start_ambiguous_wire_zero_prefers_the_stale_confirmed_value_while_a_probe_is_in_flight()
+    {
+        let mut hl = table_with(Some(0xF8F8F2), Some(0), 1, no_attrs());
+        hl.probe_generation = 2;
+        hl.confirmed = Some(crate::hl::ProbedDefaults {
+            generation: 1,
+            fg: Some(0xF8F8F2),
+            bg: None,
+        });
+        let theme = Theme::from_hl(&hl);
+        assert_eq!(
+            theme.bg, None,
+            "a stale-but-known transparent bg must not be superseded by the raw wire zero"
+        );
+    }
+
+    /// The colorscheme-switch case: a session was already confirmed
+    /// genuinely black (not transparent), and a newer `DefaultColorsSet`'s
+    /// probe is now in flight. The stale confirmed value it falls back to
+    /// is itself `Some(0)`, so the frame keeps painting black through the
+    /// switch rather than flashing transparent -- "prefer the last known
+    /// value" cuts both directions, not just toward `None`.
+    #[test]
+    fn warm_start_ambiguous_wire_zero_keeps_a_stale_confirmed_black_while_a_probe_is_in_flight() {
+        let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
+        hl.probe_generation = 2;
+        hl.confirmed = Some(crate::hl::ProbedDefaults {
+            generation: 1,
+            fg: Some(0xFFFFFF),
+            bg: Some(0),
+        });
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.bg, Some(0));
     }

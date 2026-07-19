@@ -1221,4 +1221,64 @@ mod tests {
             "a stale-generation reply must not be recorded"
         );
     }
+
+    /// A colorscheme switch mid-session: `Normal` goes from confirmed
+    /// transparent to a wire-ambiguous zero that will turn out to be
+    /// genuinely black, once its own probe replies. Between the switch's
+    /// `DefaultColorsSet` and that reply, `Theme::from_hl` must keep
+    /// reading the *old* confirmed value (still transparent) rather than
+    /// painting the new, not-yet-disambiguated wire zero -- only once the
+    /// matching reply lands does the theme converge on black.
+    #[test]
+    fn colorscheme_switch_to_ambiguous_zero_holds_the_prior_confirmed_value_until_its_own_probe_replies(
+    ) {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation: 1,
+                fg: Some(0xF8F8F2),
+                bg: None,
+            },
+        );
+        assert_eq!(crate::theme::Theme::from_hl(&m.engine.hl).bg, None);
+
+        // the colorscheme switch: a second DefaultColorsSet, still an
+        // ambiguous wire zero, bumps the generation and starts a fresh probe
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::DefaultColorsSet {
+                fg: Some(0xFFFFFF),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        assert_eq!(
+            crate::theme::Theme::from_hl(&m.engine.hl).bg,
+            None,
+            "must keep the prior confirmed transparent value while the new probe is in flight"
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation: 2,
+                fg: Some(0xFFFFFF),
+                bg: Some(0),
+            },
+        );
+        assert_eq!(
+            crate::theme::Theme::from_hl(&m.engine.hl).bg,
+            Some(0),
+            "must converge on the new theme's genuinely-black bg once its probe replies"
+        );
+    }
 }

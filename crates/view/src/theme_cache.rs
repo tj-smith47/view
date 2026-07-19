@@ -14,7 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use view_core::hl::{HlAttr, HlTable};
+use view_core::hl::{HlAttr, HlTable, ProbedDefaults};
 use view_core::theme::{ResolvedStyle, Theme};
 
 /// The on-disk cache format version this build writes and the newest
@@ -327,9 +327,24 @@ const SEED_HL_ID_BASE: u64 = u64::MAX;
 /// channels a real `hl_attr_define`/`hl_group_set` pair would populate, so
 /// the first real batch of those events overwrites this seed with zero
 /// extra branching once it arrives.
+///
+/// Also seeds `hl.confirmed` at the table's current `probe_generation`, not
+/// just the raw `default_fg`/`default_bg` pair: `Theme::from_hl` only trusts
+/// a cached bg over a fresh, still-ambiguous wire zero when a confirmed
+/// value already exists, so a cache hit that stopped at the raw pair would
+/// still let attach's first `default_colors_set` flash black on a
+/// transparent config every single startup -- the exact symptom this
+/// seeding closes. The cache only ever stores an already-honest `Theme`
+/// (never a wire-ambiguous raw value -- see `store`'s caller), so re-marking
+/// it "confirmed" here is not fabricating certainty that was never earned.
 pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
     hl.default_fg = theme.fg;
     hl.default_bg = theme.bg;
+    hl.confirmed = Some(ProbedDefaults {
+        generation: hl.probe_generation,
+        fg: theme.fg,
+        bg: theme.bg,
+    });
     let entries: [(&str, ResolvedStyle); 7] = [
         ("StatusLine", theme.status_line),
         ("TabLine", theme.tab_line),
@@ -666,6 +681,69 @@ mod tests {
         assert_eq!(derived.bg, Some(0x222222));
         assert_eq!(derived.status_line, cached_theme.status_line);
         assert_eq!(derived.pmenu_sel, cached_theme.pmenu_sel);
+    }
+
+    /// Seeding does not stop at the raw `default_fg`/`default_bg` pair, it
+    /// also marks the cached theme `confirmed` at the table's current
+    /// generation -- otherwise a cached, already-disambiguated bg would
+    /// still lose to a fresh, wire-ambiguous `default_colors_set` on the
+    /// very next attach, reintroducing the black flash this seeding exists
+    /// to prevent.
+    #[test]
+    fn seed_hl_table_marks_the_cached_theme_confirmed_at_the_current_generation() {
+        let cached_theme = Theme {
+            fg: Some(0xF8F8F2),
+            bg: None,
+            ..Theme::default()
+        };
+        let mut hl = empty_hl_table();
+        seed_hl_table(&mut hl, &cached_theme);
+        let confirmed = hl.confirmed.expect("seeding must record a confirmed value");
+        assert_eq!(confirmed.generation, hl.probe_generation);
+        assert_eq!(confirmed.fg, Some(0xF8F8F2));
+        assert_eq!(confirmed.bg, None);
+    }
+
+    /// End-to-end warm-start property spanning cache seeding and live
+    /// derivation together: a cached transparent theme, seeded pre-attach,
+    /// must survive attach's own `default_colors_set` -- which resends the
+    /// same wire-ambiguous zero every single startup -- without flashing
+    /// black while that event's own probe reply is still in flight. Without
+    /// the confirmed seed (reverting to a raw-pair-only seed), `Theme::from_hl`
+    /// would read the fresh ambiguous zero directly and this would assert
+    /// `Some(0)` instead of `None`.
+    #[test]
+    fn a_seeded_transparent_theme_survives_attachs_own_ambiguous_default_colors_set() {
+        let cached_theme = Theme {
+            fg: Some(0xF8F8F2),
+            bg: None,
+            ..Theme::default()
+        };
+        let mut hl = empty_hl_table();
+        seed_hl_table(&mut hl, &cached_theme);
+        assert_eq!(
+            Theme::from_hl(&hl).bg,
+            None,
+            "seeded state must paint pre-attach"
+        );
+
+        // attach's own default_colors_set resends the same wire-ambiguous
+        // zero the real bug report always reproduces with
+        let mut model = view_core::model::Model::new();
+        model.engine.hl = hl;
+        let _ = view_core::update::update(
+            &mut model,
+            view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0),
+                sp: None,
+            }]),
+        );
+        assert_eq!(
+            Theme::from_hl(&model.engine.hl).bg,
+            None,
+            "the seeded confirmed value must hold while attach's probe is in flight"
+        );
     }
 
     #[test]

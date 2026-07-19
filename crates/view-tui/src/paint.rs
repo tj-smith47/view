@@ -515,6 +515,63 @@ mod tests {
         );
     }
 
+    /// The warm-start counterpart to the test above: a theme cache seeded a
+    /// confirmed transparent bg *before* attach (mirrored here by setting
+    /// `hl.confirmed` directly, the same state `theme_cache::seed_hl_table`
+    /// produces), and attach's own `default_colors_set` then resends the
+    /// same wire-ambiguous zero the real bug report always reproduces with
+    /// -- before its own probe reply has landed. The frame must still carry
+    /// `Color::Reset`, never an explicit black, for that entire in-flight
+    /// window: painting the raw wire zero here is exactly the black flash
+    /// the user reported on every startup of a transparent config, even
+    /// with a warm cache that already knew the answer.
+    /// Disconfirm: reverting `Theme::from_hl`'s ambiguous-bg branch to the
+    /// raw-wire fallback (its pre-fix shape) makes this assert
+    /// `Color::Rgb(0,0,0)` instead -- the warm-start frame paints black.
+    #[test]
+    fn warm_start_confirmed_transparent_bg_survives_attachs_ambiguous_default_colors_set() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 4,
+            height: 1,
+        });
+        model.engine.grid.apply(GridOp::PutLine {
+            row: 0,
+            col_start: 0,
+            cells: vec![("x".into(), 0, 1)],
+        });
+        // mirrors theme_cache::seed_hl_table's pre-attach state: a confirmed
+        // value at the table's starting generation, from a prior session's
+        // cached, already-disambiguated theme
+        model.engine.hl.confirmed = Some(view_core::hl::ProbedDefaults {
+            generation: model.engine.hl.probe_generation,
+            fg: Some(0xF8F8F2),
+            bg: None,
+        });
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0), // wire-ambiguous: nvim sends 0 for "unset"
+                sp: None,
+            },
+        );
+        // deliberately no HlProbeReply yet: the probe this DefaultColorsSet
+        // just triggered is still in flight
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(4, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+
+        assert_eq!(
+            buf[(0, 0)].bg,
+            ratatui::style::Color::Reset,
+            "a warm-cached transparent bg must not flash black while attach's probe is in flight"
+        );
+    }
+
     /// The counterpart: a probe reply that confirms `bg = 0` (a genuinely
     /// black theme) keeps painting an explicit black cell rather than being
     /// conflated with the unset case above.
