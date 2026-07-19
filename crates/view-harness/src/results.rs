@@ -1,9 +1,8 @@
 //! The compat run's output shape: `compat/results.json`, one [`ScenarioResult`]
 //! per scenario file the `compat` subcommand drove. A committed library type
 //! (not an ad hoc `serde_json::json!` blob assembled in `bin/oracle.rs`) so
-//! a future matrix-filling and evidence-page-rendering consumer can
-//! deserialize the exact shape a run produced instead of re-deriving it
-//! from field-name guesses.
+//! the evidence-page renderer ([`crate::page`]) deserializes the exact
+//! shape a run produced instead of re-deriving it from field-name guesses.
 //!
 //! The field set mirrors the design spec's own compat-evidence row schema:
 //! "plugin, version, engine pin, scenario, state, result, date".
@@ -89,8 +88,8 @@ pub fn write_results(path: &Path, results: &ResultsFile) -> Result<(), ResultsEr
 }
 
 /// Reads and parses `path` as a [`ResultsFile`] -- the inverse of
-/// [`write_results`], for a future consumer that reads a prior run's
-/// results back rather than re-running the whole compat suite.
+/// [`write_results`], for a consumer (the `page` subcommand) that reads a
+/// prior run's results back rather than re-running the whole compat suite.
 ///
 /// # Errors
 ///

@@ -32,7 +32,10 @@ use clap::{Parser, Subcommand};
 use portable_pty::CommandBuilder;
 use view_harness::corpus::{self, CorpusEntry};
 use view_harness::fuzz;
-use view_harness::results::{write_results, ResultsFile, ScenarioResult, ScenarioStatus};
+use view_harness::page;
+use view_harness::results::{
+    load_results, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
+};
 use view_harness::scenario::{self, ScenarioFile};
 use view_oracle::compat::{CompatSession, PluginClass, ScenarioState};
 use view_oracle::{
@@ -156,6 +159,12 @@ enum Command {
         #[arg(default_value = "compat/scenarios")]
         path: PathBuf,
     },
+    /// Renders the compat-evidence page `docs/compat.md` from the latest
+    /// `compat/results.json`, refusing if the recorded engine pin no
+    /// longer matches `.engine-pin` (`view_harness::page` holds the
+    /// rendering and staleness logic; this arm only reads inputs and
+    /// writes the file).
+    Page,
 }
 
 fn main() -> Result<()> {
@@ -167,6 +176,7 @@ fn main() -> Result<()> {
         }) => minimize_command(&path, inject_divergence_at),
         Some(Command::Fuzz { seed, rounds, keys }) => fuzz_command(seed, rounds, keys),
         Some(Command::Compat { path }) => compat_command(&path),
+        Some(Command::Page) => page_command(),
         None => run_command(&cli.path),
     }
 }
@@ -1112,8 +1122,9 @@ fn state_str(state: ScenarioState) -> &'static str {
 /// compat-evidence schema ("plugin, version, engine pin, ..."). Tries
 /// `scenario.plugin` as a literal lockfile key first (a plugin spec'd
 /// without lazy.nvim's default `<repo>.nvim` naming), then with a `.nvim`
-/// suffix (lazy.nvim's own default when a spec sets no custom `name`,
-/// matching every plugin in the committed `heavy` fixture). Returns `None`
+/// suffix (lazy.nvim's own default when a spec sets no custom `name`),
+/// then with a `.lua` suffix (the other repo-naming convention in the
+/// committed `heavy` fixture: `nvim-tree.lua`). Returns `None`
 /// (never an error) for a fixture-less scenario, a fixture with no
 /// lockfile, or a plugin name the lockfile does not contain -- a missing
 /// version is a gap in the report, not a reason to fail the scenario that
@@ -1127,10 +1138,11 @@ fn resolve_plugin_version(scenario: &ScenarioFile) -> Option<String> {
     let text = std::fs::read_to_string(lockfile_path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&text).ok()?;
     let obj = json.as_object()?;
-    let suffixed = format!("{}.nvim", scenario.plugin);
-    let key = obj
-        .keys()
-        .find(|k| k.as_str() == scenario.plugin || k.as_str() == suffixed)?;
+    let suffixed_nvim = format!("{}.nvim", scenario.plugin);
+    let suffixed_lua = format!("{}.lua", scenario.plugin);
+    let key = obj.keys().find(|k| {
+        k.as_str() == scenario.plugin || k.as_str() == suffixed_nvim || k.as_str() == suffixed_lua
+    })?;
     let commit = obj.get(key)?.get("commit")?.as_str()?;
     Some(commit.get(..7).unwrap_or(commit).to_string())
 }
@@ -1370,7 +1382,7 @@ fn print_scenario_result(result: &ScenarioResult) {
 
 /// The `compat [PATH]` subcommand: every scenario under `path` (default
 /// `compat/scenarios`), reported per [`print_scenario_result`] and written
-/// to `compat/results.json` for a future matrix/evidence-page consumer.
+/// to `compat/results.json` for the `page` subcommand to render.
 /// Exit code: 0 unless at least one scenario reports
 /// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no daily config on
 /// this host, the expected state in CI) does not fail the run, since there
@@ -1431,6 +1443,37 @@ fn compat_command(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The `page` subcommand: reads the latest `compat/results.json` and
+/// `.engine-pin`, renders the compat-evidence page via
+/// [`view_harness::page::render_page`], and writes `docs/compat.md`. The
+/// staleness refusal lives in the renderer; a stale pin surfaces here as
+/// an `Err`, which exits 1 with the drift named.
+///
+/// # Errors
+///
+/// Returns an error if `compat/results.json` or `.engine-pin` cannot be
+/// read, the results are empty or stale relative to the current pin, or
+/// `docs/compat.md` cannot be written.
+fn page_command() -> Result<()> {
+    let root = workspace_root();
+    let results = load_results(&root.join("compat").join("results.json"))?;
+    let pin = current_engine_pin()?;
+    let rendered = page::render_page(&results, &pin)?;
+
+    let docs_dir = root.join("docs");
+    std::fs::create_dir_all(&docs_dir)
+        .with_context(|| format!("creating {}", docs_dir.display()))?;
+    let out_path = docs_dir.join("compat.md");
+    std::fs::write(&out_path, &rendered.markdown)
+        .with_context(|| format!("writing {}", out_path.display()))?;
+
+    println!(
+        "wrote docs/compat.md ({} rows, pin {}, {})",
+        rendered.rows, rendered.engine_pin, rendered.run_date
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1451,6 +1494,30 @@ mod tests {
         assert_eq!(civil_from_days(1000), (1972, 9, 27));
         assert_eq!(civil_from_days(19570), (2023, 8, 1));
         assert_eq!(civil_from_days(20653), (2026, 7, 19));
+    }
+
+    /// The committed heavy fixture pins nvim-tree under its real repo name
+    /// `nvim-tree.lua`, while the scenario names the plugin `nvim-tree`:
+    /// the lockfile lookup must bridge the `.lua` repo-naming convention
+    /// the same way it bridges lazy.nvim's default `.nvim` suffix, or the
+    /// evidence page's version cell goes blank for a plugin the lockfile
+    /// does pin.
+    #[test]
+    fn plugin_version_resolves_lua_suffixed_lockfile_key() {
+        let scenario = ScenarioFile {
+            plugin: "nvim-tree".to_string(),
+            class: PluginClass::UiOwning,
+            fixture: Some("heavy".to_string()),
+            state: ScenarioState::Present,
+            cold_bootstrap: false,
+            steps: Vec::new(),
+        };
+        let version = resolve_plugin_version(&scenario);
+        assert_eq!(
+            version.as_deref(),
+            Some("4213bd6"),
+            "heavy fixture's lazy-lock.json pins nvim-tree.lua at 4213bd6..."
+        );
     }
 
     #[test]
