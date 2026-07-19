@@ -136,13 +136,22 @@ impl EngineSession {
     /// before `--clean` was added here, with a floating popup swallowing
     /// the typed `i` instead of entering insert mode.
     ///
+    /// Also always spawns with `-n` (no swap file): this crate's own test
+    /// binary spawns multiple `EngineSession`s (and, in `reference.rs`,
+    /// `ReferenceSession`s) across parallel test threads, each typing into
+    /// an unnamed buffer in the same working directory. Two unnamed-buffer
+    /// swap files colliding there produces a live `E303` recovery error on
+    /// whichever side loses the race, not a hang or a decode error. A
+    /// short-lived oracle session has no crash to recover from, so there is
+    /// nothing this trades away.
+    ///
     /// # Errors
     ///
     /// Returns [`OracleError::Engine`] if the process fails to spawn or the
     /// `ui_attach` handshake fails or times out.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(EngineConfig {
-            extra_args: vec!["--clean".into()],
+            extra_args: vec!["--clean".into(), "-n".into()],
             ..EngineConfig::default()
         })?;
         engine.handle.ui_attach(cols, rows)?;

@@ -74,9 +74,22 @@ impl RefGrid {
     fn resize(&mut self, width: u16, height: u16) {
         let mut new_rows = vec![vec![Cell::blank(); usize::from(width)]; usize::from(height)];
         for r in 0..self.height.min(height) {
+            // checked access, matching view-core's Grid house style: bounds
+            // here are safe by construction (r/c are already clamped to the
+            // smaller of old/new dims), but a future loosened clamp should
+            // degrade instead of panic
+            let (Some(old_row), Some(new_row)) = (
+                self.rows.get(usize::from(r)),
+                new_rows.get_mut(usize::from(r)),
+            ) else {
+                continue;
+            };
             for c in 0..self.width.min(width) {
-                new_rows[usize::from(r)][usize::from(c)] =
-                    self.rows[usize::from(r)][usize::from(c)].clone();
+                if let (Some(old_cell), Some(new_cell)) =
+                    (old_row.get(usize::from(c)), new_row.get_mut(usize::from(c)))
+                {
+                    *new_cell = old_cell.clone();
+                }
             }
         }
         self.width = width;
@@ -139,18 +152,29 @@ impl RefGrid {
             return;
         }
 
+        // checked access throughout, matching view-core's Grid house style:
+        // top/bot/left/right are already clamped above, but a future
+        // loosened clamp should degrade instead of panic
         let mut snapshot = Vec::with_capacity(usize::from(bot - top));
         for r in top..bot {
             let mut row = Vec::with_capacity(usize::from(right - left));
-            for c in left..right {
-                row.push(self.rows[usize::from(r)][usize::from(c)].clone());
+            if let Some(src_row) = self.rows.get(usize::from(r)) {
+                for c in left..right {
+                    if let Some(cell) = src_row.get(usize::from(c)) {
+                        row.push(cell.clone());
+                    }
+                }
             }
             snapshot.push(row);
         }
 
         for r in top..bot {
-            for c in left..right {
-                self.rows[usize::from(r)][usize::from(c)] = Cell::blank();
+            if let Some(row_cells) = self.rows.get_mut(usize::from(r)) {
+                for c in left..right {
+                    if let Some(slot) = row_cells.get_mut(usize::from(c)) {
+                        *slot = Cell::blank();
+                    }
+                }
             }
         }
 
@@ -163,8 +187,13 @@ impl RefGrid {
                 continue;
             }
             let dst_row = saturate_u16(dst_row as u64);
+            let Some(dst_row_cells) = self.rows.get_mut(usize::from(dst_row)) else {
+                continue;
+            };
             for (j, cell) in row.into_iter().enumerate() {
-                self.rows[usize::from(dst_row)][usize::from(left) + j] = cell;
+                if let Some(slot) = dst_row_cells.get_mut(usize::from(left) + j) {
+                    *slot = cell;
+                }
             }
         }
     }
@@ -192,19 +221,41 @@ fn cmd_key(cmd: &str) -> String {
     format!("<Cmd>{cmd}<CR>")
 }
 
+/// `UiEvent::Unknown` names a real `--clean` nvim session emits on every
+/// healthy run, pinned from an empirical capture of the pinned nvim build
+/// attached with the full `ext_*` set (`--clean` startup through a plain
+/// insert and back to idle). [`ReferenceSession::unknown_events`] filters
+/// these out so the accessor stays empty on a healthy run instead of
+/// permanently drowning a genuinely new event name in the same noise; an
+/// nvim upgrade that starts emitting a name outside this list fails
+/// `known_unmodeled_events_match_a_live_session` loudly rather than
+/// silently widening what `unknown_events` reports as novel.
+const KNOWN_UNMODELED_EVENTS: &[&str] = &[
+    "chdir",
+    "msg_showmode",
+    "option_set",
+    "set_icon",
+    "set_title",
+    "update_menu",
+    "win_viewport",
+];
+
 /// Engine-attached headless driver applying the decoded redraw stream with
 /// [`RefGrid`] instead of view's own `Model`/`Grid`: the independent second
-/// opinion T4/T5/T6 diff against `EngineSession`'s decoded screen.
+/// opinion that parity harnesses diff against `EngineSession`'s decoded
+/// screen.
 pub struct ReferenceSession {
     engine: Engine,
     pump: DamagePump,
     grid: RefGrid,
     mode: String,
-    /// Names of `UiEvent::Unknown` events observed, in arrival order: an
-    /// unrecognized redraw event class is a potential divergence source the
-    /// operator must see, never silently dropped (part of the quiesce
-    /// protocol's contract, not just an apply-time detail).
-    unknown_events: Vec<String>,
+    /// Names of `UiEvent::Unknown` events observed, in arrival order,
+    /// unfiltered: an unrecognized redraw event class is a potential
+    /// divergence source the operator must see, never silently dropped
+    /// (part of the quiesce protocol's contract, not just an apply-time
+    /// detail). See [`unknown_events`](Self::unknown_events) for the
+    /// filtered view novelty-checking code should read instead.
+    unknown_events_raw: Vec<String>,
     next_marker_seq: u64,
 }
 
@@ -221,10 +272,9 @@ impl ReferenceSession {
     /// alongside another one (`EngineSession`, or a real editor session) in
     /// the same working directory, and two unnamed-buffer swap files
     /// colliding there produces a live `E303` recovery error on whichever
-    /// side loses the race, not a hang or a decode error -- live-verified
-    /// against a real `EngineSession` run concurrently in the same process.
-    /// A short-lived oracle double has no crash to recover from, so there is
-    /// nothing this trades away.
+    /// side loses the race, not a hang or a decode error. A short-lived
+    /// oracle double has no crash to recover from, so there is nothing this
+    /// trades away.
     ///
     /// # Errors
     ///
@@ -244,7 +294,8 @@ impl ReferenceSession {
 
     /// Same as [`spawn`](Self::spawn), but with a caller-supplied
     /// [`EngineConfig`] (a non-default `nvim_bin`, timeout, or extra
-    /// arguments) instead of the `--clean`-only default.
+    /// arguments) instead of [`spawn`](Self::spawn)'s own `--clean` + `-n`
+    /// default.
     ///
     /// # Errors
     ///
@@ -259,7 +310,7 @@ impl ReferenceSession {
             pump,
             grid: RefGrid::new(),
             mode: String::new(),
-            unknown_events: Vec::new(),
+            unknown_events_raw: Vec::new(),
             next_marker_seq: 0,
         };
         session.install_quiesce_hooks()?;
@@ -415,16 +466,37 @@ impl ReferenceSession {
         &self.mode
     }
 
-    /// Names of every `UiEvent::Unknown` event observed so far, in arrival
-    /// order. An unrecognized redraw event class is a potential divergence
-    /// source: this crate's own `UiEvent` is not `#[non_exhaustive]`, so a
-    /// genuinely new *structured* variant fails to compile here rather than
-    /// falling through silently, but a wire event nvim itself sends under a
-    /// name `view-engine`'s decoder does not yet recognize still decodes to
-    /// `Unknown` and must stay visible to whoever reads a run's output.
+    /// Names of every `UiEvent::Unknown` event observed so far that are
+    /// *not* in [`KNOWN_UNMODELED_EVENTS`], in arrival order. A real
+    /// `--clean` nvim session emits several event names view-engine's
+    /// decoder does not model as structured `UiEvent` variants on every
+    /// healthy run (`option_set`, `win_viewport`, `set_title`, and the rest
+    /// of `KNOWN_UNMODELED_EVENTS`); returning those unfiltered here would
+    /// make this accessor permanently non-empty and so operationally inert
+    /// as a novelty signal. Filtering them out means a genuinely new event
+    /// name -- one an nvim upgrade started emitting that this list has not
+    /// been updated to expect -- is the only thing that ever shows up here,
+    /// and an empty result is what a healthy run looks like. See
+    /// [`raw_unknown_events`](Self::raw_unknown_events) for the unfiltered
+    /// log.
     #[must_use]
-    pub fn unknown_events(&self) -> &[String] {
-        &self.unknown_events
+    pub fn unknown_events(&self) -> Vec<&str> {
+        self.unknown_events_raw
+            .iter()
+            .map(String::as_str)
+            .filter(|name| !KNOWN_UNMODELED_EVENTS.contains(name))
+            .collect()
+    }
+
+    /// The unfiltered arrival-order log [`unknown_events`](Self::unknown_events)
+    /// filters against [`KNOWN_UNMODELED_EVENTS`]. Kept as a separate
+    /// accessor for tests and diagnostics that want to see every
+    /// `UiEvent::Unknown` name a run actually produced, known-unmodeled or
+    /// not (e.g. pinning that `KNOWN_UNMODELED_EVENTS` still matches a live
+    /// session).
+    #[must_use]
+    pub fn raw_unknown_events(&self) -> &[String] {
+        &self.unknown_events_raw
     }
 
     /// Applies one decoded event to `RefGrid` (or to this session's
@@ -440,6 +512,14 @@ impl ReferenceSession {
     /// grids are already structurally equalized on it; ext-layer
     /// correctness is covered by state probes and view's own unit suites,
     /// not by this oracle's grid diff.
+    ///
+    /// `clamp_dim`/`saturate_u16` (from `view_core::events`, the same
+    /// helpers `EngineSession`'s own decode path normalizes through) sit
+    /// upstream of both `RefGrid` and `view_core::grid::Grid`: a wrong
+    /// clamp there would be common-mode between the two appliers and so
+    /// invisible to this module's differential, which only ever proves the
+    /// two sides agree, not that either normalized correctly in the first
+    /// place.
     fn apply(&mut self, ev: UiEvent) {
         match ev {
             UiEvent::GridResize { width, height, .. } => {
@@ -480,7 +560,7 @@ impl ReferenceSession {
                 self.mode = mode;
             }
             UiEvent::Unknown { name } => {
-                self.unknown_events.push(name);
+                self.unknown_events_raw.push(name);
             }
             // discarded for grid purposes: no cell content of theirs ever
             // reaches the grid while ext_hlstate/ext_cmdline/ext_messages/
@@ -573,17 +653,13 @@ mod tests {
             reference_side.screen_text()
         );
 
-        // live-verified: a --clean startup plus a plain insert already emits
-        // several event names view-engine's decoder does not yet model
-        // (option_set, set_icon, set_title, chdir, update_menu,
-        // msg_showmode, win_viewport), so asserting zero here would be
-        // asserting something never true on a real engine. The Unknown-event
-        // policy only requires these stay counted and visible, never
-        // silently dropped -- which this assertion proves by reading the
-        // accessor at all, not by demanding an empty result.
+        // the raw (unfiltered) log stays informative here even though this
+        // test doesn't assert on it: see unknown_events_is_empty_on_a_
+        // healthy_session and known_unmodeled_events_match_a_live_session
+        // below for the assertions this event stream backs.
         println!(
-            "unknown redraw events observed: {:?}",
-            reference_side.unknown_events()
+            "raw unknown redraw events observed: {:?}",
+            reference_side.raw_unknown_events()
         );
 
         let engine_text = engine_side.screen_text();
@@ -635,6 +711,67 @@ mod tests {
         assert_ne!(
             engine_region, reference_region,
             "corrupting a RefGrid cell must break the comparison, not pass vacuously"
+        );
+    }
+
+    /// The operational contract `unknown_events` exists for: a healthy
+    /// `--clean` startup plus a plain insert must report zero genuinely
+    /// novel event names, so any future non-empty result is real signal
+    /// rather than the permanent background noise the raw log carries.
+    #[test]
+    fn unknown_events_is_empty_on_a_healthy_session() {
+        let mut reference_side =
+            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        reference_side
+            .input("ihello world<Esc>")
+            .expect("input against ReferenceSession");
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        assert!(
+            reference_side.unknown_events().is_empty(),
+            "unknown_events() reported a genuinely novel event name on a healthy \
+             run: {:?} (raw log: {:?})",
+            reference_side.unknown_events(),
+            reference_side.raw_unknown_events()
+        );
+    }
+
+    /// Pins `KNOWN_UNMODELED_EVENTS` against what the live pinned nvim
+    /// build actually emits, in both directions: an nvim upgrade that
+    /// starts emitting a name outside this list fails here (that name
+    /// would otherwise slip straight through
+    /// `unknown_events_is_empty_on_a_healthy_session` unnoticed as
+    /// known-unmodeled noise), and a stale entry this build no longer
+    /// emits fails here too, rather than sitting in the const forever
+    /// unverified.
+    #[test]
+    fn known_unmodeled_events_match_a_live_session() {
+        let mut reference_side =
+            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        reference_side
+            .input("ihello world<Esc>")
+            .expect("input against ReferenceSession");
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        let observed: std::collections::BTreeSet<&str> = reference_side
+            .raw_unknown_events()
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let known: std::collections::BTreeSet<&str> =
+            KNOWN_UNMODELED_EVENTS.iter().copied().collect();
+        assert_eq!(
+            observed, known,
+            "KNOWN_UNMODELED_EVENTS is stale against a live nvim run: an entry \
+             present in `observed` but missing from `known` means nvim now emits \
+             an event name view-engine does not model yet (a real divergence \
+             risk to investigate, not just re-pin); an entry present in `known` \
+             but missing from `observed` means nvim stopped emitting one this \
+             const still expects"
         );
     }
 
