@@ -29,8 +29,8 @@ use clap::{Parser, Subcommand};
 use view_harness::corpus::{self, CorpusEntry};
 use view_harness::fuzz;
 use view_oracle::{
-    compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, DivergenceKind,
-    EngineSession, ReferenceSession,
+    compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
+    ReferenceSession,
 };
 
 /// Terminal size every corpus entry runs at. Fixed rather than a
@@ -384,19 +384,23 @@ fn run_command(path: &Path) -> Result<()> {
 /// layers -- a mode disagreement does not imply a cursor disagreement --
 /// so treating every `Divergence::State` as interchangeable would let a
 /// minimizer legally reduce a mode-divergence input down to an unrelated
-/// cursor-only reproduction. The `view`/`reference` payload strings stay
-/// out of the signature regardless of field: they are exactly what is
-/// expected to shift as tokens drop out during reduction, the same reason
-/// a diverging grid row index is left out of [`DivergenceKind::Grid`],
-/// which stays coarse with no per-row identity. [`FailureSignature::Timeout`]
-/// covers the remaining case neither divergence variant reaches: which
-/// side(s) failed to settle. A minimizer must never shrink a divergent
-/// script toward an unrelated timeout, or a timing-out script toward an
-/// unrelated divergence, just because either one happens to count as "not
-/// PARITY".
+/// cursor-only reproduction. `State` and `Grid` are separate variants
+/// rather than one variant wrapping an `Option<String>`, so a `Grid`
+/// signature carrying a field name or a `State` signature missing one are
+/// not representable states a caller has to guard against. The
+/// `view`/`reference` payload strings stay out of the signature regardless
+/// of field: they are exactly what is expected to shift as tokens drop out
+/// during reduction, the same reason a diverging grid row index is left
+/// out of [`FailureSignature::Grid`], which stays coarse with no per-row
+/// identity. [`FailureSignature::Timeout`] covers the remaining case
+/// neither divergence variant reaches: which side(s) failed to settle. A
+/// minimizer must never shrink a divergent script toward an unrelated
+/// timeout, or a timing-out script toward an unrelated divergence, just
+/// because either one happens to count as "not PARITY".
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FailureSignature {
-    Divergence(DivergenceKind, Option<String>),
+    State(String),
+    Grid,
     Timeout {
         engine_settled: bool,
         reference_settled: bool,
@@ -405,10 +409,7 @@ enum FailureSignature {
 
 impl FailureSignature {
     /// Reads `outcome`'s failure shape, or `None` for clean PARITY --
-    /// nothing for a minimizer to reduce toward. The `Option<String>`
-    /// alongside a `Divergence` is the diverging field name for
-    /// `Divergence::State`, or `None` for `Divergence::Grid` (which has no
-    /// field-level identity to read).
+    /// nothing for a minimizer to reduce toward.
     fn from_outcome(outcome: &EntryOutcome) -> Option<Self> {
         if !outcome.engine_settled || !outcome.reference_settled {
             return Some(Self::Timeout {
@@ -416,12 +417,9 @@ impl FailureSignature {
                 reference_settled: outcome.reference_settled,
             });
         }
-        outcome.divergences.first().map(|d| {
-            let field = match d {
-                Divergence::State { field, .. } => Some(field.clone()),
-                Divergence::Grid { .. } => None,
-            };
-            Self::Divergence(d.kind(), field)
+        outcome.divergences.first().map(|d| match d {
+            Divergence::State { field, .. } => Self::State(field.clone()),
+            Divergence::Grid { .. } => Self::Grid,
         })
     }
 
@@ -533,18 +531,34 @@ struct FuzzSummary {
     error_count: u32,
 }
 
+/// The quiesce silence/deadline pair a fuzz campaign's probe and minimizer
+/// calls settle against, grouped into one value rather than two more
+/// positional `Duration` parameters on [`fuzz_rounds`]: the pairing itself
+/// is what must stay single-sourced (see that function's own docs), so
+/// giving it a name keeps a future caller from passing the two durations
+/// in the wrong order or from only one of them.
+#[derive(Debug, Clone, Copy)]
+struct QuiesceWindow {
+    silence: Duration,
+    deadline: Duration,
+}
+
 /// Drives `rounds` generated scripts through `probe`, an injectable
 /// closure seam matching the one [`ddmin`] already takes for its own
 /// candidate checks: a live campaign passes a closure that spawns nvim
 /// through [`run_tokens`]; a pinning test passes a fake one that returns a
-/// scripted result sequence with no engine involved. Every round's result
-/// is matched, never unwrapped with `?` -- a round's own probe failure (an
-/// eval_str reply that never arrives, distinct from and more severe than
-/// the settle-timeout `FailureSignature::Timeout` already covers) must not
-/// abort the whole campaign: a fuzz generator drawing from a wide alphabet
-/// will hit a session wedge sooner or later (live-verified: seed 42 hit
-/// one at round 6 of a 10-round run during this feature's own
-/// development), and every round after it deserves the same chance to run
+/// scripted result sequence with no engine involved. `quiesce` is the
+/// caller's already-derived timing window, threaded through rather than
+/// rederived here, so [`fuzz_command`] stays the one place that turns
+/// corpus defaults or a future CLI override into the timing values both
+/// the probe closure and this function's own minimizer call run at. Every
+/// round's result is matched, never unwrapped with `?` -- a
+/// round's own probe failure (an eval_str reply that never arrives,
+/// distinct from and more severe than the settle-timeout
+/// `FailureSignature::Timeout` already covers) must not abort the whole
+/// campaign: a wide-alphabet fuzz campaign will hit session wedges sooner
+/// or later, and each one is a finding worth recording, not a reason to
+/// abort the run -- every round after it deserves the same chance to run
 /// as if the wedge had never happened, exactly as `run_command`'s own
 /// per-entry error handling already treats one entry's error as that
 /// entry's failure, not the whole corpus run's. Swapping this match for
@@ -562,15 +576,12 @@ fn fuzz_rounds<P>(
     keys: usize,
     pin: &str,
     quarantine_dir: &Path,
+    quiesce: QuiesceWindow,
     mut probe: P,
 ) -> Result<FuzzSummary>
 where
     P: FnMut(&[String]) -> Result<EntryOutcome, view_oracle::OracleError>,
 {
-    let cols = COLS;
-    let rows = ROWS;
-    let silence = Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS);
-    let deadline = Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS);
     let mut summary = FuzzSummary::default();
 
     for round in 0..rounds {
@@ -581,11 +592,19 @@ where
                     continue;
                 };
                 match &target {
-                    FailureSignature::Divergence(..) => summary.divergence_count += 1,
+                    FailureSignature::State(_) | FailureSignature::Grid => {
+                        summary.divergence_count += 1;
+                    }
                     FailureSignature::Timeout { .. } => summary.timeout_count += 1,
                 }
-                let minimized =
-                    minimize_tokens(tokens, target.clone(), cols, rows, silence, deadline);
+                let minimized = minimize_tokens(
+                    tokens,
+                    target.clone(),
+                    COLS,
+                    ROWS,
+                    quiesce.silence,
+                    quiesce.deadline,
+                );
                 let path = quarantine_entry(quarantine_dir, seed, round, &minimized, pin)?;
                 println!(
                     "fuzz: round {round} ... {target:?}, quarantined to {}",
@@ -615,15 +634,22 @@ where
 /// scripts from `seed` (see [`fuzz::generate_round`]), drives each through
 /// [`run_tokens`] via [`fuzz_rounds`]'s probe seam, and for any round that
 /// is not clean PARITY, minimizes it toward its own failure shape and
-/// writes the (already minimized) result under `corpus/quarantine`.
+/// writes the (already minimized) result under `corpus/quarantine`. The
+/// sole site that turns the corpus quiesce defaults into a
+/// [`QuiesceWindow`]: both the probe closure below and `fuzz_rounds`' own
+/// internal minimizer call run at the same values threaded in from here,
+/// so a future CLI override only ever needs to change this one derivation
+/// to reach both.
 ///
 /// # Errors
 ///
 /// Returns an error if `.engine-pin` cannot be read or a quarantine entry
 /// cannot be written.
 fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
-    let silence = Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS);
-    let deadline = Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS);
+    let quiesce = QuiesceWindow {
+        silence: Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS),
+        deadline: Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS),
+    };
     let pin = current_engine_pin()?;
 
     let summary = fuzz_rounds(
@@ -632,7 +658,8 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
         keys,
         &pin,
         Path::new("corpus/quarantine"),
-        |tokens| run_tokens(tokens, COLS, ROWS, silence, deadline),
+        quiesce,
+        |tokens| run_tokens(tokens, COLS, ROWS, quiesce.silence, quiesce.deadline),
     )?;
 
     println!(
@@ -801,7 +828,7 @@ mod tests {
         let outcome = grid_divergence_outcome();
         assert_eq!(
             FailureSignature::from_outcome(&outcome),
-            Some(FailureSignature::Divergence(DivergenceKind::Grid, None))
+            Some(FailureSignature::Grid)
         );
     }
 
@@ -810,10 +837,7 @@ mod tests {
         let outcome = state_divergence_outcome("mode");
         assert_eq!(
             FailureSignature::from_outcome(&outcome),
-            Some(FailureSignature::Divergence(
-                DivergenceKind::State,
-                Some("mode".to_string())
-            ))
+            Some(FailureSignature::State("mode".to_string()))
         );
     }
 
@@ -830,7 +854,7 @@ mod tests {
 
     #[test]
     fn failure_signature_matches_requires_the_same_kind() {
-        let target = FailureSignature::Divergence(DivergenceKind::Grid, None);
+        let target = FailureSignature::Grid;
         assert!(target.matches(&grid_divergence_outcome()));
         assert!(!target.matches(&state_divergence_outcome("mode")));
 
@@ -856,12 +880,11 @@ mod tests {
 
     #[test]
     fn failure_signature_state_divergences_on_different_fields_do_not_match() {
-        // DivergenceKind::State alone is too coarse: a mode disagreement
+        // The field name alone distinguishes them: a mode disagreement
         // and a cursor disagreement are different bugs, so a minimizer
         // targeting one must reject a candidate that only reproduces the
-        // other, even though both carry DivergenceKind::State.
-        let mode_target =
-            FailureSignature::Divergence(DivergenceKind::State, Some("mode".to_string()));
+        // other, even though both are FailureSignature::State.
+        let mode_target = FailureSignature::State("mode".to_string());
         assert!(mode_target.matches(&state_divergence_outcome("mode")));
         assert!(!mode_target.matches(&state_divergence_outcome("cursor")));
         assert!(!mode_target.matches(&state_divergence_outcome("registers")));
@@ -874,8 +897,7 @@ mod tests {
         // Payload-insensitivity: row/content values are expected to shift
         // as tokens drop out during reduction, so only the field name --
         // never the view/reference contents -- is part of the identity.
-        let target =
-            FailureSignature::Divergence(DivergenceKind::State, Some("buffer_lines".to_string()));
+        let target = FailureSignature::State("buffer_lines".to_string());
         let outcome = EntryOutcome {
             engine_settled: true,
             reference_settled: true,
@@ -893,9 +915,9 @@ mod tests {
     fn failure_signature_grid_divergences_stay_coarse_on_row_index() {
         // Grid is deliberately not sharpened the way State was: a
         // diverging row index is exactly the kind of value expected to
-        // shift during reduction, same as DivergenceKind::Grid already
+        // shift during reduction, same as FailureSignature::Grid already
         // discards it.
-        let target = FailureSignature::Divergence(DivergenceKind::Grid, None);
+        let target = FailureSignature::Grid;
         let outcome = EntryOutcome {
             engine_settled: true,
             reference_settled: true,
@@ -1021,9 +1043,13 @@ mod tests {
         let rounds = 5u32;
         let keys = 10usize;
         let error_round = 2u32;
+        let quiesce = QuiesceWindow {
+            silence: Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS),
+            deadline: Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS),
+        };
         let mut probed_rounds: Vec<u32> = Vec::new();
 
-        let summary = fuzz_rounds(seed, rounds, keys, "test-pin", &dir, |_tokens| {
+        let summary = fuzz_rounds(seed, rounds, keys, "test-pin", &dir, quiesce, |_tokens| {
             let round = u32::try_from(probed_rounds.len()).unwrap_or(u32::MAX);
             probed_rounds.push(round);
             if round == error_round {
