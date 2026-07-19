@@ -49,19 +49,17 @@ pub fn interleave_schedule(samples_per_side: usize, block_size: usize, start: Si
     }
     let mut blocks = Vec::new();
     let mut taken = 0;
-    let mut side = start;
     while taken < samples_per_side {
         let count = block_size.min(samples_per_side - taken);
-        blocks.push(Block { side, count });
+        blocks.push(Block { side: start, count });
         // the same-position block for the other side, so both sides always
         // hold identical totals no matter where samples_per_side falls
         // relative to the block size
         blocks.push(Block {
-            side: side.other(),
+            side: start.other(),
             count,
         });
         taken += count;
-        side = start;
     }
     blocks
 }

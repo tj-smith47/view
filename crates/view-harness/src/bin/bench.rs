@@ -64,6 +64,14 @@ const FLOOD_LINES: usize = 3_000_000;
 
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// Parent of every per-cell scratch world. Lives under `target/` rather
+/// than the system temp dir because /tmp is commonly a RAM-backed tmpfs
+/// (a leaked fixture copy would cost memory, not disk) and `target/` is
+/// already the disk-backed, gitignored home of build byproducts.
+fn scratch_root() -> PathBuf {
+    workspace_root().join("target").join("bench-scratch")
+}
+
 #[derive(Parser)]
 #[command(
     name = "bench",
@@ -146,7 +154,7 @@ impl CellWorld {
             std::process::id(),
             SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let hermetic_dir = std::env::temp_dir().join(format!("view-bench-{id}"));
+        let hermetic_dir = scratch_root().join(format!("view-bench-{id}"));
         std::fs::create_dir_all(&hermetic_dir)
             .with_context(|| format!("creating {}", hermetic_dir.display()))?;
         let world = Self { hermetic_dir };
@@ -305,7 +313,8 @@ fn run_taps_row(
 ) -> Result<CellMetrics> {
     if !bins.taps_view.exists() {
         bail!(
-            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass              --taps-view-bin",
+            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass \
+             --taps-view-bin",
             bins.taps_view.display()
         );
     }
@@ -322,7 +331,8 @@ fn run_taps_row(
     );
     if overhead.p99() > TAP_OVERHEAD_BAR_US {
         bail!(
-            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the              input-path budget); the tap design must change before this row can be trusted",
+            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the \
+             input-path budget); the tap design must change before this row can be trusted",
             overhead.p99()
         );
     }
@@ -353,6 +363,7 @@ fn run_taps_row(
                 report::AbsoluteStats {
                     p50: dist.p50(),
                     p99: dist.p99(),
+                    max: dist.max(),
                     unit,
                     samples: dist.len(),
                     warmup: protocol.warmup,
@@ -501,6 +512,7 @@ fn run_cell(
                     report::AbsoluteStats {
                         p50: outcome.distribution.p50(),
                         p99: outcome.gated_pss_mb,
+                        max: outcome.distribution.max(),
                         unit: "MB",
                         samples: outcome.distribution.len(),
                         warmup: protocol.warmup,
@@ -635,6 +647,13 @@ fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Drop-based cleanup is skipped when a run is killed by a signal, so
+    // stale scratch worlds from interrupted runs would otherwise pile up
+    // silently. Clearing the whole parent is safe because concurrent
+    // harness runs are out of contract anyway: two runs contending for
+    // the same cores would corrupt each other's latency numbers.
+    let _ = std::fs::remove_dir_all(scratch_root());
 
     if (cli.record || cli.gate)
         && (cli.samples < MIN_RECORDED_SAMPLES || cli.warmup < MIN_RECORDED_WARMUP)

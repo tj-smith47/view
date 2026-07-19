@@ -8,7 +8,7 @@ use crate::pairing::PairedSummary;
 /// The two-line paired-cell report:
 ///
 /// ```text
-/// echo/minimal: view p50 0.61ms p99 0.94ms | nvim p50 0.55ms p99 0.71ms
+/// echo/minimal: view p50 0.61ms p99 0.94ms max 1.20ms | nvim p50 0.55ms p99 0.71ms max 0.88ms
 ///       ratio(p99) 1.32  paired-delta p99 0.29ms  samples 1000 (+100 warmup)
 /// ```
 #[must_use]
@@ -19,12 +19,15 @@ pub fn paired_cell(
     warmup: usize,
 ) -> String {
     format!(
-        "{scenario}/{fixture}: view p50 {:.2}ms p99 {:.2}ms | nvim p50 {:.2}ms p99 {:.2}ms\n      \
+        "{scenario}/{fixture}: view p50 {:.2}ms p99 {:.2}ms max {:.2}ms | \
+         nvim p50 {:.2}ms p99 {:.2}ms max {:.2}ms\n      \
          ratio(p99) {:.2}  paired-delta p99 {:.2}ms  samples {} (+{warmup} warmup)",
         summary.view.p50(),
         summary.view.p99(),
+        summary.view.max(),
         summary.nvim.p50(),
         summary.nvim.p99(),
+        summary.nvim.max(),
         summary.ratio_p99,
         summary.paired_delta_p99_ms,
         summary.view.len(),
@@ -37,6 +40,7 @@ pub fn paired_cell(
 pub struct AbsoluteStats<'a> {
     pub p50: f64,
     pub p99: f64,
+    pub max: f64,
     pub unit: &'a str,
     pub samples: usize,
     pub warmup: usize,
@@ -48,12 +52,13 @@ pub fn absolute_cell(scenario: &str, fixture: &str, metric: &str, stats: Absolut
     let AbsoluteStats {
         p50,
         p99,
+        max,
         unit,
         samples,
         warmup,
     } = stats;
     format!(
-        "{scenario}/{fixture}: {metric} p50 {p50:.2}{unit} p99 {p99:.2}{unit}  \
+        "{scenario}/{fixture}: {metric} p50 {p50:.2}{unit} p99 {p99:.2}{unit} max {max:.2}{unit}  \
          samples {samples} (+{warmup} warmup)"
     )
 }
@@ -81,7 +86,8 @@ mod tests {
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
             lines[0],
-            "echo/minimal: view p50 2.00ms p99 2.00ms | nvim p50 1.00ms p99 1.00ms"
+            "echo/minimal: view p50 2.00ms p99 2.00ms max 2.00ms | \
+             nvim p50 1.00ms p99 1.00ms max 1.00ms"
         );
         assert_eq!(
             lines[1],
@@ -98,6 +104,7 @@ mod tests {
             AbsoluteStats {
                 p50: 40.0,
                 p99: 85.5,
+                max: 92.1,
                 unit: "us",
                 samples: 1000,
                 warmup: 100,
@@ -105,7 +112,8 @@ mod tests {
         );
         assert_eq!(
             line,
-            "input_path/minimal: key-to-rpc p50 40.00us p99 85.50us  samples 1000 (+100 warmup)"
+            "input_path/minimal: key-to-rpc p50 40.00us p99 85.50us max 92.10us  \
+             samples 1000 (+100 warmup)"
         );
     }
 

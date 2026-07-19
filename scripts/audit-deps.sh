@@ -19,7 +19,7 @@ check_absent() { # usage: check_absent <crate> <forbidden-dep>
 for dep in view view-engine view-tui view-surface view-native view-ai view-oracle view-bench rmpv crossterm ratatui tokio async-std smol; do
   check_absent view-core "$dep"
 done
-# view-bench depends on view-oracle (the latency bench drives the same
+# view-bench depends on view-oracle (the scenario drivers drive the same
 # PtySession the oracle's own tests use, instead of a second copy of the
 # spawn/read/write scaffolding) -- that edge is sanctioned and must stay
 # legal. This check only forbids the reverse: view-oracle must never depend
