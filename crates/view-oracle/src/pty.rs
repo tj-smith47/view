@@ -226,6 +226,18 @@ impl PtySession {
         self.parser.screen()
     }
 
+    /// Drains pending pty output into the parser, then hands `f` a borrowed
+    /// [`vt100::Screen`] to inspect. For a caller that only needs to peek at
+    /// cell contents (a tight polling loop counting occurrences of one
+    /// character, say), this is the non-allocating counterpart to
+    /// [`screen`](Self::screen): that method builds a fresh `String` of the
+    /// whole screen on every call, which is wasted work for a caller that
+    /// immediately discards it after inspecting a handful of bytes.
+    pub fn with_screen<R>(&mut self, f: impl FnOnce(&vt100::Screen) -> R) -> R {
+        self.drain_available();
+        f(self.parser.screen())
+    }
+
     fn drain_available(&mut self) {
         while let Ok(chunk) = self.rx.try_recv() {
             self.parser.process(&chunk);
@@ -306,6 +318,11 @@ impl PtySession {
     /// so a real deadlock in the child under test fails an assertion
     /// promptly instead of hanging the whole test binary (and, with it,
     /// CI) the way `wait` would.
+    ///
+    /// The post-kill path also reaps: a killed child that is never waited on
+    /// stays a zombie entry in the process table until this session (or the
+    /// whole test binary) exits, and `kill` alone only requests termination,
+    /// it does not collect the exit status that removes the entry.
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Option<portable_pty::ExitStatus> {
         let deadline = Instant::now() + timeout;
         loop {
@@ -314,6 +331,7 @@ impl PtySession {
             }
             if Instant::now() >= deadline {
                 let _ = self.child.kill();
+                let _ = self.child.wait();
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));

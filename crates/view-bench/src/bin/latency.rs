@@ -312,33 +312,54 @@ impl PtyTarget {
     /// settle wait never pollutes the baseline the sampling loop starts
     /// from.
     fn drain(&mut self) {
-        let _ = self.session.screen();
+        self.session.with_screen(|_| ());
     }
 
     fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.session.send(bytes).context("failed to write to pty")
     }
 
+    /// Counts occurrences of `target` across every cell on screen via
+    /// [`PtySession::with_screen`] rather than [`PtySession::screen`]: the
+    /// latter renders the whole screen into a fresh `String` on every call
+    /// just to have this loop immediately throw it away, and this count runs
+    /// once per poll iteration inside [`wait_for_count`](Self::wait_for_count)
+    /// -- the timed window this bench measures -- so that allocation was
+    /// pure overhead charged against the very latency being measured.
     fn count_char(&mut self, target: u8) -> usize {
-        self.session
-            .screen()
-            .bytes()
-            .filter(|&b| b == target)
-            .count()
+        self.session.with_screen(|screen| {
+            let (rows, cols) = screen.size();
+            let mut count = 0;
+            for row in 0..rows {
+                for col in 0..cols {
+                    if screen
+                        .cell(row, col)
+                        .is_some_and(|cell| cell.contents().as_bytes().contains(&target))
+                    {
+                        count += 1;
+                    }
+                }
+            }
+            count
+        })
     }
 
     /// Blocks (up to `timeout`) until at least `expected` occurrences of
     /// `target` are visible on screen, returning whether that happened.
     ///
-    /// A tight spin (no sleep between polls) rather than a fixed-interval
-    /// poll: [`PtySession::screen`] has no lower-level channel-blocking
-    /// entry point exposed to a caller outside the oracle crate, and this
-    /// bench measures sub-millisecond keypress-to-paint latency, well below
-    /// the OS scheduler's sleep-wakeup granularity -- a periodic sleep
-    /// there was confirmed (by running the measurement) to inject its own
-    /// poll interval directly into every sample, flattening view and nvim
-    /// to indistinguishable ~20ms readings instead of the real sub-2ms
-    /// figures.
+    /// A tight poll (no sleep between iterations) rather than a
+    /// fixed-interval one: [`PtySession::with_screen`] has no lower-level
+    /// channel-blocking entry point exposed to a caller outside the oracle
+    /// crate, and this bench measures sub-millisecond keypress-to-paint
+    /// latency, well below the OS scheduler's sleep-wakeup granularity -- a
+    /// periodic sleep there was confirmed (by running the measurement) to
+    /// inject its own poll interval directly into every sample, flattening
+    /// view and nvim to indistinguishable ~20ms readings instead of the real
+    /// sub-2ms figures. Each iteration yields the core (rather than
+    /// spinning) so the poll doesn't compete for CPU with the child process
+    /// it's waiting on -- on a core-constrained host a spinning poller can
+    /// starve the child of scheduler time and bias the very latency it's
+    /// measuring.
     fn wait_for_count(&mut self, target: u8, expected: usize, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
@@ -348,7 +369,7 @@ impl PtyTarget {
             if Instant::now() >= deadline {
                 return false;
             }
-            std::hint::spin_loop();
+            std::thread::yield_now();
         }
     }
 
