@@ -57,6 +57,9 @@ tasks:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     cmds:
       - cargo build --release -p view
+      # separate target dir so the instrumented build can never overwrite
+      # the plain binary the e2e rows measure
+      - cargo build --release -p view --features bench-taps --target-dir target/taps
       - cargo run --release -p view-harness --bin bench -- {{.CLI_ARGS}}
 
   bench-latency:

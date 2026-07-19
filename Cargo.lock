@@ -2005,6 +2005,7 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "portable-pty",
+ "rustix",
  "thiserror 2.0.18",
  "view-oracle",
  "vt100",
@@ -2023,6 +2024,7 @@ version = "0.0.1"
 dependencies = [
  "criterion",
  "rmpv",
+ "rustix",
  "thiserror 2.0.18",
  "view-core",
  "view-engine",

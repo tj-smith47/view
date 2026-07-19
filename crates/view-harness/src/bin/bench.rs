@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use view_bench::report;
-use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, Protocol};
+use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, taps, Protocol};
 use view_bench::session::SpawnSpec;
 use view_harness::baselines::{self, BaselineFile, CellMetrics};
 use view_harness::fixture::{
@@ -39,7 +39,15 @@ const MATRIX: &[(&str, &str)] = &[
     ("first_paint", "heavy"),
     ("memory", "minimal"),
     ("flood", "minimal"),
+    ("input_path", "minimal"),
+    ("output_path", "minimal"),
 ];
+
+/// Ceiling on the measured tap-operation p99 before the taps rows are
+/// allowed to run at all: 5% of the input-path row's 100 microsecond
+/// budget. Above this, the instrumentation itself would materially
+/// distort the number it measures.
+const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 
 /// Minimum sampling discipline for a number that may be recorded or
 /// gated, per the measurement protocol; ad hoc smaller runs are allowed
@@ -88,6 +96,9 @@ struct Cli {
     /// Path to the nvim binary (must match .engine-pin)
     #[arg(long)]
     nvim_bin: Option<PathBuf>,
+    /// Path to the bench-taps build of view (internal-boundary rows)
+    #[arg(long)]
+    taps_view_bin: Option<PathBuf>,
     /// Measured samples per side per trial
     #[arg(long, default_value_t = 1000)]
     samples: usize,
@@ -247,17 +258,130 @@ fn paired_specs(
     Ok((view_spec, nvim_spec))
 }
 
+/// The resolved binaries one invocation measures with.
+struct Bins {
+    view: PathBuf,
+    /// The bench-taps build; only required (and existence-checked) when a
+    /// taps row actually runs.
+    taps_view: PathBuf,
+    nvim: PathBuf,
+}
+
+/// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
+/// descriptor before exec'ing the real binary. The pty spawn path closes
+/// every inherited fd above stdio in the child, so the descriptor
+/// `VIEW_BENCH_TAP_FD` names must be (re)opened after that point; the
+/// shell's own `exec 9>` runs post-exec, exactly late enough.
+fn shim_taps_spec(inner: SpawnSpec, tap_path: &Path) -> SpawnSpec {
+    let mut args = vec![
+        OsString::from("-c"),
+        OsString::from("exec 9>\"$VIEW_BENCH_TAP_PATH\"; exec \"$0\" \"$@\""),
+        inner.program.into_os_string(),
+    ];
+    args.extend(inner.args);
+    let mut env = inner.env;
+    env.push((
+        OsString::from("VIEW_BENCH_TAP_PATH"),
+        tap_path.as_os_str().to_os_string(),
+    ));
+    env.push((OsString::from("VIEW_BENCH_TAP_FD"), OsString::from("9")));
+    SpawnSpec {
+        program: PathBuf::from("sh"),
+        args,
+        env,
+        cwd: inner.cwd,
+    }
+}
+
+/// Runs one taps row (`input_path` or `output_path`) end to end:
+/// characterizes tap overhead first and refuses to measure through taps
+/// that would distort the row's own budget.
+fn run_taps_row(
+    scenario: &str,
+    fixture: &str,
+    world: &CellWorld,
+    bins: &Bins,
+    protocol: &Protocol,
+) -> Result<CellMetrics> {
+    if !bins.taps_view.exists() {
+        bail!(
+            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass              --taps-view-bin",
+            bins.taps_view.display()
+        );
+    }
+    let side = world.side(fixture, "view")?;
+    let tap_path = side.cwd.join("tap.fifo");
+    let pipe = taps::TapPipe::create(&tap_path)?;
+
+    let overhead = taps::characterize_overhead(&tap_path, 100_000)?;
+    println!(
+        "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations (bar {TAP_OVERHEAD_BAR_US}us)",
+        overhead.p50(),
+        overhead.p99(),
+        overhead.len()
+    );
+    if overhead.p99() > TAP_OVERHEAD_BAR_US {
+        bail!(
+            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the              input-path budget); the tap design must change before this row can be trusted",
+            overhead.p99()
+        );
+    }
+
+    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
+    let deadline = settle_deadline(fixture);
+    let (outcome, metric_key, unit) = match scenario {
+        "input_path" => (
+            taps::run_input_path(&spec, &pipe, protocol, deadline)
+                .with_context(|| format!("input_path/{fixture} run failed"))?,
+            "p99_us",
+            "us",
+        ),
+        _ => (
+            taps::run_output_path(&spec, &pipe, protocol, deadline)
+                .with_context(|| format!("output_path/{fixture} run failed"))?,
+            "p99_ms",
+            "ms",
+        ),
+    };
+    for dist in &outcome.trial_distributions {
+        println!(
+            "{}",
+            report::absolute_cell(
+                scenario,
+                fixture,
+                "boundary-delta",
+                report::AbsoluteStats {
+                    p50: dist.p50(),
+                    p99: dist.p99(),
+                    unit,
+                    samples: dist.len(),
+                    warmup: protocol.warmup,
+                }
+            )
+        );
+    }
+    println!(
+        "{}",
+        report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)
+    );
+    let mut metrics = CellMetrics::new();
+    metrics.insert(metric_key.to_string(), outcome.gated_p99);
+    Ok(metrics)
+}
+
 /// Runs one matrix cell and returns the metrics the baseline records for
 /// it.
 fn run_cell(
     scenario: &str,
     fixture: &str,
-    view_bin: &Path,
-    nvim_bin: &Path,
+    bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
+    let view_bin = bins.view.as_path();
+    let nvim_bin = bins.nvim.as_path();
     let world = CellWorld::create(fixture)?;
     match scenario {
+        "input_path" | "output_path" => run_taps_row(scenario, fixture, &world, bins, protocol),
         "echo" => {
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
             let outcome = echo::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
@@ -519,7 +643,17 @@ fn main() -> Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("nvim"));
     verify_nvim_matches_pin(&nvim_bin, &pin)?;
-    let view_bin = resolve_view_bin(&cli)?;
+    let bins = Bins {
+        view: resolve_view_bin(&cli)?,
+        taps_view: cli.taps_view_bin.clone().unwrap_or_else(|| {
+            workspace_root()
+                .join("target")
+                .join("taps")
+                .join("release")
+                .join("view")
+        }),
+        nvim: nvim_bin,
+    };
 
     let cells: Vec<(String, String)> = if cli.all {
         MATRIX
@@ -560,7 +694,7 @@ fn main() -> Result<()> {
 
     let mut measured: Vec<(String, String, CellMetrics)> = Vec::new();
     for (scenario, fixture) in &cells {
-        let metrics = run_cell(scenario, fixture, &view_bin, &nvim_bin, &protocol)?;
+        let metrics = run_cell(scenario, fixture, &bins, &protocol)?;
         measured.push((scenario.clone(), fixture.clone(), metrics));
     }
 

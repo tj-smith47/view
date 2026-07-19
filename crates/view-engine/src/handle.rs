@@ -245,6 +245,8 @@ impl EngineHandle {
                     close_and_drain(&writer_pending);
                     break;
                 }
+                #[cfg(feature = "bench-taps")]
+                crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
             }
         });
 
@@ -305,7 +307,10 @@ impl EngineHandle {
                             // exist yet) is simply dropped rather than routed
                             // anywhere
                             if method == "redraw" {
-                                pump.fold_redraw(decode_redraw(&params));
+                                let events = decode_redraw(&params);
+                                #[cfg(feature = "bench-taps")]
+                                crate::tap::tap(crate::tap::TAG_REDRAW_PARSED);
+                                pump.fold_redraw(events);
                             }
                         } else if let Some(tx) = &notif_tx {
                             if tx.send(EngineNotification { method, params }).is_err() {

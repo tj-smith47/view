@@ -327,6 +327,8 @@ impl Term {
             write_sync_bracket(true)?;
         }
         self.inner.draw(|f| composite(model, surface, f))?;
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         match surface.cursor {
             Some(spec) => {
                 self.inner.set_cursor_position((spec.col, spec.row))?;

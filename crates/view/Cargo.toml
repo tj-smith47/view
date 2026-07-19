@@ -12,6 +12,12 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+# Builds the measurement-instrumented binary (taps in view-engine and
+# view-tui); the bench harness builds this variant into its own target
+# dir so the plain release binary stays byte-for-byte tap-free.
+bench-taps = ["view-engine/bench-taps", "view-tui/bench-taps"]
+
 [dependencies]
 anyhow = "1.0.103"
 clap = { version = "4.6.2", features = ["derive"] }

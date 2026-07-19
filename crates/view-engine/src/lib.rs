@@ -5,6 +5,8 @@ pub mod handle;
 pub mod nvim_api;
 pub mod process;
 pub mod rpc;
+#[cfg(feature = "bench-taps")]
+mod tap;
 pub mod ui_events;
 mod wire;
 

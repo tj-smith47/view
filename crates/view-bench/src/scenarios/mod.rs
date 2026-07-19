@@ -9,6 +9,7 @@ pub mod first_paint;
 pub mod flood;
 pub mod memory;
 pub mod scroll;
+pub mod taps;
 
 use std::time::Duration;
 
