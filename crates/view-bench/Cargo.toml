@@ -14,4 +14,5 @@ path = "src/bin/latency.rs"
 
 [dependencies]
 anyhow = "1.0.103"
+thiserror = "2.0.18"
 view-oracle = { version = "0.0.1", path = "../view-oracle" }

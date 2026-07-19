@@ -2004,6 +2004,7 @@ name = "view-bench"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "thiserror 2.0.18",
  "view-oracle",
 ]
 
