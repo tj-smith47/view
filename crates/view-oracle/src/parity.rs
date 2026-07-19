@@ -680,11 +680,10 @@ mod tests {
         // side rather than proving it -- a probe that always returns the
         // same placeholder on both sides would compare empty too. These
         // pin the actual post-`ihello<Esc>yyp` state on the view side
-        // against values captured live against the pinned nvim (see the
-        // task report's live-probe transcript): cursor on line 2 column 1
-        // (`p` lands the cursor on the pasted line), the unnamed register
-        // holding the linewise yank, and at least one mark set by the
-        // yank/paste.
+        // against values captured live against the pinned nvim: cursor on
+        // line 2 column 1 (`p` lands the cursor on the pasted line),
+        // normal mode, the unnamed register holding the linewise yank,
+        // and at least one mark set by the yank/paste.
         assert_eq!(
             view_state.cursor,
             (2, 1),
@@ -702,6 +701,11 @@ mod tests {
         assert!(
             !view_state.marks.is_empty(),
             "expected yy+p to have set at least one mark"
+        );
+        assert_eq!(
+            view_state.mode, "n",
+            "expected normal mode after <Esc>: {:?}",
+            view_state.mode
         );
     }
 
