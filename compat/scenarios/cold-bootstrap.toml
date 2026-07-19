@@ -1,0 +1,34 @@
+# Mandatory cold-bootstrap scenario (task-7-brief.md Step 4): `cold_bootstrap
+# = true` makes resolve_fixture key this run's XDG_DATA_HOME by a fresh
+# scratch id every single invocation (never the shared
+# compat/.cache/<lockfile-hash>/ directory the warm heavy-fixture scenario
+# reuses), so this scenario always drives a genuinely from-scratch
+# lazy.nvim bootstrap: cloning lazy.nvim itself over the network, then
+# lazy.nvim cloning all 8 pinned plugins, then loading them -- exactly the
+# first-run experience a real user hits once, proven here on every run
+# instead of only historically when the fixture was first authored.
+#
+# The leading `send = "<CR>"` drives past any interactive startup prompt
+# (a hit-enter prompt, for instance) the same way a real user's keystroke
+# would: through the pty's actual input stream, not the EMBED nvim_eval
+# channel the corpus's known live defect (corpus/quarantine/fuzz-42-6.toml)
+# wedges on. A bare <CR> in normal mode with nothing pending is a harmless
+# cursor-down no-op, so it is safe to send unconditionally rather than
+# needing to first detect whether a prompt actually appeared.
+#
+# Runs real network I/O (cloning lazy.nvim plus 8 plugin repos); slow by
+# nature of the work it does, not by any fixed sleep in the driver.
+schema = 1
+plugin = "lualine"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+cold_bootstrap = true
+steps = [
+  { send = "<CR>" },
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  { send = "ihello<Esc>" },
+  { wait_for = "hello", timeout_ms = 5000 },
+  { assert_absent = "E5108" },
+  { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
+]

@@ -1,0 +1,21 @@
+# The heavy fixture's own smoke scenario, matching the compat harness
+# brief's own worked example: lualine is ui-owning (occupies the
+# statusline, a surface `view` renders natively) and is the illustrative
+# case the probe-channel design itself was written against.
+schema = 1
+plugin = "lualine"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+steps = [
+  # A cold plugin cache install runs asynchronously and can still hold
+  # input focus in lazy.nvim's own install window well after `view` itself
+  # is up; wait_for_probe (not a one-shot probe) polls until the plugin
+  # actually finishes loading before any editing keystroke is sent, so this
+  # scenario is correct whether it lands on a warm or a cold cache.
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 120000 },
+  { send = "ihello<Esc>" },
+  { wait_for = "hello", timeout_ms = 5000 },
+  { assert_absent = "E5108" },
+  { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
+]

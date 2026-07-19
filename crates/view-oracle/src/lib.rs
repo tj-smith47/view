@@ -31,6 +31,7 @@
 //! `String`), never a raw wire `Value`. `scripts/audit-deps.sh` enforces
 //! both.
 
+pub mod compat;
 mod minimize;
 mod parity;
 pub mod pty;
@@ -49,6 +50,7 @@ use view_engine::process::{Engine, EngineConfig};
 use view_engine::DamagePump;
 use view_surface::Surface;
 
+pub use compat::CompatSession;
 pub use minimize::{ddmin, join_tokens, tokenize};
 pub use parity::{
     compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, StateSnapshot,

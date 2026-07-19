@@ -1,0 +1,26 @@
+# Mandatory daily-config scenario (task-7-brief.md Step 6): the standing
+# scenario that runs against the maintainer's own live nvim config via
+# $VIEW_DAILY_CONFIG, so this is the one scenario in the suite with no
+# `fixture` field. resolve_fixture reports it SKIPPED-with-notice, exit
+# 0, whenever $VIEW_DAILY_CONFIG is unset -- the expected state in CI,
+# where the heavy fixture is already the network-proxy for a real
+# plugin-heavy config. When set, the fixture-less init.lua this harness
+# does not own has no `serverstart` call of its own, so the driver primes
+# the probe channel itself by typing `:call serverstart($VIEW_COMPAT_SOCK)
+# <CR>` into the pty (CompatSession::prime_probe_channel) before running
+# these steps.
+#
+# Steps stay deliberately config-agnostic (no assertion about any
+# specific plugin being loaded) since the maintainer's own config's
+# plugin set is unknown to this harness and can change independently of
+# this scenario file.
+schema = 1
+plugin = "daily-config"
+class = "semantic"
+state = "present"
+steps = [
+  { send = "ihello from daily-config<Esc>" },
+  { wait_for = "hello from daily-config", timeout_ms = 5000 },
+  { assert_absent = "E5108" },
+  { probe = "1+1", expect = "2" },
+]

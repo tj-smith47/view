@@ -13,3 +13,5 @@
 
 pub mod corpus;
 pub mod fuzz;
+pub mod results;
+pub mod scenario;

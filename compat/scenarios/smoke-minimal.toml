@@ -1,0 +1,16 @@
+# The minimal fixture's own smoke scenario (falsifiable check, step 3 of
+# the compat harness brief): proves the driver mechanics -- spawn, step
+# execution, probe channel, zero-error epilogue -- with no plugin in play.
+# "smoke" (not a real plugin name) is a deliberate, documented choice: this
+# scenario exists to prove the harness itself, not any specific plugin.
+schema = 1
+plugin = "smoke"
+class = "semantic"
+fixture = "minimal"
+state = "present"
+steps = [
+  { send = "ihello from compat<Esc>" },
+  { wait_for = "hello from compat", timeout_ms = 5000 },
+  { assert_absent = "E5108" },
+  { probe = "1+1", expect = "2" },
+]

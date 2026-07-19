@@ -49,6 +49,10 @@ tasks:
     desc: Run the differential oracle corpus against the pinned nvim (task oracle -- corpus/insert-basic.toml for one entry)
     cmd: cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
 
+  compat:
+    desc: Run the plugin compat harness against the pinned nvim (task compat -- compat/scenarios/lualine.toml for one scenario)
+    cmd: cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
+
   bench-latency:
     desc: Paired keypress-to-paint latency, view vs nvim
     cmds:

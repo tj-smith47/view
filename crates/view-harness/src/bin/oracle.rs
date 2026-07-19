@@ -21,13 +21,20 @@
 //! spawn/drain/quiesce/compare engine the plain corpus run above uses, so
 //! all three modes see identical parity semantics.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use portable_pty::CommandBuilder;
 use view_harness::corpus::{self, CorpusEntry};
 use view_harness::fuzz;
+use view_harness::results::{write_results, ResultsFile, ScenarioResult, ScenarioStatus};
+use view_harness::scenario::{self, ScenarioFile};
+use view_oracle::compat::{CompatSession, PluginClass, ScenarioState};
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
     ReferenceSession,
@@ -67,6 +74,33 @@ const INJECT_DIVERGENCE_TOKEN: &str = "\u{0}inject-divergence\u{0}";
 /// regardless of what surrounds it in the script, giving the minimizer
 /// exactly one real thing to find.
 const INJECT_DIVERGENCE_KEYS: &str = "<Cmd>call setline(1, 'DDMIN_INJECTED_DIVERGENCE')<CR>";
+
+/// Terminal size every compat scenario runs at: roomier than the
+/// differential oracle's own fixed [`COLS`]x[`ROWS`] canvas, since a
+/// compat scenario is driving real plugin UI (a statusline, a floating
+/// picker) rather than a bare grid comparison and needs realistic room to
+/// render in.
+const COMPAT_COLS: u16 = 100;
+const COMPAT_ROWS: u16 = 30;
+
+/// Bound on [`CompatSession::prime_probe_channel`]/`await_probe_channel`'s
+/// own bounded retry: generous relative to a `serverstart` call (the first
+/// statement any committed fixture's `init.lua` runs, so this is really
+/// bounding `view`'s own spawn + `ui_attach` handshake time, not any
+/// plugin's), short enough that a session that never got that far still
+/// fails a scenario promptly.
+const PROBE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// [`CompatSession::wait_for_screen_quiescence`]'s window for a
+/// fixture-less (daily-config) scenario: how long the screen must stay
+/// unchanged, and the overall bound, before typing the priming command.
+const SCREEN_QUIESCE_SILENCE: Duration = Duration::from_millis(500);
+const SCREEN_QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// Disambiguates concurrently-generated scratch paths (a hermetic XDG home,
+/// a probe socket) within one process, the same role
+/// `view-oracle/tests/common::ScratchPaths`' own atomic counter plays.
+static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Parser)]
 #[command(
@@ -114,6 +148,14 @@ enum Command {
         #[arg(long, default_value_t = 150)]
         keys: usize,
     },
+    /// Drives `compat/scenarios/*.toml` (or a single scenario file) through
+    /// the real `view` binary over a pty, per the compat harness's own
+    /// scenario schema (`view_harness::scenario`).
+    Compat {
+        /// Scenario file or directory.
+        #[arg(default_value = "compat/scenarios")]
+        path: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -124,6 +166,7 @@ fn main() -> Result<()> {
             inject_divergence_at,
         }) => minimize_command(&path, inject_divergence_at),
         Some(Command::Fuzz { seed, rounds, keys }) => fuzz_command(seed, rounds, keys),
+        Some(Command::Compat { path }) => compat_command(&path),
         None => run_command(&cli.path),
     }
 }
@@ -160,18 +203,21 @@ fn collect_entries(path: &Path) -> Result<Vec<(PathBuf, CorpusEntry)>> {
         .collect()
 }
 
-/// Path to the repo-root `.engine-pin` file, resolved from this binary's
-/// own manifest dir rather than the caller's cwd (mirroring
-/// `view-bench`'s `latency` bin's `scratch_path` helper): `task oracle`
-/// always runs from the repo root today, but a direct `cargo run -p
-/// view-harness` invocation from a subdirectory must not silently read a
-/// stale or absent pin file instead.
-fn engine_pin_path() -> PathBuf {
+/// Resolved from this binary's own manifest dir rather than the caller's
+/// cwd (mirroring `view-bench`'s `latency` bin's `scratch_path` helper):
+/// `task oracle`/`task compat` always run from the repo root today, but a
+/// direct `cargo run -p view-harness` invocation from a subdirectory must
+/// not silently read a stale or absent path instead.
+fn workspace_root() -> PathBuf {
     let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     path.pop(); // crates/
     path.pop(); // workspace root
-    path.push(".engine-pin");
     path
+}
+
+/// Path to the repo-root `.engine-pin` file.
+fn engine_pin_path() -> PathBuf {
+    workspace_root().join(".engine-pin")
 }
 
 /// Reads and trims the current `.engine-pin` value -- the single source of
@@ -704,10 +750,617 @@ fn quarantine_entry(
     Ok(path)
 }
 
+/// `compat/fixtures/`, the directory each scenario's `fixture` field names
+/// a subdirectory of.
+fn fixtures_root() -> PathBuf {
+    workspace_root().join("compat").join("fixtures")
+}
+
+/// `compat/.cache/`, the shared, persistent (never per-run-hermetic) plugin
+/// install cache a heavy-style fixture's `XDG_DATA_HOME` is pointed at,
+/// keyed by its own `lazy-lock.json` hash. Gitignored: this is a build/test
+/// cache, not a durable artifact the way `corpus/quarantine/` is.
+fn cache_root() -> PathBuf {
+    workspace_root().join("compat").join(".cache")
+}
+
+/// Hashes `bytes` (a fixture's `lazy-lock.json` content) into a stable,
+/// filesystem-safe cache-directory name. [`DefaultHasher`] rather than a
+/// cryptographic hash: this key only has to agree with itself across runs
+/// of the *same* compiled `oracle` binary (a toolchain upgrade invalidating
+/// the cache and forcing one re-clone is an acceptable, self-healing cost,
+/// not a correctness bug -- lazy.nvim's own "already installed?" check
+/// still governs whether that re-clone actually happens).
+fn lockfile_cache_key(bytes: &[u8]) -> String {
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Builds the `view` binary (always, not gated on an existence check -- see
+/// `view-oracle/tests/common::view_bin_path`'s own doc comment for why a
+/// stale binary is worse than one extra up-to-date `cargo build`) and
+/// returns its path.
+///
+/// # Errors
+///
+/// Returns an error if `cargo build -p view` cannot be invoked or fails.
+fn ensure_view_bin() -> Result<PathBuf> {
+    let profile_dir = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
+    let path = workspace_root()
+        .join("target")
+        .join(profile_dir)
+        .join("view");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = std::process::Command::new(&cargo)
+        .args(["build", "-p", "view"])
+        .status()
+        .context("failed to invoke cargo build -p view")?;
+    if !status.success() {
+        bail!("cargo build -p view failed");
+    }
+    Ok(path)
+}
+
+/// `YYYY-MM-DD` for the current instant, in UTC. Hand-rolled rather than a
+/// `chrono`/`time` dependency: this is the only date computation anywhere
+/// in the workspace, for one report-row stamp
+/// ([`view_harness::results::ScenarioResult::date`]).
+fn today_date_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// Howard Hinnant's days-since-epoch -> proleptic Gregorian civil date
+/// algorithm (public domain: <http://howardhinnant.github.io/date_algorithms.html>),
+/// pinned by [`civil_from_days_matches_known_dates`] against independently
+/// computed reference values rather than trusted from transcription alone.
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y };
+    (y, m, d)
+}
+
+/// Removes the scratch state a compat scenario run created once the
+/// scenario finishes, on every path (success, failure, or an early `?`
+/// return) via `Drop` rather than a manual cleanup call at each return
+/// site. `cold_cache_dir` is only ever `Some` for a `cold_bootstrap`
+/// scenario's own run-unique cache key -- the normal, shared
+/// `compat/.cache/<hash>/` a warm run reuses is never touched here.
+struct ScenarioScratch {
+    hermetic_dir: PathBuf,
+    cold_cache_dir: Option<PathBuf>,
+    sock_path: PathBuf,
+}
+
+impl Drop for ScenarioScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.hermetic_dir);
+        if let Some(dir) = &self.cold_cache_dir {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        let _ = std::fs::remove_file(&self.sock_path);
+    }
+}
+
+/// A fixture resolved to concrete XDG homes a `view` invocation can be
+/// spawned against.
+struct ReadyFixture {
+    xdg_config_home: PathBuf,
+    xdg_data_home: PathBuf,
+    xdg_state_home: PathBuf,
+    xdg_cache_home: PathBuf,
+    /// Whether the driver itself must type `:call serverstart(...)` --
+    /// true only for a fixture-less (daily-config) scenario, whose
+    /// `init.lua` this harness does not own and so cannot rely on already
+    /// carrying that call.
+    needs_priming: bool,
+    /// Held only for its `Drop` cleanup; never read.
+    _scratch: ScenarioScratch,
+}
+
+/// [`resolve_fixture`]'s result: either a [`ReadyFixture`] to spawn `view`
+/// against, or a reason to report the scenario SKIPPED without spawning
+/// anything (today, only "fixture-less and `$VIEW_DAILY_CONFIG` unset").
+enum FixtureResolution {
+    Ready(ReadyFixture),
+    Skipped { notice: String },
+}
+
+/// Resolves `scenario`'s `fixture` field (or its absence) into a
+/// [`FixtureResolution`]: XDG homes to spawn `view` against, plus a
+/// [`ScenarioScratch`] guard that cleans up every scratch path this
+/// function created once the caller's session finishes and the guard
+/// drops. `sock_path` is threaded in (not generated here) so the caller's
+/// own `CompatSession::spawn_configured` and this resolution agree on
+/// exactly one socket path.
+///
+/// # Errors
+///
+/// Returns an error if a named fixture has no `nvim/init.lua`, its
+/// `lazy-lock.json` cannot be read, `$VIEW_DAILY_CONFIG` names a directory
+/// with no `init.lua`/`init.vim`, or (fixture-less, non-Unix host) the
+/// isolated config symlink cannot be created.
+fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureResolution> {
+    let scratch_id = format!(
+        "{}-{}",
+        std::process::id(),
+        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let hermetic_dir = std::env::temp_dir().join(format!("view-compat-{scratch_id}"));
+    std::fs::create_dir_all(&hermetic_dir)
+        .with_context(|| format!("creating scratch dir {}", hermetic_dir.display()))?;
+    let xdg_state_home = hermetic_dir.join("xdg_state_home");
+    let xdg_cache_home = hermetic_dir.join("xdg_cache_home");
+
+    match &scenario.fixture {
+        Some(name) => {
+            let fixture_dir = fixtures_root().join(name);
+            let init_lua = fixture_dir.join("nvim").join("init.lua");
+            if !init_lua.exists() {
+                bail!(
+                    "fixture {name:?} has no {} (compat/fixtures/{name}/nvim/init.lua)",
+                    init_lua.display()
+                );
+            }
+            let lockfile_path = fixture_dir.join("nvim").join("lazy-lock.json");
+            let xdg_data_home = if lockfile_path.exists() {
+                let bytes = std::fs::read(&lockfile_path)
+                    .with_context(|| format!("reading {}", lockfile_path.display()))?;
+                let key = if scenario.cold_bootstrap {
+                    format!("cold-{scratch_id}")
+                } else {
+                    lockfile_cache_key(&bytes)
+                };
+                cache_root().join(key)
+            } else {
+                hermetic_dir.join("xdg_data_home")
+            };
+            let cold_cache_dir = scenario.cold_bootstrap.then(|| xdg_data_home.clone());
+            Ok(FixtureResolution::Ready(ReadyFixture {
+                xdg_config_home: fixture_dir,
+                xdg_data_home,
+                xdg_state_home,
+                xdg_cache_home,
+                needs_priming: false,
+                _scratch: ScenarioScratch {
+                    hermetic_dir,
+                    cold_cache_dir,
+                    sock_path: sock_path.to_path_buf(),
+                },
+            }))
+        }
+        None => {
+            let Ok(daily) = std::env::var("VIEW_DAILY_CONFIG") else {
+                let _ = std::fs::remove_dir_all(&hermetic_dir);
+                return Ok(FixtureResolution::Skipped {
+                    notice: "VIEW_DAILY_CONFIG is unset; fixture-less scenario skipped".to_string(),
+                });
+            };
+            let daily_path = PathBuf::from(&daily);
+            if !daily_path.join("init.lua").exists() && !daily_path.join("init.vim").exists() {
+                bail!("VIEW_DAILY_CONFIG={daily} has no init.lua/init.vim");
+            }
+            let xdg_config_home = hermetic_dir.join("xdg_config_home");
+            std::fs::create_dir_all(&xdg_config_home)
+                .with_context(|| format!("creating {}", xdg_config_home.display()))?;
+            symlink_daily_config(&daily_path, &xdg_config_home.join("nvim"))?;
+            Ok(FixtureResolution::Ready(ReadyFixture {
+                xdg_config_home,
+                xdg_data_home: hermetic_dir.join("xdg_data_home"),
+                xdg_state_home,
+                xdg_cache_home,
+                needs_priming: true,
+                _scratch: ScenarioScratch {
+                    hermetic_dir,
+                    cold_cache_dir: None,
+                    sock_path: sock_path.to_path_buf(),
+                },
+            }))
+        }
+    }
+}
+
+/// Links `link` (inside a per-run hermetic `XDG_CONFIG_HOME`) to `target`
+/// (`$VIEW_DAILY_CONFIG`'s real path), so the maintainer's actual nvim
+/// config is what `view` sources while every *other* XDG home
+/// (state/data/cache) stays per-run hermetic. Unix-only (symlinks): the
+/// daily-config scenario is a maintainer-machine standing scenario, not a
+/// CI-gated one, so a non-Unix host simply cannot run it yet.
+///
+/// # Errors
+///
+/// Returns an error if the symlink cannot be created, or (non-Unix) always.
+#[cfg(unix)]
+fn symlink_daily_config(target: &Path, link: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(target, link)
+        .with_context(|| format!("symlinking {} -> {}", link.display(), target.display()))
+}
+
+#[cfg(not(unix))]
+fn symlink_daily_config(_target: &Path, _link: &Path) -> Result<()> {
+    bail!("VIEW_DAILY_CONFIG scenarios require a Unix symlink-capable host")
+}
+
+fn class_str(class: PluginClass) -> &'static str {
+    match class {
+        PluginClass::Semantic => "semantic",
+        PluginClass::UiAdjacent => "ui-adjacent",
+        PluginClass::UiOwning => "ui-owning",
+    }
+}
+
+fn state_str(state: ScenarioState) -> &'static str {
+    match state {
+        ScenarioState::Present => "present",
+    }
+}
+
+/// Best-effort plugin commit lookup from a named fixture's `lazy-lock.json`,
+/// for [`ScenarioResult::plugin_version`]'s row in the design spec's own
+/// compat-evidence schema ("plugin, version, engine pin, ..."). Tries
+/// `scenario.plugin` as a literal lockfile key first (a plugin spec'd
+/// without lazy.nvim's default `<repo>.nvim` naming), then with a `.nvim`
+/// suffix (lazy.nvim's own default when a spec sets no custom `name`,
+/// matching every plugin in the committed `heavy` fixture). Returns `None`
+/// (never an error) for a fixture-less scenario, a fixture with no
+/// lockfile, or a plugin name the lockfile does not contain -- a missing
+/// version is a gap in the report, not a reason to fail the scenario that
+/// already passed or failed on its own merits.
+fn resolve_plugin_version(scenario: &ScenarioFile) -> Option<String> {
+    let name = scenario.fixture.as_ref()?;
+    let lockfile_path = fixtures_root()
+        .join(name)
+        .join("nvim")
+        .join("lazy-lock.json");
+    let text = std::fs::read_to_string(lockfile_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let obj = json.as_object()?;
+    let suffixed = format!("{}.nvim", scenario.plugin);
+    let key = obj
+        .keys()
+        .find(|k| k.as_str() == scenario.plugin || k.as_str() == suffixed)?;
+    let commit = obj.get(key)?.get("commit")?.as_str()?;
+    Some(commit.get(..7).unwrap_or(commit).to_string())
+}
+
+/// Builds a [`ScenarioResult`] for a scenario that never spawned a session
+/// (SKIPPED) or whose session failed before or during a step
+/// (`failing_step`/`detail` set; `failing_step == Some(scenario.steps.len())`
+/// means the implicit zero-error epilogue is what failed, not a scripted
+/// step). Shared by every non-OK exit path in [`run_scenario`] and
+/// [`compat_command`]'s own top-level `Err` catch, so the report row shape
+/// is defined exactly once.
+fn scenario_result(
+    scenario_path: &Path,
+    scenario: &ScenarioFile,
+    pin: &str,
+    status: ScenarioStatus,
+    failing_step: Option<usize>,
+    detail: Option<String>,
+    elapsed_ms: u128,
+) -> ScenarioResult {
+    ScenarioResult {
+        scenario_path: scenario_path.display().to_string(),
+        plugin: scenario.plugin.clone(),
+        plugin_version: resolve_plugin_version(scenario),
+        class: class_str(scenario.class).to_string(),
+        fixture: scenario.fixture.clone(),
+        state: state_str(scenario.state).to_string(),
+        engine_pin: pin.to_string(),
+        status,
+        failing_step,
+        steps_total: scenario.steps.len(),
+        detail,
+        elapsed_ms,
+        date: today_date_string(),
+    }
+}
+
+/// Drives one scenario end to end: resolves its fixture, spawns `view`
+/// against it, opens the probe channel, runs every step in order, then the
+/// implicit zero-error epilogue, and always attempts a clean `:qa!` shutdown
+/// regardless of outcome. Never propagates a step/probe failure as an `Err`
+/// -- those become a [`ScenarioStatus::Failed`] result, the same tolerance
+/// `run_tokens`'s own callers apply to a corpus entry's failure, so one
+/// scenario's wedge cannot abort the whole compat run. Only a resolution
+/// failure that means no session could even be attempted (a missing
+/// fixture, an unreadable lockfile) surfaces as `Err`.
+///
+/// # Errors
+///
+/// Returns an error if `scenario`'s fixture cannot be resolved.
+fn run_scenario(
+    scenario_path: &Path,
+    scenario: &ScenarioFile,
+    pin: &str,
+    view_bin: &Path,
+    nvim_bin: &Path,
+) -> Result<ScenarioResult> {
+    let start = Instant::now();
+    let sock_path = std::env::temp_dir().join(format!(
+        "view-compat-{}-{}.sock",
+        std::process::id(),
+        SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let ready = match resolve_fixture(scenario, &sock_path)? {
+        FixtureResolution::Ready(ready) => ready,
+        FixtureResolution::Skipped { notice } => {
+            return Ok(scenario_result(
+                scenario_path,
+                scenario,
+                pin,
+                ScenarioStatus::Skipped,
+                None,
+                Some(notice),
+                0,
+            ));
+        }
+    };
+
+    let mut cmd = CommandBuilder::new(view_bin);
+    cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
+    cmd.env("XDG_DATA_HOME", &ready.xdg_data_home);
+    cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
+    cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
+    cmd.env("VIEW_COMPAT_SOCK", &sock_path);
+
+    let mut session = match CompatSession::spawn_configured(
+        cmd,
+        COMPAT_COLS,
+        COMPAT_ROWS,
+        nvim_bin.to_path_buf(),
+        sock_path.clone(),
+    ) {
+        Ok(session) => session,
+        Err(err) => {
+            return Ok(scenario_result(
+                scenario_path,
+                scenario,
+                pin,
+                ScenarioStatus::Failed,
+                None,
+                Some(err.to_string()),
+                start.elapsed().as_millis(),
+            ));
+        }
+    };
+
+    let channel_result = if ready.needs_priming {
+        // Best-effort settle before typing the priming command: a daily
+        // config's own startup content is unknown to this harness (see
+        // wait_for_screen_quiescence's own doc comment), so an unsettled
+        // screen here does not itself abort the scenario -- the priming
+        // retry loop right below is what actually confirms success.
+        let _ = session.wait_for_screen_quiescence(SCREEN_QUIESCE_SILENCE, SCREEN_QUIESCE_DEADLINE);
+        session.prime_probe_channel(PROBE_CHANNEL_TIMEOUT)
+    } else {
+        session.await_probe_channel(PROBE_CHANNEL_TIMEOUT)
+    };
+    if let Err(err) = channel_result {
+        session.pty().kill();
+        return Ok(scenario_result(
+            scenario_path,
+            scenario,
+            pin,
+            ScenarioStatus::Failed,
+            None,
+            Some(err.to_string()),
+            start.elapsed().as_millis(),
+        ));
+    }
+
+    let mut failing_step = None;
+    let mut detail = None;
+    for (index, step) in scenario.steps.iter().enumerate() {
+        if let Err(err) = session.drive_step(step) {
+            failing_step = Some(index);
+            detail = Some(err.to_string());
+            break;
+        }
+    }
+    if failing_step.is_none() {
+        if let Err(err) = session.zero_error_check() {
+            failing_step = Some(scenario.steps.len());
+            detail = Some(err.to_string());
+        }
+    }
+
+    // Best-effort clean shutdown regardless of outcome, so a scenario never
+    // leaves a `view` process running past its own run; failures here are
+    // not this scenario's own result (a session that already failed a step
+    // may well fail to reach a cmdline prompt to type `:qa!` into).
+    let _ = session.pty().send(b"\x1b:qa!\r");
+    let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+
+    let status = if failing_step.is_some() {
+        ScenarioStatus::Failed
+    } else {
+        ScenarioStatus::Ok
+    };
+    Ok(scenario_result(
+        scenario_path,
+        scenario,
+        pin,
+        status,
+        failing_step,
+        detail,
+        start.elapsed().as_millis(),
+    ))
+}
+
+/// Resolves `path` into a sorted list of `(file path, parsed scenario)`
+/// pairs, mirroring [`collect_entries`]'s own non-recursive directory walk.
+fn collect_scenarios(path: &Path) -> Result<Vec<(PathBuf, ScenarioFile)>> {
+    let mut files: Vec<PathBuf> = if path.is_dir() {
+        std::fs::read_dir(path)
+            .with_context(|| format!("reading scenario directory {}", path.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "toml"))
+            .collect()
+    } else {
+        vec![path.to_path_buf()]
+    };
+    files.sort();
+
+    files
+        .into_iter()
+        .map(|path| {
+            let scenario = scenario::load_file(&path)
+                .with_context(|| format!("loading scenario {}", path.display()))?;
+            Ok((path, scenario))
+        })
+        .collect()
+}
+
+/// Prints one scenario's report line, in the shape the design brief's own
+/// worked example commits to (`compat: lualine (heavy, present) ... OK (4
+/// steps, 2.1s)`).
+fn print_scenario_result(result: &ScenarioResult) {
+    let fixture = result.fixture.as_deref().unwrap_or("none");
+    match result.status {
+        ScenarioStatus::Ok => println!(
+            "compat: {} ({fixture}, {}) ... OK ({} steps, {}ms)",
+            result.plugin, result.state, result.steps_total, result.elapsed_ms
+        ),
+        ScenarioStatus::Failed => {
+            let step_label = result
+                .failing_step
+                .map_or_else(|| "epilogue".to_string(), |i| i.to_string());
+            println!(
+                "compat: {} ({fixture}, {}) ... FAILED at step {step_label} ({} steps total, {}ms): {}",
+                result.plugin,
+                result.state,
+                result.steps_total,
+                result.elapsed_ms,
+                result.detail.as_deref().unwrap_or("unknown failure")
+            );
+        }
+        ScenarioStatus::Skipped => println!(
+            "compat: {} ({fixture}, {}) ... SKIPPED: {}",
+            result.plugin,
+            result.state,
+            result.detail.as_deref().unwrap_or("")
+        ),
+    }
+}
+
+/// The `compat [PATH]` subcommand: every scenario under `path` (default
+/// `compat/scenarios`), reported per [`print_scenario_result`] and written
+/// to `compat/results.json` for a future matrix/evidence-page consumer.
+/// Exit code: 0 unless at least one scenario reports
+/// [`ScenarioStatus::Failed`] -- a SKIPPED scenario (no
+/// daily config on this host) does not fail the run, matching the design
+/// brief's "reported SKIPPED-with-notice when unset" contract.
+///
+/// # Errors
+///
+/// Returns an error if no scenario files are found under `path`, a
+/// scenario file fails to parse, `.engine-pin` cannot be read, `view`
+/// cannot be built, or `compat/results.json` cannot be written.
+fn compat_command(path: &Path) -> Result<()> {
+    let scenarios = collect_scenarios(path)?;
+    if scenarios.is_empty() {
+        bail!(
+            "no scenario files found under {} (expected *.toml files)",
+            path.display()
+        );
+    }
+
+    let pin = current_engine_pin()?;
+    let view_bin = ensure_view_bin()?;
+    let nvim_bin = PathBuf::from("nvim");
+    std::fs::create_dir_all(cache_root()).context("creating compat/.cache")?;
+
+    let mut results = ResultsFile::default();
+    let mut any_failed = false;
+    for (scenario_path, scenario) in &scenarios {
+        let result = match run_scenario(scenario_path, scenario, &pin, &view_bin, &nvim_bin) {
+            Ok(result) => result,
+            Err(err) => scenario_result(
+                scenario_path,
+                scenario,
+                &pin,
+                ScenarioStatus::Failed,
+                None,
+                Some(err.to_string()),
+                0,
+            ),
+        };
+        print_scenario_result(&result);
+        if result.status == ScenarioStatus::Failed {
+            any_failed = true;
+        }
+        results.results.push(result);
+    }
+
+    write_results(
+        &workspace_root().join("compat").join("results.json"),
+        &results,
+    )
+    .context("writing compat/results.json")?;
+
+    if any_failed {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Reference values independently computed via Python's
+    /// `datetime.date` (`epoch + timedelta(days=N)`), not transcribed from
+    /// the Hinnant algorithm's own worked examples -- an independent
+    /// derivation path, per this codebase's own re-derive-don't-recognize
+    /// standard, catches a transcription bug a self-referential check
+    /// would not.
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(1), (1970, 1, 2));
+        assert_eq!(civil_from_days(365), (1971, 1, 1));
+        assert_eq!(civil_from_days(366), (1971, 1, 2));
+        assert_eq!(civil_from_days(1000), (1972, 9, 27));
+        assert_eq!(civil_from_days(19570), (2023, 8, 1));
+        assert_eq!(civil_from_days(20653), (2026, 7, 19));
+    }
+
+    #[test]
+    fn lockfile_cache_key_is_stable_for_identical_bytes() {
+        let bytes = b"{\"lualine.nvim\": {\"commit\": \"abc123\"}}";
+        assert_eq!(lockfile_cache_key(bytes), lockfile_cache_key(bytes));
+    }
+
+    #[test]
+    fn lockfile_cache_key_differs_for_different_bytes() {
+        let a = lockfile_cache_key(b"{\"a\": 1}");
+        let b = lockfile_cache_key(b"{\"a\": 2}");
+        assert_ne!(
+            a, b,
+            "different lockfile content must key different cache dirs"
+        );
+    }
 
     /// The scenario the merge logic exists for: an engine side that never
     /// saw a Flush must report TIMEOUT even when the reference side

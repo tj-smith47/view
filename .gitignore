@@ -1,3 +1,5 @@
 /target/
 .claude/
 .superpowers/
+/compat/.cache/
+/compat/results.json

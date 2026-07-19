@@ -2031,7 +2031,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "clap",
+ "portable-pty",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
  "view-oracle",
