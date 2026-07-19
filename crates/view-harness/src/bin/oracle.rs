@@ -134,6 +134,11 @@ fn main() -> Result<()> {
 /// invocations and hosts), or `path` itself if it names a file.
 fn collect_entries(path: &Path) -> Result<Vec<(PathBuf, CorpusEntry)>> {
     let mut files: Vec<PathBuf> = if path.is_dir() {
+        // Deliberately non-recursive: this is what keeps corpus/quarantine/
+        // (and any other subdirectory) out of every plain corpus-wide run
+        // without a dedicated exclude list -- a walk that ever became
+        // recursive would need one, to keep quarantined-but-unfixed
+        // failures from silently joining the PARITY gate.
         std::fs::read_dir(path)
             .with_context(|| format!("reading corpus directory {}", path.display()))?
             .filter_map(|entry| entry.ok())
@@ -372,17 +377,26 @@ fn run_command(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The specific failure shape a minimizer run reduces toward: either a
-/// [`Divergence`]'s top-level [`DivergenceKind`] (state vs grid), or which
-/// side(s) failed to settle. Distinguishing the two matters because they
-/// are different bugs at different layers (see `view_oracle::parity`'s own
-/// module docs for the state/grid split), and a minimizer must never
-/// shrink a divergent script toward an unrelated timeout, or a timing-out
-/// script toward an unrelated divergence, just because either one happens
-/// to count as "not PARITY".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// The specific failure shape a minimizer run reduces toward. A
+/// [`Divergence::State`] carries its own field name (`"mode"`, `"cursor"`,
+/// `"registers"`, `"marks"`, `"buffer_lines"`) into the signature: two
+/// state divergences on different fields are different bugs at different
+/// layers -- a mode disagreement does not imply a cursor disagreement --
+/// so treating every `Divergence::State` as interchangeable would let a
+/// minimizer legally reduce a mode-divergence input down to an unrelated
+/// cursor-only reproduction. The `view`/`reference` payload strings stay
+/// out of the signature regardless of field: they are exactly what is
+/// expected to shift as tokens drop out during reduction, the same reason
+/// a diverging grid row index is left out of [`DivergenceKind::Grid`],
+/// which stays coarse with no per-row identity. [`FailureSignature::Timeout`]
+/// covers the remaining case neither divergence variant reaches: which
+/// side(s) failed to settle. A minimizer must never shrink a divergent
+/// script toward an unrelated timeout, or a timing-out script toward an
+/// unrelated divergence, just because either one happens to count as "not
+/// PARITY".
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum FailureSignature {
-    Divergence(DivergenceKind),
+    Divergence(DivergenceKind, Option<String>),
     Timeout {
         engine_settled: bool,
         reference_settled: bool,
@@ -391,7 +405,10 @@ enum FailureSignature {
 
 impl FailureSignature {
     /// Reads `outcome`'s failure shape, or `None` for clean PARITY --
-    /// nothing for a minimizer to reduce toward.
+    /// nothing for a minimizer to reduce toward. The `Option<String>`
+    /// alongside a `Divergence` is the diverging field name for
+    /// `Divergence::State`, or `None` for `Divergence::Grid` (which has no
+    /// field-level identity to read).
     fn from_outcome(outcome: &EntryOutcome) -> Option<Self> {
         if !outcome.engine_settled || !outcome.reference_settled {
             return Some(Self::Timeout {
@@ -399,16 +416,19 @@ impl FailureSignature {
                 reference_settled: outcome.reference_settled,
             });
         }
-        outcome
-            .divergences
-            .first()
-            .map(|d| Self::Divergence(d.kind()))
+        outcome.divergences.first().map(|d| {
+            let field = match d {
+                Divergence::State { field, .. } => Some(field.clone()),
+                Divergence::Grid { .. } => None,
+            };
+            Self::Divergence(d.kind(), field)
+        })
     }
 
     /// Whether `outcome` reproduces this same failure shape: the ddmin
     /// reproduction predicate every minimizer candidate is tested against.
-    fn matches(self, outcome: &EntryOutcome) -> bool {
-        Self::from_outcome(outcome) == Some(self)
+    fn matches(&self, outcome: &EntryOutcome) -> bool {
+        Self::from_outcome(outcome).as_ref() == Some(self)
     }
 }
 
@@ -494,68 +514,92 @@ fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<
 
 /// Directory quarantined fuzz-discovered failures are written to: durable,
 /// reviewable artifacts (matching `corpus/`'s own convention), not scratch
-/// files that vanish after one run.
-fn quarantine_path(seed: u64, round: u32) -> PathBuf {
-    PathBuf::from("corpus/quarantine").join(format!("fuzz-{seed}-{round}.toml"))
+/// files that vanish after one run. Takes the containing directory as a
+/// parameter (rather than hardcoding `corpus/quarantine`) so a pinning
+/// test can point it at a scratch directory instead of writing into the
+/// real corpus tree.
+fn quarantine_path(dir: &Path, seed: u64, round: u32) -> PathBuf {
+    dir.join(format!("fuzz-{seed}-{round}.toml"))
 }
 
-/// The `fuzz --seed N` subcommand: generates `rounds` reproducible random
-/// scripts from `seed` (see [`fuzz::generate_round`]), drives each through
-/// [`run_tokens`] at the corpus loader's own default quiesce window, and
-/// for any round that is not clean PARITY, minimizes it toward its own
-/// failure shape and writes the (already minimized) result to
-/// [`quarantine_path`].
+/// One fuzz campaign's outcome tally: how many rounds landed in each of
+/// the three buckets [`fuzz_rounds`]'s per-round match can produce.
+/// Returned as data rather than printed inline so a pinning test can
+/// assert on the counts directly instead of parsing captured stdout.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct FuzzSummary {
+    divergence_count: u32,
+    timeout_count: u32,
+    error_count: u32,
+}
+
+/// Drives `rounds` generated scripts through `probe`, an injectable
+/// closure seam matching the one [`ddmin`] already takes for its own
+/// candidate checks: a live campaign passes a closure that spawns nvim
+/// through [`run_tokens`]; a pinning test passes a fake one that returns a
+/// scripted result sequence with no engine involved. Every round's result
+/// is matched, never unwrapped with `?` -- a round's own probe failure (an
+/// eval_str reply that never arrives, distinct from and more severe than
+/// the settle-timeout `FailureSignature::Timeout` already covers) must not
+/// abort the whole campaign: a fuzz generator drawing from a wide alphabet
+/// will hit a session wedge sooner or later (live-verified: seed 42 hit
+/// one at round 6 of a 10-round run during this feature's own
+/// development), and every round after it deserves the same chance to run
+/// as if the wedge had never happened, exactly as `run_command`'s own
+/// per-entry error handling already treats one entry's error as that
+/// entry's failure, not the whole corpus run's. Swapping this match for
+/// `probe(&tokens)?` would compile cleanly and pass every test that only
+/// exercises the happy path, then silently truncate a live campaign the
+/// first time a round's probe errors -- the reason this seam exists is to
+/// let a test drive that exact scenario without spawning nvim.
 ///
 /// # Errors
 ///
-/// Returns an error if `.engine-pin` cannot be read, a round's probes
-/// fail, or a quarantine entry cannot be written.
-fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
+/// Returns an error if a quarantine entry cannot be written.
+fn fuzz_rounds<P>(
+    seed: u64,
+    rounds: u32,
+    keys: usize,
+    pin: &str,
+    quarantine_dir: &Path,
+    mut probe: P,
+) -> Result<FuzzSummary>
+where
+    P: FnMut(&[String]) -> Result<EntryOutcome, view_oracle::OracleError>,
+{
+    let cols = COLS;
+    let rows = ROWS;
     let silence = Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS);
     let deadline = Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS);
-    let pin = current_engine_pin()?;
-
-    let mut divergence_count = 0u32;
-    let mut timeout_count = 0u32;
-    let mut error_count = 0u32;
+    let mut summary = FuzzSummary::default();
 
     for round in 0..rounds {
         let tokens = fuzz::generate_round(seed, round, keys);
-        // A round's own probe failure (an eval_str reply that never
-        // arrives, distinct from and more severe than the settle-timeout
-        // FailureSignature::Timeout already covers -- see this crate's own
-        // module docs) must not abort the whole fuzz run via `?`: a fuzz
-        // generator drawing from a wide alphabet will hit a session wedge
-        // sooner or later (live-verified: seed 42 hit one at round 6 of a
-        // 10-round run during this feature's own development), and every
-        // round after it deserves the same chance to run as if the
-        // wedge had never happened, exactly as `run_command`'s own
-        // per-entry error handling already treats one entry's error as
-        // that entry's failure, not the whole corpus run's.
-        match run_tokens(&tokens, COLS, ROWS, silence, deadline) {
+        match probe(&tokens) {
             Ok(outcome) => {
                 let Some(target) = FailureSignature::from_outcome(&outcome) else {
                     continue;
                 };
-                match target {
-                    FailureSignature::Divergence(_) => divergence_count += 1,
-                    FailureSignature::Timeout { .. } => timeout_count += 1,
+                match &target {
+                    FailureSignature::Divergence(..) => summary.divergence_count += 1,
+                    FailureSignature::Timeout { .. } => summary.timeout_count += 1,
                 }
-                let minimized = minimize_tokens(tokens, target, COLS, ROWS, silence, deadline);
-                let path = quarantine_entry(seed, round, &minimized, &pin)?;
+                let minimized =
+                    minimize_tokens(tokens, target.clone(), cols, rows, silence, deadline);
+                let path = quarantine_entry(quarantine_dir, seed, round, &minimized, pin)?;
                 println!(
                     "fuzz: round {round} ... {target:?}, quarantined to {}",
                     path.display()
                 );
             }
             Err(err) => {
-                error_count += 1;
+                summary.error_count += 1;
                 // Minimizing an error round would itself require rerunning
                 // this same probe repeatedly, and a probe error already
                 // means candidate pass/fail cannot be trusted the way a
                 // settled comparison can be; the raw generated script is
                 // quarantined unminimized instead.
-                let path = quarantine_entry(seed, round, &tokens, &pin)?;
+                let path = quarantine_entry(quarantine_dir, seed, round, &tokens, pin)?;
                 println!(
                     "fuzz: round {round} ... ERROR: {err}, quarantined to {}",
                     path.display()
@@ -564,28 +608,61 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
         }
     }
 
+    Ok(summary)
+}
+
+/// The `fuzz --seed N` subcommand: generates `rounds` reproducible random
+/// scripts from `seed` (see [`fuzz::generate_round`]), drives each through
+/// [`run_tokens`] via [`fuzz_rounds`]'s probe seam, and for any round that
+/// is not clean PARITY, minimizes it toward its own failure shape and
+/// writes the (already minimized) result under `corpus/quarantine`.
+///
+/// # Errors
+///
+/// Returns an error if `.engine-pin` cannot be read or a quarantine entry
+/// cannot be written.
+fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
+    let silence = Duration::from_millis(corpus::DEFAULT_QUIESCE_SILENCE_MS);
+    let deadline = Duration::from_millis(corpus::DEFAULT_QUIESCE_DEADLINE_MS);
+    let pin = current_engine_pin()?;
+
+    let summary = fuzz_rounds(
+        seed,
+        rounds,
+        keys,
+        &pin,
+        Path::new("corpus/quarantine"),
+        |tokens| run_tokens(tokens, COLS, ROWS, silence, deadline),
+    )?;
+
     println!(
-        "fuzz: {rounds} rounds, seed {seed} ... {divergence_count} divergences, \
-         {timeout_count} timeouts, {error_count} errors"
+        "fuzz: {rounds} rounds, seed {seed} ... {} divergences, {} timeouts, {} errors",
+        summary.divergence_count, summary.timeout_count, summary.error_count
     );
 
-    if divergence_count > 0 || timeout_count > 0 || error_count > 0 {
+    if summary.divergence_count > 0 || summary.timeout_count > 0 || summary.error_count > 0 {
         std::process::exit(1);
     }
     Ok(())
 }
 
-/// Writes `tokens` to [`quarantine_path`]`(seed, round)` as a corpus entry
-/// named `fuzz-<seed>-<round>`, stamped with the live `.engine-pin` value
-/// `engine_pin` -- the write every non-PARITY fuzz round shares, whether
-/// its script has already been minimized or (an error round) is being
-/// quarantined raw.
+/// Writes `tokens` to [`quarantine_path`]`(dir, seed, round)` as a corpus
+/// entry named `fuzz-<seed>-<round>`, stamped with the live `.engine-pin`
+/// value `engine_pin` -- the write every non-PARITY fuzz round shares,
+/// whether its script has already been minimized or (an error round) is
+/// being quarantined raw.
 ///
 /// # Errors
 ///
 /// Returns an error if the entry cannot be written.
-fn quarantine_entry(seed: u64, round: u32, tokens: &[String], engine_pin: &str) -> Result<PathBuf> {
-    let path = quarantine_path(seed, round);
+fn quarantine_entry(
+    dir: &Path,
+    seed: u64,
+    round: u32,
+    tokens: &[String],
+    engine_pin: &str,
+) -> Result<PathBuf> {
+    let path = quarantine_path(dir, seed, round);
     let name = format!("fuzz-{seed}-{round}");
     corpus::write_entry(
         &path,
@@ -673,24 +750,29 @@ mod tests {
         assert!(!reference_wedged.is_success());
     }
 
-    fn divergence_outcome(kind: DivergenceKind) -> EntryOutcome {
-        let divergence = match kind {
-            DivergenceKind::State => Divergence::State {
-                field: "buffer_lines".to_string(),
-                view: "a".to_string(),
-                reference: "b".to_string(),
-            },
-            DivergenceKind::Grid => Divergence::Grid {
-                row: 0,
-                view: "a".to_string(),
-                reference: "b".to_string(),
-            },
-        };
+    fn state_divergence_outcome(field: &str) -> EntryOutcome {
         EntryOutcome {
             engine_settled: true,
             reference_settled: true,
             elapsed_ms: 0,
-            divergences: vec![divergence],
+            divergences: vec![Divergence::State {
+                field: field.to_string(),
+                view: "a".to_string(),
+                reference: "b".to_string(),
+            }],
+        }
+    }
+
+    fn grid_divergence_outcome() -> EntryOutcome {
+        EntryOutcome {
+            engine_settled: true,
+            reference_settled: true,
+            elapsed_ms: 0,
+            divergences: vec![Divergence::Grid {
+                row: 0,
+                view: "a".to_string(),
+                reference: "b".to_string(),
+            }],
         }
     }
 
@@ -716,10 +798,22 @@ mod tests {
 
     #[test]
     fn failure_signature_reads_the_first_divergences_kind() {
-        let outcome = divergence_outcome(DivergenceKind::Grid);
+        let outcome = grid_divergence_outcome();
         assert_eq!(
             FailureSignature::from_outcome(&outcome),
-            Some(FailureSignature::Divergence(DivergenceKind::Grid))
+            Some(FailureSignature::Divergence(DivergenceKind::Grid, None))
+        );
+    }
+
+    #[test]
+    fn failure_signature_reads_the_diverging_states_field_name() {
+        let outcome = state_divergence_outcome("mode");
+        assert_eq!(
+            FailureSignature::from_outcome(&outcome),
+            Some(FailureSignature::Divergence(
+                DivergenceKind::State,
+                Some("mode".to_string())
+            ))
         );
     }
 
@@ -736,9 +830,9 @@ mod tests {
 
     #[test]
     fn failure_signature_matches_requires_the_same_kind() {
-        let target = FailureSignature::Divergence(DivergenceKind::State);
-        assert!(target.matches(&divergence_outcome(DivergenceKind::State)));
-        assert!(!target.matches(&divergence_outcome(DivergenceKind::Grid)));
+        let target = FailureSignature::Divergence(DivergenceKind::Grid, None);
+        assert!(target.matches(&grid_divergence_outcome()));
+        assert!(!target.matches(&state_divergence_outcome("mode")));
 
         let timeout_target = FailureSignature::Timeout {
             engine_settled: false,
@@ -758,6 +852,61 @@ mod tests {
         };
         assert!(timeout_target.matches(&matching_timeout));
         assert!(!timeout_target.matches(&different_timeout_shape));
+    }
+
+    #[test]
+    fn failure_signature_state_divergences_on_different_fields_do_not_match() {
+        // DivergenceKind::State alone is too coarse: a mode disagreement
+        // and a cursor disagreement are different bugs, so a minimizer
+        // targeting one must reject a candidate that only reproduces the
+        // other, even though both carry DivergenceKind::State.
+        let mode_target =
+            FailureSignature::Divergence(DivergenceKind::State, Some("mode".to_string()));
+        assert!(mode_target.matches(&state_divergence_outcome("mode")));
+        assert!(!mode_target.matches(&state_divergence_outcome("cursor")));
+        assert!(!mode_target.matches(&state_divergence_outcome("registers")));
+        assert!(!mode_target.matches(&state_divergence_outcome("marks")));
+        assert!(!mode_target.matches(&state_divergence_outcome("buffer_lines")));
+    }
+
+    #[test]
+    fn failure_signature_state_divergences_on_the_same_field_match_despite_different_payload() {
+        // Payload-insensitivity: row/content values are expected to shift
+        // as tokens drop out during reduction, so only the field name --
+        // never the view/reference contents -- is part of the identity.
+        let target =
+            FailureSignature::Divergence(DivergenceKind::State, Some("buffer_lines".to_string()));
+        let outcome = EntryOutcome {
+            engine_settled: true,
+            reference_settled: true,
+            elapsed_ms: 0,
+            divergences: vec![Divergence::State {
+                field: "buffer_lines".to_string(),
+                view: "totally different content".to_string(),
+                reference: "still different".to_string(),
+            }],
+        };
+        assert!(target.matches(&outcome));
+    }
+
+    #[test]
+    fn failure_signature_grid_divergences_stay_coarse_on_row_index() {
+        // Grid is deliberately not sharpened the way State was: a
+        // diverging row index is exactly the kind of value expected to
+        // shift during reduction, same as DivergenceKind::Grid already
+        // discards it.
+        let target = FailureSignature::Divergence(DivergenceKind::Grid, None);
+        let outcome = EntryOutcome {
+            engine_settled: true,
+            reference_settled: true,
+            elapsed_ms: 0,
+            divergences: vec![Divergence::Grid {
+                row: 7,
+                view: "x".to_string(),
+                reference: "y".to_string(),
+            }],
+        };
+        assert!(target.matches(&outcome));
     }
 
     /// Regression guard for the `run_entry`/`run_tokens` split: every seed
@@ -845,6 +994,126 @@ mod tests {
             "expected minimize_command to shrink the entry's input ({} chars) below the \
              unminimized length ({unminimized_len} chars)",
             minimized.input.len()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins `fuzz_rounds`'s continue-past-error contract with a fake probe,
+    /// no nvim involved: round `error_round` of `rounds` errors, every
+    /// other round reports clean PARITY. A campaign matching (not `?`-ing)
+    /// its probe result must still run all `rounds` rounds, count exactly
+    /// one error, and quarantine the errored round's raw generated script.
+    /// Disconfirmed by temporarily replacing this seam's `match` with
+    /// `probe(&tokens)?` and rerunning this test: the campaign aborts at
+    /// `error_round`, `probed_rounds.len()` comes up short, and this test
+    /// fails loudly instead of the silent truncation a live campaign would
+    /// suffer from the same change.
+    #[test]
+    fn fuzz_rounds_continues_past_a_probe_error_and_quarantines_it_raw() {
+        let dir = std::env::temp_dir().join(format!(
+            "view-harness-oracle-fuzz-pin-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+
+        let seed = 7u64;
+        let rounds = 5u32;
+        let keys = 10usize;
+        let error_round = 2u32;
+        let mut probed_rounds: Vec<u32> = Vec::new();
+
+        let summary = fuzz_rounds(seed, rounds, keys, "test-pin", &dir, |_tokens| {
+            let round = u32::try_from(probed_rounds.len()).unwrap_or(u32::MAX);
+            probed_rounds.push(round);
+            if round == error_round {
+                Err(view_oracle::OracleError::Pty(
+                    "scripted probe failure".to_string(),
+                ))
+            } else {
+                Ok(EntryOutcome {
+                    engine_settled: true,
+                    reference_settled: true,
+                    elapsed_ms: 0,
+                    divergences: Vec::new(),
+                })
+            }
+        })
+        .expect("fuzz_rounds must not abort the campaign on a single round's probe error");
+
+        assert_eq!(
+            probed_rounds.len(),
+            rounds as usize,
+            "every round must be probed even though round {error_round} errored"
+        );
+        assert_eq!(
+            summary,
+            FuzzSummary {
+                divergence_count: 0,
+                timeout_count: 0,
+                error_count: 1,
+            }
+        );
+
+        let quarantined = quarantine_path(&dir, seed, error_round);
+        assert!(
+            quarantined.exists(),
+            "the errored round must be quarantined raw at {}",
+            quarantined.display()
+        );
+        let entry = corpus::load_file(&quarantined)
+            .expect("the quarantined error round must still parse as a corpus entry");
+        let expected_tokens = fuzz::generate_round(seed, error_round, keys);
+        assert_eq!(
+            entry.input,
+            join_tokens(&expected_tokens),
+            "the quarantined error round must hold its raw (unminimized) generated script"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Pins the dependency `collect_entries`'s WHY comment states: the walk
+    /// is non-recursive, so a `.toml` file living in a subdirectory of the
+    /// corpus dir (exactly `corpus/quarantine`'s own shape) is never
+    /// collected into a plain corpus-wide run.
+    #[test]
+    fn collect_entries_does_not_recurse_into_subdirectories() {
+        let dir = std::env::temp_dir().join(format!(
+            "view-harness-oracle-collect-entries-{}",
+            std::process::id()
+        ));
+        let subdir = dir.join("quarantine");
+        std::fs::create_dir_all(&subdir).expect("failed to create scratch dirs");
+
+        corpus::write_entry(
+            &dir.join("top-level.toml"),
+            "top-level",
+            "ihello<Esc>",
+            "test-pin",
+            "default",
+            corpus::DEFAULT_QUIESCE_SILENCE_MS,
+            corpus::DEFAULT_QUIESCE_DEADLINE_MS,
+        )
+        .expect("failed to write top-level entry");
+        corpus::write_entry(
+            &subdir.join("nested.toml"),
+            "nested",
+            "ihello<Esc>",
+            "test-pin",
+            "default",
+            corpus::DEFAULT_QUIESCE_SILENCE_MS,
+            corpus::DEFAULT_QUIESCE_DEADLINE_MS,
+        )
+        .expect("failed to write nested entry");
+
+        let entries = collect_entries(&dir).expect("collect_entries failed");
+        let names: Vec<&str> = entries.iter().map(|(_, e)| e.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec!["top-level"],
+            "a .toml file in a subdirectory of the corpus dir must not be collected"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
