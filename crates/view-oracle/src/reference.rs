@@ -437,10 +437,19 @@ impl ReferenceSession {
     /// can compare the two directly.
     #[must_use]
     pub fn screen_text(&self) -> String {
+        self.screen_rows().join("\n")
+    }
+
+    /// Renders `RefGrid`'s current content as one `String` per row, in row
+    /// order: the row-indexed form [`crate::compare`] needs, matching
+    /// [`EngineSession::screen_rows`](crate::EngineSession::screen_rows)'s
+    /// shape on the view side so a [`crate::masked_rows`] row index lines up
+    /// against both sides' row vectors identically.
+    #[must_use]
+    pub fn screen_rows(&self) -> Vec<String> {
         (0..self.grid.height)
             .map(|r| self.grid.row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n")
+            .collect()
     }
 
     /// Evaluates `expr` against the real engine, identical to

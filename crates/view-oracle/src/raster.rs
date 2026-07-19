@@ -18,17 +18,28 @@ const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 
 /// Renders `surface` to a plain-text screen dump: one newline-joined row per
 /// canvas line, each row exactly as wide as the canvas (short overlay text
-/// is left-aligned and space-padded, never truncated mid-run). The canvas
-/// size is the union of every layer's rect (`row + height`, `col + width`)
-/// rather than a caller-supplied width/height, so this stays a pure
-/// function of `surface` and `grid` alone. Later layers (`surface.layers`'
+/// is left-aligned and space-padded, never truncated mid-run). Built on
+/// [`screen_rows`]; kept as a separate entry point since most callers (test
+/// assertions, printed diagnostics) want one string, not a `Vec`.
+#[must_use]
+pub fn screen_text(surface: &Surface, grid: &Grid) -> String {
+    screen_rows(surface, grid).join("\n")
+}
+
+/// Renders `surface` to one `String` per canvas row, in row order --
+/// [`screen_text`]'s per-row split, exposed directly so a row index (e.g.
+/// from [`crate::masked_rows`]) lines up with an element index without a
+/// caller having to re-split a joined string back apart. The canvas size is
+/// the union of every layer's rect (`row + height`, `col + width`) rather
+/// than a caller-supplied width/height, so this stays a pure function of
+/// `surface` and `grid` alone. Later layers (`surface.layers`'
 /// z-ascending order, the same order [`view_surface::render`] builds) paint
 /// over earlier ones, matching the real terminal painter's stacking.
 #[must_use]
-pub fn screen_text(surface: &Surface, grid: &Grid) -> String {
+pub fn screen_rows(surface: &Surface, grid: &Grid) -> Vec<String> {
     let (width, height) = canvas_size(surface);
     if width == 0 || height == 0 {
-        return String::new();
+        return Vec::new();
     }
     let mut canvas = vec![vec![' '; usize::from(width)]; usize::from(height)];
     for layer in &surface.layers {
@@ -37,8 +48,7 @@ pub fn screen_text(surface: &Surface, grid: &Grid) -> String {
     canvas
         .into_iter()
         .map(|row| row.into_iter().collect::<String>())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .collect()
 }
 
 fn canvas_size(surface: &Surface) -> (u16, u16) {

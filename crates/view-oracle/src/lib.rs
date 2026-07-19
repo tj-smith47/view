@@ -19,6 +19,10 @@
 //!   `Model`/`Grid`. Not another fidelity tier: a differential second
 //!   opinion at the same tier as `EngineSession`, for comparing the two
 //!   appliers against each other rather than against nvim's own state.
+//! - [`parity`]: the comparison layer a corpus runner drives -- state
+//!   probes ([`StateSnapshot`]/[`snapshot`]) plus a masked row-by-row grid
+//!   diff ([`compare`]/[`masked_rows`]) between any two [`Probe`] sources,
+//!   most usefully `EngineSession` against `ReferenceSession`.
 //!
 //! Dependency direction: this crate takes no dependency on `view-tui` ([`raster`]
 //! is pure `Surface` + `Grid` -> text, no ratatui/crossterm) and stays
@@ -27,6 +31,7 @@
 //! `String`), never a raw wire `Value`. `scripts/audit-deps.sh` enforces
 //! both.
 
+mod parity;
 pub mod pty;
 mod raster;
 mod reference;
@@ -43,6 +48,7 @@ use view_engine::process::{Engine, EngineConfig};
 use view_engine::DamagePump;
 use view_surface::Surface;
 
+pub use parity::{compare, masked_rows, snapshot, Divergence, Probe, StateSnapshot};
 pub use pty::PtySession;
 pub use reference::ReferenceSession;
 
@@ -220,6 +226,16 @@ impl EngineSession {
     #[must_use]
     pub fn screen_text(&self) -> String {
         raster::screen_text(&self.surface(), &self.model.engine.grid)
+    }
+
+    /// Renders the current [`Surface`] to one row of text per canvas line,
+    /// via [`raster::screen_rows`]: the row-indexed form [`crate::compare`]
+    /// and [`crate::masked_rows`] need, since a masked row index must line
+    /// up with an element index rather than a position inside a joined
+    /// string.
+    #[must_use]
+    pub fn screen_rows(&self) -> Vec<String> {
+        raster::screen_rows(&self.surface(), &self.model.engine.grid)
     }
 
     /// Evaluates `expr` against the real engine and returns its result as
