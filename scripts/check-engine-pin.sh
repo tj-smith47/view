@@ -9,6 +9,10 @@ case "$pin" in
   *) echo "PIN FAIL: '$pin' is not a vX.Y.Z tag"; exit 1 ;;
 esac
 fail=0
+# an absent/renamed workflow file must not silently pass: grep's exit 2
+# on missing files was previously swallowed by `|| true`, turning every
+# check below into a no-op that still exited 0
+[ -f .github/workflows/ci.yml ] || { echo "PIN FAIL: .github/workflows/ci.yml not found"; exit 1; }
 # every OS leg must read the pin file itself: one read per install step,
 # or a leg can hardcode a version that silently drifts from the pin
 # shellcheck disable=SC2016 # literal grep pattern, not a shell expansion
