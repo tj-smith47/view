@@ -1,0 +1,37 @@
+# nvim-treesitter is semantic: its highlight module attaches a treesitter
+# highlighter to buffers whose language it manages. The fixture pins
+# ensure_installed = { "lua" } so the parser set is deterministic; this
+# scenario opens a lua buffer and asserts both the plugin-side fact (the
+# highlight module reports itself enabled for this buffer) and the
+# engine-side effect (a live treesitter highlighter on the buffer).
+schema = 1
+plugin = "nvim-treesitter"
+class = "semantic"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded[\"nvim-treesitter\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # A cold cache compiles the pinned parser during startup install; the
+  # timeout covers that one-time build.
+  { wait_for_probe = "luaeval('require(\"nvim-treesitter.parsers\").has_parser(\"lua\")')", expect = "true", timeout_ms = 180000 },
+  { send = ":enew<CR>" },
+  { send = ":setfiletype lua<CR>" },
+  { send = "ilocal compat = 1<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every assertion below keeps passing
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # The plugin-side fact: nvim-treesitter's own highlight module claims
+  # this buffer. nvim can attach a highlighter for bundled languages on
+  # its own, so the effect probe below is not by itself proof of the
+  # plugin; this one is.
+  { wait_for_probe = "luaeval('require(\"nvim-treesitter.configs\").is_enabled(\"highlight\", \"lua\", vim.api.nvim_get_current_buf())')", expect = "true", timeout_ms = 10000 },
+  # The engine-side effect: an attached, live treesitter highlighter.
+  { wait_for_probe = "luaeval('vim.treesitter.highlighter.active[vim.api.nvim_get_current_buf()] ~= nil')", expect = "true", timeout_ms = 10000 },
+]

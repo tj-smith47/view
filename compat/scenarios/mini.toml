@@ -1,0 +1,28 @@
+# mini.nvim is semantic: it is a library of behavior modules. The fixture
+# enables mini.pairs, whose observable effect is deterministic and
+# buffer-local: typing an opening parenthesis in insert mode inserts the
+# closing one as well. Without the plugin the same keystroke leaves a
+# lone opening parenthesis, so the line-content probe below fails.
+schema = 1
+plugin = "mini.nvim"
+class = "semantic"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded[\"mini.pairs\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ilocal t = (" },
+  # mini.pairs mutated the insert into a balanced pair; a bare nvim
+  # would leave "local t = (" here.
+  { wait_for_probe = "getline('.')", expect = "local t = ()", timeout_ms = 10000 },
+  { send = "<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # the line assertion above keeps passing against the literal text
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+]

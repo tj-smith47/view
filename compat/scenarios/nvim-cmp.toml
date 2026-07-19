@@ -1,0 +1,47 @@
+# nvim-cmp is semantic: it computes completion candidates and offers them
+# through its own floating menu. The fixture wires the cmp-buffer source,
+# so typing a prefix of a word that already exists in the buffer must
+# produce that word as a candidate -- content that is fully determined by
+# what this scenario itself typed moments earlier.
+schema = 1
+plugin = "nvim-cmp"
+class = "semantic"
+fixture = "heavy"
+state = "present"
+steps = [
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
+  { wait_for_probe = "luaeval('package.loaded.cmp ~= nil')", expect = "true", timeout_ms = 180000 },
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # Seed the buffer with a word no other screen content contains, then
+  # start a fresh line for the prefix.
+  { send = "iprefabricated<CR>" },
+  # The prefix is typed one keystroke per step, a probe between each:
+  # cmp's TextChangedI handler treats a cursor jump of more than one
+  # column between events as paste-like input and suppresses
+  # autocomplete (observed against plain nvim too, not view-specific),
+  # so a single burst pty write never opens the menu. The interleaved
+  # probes pace the keys the way real typing arrives, and assert the
+  # session stays in insert mode while they do it.
+  { send = "p" },
+  { probe = "mode()", expect = "i" },
+  { send = "r" },
+  { probe = "mode()", expect = "i" },
+  { send = "e" },
+  { probe = "mode()", expect = "i" },
+  { send = "f" },
+  { wait_for_probe = "luaeval('require(\"cmp\").visible()')", expect = "true", timeout_ms = 15000 },
+  # The seeded word offered as an actual candidate from the buffer
+  # source -- menu visibility alone would also hold for an empty or
+  # unrelated candidate list.
+  { wait_for_probe = "luaeval('(function() for _, e in ipairs(require(\"cmp\").get_entries()) do if e.completion_item.label == \"prefabricated\" then return \"offered\" end end return \"absent\" end)()')", expect = "offered", timeout_ms = 10000 },
+  { send = "<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # the assertions above keep passing
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { probe = "luaeval('require(\"cmp\").visible()')", expect = "false" },
+]

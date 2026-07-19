@@ -26,8 +26,8 @@ steps = [
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, the session stays in the
   # input float's insert mode while later assertions keep passing
-  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { send = "<Esc>" },
-  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
 ]

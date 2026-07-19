@@ -22,7 +22,7 @@ steps = [
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
-  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   # noice's startup health notifications overlay the upper grid rows
   # (including buffer line 1, where this text renders) for the first few
   # seconds after launch; the timeout must outlast their dismissal.

@@ -27,5 +27,5 @@ steps = [
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, a pending-operator state
   # would linger while later assertions keep passing
-  { probe = "mode()", expect = "n" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]

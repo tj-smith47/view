@@ -118,8 +118,40 @@ require("lazy").setup({
       dependencies = { "nvim-lua/plenary.nvim" },
       opts = {},
     },
-    { "nvim-treesitter/nvim-treesitter", branch = "master" },
-    { "hrsh7th/nvim-cmp" },
+    {
+      "nvim-treesitter/nvim-treesitter",
+      branch = "master",
+      config = function()
+        -- ensure_installed pins the parser set so scenario assertions
+        -- are deterministic; the one-time parser compile lands in the
+        -- shared plugin cache next to the plugin itself.
+        require("nvim-treesitter.configs").setup({
+          ensure_installed = { "lua" },
+          sync_install = false,
+          highlight = { enable = true },
+        })
+      end,
+    },
+    {
+      "hrsh7th/nvim-cmp",
+      dependencies = { "hrsh7th/cmp-buffer" },
+      config = function()
+        -- The buffer source is the one completion source whose candidate
+        -- set a scenario fully controls: whatever words the scenario
+        -- itself typed into the buffer.
+        local cmp = require("cmp")
+        cmp.setup({ sources = { { name = "buffer" } } })
+      end,
+    },
+    {
+      "echasnovski/mini.nvim",
+      config = function()
+        -- One module with a deterministic, buffer-local observable
+        -- effect stands in for the library: typing an opening paren in
+        -- insert mode yields a balanced pair.
+        require("mini.pairs").setup()
+      end,
+    },
   },
   lockfile = vim.fn.stdpath("config") .. "/lazy-lock.json",
   install = { missing = true },
