@@ -13,6 +13,12 @@
 //! - [`PtySession`] (in [`pty`]): the full stack through a real pty. The
 //!   integration path, the only leg that proves terminal input decode and
 //!   real-process behavior end to end.
+//! - [`ReferenceSession`] (in [`reference`]): a second embedded engine, applying
+//!   the identical decoded redraw stream `EngineSession` consumes with an
+//!   independent, deliberately naive grid applier instead of view's own
+//!   `Model`/`Grid`. Not another fidelity tier: a differential second
+//!   opinion at the same tier as `EngineSession`, for comparing the two
+//!   appliers against each other rather than against nvim's own state.
 //!
 //! Dependency direction: this crate takes no dependency on `view-tui` ([`raster`]
 //! is pure `Surface` + `Grid` -> text, no ratatui/crossterm) and stays
@@ -23,6 +29,7 @@
 
 pub mod pty;
 mod raster;
+mod reference;
 
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
@@ -37,6 +44,7 @@ use view_engine::DamagePump;
 use view_surface::Surface;
 
 pub use pty::PtySession;
+pub use reference::ReferenceSession;
 
 /// Errors surfaced by the headless drivers.
 #[non_exhaustive]
