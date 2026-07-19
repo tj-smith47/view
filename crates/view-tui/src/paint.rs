@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::Grid;
 pub use view_core::hl::{HlAttr, HlTable};
-use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
+use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 use view_core::theme::{ResolvedStyle, Theme};
 use view_surface::{LayerKind, Rect, Surface};
 
@@ -161,13 +161,12 @@ fn paint_cmdline(
     paint_text_row(&text, style, area, 0, frame);
 }
 
-/// Renders the message log as stacked toasts: `render()` already sized and
-/// right-anchored `area` to the widest visible physical line (one row per
-/// `MessageEntry::lines` entry, not one row per `MessageEntry` -- a
-/// multi-line `emsg` occupies as many rows as it has physical lines), so
-/// painting picks which lines fit in `area`'s height (the most recently
-/// shown ones, oldest of that visible set on top) and writes each on its
-/// own row.
+/// Renders the message log as stacked toasts: `render()` already picked
+/// exactly the visible physical lines (`Messages::visible_lines` --
+/// persistent error/warn lines always kept, the most recent transient
+/// lines filling the rest) and sized/right-anchored `area` to them, so
+/// painting only has to write one line per row, in the order given (oldest
+/// of the visible set on top).
 ///
 /// The whole rect is cleared to the toast's own style first, before any
 /// text: without this, a row -- or the columns past a line's own text on a
@@ -177,7 +176,7 @@ fn paint_cmdline(
 /// what a live repro showed as foreign glyphs bleeding through at a toast
 /// row's right edge.
 fn paint_messages(
-    entries: &[MessageEntry],
+    lines: &[String],
     theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
@@ -188,10 +187,7 @@ fn paint_messages(
         paint_text_row(&blank, style, area, row, frame);
     }
 
-    let lines: Vec<String> = entries.iter().flat_map(MessageEntry::lines).collect();
-    let visible = usize::from(area.height);
-    let start = lines.len().saturating_sub(visible);
-    for (i, line) in lines[start..].iter().enumerate() {
+    for (i, line) in lines.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };

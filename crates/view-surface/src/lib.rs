@@ -7,7 +7,7 @@
 
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
-use view_core::model::{CmdlineState, MessageEntry, Model, PopupmenuState, TablineState};
+use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 
 /// A rectangular region in terminal cells, addressed the same way as
 /// [`view_core::grid::Grid`]: `(row, col)` is the top-left corner.
@@ -56,8 +56,12 @@ pub enum LayerKind {
     EngineGrid,
     /// The command line, present while nvim's command line is open.
     Cmdline(CmdlineState),
-    /// The message log, present while it holds unshown-cleared entries.
-    Messages(Vec<MessageEntry>),
+    /// The visible toast box's physical lines, already selected by
+    /// `Messages::visible_lines` (persistent error/warn lines kept, the
+    /// most recent transient lines filling what room remains) and split on
+    /// each entry's own embedded line breaks: one row per string, in
+    /// display order top to bottom. Present while any message is visible.
+    Messages(Vec<String>),
     /// The open tabs, present once nvim has sent a `tabline_update`.
     Tabline(TablineState),
     /// The completion popup menu, present while it is open.
@@ -193,21 +197,25 @@ pub fn render(model: &Model) -> Surface {
         ));
     }
     if !engine.messages.entries.is_empty() {
-        // one physical line (an entry's content split on its own embedded
-        // `\n`s, see `MessageEntry::lines`) is one visual row, not one
-        // `MessageEntry` one row: sizing/painting per entry instead
-        // squashes every line of a multi-line `emsg` into a single row wide
-        // enough to hold all of them concatenated, and leaves the row it
-        // should have occupied showing whatever the grid layer painted
-        // underneath
-        let line_count: usize = engine
-            .messages
-            .entries
-            .iter()
-            .map(|e| e.lines().len())
-            .sum();
-        let width = messages_width(&engine.messages.entries).min(grid_w).max(1);
-        let height = u16::try_from(line_count)
+        // `Messages::visible_lines` is the single selection of what
+        // actually shows: persistent (error/warn) lines always kept, the
+        // remaining row budget filled with the most recent transient
+        // lines, one physical line (an entry's content split on its own
+        // embedded `\n`s) per visual row rather than one row per
+        // `MessageEntry` -- sizing/painting per entry instead squashes
+        // every line of a multi-line `emsg` into a single row wide enough
+        // to hold all of them concatenated, and leaves the row it should
+        // have occupied showing whatever the grid layer painted
+        // underneath. Both the layer's geometry and its painted content
+        // come from this exact `Vec<String>`, so sizing and painting can
+        // never disagree about what is visible. `.max(1)` on the row
+        // budget matches this block's own width/height floor below: a
+        // pre-attach frame (`grid_h` still 0, e.g. a native toast pushed
+        // before the engine's first `GridResize`) still reserves its one
+        // row rather than vanishing until real grid content arrives.
+        let visible = engine.messages.visible_lines(usize::from(grid_h).max(1));
+        let width = messages_width(&visible).min(grid_w).max(1);
+        let height = u16::try_from(visible.len())
             .unwrap_or(u16::MAX)
             .min(grid_h)
             .max(1);
@@ -219,7 +227,7 @@ pub fn render(model: &Model) -> Surface {
             height,
             (grid_w, grid_h),
             offset,
-            LayerKind::Messages(engine.messages.entries.clone()),
+            LayerKind::Messages(visible),
         ));
     }
     if let Some(pm) = &engine.popupmenu {
@@ -244,20 +252,16 @@ pub fn render(model: &Model) -> Surface {
     }
 }
 
-/// The widest single physical line across every message entry, in terminal
-/// display cells (not characters: a wide character, e.g. a CJK ideograph,
-/// occupies two cells, and sizing this layer by char count instead would
-/// clip or misalign exactly that content). Widest *line*, not widest
-/// *entry*: an entry's `MessageEntry::lines` can be several physical lines,
-/// and summing their widths together (as if they shared one row) would size
-/// the box far wider than any row it actually paints needs to be. Shared by
-/// the messages layer's width calculation and (via the same
-/// `MessageEntry::lines` call) its row rendering in `view-tui`, so sizing
-/// and painting can never disagree about what a message's text is.
-fn messages_width(entries: &[MessageEntry]) -> u16 {
-    entries
+/// The widest of the given (already-selected-as-visible) physical lines, in
+/// terminal display cells (not characters: a wide character, e.g. a CJK
+/// ideograph, occupies two cells, and sizing this layer by char count
+/// instead would clip or misalign exactly that content). Widest *line*, not
+/// widest total: summing every line's width together (as if they shared one
+/// row) would size the box far wider than any row it actually paints needs
+/// to be.
+fn messages_width(lines: &[String]) -> u16 {
+    lines
         .iter()
-        .flat_map(MessageEntry::lines)
         .map(|line| line.width())
         .max()
         .and_then(|w| u16::try_from(w).ok())
@@ -753,6 +757,52 @@ mod tests {
         assert_eq!(
             messages.rect.col, 18,
             "right-anchored: grid width (20) minus content width (2)"
+        );
+    }
+
+    #[test]
+    fn messages_layer_keeps_a_persistent_error_line_when_transient_lines_overflow_the_box() {
+        let mut model = model_with_grid(20, 2);
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "echoerr".into(),
+                content: vec![(0, "an error".into())],
+                replace_last: false,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "old info".into())],
+                replace_last: false,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "new info".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = render(&model);
+
+        let LayerKind::Messages(lines) = &surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Messages(_)))
+            .expect("messages layer present")
+            .kind
+        else {
+            unreachable!("just matched Messages above");
+        };
+        assert_eq!(
+            lines,
+            &vec!["an error".to_string(), "new info".to_string()],
+            "the persistent error must survive the overflow; the oldest transient line is evicted instead"
         );
     }
 

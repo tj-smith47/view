@@ -139,18 +139,22 @@ fn blank_row(canvas: &mut [Vec<char>], row: u16, col: u16, width: u16) {
     }
 }
 
-fn paint_messages(
-    canvas: &mut [Vec<char>],
-    layer: &Layer,
-    entries: &[view_core::model::MessageEntry],
-) {
-    for (i, entry) in entries.iter().enumerate() {
+/// `lines` is already the exact visible set `Messages::visible_lines`
+/// selected -- one physical line per row, in display order -- so this only
+/// has to blank each row (mirroring the real painter's own toast-box clear;
+/// without it a row's cells past a shorter line's text would keep showing
+/// whatever an earlier layer painted there) and write each line.
+fn paint_messages(canvas: &mut [Vec<char>], layer: &Layer, lines: &[String]) {
+    for r in 0..layer.rect.height {
+        blank_row(canvas, layer.rect.row + r, layer.rect.col, layer.rect.width);
+    }
+    for (i, line) in lines.iter().enumerate() {
         let Ok(r) = u16::try_from(i) else { break };
         paint_text(
             canvas,
             layer.rect.row.saturating_add(r),
             layer.rect.col,
-            &joined_content(&entry.content),
+            line,
         );
     }
 }

@@ -3,7 +3,7 @@
 use crate::events::{clamp_dim, saturate_u16, UiEvent};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
-use crate::model::{CmdlineState, Focus, MessageEntry, Model, PopupmenuState, TablineState};
+use crate::model::{CmdlineState, Focus, Model, PopupmenuState, TablineState};
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 
 /// Applies one message to `model`, returning the effects the executor must
@@ -12,20 +12,30 @@ use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCal
 #[must_use]
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
-        Msg::Key(Key { notation }) => match model.focus {
-            Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-            // no native overlay currently claims focus: every key is
-            // consumed here rather than dispatched to an overlay update
-            // arm, except <Esc> which always returns focus to Engine. The
-            // routing seam exists so overlays can take focus without
-            // touching this key path.
-            Focus::Native(_) => {
-                if notation == "<Esc>" {
-                    model.focus = Focus::Engine;
-                }
-                Vec::new()
+        Msg::Key(Key { notation }) => {
+            // any keypress is "the user is reading again": gives a
+            // transient (info-kind) toast a readable duration bounded by
+            // real activity instead of a wall-clock timer the zero-clock
+            // runtime has no mechanism for; runs regardless of focus, since
+            // the semantic is user activity, not specifically engine input
+            if model.engine.messages.dismiss_transient_on_keypress() {
+                model.dirty = true;
             }
-        },
+            match model.focus {
+                Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
+                // no native overlay currently claims focus: every key is
+                // consumed here rather than dispatched to an overlay update
+                // arm, except <Esc> which always returns focus to Engine. The
+                // routing seam exists so overlays can take focus without
+                // touching this key path.
+                Focus::Native(_) => {
+                    if notation == "<Esc>" {
+                        model.focus = Focus::Engine;
+                    }
+                    Vec::new()
+                }
+            }
+        }
         Msg::Paste(text) => match model.focus {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
@@ -216,6 +226,11 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // idempotent past the first Flush: see Model::content_painted's
             // doc comment for why this never resets
             model.content_painted = true;
+            // records that one full paint cycle has happened, so a
+            // transient toast pushed in this same batch is guaranteed at
+            // least one visible frame before dismiss_transient_on_keypress
+            // can drop it (see Messages::note_flush)
+            model.engine.messages.note_flush();
             Vec::new()
         }
         UiEvent::ModeInfoSet {
@@ -265,10 +280,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             content,
             replace_last,
         } => {
-            model
-                .engine
-                .messages
-                .push(MessageEntry { kind, content }, replace_last);
+            model.engine.messages.push(kind, content, replace_last);
             Vec::new()
         }
         UiEvent::MsgClear => {
@@ -417,6 +429,91 @@ mod tests {
             &effects[..],
             [Effect::Rpc(RpcCall::Input { notation })] if notation == "<C-x>"
         ));
+    }
+
+    #[test]
+    fn a_keypress_dismisses_an_already_flushed_transient_toast_and_marks_dirty() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::MsgShow {
+                    kind: "echomsg".into(),
+                    content: vec![(0, "info".into())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        assert_eq!(m.engine.messages.entries.len(), 1);
+        m.dirty = false;
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "l".into(),
+            }),
+        );
+        assert!(
+            m.engine.messages.entries.is_empty(),
+            "a transient toast that already survived one Flush must be dismissed on the next keypress"
+        );
+        assert!(
+            m.dirty,
+            "dismissing a visible toast must mark the model dirty for a repaint"
+        );
+    }
+
+    #[test]
+    fn a_keypress_never_dismisses_a_persistent_toast() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::MsgShow {
+                    kind: "echoerr".into(),
+                    content: vec![(0, "boom".into())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "l".into(),
+            }),
+        );
+        assert_eq!(
+            m.engine.messages.entries.len(),
+            1,
+            "an error/warn-kind toast must persist across a keypress"
+        );
+    }
+
+    #[test]
+    fn a_keypress_does_not_dismiss_a_transient_toast_shown_in_the_same_batch_pre_flush() {
+        // no Flush yet: the toast has not necessarily been painted even
+        // once, so it must survive this keypress and only be dismissed on
+        // the one after -- guarantees at least one visible frame
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "info".into())],
+                replace_last: false,
+            }]),
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "l".into(),
+            }),
+        );
+        assert_eq!(m.engine.messages.entries.len(), 1);
     }
 
     // routing table: focus x input-kind -> effect. Pins the seam native

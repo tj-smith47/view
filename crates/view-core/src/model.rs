@@ -193,26 +193,51 @@ pub struct CmdlineState {
 pub struct MessageEntry {
     pub kind: String,
     pub content: Vec<(u64, String)>,
+    /// `Messages::flush_generation` at the moment this entry was pushed.
+    /// Not part of nvim's wire contract -- purely local bookkeeping for
+    /// `Messages::dismiss_transient_on_keypress`'s "at least one visible
+    /// frame before dismissal" guarantee. Never set directly; every
+    /// `MessageEntry` is built by `Messages::push`, which stamps this from
+    /// its own counter.
+    shown_at_flush: u64,
 }
 
 impl MessageEntry {
     /// This entry's content chunks joined into one string, then split into
     /// one entry per physical line. A `msg_show` content chunk can carry an
     /// embedded `\n` for a genuinely multi-line message (a long `emsg`'s
-    /// wrapped continuation, live-observed from a real autocommand error)
-    /// rather than always being exactly one visual line; a caller that
-    /// joins the chunks and paints the result as a single row squashes
-    /// every line break into one toast row wide enough to hold all of them
-    /// concatenated. `view_surface::render` (layer width/height) and
-    /// `view_tui::paint::paint_messages` (per-row text) both call this
-    /// instead of joining `content` themselves, so sizing and painting can
-    /// never disagree about how many rows -- or how wide -- this entry
-    /// needs. Always yields at least one (possibly empty) line, so an
-    /// entry with no content still reserves its own row.
+    /// wrapped continuation, live-observed from a real autocommand error,
+    /// and documented in nvim's own `api-ui-events.txt`: "Messages can
+    /// contain line breaks") rather than always being exactly one visual
+    /// line; a caller that joins the chunks and paints the result as a
+    /// single row squashes every line break into one toast row wide enough
+    /// to hold all of them concatenated. `view_surface::render` (layer
+    /// width/height) and `view_tui::paint::paint_messages` (per-row text)
+    /// both call this instead of joining `content` themselves, so sizing
+    /// and painting can never disagree about how many rows -- or how wide
+    /// -- this entry needs. Always yields at least one (possibly empty)
+    /// line, so an entry with no content still reserves its own row.
     #[must_use]
     pub fn lines(&self) -> Vec<String> {
         let joined: String = self.content.iter().map(|(_, t)| t.as_str()).collect();
         joined.split('\n').map(str::to_string).collect()
+    }
+
+    /// Whether nvim's own `msg_show` `kind` (per `api-ui-events.txt`'s kind
+    /// table) names this an error or a warning: `"emsg"`, `"echoerr"`,
+    /// `"wmsg"`, `"lua_error"`, `"rpc_error"`. These must be read, not
+    /// silently lost, so they persist until explicitly cleared or replaced
+    /// -- never auto-dismissed by user activity and never evicted from the
+    /// visible toast stack merely because other messages arrived after
+    /// them (`Messages::visible_lines`) -- matching real nvim's own
+    /// hit-enter-prompt convention that an error blocks until acknowledged.
+    /// Every other kind is transient.
+    #[must_use]
+    pub fn is_persistent(&self) -> bool {
+        matches!(
+            self.kind.as_str(),
+            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error"
+        )
     }
 }
 
@@ -223,14 +248,25 @@ impl MessageEntry {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Messages {
     pub entries: Vec<MessageEntry>,
+    /// Bumped by `note_flush` on every `Flush` UI event; stamped onto each
+    /// new entry as `MessageEntry::shown_at_flush`. See
+    /// `dismiss_transient_on_keypress`.
+    flush_generation: u64,
 }
 
 impl Messages {
-    /// Records one `msg_show`. `replace_last` overwrites the most recent
-    /// entry instead of appending, matching nvim's progress-indicator
-    /// convention (e.g. successive search-match counts share one line);
-    /// with no prior entry to replace, it appends instead.
-    pub fn push(&mut self, entry: MessageEntry, replace_last: bool) {
+    /// Records one `msg_show`: `kind`/`content` as decoded off the wire (or
+    /// synthesized locally, see `push_native`), stamped with the current
+    /// flush generation. `replace_last` overwrites the most recent entry
+    /// instead of appending, matching nvim's progress-indicator convention
+    /// (e.g. successive search-match counts share one line); with no prior
+    /// entry to replace, it appends instead.
+    pub fn push(&mut self, kind: String, content: Vec<(u64, String)>, replace_last: bool) {
+        let entry = MessageEntry {
+            kind,
+            content,
+            shown_at_flush: self.flush_generation,
+        };
         if replace_last {
             if let Some(last) = self.entries.last_mut() {
                 *last = entry;
@@ -254,13 +290,85 @@ impl Messages {
     /// update an in-place running count instead of stacking a new entry per
     /// occurrence.
     pub fn push_native(&mut self, text: String, replace_last: bool) {
-        self.push(
-            MessageEntry {
-                kind: "native".to_string(),
-                content: vec![(0, text)],
-            },
-            replace_last,
-        );
+        self.push("native".to_string(), vec![(0, text)], replace_last);
+    }
+
+    /// Marks one full paint cycle as having happened, called from `update`
+    /// on every `Flush` UI event. Read by `dismiss_transient_on_keypress`
+    /// to tell whether an entry has survived at least one frame.
+    pub fn note_flush(&mut self) {
+        self.flush_generation = self.flush_generation.wrapping_add(1);
+    }
+
+    /// Drops every transient (non-`is_persistent`) entry that has already
+    /// survived at least one full paint cycle since it was shown. Called
+    /// from `update` on the user's next keypress: gives an info-level toast
+    /// a readable duration bounded by real user activity -- an event the
+    /// zero-clock runtime already receives -- rather than a wall-clock
+    /// timer the runtime has no mechanism for. An entry pushed in the same
+    /// flush generation as the pending keypress has not necessarily been
+    /// painted even once yet, so it survives this pass and is only
+    /// dismissed on the *next* keypress instead, guaranteeing every
+    /// transient toast is visible for at least one frame. Returns whether
+    /// anything was actually dropped, so the caller knows whether to mark
+    /// the model dirty for a repaint.
+    #[must_use]
+    pub fn dismiss_transient_on_keypress(&mut self) -> bool {
+        let before = self.entries.len();
+        let current = self.flush_generation;
+        self.entries
+            .retain(|e| e.is_persistent() || e.shown_at_flush == current);
+        self.entries.len() != before
+    }
+
+    /// The physical lines actually visible in a toast box `max_rows` tall:
+    /// every persistent (error/warn-kind) entry's lines are always kept, in
+    /// their original arrival order; the remaining row budget is filled
+    /// with the most recent transient lines, evicting the oldest transient
+    /// lines first when the log needs more rows than the box has. Only in
+    /// the extreme case where persistent lines alone exceed `max_rows` does
+    /// eviction reach into them too (oldest persistent first) -- the sole
+    /// remaining way an error/warn line can still be dropped, and never
+    /// merely because other messages arrived after it. Without this
+    /// priority, a burst of ordinary info messages could silently push an
+    /// unread error off the visible stack with neither an explicit
+    /// `msg_clear` nor a replace ever happening, which is exactly the
+    /// "persist until dismissed or replaced" contract broken by a plain
+    /// recency-only trim.
+    #[must_use]
+    pub fn visible_lines(&self, max_rows: usize) -> Vec<String> {
+        let all: Vec<(bool, String)> = self
+            .entries
+            .iter()
+            .flat_map(|e| {
+                let persistent = e.is_persistent();
+                e.lines().into_iter().map(move |l| (persistent, l))
+            })
+            .collect();
+        let overflow = all.len().saturating_sub(max_rows);
+        if overflow == 0 {
+            return all.into_iter().map(|(_, l)| l).collect();
+        }
+        let mut remaining = overflow;
+        let mut keep = vec![true; all.len()];
+        for target_persistent in [false, true] {
+            if remaining == 0 {
+                break;
+            }
+            for (i, (persistent, _)) in all.iter().enumerate() {
+                if remaining == 0 {
+                    break;
+                }
+                if *persistent == target_persistent && keep[i] {
+                    keep[i] = false;
+                    remaining -= 1;
+                }
+            }
+        }
+        all.into_iter()
+            .zip(keep)
+            .filter_map(|((_, l), k)| k.then_some(l))
+            .collect()
     }
 }
 
@@ -375,13 +483,19 @@ mod tests {
     use super::*;
     use crate::events::{TabEntry, TabHandle};
 
+    /// `shown_at_flush` is private bookkeeping the tests below don't
+    /// exercise; every construction goes through `Messages::push` so it
+    /// gets stamped consistently rather than being touched directly here.
+    fn entry(kind: &str, content: Vec<(u64, String)>) -> MessageEntry {
+        let mut messages = Messages::default();
+        messages.push(kind.to_string(), content, false);
+        messages.entries.into_iter().next().unwrap()
+    }
+
     #[test]
     fn message_entry_lines_splits_embedded_newlines_into_separate_physical_lines() {
-        let entry = MessageEntry {
-            kind: "echoerr".into(),
-            content: vec![(0, "first line\nsecond line".into())],
-        };
-        assert_eq!(entry.lines(), vec!["first line", "second line"]);
+        let e = entry("echoerr", vec![(0, "first line\nsecond line".into())]);
+        assert_eq!(e.lines(), vec!["first line", "second line"]);
     }
 
     #[test]
@@ -390,20 +504,93 @@ mod tests {
         // (a wrapped `emsg` continuation) or split across chunk boundaries
         // (differing highlight per segment); both must land on the correct
         // physical line, so joining happens before splitting, not after
-        let entry = MessageEntry {
-            kind: "echoerr".into(),
-            content: vec![(0, "one\ntwo".into()), (1, "-continued".into())],
-        };
-        assert_eq!(entry.lines(), vec!["one", "two-continued"]);
+        let e = entry(
+            "echoerr",
+            vec![(0, "one\ntwo".into()), (1, "-continued".into())],
+        );
+        assert_eq!(e.lines(), vec!["one", "two-continued"]);
     }
 
     #[test]
     fn message_entry_lines_single_line_message_yields_exactly_one_line() {
-        let entry = MessageEntry {
-            kind: "echomsg".into(),
-            content: vec![(0, "hello".into())],
-        };
-        assert_eq!(entry.lines(), vec!["hello"]);
+        let e = entry("echomsg", vec![(0, "hello".into())]);
+        assert_eq!(e.lines(), vec!["hello"]);
+    }
+
+    #[test]
+    fn is_persistent_matches_every_error_and_warning_kind_and_only_those() {
+        for kind in ["emsg", "echoerr", "wmsg", "lua_error", "rpc_error"] {
+            assert!(
+                entry(kind, vec![]).is_persistent(),
+                "{kind} must be persistent"
+            );
+        }
+        for kind in ["echo", "echomsg", "native", "progress", "quickfix", ""] {
+            assert!(
+                !entry(kind, vec![]).is_persistent(),
+                "{kind} must not be persistent"
+            );
+        }
+    }
+
+    #[test]
+    fn dismiss_transient_on_keypress_drops_transient_entries_seen_at_least_one_flush() {
+        let mut messages = Messages::default();
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        // not yet flushed: must survive this pass, guaranteeing at least
+        // one painted frame before an info toast can be dismissed
+        assert!(!messages.dismiss_transient_on_keypress());
+        assert_eq!(messages.entries.len(), 1);
+
+        messages.note_flush();
+        assert!(messages.dismiss_transient_on_keypress());
+        assert!(messages.entries.is_empty());
+    }
+
+    #[test]
+    fn dismiss_transient_on_keypress_never_drops_a_persistent_entry() {
+        let mut messages = Messages::default();
+        messages.push("echoerr".to_string(), vec![(0, "boom".into())], false);
+        messages.note_flush();
+        messages.note_flush();
+        assert!(!messages.dismiss_transient_on_keypress());
+        assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn visible_lines_returns_everything_when_it_fits() {
+        let mut messages = Messages::default();
+        messages.push("echomsg".to_string(), vec![(0, "a".into())], false);
+        messages.push("echomsg".to_string(), vec![(0, "b".into())], false);
+        assert_eq!(messages.visible_lines(5), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn visible_lines_evicts_oldest_transient_lines_before_touching_persistent_ones() {
+        let mut messages = Messages::default();
+        messages.push("echoerr".to_string(), vec![(0, "error".into())], false);
+        messages.push("echomsg".to_string(), vec![(0, "old info".into())], false);
+        messages.push("echomsg".to_string(), vec![(0, "new info".into())], false);
+        // box has room for 2 of the 3 lines: the persistent error must
+        // never be the one evicted just because other messages arrived
+        // after it, so the oldest transient line ("old info") goes instead
+        assert_eq!(messages.visible_lines(2), vec!["error", "new info"]);
+    }
+
+    #[test]
+    fn visible_lines_falls_back_to_evicting_oldest_persistent_when_persistent_alone_overflows() {
+        let mut messages = Messages::default();
+        messages.push(
+            "echoerr".to_string(),
+            vec![(0, "first error".into())],
+            false,
+        );
+        messages.push(
+            "echoerr".to_string(),
+            vec![(0, "second error".into())],
+            false,
+        );
+        assert_eq!(messages.visible_lines(1), vec!["second error"]);
     }
 
     #[test]
