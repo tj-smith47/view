@@ -23,6 +23,10 @@ steps = [
   { send = ":enew<CR>" },
   { send = ":setfiletype lua<CR>" },
   { send = "ilocal compat = 1<Esc>" },
+  # No later probe depends on buffer content, so a send whose keystrokes
+  # never reached the buffer would otherwise go unnoticed: the highlight
+  # probes below hold for any lua buffer, empty included.
+  { wait_for_probe = "getline('.')", expect = "local compat = 1", timeout_ms = 10000 },
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while
   # every assertion below keeps passing

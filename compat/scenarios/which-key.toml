@@ -28,4 +28,9 @@ steps = [
   # this scenario: with no real key press sent, a pending-operator state
   # would linger while later assertions keep passing
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # mode() reports "n" even while which-key's popup is still pending its
+  # next key, so the mode probe alone cannot prove the <Esc> dismissed
+  # anything; only the popup's own floating window (filetype "wk",
+  # observed live) disappearing does.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do local cfg = vim.api.nvim_win_get_config(w) if cfg.relative ~= \"\" and vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"wk\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 10000 },
 ]
