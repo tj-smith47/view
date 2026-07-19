@@ -162,24 +162,40 @@ fn paint_cmdline(
 }
 
 /// Renders the message log as stacked toasts: `render()` already sized and
-/// right-anchored `area` to the widest visible entry, so painting only
-/// picks which entries fit in `area`'s height (the most recently shown
-/// ones, oldest of that visible set on top) and writes each on its own row.
+/// right-anchored `area` to the widest visible physical line (one row per
+/// `MessageEntry::lines` entry, not one row per `MessageEntry` -- a
+/// multi-line `emsg` occupies as many rows as it has physical lines), so
+/// painting picks which lines fit in `area`'s height (the most recently
+/// shown ones, oldest of that visible set on top) and writes each on its
+/// own row.
+///
+/// The whole rect is cleared to the toast's own style first, before any
+/// text: without this, a row -- or the columns past a line's own text on a
+/// row -- keeps showing whatever the `EngineGrid` layer painted underneath
+/// (real nvim content, e.g. a floating window's cells composited into the
+/// base grid when the frontend has no `ext_multigrid` support), which is
+/// what a live repro showed as foreign glyphs bleeding through at a toast
+/// row's right edge.
 fn paint_messages(
     entries: &[MessageEntry],
     theme: &Theme,
     area: ratatui::layout::Rect,
     frame: &mut ratatui::Frame<'_>,
 ) {
-    let visible = usize::from(area.height);
-    let start = entries.len().saturating_sub(visible);
     let style = ratatui_style(theme.msg_area);
-    for (i, entry) in entries[start..].iter().enumerate() {
+    let blank = " ".repeat(usize::from(area.width));
+    for row in 0..area.height {
+        paint_text_row(&blank, style, area, row, frame);
+    }
+
+    let lines: Vec<String> = entries.iter().flat_map(MessageEntry::lines).collect();
+    let visible = usize::from(area.height);
+    let start = lines.len().saturating_sub(visible);
+    for (i, line) in lines[start..].iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };
-        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
-        paint_text_row(&text, style, area, row, frame);
+        paint_text_row(line, style, area, row, frame);
     }
 }
 
@@ -955,6 +971,67 @@ mod tests {
             "the wide glyph's shadow cell must be empty, not overwritten by the next char"
         );
         assert_eq!(&buf[(9, 0)].symbol(), &"b");
+    }
+
+    /// Reproduces a real repro: a startup `emsg` autocommand error carries
+    /// an embedded `\n` (nvim's own multi-line message convention), and the
+    /// toast must lay it out as two rows sized to the longer physical
+    /// line, not one row wide enough to hold both lines concatenated with
+    /// the columns past each line's own text left showing the grid content
+    /// underneath.
+    #[test]
+    fn messages_overlay_multiline_message_gets_one_row_per_physical_line_and_clears_its_box() {
+        let mut model = Model::new();
+        model.engine.grid.apply(GridOp::Resize {
+            width: 26,
+            height: 5,
+        });
+        // stands in for real grid content underneath the toast's rect (a
+        // composited floating window in the live repro): every cell the
+        // toast's own clear must overwrite, or it bleeds through exactly
+        // like the reported foreign glyphs at a message row's right edge
+        for row in 0..2u16 {
+            model.engine.grid.apply(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: vec![("X".into(), 0, 26)],
+            });
+        }
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echoerr".into(),
+                content: vec![(0, "short\nmuch longer second line".into())],
+                replace_last: false,
+            },
+        );
+
+        let surface = view_surface::render(&model);
+        let backend = TestBackend::new(26, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+        let buf = terminal.backend().buffer().clone();
+        let row_text =
+            |r: u16| -> String { (0..26).map(|c| buf[(c, r)].symbol().to_string()).collect() };
+
+        // box width = the longer physical line (23 cells), not the sum of
+        // both lines (28): right-anchored at column 3, so columns 0-2 stay
+        // real grid content (outside the toast's own rect) on both rows,
+        // and the second line exactly fills its row with no leftover to
+        // clear, while the first line's row has 18 cells of clear past
+        // "short" that must not still show the grid's "X" stand-in
+        let expected_first_line = format!("XXX{:<23}", "short");
+        let expected_second_line = format!("XXX{}", "much longer second line");
+        assert_eq!(
+            row_text(0),
+            expected_first_line,
+            "first physical line's row must be cleared past its own text, not left showing the grid underneath"
+        );
+        assert_eq!(
+            row_text(1),
+            expected_second_line,
+            "second physical line must land on its own row, right-anchored to the wider line's width"
+        );
     }
 
     /// Reproduces a real crash: a live nvim with user plugins fed an `emsg`

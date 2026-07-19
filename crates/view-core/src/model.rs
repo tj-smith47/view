@@ -195,6 +195,27 @@ pub struct MessageEntry {
     pub content: Vec<(u64, String)>,
 }
 
+impl MessageEntry {
+    /// This entry's content chunks joined into one string, then split into
+    /// one entry per physical line. A `msg_show` content chunk can carry an
+    /// embedded `\n` for a genuinely multi-line message (a long `emsg`'s
+    /// wrapped continuation, live-observed from a real autocommand error)
+    /// rather than always being exactly one visual line; a caller that
+    /// joins the chunks and paints the result as a single row squashes
+    /// every line break into one toast row wide enough to hold all of them
+    /// concatenated. `view_surface::render` (layer width/height) and
+    /// `view_tui::paint::paint_messages` (per-row text) both call this
+    /// instead of joining `content` themselves, so sizing and painting can
+    /// never disagree about how many rows -- or how wide -- this entry
+    /// needs. Always yields at least one (possibly empty) line, so an
+    /// entry with no content still reserves its own row.
+    #[must_use]
+    pub fn lines(&self) -> Vec<String> {
+        let joined: String = self.content.iter().map(|(_, t)| t.as_str()).collect();
+        joined.split('\n').map(str::to_string).collect()
+    }
+}
+
 /// The message log built from `msg_show`/`msg_clear`. A log rather than a
 /// single `Option`, since nvim can show several messages in sequence
 /// (`:messages` history) before any are cleared.
@@ -353,6 +374,37 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::{TabEntry, TabHandle};
+
+    #[test]
+    fn message_entry_lines_splits_embedded_newlines_into_separate_physical_lines() {
+        let entry = MessageEntry {
+            kind: "echoerr".into(),
+            content: vec![(0, "first line\nsecond line".into())],
+        };
+        assert_eq!(entry.lines(), vec!["first line", "second line"]);
+    }
+
+    #[test]
+    fn message_entry_lines_joins_chunks_before_splitting() {
+        // a real msg_show can carry the break inside one chunk's own text
+        // (a wrapped `emsg` continuation) or split across chunk boundaries
+        // (differing highlight per segment); both must land on the correct
+        // physical line, so joining happens before splitting, not after
+        let entry = MessageEntry {
+            kind: "echoerr".into(),
+            content: vec![(0, "one\ntwo".into()), (1, "-continued".into())],
+        };
+        assert_eq!(entry.lines(), vec!["one", "two-continued"]);
+    }
+
+    #[test]
+    fn message_entry_lines_single_line_message_yields_exactly_one_line() {
+        let entry = MessageEntry {
+            kind: "echomsg".into(),
+            content: vec![(0, "hello".into())],
+        };
+        assert_eq!(entry.lines(), vec!["hello"]);
+    }
 
     #[test]
     fn with_term_size_prefills_dims_and_new_defaults_to_zero() {

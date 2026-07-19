@@ -193,8 +193,21 @@ pub fn render(model: &Model) -> Surface {
         ));
     }
     if !engine.messages.entries.is_empty() {
+        // one physical line (an entry's content split on its own embedded
+        // `\n`s, see `MessageEntry::lines`) is one visual row, not one
+        // `MessageEntry` one row: sizing/painting per entry instead
+        // squashes every line of a multi-line `emsg` into a single row wide
+        // enough to hold all of them concatenated, and leaves the row it
+        // should have occupied showing whatever the grid layer painted
+        // underneath
+        let line_count: usize = engine
+            .messages
+            .entries
+            .iter()
+            .map(|e| e.lines().len())
+            .sum();
         let width = messages_width(&engine.messages.entries).min(grid_w).max(1);
-        let height = u16::try_from(engine.messages.entries.len())
+        let height = u16::try_from(line_count)
             .unwrap_or(u16::MAX)
             .min(grid_h)
             .max(1);
@@ -231,22 +244,21 @@ pub fn render(model: &Model) -> Surface {
     }
 }
 
-/// The widest message entry's rendered text, in terminal display cells (not
-/// characters: a wide character, e.g. a CJK ideograph, occupies two cells,
-/// and sizing this layer by char count instead would clip or misalign
-/// exactly that content). Shared by the messages layer's width calculation
-/// and (indirectly, via the same per-entry text join) its row rendering in
-/// `view-tui`, so sizing and painting can never disagree about what a
-/// message's text is.
+/// The widest single physical line across every message entry, in terminal
+/// display cells (not characters: a wide character, e.g. a CJK ideograph,
+/// occupies two cells, and sizing this layer by char count instead would
+/// clip or misalign exactly that content). Widest *line*, not widest
+/// *entry*: an entry's `MessageEntry::lines` can be several physical lines,
+/// and summing their widths together (as if they shared one row) would size
+/// the box far wider than any row it actually paints needs to be. Shared by
+/// the messages layer's width calculation and (via the same
+/// `MessageEntry::lines` call) its row rendering in `view-tui`, so sizing
+/// and painting can never disagree about what a message's text is.
 fn messages_width(entries: &[MessageEntry]) -> u16 {
     entries
         .iter()
-        .map(|e| {
-            e.content
-                .iter()
-                .map(|(_, text)| text.width())
-                .sum::<usize>()
-        })
+        .flat_map(MessageEntry::lines)
+        .map(|line| line.width())
         .max()
         .and_then(|w| u16::try_from(w).ok())
         .unwrap_or(u16::MAX)
