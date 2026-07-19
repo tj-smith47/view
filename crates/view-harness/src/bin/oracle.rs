@@ -256,11 +256,11 @@ mod tests {
 
     /// The scenario the merge logic exists for: an engine side that never
     /// saw a Flush must report TIMEOUT even when the reference side
-    /// happened to settle with an empty divergence list. Spawning a real
-    /// wedged `EngineSession` against a settling `ReferenceSession` is not
-    /// reproducible through the corpus/CLI surface (both sides share one
-    /// `deadline`), so this exercises `settle_status` directly rather than
-    /// live -- the seam the merge decision actually lives behind.
+    /// happened to settle with an empty divergence list. The state is
+    /// reachable through a real corpus run -- an entry whose input
+    /// produces no redraw starves only the engine side's Flush while the
+    /// reference side's marker still settles -- so this pins the merge
+    /// decision at its own seam without spawning engines.
     #[test]
     fn engine_side_timeout_is_not_masked_by_a_settled_reference() {
         assert_eq!(
@@ -307,8 +307,18 @@ mod tests {
 
         let engine_wedged = EntryOutcome {
             engine_settled: false,
-            ..base
+            reference_settled: true,
+            elapsed_ms: 0,
+            divergences: Vec::new(),
         };
         assert!(!engine_wedged.is_success());
+
+        let reference_wedged = EntryOutcome {
+            engine_settled: true,
+            reference_settled: false,
+            elapsed_ms: 0,
+            divergences: Vec::new(),
+        };
+        assert!(!reference_wedged.is_success());
     }
 }
