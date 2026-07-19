@@ -709,10 +709,12 @@ fn resolve_named_key(name: &str) -> Option<&'static [u8]> {
 /// Returns `Ok(None)` for a token that is not shaped like real vim notation
 /// at all (an author's own literal `<...>` text, e.g. `<Nonsense>`), which
 /// [`resolve_send_keys`] then types as literal characters. Returns `Err`
-/// for a token that *is* notation-shaped (a recognized modifier prefix, or
-/// an `<F\d+>` form) but whose specific case this translator does not
-/// implement (a stacked modifier combo, a modifier wrapping a named key
-/// rather than a single character, an out-of-range function key): silently
+/// for a token that *is* notation-shaped (a recognized modifier prefix, an
+/// `<F\d+>` form, or a keypad name) but whose specific case this
+/// translator does not implement (a stacked modifier combo, a modifier
+/// wrapping a named key rather than a single character, an out-of-range
+/// function key, a super-modifier or keypad form with no terminal byte
+/// sequence to translate to): silently
 /// typing that shape as literal text would leave a scenario's session
 /// stuck in whatever mode it started in, exactly the failure this module's
 /// own docs describe for a bare `<Esc>`, so an unimplemented-but-notation-
@@ -726,6 +728,9 @@ fn resolve_key_token(token: &str) -> Result<Option<Vec<u8>>, CompatError> {
         "bs" | "backspace" => return Ok(Some(b"\x08".to_vec())),
         "space" => return Ok(Some(b" ".to_vec())),
         "lt" => return Ok(Some(b"<".to_vec())),
+        "bar" => return Ok(Some(b"|".to_vec())),
+        "bslash" => return Ok(Some(b"\\".to_vec())),
+        "nul" => return Ok(Some(b"\x00".to_vec())),
         "s-tab" => return Ok(Some(b"\x1b[Z".to_vec())),
         _ => {}
     }
@@ -789,20 +794,62 @@ fn resolve_alt_notation(body: &str, original: &str) -> Result<Option<Vec<u8>>, C
 }
 
 /// True if `lower` (already lowercased) matches the *shape* of real vim key
-/// notation -- a modifier prefix or an `<F\d+>` function-key form -- even
-/// when the specific token is not one this translator implements.
-/// Distinguishes that case from a token that merely looks unfamiliar (an
-/// author's own literal `<...>` text): only the former must hard-error
-/// rather than pass through as literal characters, per [`resolve_key_token`]'s
-/// own doc.
+/// notation -- a modifier prefix, an `<F\d+>` function-key form, or a
+/// keypad name -- even when the specific token is not one this translator
+/// implements. Distinguishes that case from a token that merely looks
+/// unfamiliar (an author's own literal `<...>` text): only the former must
+/// hard-error rather than pass through as literal characters, per
+/// [`resolve_key_token`]'s own doc. The `d-` (super/cmd) prefix is here
+/// permanently, not pending implementation: the legacy VT100/xterm
+/// encoding this translator's byte sequences target has no super-modifier
+/// representation at all, so a `<D-...>` token can never be typed
+/// faithfully through the pty and must always fail loud.
 fn is_notation_shaped(lower: &str) -> bool {
     lower.starts_with("c-")
         || lower.starts_with("s-")
         || lower.starts_with("m-")
         || lower.starts_with("a-")
+        || lower.starts_with("d-")
+        || is_keypad_name(lower)
         || (lower.starts_with('f')
             && lower.len() > 1
             && lower[1..].bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// True if `lower` (already lowercased) is one of vim's keypad key names
+/// (`<kEnter>`, `<kPlus>`, `<k0>`-`<k9>`, ...). Matched as an explicit set
+/// rather than a `k` prefix heuristic so an author's own literal `<...>`
+/// text that merely starts with `k` (`<keys>`, `<kbd>`) still passes
+/// through, per [`is_notation_shaped`]'s contract. Keypad keys are
+/// notation-shaped but never translated: the legacy VT100/xterm encoding
+/// has no keypad byte sequences distinct from the plain keys' own (a
+/// terminal in numeric-keypad mode sends `kEnter` as a plain `\r`), so
+/// typing one faithfully as *the keypad key* is not possible through the
+/// pty and silently substituting the plain key would test the wrong
+/// mapping.
+fn is_keypad_name(lower: &str) -> bool {
+    matches!(
+        lower,
+        "kenter"
+            | "kplus"
+            | "kminus"
+            | "kmultiply"
+            | "kdivide"
+            | "kpoint"
+            | "kcomma"
+            | "kequal"
+            | "khome"
+            | "kend"
+            | "korigin"
+            | "kpageup"
+            | "kpagedown"
+            | "kup"
+            | "kdown"
+            | "kleft"
+            | "kright"
+            | "kdel"
+            | "kinsert"
+    ) || (lower.len() == 2 && lower.starts_with('k') && lower.as_bytes()[1].is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -983,6 +1030,45 @@ mod tests {
         let err =
             resolve_send_keys("<S-Left>").expect_err("<S-...> is only implemented for <S-Tab>");
         assert!(matches!(err, CompatError::UnsupportedKeyNotation { .. }));
+    }
+
+    #[test]
+    fn resolve_send_keys_translates_bar_and_bslash_to_their_literal_bytes() {
+        assert_eq!(resolve_send_keys("<Bar>").unwrap(), b"|".to_vec());
+        assert_eq!(resolve_send_keys("<Bslash>").unwrap(), b"\\".to_vec());
+    }
+
+    #[test]
+    fn resolve_send_keys_translates_nul_to_a_zero_byte() {
+        assert_eq!(resolve_send_keys("<Nul>").unwrap(), vec![0x00]);
+    }
+
+    #[test]
+    fn resolve_send_keys_hard_errors_on_super_modifier_notation() {
+        let err = resolve_send_keys("<D-w>")
+            .expect_err("the super/cmd modifier has no terminal byte sequence");
+        assert!(matches!(err, CompatError::UnsupportedKeyNotation { .. }));
+    }
+
+    #[test]
+    fn resolve_send_keys_hard_errors_on_keypad_notation() {
+        for token in ["<kEnter>", "<kPlus>", "<k0>", "<k9>", "<kPageUp>"] {
+            let err = resolve_send_keys(token).expect_err(
+                "a keypad key has no terminal byte sequence distinct from the plain key",
+            );
+            assert!(
+                matches!(err, CompatError::UnsupportedKeyNotation { .. }),
+                "{token} must hard-error, not pass through as literal text"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_send_keys_passes_literal_k_prefixed_text_through() {
+        // <kbd> shares keypad notation's leading `k` but is an author's own
+        // literal text, not a vim key name; the keypad reject set must not
+        // swallow it
+        assert_eq!(resolve_send_keys("<kbd>").unwrap(), b"<kbd>".to_vec());
     }
 
     #[test]

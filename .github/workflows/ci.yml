@@ -67,3 +67,47 @@ jobs:
 
       - name: Run CI suite
         run: task ci
+
+  # One Linux leg suffices: the compat harness drives ptys against the same
+  # pinned nvim on every OS, and the fast matrix above already covers
+  # cross-OS build/test drift. Its own job (not a step of the matrix) so the
+  # cold-bootstrap scenario's real network installs never extend the fast
+  # legs' feedback time.
+  compat:
+    runs-on: ubuntu-latest
+    # bounds the cold-bootstrap scenario, which clones lazy.nvim plus its
+    # pinned plugins from scratch on every run and is slow by the nature of
+    # that work (its own probe step allows up to 180s), plus a cold cargo
+    # build on a cache miss
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install neovim
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Run compat harness
+        run: task compat

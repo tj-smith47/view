@@ -550,13 +550,20 @@ fn build_tokens(entry: &CorpusEntry, inject_at: Option<usize>) -> Vec<String> {
 ///
 /// # Errors
 ///
-/// Returns an error if `path` cannot be loaded, the baseline run's probes
-/// fail, `path`'s entry currently reproduces neither a divergence nor a
-/// timeout (nothing to minimize), or the minimized entry cannot be written
-/// back.
+/// Returns an error if `path` cannot be loaded, `.engine-pin` cannot be
+/// read, the `nvim` on `PATH` does not report the version `.engine-pin`
+/// names, the baseline run's probes fail, `path`'s entry currently
+/// reproduces neither a divergence nor a timeout (nothing to minimize), or
+/// the minimized entry cannot be written back.
 fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<()> {
     let entry = corpus::load_file(path)
         .with_context(|| format!("loading corpus entry {}", path.display()))?;
+    // same gate as every other session-spawning mode: the minimized entry
+    // is rewritten still stamped with an engine pin, and a reduction
+    // performed by an off-pin nvim would re-author the entry against a
+    // version its pin field does not name
+    let pin = current_engine_pin()?;
+    verify_nvim_matches_pin(Path::new("nvim"), &pin)?;
     let silence = Duration::from_millis(entry.quiesce_silence_ms);
     let deadline = Duration::from_millis(entry.quiesce_deadline_ms);
     let tokens = build_tokens(&entry, inject_divergence_at);
@@ -580,7 +587,11 @@ fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<
         path,
         &entry.name,
         &minimized_input,
-        &entry.engine_pin,
+        // the just-verified current pin, not entry.engine_pin: the
+        // minimized input's reproduction was established on this run's
+        // binary, so a stale authored-against pin must not be carried
+        // forward as if it were the evidence's provenance
+        &pin,
         &entry.ext_set,
         entry.quiesce_silence_ms,
         entry.quiesce_deadline_ms,
@@ -1765,6 +1776,12 @@ mod tests {
             "expected minimize_command to shrink the entry's input ({} chars) below the \
              unminimized length ({unminimized_len} chars)",
             minimized.input.len()
+        );
+        assert_eq!(
+            minimized.engine_pin,
+            current_engine_pin().expect("reading .engine-pin"),
+            "the rewritten entry must be stamped with the pin the run was verified \
+             against, not the scratch entry's authored-against value"
         );
 
         let _ = std::fs::remove_dir_all(&dir);
