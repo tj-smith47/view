@@ -500,17 +500,47 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
     // grows from the 24-row spawn size to 48 rows: SIGWINCH (delivered by
     // the kernel from the pty resize below) -> crossterm's Event::Resize
     // -> Msg::Resized -> Effect::Rpc(RpcCall::TryResize) ->
-    // nvim_ui_try_resize -> nvim's own grid_resize redraw event -> repaint
-    session.resize(80, 48).unwrap();
+    // nvim_ui_try_resize -> nvim's own grid_resize redraw event -> repaint.
+    //
+    // A bare `resize()` here is not reliable: `TIOCSWINSZ`'s `SIGWINCH` has
+    // been observed to go missing outright between the kernel and view's
+    // signal-handling thread (confirmed by instrumenting view's own Msg
+    // dispatch across repeated runs -- in the failing runs no resize event
+    // reaches it at all within several seconds, with no other sign of the
+    // process being stuck, so this is a lost notification, not a slow one).
+    // `resize_until` retries the stimulus itself, not just the wait: on
+    // each retry it forces a fresh, genuinely-different size before
+    // re-requesting the target, so a dropped signal gets another chance at
+    // delivery instead of the test just waiting longer on the one attempt
+    // that already failed to arrive.
+    //
+    // Row 30 as the confirmation point: `PtySession::resize` flips the
+    // *local* vt100 parser's own dimensions synchronously (so
+    // `screen_raw().size()` reports (48, 80) immediately regardless of
+    // whether nvim has caught up), so it says nothing about whether nvim's
+    // own window has actually grown. Row 30 sits past the old window's
+    // bottom edge (chrome_rows(1) + a statusline leaves about 22 reachable
+    // buffer lines at 24 rows), so an empty buffer's own "~" past-EOF
+    // marker can only appear there once nvim's window has genuinely grown
+    // -- the same "~" convention spawn_view_pty already uses to mean "nvim
+    // is actually ready". Typing the marker before that has landed races
+    // it: nvim would still be operating its old 24-row window when it
+    // processes the keystrokes, scrolls to keep the cursor visible there,
+    // and does not necessarily revisit that scroll position once the
+    // resize eventually does arrive.
+    let resized = session
+        .resize_until(80, 48, Duration::from_secs(5), |s| {
+            s.wait_for_cell(30, 0, "~", Duration::from_millis(400))
+        })
+        .unwrap();
+    assert!(
+        resized,
+        "resize never reached nvim's own window (no '~' appeared at row 30, \
+         past the old 24-row window's bottom edge) even after repeated \
+         resize retries; last screen:\n{}",
+        session.screen()
+    );
 
-    // a line only reachable at the new height: with the pre-resize 24-row
-    // terminal, chrome_rows(1) + a global statusline leaves about 22
-    // buffer lines visible, so nvim would scroll rather than ever paint
-    // row 30 -- that row stays blank unless nvim's own window actually
-    // grew to the new height. Row 30 sits well inside both the old
-    // window's unreachable range and the new window's reachable one, so
-    // the assertion tolerates a few lines of slack around the exact
-    // tabline/statusline layout instead of pinning an off-by-one boundary.
     let mut input = Vec::from(*b"i");
     for _ in 0..29 {
         input.extend_from_slice(b"\r");
@@ -520,9 +550,9 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
 
     assert!(
         session.wait_for_cell(30, 0, "M", Duration::from_secs(5)),
-        "resize did not reach nvim: a marker typed 29 lines below the tab's first \
-         line never landed on row 30, only reachable once the window actually grew \
-         past its pre-resize 24-row height; last screen:\n{}",
+        "marker typed 29 lines below the tab's first line never landed on \
+         row 30, even after the resize was already confirmed to have \
+         reached nvim's window; last screen:\n{}",
         session.screen()
     );
     assert_eq!(

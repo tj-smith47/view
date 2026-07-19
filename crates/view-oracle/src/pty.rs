@@ -154,6 +154,48 @@ impl PtySession {
         Ok(())
     }
 
+    /// Resizes to `cols`x`rows` like [`resize`](Self::resize), then retries
+    /// (bounded by `timeout`) until `confirm` reports the child has actually
+    /// reacted, rather than trusting a single `TIOCSWINSZ` call to have
+    /// notified it.
+    ///
+    /// A single resize is not a reliable notification in practice: the
+    /// kernel only raises `SIGWINCH` on a genuine size *change*, and that
+    /// signal's delivery to the child's signal-handling thread has been
+    /// observed to go missing outright under this harness (confirmed by
+    /// instrumenting the child's own dispatch loop across repeated runs: in
+    /// the failing runs, no resize event ever reached it at all, with no
+    /// other sign of the child being stuck -- not a slow delivery, a lost
+    /// one). Re-issuing the identical target size is a kernel no-op with no
+    /// new signal, so each retry first nudges to `rows.saturating_sub(1)`
+    /// and back: two genuine size deltas, each independently eligible for
+    /// its own `SIGWINCH`, before `confirm` is asked again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Pty`] if a kernel resize call fails.
+    pub fn resize_until(
+        &mut self,
+        cols: u16,
+        rows: u16,
+        timeout: Duration,
+        mut confirm: impl FnMut(&mut Self) -> bool,
+    ) -> Result<bool, OracleError> {
+        let deadline = Instant::now() + timeout;
+        self.resize(cols, rows)?;
+        loop {
+            if confirm(self) {
+                return Ok(true);
+            }
+            if Instant::now() >= deadline {
+                return Ok(false);
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            self.resize(cols, rows.saturating_sub(1))?;
+            self.resize(cols, rows)?;
+        }
+    }
+
     /// Writes `bytes` to the pty as if a user typed them.
     ///
     /// # Errors
