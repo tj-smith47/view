@@ -83,6 +83,32 @@ pub enum OracleError {
         /// session stayed blocked.
         mode: String,
     },
+    /// [`ReferenceSession::quiesce`]'s marker round-trip failed one of its
+    /// integrity checks: the marker keys executed in a different state
+    /// than the one they were armed in, or the state was seen moving
+    /// while they were still in flight. Either way the
+    /// script's own pending input can have consumed the marker keys (a
+    /// main-loop stall such as `:sleep` leaves trailing script keys in
+    /// typeahead where the quiet-window heuristic cannot see them), so
+    /// the session may no longer hold the script's final state and no
+    /// comparison against it can be trusted. Surfaced as an error rather
+    /// than a settled-or-timeout bool so a report line names the true
+    /// cause instead of fabricating a divergence from harness-corrupted
+    /// state.
+    #[error(
+        "quiesce marker keys were armed in state {armed:?} but their round-trip passed through \
+         state {observed:?}; the script's own pending input can have consumed them, so the \
+         session may no longer hold the script's final state"
+    )]
+    QuiescePerturbed {
+        /// The mode name the fast probe reported stably before the marker
+        /// keys were typed.
+        armed: String,
+        /// The state that broke the round-trip: the mode the arm command
+        /// itself recorded at execution time, or the diverging state the
+        /// fast probe observed while the marker was still in flight.
+        observed: String,
+    },
     /// A state-probe reply did not match the shape its parser requires
     /// (the cursor or marks parsers behind [`snapshot`]). Surfaced as an
     /// error rather than degraded to a placeholder value: registers,

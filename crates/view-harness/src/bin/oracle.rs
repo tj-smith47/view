@@ -292,8 +292,10 @@ fn run_tokens(
     while engine.pump_until_flush(STARTUP_DRAIN) {}
     // startup quiescence is drained, not gated on: a slow-starting nvim's
     // own splash/plugin traffic settling late here is not itself a
-    // divergence, only the post-input settle below decides pass/fail
-    let _ = reference.quiesce(silence, deadline);
+    // divergence, only the post-input settle below decides pass/fail. A
+    // probe error, unlike a slow settle, still propagates: it means the
+    // session is broken, not merely late
+    let _ = reference.quiesce(silence, deadline)?;
 
     if let Some(pos) = tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
         let prefix = join_tokens(&tokens[..pos]);
@@ -311,7 +313,7 @@ fn run_tokens(
 
     let engine_settled = engine.pump_until_flush(deadline);
     while engine.pump_until_flush(STARTUP_DRAIN) {}
-    let reference_settled = reference.quiesce(silence, deadline);
+    let reference_settled = reference.quiesce(silence, deadline)?;
 
     let surface = engine.surface();
     let view_rows = engine.screen_rows();

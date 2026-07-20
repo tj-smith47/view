@@ -164,6 +164,17 @@ pub struct StateSnapshot {
     /// taken -- captured before the `<Esc>` dismissal [`snapshot`] performs
     /// to let its eval probes answer, so the wait itself stays a compared
     /// state rather than being silently probed away.
+    ///
+    /// Granularity boundary: this is one flag, not an identification of
+    /// *which* wait. Two different waits that report the same mode name --
+    /// a pending `t` target character vs a register name after `"`, both
+    /// `("n", blocking)` from the fast probe -- compare equal here even
+    /// though the two sessions would consume their next key differently.
+    /// That is the fast-API surface's own limit: `nvim_get_mode` (the only
+    /// probe a blocked main loop answers) exposes exactly the mode name
+    /// and this flag, and telling the waits apart would need a non-fast
+    /// probe that a blocked session defers -- the wedge this field exists
+    /// to avoid.
     pub blocked: bool,
     pub registers: Vec<(char, String)>,
     pub marks: Vec<(String, u64, u64)>,
@@ -605,6 +616,55 @@ mod tests {
         }
     }
 
+    /// A [`Probe`] whose fast mode probe always reports a blocked key-wait,
+    /// no matter how many `<Esc>` dismissals it receives: the hermetic
+    /// stand-in for a session whose wait genuinely cannot be dismissed.
+    /// Its `eval_str` fails rather than answering, because [`snapshot`]'s
+    /// contract is that no eval probe runs while the session still reports
+    /// blocked -- an eval reaching this probe would mean the dismissal
+    /// loop leaked past its own deadline check.
+    struct AlwaysBlockedProbe {
+        inputs: Vec<String>,
+    }
+
+    impl Probe for AlwaysBlockedProbe {
+        fn eval_str(&mut self, expr: &str) -> Result<String, OracleError> {
+            Err(OracleError::Parse(format!(
+                "eval probe {expr:?} reached a session that never unblocked"
+            )))
+        }
+
+        fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
+            Ok(("n".to_string(), true))
+        }
+
+        fn input(&mut self, notation: &str) -> Result<(), OracleError> {
+            self.inputs.push(notation.to_string());
+            Ok(())
+        }
+    }
+
+    /// The loud-failure arm of the blocked-wait handling: a session that
+    /// stays blocked past [`UNBLOCK_DEADLINE`] after the `<Esc>` dismissal
+    /// must surface as [`OracleError::Blocked`] naming the still-blocked
+    /// mode, never hang and never fall through to the eval probes. Also
+    /// pins the dismissal itself: exactly one `<Esc>` is typed, not a
+    /// retry storm.
+    #[test]
+    fn snapshot_fails_as_blocked_when_the_dismissal_never_unblocks() {
+        let mut probe = AlwaysBlockedProbe { inputs: Vec::new() };
+
+        match snapshot(&mut probe) {
+            Err(OracleError::Blocked { mode }) => assert_eq!(mode, "n"),
+            other => unreachable!("expected OracleError::Blocked, got {other:?}"),
+        }
+        assert_eq!(
+            probe.inputs,
+            vec!["<Esc>".to_string()],
+            "the dismissal path must type exactly one <Esc>"
+        );
+    }
+
     /// Arm 2: a corrupted, unmasked grid row (state identical) must produce
     /// exactly one `Divergence::Grid` naming that row.
     #[test]
@@ -821,7 +881,9 @@ mod tests {
             ReferenceSession::spawn(40, 10).expect("ReferenceSession::spawn against real nvim");
 
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
-        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
 
         engine_side
             .input("ihello<Esc>yyp")
@@ -832,7 +894,9 @@ mod tests {
 
         assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
-        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
 
         let view_surface = engine_side.surface();
         let view_rows = engine_side.screen_rows();
@@ -924,7 +988,9 @@ mod tests {
             ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
 
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
-        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
 
         engine_side
             .input(":tabnew<CR>gt")
@@ -935,7 +1001,9 @@ mod tests {
 
         assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
-        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
 
         let view_surface = engine_side.surface();
         let view_rows = engine_side.screen_rows();
