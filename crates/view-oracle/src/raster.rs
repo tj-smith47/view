@@ -5,11 +5,15 @@
 //! moment this crate took a normal dependency on `view-tui` to reuse its
 //! real painter instead.
 //!
-//! Not a pixel-accurate reproduction of `view-tui`'s own rendering (no
-//! styling, no clipping subtleties beyond what `view_surface::render`
-//! already clamped): the oracle only needs enough fidelity for test scripts
-//! to assert on buffer content, cursor position, and which overlay is
-//! showing, layered in the same z-order `view_surface::render` builds.
+//! Not a pixel-accurate reproduction of `view-tui`'s own rendering:
+//! styling is compared at the model layer (`attr_rows` resolves each
+//! cell's `hl_id` through the `HlTable` -- see the `attr` module's
+//! coverage-boundary note -- never through `view-tui`'s painted output),
+//! and no clipping subtleties exist beyond what `view_surface::render`
+//! already clamped. The oracle only needs enough fidelity for test
+//! scripts to assert on buffer content, cursor position, highlight
+//! identity, and which overlay is showing, layered in the same z-order
+//! `view_surface::render` builds.
 
 use view_core::grid::Grid;
 use view_core::hl::HlTable;

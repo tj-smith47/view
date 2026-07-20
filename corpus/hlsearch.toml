@@ -1,5 +1,9 @@
 schema = 1
 name = "hlsearch"
+# The matches are spread down the buffer because view's search-count
+# message toast masks the top rows from comparison; Search highlights
+# must land on rows the oracle actually compares, or this entry
+# silently stops exercising them if toast placement changes.
 input = "10ofoo bar foo<Esc>gg:set hlsearch<CR>/foo<CR>"
 engine_pin = "v0.12.4"
 ext_set = "default"

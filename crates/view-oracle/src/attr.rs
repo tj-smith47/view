@@ -27,6 +27,19 @@
 //! decode the redraw stream through the same `view-engine` path), so it can
 //! never diverge, and including it here would only compare a field neither
 //! applier reflects on screen.
+//!
+//! # Coverage boundary
+//!
+//! This comparison guards *model-level* highlight parity: each side's
+//! per-cell `hl_id` resolved through its own `HlTable` content. It
+//! re-derives from the model rather than capturing what `view-tui`
+//! emitted to the terminal, so a bug isolated to the downstream
+//! paint-resolution layer (`Theme::style_for` fallbacks, the frame-scoped
+//! style cache, `ratatui_style`) is outside this moat --
+//! `scripts/audit-deps.sh` forbids this crate depending on `view-tui`,
+//! and the text raster has always had the same boundary. Painted-output
+//! verification belongs to `view-tui`'s own tests and the compat
+//! harness's vt100 captures, not here.
 
 /// One grid cell's highlight identity: the rendering attributes its `hl_id`
 /// resolves to on the side that painted it. See this module's docs for why
