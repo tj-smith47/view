@@ -9,7 +9,9 @@ use crate::mouse::encode_mouse;
 use crate::paint::composite;
 use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
+use std::cell::RefCell;
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::mpsc::SyncSender;
 use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::{Key, Msg};
@@ -141,22 +143,6 @@ fn restore() {
     let _ = out.flush();
 }
 
-/// Writes a synchronized-update bracket escape (`CSI ? 2026 h` to begin,
-/// `CSI ? 2026 l` to end) directly to stdout, bypassing `ratatui`'s own
-/// buffered writer: the bracket must wrap the entire frame write including
-/// the cursor move that follows it, not just the buffer diff `ratatui`
-/// flushes internally.
-fn write_sync_bracket(begin: bool) -> std::io::Result<()> {
-    let seq: &[u8] = if begin {
-        b"\x1b[?2026h"
-    } else {
-        b"\x1b[?2026l"
-    };
-    let mut out = std::io::stdout();
-    out.write_all(seq)?;
-    out.flush()
-}
-
 /// Maps a [`CursorShape`] to its DECSCUSR steady parameter: `2` (block),
 /// `4` (underline/horizontal), `6` (bar/vertical). Steady rather than
 /// blinking (`1`/`3`/`5`): a deterministic cursor is safer to test against
@@ -175,19 +161,51 @@ fn decscusr_param(shape: CursorShape) -> u8 {
 }
 
 /// Writes the DECSCUSR cursor-shape escape (`CSI n SP q`) for `shape` to
-/// `writer`. Generic over `Write` (rather than writing straight to stdout
-/// like [`write_sync_bracket`]) so the byte sequence itself is unit
+/// `writer`. Generic over `Write` so the byte sequence itself is unit
 /// testable against an injected `Vec<u8>` writer instead of only being
 /// provable via a live terminal.
 fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::Result<()> {
     write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
+/// A frame-scoped byte accumulator standing in for stdout as ratatui's
+/// backend writer: `write` appends, `flush` is a no-op, so everything
+/// ratatui and the cursor/bracket escapes emit for one frame coalesces
+/// into a single buffer [`Term::draw_surface`] then writes to the real
+/// terminal in ONE `write`+`flush`. One syscall per frame instead of
+/// ~5 (bracket open, content flush, cursor position, cursor show,
+/// bracket close): each separate pty write costs a kernel copy plus a
+/// reader wakeup, which the output-path bench measured as the majority
+/// of the paint segment's non-CPU time.
+///
+/// `Rc<RefCell<..>>` rather than a plain field because ratatui owns its
+/// backend writer for the terminal's lifetime while `draw_surface` must
+/// also drain the same buffer after each draw; `Term` lives on one
+/// thread (nothing here is `Send`), so the shared handle is safe by
+/// construction and the borrows never overlap (ratatui borrows only
+/// inside `write` calls, the drain happens strictly after `draw`
+/// returns).
+struct FrameBuf(Rc<RefCell<Vec<u8>>>);
+
+impl Write for FrameBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The ratatui-backed terminal: draws grid frames and reports its size,
 /// without exposing `ratatui` types to callers outside this crate.
 pub struct Term {
     guard: TerminalGuard,
-    inner: ratatui::DefaultTerminal,
+    inner: ratatui::Terminal<ratatui::backend::CrosstermBackend<FrameBuf>>,
+    /// The frame accumulator shared with `inner`'s backend writer; see
+    /// [`FrameBuf`].
+    frame_buf: Rc<RefCell<Vec<u8>>>,
     /// The last DECSCUSR shape written, so `draw_surface` only re-emits the
     /// escape when the `Surface` cursor's shape actually changed instead of
     /// writing it unconditionally on every frame.
@@ -231,11 +249,14 @@ impl Term {
         let guard = TerminalGuard::enter_raw_mode()?;
         let (caps, residue) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen()?;
-        let inner =
-            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
+        let frame_buf = Rc::new(RefCell::new(Vec::new()));
+        let inner = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(FrameBuf(
+            Rc::clone(&frame_buf),
+        )))?;
         Ok(Self {
             guard,
             inner,
+            frame_buf,
             last_cursor_shape: None,
             last_mouse_capture: None,
             caps,
@@ -315,38 +336,46 @@ impl Term {
     pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
+        let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_capture != Some(model.engine.mouse_on) {
-            let mut out = std::io::stdout();
             if model.engine.mouse_on {
-                crossterm::execute!(out, EnableMouseCapture)?;
+                crossterm::queue!(sink, EnableMouseCapture)?;
             } else {
-                crossterm::execute!(out, DisableMouseCapture)?;
+                crossterm::queue!(sink, DisableMouseCapture)?;
             }
-            out.flush()?;
             self.last_mouse_capture = Some(model.engine.mouse_on);
         }
         if model.caps.sync {
-            write_sync_bracket(true)?;
+            sink.write_all(b"\x1b[?2026h")?;
         }
         self.inner.draw(|f| composite(model, surface, f))?;
-        #[cfg(feature = "bench-taps")]
-        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         match surface.cursor {
             Some(spec) => {
                 self.inner.set_cursor_position((spec.col, spec.row))?;
                 self.inner.show_cursor()?;
                 if self.last_cursor_shape != Some(spec.shape) {
-                    let mut out = std::io::stdout();
-                    write_cursor_shape(&mut out, spec.shape)?;
-                    out.flush()?;
+                    write_cursor_shape(&mut sink, spec.shape)?;
                     self.last_cursor_shape = Some(spec.shape);
                 }
             }
             None => self.inner.hide_cursor()?,
         }
         if model.caps.sync {
-            write_sync_bracket(false)?;
+            sink.write_all(b"\x1b[?2026l")?;
         }
+        // the frame's single real write: everything queued above -- mouse
+        // toggles, the sync bracket, ratatui's content diff, cursor
+        // escapes -- reaches the terminal in one syscall, atomically from
+        // the pty reader's point of view
+        let mut out = std::io::stdout().lock();
+        {
+            let mut frame = self.frame_buf.borrow_mut();
+            out.write_all(&frame)?;
+            frame.clear();
+        }
+        out.flush()?;
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         Ok(())
     }
 

@@ -26,8 +26,9 @@ use std::sync::OnceLock;
 
 /// A frame's content bytes written and flushed to the terminal. A late
 /// (conservative) reading of the "first byte of the output flush"
-/// boundary: the tap fires when the backend draw that ends in the flush
-/// returns, so measured intervals overstate, never understate, latency.
+/// boundary: the tap fires after the frame's single coalesced
+/// write+flush returns, so measured intervals overstate, never
+/// understate, latency.
 pub const TAG_TERM_WRITTEN: u8 = b'T';
 /// A key event decoded off the host terminal, immediately before it is
 /// sent to the runtime loop's channel.

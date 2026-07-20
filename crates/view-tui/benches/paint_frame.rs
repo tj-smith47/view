@@ -6,6 +6,8 @@
 //! single typed character pays end to end, minus real terminal write
 //! syscalls (`TestBackend` absorbs those).
 
+#![allow(clippy::expect_used)]
+
 use criterion::{criterion_group, criterion_main, Criterion};
 use ratatui::backend::TestBackend;
 use ratatui::Terminal;
@@ -74,5 +76,47 @@ fn bench_paint_frame(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_paint_frame);
+/// Same steady-state frame, but through `CrosstermBackend` over an
+/// in-memory writer: includes the real escape-sequence generation the
+/// production path pays, still minus terminal write syscalls, so the
+/// difference against `paint_frame_steady_state` isolates crossterm's
+/// per-frame encoding cost.
+fn bench_paint_frame_crossterm(c: &mut Criterion) {
+    let mut model = populated_model();
+    let backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    // fixed viewport: the sink writer is not a tty, so ratatui's per-draw
+    // autoresize would otherwise query a nonexistent terminal size and
+    // force a full clear+repaint every frame, measuring an artifact
+    let mut terminal = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, WIDTH, HEIGHT)),
+        },
+    )
+    .expect("crossterm sink terminal");
+
+    let surface = view_surface::render(&model);
+    terminal
+        .draw(|f| composite(&model, &surface, f))
+        .expect("priming draw");
+
+    let mut flip = false;
+    c.bench_function("paint_frame_steady_state_crossterm", |b| {
+        b.iter(|| {
+            flip = !flip;
+            model.engine.grid.apply(GridOp::PutLine {
+                row: 5,
+                col_start: 5,
+                cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],
+            });
+            let surface = view_surface::render(&model);
+            let frame = terminal
+                .draw(|f| composite(black_box(&model), black_box(&surface), f))
+                .expect("draw");
+            black_box(frame.area);
+        });
+    });
+}
+
+criterion_group!(benches, bench_paint_frame, bench_paint_frame_crossterm);
 criterion_main!(benches);
