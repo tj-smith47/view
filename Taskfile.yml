@@ -70,6 +70,15 @@ tasks:
       - cargo bench -p view-engine --bench damage_fold --features bench-support
       - cargo bench -p view-surface --bench render_frame
 
+  perf-audit:
+    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class, then every hot-path micro-bench (task perf-audit CLASS=dev-linux)
+    vars:
+      CLASS: '{{.CLASS | default "dev-linux"}}'
+    cmds:
+      - task: bench
+        vars: { CLI_ARGS: "--all --class {{.CLASS}} --gate" }
+      - task: bench-micro
+
   commit:
     desc: Gated commit — runs the ci chain first
     cmds:

@@ -6,6 +6,7 @@
 //! bench --scenario echo --fixture minimal --class dev-linux
 //! bench --all --class dev-linux --record   # writes baselines/<class>.toml
 //! bench --all --class dev-linux --gate     # exit 1 on any breach
+//! bench --all --class gh-linux --gate --bootstrap   # record instead if no baseline yet
 //! ```
 //!
 //! The machine class is a required argument: shared-runner numbers must
@@ -114,6 +115,12 @@ struct Cli {
     /// any breach
     #[arg(long)]
     gate: bool,
+    /// With --gate: when no baseline exists for this class yet, record
+    /// one instead of failing the provenance rule. Intended for a class's
+    /// first CI run, which uploads the recorded TOML for review and
+    /// commit; once the baseline is committed the flag comes back out
+    #[arg(long, requires = "gate")]
+    bootstrap: bool,
     /// Path to the release view binary
     #[arg(long)]
     view_bin: Option<PathBuf>,
@@ -676,6 +683,20 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+/// Why `scenario` cannot be measured on this host's platform, if it
+/// cannot. The memory row is defined as PSS read from
+/// `/proc/<pid>/smaps_rollup` (spec 3.4); no equivalent measurement is
+/// defined for other platforms, so the row runs only where its
+/// definition does rather than recording a lookalike number under the
+/// same metric name.
+fn platform_block(scenario: &str) -> Option<&'static str> {
+    if scenario == "memory" && cfg!(not(target_os = "linux")) {
+        Some("PSS via /proc/<pid>/smaps_rollup is a Linux measurement (spec 3.4)")
+    } else {
+        None
+    }
+}
+
 fn known_scenarios() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = MATRIX.iter().map(|(s, _)| *s).collect();
     names.dedup();
@@ -735,9 +756,43 @@ fn main() -> Result<()> {
         nvim: nvim_bin,
     };
 
+    // resolved before anything expensive runs: a gate that was always
+    // going to fail the provenance rule must say so up front, not after
+    // half an hour of measurement
+    let path = baseline_path(&cli.class);
+    let bootstrapping = cli.bootstrap && !path.exists();
+    let recording = cli.record || bootstrapping;
+    let gating = cli.gate && !bootstrapping;
+    if cli.bootstrap {
+        if bootstrapping {
+            println!(
+                "--bootstrap: no baseline at {}; this run records one instead of gating",
+                path.display()
+            );
+        } else {
+            println!(
+                "--bootstrap: baseline {} already exists; gating normally",
+                path.display()
+            );
+        }
+    } else if gating && !path.exists() {
+        bail!(
+            "gating requires a recorded baseline at {}; run --record for this class (or pass \
+             --bootstrap in CI) before gating",
+            path.display()
+        );
+    }
+
     let cells: Vec<(String, String)> = if cli.all {
         MATRIX
             .iter()
+            .filter(|(scenario, fixture)| match platform_block(scenario) {
+                Some(reason) => {
+                    println!("skipping {scenario}/{fixture}: {reason}");
+                    false
+                }
+                None => true,
+            })
             .map(|(s, f)| ((*s).to_string(), (*f).to_string()))
             .collect()
     } else {
@@ -762,6 +817,9 @@ fn main() -> Result<()> {
                     .join(", ")
             );
         }
+        if let Some(reason) = platform_block(&scenario) {
+            bail!("{scenario}/{fixture} cannot run on this platform: {reason}");
+        }
         vec![(scenario, fixture)]
     };
 
@@ -775,7 +833,7 @@ fn main() -> Result<()> {
     // gating on a noisy host produces false verdicts, and recording on
     // one poisons the baseline every later quiet run is judged against;
     // both therefore verify their own precondition before any cell runs
-    if cli.record || cli.gate {
+    if recording || gating {
         // the class name alone selects the tail-gating policy, so a
         // mis-typed class silently weakens the gate unless every run
         // states the policy it derived
@@ -799,7 +857,7 @@ fn main() -> Result<()> {
                 "host too noisy to {}: null-pair (nvim vs nvim) ratio_p50 measured {ratio:.4}, \
                  deviation {deviation:.4} from 1.0 exceeds the calibration floor \
                  {NULL_RATIO_FLOOR}; re-run when the host is quiet",
-                if cli.record { "record" } else { "gate" }
+                if recording { "record" } else { "gate" }
             );
         }
     }
@@ -810,8 +868,7 @@ fn main() -> Result<()> {
         measured.push((scenario.clone(), fixture.clone(), metrics));
     }
 
-    let path = baseline_path(&cli.class);
-    if cli.record {
+    if recording {
         let mut file = if cli.all || !path.exists() {
             // a full-matrix record rewrites the file from scratch under
             // the current pin; recorded-but-not-remeasured cells from an
@@ -834,7 +891,7 @@ fn main() -> Result<()> {
         );
     }
 
-    if cli.gate {
+    if gating {
         let file = baselines::load(&path).with_context(|| {
             format!("gating requires a recorded baseline at {}", path.display())
         })?;
