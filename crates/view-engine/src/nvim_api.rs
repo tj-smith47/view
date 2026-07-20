@@ -5,6 +5,7 @@
 //! way for it to reach the same calls.
 
 use crate::handle::{EngineError, EngineHandle};
+use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
 
@@ -29,6 +30,13 @@ const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
 /// paint loop itself, but an unbounded wait against a wedged engine would
 /// still hang whatever harness is blocked on the answer.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on how long [`EngineHandle::get_mode`] waits for nvim's
+/// reply. `nvim_get_mode` is answered on receipt even while nvim's main
+/// loop is busy or blocked (see [`EngineHandle::get_mode`]), so a healthy
+/// engine replies near-instantly; this bound only covers a dead or wedged
+/// connection.
+const GET_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -250,6 +258,50 @@ impl EngineHandle {
     pub fn eval_str(&self, expr: &str) -> Result<String, EngineError> {
         let value = self.request_timeout("nvim_eval", vec![Value::from(expr)], EVAL_TIMEOUT)?;
         Ok(value_to_string(&value))
+    }
+
+    /// Reads nvim's current mode name and blocked flag via `nvim_get_mode`
+    /// (`nvim_get_mode() -> {"mode": String, "blocking": Boolean}`, the
+    /// mode string in `mode(1)`'s own format). Unlike every other request
+    /// here, `nvim_get_mode` is one of the API's few `fast` methods: nvim
+    /// answers it immediately on receipt, even while its main loop is
+    /// blocked waiting for a key -- a hit-enter prompt, a pending
+    /// `t`/`f`/`r` character argument, a register name after `"` -- states
+    /// in which a non-fast request like `nvim_eval` is deferred until the
+    /// wait ends (live-verified against the pinned nvim: `nvim_eval` times
+    /// out in every `blocking = true` state this reply reports, while this
+    /// call still answers). That makes it the one probe an embedded driver
+    /// can use to distinguish "engine is wedged" from "engine is
+    /// deliberately waiting for a key", which is what `view-oracle`'s
+    /// quiesce and snapshot machinery calls it for.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// the reply does not arrive within [`GET_MODE_TIMEOUT`], or the reply
+    /// is not the documented map shape (surfaced as
+    /// [`RpcError::Malformed`] rather than degraded to a placeholder a
+    /// differential comparison could silently accept on both sides).
+    pub fn get_mode(&self) -> Result<(String, bool), EngineError> {
+        let value = self.request_timeout("nvim_get_mode", vec![], GET_MODE_TIMEOUT)?;
+        let malformed =
+            || EngineError::Rpc(RpcError::Malformed(format!("nvim_get_mode reply: {value}")));
+        let Value::Map(pairs) = &value else {
+            return Err(malformed());
+        };
+        let mut mode = None;
+        let mut blocking = None;
+        for (key, val) in pairs {
+            match key.as_str() {
+                Some("mode") => mode = val.as_str().map(str::to_string),
+                Some("blocking") => blocking = val.as_bool(),
+                _ => {}
+            }
+        }
+        match (mode, blocking) {
+            (Some(mode), Some(blocking)) => Ok((mode, blocking)),
+            _ => Err(malformed()),
+        }
     }
 
     /// Issues `nvim_get_hl(0, {name = "Normal"})` as an async probe tagged
