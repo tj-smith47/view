@@ -18,7 +18,14 @@ steps = [
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   # $XDG_CONFIG_HOME is expanded by nvim itself, so this resolves to the
   # per-run hermetic copy of the fixture, never a real user directory.
-  { send = ":cd $XDG_CONFIG_HOME/nvim<CR>" },
+  # :silent, because a bare :cd echoes the new directory and view renders
+  # that message as its ext_messages toast overlay -- right-anchored,
+  # sized by the (host-dependent) scratch path, observed occluding the
+  # sidebar name column to within one cell of the text the wait below
+  # asserts on. Nothing in this scenario ever clears the message (view's
+  # toast persists until a message-clearing event arrives), so the only
+  # deterministic screen is the one where the echo never happens.
+  { send = ":silent cd $XDG_CONFIG_HOME/nvim<CR>" },
   { send = ":NvimTreeOpen<CR>" },
   # lazy-lock.json appears nowhere on screen except as a sidebar entry, so
   # this pins nvim-tree actually rendering the directory listing, not just
