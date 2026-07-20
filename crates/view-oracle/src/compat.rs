@@ -32,14 +32,15 @@
 //! equivalent command into the pty itself instead.
 //!
 //! Every probe subprocess is spawned with an explicit bounded wait
-//! ([`wait_with_timeout`]), not `Child::wait`'s unbounded block: the
-//! embed-channel `nvim_eval` wedge a hit-enter prompt can cause (tracked,
-//! not fixed, in `corpus/quarantine/fuzz-42-6.toml`) is a different RPC path
-//! than this one, but the same underlying nvim process can still leave an
-//! `--remote-expr` client's request unanswered if it is showing a blocking
-//! prompt -- this channel existing at all does not itself immunize a probe
-//! call from that, so it must fail loud on its own deadline rather than
-//! hang the whole compat run.
+//! ([`wait_with_timeout`]), not `Child::wait`'s unbounded block: nvim
+//! defers non-fast requests while blocked in a key-wait (the embed-channel
+//! `nvim_eval` wedge `corpus/fuzz-42-6.toml` once reproduced, fixed in the
+//! corpus stack by [`crate::snapshot`]'s blocked-state dismissal), and this
+//! channel takes a different RPC path but the same underlying nvim process
+//! can still leave an `--remote-expr` client's request unanswered while it
+//! is showing a blocking prompt -- this channel existing at all does not
+//! itself immunize a probe call from that, so it must fail loud on its own
+//! deadline rather than hang the whole compat run.
 
 use std::io::Read;
 use std::path::PathBuf;

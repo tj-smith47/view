@@ -412,8 +412,9 @@ fn run_command(path: &Path) -> Result<()> {
 }
 
 /// The specific failure shape a minimizer run reduces toward. A
-/// [`Divergence::State`] carries its own field name (`"mode"`, `"cursor"`,
-/// `"registers"`, `"marks"`, `"buffer_lines"`) into the signature: two
+/// [`Divergence::State`] carries its own field name (`"mode"`, `"blocked"`,
+/// `"cursor"`, `"registers"`, `"marks"`, `"buffer_lines"`) into the
+/// signature: two
 /// state divergences on different fields are different bugs at different
 /// layers -- a mode disagreement does not imply a cursor disagreement --
 /// so treating every `Divergence::State` as interchangeable would let a

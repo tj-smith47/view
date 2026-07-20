@@ -38,6 +38,8 @@
 //! compare equal against an identically malformed reply from the other
 //! side.
 
+use std::time::{Duration, Instant};
+
 use view_surface::{LayerKind, Surface};
 
 use crate::{EngineSession, OracleError, ReferenceSession};
@@ -63,6 +65,14 @@ const RECORD_SEP: &str = "\u{1e}";
 /// host clipboard/session state a hermetic probe must never depend on.
 const REGISTER_NAMES: [char; 4] = ['"', '0', '1', 'a'];
 
+/// Bound on [`snapshot`]'s wait for a blocked session to leave its
+/// key-wait after the `<Esc>` dismissal (see [`snapshot`]'s own doc
+/// comment): generous relative to processing a single already-queued
+/// keystroke, short enough that a session `<Esc>` genuinely cannot
+/// unblock fails the probe promptly as [`OracleError::Blocked`] instead
+/// of hanging the run.
+const UNBLOCK_DEADLINE: Duration = Duration::from_secs(5);
+
 /// Anything a differential parity check can read state from: `view`'s own
 /// [`EngineSession`] and [`ReferenceSession`] both qualify, since both wrap
 /// a real embedded engine's `nvim_eval`. Kept as a trait (not a concrete
@@ -82,11 +92,43 @@ pub trait Probe {
     /// Returns [`OracleError`] under the same conditions as the underlying
     /// session's own `eval_str`.
     fn eval_str(&mut self, expr: &str) -> Result<String, OracleError>;
+
+    /// Reads the session's current mode name and blocked flag via the fast
+    /// `nvim_get_mode` probe, identical in contract to
+    /// [`EngineSession::get_mode`] and [`ReferenceSession::get_mode`]:
+    /// answered even in the blocked key-wait states where
+    /// [`eval_str`](Self::eval_str) is deferred, which is what lets
+    /// [`snapshot`] decide whether its eval probes can run at all.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError`] under the same conditions as the underlying
+    /// session's own `get_mode`.
+    fn get_mode(&mut self) -> Result<(String, bool), OracleError>;
+
+    /// Forwards one encoded key `notation` via `nvim_input`, identical in
+    /// contract to [`EngineSession::input`] and [`ReferenceSession::input`]:
+    /// how [`snapshot`] dismisses a blocked key-wait (see its doc comment)
+    /// before running probes that a blocked session would defer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError`] under the same conditions as the underlying
+    /// session's own `input`.
+    fn input(&mut self, notation: &str) -> Result<(), OracleError>;
 }
 
 impl Probe for EngineSession {
     fn eval_str(&mut self, expr: &str) -> Result<String, OracleError> {
         EngineSession::eval_str(self, expr)
+    }
+
+    fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
+        EngineSession::get_mode(self)
+    }
+
+    fn input(&mut self, notation: &str) -> Result<(), OracleError> {
+        EngineSession::input(self, notation)
     }
 }
 
@@ -94,28 +136,66 @@ impl Probe for ReferenceSession {
     fn eval_str(&mut self, expr: &str) -> Result<String, OracleError> {
         ReferenceSession::eval_str(self, expr)
     }
+
+    fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
+        ReferenceSession::get_mode(self)
+    }
+
+    fn input(&mut self, notation: &str) -> Result<(), OracleError> {
+        ReferenceSession::input(self, notation)
+    }
 }
 
-/// One side's `nvim_eval` state, as read back through five fixed
-/// probes: buffer text, cursor, mode, a fixed register set, and marks. Not a
-/// full state dump (nvim has far more introspectable state than this): the
-/// fields here are exactly what a scripted key-notation scenario can make
-/// disagree between `view`'s own engine and [`ReferenceSession`]'s -- what
-/// the buffer holds, where the cursor sits, what mode nvim is in, what a
-/// yank/delete left in a register, and where a mark landed.
+/// One side's probed state: buffer text, cursor, mode plus blocked flag, a
+/// fixed register set, and marks. Not a full state dump (nvim has far more
+/// introspectable state than this): the fields here are exactly what a
+/// scripted key-notation scenario can make disagree between `view`'s own
+/// engine and [`ReferenceSession`]'s -- what the buffer holds, where the
+/// cursor sits, what mode nvim is in (and whether it sits blocked in a
+/// key-wait), what a yank/delete left in a register, and where a mark
+/// landed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StateSnapshot {
     pub buffer_lines: Vec<String>,
     pub cursor: (u64, u64),
     pub mode: String,
+    /// Whether the session sat blocked in a key-wait (a hit-enter prompt,
+    /// a pending `t`/`f`/`r` character argument) when this snapshot was
+    /// taken -- captured before the `<Esc>` dismissal [`snapshot`] performs
+    /// to let its eval probes answer, so the wait itself stays a compared
+    /// state rather than being silently probed away.
+    pub blocked: bool,
     pub registers: Vec<(char, String)>,
     pub marks: Vec<(String, u64, u64)>,
 }
 
-/// Probes `probe` for a full [`StateSnapshot`]: one `nvim_eval` round trip
-/// for the buffer, one for the cursor, one for the mode, one per
-/// [`REGISTER_NAMES`] entry, and two for marks (buffer-local, then global --
-/// see [`marks_expr`]). Every list-shaped probe (buffer lines, marks) is
+/// Probes `probe` for a full [`StateSnapshot`]: the fast `nvim_get_mode`
+/// probe for the mode name and blocked flag, then one `nvim_eval` round
+/// trip for the buffer, one for the cursor, one per [`REGISTER_NAMES`]
+/// entry, and two for marks (buffer-local, then global -- see
+/// [`marks_expr`]).
+///
+/// The mode comes from `nvim_get_mode` (which reports it in `mode(1)`'s own
+/// format) rather than an eval probe, and it is read first, because the two
+/// probe kinds have different availability: nvim defers every non-fast
+/// request -- all the eval probes below -- while its main loop is blocked
+/// waiting for a key (a hit-enter prompt, a pending `t`/`f`/`r` character
+/// argument, a register name after `"`), but answers `nvim_get_mode`
+/// immediately in exactly those states. A script is free to end blocked, and
+/// that wait is real compared state ([`StateSnapshot::blocked`]), so a
+/// blocked session must neither wedge the probe run (the eval-timeout
+/// failure seeded fuzz once quarantined as `fuzz-42-6`) nor be skipped: the
+/// pre-dismissal mode/blocked pair is captured, then the wait is dismissed
+/// with a single `<Esc>` -- which aborts a pending key-wait without touching
+/// buffer text, cursor, registers, or marks (live-verified against the
+/// pinned nvim) -- and once the fast probe confirms the session unblocked,
+/// the eval probes below read the rest of the state the script actually
+/// produced. Each side of a differential is handled identically by
+/// construction (this one shared function), so a side that blocks when the
+/// other does not still surfaces as a `blocked` state divergence rather
+/// than disappearing into asymmetric handling.
+///
+/// Every list-shaped probe (buffer lines, marks) is
 /// joined vimscript-side with [`FIELD_SEP`]/[`RECORD_SEP`] (or, for buffer
 /// lines, a literal newline -- no nvim buffer line can ever contain an
 /// embedded `\n`, since that byte is exactly what separates lines in nvim's
@@ -128,12 +208,19 @@ pub struct StateSnapshot {
 ///
 /// # Errors
 ///
-/// Returns [`OracleError`] if any of the underlying `eval_str` calls fail,
+/// Returns [`OracleError`] if any of the underlying `get_mode`/`eval_str`
+/// calls fail, if a blocked session stays blocked past [`UNBLOCK_DEADLINE`]
+/// after the `<Esc>` dismissal ([`OracleError::Blocked`], naming the mode),
 /// or if a cursor/marks reply does not parse (see [`parse_cursor`],
-/// [`parse_marks`]) -- a malformed reply is now a loud probe failure, not a
+/// [`parse_marks`]) -- a malformed reply is a loud probe failure, not a
 /// value degraded to a placeholder that could compare equal against an
 /// identically malformed reply from the other side.
 pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
+    let (mode, blocked) = probe.get_mode()?;
+    if blocked {
+        dismiss_blocked_wait(probe)?;
+    }
+
     let buffer_lines = probe
         .eval_str("join(getline(1,'$'), \"\\n\")")?
         .split('\n')
@@ -142,8 +229,6 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
 
     let cursor_raw = probe.eval_str(&format!("join(getpos('.'), \"{FIELD_SEP}\")"))?;
     let cursor = parse_cursor(&cursor_raw)?;
-
-    let mode = probe.eval_str("mode(1)")?;
 
     let mut registers = Vec::with_capacity(REGISTER_NAMES.len());
     for name in REGISTER_NAMES {
@@ -160,9 +245,37 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
         buffer_lines,
         cursor,
         mode,
+        blocked,
         registers,
         marks,
     })
+}
+
+/// Types a single `<Esc>` to abort the blocked key-wait `probe`'s fast
+/// mode probe just reported, then re-polls that same fast probe until the
+/// session leaves the blocked state, bounded by [`UNBLOCK_DEADLINE`]. See
+/// [`snapshot`]'s doc comment for why `<Esc>` is a state-preserving
+/// dismissal and why the pre-dismissal mode/blocked pair is what the
+/// snapshot itself carries.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Blocked`] (naming the still-blocked mode) if the
+/// session has not unblocked by the deadline, or the underlying
+/// `input`/`get_mode` error if either call fails outright.
+fn dismiss_blocked_wait(probe: &mut dyn Probe) -> Result<(), OracleError> {
+    probe.input("<Esc>")?;
+    let start = Instant::now();
+    loop {
+        let (mode, blocked) = probe.get_mode()?;
+        if !blocked {
+            return Ok(());
+        }
+        if start.elapsed() >= UNBLOCK_DEADLINE {
+            return Err(OracleError::Blocked { mode });
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
 }
 
 /// Builds a `getmarklist(...)` probe expression, `buf_arg` either
@@ -256,8 +369,8 @@ fn parse_marks(raw: &str) -> Result<Vec<(String, u64, u64)>, OracleError> {
 #[derive(Debug)]
 pub enum Divergence {
     /// A [`StateSnapshot`] field disagreed; `field` names which one
-    /// (`"buffer_lines"`, `"cursor"`, `"mode"`, `"registers"`, or
-    /// `"marks"`).
+    /// (`"buffer_lines"`, `"cursor"`, `"mode"`, `"blocked"`, `"registers"`,
+    /// or `"marks"`).
     State {
         field: String,
         view: String,
@@ -337,6 +450,13 @@ pub fn compare(
             field: "mode".to_string(),
             view: view_state.mode.clone(),
             reference: ref_state.mode.clone(),
+        });
+    }
+    if view_state.blocked != ref_state.blocked {
+        divergences.push(Divergence::State {
+            field: "blocked".to_string(),
+            view: view_state.blocked.to_string(),
+            reference: ref_state.blocked.to_string(),
         });
     }
     if view_state.registers != ref_state.registers {
@@ -427,6 +547,7 @@ mod tests {
             buffer_lines: vec!["hello".to_string(), "world".to_string()],
             cursor: (1, 0),
             mode: "n".to_string(),
+            blocked: false,
             registers: vec![('"', "hello\n".to_string()), ('0', "hello\n".to_string())],
             marks: vec![("'.".to_string(), 1, 0)],
         }
@@ -452,6 +573,34 @@ mod tests {
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
             Divergence::State { field, .. } => assert_eq!(field, "registers"),
+            other => unreachable!("expected Divergence::State, got {other:?}"),
+        }
+    }
+
+    /// A doctored `blocked` flag (everything else identical) must produce
+    /// exactly one `Divergence::State` naming the `"blocked"` field: one
+    /// side sitting in a key-wait the other side left is a real behavioral
+    /// disagreement, not probe noise to be absorbed.
+    #[test]
+    fn doctored_blocked_flag_produces_exactly_one_state_divergence() {
+        let view_state = snapshot_fixture();
+        let mut ref_state = snapshot_fixture();
+        ref_state.blocked = true;
+        let rows = rows_fixture();
+
+        let divergences = compare(&view_state, &ref_state, &rows, &rows, &[]);
+
+        assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
+        match &divergences[0] {
+            Divergence::State {
+                field,
+                view,
+                reference,
+            } => {
+                assert_eq!(field, "blocked");
+                assert_eq!(view, "false");
+                assert_eq!(reference, "true");
+            }
             other => unreachable!("expected Divergence::State, got {other:?}"),
         }
     }
@@ -813,6 +962,51 @@ mod tests {
             divergences.is_empty(),
             "engine/reference parity check found divergences after a second tab opened: \
              {divergences:?}\nview rows: {view_rows:?}\nreference rows: {ref_rows:?}\nmask: {mask:?}"
+        );
+    }
+
+    /// Regression pin for the blocked-probe wedge (`corpus/fuzz-42-6.toml`,
+    /// found by seeded fuzz): a script ending with a bare `t` leaves nvim
+    /// blocked waiting for the motion's character argument, a state that
+    /// defers every non-fast request -- so the old all-eval `snapshot`
+    /// timed out on its first probe and the whole run failed as an ERROR.
+    /// `snapshot` must instead capture the blocked state itself and still
+    /// read the rest of the session's state through the `<Esc>` dismissal.
+    #[test]
+    fn snapshot_answers_in_a_blocked_char_wait_instead_of_wedging() {
+        let mut session =
+            EngineSession::spawn(40, 10).expect("EngineSession::spawn against real nvim");
+        while session.pump_until_flush(Duration::from_millis(500)) {}
+
+        session
+            .input("ihello<Esc>0t")
+            .expect("input against EngineSession");
+        assert!(session.pump_until_flush(QUIESCE_DEADLINE));
+        while session.pump_until_flush(Duration::from_millis(500)) {}
+
+        let state = snapshot(&mut session).expect("snapshot against a blocked session");
+
+        assert!(
+            state.blocked,
+            "a pending t character argument must be captured as blocked: {state:?}"
+        );
+        assert_eq!(
+            state.mode, "n",
+            "nvim reports normal mode while blocked on a motion argument"
+        );
+        // the eval probes below the dismissal must still see the state the
+        // script produced: the typed line, the cursor parked by `0`, and no
+        // register the aborted `t` could have touched
+        assert_eq!(state.buffer_lines, vec!["hello".to_string()]);
+        assert_eq!(
+            state.cursor,
+            (1, 1),
+            "the <Esc> dismissal must not move the cursor: {state:?}"
+        );
+        assert!(
+            state.registers.iter().all(|(_, value)| value.is_empty()),
+            "no probed register should hold anything after ihello<Esc>0t: {:?}",
+            state.registers
         );
     }
 

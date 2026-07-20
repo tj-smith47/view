@@ -12,8 +12,10 @@
 # The leading `send = "<CR>"` drives past any interactive startup prompt
 # (a hit-enter prompt, for instance) the same way a real user's keystroke
 # would: through the pty's actual input stream, not the EMBED nvim_eval
-# channel the corpus's known live defect (corpus/quarantine/fuzz-42-6.toml)
-# wedges on. A bare <CR> in normal mode with nothing pending is a harmless
+# channel a blocking prompt defers (the wedge corpus/fuzz-42-6.toml once
+# reproduced; the corpus snapshot layer now dismisses blocked waits before
+# probing, while this driver stays on the pty path a real keystroke takes).
+# A bare <CR> in normal mode with nothing pending is a harmless
 # cursor-down no-op, so it is safe to send unconditionally rather than
 # needing to first detect whether a prompt actually appeared.
 #

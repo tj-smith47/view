@@ -71,6 +71,18 @@ pub enum OracleError {
     /// An I/O error writing to or reading from a pty.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A session stayed blocked in a key-wait (a hit-enter prompt, a
+    /// pending `t`/`f`/`r` character argument) even after the snapshot
+    /// layer's `<Esc>` dismissal (see [`snapshot`]'s doc comment), so its
+    /// eval probes can never answer. Named rather than left to surface as
+    /// a generic eval timeout so a report line says which nvim state
+    /// actually wedged the probe.
+    #[error("session still blocked waiting for a key (mode {mode:?}) after <Esc> dismissal")]
+    Blocked {
+        /// The mode name the fast `nvim_get_mode` probe reported while the
+        /// session stayed blocked.
+        mode: String,
+    },
     /// A state-probe reply did not match the shape its parser requires
     /// (the cursor or marks parsers behind [`snapshot`]). Surfaced as an
     /// error rather than degraded to a placeholder value: registers,
@@ -317,6 +329,20 @@ impl EngineSession {
     /// the expression, or the reply times out.
     pub fn eval_str(&mut self, expr: &str) -> Result<String, OracleError> {
         self.engine.handle.eval_str(expr).map_err(Into::into)
+    }
+
+    /// Reads nvim's current mode name and blocked flag via the fast
+    /// `nvim_get_mode` probe (see `EngineHandle::get_mode`): answered even
+    /// in the blocked key-wait states where [`eval_str`](Self::eval_str)
+    /// would be deferred until the wait ends, which is what lets
+    /// [`snapshot`] probe such a session at all instead of timing out.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Engine`] if the request fails, the reply
+    /// times out, or the reply shape is malformed.
+    pub fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
+        self.engine.handle.get_mode().map_err(Into::into)
     }
 }
 

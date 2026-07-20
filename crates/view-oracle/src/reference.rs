@@ -951,6 +951,42 @@ mod tests {
         );
     }
 
+    /// The blocked-wait sibling of the operator-pending pin above
+    /// (`corpus/fuzz-42-6.toml`'s quiesce half): a script ending with a
+    /// bare `t` leaves nvim blocked waiting for the motion's character
+    /// argument. `SafeState` cannot fire there and a typed marker key
+    /// would become that argument, so `quiesce` must settle on the
+    /// silence window alone and leave the wait in place for the snapshot
+    /// layer to capture.
+    #[test]
+    fn quiesce_settles_on_a_blocked_char_wait_without_typing() {
+        let mut reference_side =
+            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        assert!(reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE));
+
+        reference_side
+            .input("ihello<Esc>0t")
+            .expect("input against ReferenceSession");
+        assert!(
+            reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE),
+            "quiesce must settle on a blocked key-wait, not time out"
+        );
+
+        let (mode, blocking) = reference_side
+            .get_mode()
+            .expect("get_mode against ReferenceSession");
+        assert!(
+            blocking,
+            "the pending character-argument wait must survive quiesce untouched"
+        );
+        assert_eq!(mode, "n", "nvim reports normal mode while blocked on t");
+        assert!(
+            reference_side.screen_text().contains("hello"),
+            "the typed text never reached the reference grid:\n{}",
+            reference_side.screen_text()
+        );
+    }
+
     /// `quiesce` must return `false` at `deadline` rather than hang while a
     /// blocking `:sleep` is still pending: no `SafeState` fires (nvim's
     /// main loop is not idle, it is inside the sleep) and no marker is ever
