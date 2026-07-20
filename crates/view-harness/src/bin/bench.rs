@@ -697,6 +697,20 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
     }
 }
 
+/// Lines a full-matrix run prints for a platform-skipped cell. Under
+/// GitHub Actions a `::warning::` workflow command is added so the
+/// skipped cell surfaces on the checks page instead of only inside the
+/// run log.
+fn skip_announcements(scenario: &str, fixture: &str, reason: &str, under_gha: bool) -> Vec<String> {
+    let mut lines = vec![format!("skipping {scenario}/{fixture}: {reason}")];
+    if under_gha {
+        lines.push(format!(
+            "::warning::bench cell {scenario}/{fixture} skipped on this platform: {reason}"
+        ));
+    }
+    lines
+}
+
 fn known_scenarios() -> Vec<&'static str> {
     let mut names: Vec<&'static str> = MATRIX.iter().map(|(s, _)| *s).collect();
     names.dedup();
@@ -783,18 +797,21 @@ fn main() -> Result<()> {
         );
     }
 
+    let under_gha = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
+    let mut skipped: Vec<(String, String)> = Vec::new();
     let cells: Vec<(String, String)> = if cli.all {
-        MATRIX
-            .iter()
-            .filter(|(scenario, fixture)| match platform_block(scenario) {
-                Some(reason) => {
-                    println!("skipping {scenario}/{fixture}: {reason}");
-                    false
+        let mut selected = Vec::new();
+        for &(scenario, fixture) in MATRIX {
+            if let Some(reason) = platform_block(scenario) {
+                for line in skip_announcements(scenario, fixture, reason, under_gha) {
+                    println!("{line}");
                 }
-                None => true,
-            })
-            .map(|(s, f)| ((*s).to_string(), (*f).to_string()))
-            .collect()
+                skipped.push((scenario.to_string(), fixture.to_string()));
+            } else {
+                selected.push((scenario.to_string(), fixture.to_string()));
+            }
+        }
+        selected
     } else {
         let scenario = cli
             .scenario
@@ -909,15 +926,55 @@ fn main() -> Result<()> {
                 scenario, fixture, metrics, recorded, &cli.class,
             ));
         }
-        if breaches.is_empty() {
+        for breach in &breaches {
+            eprintln!("{breach}");
+        }
+        // the forward walk proves measured cells sit inside their bars; a
+        // full-coverage run must also prove the baseline holds no cell the
+        // run silently dropped, or a cell that falls out of the matrix
+        // stays green forever with bars that are never re-tested
+        let mut uncovered = Vec::new();
+        if cli.all {
+            let measured_cells: Vec<(String, String)> = measured
+                .iter()
+                .map(|(scenario, fixture, _)| (scenario.clone(), fixture.clone()))
+                .collect();
+            uncovered = baselines::uncovered_cells(&file, &measured_cells, &skipped);
+            for (scenario, fixture) in &uncovered {
+                eprintln!(
+                    "GATE COVERAGE FAIL [{scenario}.{fixture}]: baseline cell was neither \
+                     measured nor platform-skipped this run"
+                );
+            }
+        }
+        if breaches.is_empty() && uncovered.is_empty() {
             println!("gate OK: {} cell(s) within recorded bars", measured.len());
         } else {
-            for breach in &breaches {
-                eprintln!("{breach}");
-            }
             std::process::exit(1);
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_announcement_adds_a_checks_page_warning_only_under_gha() {
+        let plain = skip_announcements("memory", "minimal", "linux-only metric", false);
+        assert_eq!(
+            plain,
+            vec!["skipping memory/minimal: linux-only metric".to_string()]
+        );
+        let gha = skip_announcements("memory", "minimal", "linux-only metric", true);
+        assert_eq!(gha.len(), 2);
+        assert_eq!(gha[0], plain[0]);
+        assert!(
+            gha[1].starts_with("::warning::") && gha[1].contains("memory/minimal"),
+            "annotation must be a workflow command naming the cell: {}",
+            gha[1]
+        );
+    }
 }

@@ -244,6 +244,36 @@ pub fn gate_cell(
     breaches
 }
 
+/// Baseline cells that `measured` and `skipped` together leave
+/// unchecked, in deterministic (sorted) order. The forward gate walks
+/// measured cells only, so a cell that silently fell out of a
+/// full-coverage run (dropped from the matrix, lost to a selection bug)
+/// would otherwise stay green forever with its recorded bars never
+/// re-tested; `skipped` carries the cells the run legitimately excluded
+/// for platform reasons so they do not count as coverage gaps.
+#[must_use]
+pub fn uncovered_cells(
+    baseline: &BaselineFile,
+    measured: &[(String, String)],
+    skipped: &[(String, String)],
+) -> Vec<(String, String)> {
+    let covered = |scenario: &str, fixture: &str| {
+        measured
+            .iter()
+            .chain(skipped.iter())
+            .any(|(s, f)| s == scenario && f == fixture)
+    };
+    let mut uncovered = Vec::new();
+    for (scenario, fixtures) in &baseline.cells {
+        for fixture in fixtures.keys() {
+            if !covered(scenario, fixture) {
+                uncovered.push((scenario.clone(), fixture.clone()));
+            }
+        }
+    }
+    uncovered
+}
+
 /// Loads and validates `path`.
 ///
 /// # Errors
@@ -369,6 +399,37 @@ mod tests {
         file.upsert_cell("echo", "minimal", metrics(&[("ratio_p99", 1.1)]));
         assert_eq!(file.cell("echo", "minimal").unwrap()["ratio_p99"], 1.1);
         assert_eq!(file.cell("echo", "heavy").unwrap()["ratio_p99"], 1.4);
+    }
+
+    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
+        list.iter()
+            .map(|(s, f)| ((*s).to_string(), (*f).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn uncovered_cells_names_a_baseline_cell_the_run_never_touched() {
+        let mut file = BaselineFile::new("dev-linux", "v0.12.4");
+        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
+        file.upsert_cell("memory", "minimal", metrics(&[("pss_mb", 3.4)]));
+        let uncovered = uncovered_cells(&file, &pairs(&[("echo", "minimal")]), &[]);
+        assert_eq!(uncovered, pairs(&[("memory", "minimal")]));
+    }
+
+    #[test]
+    fn uncovered_cells_accepts_a_platform_skipped_cell() {
+        let mut file = BaselineFile::new("gh-macos", "v0.12.4");
+        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
+        file.upsert_cell("memory", "minimal", metrics(&[("pss_mb", 3.4)]));
+        let uncovered = uncovered_cells(
+            &file,
+            &pairs(&[("echo", "minimal")]),
+            &pairs(&[("memory", "minimal")]),
+        );
+        assert!(
+            uncovered.is_empty(),
+            "a platform-skipped cell must not read as a coverage gap: {uncovered:?}"
+        );
     }
 
     #[test]
