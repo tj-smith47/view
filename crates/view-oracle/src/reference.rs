@@ -14,9 +14,12 @@
 
 use std::time::{Duration, Instant};
 
+use std::collections::HashMap;
+
 use view_core::events::{clamp_dim, saturate_u16, GridCell, UiEvent};
 use view_engine::{DamagePump, Engine, EngineConfig};
 
+use crate::attr::{row_fingerprint, ResolvedAttr};
 use crate::OracleError;
 
 /// One [`RefGrid`] cell: display text and the highlight group id it was
@@ -53,6 +56,14 @@ struct RefGrid {
     rows: Vec<Vec<Cell>>,
     cursor_row: u16,
     cursor_col: u16,
+    /// Highlight definitions this side has received, keyed by the
+    /// per-session `hl_id` its own `grid_line` cells reference. Independent
+    /// of `view_core::hl::HlTable` for the same reason the rest of this
+    /// grid is independent of `view_core::grid::Grid` (see the module's
+    /// DO-NOT-CONSOLIDATE note): the oracle compares the resolved
+    /// [`ResolvedAttr`] content, never the raw id, so the two sides' id
+    /// spaces never have to agree. See [`crate::attr`]'s docs.
+    attrs: HashMap<u64, ResolvedAttr>,
 }
 
 impl RefGrid {
@@ -63,7 +74,17 @@ impl RefGrid {
             rows: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
+            attrs: HashMap::new(),
         }
+    }
+
+    /// Records one `hl_attr_define`'s resolved attributes under its
+    /// `hl_id`, the reference-side counterpart of `view_core`'s
+    /// `HlTable::attrs` insert. Grid content already stores each cell's raw
+    /// `hl_id` (see [`put_line`](Self::put_line)); this table is what
+    /// [`attr_row`](Self::attr_row) later resolves those ids through.
+    fn define_attr(&mut self, id: u64, attr: ResolvedAttr) {
+        self.attrs.insert(id, attr);
     }
 
     /// Rebuilds `rows` at the new size, copying the overlapping region from
@@ -202,6 +223,25 @@ impl RefGrid {
         self.rows
             .get(usize::from(row))
             .map(|cells| cells.iter().map(|c| c.text.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Renders `row`'s per-cell highlight identity, each cell's stored
+    /// `hl_id` resolved through [`attrs`](Self::attrs) into a
+    /// [`ResolvedAttr`] (defaulting for `hl_id` 0 and any undefined id, the
+    /// same fallback the view side's `resolve_attr` applies). The attr-parity
+    /// counterpart of [`row_text`](Self::row_text).
+    fn attr_row(&self, row: u16) -> String {
+        self.rows
+            .get(usize::from(row))
+            .map(|cells| {
+                row_fingerprint(cells.iter().map(|c| {
+                    self.attrs
+                        .get(&c.hl_id)
+                        .copied()
+                        .unwrap_or(ResolvedAttr::DEFAULT)
+                }))
+            })
             .unwrap_or_default()
     }
 }
@@ -623,6 +663,32 @@ impl ReferenceSession {
         rows
     }
 
+    /// Renders `RefGrid`'s per-cell highlight identity as one string per row,
+    /// row-indexed identically to [`screen_rows`](Self::screen_rows) (same
+    /// chrome-placeholder offset): the attr-parity counterpart of the text
+    /// dump that [`crate::compare`] diffs against the view side's
+    /// `attr_rows`. Each cell's `hl_id` is resolved through this session's
+    /// own highlight table, so the two sides' per-session id assignments
+    /// never enter the comparison (see [`crate::attr`]'s docs).
+    #[must_use]
+    pub fn attr_rows(&self) -> Vec<String> {
+        let chrome = self.chrome_rows();
+        let mut rows: Vec<String> = (0..chrome).map(|_| String::new()).collect();
+        rows.extend((0..self.grid.height).map(|r| self.grid.attr_row(r)));
+        rows
+    }
+
+    /// Captures this side's [`crate::Screen`] -- glyph rows plus per-cell
+    /// highlight rows -- for [`crate::compare`], the reference-side
+    /// counterpart of [`EngineSession::screen`](crate::EngineSession::screen).
+    #[must_use]
+    pub fn screen(&self) -> crate::Screen {
+        crate::Screen {
+            rows: self.screen_rows(),
+            attr_rows: self.attr_rows(),
+        }
+    }
+
     /// Evaluates `expr` against the real engine, identical to
     /// [`EngineSession::eval_str`](crate::EngineSession::eval_str).
     ///
@@ -782,12 +848,37 @@ impl ReferenceSession {
                         .try_resize(self.term_width, target_height);
                 }
             }
+            // recorded (not discarded like the rest of this arm's ext
+            // content) because a cell's own `hl_id` -- already stored by
+            // put_line -- is meaningless without the table that resolves it
+            // to rendered attributes, and attr parity compares that
+            // resolved content cell-for-cell (see the attr module's docs)
+            UiEvent::HlAttrDefine {
+                id,
+                fg,
+                bg,
+                bold,
+                italic,
+                underline,
+                reverse,
+            } => {
+                self.grid.define_attr(
+                    id,
+                    ResolvedAttr {
+                        fg,
+                        bg,
+                        bold,
+                        italic,
+                        underline,
+                        reverse,
+                    },
+                );
+            }
             // discarded for grid purposes: no cell content of theirs ever
             // reaches the grid while ext_hlstate/ext_cmdline/ext_messages/
             // ext_tabline/ext_popupmenu are attached (see this fn's doc
             // comment's ext-event policy paragraph)
-            UiEvent::HlAttrDefine { .. }
-            | UiEvent::DefaultColorsSet { .. }
+            UiEvent::DefaultColorsSet { .. }
             | UiEvent::HlGroupSet { .. }
             | UiEvent::Flush
             | UiEvent::ModeInfoSet { .. }

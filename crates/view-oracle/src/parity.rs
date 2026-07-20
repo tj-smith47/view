@@ -6,16 +6,22 @@
 //! comparison layer that turns two sides' state into a list of concrete
 //! disagreements.
 //!
-//! Two comparison axes, kept separate because they diverge for different
+//! Three comparison axes, kept separate because they diverge for different
 //! reasons and a caller needs to tell them apart:
 //! - [`Divergence::State`]: the two sides' `nvim_eval` state probes
 //!   ([`StateSnapshot`]) disagree -- buffer text, cursor, mode, registers,
 //!   or marks. A bug in `view`'s own input handling or engine wiring, not a
 //!   rendering bug.
-//! - [`Divergence::Grid`]: the two sides' rendered screen text disagrees at
+//! - [`Divergence::Grid`]: the two sides' rendered screen *text* disagrees at
 //!   a specific row not excluded by [`masked_rows`]. A rendering/apply bug
 //!   in `view`'s `Model`/`Grid`/`Surface` pipeline (the exact class
 //!   [`crate::ReferenceSession`]'s `RefGrid` exists to catch).
+//! - [`Divergence::Attr`]: the two sides agree on a row's glyphs but not on
+//!   its per-cell *highlights* -- a style/attr bug (e.g. in a frame-scoped
+//!   hl cache) that leaves the text untouched. Each cell's `hl_id` is
+//!   resolved to its rendered attributes before comparison, so the two
+//!   sessions' independent id assignments never register as a difference
+//!   (see [`crate::attr`]'s docs).
 //!
 //! [`masked_rows`] excludes rows [`crate::ReferenceSession`] cannot ever
 //! agree on by construction: its `RefGrid` never receives
@@ -384,11 +390,11 @@ fn parse_marks(raw: &str) -> Result<Vec<(String, u64, u64)>, OracleError> {
 }
 
 /// One concrete disagreement between `view`'s side and the reference side,
-/// found by [`compare`]. Two arms because a state-probe disagreement and a
-/// rendered-row disagreement point at different layers of the stack (see
-/// this module's own doc comment) and a caller triaging a failure needs to
-/// know immediately which kind it is looking at, not just that the two
-/// sides disagreed somewhere.
+/// found by [`compare`]. Three arms because a state-probe disagreement, a
+/// rendered-glyph disagreement, and a rendered-attribute disagreement point
+/// at different layers of the stack (see this module's own doc comment) and a
+/// caller triaging a failure needs to know immediately which kind it is
+/// looking at, not just that the two sides disagreed somewhere.
 #[derive(Debug)]
 pub enum Divergence {
     /// A [`StateSnapshot`] field disagreed; `field` names which one
@@ -399,8 +405,20 @@ pub enum Divergence {
         view: String,
         reference: String,
     },
-    /// Rendered row `row` disagreed and was not in the caller's mask.
+    /// Rendered glyph row `row` disagreed and was not in the caller's mask.
     Grid {
+        row: u16,
+        view: String,
+        reference: String,
+    },
+    /// Rendered highlight row `row` disagreed and was not in the caller's
+    /// mask: the two sides painted the same (or a masked-away) glyph but a
+    /// cell's resolved attributes differ. `view`/`reference` carry the two
+    /// sides' [`crate::attr::ResolvedAttr`] row fingerprints, so a report
+    /// names what differed rather than only that something did -- a
+    /// glyph-equal-but-styled-differently row is exactly the class the
+    /// text-only [`Divergence::Grid`] diff cannot see.
+    Attr {
         row: u16,
         view: String,
         reference: String,
@@ -413,11 +431,15 @@ pub enum Divergence {
 /// their first entries share this tag, regardless of which buffer line or
 /// grid row the payload happens to name (a minimized script's exact row
 /// index or buffer content is expected to shift as tokens drop out; the
-/// variant it fails on is not).
+/// variant it fails on is not). `Grid` and `Attr` are kept distinct here so
+/// a minimizer never reduces a text-render divergence toward an unrelated
+/// attr-render one, or the reverse -- they are different rendering bugs even
+/// when they land on the same row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DivergenceKind {
     State,
     Grid,
+    Attr,
 }
 
 impl Divergence {
@@ -428,28 +450,51 @@ impl Divergence {
         match self {
             Self::State { .. } => DivergenceKind::State,
             Self::Grid { .. } => DivergenceKind::Grid,
+            Self::Attr { .. } => DivergenceKind::Attr,
         }
     }
 }
 
-/// Diffs `view_state` against `ref_state` field by field, then
-/// `view_rows`/`ref_rows` row by row, skipping any row index present in
-/// `mask` (see [`masked_rows`]) -- the ordering (state first, then grid) is
-/// arbitrary and not load-bearing; every field/row that disagrees produces
-/// its own [`Divergence`], so this always returns the *complete* set of
-/// disagreements between the two sides, not just the first.
+/// One side's rendered screen: the glyph dump plus the per-cell highlight
+/// dump, held together because [`compare`] diffs both against the other
+/// side's same pair and a caller must never diff one side's glyphs against a
+/// stale frame's attributes. `rows` and `attr_rows` are row-indexed
+/// identically (same chrome offset), so a given index names the same on-screen
+/// row in both -- which is what lets one shared [`masked_rows`] mask suppress
+/// overlay rows in both diffs at once.
+#[derive(Debug, Clone)]
+pub struct Screen {
+    /// One glyph string per canvas row (from `screen_rows`).
+    pub rows: Vec<String>,
+    /// One [`crate::attr::ResolvedAttr`] fingerprint string per canvas row
+    /// (from `attr_rows`), aligned cell-for-cell with `rows`.
+    pub attr_rows: Vec<String>,
+}
+
+/// Diffs `view_state` against `ref_state` field by field, then the two
+/// screens' glyph rows, then their attribute rows, skipping any row index
+/// present in `mask` (see [`masked_rows`]) -- the ordering is arbitrary and
+/// not load-bearing; every field/row that disagrees produces its own
+/// [`Divergence`], so this always returns the *complete* set of disagreements
+/// between the two sides, not just the first.
 ///
-/// A row present in only one of `view_rows`/`ref_rows` (the two sides
-/// disagreeing on total row count) is treated as disagreeing against an
-/// empty string on the shorter side, rather than being silently skipped:
-/// a row count mismatch is itself real signal a differential oracle must
-/// surface.
+/// Glyph and attribute rows are diffed as two independent passes producing
+/// [`Divergence::Grid`] and [`Divergence::Attr`] respectively: a row whose
+/// text matches but whose highlights differ (a style/attr bug that leaves the
+/// glyphs untouched) surfaces as an `Attr` divergence naming the row and the
+/// two resolved-attr renderings, never vanishing into a text-only diff that
+/// sees the glyphs agree.
+///
+/// A row present on only one side of either pair (the two sides disagreeing
+/// on total row count) is treated as disagreeing against an empty string on
+/// the shorter side, rather than being silently skipped: a row count mismatch
+/// is itself real signal a differential oracle must surface.
 #[must_use]
 pub fn compare(
     view_state: &StateSnapshot,
     ref_state: &StateSnapshot,
-    view_rows: &[String],
-    ref_rows: &[String],
+    view: &Screen,
+    reference: &Screen,
     mask: &[u16],
 ) -> Vec<Divergence> {
     let mut divergences = Vec::new();
@@ -497,6 +542,45 @@ pub fn compare(
         });
     }
 
+    diff_rows(
+        &view.rows,
+        &reference.rows,
+        mask,
+        &mut divergences,
+        |row, v, r| Divergence::Grid {
+            row,
+            view: v.to_string(),
+            reference: r.to_string(),
+        },
+    );
+    diff_rows(
+        &view.attr_rows,
+        &reference.attr_rows,
+        mask,
+        &mut divergences,
+        |row, v, r| Divergence::Attr {
+            row,
+            view: v.to_string(),
+            reference: r.to_string(),
+        },
+    );
+
+    divergences
+}
+
+/// Diffs two row vectors index by index, skipping masked rows and pushing a
+/// `make`-built [`Divergence`] for each unmasked disagreement. Shared by
+/// [`compare`]'s glyph pass and attr pass so both handle a row-count
+/// mismatch (diffing against an empty string on the shorter side) and the
+/// mask identically -- the only thing that differs between the two passes is
+/// which [`Divergence`] variant a disagreement becomes.
+fn diff_rows(
+    view_rows: &[String],
+    ref_rows: &[String],
+    mask: &[u16],
+    out: &mut Vec<Divergence>,
+    make: impl Fn(u16, &str, &str) -> Divergence,
+) {
     let row_count = view_rows.len().max(ref_rows.len());
     for index in 0..row_count {
         // Unreachable in practice: both sides' canvases are u16-bounded
@@ -512,15 +596,9 @@ pub fn compare(
         let view = view_rows.get(index).map_or("", String::as_str);
         let reference = ref_rows.get(index).map_or("", String::as_str);
         if view != reference {
-            divergences.push(Divergence::Grid {
-                row,
-                view: view.to_string(),
-                reference: reference.to_string(),
-            });
+            out.push(make(row, view, reference));
         }
     }
-
-    divergences
 }
 
 /// The row indices `surface`'s own overlay layers occupy: every
@@ -580,6 +658,19 @@ mod tests {
         vec!["hello     ".to_string(), "world     ".to_string()]
     }
 
+    /// A [`Screen`] with the given glyph rows and empty attr rows: the glyph
+    /// and state passes are what most of these tests exercise, so leaving
+    /// `attr_rows` empty on both sides keeps the attr pass silent (an empty
+    /// vs empty diff produces nothing) and lets a test isolate the pass it
+    /// means to. Attr-pass behavior is proven by the dedicated attr tests
+    /// below, which set `attr_rows` explicitly.
+    fn screen(rows: Vec<String>) -> Screen {
+        Screen {
+            rows,
+            attr_rows: Vec::new(),
+        }
+    }
+
     /// The falsifiable check this whole module exists for, arm 1: a doctored
     /// register (everything else identical) must produce exactly one
     /// `Divergence::State` naming the `"registers"` field, and nothing else
@@ -591,7 +682,13 @@ mod tests {
         ref_state.registers[0].1 = "DOCTORED".to_string();
         let rows = rows_fixture();
 
-        let divergences = compare(&view_state, &ref_state, &rows, &rows, &[]);
+        let divergences = compare(
+            &view_state,
+            &ref_state,
+            &screen(rows.clone()),
+            &screen(rows),
+            &[],
+        );
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -611,7 +708,13 @@ mod tests {
         ref_state.blocked = true;
         let rows = rows_fixture();
 
-        let divergences = compare(&view_state, &ref_state, &rows, &rows, &[]);
+        let divergences = compare(
+            &view_state,
+            &ref_state,
+            &screen(rows.clone()),
+            &screen(rows),
+            &[],
+        );
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -688,7 +791,7 @@ mod tests {
         let mut ref_rows = rows_fixture();
         ref_rows[1] = "CORRUPTED ".to_string();
 
-        let divergences = compare(&state, &state, &view_rows, &ref_rows, &[]);
+        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[]);
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -707,7 +810,7 @@ mod tests {
         let mut ref_rows = rows_fixture();
         ref_rows[1] = "CORRUPTED ".to_string();
 
-        let divergences = compare(&state, &state, &view_rows, &ref_rows, &[1]);
+        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[1]);
 
         assert!(
             divergences.is_empty(),
@@ -732,8 +835,14 @@ mod tests {
             view: "a".to_string(),
             reference: "b".to_string(),
         };
+        let attr_divergence = Divergence::Attr {
+            row: 5,
+            view: "[b]".to_string(),
+            reference: ".".to_string(),
+        };
         assert_eq!(state_divergence.kind(), DivergenceKind::State);
         assert_eq!(grid_divergence.kind(), DivergenceKind::Grid);
+        assert_eq!(attr_divergence.kind(), DivergenceKind::Attr);
     }
 
     /// Arm 4: identical state and rows on both sides, no mask, must produce
@@ -744,11 +853,70 @@ mod tests {
         let state = snapshot_fixture();
         let rows = rows_fixture();
 
-        let divergences = compare(&state, &state, &rows, &rows, &[]);
+        let divergences = compare(&state, &state, &screen(rows.clone()), &screen(rows), &[]);
 
         assert!(
             divergences.is_empty(),
             "identical inputs produced a divergence: {divergences:?}"
+        );
+    }
+
+    /// The whole point of the attr pass: two sides whose glyphs agree row
+    /// for row but whose resolved highlights differ on one row must surface
+    /// as exactly one `Divergence::Attr` naming that row -- never a `Grid`
+    /// divergence (the text is equal) and never nothing (a text-only diff's
+    /// blind spot, which is the coverage gap this pass closes).
+    #[test]
+    fn attr_row_divergence_surfaces_when_glyphs_agree() {
+        let state = snapshot_fixture();
+        let rows = rows_fixture();
+        let view = Screen {
+            rows: rows.clone(),
+            attr_rows: vec![".....".to_string(), "[b]..".to_string()],
+        };
+        let reference = Screen {
+            rows,
+            attr_rows: vec![".....".to_string(), ".....".to_string()],
+        };
+
+        let divergences = compare(&state, &state, &view, &reference, &[]);
+
+        assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
+        match &divergences[0] {
+            Divergence::Attr {
+                row,
+                view,
+                reference,
+            } => {
+                assert_eq!(*row, 1);
+                assert_eq!(view, "[b]..");
+                assert_eq!(reference, ".....");
+            }
+            other => unreachable!("expected Divergence::Attr, got {other:?}"),
+        }
+    }
+
+    /// A masked row's attr disagreement must be suppressed by the same mask
+    /// the glyph pass reads, proving the attr pass honors it rather than
+    /// diffing overlay rows the reference side can never populate.
+    #[test]
+    fn masked_attr_row_produces_no_divergence() {
+        let state = snapshot_fixture();
+        let rows = rows_fixture();
+        let view = Screen {
+            rows: rows.clone(),
+            attr_rows: vec![".....".to_string(), "[b]..".to_string()],
+        };
+        let reference = Screen {
+            rows,
+            attr_rows: vec![".....".to_string(), ".....".to_string()],
+        };
+
+        let divergences = compare(&state, &state, &view, &reference, &[1]);
+
+        assert!(
+            divergences.is_empty(),
+            "masked attr row still produced a divergence: {divergences:?}"
         );
     }
 
@@ -760,7 +928,7 @@ mod tests {
         let view_rows = rows_fixture();
         let ref_rows = vec![view_rows[0].clone()];
 
-        let divergences = compare(&state, &state, &view_rows, &ref_rows, &[]);
+        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[]);
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -913,9 +1081,9 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         let view_surface = engine_side.surface();
-        let view_rows = engine_side.screen_rows();
+        let view_screen = engine_side.screen();
         let mask = masked_rows(&view_surface);
-        let ref_rows = reference_side.screen_rows();
+        let ref_screen = reference_side.screen();
 
         // This scenario never opens the cmdline, a message, or
         // any other chrome layer, so the mask must be empty. An over-masking
@@ -930,13 +1098,13 @@ mod tests {
         let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
         let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
 
-        let divergences = compare(&view_state, &ref_state, &view_rows, &ref_rows, &mask);
+        let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
 
         assert!(
             divergences.is_empty(),
             "engine/reference parity check found divergences: {divergences:?}\n\
              view state: {view_state:?}\nref state: {ref_state:?}\n\
-             view rows: {view_rows:?}\nref rows: {ref_rows:?}\nmask: {mask:?}"
+             view screen: {view_screen:?}\nref screen: {ref_screen:?}\nmask: {mask:?}"
         );
         assert!(
             view_state
@@ -1020,9 +1188,9 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         let view_surface = engine_side.surface();
-        let view_rows = engine_side.screen_rows();
+        let view_screen = engine_side.screen();
         let mask = masked_rows(&view_surface);
-        let ref_rows = reference_side.screen_rows();
+        let ref_screen = reference_side.screen();
 
         assert_eq!(
             mask,
@@ -1030,20 +1198,20 @@ mod tests {
             "expected exactly the tabline row masked once a second tab is open, got {mask:?}"
         );
         assert_eq!(
-            view_rows.len(),
-            ref_rows.len(),
+            view_screen.rows.len(),
+            ref_screen.rows.len(),
             "expected both sides' canvases to agree on total row count once the tabline \
-             reserves a row: view {view_rows:?}\nreference {ref_rows:?}"
+             reserves a row: view {view_screen:?}\nreference {ref_screen:?}"
         );
 
         let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
         let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
-        let divergences = compare(&view_state, &ref_state, &view_rows, &ref_rows, &mask);
+        let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
 
         assert!(
             divergences.is_empty(),
             "engine/reference parity check found divergences after a second tab opened: \
-             {divergences:?}\nview rows: {view_rows:?}\nreference rows: {ref_rows:?}\nmask: {mask:?}"
+             {divergences:?}\nview screen: {view_screen:?}\nreference screen: {ref_screen:?}\nmask: {mask:?}"
         );
     }
 

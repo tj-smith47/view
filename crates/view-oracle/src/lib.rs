@@ -31,6 +31,7 @@
 //! `String`), never a raw wire `Value`. `scripts/audit-deps.sh` enforces
 //! both.
 
+mod attr;
 pub mod compat;
 mod minimize;
 mod parity;
@@ -53,7 +54,7 @@ use view_surface::Surface;
 pub use compat::CompatSession;
 pub use minimize::{ddmin, join_tokens, tokenize};
 pub use parity::{
-    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, StateSnapshot,
+    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, Screen, StateSnapshot,
 };
 pub use pty::PtySession;
 pub use reference::ReferenceSession;
@@ -342,6 +343,22 @@ impl EngineSession {
     #[must_use]
     pub fn screen_rows(&self) -> Vec<String> {
         raster::screen_rows(&self.surface(), &self.model.engine.grid)
+    }
+
+    /// Captures the current [`Screen`] -- glyph rows plus per-cell highlight
+    /// rows -- for [`crate::compare`], rendering the [`Surface`] once and
+    /// feeding it to both [`raster::screen_rows`] and [`raster::attr_rows`]
+    /// so the two dumps can never come from different frames. The
+    /// highlight rows resolve each grid cell's `hl_id` through this session's
+    /// own `HlTable`, the id-independent form the differential compares (see
+    /// [`crate::attr`]'s docs).
+    #[must_use]
+    pub fn screen(&self) -> Screen {
+        let surface = self.surface();
+        Screen {
+            rows: raster::screen_rows(&surface, &self.model.engine.grid),
+            attr_rows: raster::attr_rows(&surface, &self.model.engine.grid, &self.model.engine.hl),
+        }
     }
 
     /// Evaluates `expr` against the real engine and returns its result as

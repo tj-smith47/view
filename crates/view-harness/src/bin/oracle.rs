@@ -316,14 +316,14 @@ fn run_tokens(
     let reference_settled = reference.quiesce(silence, deadline)?;
 
     let surface = engine.surface();
-    let view_rows = engine.screen_rows();
+    let view_screen = engine.screen();
     let mask = masked_rows(&surface);
-    let ref_rows = reference.screen_rows();
+    let ref_screen = reference.screen();
 
     let view_state = snapshot(&mut engine)?;
     let ref_state = snapshot(&mut reference)?;
 
-    let divergences = compare(&view_state, &ref_state, &view_rows, &ref_rows, &mask);
+    let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
 
     Ok(EntryOutcome {
         engine_settled,
@@ -438,6 +438,7 @@ fn run_command(path: &Path) -> Result<()> {
 enum FailureSignature {
     State(String),
     Grid,
+    Attr,
     Timeout {
         engine_settled: bool,
         reference_settled: bool,
@@ -457,6 +458,11 @@ impl FailureSignature {
         outcome.divergences.first().map(|d| match d {
             Divergence::State { field, .. } => Self::State(field.clone()),
             Divergence::Grid { .. } => Self::Grid,
+            // coarse like Grid (no per-row identity, since a minimized
+            // script's diverging row is expected to shift): kept a distinct
+            // signature from Grid so a minimizer never reduces an
+            // attr-render divergence toward an unrelated text-render one
+            Divergence::Attr { .. } => Self::Attr,
         })
     }
 
@@ -640,7 +646,9 @@ where
                     continue;
                 };
                 match &target {
-                    FailureSignature::State(_) | FailureSignature::Grid => {
+                    FailureSignature::State(_)
+                    | FailureSignature::Grid
+                    | FailureSignature::Attr => {
                         summary.divergence_count += 1;
                     }
                     FailureSignature::Timeout { .. } => summary.timeout_count += 1,

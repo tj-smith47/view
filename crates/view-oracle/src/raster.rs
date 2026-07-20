@@ -12,7 +12,10 @@
 //! showing, layered in the same z-order `view_surface::render` builds.
 
 use view_core::grid::Grid;
+use view_core::hl::HlTable;
 use view_surface::{Layer, LayerKind, Surface};
+
+use crate::attr::{row_fingerprint, ResolvedAttr};
 
 const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 
@@ -49,6 +52,59 @@ pub fn screen_rows(surface: &Surface, grid: &Grid) -> Vec<String> {
         .into_iter()
         .map(|row| row.into_iter().collect::<String>())
         .collect()
+}
+
+/// Renders each canvas row's per-cell highlight identity to one string,
+/// row-indexed to line up cell-for-cell with [`screen_rows`]: the attr-parity
+/// counterpart of the text dump, so [`crate::compare`] can diff a
+/// [`crate::attr::ResolvedAttr`] fingerprint per cell alongside the glyph.
+/// Only the `EngineGrid` layer contributes -- overlay layers
+/// (cmdline/messages/tabline/popupmenu) carry no grid `hl_id` of their own and
+/// their rows are excluded by [`crate::masked_rows`] anyway -- so every other
+/// canvas row renders empty, holding its index slot the same way
+/// [`crate::ReferenceSession::screen_rows`]'s chrome placeholders do. Each
+/// cell's `hl_id` is resolved through `hl` into the semantic attributes it
+/// stands for (never the raw per-session id: see [`crate::attr`]'s docs).
+#[must_use]
+pub fn attr_rows(surface: &Surface, grid: &Grid, hl: &HlTable) -> Vec<String> {
+    let (width, height) = canvas_size(surface);
+    if width == 0 || height == 0 {
+        return Vec::new();
+    }
+    let mut rows = vec![String::new(); usize::from(height)];
+    for layer in &surface.layers {
+        if matches!(layer.kind, LayerKind::EngineGrid) {
+            attr_grid(&mut rows, layer, grid, hl);
+        }
+    }
+    rows
+}
+
+/// Writes the `EngineGrid` layer's per-cell attr fingerprints into `rows` at
+/// the same canvas offset [`paint_grid`] paints the grid's text into, so the
+/// attr row for a grid line and its glyph row share a canvas index.
+fn attr_grid(rows: &mut [String], layer: &Layer, grid: &Grid, hl: &HlTable) {
+    let (grid_w, grid_h) = grid.size();
+    for r in 0..grid_h.min(layer.rect.height) {
+        let canvas_row = layer.rect.row.saturating_add(r);
+        let Some(slot) = rows.get_mut(usize::from(canvas_row)) else {
+            continue;
+        };
+        *slot = row_fingerprint((0..grid_w).map(|c| {
+            grid.cell(r, c)
+                .map_or(ResolvedAttr::DEFAULT, |cell| resolve_attr(hl, cell.hl_id))
+        }));
+    }
+}
+
+/// Resolves one grid cell's `hl_id` through `hl` into its
+/// [`ResolvedAttr`], falling back to [`ResolvedAttr::DEFAULT`] for `hl_id` 0
+/// and for any id not yet defined -- the same fallback the reference side
+/// applies, so an undefined id can never itself be a divergence.
+fn resolve_attr(hl: &HlTable, hl_id: u64) -> ResolvedAttr {
+    hl.attrs
+        .get(&hl_id)
+        .map_or(ResolvedAttr::DEFAULT, Into::into)
 }
 
 fn canvas_size(surface: &Surface) -> (u16, u16) {
