@@ -227,9 +227,21 @@ pub struct StateSnapshot {
 /// value degraded to a placeholder that could compare equal against an
 /// identically malformed reply from the other side.
 pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
+    snapshot_with_deadline(probe, UNBLOCK_DEADLINE)
+}
+
+/// [`snapshot`] with the blocked-wait dismissal bound injectable: the
+/// loud-failure arm (a session that never unblocks) can only be exercised
+/// by actually reaching the deadline, so proving it must not cost a full
+/// [`UNBLOCK_DEADLINE`] wait every run. [`snapshot`] is the sole
+/// production caller and always passes the const.
+fn snapshot_with_deadline(
+    probe: &mut dyn Probe,
+    unblock_deadline: Duration,
+) -> Result<StateSnapshot, OracleError> {
     let (mode, blocked) = probe.get_mode()?;
     if blocked {
-        dismiss_blocked_wait(probe)?;
+        dismiss_blocked_wait(probe, unblock_deadline)?;
     }
 
     let buffer_lines = probe
@@ -264,7 +276,7 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
 
 /// Types a single `<Esc>` to abort the blocked key-wait `probe`'s fast
 /// mode probe just reported, then re-polls that same fast probe until the
-/// session leaves the blocked state, bounded by [`UNBLOCK_DEADLINE`]. See
+/// session leaves the blocked state, bounded by `deadline`. See
 /// [`snapshot`]'s doc comment for why `<Esc>` is a state-preserving
 /// dismissal and why the pre-dismissal mode/blocked pair is what the
 /// snapshot itself carries.
@@ -274,7 +286,7 @@ pub fn snapshot(probe: &mut dyn Probe) -> Result<StateSnapshot, OracleError> {
 /// Returns [`OracleError::Blocked`] (naming the still-blocked mode) if the
 /// session has not unblocked by the deadline, or the underlying
 /// `input`/`get_mode` error if either call fails outright.
-fn dismiss_blocked_wait(probe: &mut dyn Probe) -> Result<(), OracleError> {
+fn dismiss_blocked_wait(probe: &mut dyn Probe, deadline: Duration) -> Result<(), OracleError> {
     probe.input("<Esc>")?;
     let start = Instant::now();
     loop {
@@ -282,7 +294,7 @@ fn dismiss_blocked_wait(probe: &mut dyn Probe) -> Result<(), OracleError> {
         if !blocked {
             return Ok(());
         }
-        if start.elapsed() >= UNBLOCK_DEADLINE {
+        if start.elapsed() >= deadline {
             return Err(OracleError::Blocked { mode });
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -645,16 +657,18 @@ mod tests {
     }
 
     /// The loud-failure arm of the blocked-wait handling: a session that
-    /// stays blocked past [`UNBLOCK_DEADLINE`] after the `<Esc>` dismissal
-    /// must surface as [`OracleError::Blocked`] naming the still-blocked
-    /// mode, never hang and never fall through to the eval probes. Also
-    /// pins the dismissal itself: exactly one `<Esc>` is typed, not a
-    /// retry storm.
+    /// stays blocked past the dismissal deadline after the `<Esc>` must
+    /// surface as [`OracleError::Blocked`] naming the still-blocked mode,
+    /// never hang and never fall through to the eval probes. Also pins the
+    /// dismissal itself: exactly one `<Esc>` is typed, not a retry storm.
+    /// Runs through [`snapshot_with_deadline`] with a short deadline: the
+    /// same code path [`snapshot`] takes, genuinely reaching the deadline
+    /// rather than waiting out the production bound.
     #[test]
     fn snapshot_fails_as_blocked_when_the_dismissal_never_unblocks() {
         let mut probe = AlwaysBlockedProbe { inputs: Vec::new() };
 
-        match snapshot(&mut probe) {
+        match snapshot_with_deadline(&mut probe, Duration::from_millis(50)) {
             Err(OracleError::Blocked { mode }) => assert_eq!(mode, "n"),
             other => unreachable!("expected OracleError::Blocked, got {other:?}"),
         }

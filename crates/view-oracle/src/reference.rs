@@ -449,7 +449,10 @@ impl ReferenceSession {
     ///   therefore carries proof of where it executed: the arm command
     ///   records `mode(1)` at its own execution time and the `echom`
     ///   publishes it (char-code encoded, so control-char modes like
-    ///   visual-block survive message rendering) inside the marker text.
+    ///   visual-block survive message rendering, and terminator-delimited
+    ///   so a payload cut short at a message-chunk boundary can never
+    ///   decode as a shorter mode that prefixes the real one) inside the
+    ///   marker text.
     ///   A settled result requires all of: the published mode equals the
     ///   mode the marker was armed in, the fast probe never saw the state
     ///   move while the marker was in flight, and the settle-time probe
@@ -495,10 +498,20 @@ impl ReferenceSession {
                     if executed_mode.is_none() {
                         if let (Some((prefix, _)), UiEvent::MsgShow { content, .. }) = (&armed, &ev)
                         {
-                            executed_mode = content
-                                .iter()
-                                .find_map(|(_, text)| text.split_once(prefix.as_str()))
-                                .map(|(_, payload)| decode_mode_payload(payload));
+                            // chunks are reassembled before searching and the
+                            // payload must reach its terminator: a payload cut
+                            // at a chunk or truncation boundary could otherwise
+                            // decode as a shorter mode that is a prefix of the
+                            // real one ("n" out of "no") and falsely pass the
+                            // round-trip check
+                            let full: String =
+                                content.iter().map(|(_, text)| text.as_str()).collect();
+                            executed_mode = full.split_once(prefix.as_str()).map(|(_, rest)| {
+                                match rest.split_once(':') {
+                                    Some((payload, _)) => decode_mode_payload(payload),
+                                    None => format!("<unterminated marker payload {rest:?}>"),
+                                }
+                            });
                         }
                     }
                     self.apply(ev);
@@ -563,7 +576,7 @@ impl ReferenceSession {
                     let arm = cmd_key(&format!(
                         "let g:view_oracle_quiesce_mode = mode(1) | \
                          autocmd! {QUIESCE_AUGROUP} SafeState * ++once \
-                         echom '{marker}' . join(str2list(g:view_oracle_quiesce_mode), '-')"
+                         echom '{marker}' . join(str2list(g:view_oracle_quiesce_mode), '-') . ':'"
                     ));
                     self.engine.handle.input(&arm)?;
                     armed = Some((marker, pre_arm));
