@@ -313,6 +313,8 @@ impl Term {
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
     pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_DRAW_START);
         if self.last_mouse_capture != Some(model.engine.mouse_on) {
             let mut out = std::io::stdout();
             if model.engine.mouse_on {
@@ -380,7 +382,14 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
             let msg = match event {
-                Event::Key(k) => encode_key(&k).map(|notation| Msg::Key(Key { notation })),
+                Event::Key(k) => {
+                    let msg = encode_key(&k).map(|notation| Msg::Key(Key { notation }));
+                    #[cfg(feature = "bench-taps")]
+                    if msg.is_some() {
+                        crate::tap::tap(crate::tap::TAG_KEY_DECODED);
+                    }
+                    msg
+                }
                 Event::Resize(width, height) => Some(Msg::Resized { width, height }),
                 Event::Paste(text) => Some(Msg::Paste(text)),
                 Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),

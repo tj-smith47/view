@@ -494,6 +494,8 @@ impl EngineHandle {
             params,
         };
         let bytes = encode_message(&msg)?;
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_RPC_HANDOFF);
         self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
     }
 

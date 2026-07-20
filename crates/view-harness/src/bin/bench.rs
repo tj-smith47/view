@@ -420,6 +420,12 @@ fn run_taps_row(
             )
         );
     }
+    for segment in &outcome.segments {
+        println!(
+            "      segment {}: p50 {:.1}us p99 {:.1}us over {} samples",
+            segment.label, segment.p50_us, segment.p99_us, segment.samples
+        );
+    }
     println!(
         "{}",
         report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)

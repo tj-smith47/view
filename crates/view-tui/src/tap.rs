@@ -29,6 +29,16 @@ use std::sync::OnceLock;
 /// boundary: the tap fires when the backend draw that ends in the flush
 /// returns, so measured intervals overstate, never understate, latency.
 pub const TAG_TERM_WRITTEN: u8 = b'T';
+/// A key event decoded off the host terminal, immediately before it is
+/// sent to the runtime loop's channel.
+pub const TAG_KEY_DECODED: u8 = b'K';
+/// The runtime loop dequeued one message (any kind); emitted by the bin
+/// crate's loop through this module so the loop-wakeup boundary shares
+/// the paint tag's sequence counter.
+pub const TAG_LOOP_WAKE: u8 = b'U';
+/// A frame draw is starting (before compositing and the backend diff);
+/// with [`TAG_TERM_WRITTEN`] this brackets the paint's own CPU cost.
+pub const TAG_DRAW_START: u8 = b'B';
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static SINK: OnceLock<Option<File>> = OnceLock::new();

@@ -256,7 +256,12 @@ pub fn run(
             term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
-        let msg = match msg_rx.recv() {
+        let received = msg_rx.recv();
+        #[cfg(feature = "bench-taps")]
+        if received.is_ok() {
+            view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
+        }
+        let msg = match received {
             Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
             Ok(Msg::EngineStopped(reason)) => {
                 // stashed on the model rather than reported here: this loop

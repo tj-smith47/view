@@ -36,3 +36,10 @@ unicode-width = "0.2.2"
 # surface, just a direct edge to an already-vetted crate.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "termios"] }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "paint_frame"
+harness = false

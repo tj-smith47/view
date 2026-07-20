@@ -28,6 +28,10 @@ use std::sync::OnceLock;
 pub const TAG_RPC_WRITTEN: u8 = b'W';
 /// A redraw notification batch fully parsed into `UiEvent`s.
 pub const TAG_REDRAW_PARSED: u8 = b'R';
+/// An outgoing notification encoded and handed to the writer thread's
+/// channel; with [`TAG_RPC_WRITTEN`] this brackets the writer-thread
+/// handoff (one scheduler hop plus the pipe write itself).
+pub const TAG_RPC_HANDOFF: u8 = b'S';
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static SINK: OnceLock<Option<File>> = OnceLock::new();

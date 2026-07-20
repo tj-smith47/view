@@ -2073,6 +2073,7 @@ dependencies = [
 name = "view-tui"
 version = "0.0.1"
 dependencies = [
+ "criterion",
  "crossterm",
  "ratatui",
  "rustix",
