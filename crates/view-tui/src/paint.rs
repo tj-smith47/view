@@ -416,6 +416,47 @@ fn clip_to_frame(rect: Rect, frame_area: ratatui::layout::Rect) -> ratatui::layo
     }
 }
 
+/// Highest `hl_id` the per-frame dense style cache will hold. nvim
+/// allocates highlight ids as small dense integers, so real frames sit
+/// far below this; an id past the cap (or a pathological huge id) simply
+/// resolves uncached rather than growing an unbounded table.
+const STYLE_CACHE_CAP: usize = 4096;
+
+/// A per-frame memo of `hl_id -> ratatui::Style`, indexed directly by id.
+/// `Theme::style_for` costs a `HashMap` probe per call, and a full-grid
+/// composite makes one call per cell (4800 on a 120x40 frame) out of only
+/// a handful of distinct ids; resolving each id once per frame removes
+/// the probe from the per-cell path entirely. Frame-scoped rather than
+/// persistent so there is no invalidation to get wrong when the
+/// highlight table or theme changes between frames.
+struct StyleCache {
+    dense: Vec<Option<Style>>,
+}
+
+impl StyleCache {
+    fn new() -> Self {
+        Self { dense: Vec::new() }
+    }
+
+    fn get(&mut self, theme: &Theme, hl: &HlTable, hl_id: u64) -> Style {
+        let Ok(index) = usize::try_from(hl_id) else {
+            return style_for(theme, hl_id, hl);
+        };
+        if index >= STYLE_CACHE_CAP {
+            return style_for(theme, hl_id, hl);
+        }
+        if self.dense.len() <= index {
+            self.dense.resize(index + 1, None);
+        }
+        if let Some(style) = self.dense[index] {
+            return style;
+        }
+        let style = style_for(theme, hl_id, hl);
+        self.dense[index] = Some(style);
+        style
+    }
+}
+
 /// Paints every visible `grid` cell within `area`, styled per `hl` through
 /// `theme`.
 fn paint_grid(
@@ -427,12 +468,13 @@ fn paint_grid(
 ) {
     let buf = frame.buffer_mut();
     let (w, h) = grid.size();
+    let mut styles = StyleCache::new();
     for row in 0..h.min(area.height) {
         for col in 0..w.min(area.width) {
             if let Some(cell) = grid.cell(row, col) {
                 let out = &mut buf[(area.x + col, area.y + row)];
                 out.set_symbol(&sanitized_symbol(&cell.text));
-                out.set_style(style_for(theme, cell.hl_id, hl));
+                out.set_style(styles.get(theme, hl, cell.hl_id));
             }
         }
     }
