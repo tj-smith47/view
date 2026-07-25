@@ -382,6 +382,8 @@ impl Term {
         let offset = model.chrome_rows();
         let cur_overlay = overlay_rows(surface);
         let size = self.inner.size()?;
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_SIZE_PROBED);
         let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
         let resized = self.shadow.resize(area);
         let force_full = resized || self.last_offset != Some(offset);
@@ -405,6 +407,8 @@ impl Term {
         // the cells that actually changed against what the terminal already
         // shows; no full-buffer copy runs, because the shadow's buffers swap
         self.shadow.compose(model, surface, &damage);
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_COMPOSED);
         // disjoint field borrows: `shadow` supplies the cells while `inner`'s
         // backend encodes them into the shared frame buffer
         self.shadow.emit_updates(&mut self.inner)?;

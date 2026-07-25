@@ -46,6 +46,16 @@ pub const TAG_DRAW_START: u8 = b'B';
 /// it isolates the pty write+flush cost on its own, directly rather than
 /// by subtraction.
 pub const TAG_FLUSH_START: u8 = b'F';
+/// The frame's terminal size has been read back. With [`TAG_DRAW_START`]
+/// this isolates the frame preamble and the size query, whose backend
+/// implementation opens the controlling terminal on every call, from the
+/// compositing that follows it.
+pub const TAG_SIZE_PROBED: u8 = b'G';
+/// This frame's damaged rows are composited into the shadow. With
+/// [`TAG_SIZE_PROBED`] this brackets damage resolution and compositing,
+/// and with [`TAG_FLUSH_START`] the backend diff and escape encode, so
+/// the two halves of the paint's CPU are separable rather than pooled.
+pub const TAG_COMPOSED: u8 = b'C';
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static SINK: OnceLock<Option<File>> = OnceLock::new();

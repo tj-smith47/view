@@ -53,6 +53,11 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
     Some(TapRecord { tag, seq, nanos })
 }
 
+/// Every tap tag, grouped by the crate whose sequence counter numbers it.
+/// A tag missing from this table is a tag whose loss no drop check can
+/// see, so the chain walkers below assert their own tags against it.
+const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFGC")];
+
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
 /// two tags share one counter and the tui's tags share their own, so the
 /// streams are checked per origin.
@@ -62,10 +67,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 /// Returns [`BenchError::Desync`] naming the missing span when records
 /// were dropped (a full pipe under a non-blocking tap write).
 pub fn verify_no_drops(records: &[TapRecord]) -> Result<(), BenchError> {
-    for (name, tags) in [
-        ("view-engine", b"WRS".as_slice()),
-        ("view-tui", b"TKUBF".as_slice()),
-    ] {
+    for (name, tags) in TAG_ORIGINS {
         let mut seqs: Vec<u64> = records
             .iter()
             .filter(|r| tags.contains(&r.tag))
@@ -505,9 +507,10 @@ pub fn run_output_path(
 /// The tags one keystroke walks, in order, across view's whole echo round
 /// trip: key decoded off the host terminal, runtime loop woken, RPC
 /// encoded and handed off, RPC bytes written to the engine, then the
-/// engine's redraw parsed, the loop woken again, the frame drawn, its
+/// engine's redraw parsed, the loop woken again, the frame's draw
+/// started, its terminal size probed, its damaged rows composited, its
 /// bytes flushed, and the terminal write completed.
-const ECHO_CHAIN: &[u8] = b"KUSWRUBFT";
+const ECHO_CHAIN: &[u8] = b"KUSWRUBGCFT";
 
 /// One label per interval of [`ECHO_CHAIN`], anchored at the harness's
 /// pre-keystroke timestamp and closed by the harness observing the echoed
@@ -521,7 +524,9 @@ const ECHO_LABELS: &[&str] = &[
     "rpc-written->redraw-parsed",
     "redraw-parsed->loop-wake",
     "loop-wake->draw-start",
-    "draw-start->flush-start",
+    "draw-start->size-probed",
+    "size-probed->composed",
+    "composed->flush-start",
     "flush-start->term-written",
     "term-written->glyph-seen",
 ];
@@ -1026,6 +1031,8 @@ mod tests {
             (b'R', 50),
             (b'U', 60),
             (b'B', 70),
+            (b'G', 72),
+            (b'C', 74),
             (b'F', 80),
             (b'T', 90),
         ])
@@ -1036,7 +1043,7 @@ mod tests {
         let chain = tag_chain(&clean_round_trip(), ECHO_CHAIN, 0).unwrap();
         assert_eq!(
             chain.iter().map(|r| r.nanos).collect::<Vec<_>>(),
-            vec![10, 20, 30, 40, 50, 60, 70, 80, 90]
+            vec![10, 20, 30, 40, 50, 60, 70, 72, 74, 80, 90]
         );
         assert_eq!(chain[1].nanos, 20, "input-side wake");
         assert_eq!(chain[5].nanos, 60, "output-side wake");
@@ -1057,7 +1064,13 @@ mod tests {
         // a previous sample's paint landing inside this sample's window
         // must not pull B/F/T ahead of the redraw that caused them
         let mut window = clean_round_trip();
-        window.extend(records(&[(b'B', 42), (b'F', 44), (b'T', 46)]));
+        window.extend(records(&[
+            (b'B', 41),
+            (b'G', 42),
+            (b'C', 43),
+            (b'F', 44),
+            (b'T', 46),
+        ]));
         let chain = tag_chain(&window, ECHO_CHAIN, 0).unwrap();
         assert_eq!(chain[4].nanos, 50, "redraw parsed");
         assert_eq!(
@@ -1073,11 +1086,17 @@ mod tests {
             (b'R', 100),
             (b'U', 110),
             (b'B', 120),
+            (b'G', 122),
+            (b'C', 124),
             (b'F', 130),
             (b'T', 140),
         ]));
         let chain = tag_chain(&window, ECHO_CHAIN, 0).unwrap();
-        assert_eq!(chain[8].nanos, 90, "the first paint closes the chain");
+        assert_eq!(
+            chain[ECHO_CHAIN.len() - 1].nanos,
+            90,
+            "the first paint closes the chain"
+        );
     }
 
     #[test]
@@ -1140,7 +1159,7 @@ mod tests {
         // tag set
         for tag in ECHO_CHAIN {
             assert!(
-                b"WRS".contains(tag) || b"TKUBF".contains(tag),
+                TAG_ORIGINS.iter().any(|(_, tags)| tags.contains(tag)),
                 "chain tag {} belongs to no checked origin stream",
                 *tag as char
             );
