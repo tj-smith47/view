@@ -603,12 +603,17 @@ fn run_cell(
             )
             .with_context(|| format!("flood/{fixture} run failed"))?;
             for (view_side, nvim_side) in outcome.view_trials.iter().zip(&outcome.nvim_trials) {
+                // both sides' gap counts, not just the gated side's: a low
+                // count on the view side alone points at view's painting,
+                // while a low count on both points at what the harness can
+                // observe through the pty on this host
                 println!(
-                    "flood/{fixture}: view drain {:.0}ms ({} frame gaps) | nvim drain {:.0}ms  \
-                     ratio {:.2}",
+                    "flood/{fixture}: view drain {:.0}ms ({} frame gaps) | nvim drain {:.0}ms \
+                     ({} frame gaps)  ratio {:.2}",
                     view_side.drain_ms,
                     view_side.cadence_gaps_ms.len(),
                     nvim_side.drain_ms,
+                    nvim_side.cadence_gaps_ms.len(),
                     view_side.drain_ms / nvim_side.drain_ms
                 );
             }
