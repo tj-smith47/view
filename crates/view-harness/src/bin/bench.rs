@@ -103,9 +103,14 @@ struct Cli {
     #[arg(long)]
     all: bool,
     /// Machine class the numbers belong to (e.g. dev-linux); baselines
-    /// are stored and gated per class. A "controlled-" name prefix opts
-    /// the class into tail-metric gating (ratio_p99, paired-delta p99);
-    /// any other name records tails without gating them
+    /// are stored and gated per class. The name must carry exactly one of
+    /// linux, macos or windows as a hyphen-delimited segment, and it must
+    /// be this host's own platform: rows are measured per-platform under
+    /// per-platform metric names, so a class naming another platform is
+    /// refused rather than gated against incomparable numbers. A
+    /// "controlled-" name prefix opts the class into tail-metric gating
+    /// (ratio_p99, paired-delta p99); any other name records tails without
+    /// gating them
     #[arg(long)]
     class: String,
     /// Record measured values into baselines/<class>.toml

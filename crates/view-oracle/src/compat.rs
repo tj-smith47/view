@@ -1177,9 +1177,7 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn /bin/sleep");
-        // captured before the child is moved into the call, and only
-        // where the /proc assertion below can use it
-        #[cfg(target_os = "linux")]
+        // captured before the child is moved into the call
         let pid = child.id();
 
         let result = wait_with_timeout(child, Duration::from_millis(100));
@@ -1189,19 +1187,43 @@ mod tests {
             "expected ProbeTimedOut, got {result:?}"
         );
 
-        // a killed-and-reaped child leaves no /proc entry at all; a
-        // killed-but-never-waited child would instead linger as a zombie
-        // ("Z" state) until some other process reaps it, so this
-        // distinguishes the two rather than trusting kill() alone freed pid
+        assert!(
+            !process_table_entry_exists(pid),
+            "child pid {pid} still has a process-table entry after \
+             wait_with_timeout returned; it was killed but not reaped"
+        );
+    }
+
+    /// Whether the OS still holds a process-table entry for `pid`.
+    ///
+    /// The distinction the reaping assertion needs: a killed-and-reaped
+    /// child leaves no entry at all, while a killed-but-never-waited one
+    /// lingers as a zombie ("Z" state) until some other process reaps it,
+    /// so an entry that is still there says `kill` ran without `wait`.
+    /// Reads `/proc` on Linux and asks `ps` for the same fact on macOS,
+    /// which has no `/proc`; `ps` lists zombies exactly like `/proc` keeps
+    /// their directories, so the two are the same evidence.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn process_table_entry_exists(pid: u32) -> bool {
         #[cfg(target_os = "linux")]
         {
-            let proc_path = format!("/proc/{pid}");
-            assert!(
-                !std::path::Path::new(&proc_path).exists(),
-                "child pid {pid} still has a /proc entry after \
-                 wait_with_timeout returned; it was killed but not reaped"
-            );
+            std::path::Path::new(&format!("/proc/{pid}")).exists()
         }
+        #[cfg(target_os = "macos")]
+        {
+            Command::new("/bin/ps")
+                .args(["-o", "stat=", "-p", &pid.to_string()])
+                .output()
+                .is_ok_and(|out| !out.stdout.is_empty())
+        }
+    }
+
+    /// Reports no entry on a platform with neither `/proc` nor a POSIX
+    /// `ps`, so the reaping assertion is inert there rather than failing
+    /// on the absence of a way to look.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn process_table_entry_exists(_pid: u32) -> bool {
+        false
     }
 
     #[test]

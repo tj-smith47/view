@@ -289,6 +289,29 @@ impl PtySession {
         self.wait_until(timeout, |screen| screen.contents().contains(needle))
     }
 
+    /// Blocks (up to `timeout`) until `predicate` holds against the screen,
+    /// returning whether it did -- [`wait_for`](Self::wait_for)'s
+    /// whole-screen substring check generalized to an arbitrary condition.
+    ///
+    /// For a caller asserting an *ordering* rather than a single needle:
+    /// a predicate reading several things at once ("the placeholder is
+    /// showing and the engine's content is not yet there") is checked
+    /// against one screen state, whereas two successive `wait_for` calls
+    /// each observe a possibly-different state and so cannot express a
+    /// relationship between them.
+    ///
+    /// The predicate is the last parameter, unlike the needle in
+    /// `wait_for`: it is the closure argument, and Rust reads a call with a
+    /// trailing closure better than one that buries it before a duration.
+    #[must_use]
+    pub fn wait_for_screen(
+        &mut self,
+        timeout: Duration,
+        predicate: impl FnMut(&vt100::Screen) -> bool,
+    ) -> bool {
+        self.wait_until(timeout, predicate)
+    }
+
     /// Blocks (up to `timeout`) until the cell at `(row, col)` holds exactly
     /// `expected`, returning whether it did. Unlike [`wait_for`](Self::wait_for)
     /// (whole-screen substring search), this pins content to a specific

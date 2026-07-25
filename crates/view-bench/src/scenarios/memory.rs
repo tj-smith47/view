@@ -54,9 +54,40 @@ pub const METRIC: Option<&str> = if cfg!(target_os = "linux") {
     None
 };
 
+/// Reads this platform's memory metric for `pid`, in megabytes, rejecting
+/// any reading that is not a positive finite number.
+///
+/// Every platform's reader goes through the floor, because every one of
+/// them can report success while yielding zero: Linux's `smaps_rollup`
+/// parses a literal `Pss: 0 kB` without complaint, and the macOS ledger is
+/// a plain struct field the kernel fills in. Zero is not a plausible
+/// footprint for a running editor, and it is the one wrong value that
+/// gates green forever once recorded, since every later measurement is
+/// then a breach of a zero bar rather than a pass.
+fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
+    let mb = read_platform_memory_mb(pid)?;
+    require_positive_mb(mb, pid)
+}
+
+/// The positivity floor [`read_memory_mb`] applies, split out from the
+/// platform readers so one rule covers all of them and can be exercised
+/// without a live process to measure.
+fn require_positive_mb(mb: f64, pid: u32) -> Result<f64, BenchError> {
+    if mb.is_finite() && mb > 0.0 {
+        return Ok(mb);
+    }
+    Err(BenchError::Desync {
+        context: format!(
+            "memory reading for pid {pid} was {mb} MB; a running process cannot occupy \
+             a non-positive amount of memory, so this is a failed or empty read, not a \
+             measurement"
+        ),
+    })
+}
+
 /// Reads the `Pss:` line of `/proc/<pid>/smaps_rollup`, in megabytes.
 #[cfg(target_os = "linux")]
-fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
+fn read_platform_memory_mb(pid: u32) -> Result<f64, BenchError> {
     let path = format!("/proc/{pid}/smaps_rollup");
     let text = std::fs::read_to_string(&path).map_err(|source| BenchError::Desync {
         context: format!("reading {path}: {source}"),
@@ -81,8 +112,7 @@ fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
 
 /// Reads the kernel's `phys_footprint` ledger for `pid`, in megabytes.
 #[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
+fn read_platform_memory_mb(pid: u32) -> Result<f64, BenchError> {
     // libproc rather than task_info(TASK_VM_INFO): the measured process
     // is a child, and reading another task's info needs its task port
     // from task_for_pid, which is root/entitlement gated. proc_pid_rusage
@@ -95,6 +125,7 @@ fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
     // SAFETY: the buffer is a live, correctly aligned `rusage_info_v2`,
     // which is the layout RUSAGE_INFO_V2 selects; the call writes only
     // into it and reports failure through its return value.
+    #[allow(unsafe_code)]
     let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast()) };
     if rc != 0 {
         return Err(BenchError::Desync {
@@ -105,6 +136,7 @@ fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
         });
     }
     // SAFETY: the call returned success, so it initialized the buffer.
+    #[allow(unsafe_code)]
     let footprint = unsafe { info.assume_init() }.ri_phys_footprint;
     Ok(footprint as f64 / (1024.0 * 1024.0))
 }
@@ -113,7 +145,7 @@ fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
 /// caller keeps such a platform out of the matrix via [`METRIC`], and
 /// this exists so the scenario still compiles there.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn read_memory_mb(_pid: u32) -> Result<f64, BenchError> {
+fn read_platform_memory_mb(_pid: u32) -> Result<f64, BenchError> {
     Err(BenchError::Desync {
         context: "no memory metric is defined for this platform".to_string(),
     })
@@ -220,6 +252,25 @@ mod tests {
     fn own_process_memory_is_readable_and_positive() {
         let mb = read_memory_mb(std::process::id()).unwrap();
         assert!(mb > 0.0, "own memory reading must be positive, got {mb}");
+    }
+
+    #[test]
+    fn a_non_positive_reading_is_refused_rather_than_recorded() {
+        for bogus in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let err = require_positive_mb(bogus, 4242).expect_err(&format!(
+                "a {bogus} MB reading must fail loudly, not become a bar every later run passes"
+            ));
+            let message = err.to_string();
+            assert!(
+                message.contains("4242"),
+                "the refusal must name the pid it read, got {message:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_positive_reading_passes_the_floor_unchanged() {
+        assert!((require_positive_mb(3.5, 1).unwrap() - 3.5).abs() < f64::EPSILON);
     }
 
     #[test]

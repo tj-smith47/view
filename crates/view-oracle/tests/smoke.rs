@@ -607,23 +607,47 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     path
 }
 
-/// Asserts the startup shell frame is on screen before an engine held
-/// back by `engine_delay_ms` could possibly have attached, and reports
-/// how long it actually took when it is not.
+/// The static indicator `view-tui`'s `paint_shell` puts on screen for the
+/// pre-content startup shell. Nothing else paints this text, so its
+/// presence identifies the shell frame specifically.
+const SHELL_PLACEHOLDER: &str = "waiting for nvim";
+
+/// nvim's own empty-buffer line marker, the first thing a fresh buffer's
+/// grid content puts on screen. The startup shell paints no `~` of its own
+/// (only a blank statusline bar and the placeholder label) and no scratch
+/// path this file uses contains one, so its presence on screen means the
+/// engine attached and its grid reached the terminal.
+const ENGINE_CONTENT_MARKER: char = '~';
+
+/// Asserts the ordering the startup shell exists for: the placeholder frame
+/// reaches the terminal while the engine's own content is not yet on
+/// screen. Both halves are read from a single screen state, so what is
+/// proven is the order of the two frames in the pty stream, not the wall
+/// time either took to get there.
 ///
-/// The bar is the wrapper's own delay rather than a fixed margin: what
-/// this proves is an ordering (placeholder first, engine second), and a
-/// tighter fixed margin is really an absolute first-paint budget, which
-/// the bench matrix measures on a release build under a controlled
-/// protocol instead of a debug binary on whatever host runs the tests.
-fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession, engine_delay_ms: u64) {
-    let started = std::time::Instant::now();
-    let painted = session.wait_for("waiting for nvim", Duration::from_secs(3));
-    let elapsed = started.elapsed();
+/// Deliberately not a latency bar. Measured shell-frame paint spans roughly
+/// 50ms on Linux to 450ms on macOS on developer hardware, so any fixed
+/// millisecond bar tight enough to be meaningful on one platform sits
+/// inside the other's ordinary distribution; absolute first-paint budgets
+/// are gated in the bench matrix, on a release build under a controlled
+/// protocol, rather than by a debug binary on whatever host runs the tests.
+/// The caller's delayed-engine wrapper is what makes the two frames
+/// separately observable, by holding nvim back far longer than a pty read
+/// takes to deliver the frame already written.
+///
+/// Proves only the first half of the ordering: the caller must go on to
+/// establish that the engine really did attach afterwards (otherwise a
+/// `view` that never starts an engine at all would satisfy this vacuously).
+fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
+    let ordered = session.wait_for_screen(Duration::from_secs(15), |screen| {
+        let text = screen.contents();
+        text.contains(SHELL_PLACEHOLDER) && !text.contains(ENGINE_CONTENT_MARKER)
+    });
     assert!(
-        painted && elapsed < Duration::from_millis(engine_delay_ms),
-        "shell frame took {elapsed:?} against a {engine_delay_ms}ms-delayed engine (painted at \
-         all: {painted}); last screen:\n{}",
+        ordered,
+        "never observed the startup shell frame ({SHELL_PLACEHOLDER:?}) on screen ahead of the \
+         engine's own content ({ENGINE_CONTENT_MARKER:?}): either the placeholder never painted, \
+         or engine content was already on screen by the time it did; last screen:\n{}",
         session.screen()
     );
 }
@@ -648,7 +672,7 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert_shell_frame_precedes_attach(&mut session, 500);
+    assert_shell_frame_precedes_attach(&mut session);
 
     // typed immediately, well before the delayed engine has attached: this
     // is exactly the pre-attach window startup::drain_pre_attach buffers
@@ -656,7 +680,10 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 
     // the wrapper sleeps 500ms before nvim even starts; wait comfortably
     // past attach plus startup for the buffered keys to replay into the
-    // real buffer
+    // real buffer. Text in the buffer is also the engine-attached half of
+    // the ordering asserted above: buffer content can only be on screen
+    // once the engine attached and painted, so the placeholder observed
+    // without it genuinely preceded attach
     assert!(
         session.wait_for("hello world", Duration::from_secs(5)),
         "pre-attach keys never replayed into the buffer after attach, or \
@@ -712,7 +739,7 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert_shell_frame_precedes_attach(&mut session, 300);
+    assert_shell_frame_precedes_attach(&mut session);
 
     // 150 keystrokes, one at a time, over ~450ms: comfortably past
     // KEY_RING_CAPACITY (64), and comfortably past the wrapper's 300ms
@@ -722,6 +749,17 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         session.send(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(3));
     }
+    // the engine-attached half of the ordering asserted above: the
+    // placeholder was observed without this content, and now the content
+    // is here, so the shell frame genuinely preceded attach rather than
+    // standing in for an engine that never arrived
+    assert!(
+        session.wait_for(&ENGINE_CONTENT_MARKER.to_string(), Duration::from_secs(15)),
+        "the engine never put its own content on screen, so the shell frame \
+         preceded nothing; last screen:\n{}",
+        session.screen()
+    );
+
     session.send(b"\x1b:q!\r").unwrap();
 
     let exit = session.wait_for_exit(Duration::from_secs(15)).expect(
