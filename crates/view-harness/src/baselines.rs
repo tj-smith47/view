@@ -149,6 +149,10 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<f64> {
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
 
+/// One measured cell as the record path carries it: scenario, fixture, and
+/// the metrics produced for that pair.
+pub type MeasuredCell = (String, String, CellMetrics);
+
 /// Errors loading, saving, or gating against a baseline file.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -438,6 +442,281 @@ pub fn require_pin_match(
     Ok(())
 }
 
+/// What ratcheting one measured metric against the recorded baseline did.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum RatchetOutcome {
+    /// The metric was not in the baseline; the measured value is recorded as-is.
+    New { metric: String, value: f64 },
+    /// The measured value beat the recorded bar; the bar moves down to it.
+    Improved { metric: String, old: f64, new: f64 },
+    /// The measured value did not beat the recorded bar, so the bar is
+    /// held. `regression_masked` is set when the measured value also
+    /// exceeds the gated bar (`recorded * headroom`): the record is
+    /// refusing to lower a bar the measurement would have breached, which
+    /// is a regression signal the operator must see, not noise the ratchet
+    /// should silently absorb.
+    Held {
+        metric: String,
+        recorded: f64,
+        measured: f64,
+        regression_masked: bool,
+    },
+}
+
+/// Ratchets one cell's `measured` metrics against the `existing` recorded
+/// cell (if any), so a recorded bar moves only in the improving (lower)
+/// direction. Every metric is lower-is-better (see the module invariant),
+/// so the ratchet keeps `min(recorded, measured)` per metric; a metric the
+/// baseline never held is recorded as-is. `controlled` selects the headroom
+/// used to flag a masked regression via [`gate_headroom`].
+///
+/// The returned cell carries exactly the measured metric keys: an existing
+/// metric the run did not remeasure is not carried forward, matching the
+/// full-matrix record's from-scratch hygiene.
+///
+/// Ratcheting to `min` pins an absolute metric's bar to its best-ever quiet
+/// run, so the gated ceiling becomes `min * ABSOLUTE_HEADROOM`. On a shared
+/// class whose quiet absolute variance is itself ~1.5x (see
+/// [`ABSOLUTE_HEADROOM`]) that ceiling sits near the top of the honest band,
+/// so a normal quiet run can breach; the load-controlled classes it matters
+/// for do not carry that variance. Sizing a noise-aware floor into the
+/// downward move (only ratchet down past the host's measured resolution) is
+/// the refinement that closes this, and it needs the per-host floor that is
+/// not yet measured; until then the min-ratchet is the faithful "only
+/// improves" rule and the shared-class breach is the documented
+/// loud-breach-then-rerun regime.
+#[must_use]
+pub fn ratchet_cell(
+    existing: Option<&CellMetrics>,
+    measured: &CellMetrics,
+    controlled: bool,
+) -> (CellMetrics, Vec<RatchetOutcome>) {
+    let mut cell = CellMetrics::new();
+    let mut outcomes = Vec::new();
+    for (metric, &value) in measured {
+        match existing.and_then(|existing| existing.get(metric)) {
+            None => {
+                cell.insert(metric.clone(), value);
+                outcomes.push(RatchetOutcome::New {
+                    metric: metric.clone(),
+                    value,
+                });
+            }
+            // a non-finite or non-positive measurement is not a real
+            // improvement: every recorded metric is a positive latency, ratio,
+            // or size, and lowering the bar to 0.0 or NaN would make the gate
+            // breach on every later honest measurement
+            Some(&recorded) if value.is_finite() && value > 0.0 && value < recorded => {
+                cell.insert(metric.clone(), value);
+                outcomes.push(RatchetOutcome::Improved {
+                    metric: metric.clone(),
+                    old: recorded,
+                    new: value,
+                });
+            }
+            Some(&recorded) => {
+                cell.insert(metric.clone(), recorded);
+                let regression_masked = gate_headroom(metric, controlled)
+                    .is_some_and(|headroom| value > recorded * headroom);
+                outcomes.push(RatchetOutcome::Held {
+                    metric: metric.clone(),
+                    recorded,
+                    measured: value,
+                    regression_masked,
+                });
+            }
+        }
+    }
+    (cell, outcomes)
+}
+
+/// Which cells a record touches, which decides how the recorded file is
+/// assembled around the ratchet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RecordMode {
+    /// The whole matrix was measured. The file is rebuilt from the measured
+    /// cells so a cell that left the matrix does not survive with a stale
+    /// bar, and an existing file that cannot be a ratchet reference (a
+    /// different pin or class) is discarded rather than blocking the record.
+    FullMatrix,
+    /// A single cell was measured. The existing file's other cells are
+    /// preserved untouched; only the measured cell is ratcheted in.
+    SingleCell,
+}
+
+/// What one cell's ratchet did during a record.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellRatchet {
+    pub scenario: String,
+    pub fixture: String,
+    pub outcomes: Vec<RatchetOutcome>,
+}
+
+/// The file to save and a per-cell account of what the ratchet did.
+#[derive(Debug, Clone)]
+pub struct RecordPlan {
+    pub file: BaselineFile,
+    pub cells: Vec<CellRatchet>,
+    /// Set when a full-matrix record found an existing baseline it could
+    /// not ratchet against (different pin or class) and recorded fresh
+    /// instead; the operator is told why the bars did not ratchet.
+    pub reset_reason: Option<String>,
+}
+
+/// Assembles the baseline to record from `measured`, ratcheting each cell
+/// against `existing` when that file is a valid reference for it (same
+/// engine `pin` and `class`; see [`ratchet_cell`] for the per-metric rule).
+///
+/// The two record modes differ only in how the surrounding file is built:
+/// [`RecordMode::FullMatrix`] starts fresh so stale cells fall away and an
+/// incomparable existing file is set aside (recorded in `reset_reason`);
+/// [`RecordMode::SingleCell`] preserves the existing file's other cells.
+///
+/// Precondition for [`RecordMode::SingleCell`]: when `existing` is
+/// `Some`, it must already be pin- and class-matched by the caller (via
+/// [`require_pin_match`]/[`require_class_match`]), because a single-cell
+/// edit of a file that fails those checks would silently invalidate it.
+#[must_use]
+pub fn plan_record(
+    existing: Option<BaselineFile>,
+    mode: RecordMode,
+    class: &str,
+    pin: &str,
+    measured: &[MeasuredCell],
+) -> RecordPlan {
+    let controlled = is_controlled_class(class);
+    let comparable = existing
+        .as_ref()
+        .is_some_and(|file| file.engine_pin == pin && file.machine_class == class);
+
+    let reset_reason = match &existing {
+        Some(file) if !comparable => Some(format!(
+            "existing baseline is pin {:?} class {:?}, not pin {pin:?} class {class:?}; recorded \
+             fresh, no ratchet",
+            file.engine_pin, file.machine_class
+        )),
+        _ => None,
+    };
+
+    // A single-cell record edits one cell of the existing file, so it starts
+    // from that file to keep the others -- but only when the file is
+    // comparable; cloning an incomparable one would save its cells (measured
+    // under a different engine or class) relabeled under this run's pin. A
+    // full-matrix record always rebuilds the file so a cell that left the
+    // matrix cannot survive with a stale bar.
+    let mut file = match (mode, &existing) {
+        (RecordMode::SingleCell, Some(existing)) if comparable => existing.clone(),
+        _ => BaselineFile::new(class, pin),
+    };
+
+    // The ratchet reference is the existing file only when it is comparable;
+    // an incomparable file's numbers were taken against a different engine or
+    // gate policy and are not a bar this run's numbers may be held to.
+    let reference = comparable.then_some(existing.as_ref()).flatten();
+
+    let mut cells = Vec::new();
+    for (scenario, fixture, metrics) in measured {
+        let existing_cell = reference.and_then(|file| file.cell(scenario, fixture));
+        let (ratcheted, outcomes) = ratchet_cell(existing_cell, metrics, controlled);
+        file.upsert_cell(scenario, fixture, ratcheted);
+        cells.push(CellRatchet {
+            scenario: scenario.clone(),
+            fixture: fixture.clone(),
+            outcomes,
+        });
+    }
+
+    RecordPlan {
+        file,
+        cells,
+        reset_reason,
+    }
+}
+
+impl RecordPlan {
+    /// The number of held metrics whose measurement would have breached the
+    /// gate: a ratcheted record kept the better bar, but each of these is a
+    /// regression the operator must see rather than a bar that merely failed
+    /// to improve.
+    #[must_use]
+    pub fn masked_regressions(&self) -> usize {
+        self.cells
+            .iter()
+            .flat_map(|cell| &cell.outcomes)
+            .filter(|outcome| {
+                matches!(
+                    outcome,
+                    RatchetOutcome::Held {
+                        regression_masked: true,
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// Human-readable lines summarizing what the record did, for `target`
+    /// (the baseline path). Carries the reset note (if any), one line per
+    /// metric ratcheted, the count recorded, and a trailing warning when any
+    /// held bar hid a regression, so the operator never reads "recorded N
+    /// cells" as "the bars all moved."
+    #[must_use]
+    pub fn report_lines(&self, target: &str) -> Vec<String> {
+        let mut lines = Vec::new();
+        if let Some(reason) = &self.reset_reason {
+            lines.push(format!("      {reason}"));
+        }
+        for cell in &self.cells {
+            let (scenario, fixture) = (&cell.scenario, &cell.fixture);
+            for outcome in &cell.outcomes {
+                lines.push(match outcome {
+                    RatchetOutcome::Improved { metric, old, new } => {
+                        format!(
+                            "      improved {scenario}.{fixture} {metric}: {old:.4} -> {new:.4}"
+                        )
+                    }
+                    RatchetOutcome::New { metric, value } => {
+                        format!("      new {scenario}.{fixture} {metric}: {value:.4}")
+                    }
+                    RatchetOutcome::Held {
+                        metric,
+                        recorded,
+                        measured,
+                        regression_masked: false,
+                    } => format!(
+                        "      held {scenario}.{fixture} {metric}: recorded {recorded:.4} kept \
+                         (measured {measured:.4} did not improve it)"
+                    ),
+                    RatchetOutcome::Held {
+                        metric,
+                        recorded,
+                        measured,
+                        regression_masked: true,
+                    } => format!(
+                        "      REGRESSION MASKED {scenario}.{fixture} {metric}: measured \
+                         {measured:.4} would breach the recorded bar {recorded:.4}, held to keep \
+                         the ratchet; a later --gate will breach on it, so investigate first"
+                    ),
+                });
+            }
+        }
+        lines.push(format!(
+            "recorded {} cell(s) into {target}",
+            self.cells.len()
+        ));
+        let masked = self.masked_regressions();
+        if masked > 0 {
+            lines.push(format!(
+                "      WARNING: {masked} held metric(s) would have breached the gate; the record \
+                 kept the better bar but the measurement shows a regression"
+            ));
+        }
+        lines
+    }
+}
+
 /// Rejects using a baseline file whose recorded `machine_class` differs
 /// from the class this invocation named: the gate policy (controlled vs
 /// shared) is derived from the class, so a mismatch would silently apply
@@ -716,5 +995,482 @@ mod tests {
             38.0
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn outcome_for<'a>(outcomes: &'a [RatchetOutcome], name: &str) -> &'a RatchetOutcome {
+        outcomes
+            .iter()
+            .find(|o| match o {
+                RatchetOutcome::New { metric, .. }
+                | RatchetOutcome::Improved { metric, .. }
+                | RatchetOutcome::Held { metric, .. } => metric == name,
+            })
+            .expect("outcome present for the named metric")
+    }
+
+    #[test]
+    fn ratchet_holds_the_bar_when_the_measurement_regresses() {
+        let existing = metrics(&[("ratio_p50", 1.20)]);
+        let measured = metrics(&[("ratio_p50", 1.35)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(
+            cell["ratio_p50"], 1.20,
+            "a worse measurement must not raise the recorded bar"
+        );
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p50"),
+            &RatchetOutcome::Held {
+                metric: "ratio_p50".to_string(),
+                recorded: 1.20,
+                measured: 1.35,
+                regression_masked: false,
+            }
+        );
+    }
+
+    #[test]
+    fn ratchet_lowers_the_bar_when_the_measurement_improves() {
+        let existing = metrics(&[("ratio_p50", 1.35)]);
+        let measured = metrics(&[("ratio_p50", 1.20)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(
+            cell["ratio_p50"], 1.20,
+            "a better measurement must lower the recorded bar to it"
+        );
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p50"),
+            &RatchetOutcome::Improved {
+                metric: "ratio_p50".to_string(),
+                old: 1.35,
+                new: 1.20,
+            }
+        );
+    }
+
+    #[test]
+    fn ratchet_records_a_metric_the_baseline_never_held() {
+        let existing = metrics(&[("ratio_p50", 1.20)]);
+        let measured = metrics(&[("ratio_p50", 1.15), ("view_p99_ms", 2.0)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(cell["view_p99_ms"], 2.0);
+        assert_eq!(
+            outcome_for(&outcomes, "view_p99_ms"),
+            &RatchetOutcome::New {
+                metric: "view_p99_ms".to_string(),
+                value: 2.0,
+            }
+        );
+    }
+
+    #[test]
+    fn ratchet_with_no_existing_cell_records_every_metric_as_new() {
+        let measured = metrics(&[("ratio_p50", 1.20), ("view_p99_ms", 2.0)]);
+        let (cell, outcomes) = ratchet_cell(None, &measured, false);
+        assert_eq!(cell, measured);
+        assert!(outcomes
+            .iter()
+            .all(|o| matches!(o, RatchetOutcome::New { .. })));
+        assert_eq!(outcomes.len(), 2);
+    }
+
+    #[test]
+    fn ratchet_flags_a_held_value_that_exceeds_the_gated_bar_as_a_masked_regression() {
+        // recorded 1.0, headroom 1.25 -> gated bar 1.25; a measurement of
+        // 1.40 both fails to improve AND would breach the gate, so holding
+        // the bar hides a real regression the operator must be told about.
+        let existing = metrics(&[("ratio_p50", 1.0)]);
+        let measured = metrics(&[("ratio_p50", 1.40)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(cell["ratio_p50"], 1.0);
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p50"),
+            &RatchetOutcome::Held {
+                metric: "ratio_p50".to_string(),
+                recorded: 1.0,
+                measured: 1.40,
+                regression_masked: true,
+            }
+        );
+    }
+
+    #[test]
+    fn ratchet_does_not_carry_forward_a_metric_the_run_did_not_remeasure() {
+        let existing = metrics(&[("ratio_p50", 1.20), ("stale_metric", 9.0)]);
+        let measured = metrics(&[("ratio_p50", 1.15)]);
+        let (cell, _outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert!(
+            !cell.contains_key("stale_metric"),
+            "an existing metric the run did not remeasure must not survive: {cell:?}"
+        );
+    }
+
+    #[test]
+    fn ratchet_flags_masked_regression_only_for_gated_metrics() {
+        // ratio_p99 is ungated on a shared class (gate_headroom None), so a
+        // held-worse value there is not a masked gate breach: there is no
+        // bar for it to have breached.
+        let existing = metrics(&[("ratio_p99", 1.0)]);
+        let measured = metrics(&[("ratio_p99", 5.0)]);
+        let (_cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p99"),
+            &RatchetOutcome::Held {
+                metric: "ratio_p99".to_string(),
+                recorded: 1.0,
+                measured: 5.0,
+                regression_masked: false,
+            }
+        );
+    }
+
+    fn measured_cell(scenario: &str, fixture: &str, pairs: &[(&str, f64)]) -> MeasuredCell {
+        (scenario.to_string(), fixture.to_string(), metrics(pairs))
+    }
+
+    type CellSpec<'a> = (&'a str, &'a str, &'a [(&'a str, f64)]);
+
+    fn baseline_with(pin: &str, class: &str, cells: &[CellSpec]) -> BaselineFile {
+        let mut file = BaselineFile::new(class, pin);
+        for (scenario, fixture, pairs) in cells {
+            file.upsert_cell(scenario, fixture, metrics(pairs));
+        }
+        file
+    }
+
+    #[test]
+    fn full_matrix_record_ratchets_each_cell_against_a_comparable_baseline() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("echo", "minimal", &[("ratio_p50", 1.30)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20
+        );
+        assert!(plan.reset_reason.is_none());
+    }
+
+    #[test]
+    fn full_matrix_record_drops_a_cell_no_longer_measured() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[
+                ("echo", "minimal", &[("ratio_p50", 1.30)]),
+                ("scroll", "minimal", &[("ratio_p50", 1.70)]),
+            ],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.25)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert!(
+            plan.file.cell("scroll", "minimal").is_none(),
+            "a full-matrix record must not carry a cell the run no longer measures"
+        );
+    }
+
+    #[test]
+    fn full_matrix_record_ignores_a_pin_drifted_baseline_and_records_fresh() {
+        let existing = baseline_with(
+            "v0.12.3",
+            "dev-linux",
+            &[("echo", "minimal", &[("ratio_p50", 0.5)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20,
+            "a baseline under another pin must not ratchet the fresh measurement down to its own number"
+        );
+        assert!(plan.reset_reason.is_some());
+        assert!(matches!(
+            plan.cells[0].outcomes[0],
+            RatchetOutcome::New { .. }
+        ));
+    }
+
+    #[test]
+    fn full_matrix_record_with_no_existing_file_records_fresh_without_a_reset_reason() {
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            None,
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20
+        );
+        assert!(
+            plan.reset_reason.is_none(),
+            "recording the first baseline is not a reset"
+        );
+    }
+
+    #[test]
+    fn single_cell_record_preserves_the_other_cells_and_ratchets_the_measured_one() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[
+                ("echo", "minimal", &[("ratio_p50", 1.30)]),
+                ("scroll", "minimal", &[("ratio_p50", 1.70)]),
+            ],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::SingleCell,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("scroll", "minimal").unwrap()["ratio_p50"],
+            1.70,
+            "a single-cell record must leave the other cells untouched"
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20
+        );
+    }
+
+    #[test]
+    fn report_names_an_improved_metric_and_counts_no_masked_regression() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("echo", "minimal", &[("ratio_p50", 1.30)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(plan.masked_regressions(), 0);
+        let lines = plan.report_lines("dev-linux.toml");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("improved") && l.contains("ratio_p50")),
+            "an improved metric must be named in the report: {lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("recorded 1 cell(s) into dev-linux.toml")),
+            "the report must state where and how many cells were recorded: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn report_flags_a_masked_regression_and_a_trailing_warning() {
+        // recorded 1.0, headroom 1.25; measuring 1.40 does not improve and
+        // would breach the gate, so the held bar hides a regression.
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("echo", "minimal", &[("ratio_p50", 1.0)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.40)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(plan.masked_regressions(), 1);
+        let lines = plan.report_lines("dev-linux.toml");
+        assert!(
+            lines.iter().any(|l| l.contains("REGRESSION MASKED")),
+            "a masked regression must be called out: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.starts_with("      WARNING:")),
+            "a trailing warning must summarize the masked regression: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn ratchet_does_not_lower_a_bar_to_a_nonpositive_measurement() {
+        // a 0.0 (or negative) measurement would install a 0.0 bar, and the
+        // gate bar 0.0 * headroom = 0.0 breaches on every later positive
+        // measurement forever; a metric that cannot physically be <= 0 must
+        // never ratchet the bar there.
+        let existing = metrics(&[("view_p99_ms", 2.0)]);
+        let (cell, _) = ratchet_cell(Some(&existing), &metrics(&[("view_p99_ms", 0.0)]), false);
+        assert_eq!(
+            cell["view_p99_ms"], 2.0,
+            "a 0.0 measurement must not install a 0.0 bar"
+        );
+    }
+
+    #[test]
+    fn ratchet_does_not_lower_a_bar_to_a_nonfinite_measurement() {
+        let existing = metrics(&[("view_p99_ms", 2.0)]);
+        let (cell, _) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("view_p99_ms", f64::NAN)]),
+            false,
+        );
+        assert_eq!(
+            cell["view_p99_ms"], 2.0,
+            "a non-finite measurement must not disturb the recorded bar"
+        );
+    }
+
+    #[test]
+    fn ratchet_flags_masked_regression_for_a_tail_metric_on_a_controlled_class() {
+        // ratio_p99 is gated ONLY on controlled classes; there a held-worse
+        // value that would breach must be flagged, exactly opposite to the
+        // shared-class case tested above.
+        let existing = metrics(&[("ratio_p99", 1.0)]);
+        let (_cell, outcomes) =
+            ratchet_cell(Some(&existing), &metrics(&[("ratio_p99", 1.40)]), true);
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p99"),
+            &RatchetOutcome::Held {
+                metric: "ratio_p99".to_string(),
+                recorded: 1.0,
+                measured: 1.40,
+                regression_masked: true,
+            }
+        );
+    }
+
+    #[test]
+    fn plan_record_derives_controlled_from_the_class_for_the_masked_flag() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "controlled-linux",
+            &[("echo", "minimal", &[("ratio_p99", 1.0)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p99", 1.40)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "controlled-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.masked_regressions(),
+            1,
+            "a controlled class must flag a tail-metric regression a shared class would not"
+        );
+    }
+
+    #[test]
+    fn full_matrix_record_holds_a_bar_the_measurement_did_not_beat() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("echo", "minimal", &[("ratio_p50", 1.20)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.35)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20,
+            "a worse full-matrix remeasure must hold the better recorded bar"
+        );
+    }
+
+    #[test]
+    fn full_matrix_record_ignores_a_class_mismatched_baseline() {
+        let existing = baseline_with(
+            "v0.12.4",
+            "controlled-linux",
+            &[("echo", "minimal", &[("ratio_p50", 0.5)])],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20
+        );
+        assert_eq!(plan.file.machine_class, "dev-linux");
+        assert!(
+            plan.reset_reason.is_some(),
+            "a class-mismatched baseline is not a ratchet reference"
+        );
+    }
+
+    #[test]
+    fn single_cell_record_against_an_incomparable_existing_records_fresh_not_a_stale_clone() {
+        // the caller normally errors before here, but plan_record must not
+        // silently save the old pin's cells relabeled under the new run: the
+        // saved file must carry this run's pin and drop cells measured under
+        // the old engine.
+        let existing = baseline_with(
+            "v0.12.3",
+            "dev-linux",
+            &[
+                ("echo", "minimal", &[("ratio_p50", 0.5)]),
+                ("scroll", "minimal", &[("ratio_p50", 1.7)]),
+            ],
+        );
+        let measured = vec![measured_cell("echo", "minimal", &[("ratio_p50", 1.20)])];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::SingleCell,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+        );
+        assert_eq!(
+            plan.file.engine_pin, "v0.12.4",
+            "the saved file must carry the run's pin, not the drifted one"
+        );
+        assert!(
+            plan.file.cell("scroll", "minimal").is_none(),
+            "cells measured under the old pin must not survive relabeled under the new one"
+        );
+        assert_eq!(
+            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            1.20,
+            "the fresh measurement, not the drifted 0.5, must be recorded"
+        );
+        assert!(plan.reset_reason.is_some());
     }
 }

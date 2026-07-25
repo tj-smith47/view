@@ -24,7 +24,7 @@ use clap::Parser;
 use view_bench::report;
 use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, taps, Protocol};
 use view_bench::session::SpawnSpec;
-use view_harness::baselines::{self, BaselineFile, CellMetrics};
+use view_harness::baselines::{self, CellMetrics};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
     verify_nvim_matches_pin, workspace_root,
@@ -1114,7 +1114,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let mut measured: Vec<(String, String, CellMetrics)> = Vec::new();
+    let mut measured: Vec<baselines::MeasuredCell> = Vec::new();
     for (scenario, fixture) in &cells {
         let metrics = run_cell(scenario, fixture, &bins, &protocol)?;
         measured.push((scenario.clone(), fixture.clone(), metrics));
@@ -1123,26 +1123,31 @@ fn main() -> Result<()> {
     announce_load("end");
 
     if recording {
-        let mut file = if cli.all || !path.exists() {
-            // a full-matrix record rewrites the file from scratch under
-            // the current pin; recorded-but-not-remeasured cells from an
-            // older pin must not survive into a fresh full baseline
-            BaselineFile::new(&cli.class, &pin)
+        let mode = if cli.all {
+            baselines::RecordMode::FullMatrix
         } else {
-            let existing = baselines::load(&path)?;
-            baselines::require_pin_match(&existing, &pin, &path)?;
-            baselines::require_class_match(&existing, &cli.class, &path)?;
-            existing
+            baselines::RecordMode::SingleCell
         };
-        for (scenario, fixture, metrics) in &measured {
-            file.upsert_cell(scenario, fixture, metrics.clone());
+        let existing = if path.exists() {
+            let existing = baselines::load(&path)?;
+            // a single-cell record keeps the file's other cells, so a pin or
+            // class mismatch there would silently invalidate them; a
+            // full-matrix record rebuilds the file and tolerates an
+            // incomparable existing one (plan_record sets it aside)
+            if matches!(mode, baselines::RecordMode::SingleCell) {
+                baselines::require_pin_match(&existing, &pin, &path)?;
+                baselines::require_class_match(&existing, &cli.class, &path)?;
+            }
+            Some(existing)
+        } else {
+            None
+        };
+
+        let plan = baselines::plan_record(existing, mode, &cli.class, &pin, &measured);
+        baselines::save(&path, &plan.file)?;
+        for line in plan.report_lines(&path.display().to_string()) {
+            println!("{line}");
         }
-        baselines::save(&path, &file)?;
-        println!(
-            "recorded {} cell(s) into {}",
-            measured.len(),
-            path.display()
-        );
     }
 
     if gating {
