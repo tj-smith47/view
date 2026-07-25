@@ -40,11 +40,9 @@ fn handshake_failure_reaps_child() {
         env!("CARGO_MANIFEST_DIR"),
         "/tests/fixtures/fake_hang_nvim.sh"
     ));
-    let cfg = EngineConfig {
-        nvim_bin: fixture.clone(),
-        handshake_timeout: Duration::from_millis(500),
-        ..EngineConfig::default()
-    };
+    let cfg = EngineConfig::default()
+        .with_nvim_bin(fixture.clone())
+        .with_handshake_timeout(Duration::from_millis(500));
 
     // spawn() blocks for ~500ms waiting on the handshake; race a pgrep
     // against it on another thread to prove the fake process was actually

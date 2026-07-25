@@ -63,14 +63,21 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
 /// not set. Nothing spawned through a pty here is a user's editor: these
 /// are measured and asserted-on sessions, one and all, so there is no
 /// caller for which inheriting the host's setup is the wanted behavior.
-fn hermetic_env(cmd: &mut CommandBuilder) {
+///
+/// # Errors
+///
+/// Returns [`OracleError::Io`] if the empty search path cannot be
+/// established empty, which fails the spawn rather than pointing a session
+/// at a directory somebody may have planted a `plugin/` script in.
+fn hermetic_env(cmd: &mut CommandBuilder) -> Result<(), OracleError> {
     for name in view_engine::env::HOST_REDIRECT_VARS {
         cmd.env_remove(name);
     }
-    let empty = view_engine::env::empty_search_path();
+    let empty = view_engine::env::prepare_empty_search_path()?;
     for name in view_engine::env::HOST_SEARCH_PATH_VARS {
         cmd.env(name, &empty);
     }
+    Ok(())
 }
 
 /// A process running inside a real pty, with everything a test needs to
@@ -119,13 +126,14 @@ impl PtySession {
     /// # Errors
     ///
     /// Returns [`OracleError::Pty`] if the pty cannot be opened or the
-    /// command fails to spawn.
+    /// command fails to spawn, or [`OracleError::Io`] if the hermetic empty
+    /// search path cannot be established (see [`hermetic_env`]).
     pub fn spawn_configured(
         mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
     ) -> Result<Self, OracleError> {
-        hermetic_env(&mut cmd);
+        hermetic_env(&mut cmd)?;
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -409,9 +417,12 @@ impl PtySession {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
 
     #[test]
     fn spawn_and_send_shows_typed_output_on_screen() {
+        let _planting = planting_guard();
         let mut session = PtySession::spawn("/bin/cat", &[], 80, 24).unwrap();
         session.send(b"hello-pty\n").unwrap();
         assert!(
@@ -425,6 +436,7 @@ mod tests {
 
     #[test]
     fn wait_for_returns_true_immediately_when_the_needle_is_already_on_screen() {
+        let _planting = planting_guard();
         let mut session = PtySession::spawn("/bin/echo", &["already-there"], 80, 24).unwrap();
         // no send(): the text is already on screen from the process's own
         // startup output, the current-state-check-first path wait_for must
@@ -434,8 +446,27 @@ mod tests {
 
     #[test]
     fn wait_for_times_out_on_a_needle_that_never_appears() {
+        let _planting = planting_guard();
         let mut session = PtySession::spawn("/bin/echo", &["hi"], 80, 24).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
+    }
+
+    /// Serializes the environment planting below against this module's own
+    /// `CommandBuilder` construction, which copies the whole process
+    /// environment: these tests run as threads in one process, so an
+    /// unguarded `set_var` could race a copy already in progress. Every
+    /// test here that spawns takes it, through [`planting_guard`].
+    static PLANTING: Mutex<()> = Mutex::new(());
+
+    /// [`PLANTING`], with poisoning ignored: the mutex orders two operations
+    /// and guards no data, so a test that panicked while holding it left
+    /// nothing behind for the next one to find broken. Propagating the
+    /// poison instead would turn one real failure into a screenful of
+    /// unrelated ones, none of which names what actually broke.
+    fn planting_guard() -> std::sync::MutexGuard<'static, ()> {
+        PLANTING
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Reports back what a spawned child sees in the two variables that
@@ -445,15 +476,21 @@ mod tests {
     /// is what a real child's environment holds after the spawn, and a
     /// builder that recorded the right plan but handed the child something
     /// else would satisfy every accessor while still leaking.
+    ///
+    /// The variables are planted in *this process's* environment rather than
+    /// through `CommandBuilder::env`. The property under test is that a
+    /// child inherits neither of them, and a builder-set value only stands
+    /// in for an inherited one while the pty layer happens to seed its map
+    /// from `std::env::vars_os()`, which is its implementation's choice to
+    /// change. Nothing else in this binary is disturbed by the plant: both
+    /// names are ones the funnel clears from every spawn it makes.
     fn env_report(preset: &str) -> String {
+        let _planting = planting_guard();
+        std::env::set_var("VIMINIT", preset);
+        std::env::set_var("XDG_CONFIG_DIRS", preset);
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.arg("-c");
         cmd.arg(r#"echo "VIMINIT=[${VIMINIT-unset}]"; echo "DIRS=[${XDG_CONFIG_DIRS-unset}]""#);
-        // planted the way the host would hand them down; `CommandBuilder`
-        // holds inherited and explicitly set variables in one map, so
-        // removing either is the same operation on the same entry
-        cmd.env("VIMINIT", preset);
-        cmd.env("XDG_CONFIG_DIRS", preset);
         let mut session = PtySession::spawn_configured(cmd, 200, 24).unwrap();
         // the second line's arrival proves the first line is final, so an
         // absent needle below means the child never printed it rather than
@@ -484,6 +521,120 @@ mod tests {
                 view_engine::env::empty_search_path().display()
             )),
             "the child searches somewhere other than the empty directory; screen:\n{screen}"
+        );
+    }
+
+    /// A scratch world holding one plugin planted under each of the two
+    /// layouts the search-path variables feed into 'runtimepath'
+    /// (`$XDG_CONFIG_DIRS/nvim/plugin/` and
+    /// `$XDG_DATA_DIRS/nvim/site/plugin/`), each writing a marker file when
+    /// an editor sources it.
+    ///
+    /// The marker is what makes this an oracle rather than a restatement of
+    /// the code under test: it reports whether a child *executed* a host
+    /// plugin, which is the consequence the two variables exist to prevent,
+    /// and it says so without consulting either the variable names or the
+    /// replacement path the funnel uses.
+    struct SearchPathWorld {
+        config_dirs: PathBuf,
+        data_dirs: PathBuf,
+        markers: [PathBuf; 2],
+    }
+
+    impl SearchPathWorld {
+        fn plant() -> Self {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.pop(); // crates/
+            root.pop(); // workspace root
+                        // under the build tree, never the system temp dir: this world is
+                        // the host config a leak would source, so it must not be
+                        // somewhere an unrelated process can reach into
+            let root = root.join("target").join("view-pty-search-path");
+            let _ = std::fs::remove_dir_all(&root);
+            let world = Self {
+                config_dirs: root.join("config"),
+                data_dirs: root.join("data"),
+                markers: [root.join("config-marker"), root.join("data-marker")],
+            };
+            let plugins = [
+                world.config_dirs.join("nvim/plugin"),
+                world.data_dirs.join("nvim/site/plugin"),
+            ];
+            for (dir, marker) in plugins.iter().zip(&world.markers) {
+                std::fs::create_dir_all(dir).unwrap();
+                std::fs::write(
+                    dir.join("leak.lua"),
+                    format!("vim.fn.writefile({{'sourced'}}, '{}')\n", marker.display()),
+                )
+                .unwrap();
+            }
+            world
+        }
+
+        fn sourced(&self) -> Vec<&Path> {
+            self.markers
+                .iter()
+                .filter(|marker| marker.exists())
+                .map(PathBuf::as_path)
+                .collect()
+        }
+
+        fn forget_what_was_sourced(&self) {
+            for marker in &self.markers {
+                let _ = std::fs::remove_file(marker);
+            }
+        }
+
+        /// The editor arguments both spawns below use: `--clean` (which
+        /// drops the *user* directories and not these), no swap file, and an
+        /// immediate exit, since a plugin under either layout has already
+        /// run by the time the first `-c` command does.
+        const ARGS: [&'static str; 5] = ["--clean", "-n", "--headless", "-c", "qa!"];
+    }
+
+    #[test]
+    fn a_pty_spawn_sources_no_plugin_from_the_hosts_search_path() {
+        let _planting = planting_guard();
+        let world = SearchPathWorld::plant();
+
+        // control first: the same planted world, reaching an editor that
+        // never passes the funnel. Without it a green assertion below would
+        // equally describe a plant that never worked, a layout Neovim
+        // stopped reading, or an editor that failed to start.
+        let control = std::process::Command::new("nvim")
+            .args(SearchPathWorld::ARGS)
+            .env("XDG_CONFIG_DIRS", &world.config_dirs)
+            .env("XDG_DATA_DIRS", &world.data_dirs)
+            .status()
+            .unwrap();
+        assert!(control.success(), "the control editor failed to run");
+        assert_eq!(
+            world.sourced().len(),
+            2,
+            "the planted plugins never ran even unguarded, so this test can \
+             prove nothing about a guarded spawn; sourced {:?}",
+            world.sourced()
+        );
+        world.forget_what_was_sourced();
+
+        let mut cmd = CommandBuilder::new("nvim");
+        for arg in SearchPathWorld::ARGS {
+            cmd.arg(arg);
+        }
+        cmd.env("XDG_CONFIG_DIRS", &world.config_dirs);
+        cmd.env("XDG_DATA_DIRS", &world.data_dirs);
+        let mut session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
+        assert!(
+            session.wait_for_exit(Duration::from_secs(30)).is_some(),
+            "the guarded editor never exited; screen:\n{}",
+            session.screen()
+        );
+        assert!(
+            world.sourced().is_empty(),
+            "{:?} ran inside a spawn that is supposed to search nothing of \
+             the host's, so every measured session executes whatever the \
+             machine has installed system-wide",
+            world.sourced()
         );
     }
 }

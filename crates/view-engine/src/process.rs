@@ -10,7 +10,7 @@
 use crate::damage::{DamagePump, PumpShared, SinkCutover};
 use crate::handle::{EngineError, EngineHandle};
 use rmpv::Value;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::SyncSender;
@@ -19,6 +19,13 @@ use std::time::{Duration, Instant};
 use view_core::msg::{ExitInfo, Msg};
 
 /// Configuration for spawning an embedded Neovim process.
+///
+/// `#[non_exhaustive]`: the hermetic environment plan an isolated spawn
+/// applies is a private field rather than a seventh public one, so a caller
+/// cannot construct a config that looks isolated and is not.
+/// Cross-crate callers build one from [`default`](Self::default) or
+/// [`isolated`](Self::isolated) and the `with_*` methods below.
+#[non_exhaustive]
 pub struct EngineConfig {
     /// Path to the `nvim` binary. Defaults to `"nvim"`, resolved via `PATH`;
     /// release packaging replaces this default with a bundled binary path.
@@ -31,8 +38,8 @@ pub struct EngineConfig {
     pub env: Vec<(OsString, OsString)>,
     /// Environment variables removed from the environment the child
     /// inherits. Applied after [`env`](Self::env), so a name in both is
-    /// removed: an isolated spawn's hermeticity must not be defeatable by
-    /// an override that happens to be pushed later.
+    /// removed: an override pushed later must not reinstate a variable a
+    /// caller asked to be rid of.
     pub env_remove: Vec<OsString>,
     /// Maximum time to wait for the `nvim_get_api_info` handshake response
     /// during [`Engine::spawn`]. Defaults to 5 seconds. A process that
@@ -46,6 +53,13 @@ pub struct EngineConfig {
     /// `Drop`). Defaults to 500 milliseconds. A child still running once
     /// this elapses is force-killed instead.
     pub shutdown_timeout: Duration,
+    /// Whether [`crate::env`]'s hermetic environment plan is applied to the
+    /// child. Private, and applied strictly after both public vectors (see
+    /// [`env_plan`](Self::env_plan)): hermeticity that a caller's own
+    /// `env` entry or a `env_remove.clear()` could discard is hermeticity
+    /// that holds only while nobody touches the config, and a child that
+    /// lost it looks exactly like one that kept it.
+    hermetic: bool,
 }
 
 impl Default for EngineConfig {
@@ -57,6 +71,7 @@ impl Default for EngineConfig {
             env_remove: vec![],
             handshake_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_millis(500),
+            hermetic: false,
         }
     }
 }
@@ -81,9 +96,11 @@ impl EngineConfig {
     /// constructor would measure a plugin-free editor against baselines
     /// recorded with the fixture's full plugin set, and the resulting
     /// number would pass its gate as a large improvement. Nothing about a
-    /// stripped-down child fails loudly, so the invariant is pinned by
-    /// test on both sides: that `default` carries no arguments, and that
-    /// the specs the matrix builds carry no `--clean`.
+    /// stripped-down child fails loudly, so the invariant is pinned by test
+    /// on every side: that `default` carries neither arguments nor an
+    /// environment plan, that the config the `view` binary's own CLI builds
+    /// is that `default` one, and that the specs the matrix builds carry no
+    /// `--clean`.
     ///
     /// It also keeps the child's exit path open, which a host config can
     /// close off outright: any message emitted during startup parks `qa!`
@@ -94,19 +111,99 @@ impl EngineConfig {
     /// ends it.
     #[must_use]
     pub fn isolated() -> Self {
-        let empty = crate::env::empty_search_path().into_os_string();
         Self {
             extra_args: vec![OsString::from("--clean"), OsString::from("-n")],
-            env: crate::env::HOST_SEARCH_PATH_VARS
-                .iter()
-                .map(|name| (OsString::from(*name), empty.clone()))
-                .collect(),
-            env_remove: crate::env::HOST_REDIRECT_VARS
-                .iter()
-                .map(|name| OsString::from(*name))
-                .collect(),
+            hermetic: true,
             ..Self::default()
         }
+    }
+
+    /// The `nvim` binary to spawn, replacing the `PATH` lookup.
+    #[must_use]
+    pub fn with_nvim_bin(mut self, bin: impl Into<PathBuf>) -> Self {
+        self.nvim_bin = bin.into();
+        self
+    }
+
+    /// Appends one argument after `--embed`.
+    #[must_use]
+    pub fn with_arg(mut self, arg: impl Into<OsString>) -> Self {
+        self.extra_args.push(arg.into());
+        self
+    }
+
+    /// Appends one environment override. Overridden in turn by a hermetic
+    /// config's own plan, which applies last (see [`env_plan`](Self::env_plan)).
+    #[must_use]
+    pub fn with_env(mut self, name: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((name.into(), value.into()));
+        self
+    }
+
+    /// Appends one environment removal, which outranks any override of the
+    /// same name.
+    #[must_use]
+    pub fn with_env_remove(mut self, name: impl Into<OsString>) -> Self {
+        self.env_remove.push(name.into());
+        self
+    }
+
+    /// The handshake timeout, replacing the 5 second default.
+    #[must_use]
+    pub fn with_handshake_timeout(mut self, timeout: Duration) -> Self {
+        self.handshake_timeout = timeout;
+        self
+    }
+
+    /// The graceful-shutdown timeout, replacing the 500 millisecond default.
+    #[must_use]
+    pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.shutdown_timeout = timeout;
+        self
+    }
+
+    /// The environment plan this config applies to a child: `Some(value)`
+    /// for an override, `None` for a removal, in application order and with
+    /// one entry per name.
+    ///
+    /// [`env`](Self::env) first, then [`env_remove`](Self::env_remove), then
+    /// -- for a config from [`isolated`](Self::isolated) -- [`crate::env`]'s
+    /// hermetic plan, which therefore cannot be clobbered by anything a
+    /// caller pushed. Public so the plan can be asserted on without spawning
+    /// anything: an override or removal that silently stopped being applied
+    /// would leave a child reading the host's own editor configuration, and
+    /// nothing about that fails visibly.
+    #[must_use]
+    pub fn env_plan(&self) -> Vec<(OsString, Option<OsString>)> {
+        let mut plan: Vec<(OsString, Option<OsString>)> = Vec::new();
+        for (name, value) in &self.env {
+            plan_set(&mut plan, name, Some(value.clone()));
+        }
+        for name in &self.env_remove {
+            plan_set(&mut plan, name, None);
+        }
+        if self.hermetic {
+            for name in crate::env::HOST_REDIRECT_VARS {
+                plan_set(&mut plan, OsStr::new(name), None);
+            }
+            let empty = crate::env::empty_search_path().into_os_string();
+            for name in crate::env::HOST_SEARCH_PATH_VARS {
+                plan_set(&mut plan, OsStr::new(name), Some(empty.clone()));
+            }
+        }
+        plan
+    }
+}
+
+/// Records `name`'s disposition in `plan`, replacing any earlier one rather
+/// than appending a second entry for the same variable: the plan is applied
+/// to a process environment, where a name has one value or none, so a later
+/// entry silently winning over an earlier one in `Command`'s own map would
+/// make the inspectable plan disagree with the spawned child.
+fn plan_set(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr, value: Option<OsString>) {
+    match plan.iter_mut().find(|(known, _)| known.as_os_str() == name) {
+        Some(entry) => entry.1 = value,
+        None => plan.push((name.to_os_string(), value)),
     }
 }
 
@@ -216,7 +313,16 @@ impl Engine {
     /// engine does not answer within `cfg.handshake_timeout`). On any error
     /// after a successful process spawn, the child is killed and reaped
     /// before the error is returned; no zombie survives a failed `spawn`.
+    ///
+    /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
+    /// search path cannot be established empty (see
+    /// [`crate::env::prepare_empty_search_path`]), before any process is
+    /// started: a child pointed at a directory somebody planted a plugin in
+    /// is not isolated, and refusing the spawn is the only way that says so.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
+        if cfg.hermetic {
+            crate::env::prepare_empty_search_path()?;
+        }
         let mut guard = ChildGuard(Some(build_command(&cfg).spawn()?));
         // unreachable ok_or: nothing clears guard.0 before this point
         let child = guard
@@ -332,23 +438,17 @@ impl Drop for Engine {
     }
 }
 
-/// Builds the `nvim --embed` command `cfg` describes, environment plan
-/// included: overrides first, then removals, so a variable named by both
-/// ends up removed rather than depending on which vector a caller filled
-/// last.
-///
-/// Separate from [`Engine::spawn`] so the plan can be inspected without
-/// spawning anything: a removal that silently stopped being applied would
-/// leave a child reading the host's own editor configuration, and nothing
-/// about that fails visibly.
+/// Builds the `nvim --embed` command `cfg` describes, applying
+/// [`EngineConfig::env_plan`] entry by entry so the environment the child
+/// gets is the plan a caller can inspect, never a second derivation of it.
 fn build_command(cfg: &EngineConfig) -> Command {
     let mut command = Command::new(&cfg.nvim_bin);
     command.arg("--embed").args(&cfg.extra_args);
-    for (name, value) in &cfg.env {
-        command.env(name, value);
-    }
-    for name in &cfg.env_remove {
-        command.env_remove(name);
+    for (name, value) in cfg.env_plan() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
     }
     command
         .stdin(Stdio::piped())
@@ -457,11 +557,12 @@ fn map_get(v: &Value, key: &str) -> Option<Value> {
 mod config_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use std::ffi::OsStr;
 
-    /// The environment plan `cfg` produces, as the spawn path would apply
-    /// it: `None` for a removed variable, `Some(value)` for an override.
-    fn env_plan(cfg: &EngineConfig) -> Vec<(OsString, Option<OsString>)> {
+    /// The environment the spawn path actually hands a child, read back off
+    /// the built `Command` rather than off [`EngineConfig::env_plan`]: the
+    /// plan is what the assertions below are about, and a plan that stopped
+    /// reaching `Command` at all would satisfy every one of them.
+    fn spawned_env(cfg: &EngineConfig) -> Vec<(OsString, Option<OsString>)> {
         build_command(cfg)
             .get_envs()
             .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
@@ -480,12 +581,13 @@ mod config_tests {
              got {:?}",
             cfg.extra_args
         );
-        assert!(env_plan(&cfg).is_empty(), "{:?}", env_plan(&cfg));
+        assert!(spawned_env(&cfg).is_empty(), "{:?}", spawned_env(&cfg));
+        assert!(cfg.env_plan().is_empty(), "{:?}", cfg.env_plan());
     }
 
     #[test]
     fn an_isolated_config_neutralizes_every_host_config_variable() {
-        let plan = env_plan(&EngineConfig::isolated());
+        let plan = spawned_env(&EngineConfig::isolated());
         for name in crate::env::HOST_REDIRECT_VARS {
             assert!(
                 plan.contains(&(OsString::from(*name), None)),
@@ -504,13 +606,76 @@ mod config_tests {
 
     #[test]
     fn a_removal_outranks_an_override_of_the_same_variable() {
-        let mut cfg = EngineConfig::isolated();
-        cfg.env
-            .push((OsString::from("VIMINIT"), OsString::from("echo leaked")));
+        let cfg = EngineConfig::default()
+            .with_env("VIMINIT", "echo leaked")
+            .with_env_remove("VIMINIT");
         assert!(
-            env_plan(&cfg).contains(&(OsString::from("VIMINIT"), None)),
-            "an override reinstated a variable the isolation removes"
+            spawned_env(&cfg).contains(&(OsString::from("VIMINIT"), None)),
+            "an override reinstated a variable a caller asked to be rid of"
         );
+    }
+
+    /// The hermetic plan is not a set of entries a caller happens to find in
+    /// the two public vectors: emptying both leaves it in force. Compiles
+    /// either way, and a child that lost its isolation to it reports
+    /// nothing at all.
+    #[test]
+    fn emptying_a_callers_vectors_leaves_an_isolated_config_isolated() {
+        let mut cfg = EngineConfig::isolated();
+        cfg.env.clear();
+        cfg.env_remove.clear();
+        let plan = spawned_env(&cfg);
+        assert!(
+            plan.contains(&(OsString::from("VIMINIT"), None)),
+            "clearing the caller's vectors took the isolation with it; plan {plan:?}"
+        );
+        let empty = crate::env::empty_search_path().into_os_string();
+        assert!(
+            plan.contains(&(OsString::from("XDG_CONFIG_DIRS"), Some(empty))),
+            "clearing the caller's vectors took the isolation's search path \
+             with it; plan {plan:?}"
+        );
+    }
+
+    /// The other half of the same guarantee: an entry a caller pushes for a
+    /// name the hermetic plan covers loses to it, whichever vector it went
+    /// into. The composed shape (`with_env` for a variable an isolated spawn
+    /// clears) is the one that compiles most readily and silently.
+    #[test]
+    fn a_callers_own_entry_cannot_outrank_the_isolation() {
+        let cfg = EngineConfig::isolated()
+            .with_env("VIMINIT", "echo leaked")
+            .with_env("XDG_CONFIG_DIRS", "/host/xdg")
+            .with_env_remove("XDG_CONFIG_DIRS");
+        let plan = spawned_env(&cfg);
+        assert!(
+            plan.contains(&(OsString::from("VIMINIT"), None)),
+            "a caller's override reinstated a variable the isolation \
+             removes; plan {plan:?}"
+        );
+        let empty = crate::env::empty_search_path().into_os_string();
+        assert!(
+            plan.contains(&(OsString::from("XDG_CONFIG_DIRS"), Some(empty))),
+            "a caller's own entry outranked the isolation's search path, so \
+             the child searches somewhere the isolation did not choose; plan \
+             {plan:?}"
+        );
+    }
+
+    /// One entry per variable, whichever vector named it: `Command` holds
+    /// one disposition per name, so a plan carrying two would report a
+    /// variable's fate differently from how the child receives it.
+    #[test]
+    fn the_plan_carries_one_entry_per_variable() {
+        let cfg = EngineConfig::isolated()
+            .with_env("VIMINIT", "echo leaked")
+            .with_env("XDG_CONFIG_DIRS", "/host/xdg")
+            .with_env_remove("XDG_CONFIG_DIRS");
+        let mut names: Vec<OsString> = cfg.env_plan().into_iter().map(|(name, _)| name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(total, names.len(), "the plan names a variable twice");
     }
 }
 

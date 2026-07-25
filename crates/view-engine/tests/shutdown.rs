@@ -172,10 +172,7 @@ fn within_liveness_bound<T: Send + 'static>(
 fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    let cfg = EngineConfig {
-        shutdown_timeout: GRACEFUL_DEADLINE_PAST_THE_TEST,
-        ..EngineConfig::isolated()
-    };
+    let cfg = EngineConfig::isolated().with_shutdown_timeout(GRACEFUL_DEADLINE_PAST_THE_TEST);
     let engine = Engine::spawn(cfg).unwrap();
     // named by pid so a failure below points at the process it concerns,
     // not just at the fact that one existed
@@ -203,10 +200,7 @@ fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
 fn shutdown_force_kills_when_unresponsive_within_timeout() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    let cfg = EngineConfig {
-        shutdown_timeout: Duration::from_millis(50),
-        ..EngineConfig::isolated()
-    };
+    let cfg = EngineConfig::isolated().with_shutdown_timeout(Duration::from_millis(50));
     let engine = Engine::spawn(cfg).unwrap();
 
     // `:sleep` alone does not work here: Neovim's sleep implementation
@@ -264,10 +258,7 @@ fn wait_for_engine_stopped(msgs: &std::sync::mpsc::Receiver<Msg>) -> bool {
 /// machinery `shutdown`/`Drop` use, not hang or fabricate one.
 #[test]
 fn wait_exit_resolves_a_normally_exiting_child() {
-    let cfg = EngineConfig {
-        shutdown_timeout: GRACEFUL_DEADLINE_PAST_THE_TEST,
-        ..EngineConfig::isolated()
-    };
+    let cfg = EngineConfig::isolated().with_shutdown_timeout(GRACEFUL_DEADLINE_PAST_THE_TEST);
     let mut engine = Engine::spawn(cfg).unwrap();
     let (sink, msgs) = std::sync::mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(sink);
