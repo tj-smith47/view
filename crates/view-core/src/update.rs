@@ -85,8 +85,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // after a newer one) would overwrite the newer reply's already-
             // correct confirmed state, permanently losing it since only one
             // slot is kept -- see HlTable::confirmed's doc comment
-            if generation == model.engine.hl.probe_generation {
-                model.engine.hl.confirmed = Some(crate::hl::ProbedDefaults { generation, fg, bg });
+            if generation == model.engine.hl.probe_generation() {
+                model
+                    .engine
+                    .hl
+                    .confirm_defaults(crate::hl::ProbedDefaults { generation, fg, bg });
                 // the paint loop's `if model.dirty` gate is the only thing
                 // that triggers a repaint; without this, a probe reply that
                 // arrives after the frame it corrects has already painted
@@ -190,7 +193,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             underline,
             reverse,
         } => {
-            model.engine.hl.attrs.insert(
+            model.engine.hl.define_attr(
                 id,
                 HlAttr {
                     fg,
@@ -204,21 +207,17 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::DefaultColorsSet { fg, bg, .. } => {
-            model.engine.hl.default_fg = fg;
-            model.engine.hl.default_bg = bg;
-            // bumped before the effect is built so the emitted probe
-            // carries the exact generation this event owns; a stale reply
-            // for an older generation is dropped by the Msg::HlProbeReply
-            // arm below, and Theme::from_hl falls back to the (possibly
-            // still wire-ambiguous) raw values above until a matching reply
-            // lands
-            model.engine.hl.probe_generation = model.engine.hl.probe_generation.wrapping_add(1);
-            vec![Effect::Rpc(RpcCall::GetDefaultHl {
-                generation: model.engine.hl.probe_generation,
-            })]
+            // the generation comes back from the write that opened it, so
+            // the emitted probe carries the exact generation these colors
+            // own; a stale reply for an older generation is dropped by the
+            // Msg::HlProbeReply arm above, and Theme::from_hl falls back to
+            // the (possibly still wire-ambiguous) raw values until a
+            // matching reply lands
+            let generation = model.engine.hl.set_default_colors(fg, bg);
+            vec![Effect::Rpc(RpcCall::GetDefaultHl { generation })]
         }
         UiEvent::HlGroupSet { name, hl_id } => {
-            model.engine.hl.groups.insert(name, hl_id);
+            model.engine.hl.set_group(name, hl_id);
             Vec::new()
         }
         UiEvent::Flush => {
@@ -393,7 +392,7 @@ mod tests {
             }]),
         );
         assert!(effects.is_empty());
-        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&41));
+        assert_eq!(m.engine.hl.group("StatusLine"), Some(41));
     }
 
     #[test]
@@ -413,7 +412,7 @@ mod tests {
                 hl_id: 168,
             }]),
         );
-        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&168));
+        assert_eq!(m.engine.hl.group("StatusLine"), Some(168));
     }
 
     #[test]
@@ -1102,10 +1101,99 @@ mod tests {
         assert!(effects.is_empty());
     }
 
+    /// A style change has no rows of its own: the highlight table sits
+    /// behind every cell's resolved style, so any change to it can restyle
+    /// the whole screen while no grid cell's text moves. Damage clipped to
+    /// grid rows alone would repaint whatever row happened to change and
+    /// leave the rest of the screen in the previous colors.
+    #[test]
+    fn a_highlight_change_with_no_grid_change_damages_the_whole_frame() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 1,
+                width: 8,
+                height: 4,
+            }]),
+        );
+        let _ = m.take_paint_damage();
+
+        for ev in [
+            UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0x282A36),
+                sp: None,
+            },
+            UiEvent::HlAttrDefine {
+                id: 3,
+                fg: Some(0xFF0000),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "StatusLine".to_string(),
+                hl_id: 3,
+            },
+        ] {
+            let _ = update(&mut m, Msg::Redraw(vec![ev.clone()]));
+            assert!(
+                m.take_paint_damage().full,
+                "{ev:?} must damage every cell, not none of them"
+            );
+        }
+
+        let generation = m.engine.hl.probe_generation();
+        let _ = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: Some(0x282A36),
+            },
+        );
+        assert!(
+            m.take_paint_damage().full,
+            "an accepted probe reply re-derives the theme and must damage every cell"
+        );
+    }
+
+    /// The other direction, and the reason the check above is a value
+    /// comparison rather than a blanket mark: nvim resends definitions that
+    /// change nothing, and turning each of those into a whole-frame repaint
+    /// would give back the frames damage clipping exists to save.
+    #[test]
+    fn a_highlight_definition_that_changes_nothing_produces_no_damage() {
+        let mut m = model();
+        let define = UiEvent::HlAttrDefine {
+            id: 3,
+            fg: Some(0xFF0000),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        };
+        let group = UiEvent::HlGroupSet {
+            name: "StatusLine".to_string(),
+            hl_id: 3,
+        };
+        let _ = update(&mut m, Msg::Redraw(vec![define.clone(), group.clone()]));
+        let _ = m.take_paint_damage();
+
+        let _ = update(&mut m, Msg::Redraw(vec![define, group]));
+        let damage = m.take_paint_damage();
+        assert!(!damage.full, "an identical redefinition is not a repaint");
+        assert!(damage.rows.is_empty(), "and touches no grid row either");
+    }
+
     #[test]
     fn default_colors_set_bumps_generation_and_emits_a_matching_probe_effect() {
         let mut m = model();
-        assert_eq!(m.engine.hl.probe_generation, 0);
+        assert_eq!(m.engine.hl.probe_generation(), 0);
         let effects = update(
             &mut m,
             Msg::Redraw(vec![UiEvent::DefaultColorsSet {
@@ -1114,7 +1202,7 @@ mod tests {
                 sp: None,
             }]),
         );
-        assert_eq!(m.engine.hl.probe_generation, 1);
+        assert_eq!(m.engine.hl.probe_generation(), 1);
         assert!(matches!(
             effects.as_slice(),
             [Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 })]
@@ -1140,7 +1228,7 @@ mod tests {
                 sp: None,
             }]),
         );
-        assert_eq!(m.engine.hl.probe_generation, 2);
+        assert_eq!(m.engine.hl.probe_generation(), 2);
         assert!(matches!(
             effects.as_slice(),
             [Effect::Rpc(RpcCall::GetDefaultHl { generation: 2 })]
@@ -1169,7 +1257,7 @@ mod tests {
         );
         assert!(effects.is_empty());
         assert!(m.dirty, "an accepted probe reply must trigger a repaint");
-        let confirmed = m.engine.hl.confirmed.expect("reply must be recorded");
+        let confirmed = m.engine.hl.confirmed().expect("reply must be recorded");
         assert_eq!(confirmed.generation, 1);
         assert_eq!(confirmed.fg, Some(0x111111));
         assert_eq!(confirmed.bg, None);
@@ -1217,7 +1305,7 @@ mod tests {
             "a stale-generation reply must not trigger a repaint"
         );
         assert!(
-            m.engine.hl.confirmed.is_none(),
+            m.engine.hl.confirmed().is_none(),
             "a stale-generation reply must not be recorded"
         );
     }

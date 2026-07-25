@@ -16,15 +16,15 @@ view_p99_ms = 1.018586
 
 [first_paint.heavy]
 cold_ms = 53.351276000000006
-ratio_vs_nvim = 0.2848857772855777
+ratio_vs_nvim = 0.25868678951344914
 
 [first_paint.minimal]
 cold_ms = 53.333717
-ratio_vs_nvim = 0.4086111530168629
+ratio_vs_nvim = 0.40164204374093704
 
 [flood.minimal]
 cadence_p99_ms = 14.245040000000001
-drain_ratio = 1.0375745571789832
+drain_ratio = 0.9698268972474688
 
 [input_path.minimal]
 p99_us = 269.606

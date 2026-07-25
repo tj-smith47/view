@@ -106,9 +106,7 @@ fn attr_grid(rows: &mut [String], layer: &Layer, grid: &Grid, hl: &HlTable) {
 /// and for any id not yet defined -- the same fallback the reference side
 /// applies, so an undefined id can never itself be a divergence.
 fn resolve_attr(hl: &HlTable, hl_id: u64) -> ResolvedAttr {
-    hl.attrs
-        .get(&hl_id)
-        .map_or(ResolvedAttr::DEFAULT, Into::into)
+    hl.attr(hl_id).map_or(ResolvedAttr::DEFAULT, Into::into)
 }
 
 fn canvas_size(surface: &Surface) -> (u16, u16) {

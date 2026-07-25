@@ -338,10 +338,11 @@ const SEED_HL_ID_BASE: u64 = u64::MAX;
 /// (never a wire-ambiguous raw value -- see `store`'s caller), so re-marking
 /// it "confirmed" here is not fabricating certainty that was never earned.
 pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
-    hl.default_fg = theme.fg;
-    hl.default_bg = theme.bg;
-    hl.confirmed = Some(ProbedDefaults {
-        generation: hl.probe_generation,
+    // the generation the write itself opened, so the seeded confirmation
+    // answers these defaults rather than whatever generation preceded them
+    let generation = hl.set_default_colors(theme.fg, theme.bg);
+    hl.confirm_defaults(ProbedDefaults {
+        generation,
         fg: theme.fg,
         bg: theme.bg,
     });
@@ -366,7 +367,7 @@ pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
 /// group's colors can never bleed into another's.
 fn seed_named(hl: &mut HlTable, name: &str, style: ResolvedStyle, offset: u64) {
     let hl_id = SEED_HL_ID_BASE - offset;
-    hl.attrs.insert(
+    hl.define_attr(
         hl_id,
         HlAttr {
             fg: style.fg,
@@ -377,7 +378,7 @@ fn seed_named(hl: &mut HlTable, name: &str, style: ResolvedStyle, offset: u64) {
             reverse: style.reverse,
         },
     );
-    hl.groups.insert(name.to_string(), hl_id);
+    hl.set_group(name.to_string(), hl_id);
 }
 
 #[cfg(test)]
@@ -399,14 +400,7 @@ mod tests {
     }
 
     fn empty_hl_table() -> HlTable {
-        HlTable {
-            default_fg: None,
-            default_bg: None,
-            attrs: std::collections::HashMap::new(),
-            groups: std::collections::HashMap::new(),
-            probe_generation: 0,
-            confirmed: None,
-        }
+        HlTable::new()
     }
 
     /// Serializes every test in this module that calls `std::env::set_var`/
@@ -698,8 +692,10 @@ mod tests {
         };
         let mut hl = empty_hl_table();
         seed_hl_table(&mut hl, &cached_theme);
-        let confirmed = hl.confirmed.expect("seeding must record a confirmed value");
-        assert_eq!(confirmed.generation, hl.probe_generation);
+        let confirmed = hl
+            .confirmed()
+            .expect("seeding must record a confirmed value");
+        assert_eq!(confirmed.generation, hl.probe_generation());
         assert_eq!(confirmed.fg, Some(0xF8F8F2));
         assert_eq!(confirmed.bg, None);
     }
@@ -792,10 +788,22 @@ mod tests {
     fn seed_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
         let mut hl = empty_hl_table();
         seed_hl_table(&mut hl, &Theme::default());
-        let ids: std::collections::HashSet<u64> = hl.groups.values().copied().collect();
+        let names = [
+            "StatusLine",
+            "TabLine",
+            "TabLineSel",
+            "TabLineFill",
+            "Pmenu",
+            "PmenuSel",
+            "MsgArea",
+        ];
+        let ids: std::collections::HashSet<u64> = names
+            .iter()
+            .map(|n| hl.group(n).expect("seeding must map every named group"))
+            .collect();
         assert_eq!(
             ids.len(),
-            hl.groups.len(),
+            names.len(),
             "each named group must get its own synthetic hl_id, not a shared one"
         );
     }

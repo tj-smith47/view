@@ -12,34 +12,6 @@ use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 use view_core::theme::{ResolvedStyle, Theme};
 use view_surface::{LayerKind, Rect, Surface};
 
-/// Paints every layer in `surface`, in order (z ascending), into `frame`.
-/// Later layers would overwrite the cells of earlier ones within their own
-/// rect, which is the z-order compositing contract.
-///
-/// Repaints every cell, for callers that paint into a fresh `ratatui::Frame`
-/// (startup, and the tests that assert against a full recomposite). The
-/// runtime loop instead drives [`Shadow`], which composites only the rows a
-/// frame damaged; [`composite_into`] is the shared implementation.
-///
-/// `model` supplies the engine grid and highlight table backing the
-/// [`LayerKind::EngineGrid`] layer: `Surface` describes where to paint and
-/// what kind of content goes there, not the grid's (potentially large)
-/// per-cell content itself, so painting reads that straight from `model`
-/// rather than cloning it into every frame's `Surface`.
-///
-/// `view-surface`'s `render()` chose each layer's placement per the two
-/// layout mechanisms nvim's full ext attach demands: the tabline reserves a
-/// real row (`view_core::model::Model::chrome_rows`) so it is never in the
-/// same rect as the `EngineGrid` layer, while cmdline/messages/popupmenu
-/// are transient overlays that intentionally paint over grid content only
-/// while their state is active, then vanish the frame it clears (their
-/// `LayerKind` variant is simply absent from `surface.layers` that frame,
-/// so the unconditional `EngineGrid` paint below is what restores the
-/// resting text underneath).
-pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_>) {
-    composite_into(frame.buffer_mut(), model, surface, &Damage::full());
-}
-
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
 ///
@@ -52,10 +24,21 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
 /// when present, and their rows are always included in a non-full
 /// `Damage` (see [`Damage::from_frame`]) so the grid underneath a vacated
 /// overlay repaints.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct Damage {
     full: bool,
     rows: Vec<u16>,
+}
+
+impl Default for Damage {
+    /// Repaints every row, not none of them. A damage nobody chose is a
+    /// damage nobody computed, and the two candidate meanings are not
+    /// symmetric: repainting a clean row wastes composite CPU for one
+    /// frame, while skipping a dirty one leaves the terminal showing
+    /// something the model no longer says.
+    fn default() -> Self {
+        Self::full()
+    }
 }
 
 impl Damage {
@@ -217,14 +200,32 @@ pub fn overlay_rows(surface: &Surface) -> Vec<u16> {
     rows
 }
 
-/// Paints the layers of `surface` into `buf`, clipping the engine grid to
-/// `damage`'s rows; see [`composite`] for the full z-order contract.
+/// Paints every layer in `surface`, in order (z ascending), into `buf`,
+/// clipping the engine grid to `damage`'s rows. Later layers overwrite the
+/// cells of earlier ones within their own rect, which is the z-order
+/// compositing contract.
 ///
 /// `buf` is persistent across frames (it holds the last frame's content),
 /// so a non-full `damage` repaints only its rows and leaves every other
 /// cell as the previous frame painted it -- the compositor's half of the
-/// terminal's own cell diff. A full `damage` repaints everything, the
-/// behavior every existing caller of [`composite`] relies on.
+/// terminal's own cell diff. A full `damage` repaints every cell, which is
+/// what a fresh buffer needs.
+///
+/// `model` supplies the engine grid and highlight table backing the
+/// [`LayerKind::EngineGrid`] layer: `Surface` describes where to paint and
+/// what kind of content goes there, not the grid's (potentially large)
+/// per-cell content itself, so painting reads that straight from `model`
+/// rather than cloning it into every frame's `Surface`.
+///
+/// `view-surface`'s `render()` chose each layer's placement per the two
+/// layout mechanisms nvim's full ext attach demands: the tabline reserves a
+/// real row (`view_core::model::Model::chrome_rows`) so it is never in the
+/// same rect as the `EngineGrid` layer, while cmdline/messages/popupmenu
+/// are transient overlays that intentionally paint over grid content only
+/// while their state is active, then vanish the frame it clears (their
+/// `LayerKind` variant is simply absent from `surface.layers` that frame,
+/// so the unconditional `EngineGrid` paint below is what restores the
+/// resting text underneath).
 pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage: &Damage) {
     let frame_area = buf.area;
     // Clear the rows this frame repaints before any layer paints, so each
@@ -775,17 +776,21 @@ mod tests {
     use ratatui::Terminal;
     use view_core::grid::GridOp;
 
+    /// A whole-frame composite into a fresh `ratatui::Frame`. Lives here
+    /// rather than beside [`composite_into`] because nothing in production
+    /// paints this way: the runtime drives [`Shadow`], which owns the
+    /// persistent buffers a damage clip needs, and a second entry point
+    /// bypassing it would be an entry point bypassing the damage discipline.
+    /// A `Frame` (through `Terminal::draw`) is still the least indirect way
+    /// for a test to observe a whole painted frame's cells.
+    fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_>) {
+        composite_into(frame.buffer_mut(), model, surface, &Damage::full());
+    }
+
     fn table_with(attr: HlAttr) -> HlTable {
-        let mut attrs = std::collections::HashMap::new();
-        attrs.insert(1, attr);
-        HlTable {
-            default_fg: None,
-            default_bg: None,
-            attrs,
-            groups: std::collections::HashMap::new(),
-            probe_generation: 0,
-            confirmed: None,
-        }
+        let mut table = HlTable::new();
+        table.define_attr(1, attr);
+        table
     }
 
     #[test]
@@ -875,7 +880,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation;
+        let generation = model.engine.hl.probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -927,11 +932,15 @@ mod tests {
         // mirrors the pre-attach state seeded from persisted state: a
         // confirmed value at the table's starting generation, from a prior
         // session's cached, already-disambiguated theme
-        model.engine.hl.confirmed = Some(view_core::hl::ProbedDefaults {
-            generation: model.engine.hl.probe_generation,
-            fg: Some(0xF8F8F2),
-            bg: None,
-        });
+        let generation = model.engine.hl.probe_generation();
+        model
+            .engine
+            .hl
+            .confirm_defaults(view_core::hl::ProbedDefaults {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: None,
+            });
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -979,7 +988,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation;
+        let generation = model.engine.hl.probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -2360,6 +2369,229 @@ mod tests {
         );
     }
 
+    /// Sends one probe reply for the highlight table's current generation,
+    /// the shape `view-engine` produces when `nvim_get_hl` answers the probe
+    /// a `default_colors_set` triggered. A `Msg`, not a `UiEvent`, so it
+    /// cannot go through `apply`.
+    fn probe_reply(model: &mut Model, fg: Option<u32>, bg: Option<u32>) {
+        let generation = model.engine.hl.probe_generation();
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::HlProbeReply { generation, fg, bg },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_default_colors_change() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0xF8F8F2),
+                        bg: Some(0x101010),
+                        sp: None,
+                    },
+                );
+            },
+            40,
+            12,
+            |m| {
+                // every cell resolves its colors through the defaults, so a
+                // colorscheme swap restyles the whole screen without any grid
+                // cell's text changing
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0x202020),
+                        bg: Some(0x445566),
+                        sp: None,
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_hl_attr_redefinition() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::HlAttrDefine {
+                        id: 2,
+                        fg: Some(0xFF0000),
+                        bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        reverse: false,
+                    },
+                );
+            },
+            40,
+            12,
+            // redefining an id already on screen restyles every cell holding
+            // it, again with no grid cell changing its text
+            |m| {
+                apply(
+                    m,
+                    view_core::events::UiEvent::HlAttrDefine {
+                        id: 2,
+                        fg: Some(0x00FF00),
+                        bg: Some(0x000080),
+                        bold: true,
+                        italic: false,
+                        underline: false,
+                        reverse: false,
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_hl_probe_reply_confirms_a_black_default() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                // the wire-ambiguous zero: painted transparent until a probe
+                // reply says whether the colorscheme genuinely sets black
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0xF8F8F2),
+                        bg: Some(0),
+                        sp: None,
+                    },
+                );
+            },
+            40,
+            12,
+            // the reply lands after its own frame has painted, which the
+            // paint loop's never-await-RPC contract makes the common case
+            |m| probe_reply(m, Some(0xF8F8F2), Some(0)),
+        );
+    }
+
+    /// A highlight-only frame interposed after a partially damaged one: the
+    /// hole [`Shadow`]'s carry-forward can mask for exactly one frame.
+    ///
+    /// Frame two damages a single row, so frame three composites into a
+    /// buffer whose every other row is two frames old. If a highlight change
+    /// produced no damage, that third frame would repaint the carried row
+    /// alone and leave the rest of the screen in the previous theme's colors
+    /// -- one restyled stripe on an otherwise stale screen, which no
+    /// single-transition check and no first-frame check can see.
+    #[test]
+    fn shadow_front_matches_full_recomposite_across_a_highlight_only_frame() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = Model::new();
+        seed_grid(&mut model, 40, 12);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0),
+                sp: None,
+            },
+        );
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+
+        type Step = (&'static str, Box<dyn Fn(&mut Model)>);
+        let steps: Vec<Step> = vec![
+            ("first paint", Box::new(|_: &mut Model| {})),
+            (
+                "edit row 4 only",
+                Box::new(|m: &mut Model| {
+                    m.engine.grid.apply(GridOp::PutLine {
+                        row: 4,
+                        col_start: 3,
+                        cells: vec![("K".into(), 1, 1)],
+                    });
+                }),
+            ),
+            (
+                "probe reply confirms black, no grid change",
+                Box::new(|m: &mut Model| probe_reply(m, Some(0xF8F8F2), Some(0))),
+            ),
+            (
+                "edit row 9 only",
+                Box::new(|m: &mut Model| {
+                    m.engine.grid.apply(GridOp::PutLine {
+                        row: 9,
+                        col_start: 1,
+                        cells: vec![("J".into(), 3, 1)],
+                    });
+                }),
+            ),
+            (
+                "colorscheme swap, no grid change",
+                Box::new(|m: &mut Model| {
+                    apply(
+                        m,
+                        view_core::events::UiEvent::DefaultColorsSet {
+                            fg: Some(0x1A1A1A),
+                            bg: Some(0xEEEEEE),
+                            sp: None,
+                        },
+                    );
+                }),
+            ),
+            (
+                "redefine an on-screen highlight id",
+                Box::new(|m: &mut Model| {
+                    apply(
+                        m,
+                        view_core::events::UiEvent::HlAttrDefine {
+                            id: 3,
+                            fg: Some(0x00FF00),
+                            bg: Some(0x000080),
+                            bold: true,
+                            italic: false,
+                            underline: false,
+                            reverse: false,
+                        },
+                    );
+                }),
+            ),
+        ];
+
+        let mut prev_overlay: Vec<u16> = Vec::new();
+        let mut first = true;
+        for (label, mutate) in steps {
+            mutate(&mut model);
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let cur_overlay = overlay_rows(&surface);
+            let damage = Damage::from_frame(
+                &grid_damage,
+                model.chrome_rows(),
+                &prev_overlay,
+                &cur_overlay,
+                first,
+            );
+            first = false;
+            prev_overlay = cur_overlay;
+            shadow.compose(&model, &surface, &damage);
+            shadow.commit();
+            assert_eq!(
+                shadow.front(),
+                &full_paint(&model, area),
+                "shadow diverged from a full recomposite after: {label}"
+            );
+        }
+    }
+
     #[test]
     fn clip_matches_full_grid_clear_is_full_damage() {
         assert_clip_matches_full(
@@ -2447,8 +2679,14 @@ mod tests {
         let _grid_damage = model.take_paint_damage();
         let surf_b = view_surface::render(&model);
         // sabotage: an EMPTY damage, dropping the changed row 5 -- the clip
-        // paints nothing, so the shadow keeps row 5's stale cell
-        let sabotaged = Damage::default();
+        // paints nothing, so the shadow keeps row 5's stale cell. Built
+        // field-wise because no constructor produces it: `Damage::default`
+        // is whole-frame precisely so this value cannot be reached by
+        // accident.
+        let sabotaged = Damage {
+            full: false,
+            rows: Vec::new(),
+        };
         composite_into(&mut shadow, &model, &surf_b, &sabotaged);
 
         let full = full_paint(&model, area);

@@ -115,8 +115,8 @@ impl ResolvedAttr {
     }
 }
 
-impl From<&view_core::hl::HlAttr> for ResolvedAttr {
-    fn from(attr: &view_core::hl::HlAttr) -> Self {
+impl From<view_core::hl::HlAttr> for ResolvedAttr {
+    fn from(attr: view_core::hl::HlAttr) -> Self {
         Self {
             fg: attr.fg,
             bg: attr.bg,

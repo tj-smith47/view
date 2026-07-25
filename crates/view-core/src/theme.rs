@@ -75,7 +75,7 @@ impl Theme {
     /// Derives a `Theme` from the engine's live highlight table. Pure and
     /// deterministic: the same `HlTable` state always derives the same
     /// `Theme`, so callers may re-derive on every frame with no history to
-    /// track. A named group absent from `hl.groups` -- before the first
+    /// track. A named group with no mapping yet -- before the first
     /// `hl_group_set` batch, or under a minimal colorscheme that never
     /// redefines every builtin group -- falls back to [`Theme::normal`] for
     /// an ordinary chrome group or [`Theme::emphasis`] for a
@@ -92,9 +92,9 @@ impl Theme {
         // (nvim always sends a genuine color or -1/None for it, decoded
         // upstream), so it falls straight back to the raw wire value for
         // that window, self-correcting the moment the fresh reply arrives.
-        let fg = match hl.confirmed {
-            Some(p) if p.generation == hl.probe_generation => p.fg,
-            _ => hl.default_fg,
+        let fg = match hl.confirmed() {
+            Some(p) if p.generation == hl.probe_generation() => p.fg,
+            _ => hl.default_fg(),
         };
         // `bg`, unlike `fg`, has a genuinely ambiguous wire encoding: nvim
         // sends 0 both for "Normal has no background" and for a real
@@ -108,10 +108,10 @@ impl Theme {
         // "unset" when no confirmed value has ever existed at all (a true
         // cold start with no seeded state). A non-zero wire value carries no
         // such ambiguity and keeps applying immediately, exactly like `fg`.
-        let bg = match hl.confirmed {
-            Some(p) if p.generation == hl.probe_generation => p.bg,
-            _ if hl.default_bg == Some(0) => hl.confirmed.and_then(|p| p.bg),
-            _ => hl.default_bg,
+        let bg = match hl.confirmed() {
+            Some(p) if p.generation == hl.probe_generation() => p.bg,
+            _ if hl.default_bg() == Some(0) => hl.confirmed().and_then(|p| p.bg),
+            _ => hl.default_bg(),
         };
         let mut theme = Self {
             fg,
@@ -161,7 +161,7 @@ impl Theme {
     #[must_use]
     pub fn style_for(&self, hl_id: u64, hl: &HlTable) -> ResolvedStyle {
         let mut style = self.normal();
-        if let Some(a) = hl.attrs.get(&hl_id) {
+        if let Some(a) = hl.attr(hl_id) {
             if a.fg.is_some() {
                 style.fg = a.fg;
             }
@@ -177,15 +177,15 @@ impl Theme {
     }
 
     /// One builtin chrome element's resolved style, looked up in
-    /// `hl.groups` by nvim's `hl_group_set` name and resolved the same way
+    /// the table by nvim's `hl_group_set` name and resolved the same way
     /// a grid cell's `hl_id` resolves ([`Theme::style_for`]). `fallback` is
     /// used only when nvim has not associated `name` with an `hl_id` at
     /// all yet; once it has, that resolution is trusted as-is, even where
     /// it happens to equal `fallback`.
     #[must_use]
     pub fn named(&self, hl: &HlTable, name: &str, fallback: ResolvedStyle) -> ResolvedStyle {
-        match hl.groups.get(name) {
-            Some(&hl_id) => self.style_for(hl_id, hl),
+        match hl.group(name) {
+            Some(hl_id) => self.style_for(hl_id, hl),
             None => fallback,
         }
     }
@@ -199,24 +199,22 @@ mod tests {
     use crate::model::Model;
     use crate::msg::Msg;
     use crate::update::update;
-    use std::collections::HashMap;
 
+    /// A table carrying one defined highlight id and one `default_colors_set`
+    /// worth of defaults, built through the same transitions nvim's events
+    /// drive, so no test can pin a state production cannot reach. The
+    /// defaults write leaves `probe_generation` at 1, the generation a probe
+    /// reply for these colors must carry.
     fn table_with(
         default_fg: Option<u32>,
         default_bg: Option<u32>,
         id: u64,
         attr: HlAttr,
     ) -> HlTable {
-        let mut attrs = HashMap::new();
-        attrs.insert(id, attr);
-        HlTable {
-            default_fg,
-            default_bg,
-            attrs,
-            groups: HashMap::new(),
-            probe_generation: 0,
-            confirmed: None,
-        }
+        let mut hl = HlTable::new();
+        hl.define_attr(id, attr);
+        let _ = hl.set_default_colors(default_fg, default_bg);
+        hl
     }
 
     fn no_attrs() -> HlAttr {
@@ -400,7 +398,7 @@ mod tests {
                 reverse: false,
             },
         );
-        hl.groups.insert("StatusLine".to_string(), 9);
+        hl.set_group("StatusLine".to_string(), 9);
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.status_line.fg, Some(0x123456));
         assert_eq!(theme.status_line.bg, Some(0x654321));
@@ -439,15 +437,14 @@ mod tests {
     /// so `default_bg = Some(0)` on the wire must not survive into
     /// `Theme::bg` once a matching probe reply says the key was absent.
     /// Disconfirm: reverting `from_hl`'s generation-matched branch back to
-    /// reading `hl.default_bg` unconditionally makes this assert `Some(0)`
+    /// reading the raw wire default unconditionally makes this assert `Some(0)`
     /// instead of `None` -- an all-black paint where the terminal's own
     /// background should show through instead.
     #[test]
     fn probe_confirmed_no_bg_overrides_the_wire_ambiguous_zero() {
         let mut hl = table_with(Some(0xF8F8F2), Some(0), 1, no_attrs());
-        hl.probe_generation = 1;
-        hl.confirmed = Some(crate::hl::ProbedDefaults {
-            generation: 1,
+        hl.confirm_defaults(crate::hl::ProbedDefaults {
+            generation: hl.probe_generation(),
             fg: Some(0xF8F8F2),
             bg: None,
         });
@@ -462,12 +459,12 @@ mod tests {
     #[test]
     fn probe_confirmed_bg_zero_still_paints_black() {
         let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
-        hl.probe_generation = 1;
-        hl.confirmed = Some(crate::hl::ProbedDefaults {
-            generation: 1,
+        hl.confirm_defaults(crate::hl::ProbedDefaults {
+            generation: hl.probe_generation(),
             fg: Some(0xFFFFFF),
             bg: Some(0),
         });
+        let _ = hl.set_default_colors(Some(0xFFFFFF), Some(0));
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.bg, Some(0));
     }
@@ -483,7 +480,7 @@ mod tests {
     #[test]
     fn cold_start_ambiguous_wire_zero_with_no_confirmed_history_stays_unset() {
         let hl = table_with(Some(0x123456), Some(0x0), 1, no_attrs());
-        assert_eq!(hl.confirmed, None);
+        assert_eq!(hl.confirmed(), None);
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.bg, None);
         assert_eq!(theme.fg, Some(0x123456));
@@ -504,12 +501,14 @@ mod tests {
     fn warm_start_ambiguous_wire_zero_prefers_the_stale_confirmed_value_while_a_probe_is_in_flight()
     {
         let mut hl = table_with(Some(0xF8F8F2), Some(0), 1, no_attrs());
-        hl.probe_generation = 2;
-        hl.confirmed = Some(crate::hl::ProbedDefaults {
-            generation: 1,
+        hl.confirm_defaults(crate::hl::ProbedDefaults {
+            generation: hl.probe_generation(),
             fg: Some(0xF8F8F2),
             bg: None,
         });
+        // a second default_colors_set opens a new generation, leaving the
+        // reply above one behind and its own probe in flight
+        let _ = hl.set_default_colors(Some(0xF8F8F2), Some(0));
         let theme = Theme::from_hl(&hl);
         assert_eq!(
             theme.bg, None,
@@ -526,9 +525,8 @@ mod tests {
     #[test]
     fn warm_start_ambiguous_wire_zero_keeps_a_stale_confirmed_black_while_a_probe_is_in_flight() {
         let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
-        hl.probe_generation = 2;
-        hl.confirmed = Some(crate::hl::ProbedDefaults {
-            generation: 1,
+        hl.confirm_defaults(crate::hl::ProbedDefaults {
+            generation: hl.probe_generation(),
             fg: Some(0xFFFFFF),
             bg: Some(0),
         });
@@ -549,17 +547,19 @@ mod tests {
         // involved. The wire-ambiguous (zero) case is covered by the
         // warm_start_* tests above.
         let mut hl = table_with(Some(0x1), Some(0x282a36), 1, no_attrs());
-        hl.probe_generation = 2;
-        hl.confirmed = Some(crate::hl::ProbedDefaults {
-            generation: 1,
+        hl.confirm_defaults(crate::hl::ProbedDefaults {
+            generation: hl.probe_generation(),
             fg: Some(0x1),
             bg: None,
         });
+        // the newer colorscheme's default_colors_set, which supersedes the
+        // reply above
+        let _ = hl.set_default_colors(Some(0x1), Some(0x282a36));
         let theme = Theme::from_hl(&hl);
         assert_eq!(
             theme.bg,
             Some(0x282a36),
-            "must read the fresh raw value, not the stale generation-1 confirmation"
+            "must read the fresh raw value, not the superseded confirmation"
         );
     }
 }

@@ -147,10 +147,14 @@ impl Grid {
     }
 
     /// Drains the rows changed since the last call, resetting the tracker to
-    /// clean. The repaint loop calls this once per frame to clip compositing
-    /// to the damaged region; see [`GridDamage`].
+    /// clean; see [`GridDamage`].
+    ///
+    /// Crate-private on purpose: the grid is one of two paint inputs, and a
+    /// repaint clipped to this alone strands the styles the other one owns.
+    /// [`crate::model::Model::take_paint_damage`] is the sanctioned drain,
+    /// and folds both.
     #[must_use]
-    pub fn take_dirty(&mut self) -> GridDamage {
+    pub(crate) fn take_dirty(&mut self) -> GridDamage {
         let damage = if self.dirty_full {
             GridDamage {
                 full: true,

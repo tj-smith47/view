@@ -49,14 +49,7 @@ impl Model {
         Self {
             engine: EngineModel {
                 grid: Grid::new(),
-                hl: HlTable {
-                    default_fg: None,
-                    default_bg: None,
-                    attrs: std::collections::HashMap::new(),
-                    groups: std::collections::HashMap::new(),
-                    probe_generation: 0,
-                    confirmed: None,
-                },
+                hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
                 messages: Messages::default(),
@@ -102,13 +95,30 @@ impl Model {
         }
     }
 
-    /// Drains the grid rows changed since the last call, so a repaint can
-    /// clip compositing to the damaged region. The runtime calls this once
-    /// per frame, alongside clearing [`Model::dirty`]; see
+    /// Drains what changed since the last call, so a repaint can clip
+    /// compositing to the damaged region. The runtime calls this once per
+    /// frame, alongside clearing [`Model::dirty`]; see
     /// [`crate::grid::GridDamage`].
+    ///
+    /// The one place damage is drained, because it is the one place that
+    /// sees every input a composite reads: the grid's own changed rows, and
+    /// the highlight table behind every cell's resolved style. A highlight
+    /// change has no rows of its own -- it can restyle the whole screen at
+    /// once -- so it collapses to whole-frame damage. Draining a paint input
+    /// anywhere else would clip a frame against a subset of what it paints
+    /// from, which is why [`crate::grid::Grid::take_dirty`] is crate-private.
     #[must_use]
     pub fn take_paint_damage(&mut self) -> crate::grid::GridDamage {
-        self.engine.grid.take_dirty()
+        // both drained unconditionally: a change left in either tracker
+        // would resurface as damage on some later frame that no longer
+        // needs it
+        let hl_changed = self.engine.hl.take_dirty();
+        let grid = self.engine.grid.take_dirty();
+        if hl_changed {
+            crate::grid::GridDamage::full()
+        } else {
+            grid
+        }
     }
 
     /// The `(width, height)` the engine grid should be resized to, given
