@@ -405,12 +405,9 @@ impl Term {
         // the cells that actually changed against what the terminal already
         // shows; no full-buffer copy runs, because the shadow's buffers swap
         self.shadow.compose(model, surface, &damage);
-        {
-            // disjoint field borrows: `shadow` supplies the cells while
-            // `inner`'s backend encodes them into the shared frame buffer
-            let updates = self.shadow.updates();
-            self.inner.draw(updates)?;
-        }
+        // disjoint field borrows: `shadow` supplies the cells while `inner`'s
+        // backend encodes them into the shared frame buffer
+        self.shadow.emit_updates(&mut self.inner)?;
         self.shadow.commit();
         self.last_overlay_rows = cur_overlay;
         self.last_offset = Some(offset);

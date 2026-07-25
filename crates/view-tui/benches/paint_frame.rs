@@ -66,7 +66,7 @@ fn emit_frame<B: Backend>(
     damage: &Damage,
 ) {
     shadow.compose(model, surface, damage);
-    let _ = backend.draw(shadow.updates());
+    let _ = shadow.emit_updates(backend);
     shadow.commit();
 }
 
