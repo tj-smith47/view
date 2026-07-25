@@ -391,7 +391,9 @@ fn seed_named(hl: &mut HlTable, name: &str, style: ResolvedStyle, offset: u64) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // the env-mutation sites below are the ones ENV_MUTATION_LOCK exists to
+    // bound; each holds the guard across its own restore
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
     use super::*;
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -409,18 +411,33 @@ mod tests {
 
     /// Serializes every test in this module that calls `std::env::set_var`/
     /// `remove_var`. `cargo test` runs a module's tests on multiple threads
-    /// by default, and concurrent mutation of the process environment from
-    /// separate threads races at the libc `environ` level (any thread's
-    /// concurrent `var()` read can observe a table another thread is
-    /// mid-reallocation on), not just at the logical "which var did I read"
-    /// level -- disjoint var names do not make two such tests safe to run
-    /// concurrently. Each env-touching test acquires this for its whole
-    /// body, including its own restore of the prior value.
+    /// by default, and these tests set and then restore the *same* names, so
+    /// two of them overlapping would interleave one's restore with another's
+    /// plant and leave the loser reading a value it never set. The lock is
+    /// held for the whole body, restore included, because releasing it
+    /// between the mutation and the restore is what opens that window.
+    ///
+    /// The hazard is that overlap, not a torn read of libc's `environ`:
+    /// std's own `ENV_LOCK` already excludes `set_var` against `vars_os` and
+    /// against the environment copy inside `Command::spawn`, so a program
+    /// mutating the environment only through `std` cannot observe a table
+    /// mid-reallocation.
     static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`ENV_MUTATION_LOCK`], with poisoning ignored: it orders two
+    /// operations and guards no data, so a test that panicked while holding
+    /// it left nothing behind for the next one to find broken. Propagating
+    /// the poison would turn one real failure into a screenful of unrelated
+    /// ones, none of which names what actually broke.
+    fn env_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn resolved_config_path_prefers_xdg_config_home_then_home_then_appdata() {
-        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
+        let _guard = env_mutation_guard();
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
         let prev_appdata = std::env::var("APPDATA").ok();
@@ -815,7 +832,7 @@ mod tests {
     /// owning disjoint var names.
     #[test]
     fn load_and_store_round_trip_through_xdg_state_home() {
-        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
+        let _guard = env_mutation_guard();
         let dir = tmp_dir("xdg-e2e");
         let prev = std::env::var("XDG_STATE_HOME").ok();
         std::env::set_var("XDG_STATE_HOME", &dir);

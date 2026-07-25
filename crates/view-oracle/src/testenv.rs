@@ -49,6 +49,10 @@
 //!
 //! [`CommandBuilder`]: portable_pty::CommandBuilder
 
+// the guard this module hands out is what makes an environment mutation
+// bounded, so the calls implementing it are the sanctioned ones
+#![allow(clippy::disallowed_methods)]
+
 use std::ffi::{OsStr, OsString};
 use std::sync::{PoisonError, RwLock, RwLockWriteGuard};
 

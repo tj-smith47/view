@@ -15,6 +15,10 @@
 //! A second test added to this file would need the same treatment: it would
 //! run on its own thread, and `EngineSession::spawn` below reads the
 //! environment this one is rewriting.
+
+// sole test in this binary, and its spawn runs on the same thread after
+// the plant, so there is no second reader for a guard to order it against
+#![allow(clippy::disallowed_methods)]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
