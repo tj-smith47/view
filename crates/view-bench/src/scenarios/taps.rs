@@ -51,7 +51,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 }
 
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
-/// two tags share one counter and the tui's tag has its own, so the
+/// two tags share one counter and the tui's tags share their own, so the
 /// streams are checked per origin.
 ///
 /// # Errors
@@ -61,7 +61,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 pub fn verify_no_drops(records: &[TapRecord]) -> Result<(), BenchError> {
     for (name, tags) in [
         ("view-engine", b"WRS".as_slice()),
-        ("view-tui", b"TKUB".as_slice()),
+        ("view-tui", b"TKUBF".as_slice()),
     ] {
         let mut seqs: Vec<u64> = records
             .iter()
@@ -403,7 +403,8 @@ pub fn run_output_path(
     let labels = [
         "redraw-parsed->loop-wake",
         "loop-wake->draw-start",
-        "draw-start->term-written",
+        "draw-start->flush-start",
+        "flush-start->term-written",
     ];
     let mut pools: Vec<Vec<f64>> = vec![Vec::new(); labels.len()];
     for _ in 0..protocol.trials {
@@ -453,7 +454,7 @@ pub fn run_output_path(
                     .filter(|r| r.nanos >= start && r.nanos <= paint.nanos)
                     .copied()
                     .collect();
-                if let Some(chain) = tag_chain(&in_window, b"UB", start) {
+                if let Some(chain) = tag_chain(&in_window, b"UBF", start) {
                     let mut prev = start;
                     for (pool, hit) in pools.iter_mut().zip(&chain) {
                         pool.push(delta_us(prev, hit.nanos));

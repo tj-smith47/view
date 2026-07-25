@@ -253,7 +253,8 @@ pub fn run(
         // with no timer, no recv_timeout, no tick anywhere in this loop.
         if model.dirty {
             let surface = view_surface::render(&model);
-            term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
+            let damage = model.take_paint_damage();
+            term.draw_surface(&model, &surface, &damage)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
         let received = msg_rx.recv();

@@ -102,6 +102,15 @@ impl Model {
         }
     }
 
+    /// Drains the grid rows changed since the last call, so a repaint can
+    /// clip compositing to the damaged region. The runtime calls this once
+    /// per frame, alongside clearing [`Model::dirty`]; see
+    /// [`crate::grid::GridDamage`].
+    #[must_use]
+    pub fn take_paint_damage(&mut self) -> crate::grid::GridDamage {
+        self.engine.grid.take_dirty()
+    }
+
     /// The `(width, height)` the engine grid should be resized to, given
     /// the current terminal size and reserved chrome rows. `update()` sends
     /// this as `Effect::Rpc(RpcCall::TryResize)` whenever the terminal size

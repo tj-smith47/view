@@ -6,13 +6,15 @@
 
 use crate::keys::encode_key;
 use crate::mouse::encode_mouse;
-use crate::paint::composite;
+use crate::paint::{overlay_rows, Damage, Shadow};
 use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::backend::Backend;
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
 use std::sync::mpsc::SyncSender;
+use view_core::grid::GridDamage;
 use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::{Key, Msg};
 use view_surface::{CursorShape, Surface};
@@ -202,9 +204,11 @@ impl Write for FrameBuf {
 /// without exposing `ratatui` types to callers outside this crate.
 pub struct Term {
     guard: TerminalGuard,
-    inner: ratatui::Terminal<ratatui::backend::CrosstermBackend<FrameBuf>>,
-    /// The frame accumulator shared with `inner`'s backend writer; see
-    /// [`FrameBuf`].
+    /// The backend directly, not a `ratatui::Terminal`: this type keeps its
+    /// own [`Shadow`] and emits the diff itself, so a `Terminal` would only
+    /// add two more full-size cell buffers that nothing ever reads.
+    inner: ratatui::backend::CrosstermBackend<FrameBuf>,
+    /// The frame accumulator shared with `inner`'s writer; see [`FrameBuf`].
     frame_buf: Rc<RefCell<Vec<u8>>>,
     /// The last DECSCUSR shape written, so `draw_surface` only re-emits the
     /// escape when the `Surface` cursor's shape actually changed instead of
@@ -216,6 +220,22 @@ pub struct Term {
     /// paint. `None` before the first frame, matching `last_cursor_shape`'s
     /// convention.
     last_mouse_capture: Option<bool>,
+    /// The persistent double-buffered shadow of the terminal's cells. Each
+    /// frame composites only its damaged rows into it, leaving every other
+    /// cell as earlier frames painted it. This is what clips per-frame
+    /// composite CPU to the damaged region instead of re-resolving all
+    /// ~4800 cells every keystroke. Starts zero-sized so the first paint
+    /// (and any later size change) rebuilds it and repaints in full.
+    shadow: Shadow,
+    /// The terminal-space rows every overlay layer covered last frame, so a
+    /// vanished, moved, or shrunk overlay's vacated cells are marked dirty
+    /// this frame and the grid (or the new overlay position) repaints under
+    /// them; see [`crate::paint::Damage::from_frame`].
+    last_overlay_rows: Vec<u16>,
+    /// The reserved chrome-row offset last frame. A change (a tabline
+    /// appearing or vanishing) shifts every grid row, so the next paint
+    /// must be full rather than damage-clipped.
+    last_offset: Option<u16>,
     /// The capabilities resolved during [`Term::init`], either probed or
     /// from a `--tier` override. Stored so [`Term::caps`] can hand a copy
     /// to the caller without re-running the (stdin-consuming, one-shot)
@@ -250,15 +270,16 @@ impl Term {
         let (caps, residue) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen()?;
         let frame_buf = Rc::new(RefCell::new(Vec::new()));
-        let inner = ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(FrameBuf(
-            Rc::clone(&frame_buf),
-        )))?;
+        let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         Ok(Self {
             guard,
             inner,
             frame_buf,
             last_cursor_shape: None,
             last_mouse_capture: None,
+            shadow: Shadow::new(),
+            last_overlay_rows: Vec::new(),
+            last_offset: None,
             caps,
             residue,
         })
@@ -333,7 +354,12 @@ impl Term {
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
-    pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
+    pub fn draw_surface(
+        &mut self,
+        model: &Model,
+        surface: &Surface,
+        grid_damage: &GridDamage,
+    ) -> std::io::Result<()> {
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
@@ -348,7 +374,46 @@ impl Term {
         if model.caps.sync {
             sink.write_all(b"\x1b[?2026h")?;
         }
-        self.inner.draw(|f| composite(model, surface, f))?;
+        // Translate this frame's grid damage into terminal-space rows, unioned
+        // with the overlay rows of this frame and the last so a vanished or
+        // moved overlay repaints the grid it uncovered. A chrome-offset change
+        // (a tabline appearing), a first paint, or a resize forces a
+        // whole-frame repaint instead.
+        let offset = model.chrome_rows();
+        let cur_overlay = overlay_rows(surface);
+        let size = self.inner.size()?;
+        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
+        let resized = self.shadow.resize(area);
+        let force_full = resized || self.last_offset != Some(offset);
+        if resized {
+            // the terminal changed size: its on-screen contents are no longer
+            // trustworthy, so clear it and repaint every cell from a blank
+            // shadow -- the one place a full clear is warranted
+            crossterm::queue!(
+                sink,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            )?;
+        }
+        let damage = Damage::from_frame(
+            grid_damage,
+            offset,
+            &self.last_overlay_rows,
+            &cur_overlay,
+            force_full,
+        );
+        // paint only the damaged rows into the persistent shadow, then emit
+        // the cells that actually changed against what the terminal already
+        // shows; no full-buffer copy runs, because the shadow's buffers swap
+        self.shadow.compose(model, surface, &damage);
+        {
+            // disjoint field borrows: `shadow` supplies the cells while
+            // `inner`'s backend encodes them into the shared frame buffer
+            let updates = self.shadow.updates();
+            self.inner.draw(updates)?;
+        }
+        self.shadow.commit();
+        self.last_overlay_rows = cur_overlay;
+        self.last_offset = Some(offset);
         match surface.cursor {
             Some(spec) => {
                 self.inner.set_cursor_position((spec.col, spec.row))?;
@@ -364,9 +429,12 @@ impl Term {
             sink.write_all(b"\x1b[?2026l")?;
         }
         // the frame's single real write: everything queued above -- mouse
-        // toggles, the sync bracket, ratatui's content diff, cursor
-        // escapes -- reaches the terminal in one syscall, atomically from
-        // the pty reader's point of view
+        // toggles, the sync bracket, the content diff, cursor escapes --
+        // reaches the terminal in one syscall, atomically from the pty
+        // reader's point of view. The tap here brackets exactly that write
+        // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_FLUSH_START);
         let mut out = std::io::stdout().lock();
         {
             let mut frame = self.frame_buf.borrow_mut();

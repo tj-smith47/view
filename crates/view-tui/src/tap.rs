@@ -40,6 +40,12 @@ pub const TAG_LOOP_WAKE: u8 = b'U';
 /// A frame draw is starting (before compositing and the backend diff);
 /// with [`TAG_TERM_WRITTEN`] this brackets the paint's own CPU cost.
 pub const TAG_DRAW_START: u8 = b'B';
+/// The frame's coalesced bytes are fully built and the single pty
+/// `write_all`+`flush` is about to run; with [`TAG_DRAW_START`] this
+/// brackets the composite+diff+encode CPU, and with [`TAG_TERM_WRITTEN`]
+/// it isolates the pty write+flush cost on its own, directly rather than
+/// by subtraction.
+pub const TAG_FLUSH_START: u8 = b'F';
 
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static SINK: OnceLock<Option<File>> = OnceLock::new();

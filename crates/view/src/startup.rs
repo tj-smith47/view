@@ -105,7 +105,8 @@ pub fn paint_shell_frame(
     process_start: Instant,
 ) -> std::io::Result<()> {
     let surface = view_surface::render(model);
-    term.draw_surface(model, &surface)?;
+    // the placeholder shell is always a whole-frame paint
+    term.draw_surface(model, &surface, &view_core::grid::GridDamage::full())?;
     log_shell_paint_latency(process_start);
     Ok(())
 }
@@ -258,7 +259,7 @@ pub fn drain_pre_attach(
 ) -> DrainedInput {
     drain_pre_attach_with(msg_rx, model, |model| {
         let surface = view_surface::render(model);
-        let _ = term.draw_surface(model, &surface);
+        let _ = term.draw_surface(model, &surface, &view_core::grid::GridDamage::full());
     })
 }
 
