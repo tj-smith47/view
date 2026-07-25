@@ -84,6 +84,33 @@ pub fn verify_no_drops(records: &[TapRecord]) -> Result<(), BenchError> {
     Ok(())
 }
 
+/// Creates a FIFO at `path`, readable and writable by its owner.
+///
+/// Two implementations because no one crate here reaches `mkfifo(2)` on
+/// both platforms: `rustix` excludes `mknodat` and `mkfifoat` on Apple
+/// targets, and the standard library has no FIFO constructor at all. Both
+/// arms produce the same file, so every caller above is platform-blind.
+#[cfg(not(target_vendor = "apple"))]
+fn create_fifo(path: &std::path::Path) -> std::io::Result<()> {
+    rustix::fs::mknodat(
+        rustix::fs::CWD,
+        path,
+        rustix::fs::FileType::Fifo,
+        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
+        0,
+    )
+    .map_err(std::io::Error::from)
+}
+
+#[cfg(target_vendor = "apple")]
+fn create_fifo(path: &std::path::Path) -> std::io::Result<()> {
+    nix::unistd::mkfifo(
+        path,
+        nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+    )
+    .map_err(std::io::Error::from)
+}
+
 /// The harness end of the tap channel: a FIFO plus a reader thread
 /// accumulating parsed records.
 pub struct TapPipe {
@@ -100,14 +127,7 @@ impl TapPipe {
     /// Returns [`BenchError::Desync`] if the FIFO cannot be created or
     /// opened.
     pub fn create(path: &std::path::Path) -> Result<Self, BenchError> {
-        rustix::fs::mknodat(
-            rustix::fs::CWD,
-            path,
-            rustix::fs::FileType::Fifo,
-            rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-            0,
-        )
-        .map_err(|e| BenchError::Desync {
+        create_fifo(path).map_err(|e| BenchError::Desync {
             context: format!("creating tap fifo {}: {e}", path.display()),
         })?;
         let file = rustix::fs::openat(

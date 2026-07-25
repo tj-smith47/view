@@ -21,3 +21,8 @@ rustix = { version = "1", default-features = false, features = [
 thiserror = "2.0.18"
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
 vt100 = "0.16.2"
+
+# FIFO creation on Apple targets only, where rustix excludes mknodat and
+# mkfifoat; a safe wrapper, so the crate keeps its no-unsafe guarantee.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["fs"] }
