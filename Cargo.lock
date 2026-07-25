@@ -2015,6 +2015,7 @@ version = "0.0.1"
 name = "view-bench"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "nix 0.31.3",
  "portable-pty",
  "rustix",

@@ -48,6 +48,65 @@ pub const RATIO_HEADROOM: f64 = 1.25;
 /// regression (2x) still cannot hide inside it.
 pub const ABSOLUTE_HEADROOM: f64 = 1.5;
 
+/// The platforms a machine-class name may claim, spelled as
+/// [`std::env::consts::OS`] spells them so the two can be compared
+/// directly.
+const PLATFORM_TOKENS: [&str; 3] = ["linux", "macos", "windows"];
+
+/// The platform `class` claims, or `None` when it claims none or claims
+/// two. The token is matched as a hyphen-delimited segment (`dev-linux`,
+/// `gh-macos`, `controlled-linux-x86`), never as a substring, so a
+/// machine name that merely contains a platform word cannot pass for a
+/// declaration.
+#[must_use]
+pub fn class_platform(class: &str) -> Option<&'static str> {
+    let mut claimed: Option<&'static str> = None;
+    for segment in class.split('-') {
+        let Some(token) = PLATFORM_TOKENS.iter().find(|token| **token == segment) else {
+            continue;
+        };
+        if claimed.is_some_and(|first| first != *token) {
+            return None;
+        }
+        claimed = Some(token);
+    }
+    claimed
+}
+
+/// Rejects running under a class whose platform is not this binary's
+/// host platform.
+///
+/// Rows are measured per-platform under per-platform metric names, and
+/// the machine class is what selects the baseline file. Both sides of
+/// [`require_class_match`] are hand-supplied (the CLI argument and the
+/// file's own field), so they can agree with each other while both being
+/// wrong about the host; the host platform is the one value in the check
+/// that cannot be typed in. Refusing here is what stops one platform's
+/// recorded numbers from becoming another platform's bars.
+///
+/// # Errors
+///
+/// Returns [`BaselineError::ClassPlatformUnnamed`] when the class names
+/// no single platform, and [`BaselineError::HostPlatformMismatch`] when
+/// it names one this binary is not running on.
+pub fn require_host_platform(class: &str) -> Result<(), BaselineError> {
+    let host = std::env::consts::OS;
+    let Some(named) = class_platform(class) else {
+        return Err(BaselineError::ClassPlatformUnnamed {
+            class: class.to_string(),
+            tokens: PLATFORM_TOKENS.join(", "),
+        });
+    };
+    if named != host {
+        return Err(BaselineError::HostPlatformMismatch {
+            class: class.to_string(),
+            named: named.to_string(),
+            host: host.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Whether `class` names a dedicated, load-controlled bench runner. The
 /// policy lives in the class name itself (a `controlled-` prefix) rather
 /// than a separate metadata field so a baseline file can never disagree
@@ -130,6 +189,22 @@ pub enum BaselineError {
         path: String,
         recorded: String,
         current: String,
+    },
+    #[error(
+        "machine class {class:?} names no platform; a class name must carry exactly one of \
+         [{tokens}] as a hyphen-delimited segment, because baselines are per-platform and a \
+         class that will not say which platform it belongs to cannot be checked against the host"
+    )]
+    ClassPlatformUnnamed { class: String, tokens: String },
+    #[error(
+        "machine class {class:?} names platform {named:?} but this binary runs on {host:?}; rows \
+         are measured per-platform under per-platform metric names, so one platform's recorded \
+         numbers are not another's bars"
+    )]
+    HostPlatformMismatch {
+        class: String,
+        named: String,
+        host: String,
     },
     #[error("baseline {path} has no [{scenario}.{fixture}] cell to gate against")]
     MissingCell {
@@ -272,6 +347,25 @@ pub fn uncovered_cells(
         }
     }
     uncovered
+}
+
+/// Recorded metrics of one cell that the run produced no value for, in
+/// deterministic (sorted) order.
+///
+/// [`gate_cell`] walks only the metrics both sides hold, so a cell that
+/// still runs but stops producing one of its recorded numbers (a renamed
+/// metric, a platform whose row measures a different quantity under a
+/// different name) would otherwise report green with that recorded bar
+/// silently untested. This is [`uncovered_cells`] one level down: cell
+/// coverage proves the row ran, metric coverage proves it produced what
+/// the baseline gates.
+#[must_use]
+pub fn unmeasured_metrics(measured: &CellMetrics, recorded: &CellMetrics) -> Vec<String> {
+    recorded
+        .keys()
+        .filter(|metric| !measured.contains_key(*metric))
+        .cloned()
+        .collect()
 }
 
 /// Loads and validates `path`.
@@ -430,6 +524,46 @@ mod tests {
             uncovered.is_empty(),
             "a platform-skipped cell must not read as a coverage gap: {uncovered:?}"
         );
+    }
+
+    #[test]
+    fn class_platform_reads_one_hyphen_delimited_token() {
+        assert_eq!(class_platform("dev-linux"), Some("linux"));
+        assert_eq!(class_platform("gh-macos"), Some("macos"));
+        assert_eq!(class_platform("controlled-linux-x86"), Some("linux"));
+        assert_eq!(class_platform("gh-windows"), Some("windows"));
+        assert_eq!(class_platform("dev-linuxish"), None);
+        assert_eq!(class_platform("bench-box-1"), None);
+        assert_eq!(class_platform("dev-linux-macos"), None);
+    }
+
+    #[test]
+    fn a_class_naming_another_platform_is_refused_on_this_host() {
+        let host = std::env::consts::OS;
+        assert!(
+            require_host_platform(&format!("dev-{host}")).is_ok(),
+            "the host's own platform must be accepted"
+        );
+        let other = if host == "linux" { "macos" } else { "linux" };
+        let err = require_host_platform(&format!("gh-{other}")).unwrap_err();
+        assert!(
+            matches!(err, BaselineError::HostPlatformMismatch { .. }),
+            "a foreign platform's class must be refused, got {err}"
+        );
+        let err = require_host_platform("bench-box-1").unwrap_err();
+        assert!(matches!(err, BaselineError::ClassPlatformUnnamed { .. }));
+    }
+
+    #[test]
+    fn a_recorded_metric_the_run_never_measured_is_named() {
+        let recorded = metrics(&[("pss_mb", 3.4)]);
+        let measured = metrics(&[("phys_footprint_mb", 41.0)]);
+        assert!(
+            gate_cell("memory", "minimal", &measured, &recorded, "dev-linux").is_empty(),
+            "a differently named metric cannot breach, which is why coverage must catch it"
+        );
+        assert_eq!(unmeasured_metrics(&measured, &recorded), vec!["pss_mb"]);
+        assert!(unmeasured_metrics(&recorded, &recorded).is_empty());
     }
 
     #[test]

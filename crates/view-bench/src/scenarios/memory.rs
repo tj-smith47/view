@@ -1,7 +1,10 @@
-//! The memory scenario: view-side PSS from `smaps_rollup` after the
-//! standard workload (10 buffers opened and visited). PSS rather than
-//! peak RSS, and the view process only: the embedded nvim is a separate
-//! process the view-side budget deliberately excludes.
+//! The memory scenario: the view process's settled memory after the
+//! standard workload (10 buffers opened and visited), sampled under the
+//! metric its platform defines (spec 3.4) -- `pss_mb` from
+//! `smaps_rollup` on Linux, `phys_footprint_mb` from the kernel's
+//! per-task footprint ledger on macOS. A proportional/footprint measure
+//! rather than peak RSS, and the view process only: the embedded nvim is
+//! a separate process the view-side budget deliberately excludes.
 
 use std::time::{Duration, Instant};
 
@@ -34,8 +37,26 @@ pub fn workload_content(index: usize) -> String {
     content
 }
 
+/// The metric name this platform records the memory row under, or
+/// `None` where no memory measurement is defined for the platform.
+///
+/// The name differs per platform because the quantity does: PSS and
+/// phys_footprint are related but not the same number. Each platform
+/// therefore records under its own name, so a baseline recorded on one
+/// can never be read as a bar for the other, and a platform whose
+/// measurement is undefined yields `None` rather than a lookalike number
+/// under a borrowed name.
+pub const METRIC: Option<&str> = if cfg!(target_os = "linux") {
+    Some("pss_mb")
+} else if cfg!(target_os = "macos") {
+    Some("phys_footprint_mb")
+} else {
+    None
+};
+
 /// Reads the `Pss:` line of `/proc/<pid>/smaps_rollup`, in megabytes.
-fn read_pss_mb(pid: u32) -> Result<f64, BenchError> {
+#[cfg(target_os = "linux")]
+fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
     let path = format!("/proc/{pid}/smaps_rollup");
     let text = std::fs::read_to_string(&path).map_err(|source| BenchError::Desync {
         context: format!("reading {path}: {source}"),
@@ -58,25 +79,76 @@ fn read_pss_mb(pid: u32) -> Result<f64, BenchError> {
     })
 }
 
+/// Reads the kernel's `phys_footprint` ledger for `pid`, in megabytes.
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
+    // libproc rather than task_info(TASK_VM_INFO): the measured process
+    // is a child, and reading another task's info needs its task port
+    // from task_for_pid, which is root/entitlement gated. proc_pid_rusage
+    // reports the same per-task phys_footprint ledger for any process of
+    // the same user, in one syscall per sample like the Linux read.
+    let pid = i32::try_from(pid).map_err(|source| BenchError::Desync {
+        context: format!("pid {pid} does not fit a C int: {source}"),
+    })?;
+    let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+    // SAFETY: the buffer is a live, correctly aligned `rusage_info_v2`,
+    // which is the layout RUSAGE_INFO_V2 selects; the call writes only
+    // into it and reports failure through its return value.
+    let rc = unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V2, info.as_mut_ptr().cast()) };
+    if rc != 0 {
+        return Err(BenchError::Desync {
+            context: format!(
+                "proc_pid_rusage(pid {pid}) failed: {}",
+                std::io::Error::last_os_error()
+            ),
+        });
+    }
+    // SAFETY: the call returned success, so it initialized the buffer.
+    let footprint = unsafe { info.assume_init() }.ri_phys_footprint;
+    Ok(footprint as f64 / (1024.0 * 1024.0))
+}
+
+/// Fails on a platform for which no memory measurement is defined; the
+/// caller keeps such a platform out of the matrix via [`METRIC`], and
+/// this exists so the scenario still compiles there.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_memory_mb(_pid: u32) -> Result<f64, BenchError> {
+    Err(BenchError::Desync {
+        context: "no memory metric is defined for this platform".to_string(),
+    })
+}
+
 /// The memory run's outcome.
 #[derive(Debug)]
 pub struct MemoryOutcome {
     pub distribution: Distribution,
-    /// p99 of post-workload PSS reads, in megabytes.
-    pub gated_pss_mb: f64,
+    /// The metric name the reading was taken under, carried out of the
+    /// run so the caller records the number under the name the platform
+    /// actually measured rather than a name chosen at the call site.
+    pub metric: &'static str,
+    /// p99 of the post-workload reads, in megabytes.
+    pub gated_mb: f64,
 }
 
-/// Spawns view, drives the 10-buffer workload, then samples PSS
-/// `protocol.warmup + protocol.samples` times. PSS after a settled
-/// workload is a stable quantity; repeated reads sample allocator and
-/// cache jitter around it so the recorded number is a distribution
-/// statistic like every other cell, not a single lucky read.
+/// Spawns view, drives the 10-buffer workload, then reads this
+/// platform's memory metric `protocol.warmup + protocol.samples` times.
+/// Memory after a settled workload is a stable quantity; repeated reads
+/// sample allocator and cache jitter around it so the recorded number is
+/// a distribution statistic like every other cell, not a single lucky
+/// read.
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] if the session never settles, the pid
-/// is unavailable, or `smaps_rollup` cannot be read.
+/// Returns [`BenchError::Desync`] if the platform defines no memory
+/// metric, the session never settles, the pid is unavailable, or the
+/// per-process reading cannot be taken.
 pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, BenchError> {
+    let Some(metric) = METRIC else {
+        return Err(BenchError::Desync {
+            context: "no memory metric is defined for this platform".to_string(),
+        });
+    };
     let mut session = BenchSession::spawn(view)?;
     if !session.settle(Duration::from_secs(2), Duration::from_secs(60)) {
         return Err(BenchError::Desync {
@@ -113,7 +185,7 @@ pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, Bench
     let mut raw_mb = Vec::with_capacity(total);
     let pace = Duration::from_millis(2);
     for _ in 0..total {
-        raw_mb.push(read_pss_mb(pid)?);
+        raw_mb.push(read_memory_mb(pid)?);
         let next = Instant::now() + pace;
         while Instant::now() < next {
             std::thread::yield_now();
@@ -122,10 +194,11 @@ pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, Bench
     session.shutdown();
 
     let distribution = Distribution::from_samples(&raw_mb, protocol.warmup)?;
-    let gated_pss_mb = distribution.p99();
+    let gated_mb = distribution.p99();
     Ok(MemoryOutcome {
         distribution,
-        gated_pss_mb,
+        metric,
+        gated_mb,
     })
 }
 
@@ -143,8 +216,21 @@ mod tests {
     }
 
     #[test]
-    fn own_process_pss_is_readable_and_positive() {
-        let mb = read_pss_mb(std::process::id()).unwrap();
-        assert!(mb > 0.0, "own PSS must be positive, got {mb}");
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn own_process_memory_is_readable_and_positive() {
+        let mb = read_memory_mb(std::process::id()).unwrap();
+        assert!(mb > 0.0, "own memory reading must be positive, got {mb}");
+    }
+
+    #[test]
+    fn metric_name_is_pinned_per_platform() {
+        let expected = if cfg!(target_os = "linux") {
+            Some("pss_mb")
+        } else if cfg!(target_os = "macos") {
+            Some("phys_footprint_mb")
+        } else {
+            None
+        };
+        assert_eq!(METRIC, expected);
     }
 }

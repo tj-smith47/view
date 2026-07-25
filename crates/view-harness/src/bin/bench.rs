@@ -572,10 +572,10 @@ fn run_cell(
                 report::absolute_cell(
                     scenario,
                     fixture,
-                    "view-pss",
+                    outcome.metric,
                     report::AbsoluteStats {
                         p50: outcome.distribution.p50(),
-                        p99: outcome.gated_pss_mb,
+                        p99: outcome.gated_mb,
                         max: outcome.distribution.max(),
                         unit: "MB",
                         samples: outcome.distribution.len(),
@@ -585,10 +585,10 @@ fn run_cell(
             );
             println!(
                 "{}",
-                report::aggregate_line("pss_mb", outcome.gated_pss_mb, 1)
+                report::aggregate_line(outcome.metric, outcome.gated_mb, 1)
             );
             let mut metrics = CellMetrics::new();
-            metrics.insert("pss_mb".to_string(), outcome.gated_pss_mb);
+            metrics.insert(outcome.metric.to_string(), outcome.gated_mb);
             Ok(metrics)
         }
         "flood" => {
@@ -690,14 +690,13 @@ fn walk_files(root: &Path) -> Result<Vec<PathBuf>> {
 }
 
 /// Why `scenario` cannot be measured on this host's platform, if it
-/// cannot. The memory row is defined as PSS read from
-/// `/proc/<pid>/smaps_rollup` (spec 3.4); no equivalent measurement is
-/// defined for other platforms, so the row runs only where its
-/// definition does rather than recording a lookalike number under the
-/// same metric name.
+/// cannot. The memory row is defined per-platform under that platform's
+/// own metric name (spec 3.4), so the row is blocked exactly where the
+/// scenario itself defines no metric rather than on a separate list of
+/// platforms that could drift away from what the scenario measures.
 fn platform_block(scenario: &str) -> Option<&'static str> {
-    if scenario == "memory" && cfg!(not(target_os = "linux")) {
-        Some("PSS via /proc/<pid>/smaps_rollup is a Linux measurement (spec 3.4)")
+    if scenario == "memory" && memory::METRIC.is_none() {
+        Some("no memory metric is defined for this platform (spec 3.4 defines pss_mb on Linux and phys_footprint_mb on macOS)")
     } else {
         None
     }
@@ -757,6 +756,12 @@ fn main() -> Result<()> {
             cli.warmup
         );
     }
+
+    // before any measurement: the class selects both the baseline file
+    // and the per-platform metric names inside it, so a class from
+    // another platform can only ever produce a verdict about numbers
+    // this host does not measure
+    baselines::require_host_platform(&cli.class)?;
 
     let pin = current_engine_pin()?;
     let nvim_bin = cli
@@ -921,6 +926,11 @@ fn main() -> Result<()> {
         baselines::require_pin_match(&file, &pin, &path)?;
         baselines::require_class_match(&file, &cli.class, &path)?;
         let mut breaches = Vec::new();
+        // a cell that ran but stopped producing one of its recorded
+        // numbers passes the forward walk, which compares only the
+        // metrics both sides hold; naming those makes a silently
+        // untested bar as loud as a dropped cell
+        let mut unmeasured = Vec::new();
         for (scenario, fixture, metrics) in &measured {
             let Some(recorded) = file.cell(scenario, fixture) else {
                 bail!(
@@ -931,9 +941,18 @@ fn main() -> Result<()> {
             breaches.extend(baselines::gate_cell(
                 scenario, fixture, metrics, recorded, &cli.class,
             ));
+            for metric in baselines::unmeasured_metrics(metrics, recorded) {
+                unmeasured.push((scenario.clone(), fixture.clone(), metric));
+            }
         }
         for breach in &breaches {
             eprintln!("{breach}");
+        }
+        for (scenario, fixture, metric) in &unmeasured {
+            eprintln!(
+                "GATE COVERAGE FAIL [{scenario}.{fixture}] {metric}: the baseline records this \
+                 metric but the run measured no value for it"
+            );
         }
         // the forward walk proves measured cells sit inside their bars; a
         // full-coverage run must also prove the baseline holds no cell the
@@ -953,7 +972,7 @@ fn main() -> Result<()> {
                 );
             }
         }
-        if breaches.is_empty() && uncovered.is_empty() {
+        if breaches.is_empty() && uncovered.is_empty() && unmeasured.is_empty() {
             println!("gate OK: {} cell(s) within recorded bars", measured.len());
         } else {
             std::process::exit(1);
@@ -966,6 +985,16 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_memory_row_is_blocked_exactly_where_it_has_no_metric() {
+        assert_eq!(
+            platform_block("memory").is_some(),
+            memory::METRIC.is_none(),
+            "the skip and the measurement must never disagree about whether the row can run"
+        );
+        assert!(platform_block("echo").is_none());
+    }
 
     #[test]
     fn skip_announcement_adds_a_checks_page_warning_only_under_gha() {
