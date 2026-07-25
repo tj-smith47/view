@@ -1004,7 +1004,7 @@ mod tests {
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize { width, height });
+        model.engine.apply_grid(GridOp::Resize { width, height });
         model
     }
 

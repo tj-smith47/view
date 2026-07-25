@@ -289,13 +289,13 @@ mod tests {
                 },
             ]),
         );
-        let first = Theme::from_hl(&model.engine.hl);
-        let second = Theme::from_hl(&model.engine.hl);
+        let first = Theme::from_hl(model.engine.hl());
+        let second = Theme::from_hl(model.engine.hl());
         assert_eq!(first, second);
         assert_eq!(first.fg, Some(0xABCDEF));
         assert_eq!(first.bg, Some(0x010203));
         assert_eq!(
-            first.style_for(3, &model.engine.hl),
+            first.style_for(3, model.engine.hl()),
             ResolvedStyle {
                 fg: Some(0xFF0000),
                 bg: Some(0x010203),
@@ -305,7 +305,7 @@ mod tests {
                 reverse: false,
             }
         );
-        assert_eq!(first.status_line, first.style_for(3, &model.engine.hl));
+        assert_eq!(first.status_line, first.style_for(3, model.engine.hl()));
     }
 
     #[test]
@@ -435,11 +435,19 @@ mod tests {
     /// `default_colors_set` alone cannot tell "no background" from
     /// "background is genuinely black" (nvim sends `rgb_bg = 0` for both),
     /// so `default_bg = Some(0)` on the wire must not survive into
-    /// `Theme::bg` once a matching probe reply says the key was absent.
-    /// Disconfirm: reverting `from_hl`'s generation-matched branch back to
-    /// reading the raw wire default unconditionally makes this assert `Some(0)`
-    /// instead of `None` -- an all-black paint where the terminal's own
-    /// background should show through instead.
+    /// `Theme::bg` once a probe reply says the key was absent.
+    ///
+    /// A confirmed-unset `bg` is produced by the generation-matched branch
+    /// and by the ambiguous-zero fallback alike, so this pins the property
+    /// rather than either branch on its own; the branches are told apart by
+    /// `probe_confirmed_bg_zero_for_the_current_generation_still_paints_black`
+    /// and by
+    /// `warm_start_ambiguous_wire_zero_prefers_the_stale_confirmed_value_while_a_probe_is_in_flight`.
+    /// Disconfirm: collapsing `bg`'s derivation to the raw wire default --
+    /// dropping the generation-matched branch and the ambiguous-zero
+    /// fallback together -- makes this assert `Some(0)` instead of `None`,
+    /// an all-black paint where the terminal's own background should show
+    /// through instead.
     #[test]
     fn probe_confirmed_no_bg_overrides_the_wire_ambiguous_zero() {
         let mut hl = table_with(Some(0xF8F8F2), Some(0), 1, no_attrs());
@@ -455,18 +463,42 @@ mod tests {
 
     /// The other half of the same property: a probe reply that confirms
     /// `bg = 0` (a genuinely-black theme, e.g. `guibg=#000000`) must keep
-    /// painting black rather than being conflated with the unset case.
+    /// painting black rather than being conflated with the unset case. The
+    /// reply answers the generation currently open, so both channels read
+    /// it in preference to the wire values.
+    ///
+    /// The wire defaults deliberately disagree with the reply, and the wire
+    /// `bg` is deliberately non-zero: that is the only shape of state in
+    /// which the generation-matched branch is observable at all. Wherever
+    /// the two agree, or wherever the wire `bg` is the ambiguous zero, the
+    /// stale-confirmed fallback derives the identical value, and the branch
+    /// could be deleted outright with every assertion still passing.
+    /// Reaching such a state live needs `nvim_get_hl`'s answer to differ
+    /// from the `default_colors_set` that opened the same generation, so it
+    /// is built here directly rather than driven from an event sequence.
+    /// Disconfirm: deleting the generation-matched arm from either
+    /// derivation makes this read the wire values instead -- `Some(0x1F1F1F)`
+    /// for `fg`, `Some(0x2A2A2A)` for `bg`.
     #[test]
-    fn probe_confirmed_bg_zero_still_paints_black() {
-        let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
+    fn probe_confirmed_bg_zero_for_the_current_generation_still_paints_black() {
+        let mut hl = table_with(Some(0x1F1F1F), Some(0x2A2A2A), 1, no_attrs());
         hl.confirm_defaults(crate::hl::ProbedDefaults {
             generation: hl.probe_generation(),
-            fg: Some(0xFFFFFF),
+            fg: Some(0xF8F8F2),
             bg: Some(0),
         });
-        let _ = hl.set_default_colors(Some(0xFFFFFF), Some(0));
+        assert_eq!(
+            hl.confirmed().map(|p| p.generation),
+            Some(hl.probe_generation()),
+            "the reply must answer the generation currently open"
+        );
         let theme = Theme::from_hl(&hl);
-        assert_eq!(theme.bg, Some(0));
+        assert_eq!(theme.bg, Some(0), "a confirmed black must paint black");
+        assert_eq!(
+            theme.fg,
+            Some(0xF8F8F2),
+            "a matching reply is authoritative for fg as well as bg"
+        );
     }
 
     /// Cold start: no probe reply has ever landed for this session
@@ -522,16 +554,38 @@ mod tests {
     /// is itself `Some(0)`, so the frame keeps painting black through the
     /// switch rather than flashing transparent -- "prefer the last known
     /// value" cuts both directions, not just toward `None`.
+    ///
+    /// The opposed generation relationship to
+    /// `probe_confirmed_bg_zero_for_the_current_generation_still_paints_black`
+    /// is what this pins: there the reply answers the open generation and is
+    /// read, here it answers a superseded one and is not. The reply's `fg`
+    /// deliberately differs from the wire's so that difference is
+    /// observable, since an unread reply leaves `fg` coming off the wire.
+    /// Disconfirm: dropping the `p.generation == hl.probe_generation()`
+    /// guard makes `fg` read `Some(0xC0FFEE)` instead.
     #[test]
     fn warm_start_ambiguous_wire_zero_keeps_a_stale_confirmed_black_while_a_probe_is_in_flight() {
         let mut hl = table_with(Some(0xFFFFFF), Some(0), 1, no_attrs());
         hl.confirm_defaults(crate::hl::ProbedDefaults {
             generation: hl.probe_generation(),
-            fg: Some(0xFFFFFF),
+            fg: Some(0xC0FFEE),
             bg: Some(0),
         });
+        // a second default_colors_set opens a new generation, leaving the
+        // reply above one behind and its own probe in flight
+        let _ = hl.set_default_colors(Some(0xFFFFFF), Some(0));
+        assert_ne!(
+            hl.confirmed().map(|p| p.generation),
+            Some(hl.probe_generation()),
+            "the reply must be one generation behind the open probe"
+        );
         let theme = Theme::from_hl(&hl);
         assert_eq!(theme.bg, Some(0));
+        assert_eq!(
+            theme.fg,
+            Some(0xFFFFFF),
+            "a reply for a superseded generation must not be read"
+        );
     }
 
     /// A `confirmed` value left over from a superseded `DefaultColorsSet`

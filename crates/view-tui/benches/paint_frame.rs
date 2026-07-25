@@ -34,7 +34,7 @@ const HEIGHT: u16 = 40;
 /// fast path.
 fn populated_model() -> Model {
     let mut model = Model::new();
-    model.engine.grid.apply(GridOp::Resize {
+    model.engine.apply_grid(GridOp::Resize {
         width: WIDTH,
         height: HEIGHT,
     });
@@ -45,7 +45,7 @@ fn populated_model() -> Model {
                 (ch.to_string(), u64::from((row + col) % 7), 1)
             })
             .collect();
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row,
             col_start: 0,
             cells,
@@ -94,7 +94,7 @@ fn bench_paint_frame_full(c: &mut Criterion) {
     c.bench_function("paint_frame_full_recomposite", |b| {
         b.iter(|| {
             flip = !flip;
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row: 5,
                 col_start: 5,
                 cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],
@@ -125,7 +125,7 @@ fn bench_paint_frame(c: &mut Criterion) {
             // one changed cell per frame, alternating so no iteration is a
             // no-op diff
             flip = !flip;
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row: 5,
                 col_start: 5,
                 cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],
@@ -166,7 +166,7 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
     c.bench_function("paint_frame_steady_state_crossterm", |b| {
         b.iter(|| {
             flip = !flip;
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row: 5,
                 col_start: 5,
                 cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],

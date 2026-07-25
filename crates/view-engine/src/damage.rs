@@ -1067,14 +1067,14 @@ mod tests {
     /// Enough of `model`'s `Grid` to compare final states: every cell plus
     /// size plus the cursor, since `Grid` itself has no `PartialEq`.
     fn grid_state(model: &Model) -> (Vec<view_core::grid::Cell>, (u16, u16), (u16, u16)) {
-        let (w, h) = model.engine.grid.size();
+        let (w, h) = model.engine.grid().size();
         let mut cells = Vec::with_capacity(usize::from(w) * usize::from(h));
         for r in 0..h {
             for c in 0..w {
-                cells.push(model.engine.grid.cell(r, c).cloned().unwrap_or_default());
+                cells.push(model.engine.grid().cell(r, c).cloned().unwrap_or_default());
             }
         }
-        (cells, (w, h), model.engine.grid.cursor())
+        (cells, (w, h), model.engine.grid().cursor())
     }
 
     /// Applies `events` through `update()` (the same `UiEvent` -> `GridOp`

@@ -255,7 +255,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
             .expect("getline must return a String result");
 
         assert_eq!(
-            model.engine.grid.row_text(i as u16).trim_end(),
+            model.engine.grid().row_text(i as u16).trim_end(),
             expected_text,
             "compacted damage's final grid row {i} does not match nvim's own \
              reported buffer line (top_line={top_line})"
@@ -281,7 +281,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     // (offset from top_line, also 1-based) while the column carries over
     // directly.
     let expected_cursor_row = nvim_cursor_line - top_line;
-    let (grid_cursor_row, grid_cursor_col) = model.engine.grid.cursor();
+    let (grid_cursor_row, grid_cursor_col) = model.engine.grid().cursor();
 
     assert_eq!(
         i64::from(grid_cursor_row),

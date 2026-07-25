@@ -196,12 +196,26 @@ impl HlTable {
         self.dirty = true;
     }
 
+    /// Records that the resolved styles moved for a reason no single
+    /// mutator above saw: a whole-table replacement, where the incoming
+    /// table's own flag describes its construction rather than the swap.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
     /// Drains whether anything here changed since the last call. Called once
     /// per frame by [`crate::model::Model::take_paint_damage`], which turns
     /// a `true` into whole-frame damage: a style change has no rows of its
     /// own, since it can restyle every cell on screen at once.
+    ///
+    /// Crate-private for the same reason [`crate::grid::Grid::take_dirty`]
+    /// is: the highlight table is one of two paint inputs, and whoever
+    /// drains it in isolation clips the next frame against a subset of what
+    /// that frame paints from. Draining it here would leave the grid's own
+    /// rows as the whole of the damage, which is exactly the one restyled
+    /// stripe on an otherwise stale screen the fold exists to prevent.
     #[must_use]
-    pub fn take_dirty(&mut self) -> bool {
+    pub(crate) fn take_dirty(&mut self) -> bool {
         std::mem::replace(&mut self.dirty, false)
     }
 }

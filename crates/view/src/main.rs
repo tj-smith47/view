@@ -113,7 +113,9 @@ fn main() -> Result<()> {
             // emphasis fallback for the pre-attach frame (see
             // theme_cache::load's doc comment)
             if let Some(cached) = cached {
-                theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
+                model
+                    .engine
+                    .replace_hl(theme_cache::seeded_hl_table(&cached));
             }
         }
         None => {
@@ -224,7 +226,7 @@ fn main() -> Result<()> {
 /// cannot copy one and silently miss the store).
 fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
     if let Some(path) = config_path {
-        theme_cache::store(Theme::from_hl(&model.engine.hl), path);
+        theme_cache::store(Theme::from_hl(model.engine.hl()), path);
     }
 }
 

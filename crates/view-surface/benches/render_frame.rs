@@ -14,11 +14,11 @@ use view_core::update::update;
 
 fn full_model() -> Model {
     let mut model = Model::new();
-    model.engine.grid.apply(GridOp::Resize {
+    model.engine.apply_grid(GridOp::Resize {
         width: 120,
         height: 40,
     });
-    model.engine.grid.apply(GridOp::PutLine {
+    model.engine.apply_grid(GridOp::PutLine {
         row: 0,
         col_start: 0,
         cells: vec![("x".to_string(), 0, 120)],

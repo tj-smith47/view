@@ -240,7 +240,7 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
     // derived once per frame from the engine's live highlight state: a
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
-    let theme = Theme::from_hl(&model.engine.hl);
+    let theme = Theme::from_hl(model.engine.hl());
     for layer in &surface.layers {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
@@ -249,9 +249,9 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
         match &layer.kind {
             LayerKind::EngineGrid => {
                 paint_grid(
-                    &model.engine.grid,
+                    model.engine.grid(),
                     &theme,
-                    &model.engine.hl,
+                    model.engine.hl(),
                     area,
                     damage,
                     buf,
@@ -831,11 +831,11 @@ mod tests {
     #[test]
     fn composite_paints_grid_layer_content() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("h".into(), 0, 1), ("i".into(), 0, 1)],
@@ -857,17 +857,21 @@ mod tests {
     /// for the wire-verified shape this mirrors), a default grid cell must
     /// carry `Color::Reset` (ratatui's "no color set" default), never an
     /// explicit RGB, so the real terminal's own background shows through.
-    /// Disconfirm: reverting `Theme::from_hl`'s generation-matched branch
-    /// (see `theme.rs`) makes this assert `Color::Rgb(0,0,0)` instead -- an
-    /// all-black paint where transparency was expected.
+    /// Disconfirm: collapsing `Theme::from_hl`'s `bg` derivation to the raw
+    /// wire default (see `theme.rs`) makes this assert `Color::Rgb(0,0,0)`
+    /// instead -- an all-black paint where transparency was expected. Both
+    /// of that derivation's confirmed-reading branches produce the same
+    /// value for the state here, so it takes dropping the pair to move this
+    /// assertion; the branches are told apart from each other in `theme.rs`,
+    /// against state built for that purpose.
     #[test]
     fn transparent_confirmed_default_paints_grid_cells_with_no_bg_color() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -880,7 +884,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation();
+        let generation = model.engine.hl().probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -920,11 +924,11 @@ mod tests {
     #[test]
     fn warm_start_confirmed_transparent_bg_survives_attachs_ambiguous_default_colors_set() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -932,11 +936,10 @@ mod tests {
         // mirrors the pre-attach state seeded from persisted state: a
         // confirmed value at the table's starting generation, from a prior
         // session's cached, already-disambiguated theme
-        let generation = model.engine.hl.probe_generation();
+        let generation = model.engine.hl().probe_generation();
         model
             .engine
-            .hl
-            .confirm_defaults(view_core::hl::ProbedDefaults {
+            .confirm_hl_defaults(view_core::hl::ProbedDefaults {
                 generation,
                 fg: Some(0xF8F8F2),
                 bg: None,
@@ -971,11 +974,11 @@ mod tests {
     #[test]
     fn genuinely_black_confirmed_default_still_paints_black() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -988,7 +991,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation();
+        let generation = model.engine.hl().probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -1024,11 +1027,11 @@ mod tests {
     #[test]
     fn cmdline_overlay_paints_while_shown_and_vanishes_with_cmdlinehide() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: vec![("x".into(), 0, 1), ("y".into(), 0, 1)],
@@ -1077,11 +1080,11 @@ mod tests {
     #[test]
     fn cmdline_overlay_claims_the_full_bottom_row_no_grid_glyph_bleeds_through() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: "STATUSLIN".chars().map(|c| (c.to_string(), 0, 1)).collect(),
@@ -1127,11 +1130,11 @@ mod tests {
     #[test]
     fn cmdline_prompt_mode_renders_prompt_label_and_places_cursor_after_it() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: "STATUSLINESTATUSLINE"
@@ -1188,11 +1191,11 @@ mod tests {
     #[test]
     fn tabline_reserves_the_top_row_and_never_covers_resting_grid_text() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1), ("b".into(), 0, 1)],
@@ -1217,11 +1220,11 @@ mod tests {
         // the grid itself only reflects that once nvim's GridResize round
         // trips, which this test drives directly to exercise the settled
         // (post-round-trip) frame.
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 2,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1), ("b".into(), 0, 1)],
@@ -1259,16 +1262,16 @@ mod tests {
     #[test]
     fn tabline_update_without_matching_grid_resize_clips_the_transient_overflow_row() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1)],
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: vec![("z".into(), 0, 1)],
@@ -1326,11 +1329,11 @@ mod tests {
     #[test]
     fn single_tab_reserves_no_row_and_grid_fills_the_full_frame() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("z".into(), 0, 1)],
@@ -1347,7 +1350,7 @@ mod tests {
     #[test]
     fn messages_overlay_renders_stacked_toasts_top_right() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1392,7 +1395,7 @@ mod tests {
     #[test]
     fn messages_overlay_wide_char_advances_two_columns_not_one() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1433,7 +1436,7 @@ mod tests {
     #[test]
     fn messages_overlay_multiline_message_gets_one_row_per_physical_line_and_clears_its_box() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 26,
             height: 5,
         });
@@ -1442,7 +1445,7 @@ mod tests {
         // toast's own clear must overwrite, or it bleeds through exactly
         // like the reported foreign glyphs at a message row's right edge
         for row in 0..2u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("X".into(), 0, 26)],
@@ -1498,17 +1501,17 @@ mod tests {
     /// dropped the tail of that `Vec` -- the two newest lines, including
     /// the persistent `echoerr` -- without `visible_lines`'s own
     /// persistent-line-priority eviction ever getting a say. Disconfirm:
-    /// reverting `render()`'s two `.saturating_sub(2)` budget lines back
+    /// reverting `render()`'s three `.saturating_sub(2)` budget clamps back
     /// to the raw `grid_h`/`grid_w` reproduces exactly this -- `cargo test
     /// -p view-tui messages_toast_paints_the_newest_persistent_line`
-    /// fails with the interior's last row reading blank border-fill
-    /// instead of "critical error", confirmed by running it against the
-    /// reverted budget before restoring the fix.
+    /// fails with the interior's last row reading `"info2"`, a transient
+    /// line three older than the dropped `echoerr`, instead of
+    /// "critical error".
     #[test]
     fn messages_toast_paints_the_newest_persistent_line_at_the_clamp_boundary_instead_of_silently_dropping_it(
     ) {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 5,
         });
@@ -1591,7 +1594,7 @@ mod tests {
     #[test]
     fn messages_toast_shows_the_widest_lines_final_interior_cell_at_the_width_clamp_boundary() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
@@ -1633,7 +1636,7 @@ mod tests {
     #[test]
     fn framed_toast_renders_border_glyphs_on_all_four_edges() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
@@ -1718,18 +1721,18 @@ mod tests {
     #[test]
     fn empty_message_log_paints_nothing() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 8,
             height: 4,
         });
         for row in 0..4u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("Z".into(), 0, 8)],
             });
         }
-        let theme = Theme::from_hl(&model.engine.hl);
+        let theme = Theme::from_hl(model.engine.hl());
         // an area shaped like a real toast rect would occupy, handed
         // straight to paint_messages with an empty slice: render()'s own
         // contract never emits a Messages layer for an empty log, but this
@@ -1748,9 +1751,9 @@ mod tests {
                 let fa = f.area();
                 let buf = f.buffer_mut();
                 paint_grid(
-                    &model.engine.grid,
+                    model.engine.grid(),
                     &theme,
-                    &model.engine.hl,
+                    model.engine.hl(),
                     fa,
                     &Damage::full(),
                     buf,
@@ -1774,12 +1777,12 @@ mod tests {
     fn clear_under_frame_overwrites_grid_content_across_the_whole_framed_rect_including_border_cells(
     ) {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
         for row in 0..5u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("Z".into(), 0, 10)],
@@ -1823,7 +1826,7 @@ mod tests {
     #[test]
     fn control_characters_in_message_text_do_not_panic_and_are_sanitized() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1856,11 +1859,11 @@ mod tests {
     #[test]
     fn control_characters_in_grid_cell_text_do_not_panic_and_are_sanitized() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("\u{7}".into(), 0, 1)],
@@ -1876,7 +1879,7 @@ mod tests {
     #[test]
     fn popupmenu_overlay_anchors_at_its_grid_coords_and_highlights_selected() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 6,
         });
@@ -2068,7 +2071,7 @@ mod tests {
             (
                 "edit row 3",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row: 3,
                         col_start: 2,
                         cells: vec![("Z".into(), 1, 1)],
@@ -2078,7 +2081,7 @@ mod tests {
             (
                 "edit row 7",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row: 7,
                         col_start: 5,
                         cells: vec![("Q".into(), 2, 1)],
@@ -2107,7 +2110,7 @@ mod tests {
             (
                 "scroll",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::Scroll {
+                    m.engine.apply_grid(GridOp::Scroll {
                         top: 2,
                         bot: 10,
                         left: 0,
@@ -2119,7 +2122,7 @@ mod tests {
             (
                 "edit row 0",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row: 0,
                         col_start: 0,
                         cells: vec![("W".into(), 3, 1)],
@@ -2196,7 +2199,7 @@ mod tests {
     /// stranded stale cell from an under-clip is a visible mismatch rather
     /// than two default spaces comparing equal by accident.
     fn seed_grid(model: &mut Model, width: u16, height: u16) {
-        model.engine.grid.apply(GridOp::Resize { width, height });
+        model.engine.apply_grid(GridOp::Resize { width, height });
         for row in 0..height {
             let cells = (0..width)
                 .map(|col| {
@@ -2204,7 +2207,7 @@ mod tests {
                     (ch.to_string(), u64::from((row + col) % 5), 1)
                 })
                 .collect();
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells,
@@ -2221,7 +2224,7 @@ mod tests {
             40,
             12,
             |m| {
-                m.engine.grid.apply(GridOp::PutLine {
+                m.engine.apply_grid(GridOp::PutLine {
                     row: 5,
                     col_start: 7,
                     cells: vec![("Z".into(), 2, 1)],
@@ -2240,7 +2243,7 @@ mod tests {
             12,
             |m| {
                 for row in 3..=6 {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row,
                         col_start: 0,
                         cells: vec![("Q".into(), 1, 40)],
@@ -2259,7 +2262,7 @@ mod tests {
             40,
             12,
             |m| {
-                m.engine.grid.apply(GridOp::Scroll {
+                m.engine.apply_grid(GridOp::Scroll {
                     top: 2,
                     bot: 10,
                     left: 0,
@@ -2374,7 +2377,7 @@ mod tests {
     /// a `default_colors_set` triggered. A `Msg`, not a `UiEvent`, so it
     /// cannot go through `apply`.
     fn probe_reply(model: &mut Model, fg: Option<u32>, bg: Option<u32>) {
-        let generation = model.engine.hl.probe_generation();
+        let generation = model.engine.hl().probe_generation();
         let _ = view_core::update::update(
             model,
             view_core::msg::Msg::HlProbeReply { generation, fg, bg },
@@ -2513,7 +2516,7 @@ mod tests {
             (
                 "edit row 4 only",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row: 4,
                         col_start: 3,
                         cells: vec![("K".into(), 1, 1)],
@@ -2527,7 +2530,7 @@ mod tests {
             (
                 "edit row 9 only",
                 Box::new(|m: &mut Model| {
-                    m.engine.grid.apply(GridOp::PutLine {
+                    m.engine.apply_grid(GridOp::PutLine {
                         row: 9,
                         col_start: 1,
                         cells: vec![("J".into(), 3, 1)],
@@ -2600,7 +2603,7 @@ mod tests {
             |m| seed_grid(m, 40, 12),
             40,
             12,
-            |m| m.engine.grid.apply(GridOp::Clear),
+            |m| m.engine.apply_grid(GridOp::Clear),
         );
     }
 
@@ -2671,7 +2674,7 @@ mod tests {
         let mut shadow = ratatui::buffer::Buffer::empty(area);
         composite_into(&mut shadow, &model, &surf_a, &Damage::full());
 
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 5,
             col_start: 7,
             cells: vec![("Z".into(), 2, 1)],

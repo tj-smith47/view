@@ -159,7 +159,7 @@ impl Session {
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
     #[must_use]
     pub fn screen_text(&self) -> String {
-        raster::screen_text(&self.surface(), &self.model.engine.grid)
+        raster::screen_text(&self.surface(), self.model.engine.grid())
     }
 }
 
@@ -332,7 +332,7 @@ impl EngineSession {
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
     #[must_use]
     pub fn screen_text(&self) -> String {
-        raster::screen_text(&self.surface(), &self.model.engine.grid)
+        raster::screen_text(&self.surface(), self.model.engine.grid())
     }
 
     /// Renders the current [`Surface`] to one row of text per canvas line,
@@ -342,7 +342,7 @@ impl EngineSession {
     /// string.
     #[must_use]
     pub fn screen_rows(&self) -> Vec<String> {
-        raster::screen_rows(&self.surface(), &self.model.engine.grid)
+        raster::screen_rows(&self.surface(), self.model.engine.grid())
     }
 
     /// Captures the current [`Screen`] -- glyph rows plus per-cell highlight
@@ -356,8 +356,12 @@ impl EngineSession {
     pub fn screen(&self) -> Screen {
         let surface = self.surface();
         Screen {
-            rows: raster::screen_rows(&surface, &self.model.engine.grid),
-            attr_rows: raster::attr_rows(&surface, &self.model.engine.grid, &self.model.engine.hl),
+            rows: raster::screen_rows(&surface, self.model.engine.grid()),
+            attr_rows: raster::attr_rows(
+                &surface,
+                self.model.engine.grid(),
+                self.model.engine.hl(),
+            ),
         }
     }
 

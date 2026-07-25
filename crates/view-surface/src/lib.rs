@@ -135,7 +135,7 @@ pub struct Surface {
 #[must_use]
 pub fn render(model: &Model) -> Surface {
     let engine = &model.engine;
-    let (grid_w, grid_h) = engine.grid.size();
+    let (grid_w, grid_h) = engine.grid().size();
     let offset = model.chrome_rows();
 
     let mut layers = vec![Layer {
@@ -384,7 +384,7 @@ fn cmdline_cursor_col(cmdline: &CmdlineState) -> u16 {
 /// grid has no cells to place it in (a freshly started `Model` before the
 /// first resize).
 fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
-    let (width, height) = model.engine.grid.size();
+    let (width, height) = model.engine.grid().size();
     if width == 0 || height == 0 {
         return None;
     }
@@ -393,7 +393,7 @@ fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
         let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
         (height.saturating_sub(1), col)
     } else {
-        model.engine.grid.cursor()
+        model.engine.grid().cursor()
     };
     Some(CursorSpec {
         row: row.saturating_add(offset),
@@ -413,7 +413,7 @@ mod tests {
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize { width, height });
+        model.engine.apply_grid(GridOp::Resize { width, height });
         model
     }
 
@@ -431,8 +431,7 @@ mod tests {
         let mut model = model_with_grid(10, 5);
         model
             .engine
-            .grid
-            .apply(GridOp::CursorGoto { row: 2, col: 4 });
+            .apply_grid(GridOp::CursorGoto { row: 2, col: 4 });
 
         let surface = render(&model);
 
@@ -693,8 +692,7 @@ mod tests {
         let mut model = model_with_grid(10, 5);
         model
             .engine
-            .grid
-            .apply(GridOp::CursorGoto { row: 2, col: 4 });
+            .apply_grid(GridOp::CursorGoto { row: 2, col: 4 });
         apply(
             &mut model,
             UiEvent::TablineUpdate {

@@ -255,7 +255,7 @@ mod tests {
 
     fn model_with_grid(width: u16, height: u16) -> Model {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize { width, height });
+        model.engine.apply_grid(GridOp::Resize { width, height });
         model
     }
 
@@ -266,14 +266,14 @@ mod tests {
     #[test]
     fn plain_grid_renders_row_text_joined_by_newlines() {
         let mut model = model_with_grid(5, 2);
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("h".into(), 0, 1), ("i".into(), 0, 1)],
         });
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, &model.engine.grid);
+        let text = screen_text(&surface, model.engine.grid());
 
         assert_eq!(text, "hi   \n     ");
     }
@@ -282,7 +282,7 @@ mod tests {
     fn empty_grid_renders_empty_string() {
         let model = Model::new();
         let surface = view_surface::render(&model);
-        assert_eq!(screen_text(&surface, &model.engine.grid), "");
+        assert_eq!(screen_text(&surface, model.engine.grid()), "");
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, &model.engine.grid);
+        let text = screen_text(&surface, model.engine.grid());
 
         let last_row = text.lines().next_back().unwrap();
         assert!(
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn cmdline_overlay_claims_the_full_bottom_row() {
         let mut model = model_with_grid(20, 3);
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: "NvimTree_1 [-] COMMAND"
@@ -340,7 +340,7 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, &model.engine.grid);
+        let text = screen_text(&surface, model.engine.grid());
 
         let last_row = text.lines().next_back().unwrap();
         assert_eq!(
@@ -362,7 +362,7 @@ mod tests {
         );
         let surface = view_surface::render(&model);
 
-        let text = screen_text(&surface, &model.engine.grid);
+        let text = screen_text(&surface, model.engine.grid());
 
         assert!(
             text.lines().any(|l| l.trim_end().ends_with("hi")),

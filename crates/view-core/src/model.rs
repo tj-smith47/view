@@ -1,8 +1,8 @@
 //! Application state `update()` reads and mutates. No I/O, no rendering.
 
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
-use crate::grid::Grid;
-use crate::hl::HlTable;
+use crate::grid::{Grid, GridOp};
+use crate::hl::{HlAttr, HlTable, ProbedDefaults};
 
 /// The complete application state.
 #[non_exhaustive]
@@ -149,8 +149,19 @@ impl Default for Model {
 /// wire.
 #[non_exhaustive]
 pub struct EngineModel {
-    pub grid: Grid,
-    pub hl: HlTable,
+    /// The engine grid. Private, and reachable only through
+    /// [`EngineModel::grid`] and [`EngineModel::apply_grid`], because it is
+    /// one of the two paint inputs that track their own damage: a `pub`
+    /// field makes `engine.grid = Grid::new()` compile, which installs a
+    /// tracker holding none of the damage the replacement caused and clips
+    /// the next frame to nothing.
+    grid: Grid,
+    /// The highlight table, private for the same reason `grid` is; see
+    /// [`EngineModel::hl`] and the mutators beside it. Whole-table
+    /// replacement stays available through [`EngineModel::replace_hl`],
+    /// which records the damage a replacement causes instead of discarding
+    /// it.
+    hl: HlTable,
     pub mode: ModeState,
     pub cmdline: Option<CmdlineState>,
     pub messages: Messages,
@@ -162,6 +173,75 @@ pub struct EngineModel {
     /// swallow the host terminal's own selection/scrollback gestures even
     /// when nvim's `'mouse'` option is off.
     pub mouse_on: bool,
+}
+
+// the three accessors the compositor reaches for every frame carry
+// `#[inline]`: they are field reads, the workspace builds without LTO, and
+// without the hint nothing outside this crate can see through them
+impl EngineModel {
+    /// The engine grid, for reading: its cells, size, and cursor position.
+    #[must_use]
+    #[inline]
+    pub fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    /// Applies one decoded `ext_linegrid` operation to the grid. The only
+    /// way to mutate it, so every mutation goes through the tracker that
+    /// records which rows it touched.
+    #[inline]
+    pub fn apply_grid(&mut self, op: GridOp) {
+        self.grid.apply(op);
+    }
+
+    /// The highlight table, for reading: default colors, per-id attributes,
+    /// builtin group mappings, and the probe generation.
+    #[must_use]
+    #[inline]
+    pub fn hl(&self) -> &HlTable {
+        &self.hl
+    }
+
+    /// Defines (or redefines) one highlight id's attributes, per
+    /// `hl_attr_define`.
+    pub fn define_hl_attr(&mut self, hl_id: u64, attr: HlAttr) {
+        self.hl.define_attr(hl_id, attr);
+    }
+
+    /// Associates a builtin UI element name with the `hl_id` it resolves
+    /// through, per `hl_group_set`.
+    pub fn set_hl_group(&mut self, name: String, hl_id: u64) {
+        self.hl.set_group(name, hl_id);
+    }
+
+    /// Records new default colors, returning the probe generation the
+    /// emitted `nvim_get_hl` call must carry; see
+    /// [`HlTable::set_default_colors`] for why dropping it is never correct.
+    #[must_use]
+    pub fn set_hl_default_colors(&mut self, fg: Option<u32>, bg: Option<u32>) -> u64 {
+        self.hl.set_default_colors(fg, bg)
+    }
+
+    /// Accepts one probe reply as the confirmed disambiguation of the
+    /// current defaults; see [`HlTable::confirm_defaults`] for the
+    /// generation check the caller owes first.
+    pub fn confirm_hl_defaults(&mut self, probe: ProbedDefaults) {
+        self.hl.confirm_defaults(probe);
+    }
+
+    /// Installs a whole highlight table, as startup does with one seeded
+    /// from a persisted theme, and records that every resolved style on
+    /// screen just moved.
+    ///
+    /// The damage mark is the reason this exists rather than a `pub` field
+    /// or a `&mut` accessor: a replacement changes the styles behind every
+    /// painted cell while touching no grid row, so a plain assignment would
+    /// leave the next frame clipped to whatever rows the grid happened to
+    /// damage, painting the new table's colors onto those rows alone.
+    pub fn replace_hl(&mut self, hl: HlTable) {
+        self.hl = hl;
+        self.hl.mark_dirty();
+    }
 }
 
 /// nvim mode state: the cursor/highlight property table from the last
