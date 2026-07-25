@@ -46,10 +46,14 @@ pub const TAG_DRAW_START: u8 = b'B';
 /// it isolates the pty write+flush cost on its own, directly rather than
 /// by subtraction.
 pub const TAG_FLUSH_START: u8 = b'F';
-/// The frame's terminal size has been read back. With [`TAG_DRAW_START`]
-/// this isolates the frame preamble and the size query, whose backend
-/// implementation opens the controlling terminal on every call, from the
-/// compositing that follows it.
+/// The frame's mode toggles are queued and its overlay rows resolved,
+/// immediately before the terminal size is queried; with
+/// [`TAG_DRAW_START`] this brackets the frame preamble on its own.
+pub const TAG_FRAME_PREPARED: u8 = b'P';
+/// The frame's terminal size has been read back. With
+/// [`TAG_FRAME_PREPARED`] this isolates the size query, whose backend
+/// implementation opens the controlling terminal on every call, from
+/// everything around it.
 pub const TAG_SIZE_PROBED: u8 = b'G';
 /// This frame's damaged rows are composited into the shadow. With
 /// [`TAG_SIZE_PROBED`] this brackets damage resolution and compositing,

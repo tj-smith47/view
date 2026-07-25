@@ -56,7 +56,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 /// Every tap tag, grouped by the crate whose sequence counter numbers it.
 /// A tag missing from this table is a tag whose loss no drop check can
 /// see, so the chain walkers below assert their own tags against it.
-const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFGC")];
+const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGC")];
 
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
 /// two tags share one counter and the tui's tags share their own, so the
@@ -508,9 +508,9 @@ pub fn run_output_path(
 /// trip: key decoded off the host terminal, runtime loop woken, RPC
 /// encoded and handed off, RPC bytes written to the engine, then the
 /// engine's redraw parsed, the loop woken again, the frame's draw
-/// started, its terminal size probed, its damaged rows composited, its
-/// bytes flushed, and the terminal write completed.
-const ECHO_CHAIN: &[u8] = b"KUSWRUBGCFT";
+/// started, its frame prepared, its terminal size probed, its damaged
+/// rows composited, its bytes flushed, and the terminal write completed.
+const ECHO_CHAIN: &[u8] = b"KUSWRUBPGCFT";
 
 /// One label per interval of [`ECHO_CHAIN`], anchored at the harness's
 /// pre-keystroke timestamp and closed by the harness observing the echoed
@@ -524,7 +524,8 @@ const ECHO_LABELS: &[&str] = &[
     "rpc-written->redraw-parsed",
     "redraw-parsed->loop-wake",
     "loop-wake->draw-start",
-    "draw-start->size-probed",
+    "draw-start->frame-prepared",
+    "frame-prepared->size-probed",
     "size-probed->composed",
     "composed->flush-start",
     "flush-start->term-written",
@@ -1031,6 +1032,7 @@ mod tests {
             (b'R', 50),
             (b'U', 60),
             (b'B', 70),
+            (b'P', 71),
             (b'G', 72),
             (b'C', 74),
             (b'F', 80),
@@ -1043,7 +1045,7 @@ mod tests {
         let chain = tag_chain(&clean_round_trip(), ECHO_CHAIN, 0).unwrap();
         assert_eq!(
             chain.iter().map(|r| r.nanos).collect::<Vec<_>>(),
-            vec![10, 20, 30, 40, 50, 60, 70, 72, 74, 80, 90]
+            vec![10, 20, 30, 40, 50, 60, 70, 71, 72, 74, 80, 90]
         );
         assert_eq!(chain[1].nanos, 20, "input-side wake");
         assert_eq!(chain[5].nanos, 60, "output-side wake");
@@ -1065,7 +1067,8 @@ mod tests {
         // must not pull B/F/T ahead of the redraw that caused them
         let mut window = clean_round_trip();
         window.extend(records(&[
-            (b'B', 41),
+            (b'B', 40),
+            (b'P', 41),
             (b'G', 42),
             (b'C', 43),
             (b'F', 44),
@@ -1086,6 +1089,7 @@ mod tests {
             (b'R', 100),
             (b'U', 110),
             (b'B', 120),
+            (b'P', 121),
             (b'G', 122),
             (b'C', 124),
             (b'F', 130),

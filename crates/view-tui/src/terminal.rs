@@ -381,6 +381,8 @@ impl Term {
         // whole-frame repaint instead.
         let offset = model.chrome_rows();
         let cur_overlay = overlay_rows(surface);
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);
         let size = self.inner.size()?;
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_SIZE_PROBED);
