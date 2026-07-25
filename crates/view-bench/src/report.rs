@@ -8,8 +8,8 @@ use crate::pairing::PairedSummary;
 /// The two-line paired-cell report:
 ///
 /// ```text
-/// echo/minimal: view p50 0.61ms p99 0.94ms max 1.20ms | nvim p50 0.55ms p99 0.71ms max 0.88ms
-///       ratio(p99) 1.32  paired-delta p99 0.29ms  samples 1000 (+100 warmup)
+/// echo/minimal: view p50 0.612ms p99 0.941ms max 1.203ms | nvim p50 0.550ms p99 0.713ms max 0.881ms
+///       ratio(p99) 1.318  paired-delta p99 0.291ms  samples 1000 (+100 warmup)
 /// ```
 #[must_use]
 pub fn paired_cell(
@@ -19,9 +19,9 @@ pub fn paired_cell(
     warmup: usize,
 ) -> String {
     format!(
-        "{scenario}/{fixture}: view p50 {:.2}ms p99 {:.2}ms max {:.2}ms | \
-         nvim p50 {:.2}ms p99 {:.2}ms max {:.2}ms\n      \
-         ratio(p99) {:.2}  paired-delta p99 {:.2}ms  samples {} (+{warmup} warmup)",
+        "{scenario}/{fixture}: view p50 {:.3}ms p99 {:.3}ms max {:.3}ms | \
+         nvim p50 {:.3}ms p99 {:.3}ms max {:.3}ms\n      \
+         ratio(p99) {:.3}  paired-delta p99 {:.3}ms  samples {} (+{warmup} warmup)",
         summary.view.p50(),
         summary.view.p99(),
         summary.view.max(),
@@ -86,12 +86,12 @@ mod tests {
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
             lines[0],
-            "echo/minimal: view p50 2.00ms p99 2.00ms max 2.00ms | \
-             nvim p50 1.00ms p99 1.00ms max 1.00ms"
+            "echo/minimal: view p50 2.000ms p99 2.000ms max 2.000ms | \
+             nvim p50 1.000ms p99 1.000ms max 1.000ms"
         );
         assert_eq!(
             lines[1],
-            "      ratio(p99) 2.00  paired-delta p99 1.00ms  samples 50 (+100 warmup)"
+            "      ratio(p99) 2.000  paired-delta p99 1.000ms  samples 50 (+100 warmup)"
         );
     }
 
