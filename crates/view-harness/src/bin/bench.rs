@@ -349,6 +349,48 @@ fn null_calibration(bins: &Bins) -> Result<f64> {
     Ok(outcome.gated_ratio_p50)
 }
 
+/// This host's one-minute load average, or `None` where it cannot be
+/// read.
+///
+/// Every number a bench run prints is only interpretable next to what else
+/// the machine was doing while it was taken, and a load written down after
+/// the fact is a load nobody wrote down. Reading it here makes the run's
+/// own output carry it.
+fn host_load() -> Option<f64> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/loadavg")
+            .ok()?
+            .split_ascii_whitespace()
+            .next()?
+            .parse()
+            .ok()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // `{ 1.23 4.56 7.89 }`
+        let out = std::process::Command::new("sysctl")
+            .args(["-n", "vm.loadavg"])
+            .output()
+            .ok()?;
+        String::from_utf8(out.stdout)
+            .ok()?
+            .split_ascii_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    }
+}
+
+/// Prints this host's load under `when`, or says it is unavailable rather
+/// than printing nothing (a missing line reads as "nobody measured").
+fn announce_load(when: &str) {
+    match host_load() {
+        Some(load) => println!("host load (1 min, {when}): {load:.2}"),
+        None => println!("host load (1 min, {when}): unavailable on this host"),
+    }
+}
+
 /// The resolved binaries one invocation measures with.
 struct Bins {
     view: PathBuf,
@@ -536,6 +578,26 @@ fn run_echo_path_row(
         outcome.ambiguous_input_wakes,
         outcome.ambiguous_output_wakes
     );
+    let per_tag = outcome
+        .repeated_round_tags
+        .iter()
+        .map(|(tag, count)| format!("{} {count}", *tag as char))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "      redraw-round multiplicity: {} of {} resolved samples held a repeated chain tag \
+         ({per_tag})",
+        outcome.multiplicity_flagged,
+        outcome.view_total.samples - outcome.unresolved
+    );
+    if outcome.multiplicity_flagged > 0 {
+        println!(
+            "      WARNING: a repeated chain tag means the walker may have paired the keystroke \
+             with a redraw round it did not cause; the stages between the RPC write and the \
+             terminal write are understated by that sample's share and their time reappears in \
+             the closing stage. These percentiles are not an attribution until this reads zero."
+        );
+    }
 
     let floor = taps::run_pty_floor(
         &cwd,
@@ -998,22 +1060,37 @@ fn main() -> Result<()> {
         ..Protocol::default()
     };
 
+    announce_load("start");
+
+    // A diagnostic cell reports ratios of its own, so it needs the same
+    // read of this host's ambient pairing noise that a gated ratio gets --
+    // taken in this run, at this load, rather than borrowed from another.
+    // It is not refused on a noisy host the way a record or a gate is: a
+    // decomposition of a loaded run is still a decomposition, as long as
+    // the number it must be divided by is measured beside it.
+    let diagnostic_selected = cells.iter().any(|(scenario, fixture)| {
+        DIAGNOSTIC_MATRIX
+            .iter()
+            .any(|(s, f)| *s == scenario.as_str() && *f == fixture.as_str())
+    });
     // gating on a noisy host produces false verdicts, and recording on
     // one poisons the baseline every later quiet run is judged against;
     // both therefore verify their own precondition before any cell runs
-    if recording || gating {
-        // the class name alone selects the tail-gating policy, so a
-        // mis-typed class silently weakens the gate unless every run
-        // states the policy it derived
-        println!(
-            "class {}: {}",
-            cli.class,
-            if baselines::is_controlled_class(&cli.class) {
-                "controlled policy, tail metrics gated"
-            } else {
-                "shared policy, tail metrics recorded but not gated"
-            }
-        );
+    if recording || gating || diagnostic_selected {
+        if recording || gating {
+            // the class name alone selects the tail-gating policy, so a
+            // mis-typed class silently weakens the gate unless every run
+            // states the policy it derived
+            println!(
+                "class {}: {}",
+                cli.class,
+                if baselines::is_controlled_class(&cli.class) {
+                    "controlled policy, tail metrics gated"
+                } else {
+                    "shared policy, tail metrics recorded but not gated"
+                }
+            );
+        }
         let ratio = null_calibration(&bins)?;
         let deviation = ratio.max(1.0 / ratio);
         println!(
@@ -1021,11 +1098,18 @@ fn main() -> Result<()> {
              {NULL_RATIO_FLOOR})"
         );
         if deviation > NULL_RATIO_FLOOR {
-            bail!(
-                "host too noisy to {}: null-pair (nvim vs nvim) ratio_p50 measured {ratio:.4}, \
-                 deviation {deviation:.4} from 1.0 exceeds the calibration floor \
-                 {NULL_RATIO_FLOOR}; re-run when the host is quiet",
-                if recording { "record" } else { "gate" }
+            if recording || gating {
+                bail!(
+                    "host too noisy to {}: null-pair (nvim vs nvim) ratio_p50 measured \
+                     {ratio:.4}, deviation {deviation:.4} from 1.0 exceeds the calibration floor \
+                     {NULL_RATIO_FLOOR}; re-run when the host is quiet",
+                    if recording { "record" } else { "gate" }
+                );
+            }
+            println!(
+                "      WARNING: deviation {deviation:.4} exceeds the calibration floor \
+                 {NULL_RATIO_FLOOR}; every ratio below carries this host's noise and must be \
+                 divided by {ratio:.4} before it is compared with a ratio from another run"
             );
         }
     }
@@ -1035,6 +1119,8 @@ fn main() -> Result<()> {
         let metrics = run_cell(scenario, fixture, &bins, &protocol)?;
         measured.push((scenario.clone(), fixture.clone(), metrics));
     }
+
+    announce_load("end");
 
     if recording {
         let mut file = if cli.all || !path.exists() {

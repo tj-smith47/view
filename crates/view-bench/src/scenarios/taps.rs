@@ -532,6 +532,19 @@ const ECHO_LABELS: &[&str] = &[
     "term-written->glyph-seen",
 ];
 
+/// The chain tags one keystroke's own round trip emits exactly once. `U`
+/// is absent because it appears twice by design, once per side, and is
+/// guarded per bracket instead.
+///
+/// The walker takes the earliest match at or after the previous one, so a
+/// second occurrence of any of these inside one sample's window lets the
+/// keystroke pair with a redraw round that is not its own: the stages
+/// spanning the two rounds collapse and their time reappears in the
+/// closing stage, understating exactly the part of the round trip an
+/// attribution is trying to weigh. Uniqueness over the window forecloses
+/// that, so it is counted per sample rather than assumed.
+const SINGLE_ROUND_TAGS: [u8; 10] = *b"KSWRBPGCFT";
+
 /// Index into a resolved [`ECHO_CHAIN`] of the `S` (RPC handoff) match:
 /// with the `K` match it brackets the input-side loop wake.
 const INPUT_WAKE_BRACKET_END: usize = 2;
@@ -572,6 +585,16 @@ pub struct EchoPathOutcome {
     /// `B`; the output-side counterpart of
     /// [`Self::ambiguous_input_wakes`].
     pub ambiguous_output_wakes: usize,
+    /// Per-tag count of resolved samples whose window held that
+    /// [`SINGLE_ROUND_TAGS`] entry more than once, in that table's order.
+    /// Any non-zero entry means some published stages describe a redraw
+    /// round the chain cannot prove the keystroke caused.
+    pub repeated_round_tags: Vec<(u8, usize)>,
+    /// Resolved samples carrying a repeat of any [`SINGLE_ROUND_TAGS`]
+    /// entry. The per-sample rollup of [`Self::repeated_round_tags`]: one
+    /// spurious round repeats several tags at once, so the per-tag counts
+    /// do not add.
+    pub multiplicity_flagged: usize,
 }
 
 impl EchoPathOutcome {
@@ -604,6 +627,9 @@ struct ChainOutcome {
     resolved: bool,
     ambiguous_input_wakes: bool,
     ambiguous_output_wakes: bool,
+    /// Which [`SINGLE_ROUND_TAGS`] entries occurred more than once in the
+    /// sample's window, positionally aligned with that table.
+    repeated_round_tags: [bool; SINGLE_ROUND_TAGS.len()],
 }
 
 fn accumulate_chain(
@@ -612,11 +638,16 @@ fn accumulate_chain(
     to: i64,
     pools: &mut [Vec<f64>],
 ) -> ChainOutcome {
+    let mut repeated_round_tags = [false; SINGLE_ROUND_TAGS.len()];
+    for (slot, tag) in repeated_round_tags.iter_mut().zip(SINGLE_ROUND_TAGS) {
+        *slot = count_tag_between(window, tag, from, to) > 1;
+    }
     let Some(chain) = tag_chain(window, ECHO_CHAIN, from) else {
         return ChainOutcome {
             resolved: false,
             ambiguous_input_wakes: false,
             ambiguous_output_wakes: false,
+            repeated_round_tags,
         };
     };
     let mut prev = from;
@@ -637,6 +668,7 @@ fn accumulate_chain(
         resolved: true,
         ambiguous_input_wakes: wakes(0, INPUT_WAKE_BRACKET_END),
         ambiguous_output_wakes: wakes(OUTPUT_WAKE_BRACKET_START, OUTPUT_WAKE_BRACKET_END),
+        repeated_round_tags,
     }
 }
 
@@ -674,6 +706,8 @@ pub fn run_echo_path(
     let mut unresolved = 0;
     let mut ambiguous_input_wakes = 0;
     let mut ambiguous_output_wakes = 0;
+    let mut repeats = [0_usize; SINGLE_ROUND_TAGS.len()];
+    let mut multiplicity_flagged = 0;
 
     for trial in 0..protocol.trials {
         if trial > 0 {
@@ -711,6 +745,13 @@ pub fn run_echo_path(
                                 ambiguous_input_wakes += usize::from(outcome.ambiguous_input_wakes);
                                 ambiguous_output_wakes +=
                                     usize::from(outcome.ambiguous_output_wakes);
+                                for (total, flagged) in
+                                    repeats.iter_mut().zip(outcome.repeated_round_tags)
+                                {
+                                    *total += usize::from(flagged);
+                                }
+                                multiplicity_flagged +=
+                                    usize::from(outcome.repeated_round_tags.contains(&true));
                             } else {
                                 unresolved += 1;
                             }
@@ -761,6 +802,8 @@ pub fn run_echo_path(
         unresolved,
         ambiguous_input_wakes,
         ambiguous_output_wakes,
+        repeated_round_tags: SINGLE_ROUND_TAGS.into_iter().zip(repeats).collect(),
+        multiplicity_flagged,
     })
 }
 
@@ -1103,6 +1146,103 @@ mod tests {
         );
     }
 
+    /// The tags a chain outcome saw more than once, in table order.
+    fn repeated(outcome: &ChainOutcome) -> Vec<char> {
+        SINGLE_ROUND_TAGS
+            .iter()
+            .zip(outcome.repeated_round_tags)
+            .filter(|(_, flagged)| *flagged)
+            .map(|(tag, _)| *tag as char)
+            .collect()
+    }
+
+    #[test]
+    fn a_spurious_redraw_round_ahead_of_the_real_one_is_flagged_not_reported_clean() {
+        // the whole reason the multiplicity counters exist: this window
+        // resolves, both wake brackets read clean, and every stage between
+        // the RPC write and the terminal write silently describes a round
+        // the keystroke did not cause
+        let mut window = clean_round_trip();
+        window.extend(records(&[
+            (b'R', 42),
+            (b'U', 43),
+            (b'B', 44),
+            (b'P', 45),
+            (b'G', 46),
+            (b'C', 47),
+            (b'F', 48),
+            (b'T', 49),
+        ]));
+        let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+        let outcome = accumulate_chain(&window, 0, 100, &mut pools);
+        assert!(outcome.resolved, "the chain still resolves");
+        assert!(
+            !outcome.ambiguous_input_wakes,
+            "both wake counters read clean"
+        );
+        assert!(!outcome.ambiguous_output_wakes);
+        assert_eq!(
+            repeated(&outcome),
+            vec!['R', 'B', 'P', 'G', 'C', 'F', 'T'],
+            "every tag the spurious round duplicated is named"
+        );
+        // and the damage it does, pinned so the counter stays tied to the
+        // failure it exists to catch rather than to its own shape
+        assert!(
+            (pools[4][0] - 0.002).abs() < 1e-9,
+            "rpc-written->redraw-parsed collapsed onto the spurious round"
+        );
+        assert!(
+            (pools[ECHO_LABELS.len() - 1][0] - 0.051).abs() < 1e-9,
+            "and the collapsed time parked in the closing stage"
+        );
+    }
+
+    #[test]
+    fn a_trailing_redraw_round_is_flagged_even_though_the_stages_are_intact() {
+        // a second round after the chain closes leaves every stage correct
+        // but still means the window held two paints, so the counter fires
+        // here too: it reports multiplicity, it does not judge harm
+        let mut window = clean_round_trip();
+        window.extend(records(&[
+            (b'R', 100),
+            (b'U', 110),
+            (b'B', 120),
+            (b'P', 121),
+            (b'G', 122),
+            (b'C', 124),
+            (b'F', 130),
+            (b'T', 140),
+        ]));
+        let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+        let outcome = accumulate_chain(&window, 0, 150, &mut pools);
+        assert!(outcome.resolved);
+        assert_eq!(repeated(&outcome), vec!['R', 'B', 'P', 'G', 'C', 'F', 'T']);
+        assert!((pools[4][0] - 0.010).abs() < 1e-9, "stages unharmed");
+    }
+
+    #[test]
+    fn every_single_round_tag_is_a_chain_tag_and_no_wake_is_one() {
+        for tag in SINGLE_ROUND_TAGS {
+            assert!(
+                ECHO_CHAIN.contains(&tag),
+                "{} is counted for multiplicity but the chain never walks it",
+                tag as char
+            );
+        }
+        assert!(
+            !SINGLE_ROUND_TAGS.contains(&b'U'),
+            "the loop wake appears twice by design and is bracket-guarded instead"
+        );
+        for tag in ECHO_CHAIN {
+            assert!(
+                *tag == b'U' || SINGLE_ROUND_TAGS.contains(tag),
+                "chain tag {} has no multiplicity guard of either kind",
+                *tag as char
+            );
+        }
+    }
+
     #[test]
     fn a_resolved_chain_fills_every_stage_and_closes_on_the_observation() {
         let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
@@ -1110,6 +1250,10 @@ mod tests {
         assert!(outcome.resolved);
         assert!(!outcome.ambiguous_input_wakes);
         assert!(!outcome.ambiguous_output_wakes);
+        assert!(
+            !outcome.repeated_round_tags.contains(&true),
+            "a single clean round trip repeats no tag"
+        );
         let p50s: Vec<f64> = pools.iter().map(|p| p[0]).collect();
         assert_eq!(p50s.len(), ECHO_LABELS.len());
         // every stage is 10ns wide except the closing one, which runs from
@@ -1168,6 +1312,165 @@ mod tests {
                 *tag as char
             );
         }
+    }
+
+    /// The workspace's `crates/` directory, reached from this crate's own
+    /// manifest so the walk below does not depend on the cwd a test runner
+    /// happens to choose.
+    fn crates_dir() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("view-bench sits under crates/")
+            .to_path_buf()
+    }
+
+    /// Every `.rs` file under `crates/*/src`, excluding this crate: the
+    /// harness is the tap's consumer and names the tags freely, while the
+    /// measured crates are the ones a stray call site would cost.
+    fn measured_sources() -> Vec<std::path::PathBuf> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        let Ok(crates) = std::fs::read_dir(crates_dir()) else {
+            return out;
+        };
+        for entry in crates.flatten() {
+            if entry.file_name() == "view-bench" {
+                continue;
+            }
+            walk(&entry.path().join("src"), &mut out);
+        }
+        out
+    }
+
+    /// The attribute that keeps a line out of a default build.
+    const TAPS_CFG: &str = "#[cfg(feature = \"bench-taps\")]";
+
+    /// Indentation of `line` in spaces.
+    fn indent_of(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    /// Index of the nearest code line above `index`, skipping blanks and
+    /// comment-only lines so a doc comment between an attribute and the
+    /// item it guards does not read as an unguarded item.
+    fn code_line_above(lines: &[&str], index: usize) -> Option<usize> {
+        lines[..index].iter().enumerate().rev().find_map(|(i, l)| {
+            let t = l.trim();
+            (!t.is_empty() && !t.starts_with("//")).then_some(i)
+        })
+    }
+
+    /// Whether the item at `index` carries the taps attribute directly.
+    fn attributed(lines: &[&str], index: usize) -> bool {
+        code_line_above(lines, index).is_some_and(|i| lines[i].trim() == TAPS_CFG)
+    }
+
+    /// Whether line `index` is compiled out of a default build: either it
+    /// carries the attribute itself, or some block enclosing it does.
+    fn cfg_gated(lines: &[&str], index: usize) -> bool {
+        let mut at = index;
+        loop {
+            if attributed(lines, at) {
+                return true;
+            }
+            let depth = indent_of(lines[at]);
+            let Some(outer) = lines[..at]
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, l)| !l.trim().is_empty() && indent_of(l) < depth)
+                .map(|(i, _)| i)
+            else {
+                return false;
+            };
+            at = outer;
+        }
+    }
+
+    #[test]
+    fn no_tap_reaches_a_default_build() {
+        // Each tap module is itself `#[cfg(feature = "bench-taps")]`, so an
+        // unguarded call site fails to compile rather than quietly adding
+        // cost to the measured path. That moat is the strongest one
+        // available, but nothing in the tree re-checks the two facts it
+        // rests on: that the modules stay gated, and that the feature stays
+        // out of every default set. Both are checked here, together with
+        // the call sites themselves, so the measured build's freedom from
+        // tap work survives whoever edits next.
+        let mut unguarded = Vec::new();
+        let mut ungated_modules = Vec::new();
+        let mut call_sites = 0;
+        let mut modules = 0;
+        for path in measured_sources() {
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let lines: Vec<&str> = text.lines().collect();
+            for index in 0..lines.len() {
+                let trimmed = lines[index].trim();
+                if trimmed.ends_with("mod tap;") {
+                    modules += 1;
+                    if !attributed(&lines, index) {
+                        ungated_modules.push(format!("{}: {trimmed}", path.display()));
+                    }
+                }
+                if !trimmed.contains("tap::tap(") {
+                    continue;
+                }
+                call_sites += 1;
+                if !cfg_gated(&lines, index) {
+                    unguarded.push(format!("{}: {trimmed}", path.display()));
+                }
+            }
+        }
+        assert!(
+            call_sites > 0 && modules > 0,
+            "found {call_sites} call sites and {modules} tap modules; the walk is looking in the \
+             wrong place"
+        );
+        assert!(
+            unguarded.is_empty(),
+            "tap call sites reachable from a default build:\n{}",
+            unguarded.join("\n")
+        );
+        assert!(
+            ungated_modules.is_empty(),
+            "tap modules that a default build would compile (the compiler stops being the moat \
+             the moment one of these is ungated):\n{}",
+            ungated_modules.join("\n")
+        );
+
+        let mut enabled_by_default = Vec::new();
+        let crates = std::fs::read_dir(crates_dir()).expect("crates/ is readable");
+        for entry in crates.flatten() {
+            let manifest = entry.path().join("Cargo.toml");
+            let Ok(text) = std::fs::read_to_string(&manifest) else {
+                continue;
+            };
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("default") && trimmed.contains("bench-taps") {
+                    enabled_by_default.push(format!("{}: {trimmed}", manifest.display()));
+                }
+            }
+        }
+        assert!(
+            enabled_by_default.is_empty(),
+            "bench-taps is reachable from a default feature set:\n{}",
+            enabled_by_default.join("\n")
+        );
     }
 
     #[test]
