@@ -1,12 +1,16 @@
 //! Engine lifecycle/shutdown tests: `Drop` must never deadlock even with a
 //! request in flight, and the graceful-shutdown mechanism must actually
 //! take the graceful path with a responsive child and fall back to
-//! `SIGKILL` with an unresponsive one, observable via the exit status's
-//! signal vs. its code.
+//! `SIGKILL` with an unresponsive one, read off the `ShutdownPath` the code
+//! records at the branch it takes.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
+use view_core::msg::Msg;
 use view_engine::process::{Engine, EngineConfig};
+// only the graceful-vs-forced assertions name a path, and both are unix-only
+#[cfg(unix)]
+use view_engine::process::ShutdownPath;
 
 /// True if a process with the given pid still exists, checked via `kill
 /// -0` rather than a name-based `pgrep`, since the pid is known exactly
@@ -27,7 +31,7 @@ fn pid_alive(pid: u32) -> bool {
 
 #[test]
 fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
-    let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     #[cfg(unix)]
     let pid = engine.pid();
     let handle = engine.handle.clone();
@@ -61,27 +65,79 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     );
 }
 
+/// How long a test here waits for nvim to act on `qa!` before calling it
+/// wedged. Sized as a liveness bound rather than a performance one: a child
+/// that has not run at all in a minute is not a descheduled child, whatever
+/// the host's load.
+const GRACEFUL_EXIT_LIVENESS_BOUND: Duration = Duration::from_secs(60);
+
+/// The engine deadline the tests of responsive shutdown configure,
+/// deliberately far past [`GRACEFUL_EXIT_LIVENESS_BOUND`] so it cannot
+/// expire while any of them is still watching.
+///
+/// Which branch a responsive child drives the code down is what those tests
+/// assert, so a deadline able to fire mid-test would make the answer a
+/// function of host load. No budget value avoids that: one tight enough to
+/// mean anything on a quiet host force-kills a genuinely responsive child on
+/// a loaded one. Large but finite because `graceful_kill` turns it into an
+/// `Instant` deadline, and an effectively infinite duration overflows that
+/// addition rather than meaning "never".
+const GRACEFUL_DEADLINE_PAST_THE_TEST: Duration = Duration::from_secs(300);
+
+/// Runs `work` on its own thread and hands back what it produced, failing
+/// the test if nothing arrives within [`GRACEFUL_EXIT_LIVENESS_BOUND`].
+///
+/// Keeps the wait under the test's own control rather than the engine's.
+/// An engine deadline able to expire mid-test picks the graceful-vs-forced
+/// branch by host load, and reports the result as the wrong branch; an
+/// expiry here can only mean the child never exited at all, and says that.
+fn within_liveness_bound<T: Send + 'static>(
+    subject: &str,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    let wedged = format!(
+        "{subject} produced nothing within {GRACEFUL_EXIT_LIVENESS_BOUND:?}: nvim never exited \
+         after qa!, so it is wedged rather than merely slow to be scheduled. The child outlives \
+         this failure, since nothing here can reach a shutdown that never returned"
+    );
+    let produced = rx
+        .recv_timeout(GRACEFUL_EXIT_LIVENESS_BOUND)
+        .expect(&wedged);
+    let _ = worker.join();
+    produced
+}
+
 #[cfg(unix)]
 #[test]
 fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
     use std::os::unix::process::ExitStatusExt as _;
 
-    // the property under test is graceful-vs-forced shutdown, not deadline
-    // tightness (that belongs to shutdown_force_kills_when_unresponsive):
-    // inheriting the 500ms production default here coupled this assertion
-    // to scheduler latency, so a loaded host could force-kill a genuinely
-    // responsive nvim before it got a timeslice to process qa!, flipping a
-    // correct graceful exit into a false SIGKILL failure
     let cfg = EngineConfig {
-        shutdown_timeout: Duration::from_secs(5),
-        ..EngineConfig::default()
+        shutdown_timeout: GRACEFUL_DEADLINE_PAST_THE_TEST,
+        ..EngineConfig::isolated()
     };
     let engine = Engine::spawn(cfg).unwrap();
-    let status = engine.shutdown().unwrap();
+    // named by pid so a failure below points at the process still to be
+    // cleaned up, not just at the fact that one exists
+    let subject = format!("shutdown of nvim pid {}", engine.pid());
+    let outcome = within_liveness_bound(&subject, move || engine.shutdown()).unwrap();
+
+    assert_eq!(
+        outcome.path,
+        ShutdownPath::Graceful,
+        "a responsive nvim was force-killed rather than left to exit on its \
+         own; status {:?}",
+        outcome.status
+    );
     assert!(
-        status.signal().is_none(),
-        "expected a graceful qa! exit, got signal {:?}",
-        status.signal()
+        outcome.status.signal().is_none(),
+        "the graceful path ran but the child died by signal {:?}: it went \
+         down of something other than the qa! it was asked to perform",
+        outcome.status.signal()
     );
 }
 
@@ -92,7 +148,7 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
 
     let cfg = EngineConfig {
         shutdown_timeout: Duration::from_millis(50),
-        ..EngineConfig::default()
+        ..EngineConfig::isolated()
     };
     let engine = Engine::spawn(cfg).unwrap();
 
@@ -111,12 +167,38 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
         Duration::from_millis(10),
     );
 
-    let status = engine.shutdown().unwrap();
+    let outcome = engine.shutdown().unwrap();
     assert_eq!(
-        status.signal(),
-        Some(9),
-        "expected SIGKILL (signal 9), got {status:?}"
+        outcome.path,
+        ShutdownPath::Forced,
+        "a stalled nvim was reported as exiting on its own; status {:?}",
+        outcome.status
     );
+    assert_eq!(
+        outcome.status.signal(),
+        Some(9),
+        "the forced path ran but the child did not die of SIGKILL; status {:?}",
+        outcome.status
+    );
+}
+
+/// Drains `msgs` until the reader thread's terminal `Msg::EngineStopped`
+/// arrives, returning whether it did inside
+/// [`GRACEFUL_EXIT_LIVENESS_BOUND`].
+///
+/// Draining rather than reading one message: the same sink carries redraw
+/// and request traffic, and a `qa!` produces some of it on the way out, so
+/// the terminal signal is not necessarily the first thing to arrive.
+fn wait_for_engine_stopped(msgs: &std::sync::mpsc::Receiver<Msg>) -> bool {
+    let deadline = std::time::Instant::now() + GRACEFUL_EXIT_LIVENESS_BOUND;
+    loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        match msgs.recv_timeout(left) {
+            Ok(Msg::EngineStopped(_)) => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
 }
 
 /// `wait_exit` is what the runtime loop calls in response to
@@ -125,7 +207,14 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
 /// machinery `shutdown`/`Drop` use, not hang or fabricate one.
 #[test]
 fn wait_exit_resolves_a_normally_exiting_child() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let cfg = EngineConfig {
+        shutdown_timeout: GRACEFUL_DEADLINE_PAST_THE_TEST,
+        ..EngineConfig::isolated()
+    };
+    let mut engine = Engine::spawn(cfg).unwrap();
+    let (sink, msgs) = std::sync::mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(sink);
+
     // ask nvim to exit on its own, independent of wait_exit's own qa!, so
     // this proves wait_exit correctly observes a child that is already
     // exiting rather than being the sole cause of the exit
@@ -133,8 +222,21 @@ fn wait_exit_resolves_a_normally_exiting_child() {
         .handle
         .notify("nvim_command", vec![rmpv::Value::from("qa!")])
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
-    let info = engine.wait_exit();
+
+    // that the exit happened is then read off the connection rather than
+    // assumed after a sleep: EngineStopped is what the reader thread routes
+    // the instant nvim's stream ends, and is the very signal the runtime
+    // loop calls wait_exit in response to. A request cannot stand in for it,
+    // because an RPC-issued qa! only sets nvim exiting and lets the messages
+    // already queued behind it be answered on the way out
+    assert!(
+        wait_for_engine_stopped(&msgs),
+        "nvim's channel never ended after the qa! it was sent, so the child \
+         was not already exiting when wait_exit ran"
+    );
+
+    let subject = format!("wait_exit on nvim pid {}", engine.pid());
+    let info = within_liveness_bound(&subject, move || engine.wait_exit());
     assert_eq!(
         info.code,
         Some(0),
@@ -146,7 +248,7 @@ fn wait_exit_resolves_a_normally_exiting_child() {
 #[cfg(unix)]
 #[test]
 fn wait_exit_maps_external_signal_kill_to_128_plus_signal() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let pid = engine.pid();
     std::process::Command::new("kill")
         .args(["-KILL", &pid.to_string()])

@@ -9,7 +9,7 @@ use view_engine::EngineError;
 
 #[test]
 fn spawns_and_handshakes_with_real_nvim() {
-    let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     assert!(engine.api_info.channel_id >= 1);
     // floor from the spec: engine must be at least 0.11
     assert!(

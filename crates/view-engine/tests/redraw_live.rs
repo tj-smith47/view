@@ -47,7 +47,7 @@ fn drain_until<const N: usize>(
 
 #[test]
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
@@ -79,7 +79,7 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
 
 #[test]
 fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
@@ -135,16 +135,11 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
 /// decode paths that could both be wrong the same way.
 #[test]
 fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_storm() {
-    // `--clean` isolates this test from the host's real nvim config
-    // (plugins, statuslines, autocmds): the ground-truth comparison below
-    // assumes row 0 of the grid is the window's first buffer line with no
-    // winbar/tabline chrome above it, which a plugin-loaded config is not
-    // guaranteed to preserve.
-    let cfg = EngineConfig {
-        extra_args: vec!["--clean".into()],
-        ..EngineConfig::default()
-    };
-    let mut engine = Engine::spawn(cfg).unwrap();
+    // an isolated config matters beyond the usual reason here: the
+    // ground-truth comparison below assumes row 0 of the grid is the
+    // window's first buffer line, with no winbar or tabline chrome above
+    // it, which a plugin-loaded config is not guaranteed to preserve
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();

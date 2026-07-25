@@ -1211,10 +1211,17 @@ mod tests {
         }
         #[cfg(target_os = "macos")]
         {
-            Command::new("/bin/ps")
+            // a spawn failure means the probe never got to look, which must
+            // not be reported as "no entry": that reads as a successfully
+            // reaped child and hands the caller a silent pass from a broken
+            // probe. An empty listing from a `ps` that DID run is the real
+            // negative, and is the only one accepted here (`ps` also exits
+            // nonzero for an unknown pid, so its status is not the signal)
+            let listing = Command::new("/bin/ps")
                 .args(["-o", "stat=", "-p", &pid.to_string()])
                 .output()
-                .is_ok_and(|out| !out.stdout.is_empty())
+                .expect("/bin/ps must run for the process table to be observable at all");
+            !listing.stdout.is_empty()
         }
     }
 

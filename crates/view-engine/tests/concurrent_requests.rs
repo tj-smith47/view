@@ -8,7 +8,7 @@ use view_engine::process::{Engine, EngineConfig};
 
 #[test]
 fn concurrent_requesters_all_complete_correctly() {
-    let engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
 
     let threads: Vec<_> = (0..8i64)
         .map(|i| {

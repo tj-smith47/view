@@ -211,10 +211,7 @@ impl EngineSession {
     /// Returns [`OracleError::Engine`] if the process fails to spawn or the
     /// `ui_attach` handshake fails or times out.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
-        let mut engine = Engine::spawn(EngineConfig {
-            extra_args: vec!["--clean".into(), "-n".into()],
-            ..EngineConfig::default()
-        })?;
+        let mut engine = Engine::spawn(EngineConfig::isolated())?;
         engine.handle.ui_attach(cols, rows)?;
         // no consumer ever drains this channel: EngineSession polls
         // DamagePump::take_damage directly instead (leg (c) is

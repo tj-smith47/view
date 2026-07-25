@@ -50,6 +50,64 @@ impl Default for EngineConfig {
     }
 }
 
+impl EngineConfig {
+    /// A config whose child ignores every nvim setting the host carries: no
+    /// user config, plugins or shada (`--clean`), and no swap file (`-n`).
+    ///
+    /// For everything that measures the engine rather than a user's editor
+    /// (the oracle's reference sessions, the engine's own tests), whose
+    /// results must not turn on which machine happens to run them.
+    ///
+    /// It also keeps the child's exit path open, which a host config can
+    /// close off outright: any message emitted during startup parks `qa!`
+    /// in nvim's `wait_return` prompt waiting for the keypress that
+    /// acknowledges it, and an embedded nvim with no UI attached has no
+    /// source for that keypress. Such a child never exits on its own at
+    /// all, on any host, at any speed, and only the force-kill fallback
+    /// ends it.
+    #[must_use]
+    pub fn isolated() -> Self {
+        Self {
+            extra_args: vec![OsString::from("--clean"), OsString::from("-n")],
+            ..Self::default()
+        }
+    }
+}
+
+/// Which of the two shutdown paths ended the child: it exited on its own
+/// after `qa!`, or it was still running at the deadline and was killed.
+///
+/// Recorded where the branch is taken rather than inferred afterwards from
+/// the exit status, because the status does not carry the distinction. A
+/// child that exits between the last poll and the `kill` is signalled only
+/// after it is already gone, so `wait` reports the ordinary exit code it
+/// chose for itself and the forced path looks graceful; a child that dies
+/// of its own fault while processing `qa!` reports a signal though nothing
+/// forced it, and the graceful path looks forced. Reading the path off the
+/// status therefore both misses forced kills and invents them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ShutdownPath {
+    /// The child exited on its own before `shutdown_timeout` elapsed.
+    /// Nothing was signalled to it.
+    Graceful,
+    /// The child was still running when `shutdown_timeout` elapsed, so it
+    /// was force-killed and reaped.
+    Forced,
+}
+
+/// How a child's shutdown ended: which path ran, and the exit status the
+/// child produced.
+#[derive(Debug)]
+#[non_exhaustive]
+pub struct ShutdownOutcome {
+    /// The path taken. See [`ShutdownPath`] for why it is a recorded fact
+    /// rather than something `status` can be read for.
+    pub path: ShutdownPath,
+    /// The child's exit status, as `wait` reported it.
+    pub status: ExitStatus,
+}
+
 /// The engine's reported API version and RPC channel id, from
 /// `nvim_get_api_info`.
 pub struct ApiInfo {
@@ -200,7 +258,7 @@ impl Engine {
     #[must_use]
     pub fn wait_exit(&mut self) -> ExitInfo {
         match graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout) {
-            Ok(status) => exit_info_from_status(status),
+            Ok(outcome) => exit_info_from_status(outcome.status),
             Err(_) => ExitInfo {
                 code: None,
                 by_signal: false,
@@ -216,20 +274,21 @@ impl Engine {
     }
 
     /// Consumes the `Engine` and runs the same graceful-then-forced
-    /// shutdown sequence as `Drop`, returning the child's real exit status.
+    /// shutdown sequence as `Drop`, returning which path it took and the
+    /// child's real exit status.
     ///
     /// `Drop` alone cannot surface this: it runs on every drop path
     /// (including a panic unwinding through an `Engine`), discards errors,
-    /// and has no return value. Call `shutdown` explicitly to distinguish a
-    /// graceful exit from a forced kill (e.g. via `ExitStatusExt::signal`
-    /// on Unix) or to forward the real exit code, such as via
-    /// `std::process::exit`.
+    /// and has no return value. Call `shutdown` explicitly to learn whether
+    /// the child exited on its own or had to be killed
+    /// ([`ShutdownOutcome::path`]) or to forward the real exit code, such
+    /// as via `std::process::exit`.
     ///
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if `try_wait`, `kill`, or
     /// `wait` on the child process fails.
-    pub fn shutdown(mut self) -> std::io::Result<ExitStatus> {
+    pub fn shutdown(mut self) -> std::io::Result<ShutdownOutcome> {
         graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout)
     }
 }
@@ -250,6 +309,11 @@ impl Drop for Engine {
 /// reaps it. Shared by [`Engine::shutdown`] and `Engine`'s `Drop` impl so
 /// the two sequences can never drift apart.
 ///
+/// Reports which branch it took in the returned [`ShutdownOutcome`],
+/// tagged at the branch itself: that is the only place the two are
+/// distinguishable, since by the time a status is in hand the kill and the
+/// child's own exit have already merged into one value.
+///
 /// The `notify` call is best-effort: if the writer thread is already gone
 /// (connection already closed, e.g. nvim crashed or the peer wrote garbage
 /// mid-session), sending `qa!` fails and this falls straight through to the
@@ -259,12 +323,15 @@ fn graceful_kill(
     handle: &EngineHandle,
     child: &mut Child,
     shutdown_timeout: Duration,
-) -> std::io::Result<ExitStatus> {
+) -> std::io::Result<ShutdownOutcome> {
     let _ = handle.notify("nvim_command", vec![Value::from("qa!")]);
     let deadline = Instant::now() + shutdown_timeout;
     loop {
         if let Some(status) = child.try_wait()? {
-            return Ok(status);
+            return Ok(ShutdownOutcome {
+                path: ShutdownPath::Graceful,
+                status,
+            });
         }
         if Instant::now() >= deadline {
             break;
@@ -272,7 +339,10 @@ fn graceful_kill(
         std::thread::sleep(Duration::from_millis(10));
     }
     child.kill()?;
-    child.wait()
+    Ok(ShutdownOutcome {
+        path: ShutdownPath::Forced,
+        status: child.wait()?,
+    })
 }
 
 /// Maps a child's raw `ExitStatus` to [`ExitInfo`]: a normal exit passes its

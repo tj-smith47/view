@@ -365,20 +365,13 @@ impl ReferenceSession {
     /// `ui_attach` handshake fails or times out, or the quiesce-protocol
     /// setup commands cannot be written to the connection.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
-        Self::spawn_configured(
-            EngineConfig {
-                extra_args: vec!["--clean".into(), "-n".into()],
-                ..EngineConfig::default()
-            },
-            cols,
-            rows,
-        )
+        Self::spawn_configured(EngineConfig::isolated(), cols, rows)
     }
 
     /// Same as [`spawn`](Self::spawn), but with a caller-supplied
     /// [`EngineConfig`] (a non-default `nvim_bin`, timeout, or extra
-    /// arguments) instead of [`spawn`](Self::spawn)'s own `--clean` + `-n`
-    /// default.
+    /// arguments) instead of [`spawn`](Self::spawn)'s own
+    /// [`EngineConfig::isolated`] default.
     ///
     /// # Errors
     ///

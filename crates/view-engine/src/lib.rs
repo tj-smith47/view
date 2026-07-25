@@ -17,5 +17,5 @@ pub use handle::{EngineError, EngineHandle};
 // handle.rs) since production always goes through the pumped, bounded path.
 #[cfg(any(test, feature = "test-support"))]
 pub use handle::EngineNotification;
-pub use process::{ApiInfo, Engine, EngineConfig};
+pub use process::{ApiInfo, Engine, EngineConfig, ShutdownOutcome, ShutdownPath};
 pub use rpc::{RpcError, RpcMessage};
