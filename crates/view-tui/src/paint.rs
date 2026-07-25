@@ -215,6 +215,62 @@ struct StagedRun {
     back: Buffer,
 }
 
+/// A [`Shadow`] with its repainted row runs lifted into scratch sub-buffers,
+/// which puts them back when it drops.
+///
+/// Staging is only reachable through this guard, so the lift can never be
+/// left half-done: the rows return on the error path, on an early return, and
+/// on an unwinding panic out of the backend alike. The shadow is the only
+/// record of what the terminal shows, so a lift that failed to reverse would
+/// make every later frame diff against scratch cells and emit the wrong
+/// updates for the rest of the session.
+struct StagedRuns<'a> {
+    shadow: &'a mut Shadow,
+    runs: &'a [(u16, u16)],
+}
+
+impl<'a> StagedRuns<'a> {
+    /// Sizes one scratch sub-buffer per run and lifts the runs' rows into
+    /// them.
+    fn stage(shadow: &'a mut Shadow, runs: &'a [(u16, u16)]) -> Self {
+        if shadow.staged.len() < runs.len() {
+            shadow.staged.resize_with(runs.len(), StagedRun::default);
+        }
+        let area = shadow.front.area;
+        for (slot, &(start, height)) in shadow.staged.iter_mut().zip(runs) {
+            let rect = ratatui::layout::Rect {
+                x: area.x,
+                y: start,
+                width: area.width,
+                height,
+            };
+            let len = usize::from(height) * usize::from(area.width);
+            slot.front.area = rect;
+            slot.back.area = rect;
+            slot.front.content.resize(len, Cell::EMPTY);
+            slot.back.content.resize(len, Cell::EMPTY);
+        }
+        shadow.swap_runs(runs);
+        Self { shadow, runs }
+    }
+
+    /// The staged runs' diffs, chained in ascending row order, which is the
+    /// order the whole-frame diff would have yielded them in.
+    fn diffs(&self) -> impl Iterator<Item = (u16, u16, &Cell)> + '_ {
+        self.shadow
+            .staged
+            .iter()
+            .take(self.runs.len())
+            .flat_map(|run| run.front.diff_iter(&run.back))
+    }
+}
+
+impl Drop for StagedRuns<'_> {
+    fn drop(&mut self) {
+        self.shadow.swap_runs(self.runs);
+    }
+}
+
 impl Shadow {
     /// An empty shadow, zero-sized until the first [`Shadow::resize`].
     #[must_use]
@@ -286,50 +342,19 @@ impl Shadow {
     /// The same emission clipped to `runs`, one chained `draw` over the
     /// staged sub-buffers.
     ///
-    /// The stage/unstage pair brackets exactly the backend call: between
-    /// them the shadow's own buffers hold the scratch's stale cells in those
-    /// rows, and nothing outside this function can observe that, because
-    /// `backend` cannot reach the shadow. The backend's error is held until
-    /// after the rows are put back, so a failed write leaves the shadow
-    /// intact for the next frame.
+    /// [`StagedRuns`] brackets exactly the backend call: while it lives the
+    /// shadow's own buffers hold the scratch's stale cells in those rows, and
+    /// nothing outside this function can observe that, because `backend`
+    /// cannot reach the shadow. Its `Drop` puts the rows back before the
+    /// backend's result reaches the caller, so neither a failed write nor an
+    /// unwinding panic can leave the shadow holding scratch cells.
     fn emit_clipped<B: Backend>(
         &mut self,
         backend: &mut B,
         runs: &[(u16, u16)],
     ) -> Result<(), B::Error> {
-        self.stage(runs);
-        let count = runs.len();
-        let result = backend.draw(
-            self.staged
-                .iter()
-                .take(count)
-                .flat_map(|run| run.front.diff_iter(&run.back)),
-        );
-        self.swap_runs(runs);
-        result
-    }
-
-    /// Sizes one scratch sub-buffer per run and lifts the runs' rows into
-    /// them. Undone by the matching [`Shadow::swap_runs`].
-    fn stage(&mut self, runs: &[(u16, u16)]) {
-        if self.staged.len() < runs.len() {
-            self.staged.resize_with(runs.len(), StagedRun::default);
-        }
-        let area = self.front.area;
-        for (slot, &(start, height)) in self.staged.iter_mut().zip(runs) {
-            let rect = ratatui::layout::Rect {
-                x: area.x,
-                y: start,
-                width: area.width,
-                height,
-            };
-            let len = usize::from(height) * usize::from(area.width);
-            slot.front.area = rect;
-            slot.back.area = rect;
-            slot.front.content.resize(len, Cell::EMPTY);
-            slot.back.content.resize(len, Cell::EMPTY);
-        }
-        self.swap_runs(runs);
+        let staged = StagedRuns::stage(self, runs);
+        backend.draw(staged.diffs())
     }
 
     /// Exchanges each run's rows between the shadow's buffers and its staged
@@ -342,13 +367,21 @@ impl Shadow {
             let offset = usize::from(start.saturating_sub(area.y)) * usize::from(area.width);
             let len = slot.front.content.len();
             let end = offset.saturating_add(len);
-            // in range by construction (the runs come from `row_runs` over
-            // this same area); the fallible form is how that is asserted
-            // without a panic in a paint-loop path
             let (Some(front), Some(back)) = (
                 self.front.content.get_mut(offset..end),
                 self.back.content.get_mut(offset..end),
             ) else {
+                // in range by construction (the runs come from `row_runs`
+                // over this same area). Skipping a run would silently drop
+                // that run's updates from the frame, so the invariant is
+                // loud under test; a release build degrades to the missed
+                // repaint rather than panicking in the paint loop
+                debug_assert!(
+                    false,
+                    "staged run at row {start} spans {offset}..{end}, past the \
+                     shadow's {} cells",
+                    self.front.content.len()
+                );
                 continue;
             };
             slot.front.content.swap_with_slice(front);
@@ -481,11 +514,15 @@ fn columns_left(buf: &Buffer, col: u16) -> u16 {
 /// `cell_width`, not `unicode-width`'s raw one, because `diff_iter` skips by
 /// the former.
 ///
-/// A single-byte symbol is one column wide by definition, which is nearly
-/// every cell of a text frame; short-circuiting on that is why this costs a
-/// length check rather than a width computation per cell.
+/// A symbol's byte length is an upper bound on its display width, so a symbol
+/// no longer than the columns left fits without computing anything: every
+/// char two columns wide is at least three UTF-8 bytes, and the halfwidth
+/// dakuten `ratatui` adds a column back for spends three bytes on that one
+/// column. That bound is what keeps this a length compare on nearly every
+/// cell of a text frame -- including the wide-glyph cells a width computation
+/// would otherwise charge for -- rather than a width computation per cell.
 fn fitted_symbol(symbol: &str, columns_left: u16) -> &str {
-    if symbol.len() > 1 && symbol.cell_width() > columns_left {
+    if symbol.len() > usize::from(columns_left) && symbol.cell_width() > columns_left {
         " "
     } else {
         symbol
@@ -1005,7 +1042,7 @@ fn rgb(c: u32) -> Color {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
@@ -2672,6 +2709,128 @@ mod tests {
             three_wide,
             "a glyph filling exactly the columns left must still be painted"
         );
+    }
+
+    /// Every grapheme class the wire carries, at every column of a row,
+    /// against the rule the clip's exactness rests on: blank exactly when the
+    /// symbol's `cell_width` exceeds the columns left, and never otherwise.
+    ///
+    /// The reference is the rule itself rather than the implementation, so
+    /// this pins both directions -- a check that blanks too eagerly loses a
+    /// glyph the terminal could have shown, and one that blanks too late
+    /// lets the symbol overflow its row and strand the cells below it. Both
+    /// the helper and the painted frame are checked, because the painter is
+    /// what computes the columns left from the buffer's own rect.
+    ///
+    /// Disconfirm: dropping [`fitted_symbol`]'s width test and blanking on
+    /// the byte-length bound alone fails the over-blanking direction (a VS16
+    /// emoji spends six bytes on two columns); loosening that bound by two
+    /// bytes fails the under-blanking direction (a CJK ideograph spends three
+    /// bytes on two columns, so the width test stops running while the glyph
+    /// still overflows).
+    #[test]
+    fn the_fit_check_blanks_exactly_the_symbols_too_wide_for_the_columns_left() {
+        let symbols = [
+            ("ASCII", "a"),
+            ("CJK", "界"),
+            ("VS16 emoji", "\u{2764}\u{FE0F}"),
+            ("ZWJ family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            ("halfwidth dakuten cluster", "\u{3042}\u{FF9E}"),
+            ("regional indicator flag", "\u{1F1EF}\u{1F1F5}"),
+            ("combining mark", "e\u{0301}"),
+            ("blank", " "),
+        ];
+        const WIDTH: u16 = 6;
+        let area = ratatui::layout::Rect::new(0, 0, WIDTH, 2);
+
+        for (name, symbol) in symbols {
+            let width = symbol.cell_width();
+            for columns_left in 0..=WIDTH + 1 {
+                let fits = width <= columns_left;
+                let expected = if fits { symbol } else { " " };
+                assert_eq!(
+                    fitted_symbol(symbol, columns_left),
+                    expected,
+                    "{name} is {width} columns wide with {columns_left} left"
+                );
+            }
+
+            for col in 0..WIDTH {
+                let mut model = Model::new();
+                model.engine.apply_grid(GridOp::Resize {
+                    width: WIDTH,
+                    height: 2,
+                });
+                put(&mut model, 0, col, &[symbol]);
+                let buf = full_paint(&model, area);
+                let expected = if width <= WIDTH - col { symbol } else { " " };
+                assert_eq!(
+                    buf[(col, 0)].symbol(),
+                    expected,
+                    "{name} is {width} columns wide, painted at column {col} of {WIDTH}"
+                );
+            }
+        }
+    }
+
+    /// A shadow whose rows are staged is mid-surgery: its buffers hold the
+    /// scratch's cells, so a frame that abandoned the stage would leave every
+    /// later diff comparing against those. The rows must come back however
+    /// the staged scope ends, including by unwinding out of the backend.
+    ///
+    /// Disconfirm: emptying `StagedRuns`'s `Drop` body leaves the shadow
+    /// holding blank scratch rows and fails the comparison below.
+    #[test]
+    fn a_panic_while_the_shadow_is_staged_still_puts_its_rows_back() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 8);
+        let mut model = Model::new();
+        seed_wide_grid(&mut model, 12, 8);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+        let surface = view_surface::render(&model);
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+        let intact = shadow.front().clone();
+
+        let runs = vec![(2_u16, 2_u16)];
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _staged = StagedRuns::stage(&mut shadow, &runs);
+            // stands in for an unwinding panic anywhere inside the backend's
+            // write, which is the whole window in which the rows are lifted
+            panic!("backend write");
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(unwound.is_err(), "the panic must have crossed the guard");
+        assert_eq!(
+            shadow.front(),
+            &intact,
+            "an unwind out of the staged scope must still restore the shadow, \
+             or every later frame diffs against scratch cells"
+        );
+    }
+
+    /// A run reaching past the shadow's cells cannot be swapped, and skipping
+    /// it would drop that run's updates from the frame with nothing said. The
+    /// guard is unreachable through [`Damage::row_runs`], so it is reached
+    /// here directly.
+    ///
+    /// Disconfirm: removing the `debug_assert!` beside the `continue` makes
+    /// the skip silent again, and this test fails for want of the panic it
+    /// expects.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "past the")]
+    fn a_staged_run_reaching_past_the_shadow_fails_loudly_rather_than_silently() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 8);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+        // sizes one scratch slot, so the out-of-range run below has a slot to
+        // zip against
+        drop(StagedRuns::stage(&mut shadow, &[(2, 2)]));
+        shadow.swap_runs(&[(area.height, 2)]);
     }
 
     #[test]

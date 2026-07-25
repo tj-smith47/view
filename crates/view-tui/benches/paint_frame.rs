@@ -3,17 +3,21 @@
 //! then the shadow's diff of what changed against what the terminal shows --
 //! against a populated 120x40 grid.
 //!
-//! Three functions bracket the damage-clipping lever:
+//! Four functions bracket the damage-clipping lever:
 //!
 //! - `paint_frame_full_recomposite` recomposites every cell and diffs the
 //!   whole grid each frame (the pre-clipping behavior), the "before" number.
+//! - `paint_frame_full_recomposite_wide` does the same over a grid of
+//!   two-column glyphs. Every cost in the paint path that a symbol's width
+//!   or byte length gates is free on the all-ASCII grid and charged here, so
+//!   this is the function that sees a regression the ASCII one cannot.
 //! - `paint_frame_steady_state` mutates one cell per iteration (the echo
 //!   scenario's per-keystroke damage shape) and composites only the damaged
 //!   row, the "after" number for a single typed character.
 //! - `paint_frame_steady_state_crossterm` runs the clipped path over a real
 //!   `CrosstermBackend` so its escape-encoding cost is included.
 //!
-//! All three absorb terminal write syscalls into their backend.
+//! All four absorb terminal write syscalls into their backend.
 
 #![allow(clippy::expect_used)]
 
@@ -43,6 +47,46 @@ fn populated_model() -> Model {
             .map(|col| {
                 let ch = char::from(b'a' + ((row + col) % 26) as u8);
                 (ch.to_string(), u64::from((row + col) % 7), 1)
+            })
+            .collect();
+        model.engine.apply_grid(GridOp::PutLine {
+            row,
+            col_start: 0,
+            cells,
+        });
+    }
+    model.content_painted = true;
+    model
+}
+
+/// The same grid filled with two-column CJK ideographs, each followed by the
+/// blank cell nvim sends for the column the glyph covers.
+///
+/// The all-ASCII grid above leaves every width-dependent cost in the paint
+/// path unmeasured: a single-byte symbol is one column wide by definition, so
+/// the fit check short-circuits and the diff advances one cell at a time.
+/// This grid charges for both, and is the shape a CJK, emoji, or box-drawing
+/// buffer actually has on the wire.
+fn wide_model() -> Model {
+    let mut model = Model::new();
+    model.engine.apply_grid(GridOp::Resize {
+        width: WIDTH,
+        height: HEIGHT,
+    });
+    for row in 0..HEIGHT {
+        let cells = (0..WIDTH)
+            .map(|col| {
+                let text = if col % 2 == 0 {
+                    // CJK unified ideographs, cycling so the row is not one
+                    // repeated symbol
+                    char::from_u32(0x4E00 + u32::from((row + col) % 128))
+                        .unwrap_or('\u{4E00}')
+                        .to_string()
+                } else {
+                    // the blank nvim sends for the column the glyph covers
+                    " ".to_string()
+                };
+                (text, u64::from((row + col) % 7), 1)
             })
             .collect();
         model.engine.apply_grid(GridOp::PutLine {
@@ -98,6 +142,39 @@ fn bench_paint_frame_full(c: &mut Criterion) {
                 row: 5,
                 col_start: 5,
                 cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],
+            });
+            let _ = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            emit_frame(
+                black_box(&mut backend),
+                black_box(&mut shadow),
+                &model,
+                &surface,
+                &Damage::full(),
+            );
+        });
+    });
+}
+
+/// The wide-glyph counterpart of the reference above: the same whole-frame
+/// recomposite over a grid of two-column glyphs, so the paint path's
+/// width-dependent costs stay measured.
+fn bench_paint_frame_full_wide(c: &mut Criterion) {
+    let mut model = wide_model();
+    let mut backend = TestBackend::new(WIDTH, HEIGHT);
+    let (mut shadow, _) = primed_shadow(&mut backend, &mut model);
+
+    let mut flip = false;
+    c.bench_function("paint_frame_full_recomposite_wide", |b| {
+        b.iter(|| {
+            flip = !flip;
+            model.engine.apply_grid(GridOp::PutLine {
+                row: 5,
+                col_start: 4,
+                cells: vec![
+                    ((if flip { "界" } else { "語" }).to_string(), 0, 1),
+                    (" ".to_string(), 0, 1),
+                ],
             });
             let _ = model.take_paint_damage();
             let surface = view_surface::render(&model);
@@ -196,6 +273,7 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_paint_frame_full,
+    bench_paint_frame_full_wide,
     bench_paint_frame,
     bench_paint_frame_crossterm
 );
