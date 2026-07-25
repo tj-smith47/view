@@ -1459,10 +1459,12 @@ mod tests {
         );
     }
 
-    /// The other direction, and the reason the check above is a value
-    /// comparison rather than a blanket mark: nvim resends definitions that
-    /// change nothing, and turning each of those into a whole-frame repaint
-    /// would give back the frames damage clipping exists to save.
+    /// The other direction: a definition that changes nothing must not cost
+    /// a repaint. The value comparison this pins is defensive rather than
+    /// load-bearing -- the pinned engine was measured never to resend an
+    /// unchanged definition (see [`HlTable::define_attr`]) -- but an engine
+    /// that did would turn every resend into a whole-frame repaint, giving
+    /// back the frames damage clipping exists to save.
     #[test]
     fn a_highlight_definition_that_changes_nothing_produces_no_damage() {
         let mut m = model();

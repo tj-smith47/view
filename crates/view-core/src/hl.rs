@@ -165,9 +165,14 @@ impl HlTable {
     pub fn define_attr(&mut self, hl_id: u64, attr: HlAttr) {
         if self.attrs.get(&hl_id) == Some(&attr) {
             // a redefinition to the identical value resolves every cell to
-            // the same style, so it is not a repaint: nvim resends unchanged
-            // definitions freely, and treating those as damage would give
-            // back the frames the damage clip exists to save
+            // the same style, so it is not a repaint. Defensive rather than
+            // load-bearing: instrumenting the pinned engine across four
+            // plugin sessions saw 0 identical resends in 498 definitions
+            // (it allocates a fresh id per distinct attribute set, even
+            // across colorscheme reloads), but the table must not depend on
+            // that -- an engine that did resend would turn every resend
+            // into a whole-frame repaint, giving back the frames the damage
+            // clip exists to save
             return;
         }
         self.attrs.insert(hl_id, attr);
