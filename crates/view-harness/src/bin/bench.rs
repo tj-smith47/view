@@ -202,6 +202,13 @@ impl CellWorld {
     /// place), private state/cache homes, and a data home pointed at the
     /// shared lockfile-keyed plugin cache so both sides (and the compat
     /// harness) reuse one plugin install instead of cloning per run.
+    ///
+    /// The four directories are all this resolves. Every environment
+    /// variable that redirects an editor's configuration from outside them
+    /// (`$NVIM_APPNAME` voids the config directory below even after it is
+    /// pointed at the fixture, `$VIMINIT` runs host commands inside the
+    /// measured process) is dropped by `PtySession::spawn_configured`,
+    /// which every spawn on both sides of a pair goes through.
     fn side(&self, fixture: &str, side_tag: &str) -> Result<SideSetup> {
         let side_dir = self.hermetic_dir.join(side_tag);
         std::fs::create_dir_all(&side_dir)
@@ -262,6 +269,14 @@ fn settle_deadline(fixture: &str) -> Duration {
 /// Builds the view-side spawn spec against one resolved side setup; the
 /// engine binary is always passed explicitly so both halves of a pair
 /// exercise the same pin-verified nvim.
+///
+/// Nothing here strips the measured editor down: the fixture config is the
+/// subject of the measurement, and `view` spawns its engine through
+/// `EngineConfig::default` precisely so that config survives into it. An
+/// argument such as `--clean` added on either side, or an isolated engine
+/// config swapped in below `view`, would measure a plugin-free editor
+/// against baselines recorded with the fixture's full plugin set, report it
+/// as a large improvement, and gate green.
 fn view_spec_from(side: SideSetup, view_bin: &Path, nvim_bin: &Path) -> SpawnSpec {
     SpawnSpec {
         program: view_bin.to_path_buf(),
@@ -994,7 +1009,65 @@ fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Arguments that would leave a measured editor without the fixture
+    /// configuration the cell exists to measure it under.
+    const CONFIG_STRIPPING_ARGS: &[&str] = &["--clean", "-u", "-U", "--noplugin"];
+
+    /// A pair of specs built the way a cell builds them, against binary
+    /// paths that are never spawned: what the arguments and environment
+    /// say is the whole subject here.
+    fn paired_specs_for_test() -> (CellWorld, SpawnSpec, SpawnSpec) {
+        let world = CellWorld::create("minimal").unwrap();
+        let bin = Path::new("/nonexistent/never-spawned");
+        let (view, nvim) = paired_specs(&world, "minimal", bin, bin).unwrap();
+        (world, view, nvim)
+    }
+
+    #[test]
+    fn neither_side_of_a_pair_is_stripped_of_the_fixture_config() {
+        let (_world, view, nvim) = paired_specs_for_test();
+        for spec in [&view, &nvim] {
+            for arg in &spec.args {
+                let arg = arg.to_string_lossy().to_string();
+                assert!(
+                    !CONFIG_STRIPPING_ARGS.contains(&arg.as_str()),
+                    "{arg} strips the measured editor of the fixture config, so the \
+                     cell would measure a plugin-free editor against a baseline \
+                     recorded with the fixture's plugins and pass its gate as an \
+                     improvement; args {:?}",
+                    spec.args
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn each_side_is_pointed_at_its_own_copy_of_the_fixture_config() {
+        let (_world, view, nvim) = paired_specs_for_test();
+        let mut homes = vec![];
+        for spec in [&view, &nvim] {
+            let home = spec
+                .env
+                .iter()
+                .find(|(name, _)| name == "XDG_CONFIG_HOME")
+                .map(|(_, value)| PathBuf::from(value))
+                .expect("a side with no XDG_CONFIG_HOME reads the host's own config");
+            assert!(
+                home.join("nvim").join("init.lua").is_file(),
+                "{} holds no fixture config, so the side measures an unconfigured editor",
+                home.display()
+            );
+            homes.push(home);
+        }
+        assert_ne!(
+            homes[0], homes[1],
+            "both sides share one config copy, so whichever runs first can rewrite \
+             what the other measures"
+        );
+    }
 
     #[test]
     fn the_memory_row_is_blocked_exactly_where_it_has_no_metric() {

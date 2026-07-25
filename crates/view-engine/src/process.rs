@@ -25,6 +25,15 @@ pub struct EngineConfig {
     pub nvim_bin: PathBuf,
     /// Additional arguments passed to `nvim` after `--embed`.
     pub extra_args: Vec<OsString>,
+    /// Environment overrides applied on top of the environment the child
+    /// inherits. Empty by default: an engine spawned on a user's behalf
+    /// must see the environment that user's own `nvim` would see.
+    pub env: Vec<(OsString, OsString)>,
+    /// Environment variables removed from the environment the child
+    /// inherits. Applied after [`env`](Self::env), so a name in both is
+    /// removed: an isolated spawn's hermeticity must not be defeatable by
+    /// an override that happens to be pushed later.
+    pub env_remove: Vec<OsString>,
     /// Maximum time to wait for the `nvim_get_api_info` handshake response
     /// during [`Engine::spawn`]. Defaults to 5 seconds. A process that
     /// spawns but never replies (wedged, wrong binary, hung under a
@@ -44,6 +53,8 @@ impl Default for EngineConfig {
         Self {
             nvim_bin: PathBuf::from("nvim"),
             extra_args: vec![],
+            env: vec![],
+            env_remove: vec![],
             handshake_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_millis(500),
         }
@@ -52,11 +63,27 @@ impl Default for EngineConfig {
 
 impl EngineConfig {
     /// A config whose child ignores every nvim setting the host carries: no
-    /// user config, plugins or shada (`--clean`), and no swap file (`-n`).
+    /// user config, plugins or shada (`--clean`), no swap file (`-n`), and
+    /// none of the environment variables that reach past those flags to
+    /// redirect the child's configuration anyway (see [`crate::env`]).
     ///
     /// For everything that measures the engine rather than a user's editor
     /// (the oracle's reference sessions, the engine's own tests), whose
     /// results must not turn on which machine happens to run them.
+    ///
+    /// Never for an engine spawned on a user's behalf, and never for one
+    /// whose configuration is the thing being measured. `--clean` discards
+    /// the user's config and plugins outright, which is the point here and
+    /// exactly wrong there: the `view` binary spawns through
+    /// [`EngineConfig::default`], and the measurement matrix measures that
+    /// same binary against pinned fixture configurations it delivers
+    /// through `XDG_CONFIG_HOME`. Routing that spawn through this
+    /// constructor would measure a plugin-free editor against baselines
+    /// recorded with the fixture's full plugin set, and the resulting
+    /// number would pass its gate as a large improvement. Nothing about a
+    /// stripped-down child fails loudly, so the invariant is pinned by
+    /// test on both sides: that `default` carries no arguments, and that
+    /// the specs the matrix builds carry no `--clean`.
     ///
     /// It also keeps the child's exit path open, which a host config can
     /// close off outright: any message emitted during startup parks `qa!`
@@ -67,8 +94,17 @@ impl EngineConfig {
     /// ends it.
     #[must_use]
     pub fn isolated() -> Self {
+        let empty = crate::env::empty_search_path().into_os_string();
         Self {
             extra_args: vec![OsString::from("--clean"), OsString::from("-n")],
+            env: crate::env::HOST_SEARCH_PATH_VARS
+                .iter()
+                .map(|name| (OsString::from(*name), empty.clone()))
+                .collect(),
+            env_remove: crate::env::HOST_REDIRECT_VARS
+                .iter()
+                .map(|name| OsString::from(*name))
+                .collect(),
             ..Self::default()
         }
     }
@@ -181,15 +217,7 @@ impl Engine {
     /// after a successful process spawn, the child is killed and reaped
     /// before the error is returned; no zombie survives a failed `spawn`.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
-        let mut guard = ChildGuard(Some(
-            Command::new(&cfg.nvim_bin)
-                .arg("--embed")
-                .args(&cfg.extra_args)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()?,
-        ));
+        let mut guard = ChildGuard(Some(build_command(&cfg).spawn()?));
         // unreachable ok_or: nothing clears guard.0 before this point
         let child = guard
             .0
@@ -304,6 +332,31 @@ impl Drop for Engine {
     }
 }
 
+/// Builds the `nvim --embed` command `cfg` describes, environment plan
+/// included: overrides first, then removals, so a variable named by both
+/// ends up removed rather than depending on which vector a caller filled
+/// last.
+///
+/// Separate from [`Engine::spawn`] so the plan can be inspected without
+/// spawning anything: a removal that silently stopped being applied would
+/// leave a child reading the host's own editor configuration, and nothing
+/// about that fails visibly.
+fn build_command(cfg: &EngineConfig) -> Command {
+    let mut command = Command::new(&cfg.nvim_bin);
+    command.arg("--embed").args(&cfg.extra_args);
+    for (name, value) in &cfg.env {
+        command.env(name, value);
+    }
+    for name in &cfg.env_remove {
+        command.env_remove(name);
+    }
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
 /// Sends `qa!` as a fire-and-forget notification, polls `try_wait` until
 /// the child exits or `shutdown_timeout` elapses, then force-kills and
 /// reaps it. Shared by [`Engine::shutdown`] and `Engine`'s `Drop` impl so
@@ -398,6 +451,67 @@ fn decode_api_info(v: Value) -> Result<ApiInfo, EngineError> {
 fn map_get(v: &Value, key: &str) -> Option<Value> {
     let Value::Map(pairs) = v else { return None };
     crate::wire::map_find(pairs, key).cloned()
+}
+
+#[cfg(test)]
+mod config_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::ffi::OsStr;
+
+    /// The environment plan `cfg` produces, as the spawn path would apply
+    /// it: `None` for a removed variable, `Some(value)` for an override.
+    fn env_plan(cfg: &EngineConfig) -> Vec<(OsString, Option<OsString>)> {
+        build_command(cfg)
+            .get_envs()
+            .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
+            .collect()
+    }
+
+    #[test]
+    fn the_default_config_alters_neither_arguments_nor_environment() {
+        let cfg = EngineConfig::default();
+        assert!(
+            cfg.extra_args.is_empty(),
+            "the default spawn is the one the editor uses on a user's \
+             behalf and the one the measurement matrix measures a fixture \
+             config through; an argument added here (--clean above all) \
+             would discard that config and still measure and gate green, \
+             got {:?}",
+            cfg.extra_args
+        );
+        assert!(env_plan(&cfg).is_empty(), "{:?}", env_plan(&cfg));
+    }
+
+    #[test]
+    fn an_isolated_config_neutralizes_every_host_config_variable() {
+        let plan = env_plan(&EngineConfig::isolated());
+        for name in crate::env::HOST_REDIRECT_VARS {
+            assert!(
+                plan.contains(&(OsString::from(*name), None)),
+                "{name} survives into an isolated child's environment; plan {plan:?}"
+            );
+        }
+        let empty = crate::env::empty_search_path().into_os_string();
+        for name in crate::env::HOST_SEARCH_PATH_VARS {
+            assert!(
+                plan.contains(&(OsString::from(*name), Some(empty.clone()))),
+                "{name} is not pointed at an empty directory, so the child \
+                 searches a system-wide default; plan {plan:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_removal_outranks_an_override_of_the_same_variable() {
+        let mut cfg = EngineConfig::isolated();
+        cfg.env
+            .push((OsString::from("VIMINIT"), OsString::from("echo leaked")));
+        assert!(
+            env_plan(&cfg).contains(&(OsString::from("VIMINIT"), None)),
+            "an override reinstated a variable the isolation removes"
+        );
+    }
 }
 
 #[cfg(all(test, unix))]

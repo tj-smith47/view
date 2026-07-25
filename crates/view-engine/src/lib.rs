@@ -1,6 +1,7 @@
 //! Embedded Neovim lifecycle and msgpack-RPC client.
 
 pub mod damage;
+pub mod env;
 pub mod handle;
 pub mod nvim_api;
 pub mod process;

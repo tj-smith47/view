@@ -263,17 +263,24 @@ impl EngineHandle {
     /// Reads nvim's current mode name and blocked flag via `nvim_get_mode`
     /// (`nvim_get_mode() -> {"mode": String, "blocking": Boolean}`, the
     /// mode string in `mode(1)`'s own format). Unlike every other request
-    /// here, `nvim_get_mode` is one of the API's few `fast` methods: nvim
+    /// here, `nvim_get_mode` is one of the few the pinned nvim documents as
+    /// non-deferred, or `fast` (`:help api-fast` names it outright): nvim
     /// answers it immediately on receipt, even while its main loop is
     /// blocked waiting for a key -- a hit-enter prompt, a pending
     /// `t`/`f`/`r` character argument, a register name after `"` -- states
-    /// in which a non-fast request like `nvim_eval` is deferred until the
-    /// wait ends (live-verified against the pinned nvim: `nvim_eval` times
+    /// in which a deferred request like `nvim_eval` waits until the key
+    /// arrives (live-verified against the pinned nvim: `nvim_eval` times
     /// out in every `blocking = true` state this reply reports, while this
     /// call still answers). That makes it the one probe an embedded driver
     /// can use to distinguish "engine is wedged" from "engine is
     /// deliberately waiting for a key", which is what `view-oracle`'s
     /// quiesce and snapshot machinery calls it for.
+    ///
+    /// The API metadata is no second opinion on any of that, in either
+    /// direction: the pinned engine reports no per-function `fast` flag at
+    /// all (absent on every entry, including functions its own
+    /// documentation names as `fast`), so a method's flag reading as unset
+    /// there is the absence of an answer rather than a negative one.
     ///
     /// # Errors
     ///

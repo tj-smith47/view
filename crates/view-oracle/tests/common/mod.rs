@@ -57,6 +57,12 @@ pub fn view_bin_path() -> PathBuf {
 /// isolating the spawned process from the host's real nvim config: a
 /// dashboard plugin or custom keymap on a bare "i" would otherwise make a
 /// typed-text assertion nondeterministic.
+///
+/// Only the four directories: the environment variables that redirect an
+/// editor's configuration from outside them are dropped by
+/// `PtySession::spawn_configured` for every pty spawn in the tree, this
+/// one included, so that no caller has to remember a list to stay
+/// hermetic.
 pub fn isolate_xdg(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
     for var in [
         "XDG_CONFIG_HOME",

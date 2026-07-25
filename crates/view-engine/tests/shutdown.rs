@@ -29,11 +29,52 @@ fn pid_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
+/// SIGKILLs `pid`; a no-op where there is no `kill` binary to run, matching
+/// [`pid_alive`]'s own reach.
+fn kill_pid(pid: u32) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+}
+
+/// Kills the child it holds unless [`disarm`](Self::disarm)ed first, so a
+/// test that fails while its child is wedged does not leave that child
+/// running: the failure arrives precisely because nothing in the test can
+/// reach a shutdown that never returned, and a shared machine collects one
+/// orphaned editor per such failure.
+///
+/// Disarmed on every path that has already reaped the child, never left to
+/// fire on a pid the test is done with: a reaped pid can be reused, and
+/// signalling one is signalling whichever unrelated process now holds it.
+struct KillOnDrop(Option<u32>);
+
+impl KillOnDrop {
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            kill_pid(pid);
+        }
+    }
+}
+
 #[test]
 fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
-    #[cfg(unix)]
     let pid = engine.pid();
+    // the drop under test happens on another thread, so the child outlives
+    // a deadlock there: nothing left holds the Engine whose own Drop would
+    // reap it
+    let mut orphan_guard = KillOnDrop(Some(pid));
     let handle = engine.handle.clone();
 
     // nvim's event loop is single-threaded: a synchronous sleep keeps this
@@ -53,6 +94,9 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
         rx.recv_timeout(Duration::from_secs(3)).is_ok(),
         "Engine::drop deadlocked with a request in flight"
     );
+    // the drop returned, so the child is already reaped and its pid is no
+    // longer this test's to signal
+    orphan_guard.disarm();
     let _ = in_flight.join();
 
     // liveness re-check is unix-only (see pid_alive); the deadlock check
@@ -84,29 +128,41 @@ const GRACEFUL_EXIT_LIVENESS_BOUND: Duration = Duration::from_secs(60);
 /// addition rather than meaning "never".
 const GRACEFUL_DEADLINE_PAST_THE_TEST: Duration = Duration::from_secs(300);
 
-/// Runs `work` on its own thread and hands back what it produced, failing
-/// the test if nothing arrives within [`GRACEFUL_EXIT_LIVENESS_BOUND`].
+/// Runs `work` against the child `pid` on its own thread and hands back
+/// what it produced, failing the test if nothing arrives within
+/// [`GRACEFUL_EXIT_LIVENESS_BOUND`] and killing `pid` on the way out.
 ///
 /// Keeps the wait under the test's own control rather than the engine's.
 /// An engine deadline able to expire mid-test picks the graceful-vs-forced
 /// branch by host load, and reports the result as the wrong branch; an
 /// expiry here can only mean the child never exited at all, and says that.
+///
+/// `work` consumes or borrows the `Engine` on the worker thread, so on the
+/// expiry path nothing left in the test owns the child: no `Drop` will run
+/// for it, and the very condition being reported is that the shutdown it
+/// was handed to never returned.
 fn within_liveness_bound<T: Send + 'static>(
     subject: &str,
+    pid: u32,
     work: impl FnOnce() -> T + Send + 'static,
 ) -> T {
+    let mut orphan_guard = KillOnDrop(Some(pid));
     let (tx, rx) = std::sync::mpsc::channel();
     let worker = std::thread::spawn(move || {
         let _ = tx.send(work());
     });
     let wedged = format!(
         "{subject} produced nothing within {GRACEFUL_EXIT_LIVENESS_BOUND:?}: nvim never exited \
-         after qa!, so it is wedged rather than merely slow to be scheduled. The child outlives \
-         this failure, since nothing here can reach a shutdown that never returned"
+         after qa!, so it is wedged rather than merely slow to be scheduled. The child was \
+         killed on the way out of this failure, since nothing here can reach a shutdown that \
+         never returned"
     );
     let produced = rx
         .recv_timeout(GRACEFUL_EXIT_LIVENESS_BOUND)
         .expect(&wedged);
+    // work returned, so it reaped the child itself and the pid is no
+    // longer this test's to signal
+    orphan_guard.disarm();
     let _ = worker.join();
     produced
 }
@@ -121,10 +177,11 @@ fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
         ..EngineConfig::isolated()
     };
     let engine = Engine::spawn(cfg).unwrap();
-    // named by pid so a failure below points at the process still to be
-    // cleaned up, not just at the fact that one exists
-    let subject = format!("shutdown of nvim pid {}", engine.pid());
-    let outcome = within_liveness_bound(&subject, move || engine.shutdown()).unwrap();
+    // named by pid so a failure below points at the process it concerns,
+    // not just at the fact that one existed
+    let pid = engine.pid();
+    let subject = format!("shutdown of nvim pid {pid}");
+    let outcome = within_liveness_bound(&subject, pid, move || engine.shutdown()).unwrap();
 
     assert_eq!(
         outcome.path,
@@ -235,8 +292,9 @@ fn wait_exit_resolves_a_normally_exiting_child() {
          was not already exiting when wait_exit ran"
     );
 
-    let subject = format!("wait_exit on nvim pid {}", engine.pid());
-    let info = within_liveness_bound(&subject, move || engine.wait_exit());
+    let pid = engine.pid();
+    let subject = format!("wait_exit on nvim pid {pid}");
+    let info = within_liveness_bound(&subject, pid, move || engine.wait_exit());
     assert_eq!(
         info.code,
         Some(0),

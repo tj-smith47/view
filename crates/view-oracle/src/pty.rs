@@ -49,6 +49,30 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
     rx
 }
 
+/// Detaches `cmd` from the host's own editor configuration: drops every
+/// variable that redirects where an editor finds config, runtime files,
+/// plugin manifests or startup commands, and points the two search-path
+/// variables at an empty directory, whose system-wide defaults would
+/// otherwise apply (see [`view_engine::env`] for the enumeration).
+///
+/// Applied to every pty spawn rather than left to each caller. Pointing the
+/// four `XDG_*_HOME` variables at private directories, which the callers do
+/// individually and for their own reasons, leaves these untouched, and a
+/// session that reads one of them is indistinguishable from a correct one
+/// until its results are compared against a machine where the variable is
+/// not set. Nothing spawned through a pty here is a user's editor: these
+/// are measured and asserted-on sessions, one and all, so there is no
+/// caller for which inheriting the host's setup is the wanted behavior.
+fn hermetic_env(cmd: &mut CommandBuilder) {
+    for name in view_engine::env::HOST_REDIRECT_VARS {
+        cmd.env_remove(name);
+    }
+    let empty = view_engine::env::empty_search_path();
+    for name in view_engine::env::HOST_SEARCH_PATH_VARS {
+        cmd.env(name, &empty);
+    }
+}
+
 /// A process running inside a real pty, with everything a test needs to
 /// drive it and observe its screen: the child handle, a byte channel fed by
 /// a background reader thread, and a `vt100` parser that turns those bytes
@@ -86,15 +110,22 @@ impl PtySession {
     /// [`CommandBuilder`] (environment variables, working directory) rather
     /// than building a bare one from `cmd`/`args`.
     ///
+    /// Every host environment variable that redirects an editor's
+    /// configuration is neutralized here, after whatever the caller
+    /// configured, so no caller can spawn a session that answers to the
+    /// machine it runs on (see [`view_engine::env`], and
+    /// [`hermetic_env`] for why this is the funnel that applies it).
+    ///
     /// # Errors
     ///
     /// Returns [`OracleError::Pty`] if the pty cannot be opened or the
     /// command fails to spawn.
     pub fn spawn_configured(
-        cmd: CommandBuilder,
+        mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
     ) -> Result<Self, OracleError> {
+        hermetic_env(&mut cmd);
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -405,5 +436,54 @@ mod tests {
     fn wait_for_times_out_on_a_needle_that_never_appears() {
         let mut session = PtySession::spawn("/bin/echo", &["hi"], 80, 24).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
+    }
+
+    /// Reports back what a spawned child sees in the two variables that
+    /// stand for the whole enumeration: one removed, one overridden.
+    ///
+    /// `sh` rather than the `Command` builder's own accessors: the question
+    /// is what a real child's environment holds after the spawn, and a
+    /// builder that recorded the right plan but handed the child something
+    /// else would satisfy every accessor while still leaking.
+    fn env_report(preset: &str) -> String {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.arg("-c");
+        cmd.arg(r#"echo "VIMINIT=[${VIMINIT-unset}]"; echo "DIRS=[${XDG_CONFIG_DIRS-unset}]""#);
+        // planted the way the host would hand them down; `CommandBuilder`
+        // holds inherited and explicitly set variables in one map, so
+        // removing either is the same operation on the same entry
+        cmd.env("VIMINIT", preset);
+        cmd.env("XDG_CONFIG_DIRS", preset);
+        let mut session = PtySession::spawn_configured(cmd, 200, 24).unwrap();
+        // the second line's arrival proves the first line is final, so an
+        // absent needle below means the child never printed it rather than
+        // that this read was early
+        assert!(
+            session.wait_for("DIRS=[", Duration::from_secs(5)),
+            "the child never reported its environment; screen:\n{}",
+            session.screen()
+        );
+        session.screen()
+    }
+
+    #[test]
+    fn a_pty_spawn_hands_the_child_none_of_the_hosts_editor_configuration() {
+        let planted = "/host/nvim/config";
+        let screen = env_report(planted);
+        assert!(
+            screen.contains("VIMINIT=[unset]"),
+            "the host's startup commands reached the child; screen:\n{screen}"
+        );
+        assert!(
+            !screen.contains(planted),
+            "the host's config search path reached the child; screen:\n{screen}"
+        );
+        assert!(
+            screen.contains(&format!(
+                "DIRS=[{}]",
+                view_engine::env::empty_search_path().display()
+            )),
+            "the child searches somewhere other than the empty directory; screen:\n{screen}"
+        );
     }
 }
