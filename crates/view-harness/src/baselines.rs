@@ -512,7 +512,9 @@ mod tests {
 
     #[test]
     fn uncovered_cells_accepts_a_platform_skipped_cell() {
-        let mut file = BaselineFile::new("gh-macos", "v0.12.4");
+        // a baseline holding a cell whose scenario this platform has no
+        // measurement for, which is the shape the skip list exists for
+        let mut file = BaselineFile::new("gh-windows", "v0.12.4");
         file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
         file.upsert_cell("memory", "minimal", metrics(&[("pss_mb", 3.4)]));
         let uncovered = uncovered_cells(
