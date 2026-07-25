@@ -908,6 +908,7 @@ impl ReferenceSession {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::testenv;
     use crate::EngineSession;
 
     const QUIESCE_SILENCE: Duration = Duration::from_millis(200);
@@ -929,10 +930,10 @@ mod tests {
 
     #[test]
     fn reference_and_engine_sessions_agree_on_a_plain_insert() {
-        let mut engine_side =
-            EngineSession::spawn(60, 12).expect("EngineSession::spawn against real nvim");
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut engine_side = testenv::spawning(|| EngineSession::spawn(60, 12))
+            .expect("EngineSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
 
         // EngineSession's pump_until_flush returns on the first Flush it
         // sees, which is otherwise indistinguishable from a still-pending
@@ -1008,10 +1009,10 @@ mod tests {
     /// what either side rendered.
     #[test]
     fn corrupted_ref_grid_cell_fails_the_comparison() {
-        let mut engine_side =
-            EngineSession::spawn(60, 12).expect("EngineSession::spawn against real nvim");
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut engine_side = testenv::spawning(|| EngineSession::spawn(60, 12))
+            .expect("EngineSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
 
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
 
@@ -1047,8 +1048,8 @@ mod tests {
     /// rather than the permanent background noise the raw log carries.
     #[test]
     fn unknown_events_is_empty_on_a_healthy_session() {
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1079,8 +1080,8 @@ mod tests {
     /// unverified.
     #[test]
     fn known_unmodeled_events_match_a_live_session() {
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1120,8 +1121,8 @@ mod tests {
     /// in the exact operator-pending state the script produced.
     #[test]
     fn quiesce_leaves_an_operator_pending_state_untouched() {
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1168,8 +1169,8 @@ mod tests {
     /// layer to capture.
     #[test]
     fn quiesce_settles_on_a_blocked_char_wait_without_typing() {
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1214,8 +1215,8 @@ mod tests {
     /// mode/marks divergence the engine side never had.
     #[test]
     fn quiesce_fails_loudly_when_the_marker_arms_into_stalled_typeahead() {
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1249,8 +1250,8 @@ mod tests {
     /// observed, so this proves the deadline bound, not the marker path.
     #[test]
     fn quiesce_returns_false_at_the_deadline_during_a_pending_sleep() {
-        let mut reference_side =
-            ReferenceSession::spawn(20, 6).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(20, 6))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(
             reference_side
                 .quiesce(Duration::from_millis(50), Duration::from_secs(2))
@@ -1285,8 +1286,8 @@ mod tests {
     fn quiesce_settles_only_after_a_delayed_timer_burst_not_before_it() {
         const TIMER_DELAY_MS: u64 = 80;
         let silence = Duration::from_millis(300);
-        let mut reference_side =
-            ReferenceSession::spawn(20, 6).expect("ReferenceSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(20, 6))
+            .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
             .quiesce(silence, Duration::from_secs(2))
             .expect("quiesce ReferenceSession"));

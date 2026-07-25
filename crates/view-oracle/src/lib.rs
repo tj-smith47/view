@@ -38,6 +38,8 @@ mod parity;
 pub mod pty;
 mod raster;
 mod reference;
+#[cfg(test)]
+mod testenv;
 
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};

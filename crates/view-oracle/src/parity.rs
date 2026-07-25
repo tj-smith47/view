@@ -643,6 +643,8 @@ mod tests {
     use view_core::msg::Msg;
     use view_core::update::update;
 
+    use crate::testenv;
+
     fn snapshot_fixture() -> StateSnapshot {
         StateSnapshot {
             buffer_lines: vec!["hello".to_string(), "world".to_string()],
@@ -1057,10 +1059,10 @@ mod tests {
     /// to exercise the register probes `snapshot` reads, not just the grid.
     #[test]
     fn engine_and_reference_sessions_agree_across_the_full_parity_check() {
-        let mut engine_side =
-            EngineSession::spawn(40, 10).expect("EngineSession::spawn against real nvim");
-        let mut reference_side =
-            ReferenceSession::spawn(40, 10).expect("ReferenceSession::spawn against real nvim");
+        let mut engine_side = testenv::spawning(|| EngineSession::spawn(40, 10))
+            .expect("EngineSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(40, 10))
+            .expect("ReferenceSession::spawn against real nvim");
 
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
         assert!(reference_side
@@ -1164,10 +1166,10 @@ mod tests {
     /// mismatch when either half of that plumbing was missing.
     #[test]
     fn engine_and_reference_sessions_agree_when_a_second_tab_opens() {
-        let mut engine_side =
-            EngineSession::spawn(60, 12).expect("EngineSession::spawn against real nvim");
-        let mut reference_side =
-            ReferenceSession::spawn(60, 12).expect("ReferenceSession::spawn against real nvim");
+        let mut engine_side = testenv::spawning(|| EngineSession::spawn(60, 12))
+            .expect("EngineSession::spawn against real nvim");
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
 
         while engine_side.pump_until_flush(Duration::from_millis(500)) {}
         assert!(reference_side
@@ -1224,8 +1226,8 @@ mod tests {
     /// read the rest of the session's state through the `<Esc>` dismissal.
     #[test]
     fn snapshot_answers_in_a_blocked_char_wait_instead_of_wedging() {
-        let mut session =
-            EngineSession::spawn(40, 10).expect("EngineSession::spawn against real nvim");
+        let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))
+            .expect("EngineSession::spawn against real nvim");
         while session.pump_until_flush(Duration::from_millis(500)) {}
 
         session
@@ -1275,8 +1277,8 @@ mod tests {
     /// line 1, column 5 (1-indexed byte column, past the typed `hello`).
     #[test]
     fn parse_cursor_and_parse_marks_match_a_live_getpos_and_getmarklist_reply() {
-        let mut session =
-            EngineSession::spawn(40, 10).expect("EngineSession::spawn against real nvim");
+        let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))
+            .expect("EngineSession::spawn against real nvim");
         while session.pump_until_flush(Duration::from_millis(500)) {}
 
         session

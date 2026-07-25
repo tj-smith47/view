@@ -41,6 +41,18 @@
 //! is showing a blocking prompt -- this channel existing at all does not
 //! itself immunize a probe call from that, so it must fail loud on its own
 //! deadline rather than hang the whole compat run.
+//!
+//! The probe subprocess is also the one `nvim` this tree starts through
+//! neither hermetic spawn funnel ([`PtySession::spawn_configured`] and
+//! `EngineConfig::isolated`, which between them clear the host's editor
+//! configuration from every editor *session* the harness runs). A
+//! `--remote-expr` client is not such a session: it hands an expression to
+//! an already-running server and exits without performing an editor's
+//! startup initialization, so the host's startup commands never execute in
+//! it and there is nothing for a funnel to neutralize. Confirmed against the
+//! pinned binary and pinned by
+//! `the_probe_client_runs_none_of_the_hosts_startup_commands` below, since
+//! that is a claim about the binary's behavior rather than about this code.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -882,6 +894,8 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    use crate::testenv;
+
     #[test]
     fn error_marker_finds_an_e_numbered_line() {
         let text = "Press ENTER\nE5108: Error executing lua ...\nsome other line";
@@ -1171,12 +1185,14 @@ mod tests {
 
     #[test]
     fn wait_with_timeout_kills_and_reaps_a_process_that_outlives_its_deadline() {
-        let child = Command::new("/bin/sleep")
-            .arg("60")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn /bin/sleep");
+        let child = testenv::spawning(|| {
+            Command::new("/bin/sleep")
+                .arg("60")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+        .expect("failed to spawn /bin/sleep");
         // captured before the child is moved into the call
         let pid = child.id();
 
@@ -1217,10 +1233,12 @@ mod tests {
             // probe. An empty listing from a `ps` that DID run is the real
             // negative, and is the only one accepted here (`ps` also exits
             // nonzero for an unknown pid, so its status is not the signal)
-            let listing = Command::new("/bin/ps")
-                .args(["-o", "stat=", "-p", &pid.to_string()])
-                .output()
-                .expect("/bin/ps must run for the process table to be observable at all");
+            let listing = testenv::spawning(|| {
+                Command::new("/bin/ps")
+                    .args(["-o", "stat=", "-p", &pid.to_string()])
+                    .output()
+            })
+            .expect("/bin/ps must run for the process table to be observable at all");
             !listing.stdout.is_empty()
         }
     }
@@ -1233,6 +1251,145 @@ mod tests {
         false
     }
 
+    /// A scratch world for the probe-client pin: private search paths and
+    /// `XDG_*_HOME` directories, so an editor started here reads nothing of
+    /// the host's, plus the marker file a planted `VIMINIT` writes when an
+    /// editor actually executes it.
+    ///
+    /// Under the build tree rather than the system temp dir, matching
+    /// `pty`'s own planted world: this stands in for host configuration, so
+    /// it must not sit somewhere an unrelated process can write into.
+    struct ProbeInitWorld {
+        empty: PathBuf,
+        homes: PathBuf,
+        marker: PathBuf,
+        sock: PathBuf,
+    }
+
+    impl ProbeInitWorld {
+        const XDG_HOMES: [&'static str; 4] = [
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ];
+
+        fn plant() -> Self {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.pop(); // crates/
+            root.pop(); // workspace root
+            let root = root.join("target").join("view-compat-probe-init");
+            let _ = std::fs::remove_dir_all(&root);
+            let world = Self {
+                empty: root.join("empty"),
+                homes: root.join("homes"),
+                marker: root.join("viminit-ran"),
+                sock: root.join("probe.sock"),
+            };
+            std::fs::create_dir_all(&world.empty).unwrap();
+            std::fs::create_dir_all(&world.homes).unwrap();
+            world
+        }
+
+        /// The ex command line the planted `VIMINIT` carries. Writing a file
+        /// is what makes this an oracle rather than a restatement of the
+        /// code under test: it reports whether an editor *executed* the
+        /// host's startup command, and says so without consulting the
+        /// variable's name or anything the harness does with it.
+        fn payload(&self) -> String {
+            format!("call writefile(['ran'], '{}')", self.marker.display())
+        }
+
+        fn startup_command_ran(&self) -> bool {
+            self.marker.exists()
+        }
+
+        fn forget_that_it_ran(&self) {
+            let _ = std::fs::remove_file(&self.marker);
+        }
+
+        /// Points a raw (funnel-less) editor invocation at this world. The
+        /// control below deliberately runs without `--clean`, which skips
+        /// `VIMINIT` outright (confirmed against the pinned binary: with
+        /// `--clean` the planted command never runs, so a control carrying
+        /// it would pass while proving nothing), and these directories are
+        /// what keep such a start from reading the host's own config
+        /// instead.
+        fn isolate(&self, cmd: &mut Command) {
+            for name in Self::XDG_HOMES {
+                cmd.env(name, self.homes.join(name.to_lowercase()));
+            }
+            cmd.env("XDG_CONFIG_DIRS", &self.empty);
+            cmd.env("XDG_DATA_DIRS", &self.empty);
+        }
+    }
+
+    #[test]
+    fn the_probe_client_runs_none_of_the_hosts_startup_commands() {
+        let world = ProbeInitWorld::plant();
+
+        // the probe target: a real server for the client to talk to, started
+        // before the plant so its own startup cannot write the marker. A
+        // successful round-trip is what makes the client's silence mean
+        // "ran no startup command" rather than "exited early because it
+        // could not connect".
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("nvim");
+            for arg in ["--clean", "-n", "--headless", "--listen"] {
+                cmd.arg(arg);
+            }
+            cmd.arg(&world.sock);
+            CompatSession::spawn_configured(cmd, 80, 24, PathBuf::from("nvim"), world.sock.clone())
+        })
+        .expect("spawning the probe target");
+        session
+            .await_probe_channel(Duration::from_secs(30))
+            .expect("the probe target never started listening");
+
+        let planted = testenv::plant(&[("VIMINIT", &world.payload())]);
+
+        // control first: the same planted command reaching an editor that
+        // does start up. Without it a silent probe below would equally
+        // describe a payload that never worked or a variable the pinned
+        // binary stopped reading.
+        let mut control = planted
+            .spawning(|| {
+                let mut cmd = Command::new("nvim");
+                cmd.args(["-n", "--headless", "-c", "qa!"]);
+                world.isolate(&mut cmd);
+                cmd.spawn()
+            })
+            .expect("spawning the control editor");
+        assert!(
+            control
+                .wait()
+                .expect("waiting for the control editor")
+                .success(),
+            "the control editor failed to run"
+        );
+        assert!(
+            world.startup_command_ran(),
+            "the planted startup command never ran even in an editor that \
+             starts up, so this test can prove nothing about the probe client"
+        );
+        world.forget_that_it_ran();
+
+        let answer = planted
+            .spawning(|| session.probe("1+1"))
+            .expect("the probe round-trip failed");
+        drop(planted);
+        assert_eq!(answer, "2", "the probe channel answered something else");
+        assert!(
+            !world.startup_command_ran(),
+            "the probe client executed the host's startup command, so it is \
+             an editor session after all and belongs behind a hermetic spawn \
+             funnel like every other one"
+        );
+
+        session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+    }
+
     #[test]
     fn wait_with_timeout_drains_output_larger_than_a_pipe_buffer_without_blocking_the_child() {
         // 200KB comfortably exceeds a 64KB pipe buffer (the typical Linux
@@ -1240,13 +1397,15 @@ mod tests {
         // blocked writing to a full pipe until this call's own deadline
         // killed it, misreporting a merely slow-draining child as wedged
         let payload_len: usize = 200_000;
-        let child = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!("head -c {payload_len} /dev/zero"))
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("failed to spawn /bin/sh");
+        let child = testenv::spawning(|| {
+            Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!("head -c {payload_len} /dev/zero"))
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+        .expect("failed to spawn /bin/sh");
 
         let start = Instant::now();
         let output = wait_with_timeout(child, Duration::from_secs(10))

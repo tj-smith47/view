@@ -119,9 +119,17 @@ impl PtySession {
     ///
     /// Every host environment variable that redirects an editor's
     /// configuration is neutralized here, after whatever the caller
-    /// configured, so no caller can spawn a session that answers to the
-    /// machine it runs on (see [`view_engine::env`], and
+    /// configured, so no caller can spawn a *pty session* that answers to
+    /// the machine it runs on (see [`view_engine::env`], and
     /// [`hermetic_env`] for why this is the funnel that applies it).
+    ///
+    /// One editor process in this tree is started outside this funnel and
+    /// outside `EngineConfig::isolated`'s: the `nvim --server ...
+    /// --remote-expr` probe client in [`crate::compat`], which is a
+    /// remote-control client rather than an editor session and performs no
+    /// startup initialization to redirect. That exception is pinned by test
+    /// (`the_probe_client_runs_none_of_the_hosts_startup_commands`), not
+    /// left to this sentence.
     ///
     /// # Errors
     ///
@@ -418,12 +426,12 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::path::{Path, PathBuf};
-    use std::sync::Mutex;
+
+    use crate::testenv;
 
     #[test]
     fn spawn_and_send_shows_typed_output_on_screen() {
-        let _planting = planting_guard();
-        let mut session = PtySession::spawn("/bin/cat", &[], 80, 24).unwrap();
+        let mut session = testenv::spawning(|| PtySession::spawn("/bin/cat", &[], 80, 24)).unwrap();
         session.send(b"hello-pty\n").unwrap();
         assert!(
             session.wait_for("hello-pty", Duration::from_secs(5)),
@@ -436,8 +444,9 @@ mod tests {
 
     #[test]
     fn wait_for_returns_true_immediately_when_the_needle_is_already_on_screen() {
-        let _planting = planting_guard();
-        let mut session = PtySession::spawn("/bin/echo", &["already-there"], 80, 24).unwrap();
+        let mut session =
+            testenv::spawning(|| PtySession::spawn("/bin/echo", &["already-there"], 80, 24))
+                .unwrap();
         // no send(): the text is already on screen from the process's own
         // startup output, the current-state-check-first path wait_for must
         // take rather than blocking for a chunk that may never arrive again
@@ -446,27 +455,9 @@ mod tests {
 
     #[test]
     fn wait_for_times_out_on_a_needle_that_never_appears() {
-        let _planting = planting_guard();
-        let mut session = PtySession::spawn("/bin/echo", &["hi"], 80, 24).unwrap();
+        let mut session =
+            testenv::spawning(|| PtySession::spawn("/bin/echo", &["hi"], 80, 24)).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
-    }
-
-    /// Serializes the environment planting below against this module's own
-    /// `CommandBuilder` construction, which copies the whole process
-    /// environment: these tests run as threads in one process, so an
-    /// unguarded `set_var` could race a copy already in progress. Every
-    /// test here that spawns takes it, through [`planting_guard`].
-    static PLANTING: Mutex<()> = Mutex::new(());
-
-    /// [`PLANTING`], with poisoning ignored: the mutex orders two operations
-    /// and guards no data, so a test that panicked while holding it left
-    /// nothing behind for the next one to find broken. Propagating the
-    /// poison instead would turn one real failure into a screenful of
-    /// unrelated ones, none of which names what actually broke.
-    fn planting_guard() -> std::sync::MutexGuard<'static, ()> {
-        PLANTING
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Reports back what a spawned child sees in the two variables that
@@ -482,16 +473,25 @@ mod tests {
     /// child inherits neither of them, and a builder-set value only stands
     /// in for an inherited one while the pty layer happens to seed its map
     /// from `std::env::vars_os()`, which is its implementation's choice to
-    /// change. Nothing else in this binary is disturbed by the plant: both
-    /// names are ones the funnel clears from every spawn it makes.
+    /// change. The plant is process-wide while it stands, so it is made
+    /// through [`crate::testenv::plant`], which excludes every other spawn in
+    /// this binary for its duration and puts the two names back afterwards.
     fn env_report(preset: &str) -> String {
-        let _planting = planting_guard();
-        std::env::set_var("VIMINIT", preset);
-        std::env::set_var("XDG_CONFIG_DIRS", preset);
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        cmd.arg(r#"echo "VIMINIT=[${VIMINIT-unset}]"; echo "DIRS=[${XDG_CONFIG_DIRS-unset}]""#);
-        let mut session = PtySession::spawn_configured(cmd, 200, 24).unwrap();
+        let planted = testenv::plant(&[("VIMINIT", preset), ("XDG_CONFIG_DIRS", preset)]);
+        let mut session = planted
+            .spawning(|| {
+                let mut cmd = CommandBuilder::new("/bin/sh");
+                cmd.arg("-c");
+                cmd.arg(
+                    r#"echo "VIMINIT=[${VIMINIT-unset}]"; echo "DIRS=[${XDG_CONFIG_DIRS-unset}]""#,
+                );
+                PtySession::spawn_configured(cmd, 200, 24)
+            })
+            .unwrap();
+        // the child holds its own copy of the environment from here on, so
+        // the plant is released before the wait rather than blocking every
+        // other test's spawn for the length of it
+        drop(planted);
         // the second line's arrival proves the first line is final, so an
         // absent needle below means the child never printed it rather than
         // that this read was early
@@ -594,19 +594,31 @@ mod tests {
 
     #[test]
     fn a_pty_spawn_sources_no_plugin_from_the_hosts_search_path() {
-        let _planting = planting_guard();
         let world = SearchPathWorld::plant();
 
         // control first: the same planted world, reaching an editor that
         // never passes the funnel. Without it a green assertion below would
         // equally describe a plant that never worked, a layout Neovim
         // stopped reading, or an editor that failed to start.
-        let control = std::process::Command::new("nvim")
-            .args(SearchPathWorld::ARGS)
-            .env("XDG_CONFIG_DIRS", &world.config_dirs)
-            .env("XDG_DATA_DIRS", &world.data_dirs)
-            .status()
-            .unwrap();
+        //
+        // This is the one child in this binary that no funnel neutralizes,
+        // so it is the one a concurrent environment plant would reach: it
+        // takes the shared side of the same lock that plant holds
+        // exclusively.
+        //
+        // Spawned and waited on separately, rather than through `status()`:
+        // only the spawn itself reads the environment, and holding the lock
+        // across the editor's whole run would stall an unrelated plant for
+        // no gain.
+        let mut control = testenv::spawning(|| {
+            std::process::Command::new("nvim")
+                .args(SearchPathWorld::ARGS)
+                .env("XDG_CONFIG_DIRS", &world.config_dirs)
+                .env("XDG_DATA_DIRS", &world.data_dirs)
+                .spawn()
+        })
+        .unwrap();
+        let control = control.wait().unwrap();
         assert!(control.success(), "the control editor failed to run");
         assert_eq!(
             world.sourced().len(),
@@ -617,13 +629,16 @@ mod tests {
         );
         world.forget_what_was_sourced();
 
-        let mut cmd = CommandBuilder::new("nvim");
-        for arg in SearchPathWorld::ARGS {
-            cmd.arg(arg);
-        }
-        cmd.env("XDG_CONFIG_DIRS", &world.config_dirs);
-        cmd.env("XDG_DATA_DIRS", &world.data_dirs);
-        let mut session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("nvim");
+            for arg in SearchPathWorld::ARGS {
+                cmd.arg(arg);
+            }
+            cmd.env("XDG_CONFIG_DIRS", &world.config_dirs);
+            cmd.env("XDG_DATA_DIRS", &world.data_dirs);
+            PtySession::spawn_configured(cmd, 80, 24)
+        })
+        .unwrap();
         assert!(
             session.wait_for_exit(Duration::from_secs(30)).is_some(),
             "the guarded editor never exited; screen:\n{}",

@@ -7,7 +7,14 @@
 //!
 //! Lives alone in this integration binary because it mutates process
 //! environment: each Cargo integration test file is its own process, so the
-//! mutation cannot race tests in other binaries.
+//! mutation cannot race tests in other binaries, and being the only test
+//! here means there is no second thread in this one to spawn a child while
+//! the mutation lands or to inherit it afterwards. The lib's own tests share
+//! a binary and therefore need the lock in `view_oracle`'s `testenv`
+//! instead; that module is `#[cfg(test)]` and so is not reachable from here.
+//! A second test added to this file would need the same treatment: it would
+//! run on its own thread, and `EngineSession::spawn` below reads the
+//! environment this one is rewriting.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::time::Duration;
