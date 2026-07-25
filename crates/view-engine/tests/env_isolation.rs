@@ -165,6 +165,58 @@ fn an_isolated_child_searches_no_system_wide_config_directory() {
     );
 }
 
+/// The assumption every assertion against [`MUST_NOT_LEAK`] rests on: each
+/// name in it is one a `getenv` probe can actually observe. Neovim consumes
+/// some variables during startup and unsets them, and a name that joins that
+/// group when the engine pin moves would leave the probe blind to it while
+/// every assertion above stayed green forever. `NVIM_LISTEN_ADDRESS` is the
+/// known member of that group and has its own effect-based test below.
+///
+/// A plain headless child rather than an embedded one: the marker is
+/// nonsense to the editor reading it (a bogus `$VIMRUNTIME` above all), and
+/// an embedded child with no UI attached has nowhere to put the startup
+/// message that provokes, while a headless one prints it and exits.
+#[test]
+fn every_probed_variable_is_one_getenv_can_report() {
+    let names = MUST_NOT_LEAK
+        .iter()
+        .map(|name| format!("'{name}'"))
+        .collect::<Vec<_>>()
+        .join(",");
+    let expr = format!(
+        r#"echo join(map([{names}], 'v:val . "=" . (getenv(v:val) ==# "{MARKER}" ? "SEEN" : "hidden")'), " ")"#
+    );
+    let mut child = std::process::Command::new("nvim");
+    child.args(["--clean", "-n", "--headless", "-c", &expr, "-c", "qa!"]);
+    for name in MUST_NOT_LEAK {
+        child.env(name, MARKER);
+    }
+    // the marker is a relative path to the child, and several of these
+    // variables name a file it *writes* ($NVIM_LOG_FILE above all), so
+    // without a working directory of its own the child drops a file named
+    // after the marker into the source tree
+    let cwd = scratch("probe-cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    child.current_dir(&cwd);
+    let out = child.output().unwrap();
+    // both streams: which one a headless editor writes `:echo` to is its
+    // choice, and a startup message provoked by the markers lands on the
+    // other one
+    let reported = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for name in MUST_NOT_LEAK {
+        assert!(
+            reported.contains(&format!("{name}=SEEN")),
+            "{name} is planted but the probe cannot see it, so every \
+             assertion about it clearing passes whether it clears or not; \
+             the child reported: {reported}"
+        );
+    }
+}
+
 /// `NVIM_LISTEN_ADDRESS` cannot be probed the way [`MUST_NOT_LEAK`] is:
 /// Neovim consumes it at startup and unsets it, so `getenv` reports nothing
 /// for it in a leaking child and a clean one alike. What a leak produces is
