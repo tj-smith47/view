@@ -44,6 +44,20 @@ const MATRIX: &[(&str, &str)] = &[
     ("output_path", "minimal"),
 ];
 
+/// Cells that decompose a gated row instead of being one. They are
+/// measured on demand, never selected by `--all`, and refused under
+/// `--record`/`--gate`: a bar recorded from one would gate the
+/// decomposition rather than the row it exists to explain, and the
+/// decomposition runs the instrumented build, whose numbers are not the
+/// quantity any recorded bar was taken from.
+const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[("echo_path", "minimal")];
+
+/// Sampling for the pty floor control that runs alongside the `echo_path`
+/// row: a bare round trip has no editor in it, so a few hundred samples
+/// settle its median while keeping the control to seconds.
+const PTY_FLOOR_SAMPLES: usize = 500;
+const PTY_FLOOR_WARMUP: usize = 50;
+
 /// Ceiling on the measured tap-operation p99 before the taps rows are
 /// allowed to run at all: 5% of the input-path row's 100 microsecond
 /// budget. Above this, the instrumentation itself would materially
@@ -380,33 +394,7 @@ fn run_taps_row(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
-    if !bins.taps_view.exists() {
-        bail!(
-            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass \
-             --taps-view-bin",
-            bins.taps_view.display()
-        );
-    }
-    let side = world.side(fixture, "view")?;
-    let tap_path = side.cwd.join("tap.fifo");
-    let pipe = taps::TapPipe::create(&tap_path)?;
-
-    let overhead = taps::characterize_overhead(&tap_path, 100_000)?;
-    println!(
-        "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations (bar {TAP_OVERHEAD_BAR_US}us)",
-        overhead.p50(),
-        overhead.p99(),
-        overhead.len()
-    );
-    if overhead.p99() > TAP_OVERHEAD_BAR_US {
-        bail!(
-            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the \
-             input-path budget); the tap design must change before this row can be trusted",
-            overhead.p99()
-        );
-    }
-
-    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
+    let (pipe, spec, _cwd) = taps_side(fixture, world, bins)?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {
         "input_path" => (
@@ -455,6 +443,118 @@ fn run_taps_row(
     Ok(metrics)
 }
 
+/// Prepares one instrumented-build side: the tap FIFO, the overhead
+/// characterization that guards it, and the shimmed spawn spec.
+fn taps_side(
+    fixture: &str,
+    world: &CellWorld,
+    bins: &Bins,
+) -> Result<(taps::TapPipe, SpawnSpec, PathBuf)> {
+    if !bins.taps_view.exists() {
+        bail!(
+            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass \
+             --taps-view-bin",
+            bins.taps_view.display()
+        );
+    }
+    let side = world.side(fixture, "view")?;
+    let cwd = side.cwd.clone();
+    let tap_path = cwd.join("tap.fifo");
+    let pipe = taps::TapPipe::create(&tap_path)?;
+    let overhead = taps::characterize_overhead(&tap_path, 100_000)?;
+    println!(
+        "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations (bar {TAP_OVERHEAD_BAR_US}us)",
+        overhead.p50(),
+        overhead.p99(),
+        overhead.len()
+    );
+    if overhead.p99() > TAP_OVERHEAD_BAR_US {
+        bail!(
+            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the \
+             input-path budget); the tap design must change before this row can be trusted",
+            overhead.p99()
+        );
+    }
+    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
+    Ok((pipe, spec, cwd))
+}
+
+/// Runs the report-only `echo_path` decomposition: the echo round trip on
+/// the instrumented build, paired against bare nvim in the same run, split
+/// into the internal stages the tap chain resolves, plus this host's bare
+/// pty round trip as the floor both editors pay.
+fn run_echo_path_row(
+    fixture: &str,
+    world: &CellWorld,
+    bins: &Bins,
+    protocol: &Protocol,
+) -> Result<CellMetrics> {
+    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins)?;
+    let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
+    let outcome = taps::run_echo_path(
+        &view_spec,
+        &nvim_spec,
+        &pipe,
+        protocol,
+        settle_deadline(fixture),
+    )
+    .with_context(|| format!("echo_path/{fixture} run failed"))?;
+
+    for summary in &outcome.trials {
+        println!(
+            "{}",
+            report::paired_cell("echo_path", fixture, summary, protocol.warmup)
+        );
+    }
+    println!(
+        "{}",
+        report::aggregate_line("ratio_p50", outcome.gated_ratio_p50, outcome.trials.len())
+    );
+    for segment in outcome
+        .segments
+        .iter()
+        .chain([&outcome.view_total, &outcome.nvim_total])
+    {
+        println!(
+            "      segment {}: p50 {:.1}us p99 {:.1}us over {} samples",
+            segment.label, segment.p50_us, segment.p99_us, segment.samples
+        );
+    }
+    println!(
+        "      stage p50 sum {:.1}us vs measured total p50 {:.1}us; residual {:.1}us ({:.1}% of \
+         the total)",
+        outcome.stage_p50_sum_us(),
+        outcome.view_total.p50_us,
+        outcome.residual_p50_us(),
+        100.0 * outcome.residual_p50_us() / outcome.view_total.p50_us
+    );
+    println!(
+        "      chain unresolved on {} of {} measured view samples; ambiguous loop wakes: input \
+         {}, output {}",
+        outcome.unresolved,
+        outcome.view_total.samples,
+        outcome.ambiguous_input_wakes,
+        outcome.ambiguous_output_wakes
+    );
+
+    let floor = taps::run_pty_floor(
+        &cwd,
+        PTY_FLOOR_SAMPLES,
+        PTY_FLOOR_WARMUP,
+        protocol.sample_timeout,
+    )
+    .context("pty floor control failed")?;
+    println!(
+        "      pty floor (raw-mode cat round trip): p50 {:.1}us p99 {:.1}us over {} samples",
+        floor.p50(),
+        floor.p99(),
+        floor.len()
+    );
+    // report-only: the cell records no metric, so no baseline can be
+    // written from it and no gate can read one
+    Ok(CellMetrics::new())
+}
+
 /// Runs one matrix cell and returns the metrics the baseline records for
 /// it.
 fn run_cell(
@@ -468,6 +568,7 @@ fn run_cell(
     let world = CellWorld::create(fixture)?;
     match scenario {
         "input_path" | "output_path" => run_taps_row(scenario, fixture, &world, bins, protocol),
+        "echo_path" => run_echo_path_row(fixture, &world, bins, protocol),
         "echo" => {
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
             let outcome = echo::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
@@ -742,7 +843,11 @@ fn skip_announcements(scenario: &str, fixture: &str, reason: &str, under_gha: bo
 }
 
 fn known_scenarios() -> Vec<&'static str> {
-    let mut names: Vec<&'static str> = MATRIX.iter().map(|(s, _)| *s).collect();
+    let mut names: Vec<&'static str> = MATRIX
+        .iter()
+        .chain(DIAGNOSTIC_MATRIX)
+        .map(|(s, _)| *s)
+        .collect();
     names.dedup();
     names
 }
@@ -857,17 +962,27 @@ fn main() -> Result<()> {
             .fixture
             .clone()
             .context("--fixture is required unless --all is given")?;
-        if !MATRIX
-            .iter()
-            .any(|(s, f)| *s == scenario.as_str() && *f == fixture.as_str())
-        {
+        let cell_named = |cells: &[(&str, &str)]| {
+            cells
+                .iter()
+                .any(|(s, f)| *s == scenario.as_str() && *f == fixture.as_str())
+        };
+        if !cell_named(MATRIX) && !cell_named(DIAGNOSTIC_MATRIX) {
             bail!(
                 "no matrix cell {scenario}/{fixture}; cells: {}",
                 MATRIX
                     .iter()
+                    .chain(DIAGNOSTIC_MATRIX)
                     .map(|(s, f)| format!("{s}/{f}"))
                     .collect::<Vec<_>>()
                     .join(", ")
+            );
+        }
+        if cell_named(DIAGNOSTIC_MATRIX) && (cli.record || cli.gate) {
+            bail!(
+                "{scenario}/{fixture} is a report-only diagnostic cell: it decomposes another \
+                 row on the instrumented build and holds no bar of its own, so it can be \
+                 neither recorded nor gated"
             );
         }
         if let Some(reason) = platform_block(&scenario) {
@@ -1067,6 +1182,21 @@ mod tests {
             "both sides share one config copy, so whichever runs first can rewrite \
              what the other measures"
         );
+    }
+
+    #[test]
+    fn a_diagnostic_cell_is_never_a_recordable_matrix_cell() {
+        // --all walks MATRIX alone, and every cell it walks must have a
+        // baseline bar; a diagnostic cell appearing there would fail the
+        // gate's coverage walk on a baseline that can never legitimately
+        // hold it
+        for (scenario, fixture) in DIAGNOSTIC_MATRIX {
+            assert!(
+                !MATRIX.iter().any(|(s, f)| s == scenario && f == fixture),
+                "{scenario}/{fixture} is both a gated cell and a report-only diagnostic"
+            );
+        }
+        assert!(known_scenarios().contains(&"echo_path"));
     }
 
     #[test]

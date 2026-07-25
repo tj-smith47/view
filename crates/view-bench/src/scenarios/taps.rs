@@ -10,13 +10,16 @@
 //! the run instead of mispairing timestamps.
 
 use std::io::Read;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::sampling::Distribution;
+use crate::pairing::{paired_summary, PairedSummary};
+use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side};
+use crate::scenarios::echo::{label, SideState};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, SpawnSpec, GRID_COLS, GRID_ROWS};
 use crate::BenchError;
 
 /// Current `CLOCK_MONOTONIC` in nanoseconds, the same clock and formula
@@ -499,6 +502,344 @@ pub fn run_output_path(
     })
 }
 
+/// The tags one keystroke walks, in order, across view's whole echo round
+/// trip: key decoded off the host terminal, runtime loop woken, RPC
+/// encoded and handed off, RPC bytes written to the engine, then the
+/// engine's redraw parsed, the loop woken again, the frame drawn, its
+/// bytes flushed, and the terminal write completed.
+const ECHO_CHAIN: &[u8] = b"KUSWRUBFT";
+
+/// One label per interval of [`ECHO_CHAIN`], anchored at the harness's
+/// pre-keystroke timestamp and closed by the harness observing the echoed
+/// glyph, so the labelled stages tile the whole measured round trip with
+/// no gap left implicit.
+const ECHO_LABELS: &[&str] = &[
+    "pty->key-decoded",
+    "key-decoded->loop-wake",
+    "loop-wake->rpc-handoff",
+    "rpc-handoff->rpc-written",
+    "rpc-written->redraw-parsed",
+    "redraw-parsed->loop-wake",
+    "loop-wake->draw-start",
+    "draw-start->flush-start",
+    "flush-start->term-written",
+    "term-written->glyph-seen",
+];
+
+/// Index into a resolved [`ECHO_CHAIN`] of the `S` (RPC handoff) match:
+/// with the `K` match it brackets the input-side loop wake.
+const INPUT_WAKE_BRACKET_END: usize = 2;
+/// Index of the `R` (redraw parsed) match; with the `B` match below it
+/// brackets the output-side loop wake.
+const OUTPUT_WAKE_BRACKET_START: usize = 4;
+/// Index of the `B` (draw start) match.
+const OUTPUT_WAKE_BRACKET_END: usize = 6;
+
+/// A paired echo round trip decomposed into [`ECHO_LABELS`] stages.
+#[derive(Debug)]
+pub struct EchoPathOutcome {
+    pub trials: Vec<PairedSummary>,
+    /// Median across trials of the per-trial p50 ratio, the same statistic
+    /// the gated echo row reports, measured here on the instrumented
+    /// build so the two can be differenced into an instrumentation cost.
+    pub gated_ratio_p50: f64,
+    /// The stage decomposition, pooled across every measured sample of
+    /// every trial.
+    pub segments: Vec<Segment>,
+    /// The view side's whole measured round trip, pooled the same way, so
+    /// the stage sum can be differenced against it rather than against a
+    /// percentile computed by another route.
+    pub view_total: Segment,
+    /// Bare nvim's whole measured round trip, pooled the same way.
+    pub nvim_total: Segment,
+    /// Measured view samples whose tag chain never resolved. These
+    /// contribute to [`Self::view_total`] but to no stage, so a count
+    /// above zero is exactly how far the stage percentiles and the total
+    /// stopped describing the same population.
+    pub unresolved: usize,
+    /// Resolved samples carrying more than one loop wake between `K` and
+    /// `S`. The chain's ordering rule takes the earliest wake, so a second
+    /// one shifts time between `key-decoded->loop-wake` and
+    /// `loop-wake->rpc-handoff` without changing their sum.
+    pub ambiguous_input_wakes: usize,
+    /// Resolved samples carrying more than one loop wake between `R` and
+    /// `B`; the output-side counterpart of
+    /// [`Self::ambiguous_input_wakes`].
+    pub ambiguous_output_wakes: usize,
+}
+
+impl EchoPathOutcome {
+    /// Sum of the stage p50s. Percentiles do not add, so this is not the
+    /// total's p50; the difference between the two is the residual the
+    /// attribution has to report rather than distribute.
+    #[must_use]
+    pub fn stage_p50_sum_us(&self) -> f64 {
+        self.segments.iter().map(|s| s.p50_us).sum()
+    }
+
+    /// Measured total p50 minus [`Self::stage_p50_sum_us`].
+    #[must_use]
+    pub fn residual_p50_us(&self) -> f64 {
+        self.view_total.p50_us - self.stage_p50_sum_us()
+    }
+}
+
+/// Number of `tag` records in `[from, to]`.
+fn count_tag_between(records: &[TapRecord], tag: u8, from: i64, to: i64) -> usize {
+    records
+        .iter()
+        .filter(|r| r.tag == tag && r.nanos >= from && r.nanos <= to)
+        .count()
+}
+
+/// Accumulates one measured sample's stage deltas into `pools`, reporting
+/// whether the chain resolved and how many loop wakes each bracket held.
+struct ChainOutcome {
+    resolved: bool,
+    ambiguous_input_wakes: bool,
+    ambiguous_output_wakes: bool,
+}
+
+fn accumulate_chain(
+    window: &[TapRecord],
+    from: i64,
+    to: i64,
+    pools: &mut [Vec<f64>],
+) -> ChainOutcome {
+    let Some(chain) = tag_chain(window, ECHO_CHAIN, from) else {
+        return ChainOutcome {
+            resolved: false,
+            ambiguous_input_wakes: false,
+            ambiguous_output_wakes: false,
+        };
+    };
+    let mut prev = from;
+    for (pool, hit) in pools.iter_mut().zip(&chain) {
+        pool.push(delta_us(prev, hit.nanos));
+        prev = hit.nanos;
+    }
+    if let Some(pool) = pools.get_mut(chain.len()) {
+        pool.push(delta_us(prev, to));
+    }
+    let wakes = |start: usize, end: usize| {
+        chain
+            .get(start)
+            .zip(chain.get(end))
+            .is_some_and(|(a, b)| count_tag_between(window, b'U', a.nanos, b.nanos) > 1)
+    };
+    ChainOutcome {
+        resolved: true,
+        ambiguous_input_wakes: wakes(0, INPUT_WAKE_BRACKET_END),
+        ambiguous_output_wakes: wakes(OUTPUT_WAKE_BRACKET_START, OUTPUT_WAKE_BRACKET_END),
+    }
+}
+
+/// Drives the echo scenario against the instrumented build with bare nvim
+/// paired in the same run, decomposing every measured view sample into the
+/// [`ECHO_LABELS`] stages.
+///
+/// The view side is driven by the echo scenario's own typing state, so the
+/// measured boundary here is the echo row's boundary and not a second,
+/// separately-defined one; `W -> R` (the engine's own keystroke
+/// processing plus both pipe crossings of the `--embed` protocol) is
+/// reported as a stage in its own right rather than derived by subtracting
+/// one row's total from another's.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] on tap loss, an editor that stops
+/// responding within the sample timeout, or any underlying session error.
+pub fn run_echo_path(
+    view: &SpawnSpec,
+    nvim: &SpawnSpec,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+    settle_deadline: Duration,
+) -> Result<EchoPathOutcome, BenchError> {
+    let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
+    let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
+    let _ = pipe.drain();
+
+    let mut trials = Vec::with_capacity(protocol.trials);
+    let mut all_records = Vec::new();
+    let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+    let mut view_totals: Vec<f64> = Vec::new();
+    let mut nvim_totals: Vec<f64> = Vec::new();
+    let mut unresolved = 0;
+    let mut ambiguous_input_wakes = 0;
+    let mut ambiguous_output_wakes = 0;
+
+    for trial in 0..protocol.trials {
+        if trial > 0 {
+            view_state.reset_buffer().map_err(|e| label("view", e))?;
+            nvim_state.reset_buffer().map_err(|e| label("nvim", e))?;
+        }
+        view_state.clear_samples();
+        nvim_state.clear_samples();
+        let start = if trial % 2 == 0 {
+            Side::View
+        } else {
+            Side::Nvim
+        };
+        let per_side = protocol.warmup + protocol.samples;
+        let (mut view_taken, mut nvim_taken) = (0_usize, 0_usize);
+        for block in interleave_schedule(per_side, protocol.block, start) {
+            for _ in 0..block.count {
+                match block.side {
+                    Side::View => {
+                        // the drain is what makes the copy below this
+                        // sample's records and no other's: everything
+                        // older leaves the accumulator here, and
+                        // `sample_one`'s trailing inter-sample gap is the
+                        // grace that lets the final tap of the sample
+                        // cross the fifo before it is read
+                        all_records.extend(pipe.drain());
+                        let (t0, seen) = view_state
+                            .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                            .map_err(|e| label("view", e))?;
+                        if view_taken >= protocol.warmup {
+                            view_totals.push(delta_us(t0, seen));
+                            let window = pipe.records_between(t0, seen);
+                            let outcome = accumulate_chain(&window, t0, seen, &mut pools);
+                            if outcome.resolved {
+                                ambiguous_input_wakes += usize::from(outcome.ambiguous_input_wakes);
+                                ambiguous_output_wakes +=
+                                    usize::from(outcome.ambiguous_output_wakes);
+                            } else {
+                                unresolved += 1;
+                            }
+                        }
+                        view_taken += 1;
+                    }
+                    Side::Nvim => {
+                        let (t0, seen) = nvim_state
+                            .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                            .map_err(|e| label("nvim", e))?;
+                        if nvim_taken >= protocol.warmup {
+                            nvim_totals.push(delta_us(t0, seen));
+                        }
+                        nvim_taken += 1;
+                    }
+                }
+            }
+        }
+        trials.push(paired_summary(
+            &view_state.raw_ms(),
+            &nvim_state.raw_ms(),
+            protocol.warmup,
+        )?);
+    }
+
+    all_records.extend(pipe.drain());
+    view_state.shutdown();
+    nvim_state.shutdown();
+    verify_no_drops(&all_records)?;
+
+    let totals = summarize_segments(
+        &["TOTAL view t0->glyph-seen", "TOTAL nvim t0->glyph-seen"],
+        &[view_totals, nvim_totals],
+    );
+    let mut totals = totals.into_iter();
+    let (Some(view_total), Some(nvim_total)) = (totals.next(), totals.next()) else {
+        return Err(BenchError::Desync {
+            context: "the paired totals did not summarize into two segments".to_string(),
+        });
+    };
+    let ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p50).collect();
+    Ok(EchoPathOutcome {
+        gated_ratio_p50: median_of_trials(&ratios)?,
+        trials,
+        segments: summarize_segments(ECHO_LABELS, &pools),
+        view_total,
+        nvim_total,
+        unresolved,
+        ambiguous_input_wakes,
+        ambiguous_output_wakes,
+    })
+}
+
+/// Characters echoed per screen row by the pty floor control; one below
+/// the grid width so a wrap can never move the observed cell.
+const FLOOR_COLS: u16 = GRID_COLS - 1;
+
+/// Measures this host's bare pty round trip: the harness's write to the
+/// pty master, a raw-mode `cat` reading and writing the byte straight
+/// back, and the harness's own parse of the echoed cell.
+///
+/// Both editors pay this floor on every keystroke, so it is what separates
+/// "the work view does on its input path" from "what it costs to hand a
+/// keystroke to any process at all on this host" -- the comparison the
+/// `pty->key-decoded` stage has no in-process equivalent for.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] if the control never settles or an
+/// echoed byte never appears within `timeout`.
+pub fn run_pty_floor(
+    cwd: &Path,
+    samples: usize,
+    warmup: usize,
+    timeout: Duration,
+) -> Result<Distribution, BenchError> {
+    let spec = SpawnSpec {
+        program: std::path::PathBuf::from("sh"),
+        // raw mode with the terminal's own echo off: the byte that comes
+        // back is `cat`'s write, so the sample contains a real process
+        // wakeup rather than the line discipline echoing in the kernel
+        args: vec![
+            std::ffi::OsString::from("-c"),
+            std::ffi::OsString::from("stty raw -echo; exec cat"),
+        ],
+        env: vec![(
+            std::ffi::OsString::from("TERM"),
+            std::ffi::OsString::from("xterm-256color"),
+        )],
+        cwd: Some(cwd.to_path_buf()),
+    };
+    let mut session = BenchSession::spawn(&spec)?;
+    if !session.settle(Duration::from_millis(200), Duration::from_secs(10)) {
+        return Err(BenchError::Desync {
+            context: format!(
+                "pty floor control never went quiet; screen:\n{}",
+                session.screen_text()
+            ),
+        });
+    }
+    let mut samples_us = Vec::with_capacity(samples + warmup);
+    let (mut row, mut col) = (0_u16, 0_u16);
+    for _ in 0..(samples + warmup) {
+        if col >= FLOOR_COLS {
+            session.send(b"\r\n")?;
+            col = 0;
+            row += 1;
+        }
+        if row >= GRID_ROWS - 1 {
+            session.send(b"\x1b[2J\x1b[H")?;
+            if !session.wait_cell(0, 0, " ", timeout) {
+                return Err(BenchError::Desync {
+                    context: "pty floor control never cleared its screen".to_string(),
+                });
+            }
+            row = 0;
+            col = 0;
+        }
+        let t0 = monotonic_nanos();
+        session.send(b"x")?;
+        if !session.wait_cell(row, col, "x", timeout) {
+            return Err(BenchError::Desync {
+                context: format!(
+                    "pty floor control never echoed at ({row}, {col}); screen:\n{}",
+                    session.screen_text()
+                ),
+            });
+        }
+        samples_us.push(delta_us(t0, monotonic_nanos()));
+        col += 1;
+    }
+    session.shutdown();
+    Distribution::from_samples(&samples_us, warmup)
+}
+
 /// Measures the tap operation's own cost with the identical code shape
 /// the in-process tap sites run (one monotonic clock read, one record
 /// format, one non-blocking FIFO write), against a drained FIFO.
@@ -659,6 +1000,151 @@ mod tests {
         ];
         let chain = tag_chain(&records, b"K", 10).unwrap();
         assert_eq!(chain[0].nanos, 30);
+    }
+
+    /// Builds tap records from `(tag, nanos)` pairs; sequence numbers are
+    /// irrelevant to chain walking and are left contiguous.
+    fn records(pairs: &[(u8, i64)]) -> Vec<TapRecord> {
+        pairs
+            .iter()
+            .enumerate()
+            .map(|(seq, (tag, nanos))| TapRecord {
+                tag: *tag,
+                seq: seq as u64,
+                nanos: *nanos,
+            })
+            .collect()
+    }
+
+    /// One clean echo round trip: both loop wakes present, in order.
+    fn clean_round_trip() -> Vec<TapRecord> {
+        records(&[
+            (b'K', 10),
+            (b'U', 20),
+            (b'S', 30),
+            (b'W', 40),
+            (b'R', 50),
+            (b'U', 60),
+            (b'B', 70),
+            (b'F', 80),
+            (b'T', 90),
+        ])
+    }
+
+    #[test]
+    fn the_echo_chain_binds_each_loop_wake_to_its_own_side() {
+        let chain = tag_chain(&clean_round_trip(), ECHO_CHAIN, 0).unwrap();
+        assert_eq!(
+            chain.iter().map(|r| r.nanos).collect::<Vec<_>>(),
+            vec![10, 20, 30, 40, 50, 60, 70, 80, 90]
+        );
+        assert_eq!(chain[1].nanos, 20, "input-side wake");
+        assert_eq!(chain[5].nanos, 60, "output-side wake");
+    }
+
+    #[test]
+    fn a_lost_input_wake_breaks_the_chain_instead_of_stealing_the_output_wake() {
+        // without this, the output-side wake at 60 would fill the
+        // input-side slot and the sample's stages would be silently
+        // mispaired rather than dropped
+        let mut window = clean_round_trip();
+        window.retain(|r| !(r.tag == b'U' && r.nanos == 20));
+        assert!(tag_chain(&window, ECHO_CHAIN, 0).is_none());
+    }
+
+    #[test]
+    fn the_output_wake_is_bounded_below_by_the_redraw_it_follows() {
+        // a previous sample's paint landing inside this sample's window
+        // must not pull B/F/T ahead of the redraw that caused them
+        let mut window = clean_round_trip();
+        window.extend(records(&[(b'B', 42), (b'F', 44), (b'T', 46)]));
+        let chain = tag_chain(&window, ECHO_CHAIN, 0).unwrap();
+        assert_eq!(chain[4].nanos, 50, "redraw parsed");
+        assert_eq!(
+            chain[6].nanos, 70,
+            "draw start after the redraw, not before"
+        );
+    }
+
+    #[test]
+    fn a_second_redraw_round_does_not_extend_the_first_ones_stages() {
+        let mut window = clean_round_trip();
+        window.extend(records(&[
+            (b'R', 100),
+            (b'U', 110),
+            (b'B', 120),
+            (b'F', 130),
+            (b'T', 140),
+        ]));
+        let chain = tag_chain(&window, ECHO_CHAIN, 0).unwrap();
+        assert_eq!(chain[8].nanos, 90, "the first paint closes the chain");
+    }
+
+    #[test]
+    fn a_resolved_chain_fills_every_stage_and_closes_on_the_observation() {
+        let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+        let outcome = accumulate_chain(&clean_round_trip(), 0, 100, &mut pools);
+        assert!(outcome.resolved);
+        assert!(!outcome.ambiguous_input_wakes);
+        assert!(!outcome.ambiguous_output_wakes);
+        let p50s: Vec<f64> = pools.iter().map(|p| p[0]).collect();
+        assert_eq!(p50s.len(), ECHO_LABELS.len());
+        // every stage is 10ns wide except the closing one, which runs from
+        // the last tap to the harness's observation at 100
+        assert_eq!(p50s[0], 0.010);
+        assert_eq!(p50s[ECHO_LABELS.len() - 1], 0.010);
+        let total: f64 = p50s.iter().sum();
+        assert!((total - 0.100).abs() < 1e-9, "stages must tile the window");
+    }
+
+    #[test]
+    fn an_unresolved_chain_contributes_to_no_stage() {
+        let mut window = clean_round_trip();
+        window.retain(|r| r.tag != b'F');
+        let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+        let outcome = accumulate_chain(&window, 0, 100, &mut pools);
+        assert!(!outcome.resolved);
+        assert!(
+            pools.iter().all(Vec::is_empty),
+            "a broken chain must leave every pool untouched, not partially filled"
+        );
+    }
+
+    #[test]
+    fn an_extra_wake_inside_a_bracket_is_counted_not_hidden() {
+        let mut window = clean_round_trip();
+        window.extend(records(&[(b'U', 25), (b'U', 65)]));
+        let mut pools: Vec<Vec<f64>> = vec![Vec::new(); ECHO_LABELS.len()];
+        let outcome = accumulate_chain(&window, 0, 100, &mut pools);
+        assert!(outcome.resolved);
+        assert!(outcome.ambiguous_input_wakes);
+        assert!(outcome.ambiguous_output_wakes);
+        // the split moved but the bracket totals did not: the stages still
+        // tile the window
+        let total: f64 = pools.iter().map(|p| p[0]).sum();
+        assert!((total - 0.100).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_chain_tag_has_its_own_stage_label() {
+        assert_eq!(ECHO_LABELS.len(), ECHO_CHAIN.len() + 1);
+        assert_eq!(ECHO_CHAIN[INPUT_WAKE_BRACKET_END], b'S');
+        assert_eq!(ECHO_CHAIN[OUTPUT_WAKE_BRACKET_START], b'R');
+        assert_eq!(ECHO_CHAIN[OUTPUT_WAKE_BRACKET_END], b'B');
+    }
+
+    #[test]
+    fn every_chain_tag_is_one_a_drop_check_covers() {
+        // a tag no origin stream claims would leave a dropped record
+        // undetectable, so the chain and the drop check must name the same
+        // tag set
+        for tag in ECHO_CHAIN {
+            assert!(
+                b"WRS".contains(tag) || b"TKUBF".contains(tag),
+                "chain tag {} belongs to no checked origin stream",
+                *tag as char
+            );
+        }
     }
 
     #[test]

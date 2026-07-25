@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
+use crate::scenarios::taps::monotonic_nanos;
 use crate::scenarios::Protocol;
 use crate::session::{BenchSession, SpawnSpec};
 use crate::BenchError;
@@ -23,13 +24,13 @@ const LINE_LIMIT: usize = 100;
 const SAMPLE_CHAR: &str = "x";
 
 /// One side's typing state: where the next character will land.
-struct SideState {
+pub(crate) struct SideState {
     session: BenchSession,
     row: u16,
     col: u16,
     origin_col: u16,
     line_len: usize,
-    raw_ms: Vec<f64>,
+    windows: Vec<(i64, i64)>,
 }
 
 impl SideState {
@@ -37,7 +38,7 @@ impl SideState {
     /// mode, then locate the buffer origin by typing and erasing a probe
     /// character (the one observation that works identically across both
     /// editors and any chrome/gutter layout).
-    fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
+    pub(crate) fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
         let mut session = BenchSession::spawn(spec)?;
         if !session.settle(Duration::from_millis(500), settle_deadline) {
             return Err(BenchError::Desync {
@@ -67,17 +68,27 @@ impl SideState {
             col,
             origin_col: col,
             line_len: 0,
-            raw_ms: Vec::new(),
+            windows: Vec::new(),
         })
     }
 
-    /// Types one sample character and records how long it took to appear
-    /// in the cursor's cell.
-    fn sample_one(&mut self, timeout: Duration, inter_sample: Duration) -> Result<(), BenchError> {
+    /// Types one sample character and records the monotonic window it took
+    /// to appear in the cursor's cell, returning that window.
+    ///
+    /// The window's endpoints come from the same `CLOCK_MONOTONIC` the
+    /// instrumented build's tap records carry, so a sample's window can be
+    /// intersected directly with the tap stream; the paired milliseconds
+    /// below are derived from it rather than timed by a second clock, which
+    /// keeps one sample at exactly two clock reads either way.
+    pub(crate) fn sample_one(
+        &mut self,
+        timeout: Duration,
+        inter_sample: Duration,
+    ) -> Result<(i64, i64), BenchError> {
         if self.line_len >= LINE_LIMIT {
             self.open_fresh_line()?;
         }
-        let start = Instant::now();
+        let start = monotonic_nanos();
         self.session.send(SAMPLE_CHAR.as_bytes())?;
         if !self
             .session
@@ -92,11 +103,32 @@ impl SideState {
                 ),
             });
         }
-        self.raw_ms.push(start.elapsed().as_secs_f64() * 1000.0);
+        let seen = monotonic_nanos();
+        self.windows.push((start, seen));
         self.col += 1;
         self.line_len += 1;
         std::thread::sleep(inter_sample);
-        Ok(())
+        Ok((start, seen))
+    }
+
+    /// This side's per-sample latencies in milliseconds, derived from the
+    /// recorded windows.
+    #[allow(clippy::cast_precision_loss)]
+    pub(crate) fn raw_ms(&self) -> Vec<f64> {
+        self.windows
+            .iter()
+            .map(|(start, seen)| (seen - start) as f64 / 1_000_000.0)
+            .collect()
+    }
+
+    /// Discards the samples collected so far, for the start of a trial.
+    pub(crate) fn clear_samples(&mut self) {
+        self.windows.clear();
+    }
+
+    /// Ends this side's session; see [`BenchSession::shutdown`].
+    pub(crate) fn shutdown(&mut self) {
+        self.session.shutdown();
     }
 
     /// Opens a fresh line under the current one (Esc also dismisses any
@@ -117,7 +149,7 @@ impl SideState {
     /// Clears the buffer between trials so cell positions and line count
     /// reset; keeps a trial's screen state identical to the first
     /// trial's.
-    fn reset_buffer(&mut self) -> Result<(), BenchError> {
+    pub(crate) fn reset_buffer(&mut self) -> Result<(), BenchError> {
         self.session.send(b"\x1b:%d _\r")?;
         std::thread::sleep(Duration::from_millis(200));
         self.session.send(b"i")?;
@@ -181,7 +213,7 @@ fn probe_origin(session: &mut BenchSession) -> Result<(u16, u16), BenchError> {
 
 /// Stamps a desync error with which editor produced it; the two sides'
 /// failure screens are otherwise indistinguishable in a report.
-fn label(side: &str, err: BenchError) -> BenchError {
+pub(crate) fn label(side: &str, err: BenchError) -> BenchError {
     match err {
         BenchError::Desync { context } => BenchError::Desync {
             context: format!("[{side} side] {context}"),
@@ -227,8 +259,8 @@ pub fn run(
             view_state.reset_buffer().map_err(|e| label("view", e))?;
             nvim_state.reset_buffer().map_err(|e| label("nvim", e))?;
         }
-        view_state.raw_ms.clear();
-        nvim_state.raw_ms.clear();
+        view_state.clear_samples();
+        nvim_state.clear_samples();
 
         // the starting side alternates per trial so neither editor
         // systematically samples first within a block pattern
@@ -250,14 +282,14 @@ pub fn run(
             }
         }
         trials.push(paired_summary(
-            &view_state.raw_ms,
-            &nvim_state.raw_ms,
+            &view_state.raw_ms(),
+            &nvim_state.raw_ms(),
             protocol.warmup,
         )?);
     }
 
-    view_state.session.shutdown();
-    nvim_state.session.shutdown();
+    view_state.shutdown();
+    nvim_state.shutdown();
 
     let median_ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p50).collect();
     let ratios: Vec<f64> = trials.iter().map(|t| t.ratio_p99).collect();
