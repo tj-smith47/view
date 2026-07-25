@@ -1177,6 +1177,9 @@ mod tests {
             .stderr(Stdio::null())
             .spawn()
             .expect("failed to spawn /bin/sleep");
+        // captured before the child is moved into the call, and only
+        // where the /proc assertion below can use it
+        #[cfg(target_os = "linux")]
         let pid = child.id();
 
         let result = wait_with_timeout(child, Duration::from_millis(100));

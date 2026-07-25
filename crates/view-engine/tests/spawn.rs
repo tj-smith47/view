@@ -52,10 +52,21 @@ fn handshake_failure_reaps_child() {
     // `cargo test` tests in this binary are threads in one process, so the
     // fake child's parent pid is our own; scoping pgrep to it (rather than
     // a bare name match) avoids colliding with unrelated `sleep` processes
-    // elsewhere on the host.
+    // elsewhere on the host. The probe repeats until the fixture is seen
+    // or the handshake window is nearly spent: how long fork, exec of the
+    // shell, and its exec of sleep take varies by host and platform, so a
+    // single probe at a fixed offset races the very startup it means to
+    // observe.
     let spawn_thread = std::thread::spawn(move || Engine::spawn(cfg));
-    std::thread::sleep(Duration::from_millis(50));
-    let seen_alive = fake_child_alive();
+    let deadline = std::time::Instant::now() + Duration::from_millis(400);
+    let mut seen_alive = false;
+    while std::time::Instant::now() < deadline {
+        if fake_child_alive() {
+            seen_alive = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     let result = spawn_thread.join().unwrap();
     let err = result.err();

@@ -49,7 +49,10 @@ impl std::ops::DerefMut for ViewPtySession {
 
 impl ViewPtySession {
     /// The OS pid of the `view` process itself (not its embedded nvim
-    /// child).
+    /// child). Only the signal-death test needs it, and that test reads
+    /// the process tree through `/proc`, so this follows it in being
+    /// Linux-only rather than reading as dead code everywhere else.
+    #[cfg(target_os = "linux")]
     fn view_pid(&self) -> u32 {
         self.session
             .pid()
@@ -604,6 +607,27 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     path
 }
 
+/// Asserts the startup shell frame is on screen before an engine held
+/// back by `engine_delay_ms` could possibly have attached, and reports
+/// how long it actually took when it is not.
+///
+/// The bar is the wrapper's own delay rather than a fixed margin: what
+/// this proves is an ordering (placeholder first, engine second), and a
+/// tighter fixed margin is really an absolute first-paint budget, which
+/// the bench matrix measures on a release build under a controlled
+/// protocol instead of a debug binary on whatever host runs the tests.
+fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession, engine_delay_ms: u64) {
+    let started = std::time::Instant::now();
+    let painted = session.wait_for("waiting for nvim", Duration::from_secs(3));
+    let elapsed = started.elapsed();
+    assert!(
+        painted && elapsed < Duration::from_millis(engine_delay_ms),
+        "shell frame took {elapsed:?} against a {engine_delay_ms}ms-delayed engine (painted at \
+         all: {painted}); last screen:\n{}",
+        session.screen()
+    );
+}
+
 /// The startup sequence's shell frame -- a themed statusline placeholder
 /// plus a static "waiting for nvim" indicator, painted before the engine
 /// even spawns -- must be visible well before a deliberately slow (500ms)
@@ -624,12 +648,7 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert!(
-        session.wait_for("waiting for nvim", Duration::from_millis(200)),
-        "shell frame did not appear within 200ms against a 500ms-delayed \
-         engine; last screen:\n{}",
-        session.screen()
-    );
+    assert_shell_frame_precedes_attach(&mut session, 500);
 
     // typed immediately, well before the delayed engine has attached: this
     // is exactly the pre-attach window startup::drain_pre_attach buffers
@@ -693,12 +712,7 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert!(
-        session.wait_for("waiting for nvim", Duration::from_millis(200)),
-        "shell frame did not appear within 200ms against a 300ms-delayed \
-         engine; last screen:\n{}",
-        session.screen()
-    );
+    assert_shell_frame_precedes_attach(&mut session, 300);
 
     // 150 keystrokes, one at a time, over ~450ms: comfortably past
     // KEY_RING_CAPACITY (64), and comfortably past the wrapper's 300ms
