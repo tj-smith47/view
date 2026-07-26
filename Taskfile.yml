@@ -32,8 +32,8 @@ tasks:
     cmd: bash scripts/check-style.sh
 
   loc:
-    desc: Enforce the production-LOC ceiling per file (split modules, separate tests)
-    cmd: bash scripts/check-loc.sh
+    desc: Enforce the god-file ceiling (production code lines per file; split modules, separate tests)
+    cmd: bash scripts/audit-god-files.sh
 
   ci:
     desc: The full local gate; CI mirrors exactly this
