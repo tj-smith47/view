@@ -661,6 +661,72 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
     let _ = session.wait();
 }
 
+#[test]
+fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
+    // The direction that had no coverage anywhere, and the one where a
+    // stale paint area is actually destructive: with the shadow still sized
+    // to the old, larger terminal, every cell emitted past the new last row
+    // is addressed to a row the terminal does not have and gets clamped
+    // onto one it does, overwriting real content.
+    let mut session = spawn_view_pty();
+
+    // fills well past the shrunk window's bottom edge, so the rows that
+    // disappear held real content rather than blank padding: a clamped
+    // write is only observable when there is something for it to land on
+    let mut input = Vec::from(*b"i");
+    for line in 0..20 {
+        input.extend_from_slice(format!("LINE{line:02}\r").as_bytes());
+    }
+    input.extend_from_slice(b"LINE20\x1b");
+    session.send(&input).unwrap();
+    assert!(
+        session.wait_for("LINE00", Duration::from_secs(5)),
+        "the buffer never painted before the shrink; last screen:\n{}",
+        session.screen()
+    );
+
+    // 24 -> 12 rows. `PtySession::resize` flips the local vt100 parser's
+    // own dimensions synchronously, so geometry alone says nothing about
+    // whether nvim's window followed. The observable that does: at 24 rows
+    // the whole buffer fits, LINE00 included; at 12 rows it cannot, and
+    // nvim keeps the cursor (left on LINE20) visible, so a window that
+    // genuinely shrank shows LINE20 and no longer shows LINE00.
+    let shrunk = session
+        .resize_until(80, 12, Duration::from_secs(5), |s| {
+            s.wait_for("LINE20", Duration::from_millis(400)) && !s.screen().contains("LINE00")
+        })
+        .unwrap();
+    assert!(
+        shrunk,
+        "shrink never reached nvim's own window even after repeated resize \
+         retries; last screen:\n{}",
+        session.screen()
+    );
+
+    // the property: nothing may be addressed past the terminal's new last
+    // row. vt100 clamps a CUP beyond the screen, so an over-tall frame does
+    // not show up as an out-of-range row -- it shows up as the content that
+    // *should* be on the bottom rows having been overwritten by content
+    // meant for rows that no longer exist. Typing a fresh marker after the
+    // shrink and finding it intact is what proves the frame that painted it
+    // was sized to the real terminal.
+    session.send(b"GoSHRINKMARKER\x1b").unwrap();
+    assert!(
+        session.wait_for("SHRINKMARKER", Duration::from_secs(5)),
+        "text typed after the shrink never painted intact, so a frame was \
+         still being composed at the pre-shrink size; last screen:\n{}",
+        session.screen()
+    );
+    assert_eq!(
+        session.screen_raw().size(),
+        (12, 80),
+        "pty/vt100 geometry itself never reached the shrunk dimensions"
+    );
+
+    session.send(b"\x1b:qa!\r").unwrap();
+    let _ = session.wait();
+}
+
 /// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
 /// the real `nvim` (resolved via `which`, matching this file's other
 /// `nvim`-locating helpers) with every argument forwarded verbatim --

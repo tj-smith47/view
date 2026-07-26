@@ -240,11 +240,30 @@ pub fn run(
     mut engine: Engine,
     pump: view_engine::DamagePump,
     msg_rx: mpsc::Receiver<Msg>,
+    term_size: view_tui::terminal::TermSizeCell,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
 
     loop {
+        // a resize the input thread has already seen describes the terminal
+        // as it is now, whatever traffic is still queued ahead of its
+        // Msg::Resized: folding it in here means no frame is ever painted
+        // at a shape the terminal has left. Costs one relaxed load per pass
+        // when nothing resized, which is the whole steady state.
+        if let Some((width, height)) = term_size.take() {
+            match dispatch(&mut model, &executor, Msg::Resized { width, height }) {
+                Flow::Continue => {}
+                Flow::Quit(code) => return Ok((model, code)),
+                Flow::EngineLost => {
+                    let info = engine.wait_exit();
+                    if let Flow::Quit(code) = dispatch(&mut model, &executor, Msg::EngineDown(info))
+                    {
+                        return Ok((model, code));
+                    }
+                }
+            }
+        }
         // paint before blocking, not after processing: state mutated ahead
         // of the loop (the startup cutover replays staged messages straight
         // through dispatch) would otherwise sit unpainted until the next
@@ -536,6 +555,40 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Continue));
         assert!(ops.calls.borrow()[0].starts_with("try_resize("));
+    }
+
+    #[test]
+    fn a_resize_already_folded_in_costs_nothing_when_its_message_arrives() {
+        // the loop folds a published size in ahead of the paint gate, so
+        // the Msg::Resized for that same size reaches dispatch afterwards.
+        // Re-running the arm would dirty the model and send nvim a second
+        // TryResize for a change that already happened.
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let resize = Msg::Resized {
+            width: 100,
+            height: 50,
+        };
+        assert!(matches!(
+            dispatch(&mut model, &executor, resize.clone()),
+            Flow::Continue
+        ));
+        model.dirty = false;
+        assert!(matches!(
+            dispatch(&mut model, &executor, resize),
+            Flow::Continue
+        ));
+        assert_eq!(
+            ops.calls.borrow().len(),
+            1,
+            "the repeated resize must not reach the engine again: {:?}",
+            ops.calls.borrow()
+        );
+        assert!(
+            !model.dirty,
+            "a resize to the size already applied must not force a repaint"
+        );
     }
 
     /// Recreates re-enqueueing buffered keys onto the same bounded

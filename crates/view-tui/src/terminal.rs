@@ -478,6 +478,50 @@ impl Term {
     }
 }
 
+/// The terminal size as the input thread last observed it, readable by the
+/// paint loop.
+///
+/// Not a second source of truth for the size -- [`Model`] stays that -- but
+/// a second *transport* for it, the way `Msg::Resized` is. The message
+/// still flows and still drives the engine's own `TryResize` in message
+/// order; this only stops the frames painted between the resize happening
+/// and its message being dequeued from addressing a shape the terminal has
+/// already left. On a shrink those frames size the shadow larger than the
+/// real terminal and emit cells for rows and columns it no longer has.
+///
+/// A packed `u16` pair in one atomic, with `0` meaning "nothing published":
+/// a terminal is never 0x0, and one word keeps width and height inherently
+/// consistent with each other, which two atomics would not be.
+#[derive(Clone, Default, Debug)]
+pub struct TermSizeCell(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+impl TermSizeCell {
+    /// Publishes the size the terminal has just become.
+    pub fn publish(&self, width: u16, height: u16) {
+        let packed = (u32::from(width) << 16) | u32::from(height);
+        self.0.store(packed, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Takes a published size if one is waiting, leaving the cell empty.
+    ///
+    /// The empty case is a single relaxed load, which is what a frame pays
+    /// on every pass: the whole point of sourcing the paint area from the
+    /// model was to stop paying a `TIOCGWINSZ` per frame, and this must not
+    /// quietly put a cost back.
+    #[must_use]
+    pub fn take(&self) -> Option<(u16, u16)> {
+        use std::sync::atomic::Ordering;
+        if self.0.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        match self.0.swap(0, Ordering::Acquire) {
+            0 => None,
+            #[allow(clippy::cast_possible_truncation)]
+            packed => Some(((packed >> 16) as u16, (packed & 0xffff) as u16)),
+        }
+    }
+}
+
 /// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
 /// forwards every key, resize, paste, or mouse event to `tx` as a core
 /// [`Msg`], translating key events via [`encode_key`] and mouse events via
@@ -493,7 +537,7 @@ impl Term {
 /// dropped keystroke is never an acceptable loss the way a coalescible
 /// redraw token is, so this thread blocks rather than discards when the
 /// channel is momentarily full.
-pub fn spawn_input_thread(tx: SyncSender<Msg>) {
+pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
             let msg = match event {
@@ -505,7 +549,14 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
                     }
                     msg
                 }
-                Event::Resize(width, height) => Some(Msg::Resized { width, height }),
+                Event::Resize(width, height) => {
+                    // published before the message is queued: the message
+                    // may sit behind a burst of keys or redraw tokens, and
+                    // every frame painted in the meantime would otherwise
+                    // address the terminal's previous shape
+                    size.publish(width, height);
+                    Some(Msg::Resized { width, height })
+                }
                 Event::Paste(text) => Some(Msg::Paste(text)),
                 Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),
                 _ => None,
@@ -523,6 +574,45 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn an_empty_size_cell_yields_nothing() {
+        let cell = TermSizeCell::default();
+        assert_eq!(cell.take(), None);
+    }
+
+    #[test]
+    fn a_published_size_is_taken_exactly_once() {
+        let cell = TermSizeCell::default();
+        cell.publish(120, 40);
+        assert_eq!(cell.take(), Some((120, 40)));
+        assert_eq!(
+            cell.take(),
+            None,
+            "a second take must not re-apply a resize that was already folded in"
+        );
+    }
+
+    #[test]
+    fn a_second_publish_supersedes_the_first() {
+        // only the terminal's current shape can be right; an intermediate
+        // size the terminal has already left must never reach a frame
+        let cell = TermSizeCell::default();
+        cell.publish(120, 40);
+        cell.publish(80, 24);
+        assert_eq!(cell.take(), Some((80, 24)));
+    }
+
+    #[test]
+    fn the_size_cell_round_trips_the_extremes_of_a_u16_pair() {
+        // the packing puts width in the high half and height in the low
+        // half; a swap or a sign error shows up here and nowhere else
+        let cell = TermSizeCell::default();
+        for size in [(1, 1), (u16::MAX, 1), (1, u16::MAX), (u16::MAX, u16::MAX)] {
+            cell.publish(size.0, size.1);
+            assert_eq!(cell.take(), Some(size));
+        }
+    }
 
     #[test]
     fn frame_area_is_sourced_from_the_model_terminal_size_and_follows_a_resize() {

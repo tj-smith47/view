@@ -152,7 +152,8 @@ fn main() -> Result<()> {
     // the engine exists to send them to, or anything typed during attach
     // would be lost to a not-yet-existing channel
     let (msg_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
-    view_tui::terminal::spawn_input_thread(msg_tx.clone());
+    let term_size = view_tui::terminal::TermSizeCell::default();
+    view_tui::terminal::spawn_input_thread(msg_tx.clone(), term_size.clone());
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
     let drained = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
@@ -225,7 +226,7 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
+    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, term_size, &mut term)?;
     persist_theme(&model, &config_path);
     vlog::log_with("engine", || format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be

@@ -71,6 +71,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             value: ReplyValue::Nil,
         }],
         Msg::Resized { width, height } => {
+            // an already-applied size is a no-op, not a repeat: the
+            // frontend may fold a resize in ahead of this message to keep
+            // the next frame's paint area current, and re-running the arm
+            // would then dirty the model and re-issue TryResize for a
+            // change that already happened
+            if (model.term_width, model.term_height) == (width, height) {
+                return Vec::new();
+            }
             model.term_width = width;
             model.term_height = height;
             // the paint area is sourced from these fields, so the frame that
