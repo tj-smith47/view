@@ -656,6 +656,20 @@ mod tests {
     }
 
     #[test]
+    fn a_trailing_csi_introducer_is_dropped_rather_than_replayed_as_two_keys() {
+        // the other side of that boundary: `ESC [` ending the read is the
+        // terminal mid-reply, and `encode_residue_bytes` would turn it into
+        // an Escape followed by a literal `[` typed into the buffer
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[".as_slice()), None]);
+        let mut sink = Vec::new();
+        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        assert!(
+            residue.is_empty(),
+            "residue should be empty, got {residue:?}"
+        );
+    }
+
+    #[test]
     fn trailing_incomplete_private_mode_reply_is_dropped_not_forwarded() {
         // a DA1 reply cut off by the deadline mid-sequence: this shape is
         // only ever the terminal's own half-delivered reply (a keyboard
