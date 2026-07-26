@@ -113,6 +113,17 @@ never blocks"). Only `loop-wake->rpc-handoff` is view CPU, and it is 9.4 us
 p50. There is no ~150 us of reducible view code behind the old 100 us
 target; the target was written before the architecture it measures.
 
+**Correction (2026-07-26, later the same day).** The sentence above went on
+to be read as "the cost is therefore fixed", and that does not follow. A
+wake's cost is charged per hop and scales with how long the woken core has
+been idle: measured on the production channel primitive, one hop costs 7.8
+us after 50 us of idle and 40 us after 10 ms, and a second hop costs a
+second wake almost in full. How many hops the input path takes is a design
+variable, not a rule. See
+`2026-07-26-the-input-gap-is-thread-hops-not-cpu.md`, which sizes the
+runtime-loop-to-writer-thread hop at 20 to 26 percent of the whole
+view-vs-nvim typing gap.
+
 ## Reproducing
 
 `task bench -- --scenario input_path --fixture minimal --class <class>`.

@@ -18,3 +18,7 @@ harness = false
 [[bench]]
 name = "update_key"
 harness = false
+
+[[bench]]
+name = "input_handoff"
+harness = false
