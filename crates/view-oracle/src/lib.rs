@@ -58,7 +58,7 @@ pub use minimize::{ddmin, join_tokens, tokenize};
 pub use parity::{
     compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, Screen, StateSnapshot,
 };
-pub use pty::PtySession;
+pub use pty::{PtySession, QueryPolicy};
 pub use reference::ReferenceSession;
 
 /// Errors surfaced by the headless drivers.

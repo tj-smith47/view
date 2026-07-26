@@ -50,6 +50,18 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # view-engine as its own dev-dependency, so test-support never leaks in.
 view-engine = { path = ".", features = ["test-support"] }
 
+# The hang fixture tests/spawn.rs drives. Behind `test-support` so it is
+# built for this crate's own `cargo test` session (where the self
+# dev-dependency unifies that feature on) and for nothing else: an ordinary
+# `cargo build -p view-engine` produces no such artifact.
+[[bin]]
+name = "view-engine-hang-fixture"
+path = "tests/fixtures/hang_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+doc = false
+
 [[bench]]
 name = "damage_fold"
 harness = false

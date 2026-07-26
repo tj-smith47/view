@@ -6,7 +6,7 @@
 //! # Bounded channel contract
 //!
 //! The runtime's `Msg` channel (created by the runtime, size 64) carries
-//! three kinds of traffic with different loss tolerances:
+//! four kinds of traffic with different loss tolerances:
 //!
 //! - **Coalescible**: `Msg::RedrawReady`. A `try_send` that fails because the
 //!   channel is full means this fold's token never reached the channel, so
@@ -35,6 +35,13 @@
 //!   disconnected, `send` returns `Err` immediately (nothing left to block
 //!   on); that failure is safe to ignore, since a disconnected receiver has
 //!   nothing left to signal.
+//! - **Non-coalescible, retriable-by-pump**: `Msg::HlProbeReply`. Neither
+//!   fatal nor droppable: the reader thread must not block, but a lost reply
+//!   silently strands the theme's confirmed background for the rest of the
+//!   session, since only a later colorscheme change issues a fresh probe.
+//!   `PumpShared::route_probe_reply` therefore holds a refused reply in a
+//!   single slot, and every later routing attempt retries it. One slot, not
+//!   a queue: a newer generation's answer supersedes an older one outright.
 //!
 //! # Lock design
 //!
@@ -49,7 +56,7 @@
 //! staged with nothing to wake the consumer for it.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use view_core::events::UiEvent;
@@ -269,8 +276,9 @@ impl DamageBuffer {
     }
 
     /// Whether damage is currently staged and armed (a fold has happened
-    /// since the last `take`), used by [`PumpShared::attach_sink`]'s
-    /// catch-up check for damage that arrived before the sink attached.
+    /// since the last `take`), which stays true across a sink attaching, so
+    /// damage that arrived before there was anywhere to send a token is
+    /// still reported afterwards.
     pub(crate) fn is_pending(&self) -> bool {
         self.pending
     }
@@ -292,6 +300,40 @@ impl DamageBuffer {
 struct Route {
     sink: Option<SyncSender<Msg>>,
     presink: VecDeque<Msg>,
+    /// The newest `Msg::HlProbeReply` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot rather than a queue: only the newest probe generation's
+    /// answer can still be the right one, so an older held reply is
+    /// superseded rather than kept.
+    deferred_probe: Option<Msg>,
+}
+
+impl Route {
+    /// Re-attempts a held probe reply, putting it back if the sink is still
+    /// full. Independent of whatever the caller is routing: this reply
+    /// landing or not says nothing about that send.
+    fn retry_deferred_probe(&mut self) {
+        let Some(msg) = self.deferred_probe.take() else {
+            return;
+        };
+        let Some(sink) = self.sink.clone() else {
+            self.deferred_probe = Some(msg);
+            return;
+        };
+        self.hold_if_refused(sink.try_send(msg));
+    }
+
+    /// Holds a `try_send` result's message when the sink was merely full,
+    /// and lets it go when the sink is disconnected: the runtime loop that
+    /// would have painted the answer is gone, so there is nothing left for
+    /// a later attempt to reach.
+    fn hold_if_refused(&mut self, sent: Result<(), TrySendError<Msg>>) {
+        match sent {
+            Ok(()) | Err(TrySendError::Disconnected(_)) => {}
+            Err(TrySendError::Full(msg)) => self.deferred_probe = Some(msg),
+        }
+    }
 }
 
 /// State shared between the reader thread (which folds redraws and routes
@@ -328,7 +370,11 @@ impl PumpShared {
             return;
         }
         let sink = {
-            let route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+            // the frequent routing attempt, and so the one that actually
+            // carries a held probe reply through once the runtime loop
+            // starts draining again
+            route.retry_deferred_probe();
             route.sink.clone()
         };
         let Some(sink) = sink else {
@@ -354,6 +400,7 @@ impl PumpShared {
     /// this as fatal.
     pub(crate) fn route_msg(&self, msg: Msg) -> Result<(), ()> {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+        route.retry_deferred_probe();
         match &route.sink {
             Some(sink) => sink.try_send(msg).map_err(|_| ()),
             None => {
@@ -361,6 +408,27 @@ impl PumpShared {
                 Ok(())
             }
         }
+    }
+
+    /// Routes an `Msg::HlProbeReply` without ever dropping it on a full
+    /// sink, and without blocking.
+    ///
+    /// A dropped probe reply fails silently and for the rest of the session:
+    /// `Theme::from_hl` trusts a confirmed background only while its
+    /// generation matches the live probe generation, so a lost reply leaves
+    /// a real `guibg=#000000` painting as though the background were unset
+    /// until some later colorscheme change happens to issue a fresh probe.
+    /// Blocking is not the alternative -- this runs on the RPC reader
+    /// thread, which must never block -- so a refused reply waits in
+    /// [`Route::deferred_probe`] for the next routing attempt to carry it.
+    pub(crate) fn route_probe_reply(&self, msg: Msg) {
+        let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+        route.retry_deferred_probe();
+        let Some(sink) = route.sink.clone() else {
+            route.presink.push_back(msg);
+            return;
+        };
+        route.hold_if_refused(sink.try_send(msg));
     }
 
     /// Routes the terminal `Msg::EngineStopped` signal with a blocking
@@ -998,6 +1066,94 @@ mod tests {
         assert!(
             matches!(rx.recv(), Ok(Msg::EngineStopped(None))),
             "EngineStopped must arrive once the channel has room, not be dropped"
+        );
+    }
+
+    #[test]
+    fn a_probe_reply_refused_by_a_full_sink_arrives_once_the_channel_drains() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let (_pump, _cutover) = shared.attach_sink(tx);
+        // fill the sink, the state the cutover replay genuinely reaches: a
+        // sink is attached but nothing is draining it yet
+        shared
+            .route_msg(Msg::Resized {
+                width: 9,
+                height: 9,
+            })
+            .expect("the channel has room for the fill");
+
+        shared.route_probe_reply(Msg::HlProbeReply {
+            generation: 7,
+            fg: Some(0x00ff_ffff),
+            bg: Some(0x0000_0000),
+        });
+
+        assert!(
+            matches!(rx.recv(), Ok(Msg::Resized { width: 9, .. })),
+            "the fill message must come out first, in arrival order"
+        );
+        // any later routing attempt is what carries the held reply through
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+
+        let mut seen = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            seen.push(msg);
+        }
+        assert!(
+            seen.iter().any(|m| matches!(
+                m,
+                Msg::HlProbeReply {
+                    generation: 7,
+                    bg: Some(0),
+                    ..
+                }
+            )),
+            "the probe reply was dropped by the full sink and never retried, \
+             so this generation stays unconfirmed and a real black background \
+             paints as unset for the rest of the session; saw {seen:?}"
+        );
+    }
+
+    #[test]
+    fn a_newer_probe_reply_supersedes_a_held_older_one() {
+        let shared = PumpShared::new();
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(1);
+        let (_pump, _cutover) = shared.attach_sink(tx);
+        shared
+            .route_msg(Msg::Resized {
+                width: 9,
+                height: 9,
+            })
+            .expect("the channel has room for the fill");
+
+        // both are refused; only the newer generation can still be the
+        // right answer, so the older one must not resurface later and
+        // overwrite it
+        shared.route_probe_reply(Msg::HlProbeReply {
+            generation: 1,
+            fg: None,
+            bg: None,
+        });
+        shared.route_probe_reply(Msg::HlProbeReply {
+            generation: 2,
+            fg: None,
+            bg: Some(0x0011_2233),
+        });
+
+        assert!(matches!(rx.recv(), Ok(Msg::Resized { width: 9, .. })));
+        shared.fold_redraw(vec![line(0, 0, 1), UiEvent::Flush]);
+
+        let mut replies = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let Msg::HlProbeReply { generation, .. } = msg {
+                replies.push(generation);
+            }
+        }
+        assert_eq!(
+            replies,
+            vec![2],
+            "expected only the newest generation to be retried"
         );
     }
 

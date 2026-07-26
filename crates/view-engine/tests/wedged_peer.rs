@@ -5,26 +5,21 @@
 //! channel, so the calling thread's `recv_timeout` bounds the whole call
 //! regardless of how long the write takes.
 //!
-//! Unix-only: the fixture is a shell script, which Windows `CreateProcess`
-//! cannot exec directly.
-#![cfg(unix)]
+//! Cross-platform: the fixture is a compiled binary, and a peer that
+//! never drains its stdin blocks a large write on every platform this
+//! builds for.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 use view_engine::{EngineError, EngineHandle};
 
 #[test]
 fn request_timeout_bounds_write_phase_against_wedged_peer() {
-    // fake_hang_nvim.sh ignores --embed, never touches stdin or stdout, and
-    // blocks forever: exactly the "peer never reads stdin" shape this test
-    // needs, reused rather than duplicated as a second fixture script.
-    let fixture = PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/fake_hang_nvim.sh"
-    ));
-    let mut child = Command::new(fixture)
+    // the hang fixture never touches stdin or stdout and blocks until
+    // killed: exactly the "peer never reads stdin" shape this test needs,
+    // reused rather than duplicated as a second fixture.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_view-engine-hang-fixture"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())

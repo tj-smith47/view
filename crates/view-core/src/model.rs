@@ -252,7 +252,6 @@ pub struct ModeState {
     /// nvim's own `mode_info_set` contract: when `false`, the UI must not
     /// restyle the cursor per mode at all and should render a plain
     /// (block) cursor regardless of what `modes`/`current_idx` describe.
-    /// Consumed by `view-surface`'s `shape_from_mode`.
     pub cursor_style_enabled: bool,
     pub modes: Vec<ModeInfo>,
     pub current: String,
@@ -392,9 +391,10 @@ impl Messages {
         self.push("native".to_string(), vec![(0, text)], replace_last);
     }
 
-    /// Marks one full paint cycle as having happened, called from `update`
-    /// on every `Flush` UI event. Read by `dismiss_transient_on_keypress`
-    /// to tell whether an entry has survived at least one frame.
+    /// Marks one full paint cycle as having happened -- one call per
+    /// `Flush` UI event -- so that a transient entry's age in frames, and
+    /// therefore whether it has survived long enough to be dismissable, is
+    /// answerable at all.
     pub fn note_flush(&mut self) {
         self.flush_generation = self.flush_generation.wrapping_add(1);
     }

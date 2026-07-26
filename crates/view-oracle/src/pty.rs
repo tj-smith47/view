@@ -28,9 +28,27 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use crate::OracleError;
 
-/// A pty writer shared between the caller (typed input) and the reader
-/// thread (autonomous replies to a child's capability queries).
+/// A pty writer shared between the caller (typed input) and the reply
+/// thread (autonomous answers to a child's capability queries).
 type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// Whether a session answers the terminal capability queries its child
+/// writes, which decides which startup path that child then takes.
+///
+/// A real terminal answers, so that is the default and what a measurement
+/// must see: left unanswered, a probing child waits out its whole fallback
+/// deadline and every timing taken through the session carries it.
+/// [`Silent`](Self::Silent) is the deliberate opposite, for a test whose
+/// subject IS the deadline path -- without it, no session in the tree can
+/// reach that path at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum QueryPolicy {
+    /// Answer the DA1 fence the way a real terminal does.
+    AnswerDa1,
+    /// Answer nothing, modelling a terminal that ignores every query.
+    Silent,
+}
 
 /// The DA1 (Send Device Attributes) request a capability-probing child writes
 /// to ask what the terminal is, and the reply this pty answers with.
@@ -92,8 +110,39 @@ impl QueryResponder {
 /// child's output. The thread also answers the child's terminal capability
 /// queries through `writer`, standing in for the real terminal a child under
 /// a pty would otherwise probe in vain.
-fn spawn_reader(mut reader: Box<dyn Read + Send>, writer: SharedWriter) -> mpsc::Receiver<Vec<u8>> {
+fn spawn_reader(
+    mut reader: Box<dyn Read + Send>,
+    writer: &SharedWriter,
+    policy: QueryPolicy,
+) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
+    // replies leave on their own thread rather than being written from the
+    // reader. Writing them here would hold the writer lock across a blocking
+    // pty write, and this is the only thread draining the child: a write that
+    // blocked (tty input queue full) would stop the drain, the child would
+    // block writing, and neither side could ever make progress again.
+    let reply_tx = match policy {
+        QueryPolicy::Silent => None,
+        QueryPolicy::AnswerDa1 => {
+            let (reply_tx, reply_rx) = mpsc::channel::<Vec<u8>>();
+            let writer = Arc::clone(writer);
+            std::thread::spawn(move || {
+                while let Ok(bytes) = reply_rx.recv() {
+                    // poison is recovered rather than propagated: what this
+                    // mutex guards is a `Box<dyn Write>` over a file
+                    // descriptor, which holds no invariant a panicking
+                    // writer could leave half-updated, and a silent responder
+                    // would present as the same unexplained hang a real
+                    // deadlock does
+                    let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                    if guard.write_all(&bytes).is_err() || guard.flush().is_err() {
+                        break;
+                    }
+                }
+            });
+            Some(reply_tx)
+        }
+    };
     std::thread::spawn(move || {
         let mut responder = QueryResponder::new();
         let mut buf = [0_u8; 65536];
@@ -101,11 +150,11 @@ fn spawn_reader(mut reader: Box<dyn Read + Send>, writer: SharedWriter) -> mpsc:
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    let replies = responder.replies_for(&buf[..n]);
-                    if !replies.is_empty() {
-                        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                        let _ = guard.write_all(&replies);
-                        let _ = guard.flush();
+                    if let Some(reply_tx) = &reply_tx {
+                        let replies = responder.replies_for(&buf[..n]);
+                        if !replies.is_empty() && reply_tx.send(replies).is_err() {
+                            break;
+                        }
                     }
                     if tx.send(buf[..n].to_vec()).is_err() {
                         break;
@@ -205,9 +254,28 @@ impl PtySession {
     /// command fails to spawn, or [`OracleError::Io`] if the hermetic empty
     /// search path cannot be established (see [`hermetic_env`]).
     pub fn spawn_configured(
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+    ) -> Result<Self, OracleError> {
+        Self::spawn_configured_with(cmd, cols, rows, QueryPolicy::AnswerDa1)
+    }
+
+    /// Like [`spawn_configured`](Self::spawn_configured), but chooses whether
+    /// this pty answers the child's capability queries.
+    ///
+    /// Only a caller whose subject is the unanswered-probe path wants
+    /// [`QueryPolicy::Silent`]; everything measuring or asserting ordinary
+    /// behavior wants the default, since a real terminal answers.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn_configured`](Self::spawn_configured).
+    pub fn spawn_configured_with(
         mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
+        policy: QueryPolicy,
     ) -> Result<Self, OracleError> {
         hermetic_env(&mut cmd)?;
         let pty = native_pty_system();
@@ -237,7 +305,7 @@ impl PtySession {
         // never sees EOF once the child exits
         drop(pair.slave);
 
-        let rx = spawn_reader(reader, Arc::clone(&writer));
+        let rx = spawn_reader(reader, &writer, policy);
         let parser = vt100::Parser::new(rows, cols, 0);
 
         Ok(Self {
@@ -318,6 +386,11 @@ impl PtySession {
     ///
     /// Returns [`OracleError::Io`] if the write or flush fails.
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), OracleError> {
+        // poison is recovered, not propagated: the guarded value is a
+        // `Box<dyn Write>` over a file descriptor with no invariant a
+        // panicking writer could break, and `OracleError` carries no variant
+        // that would say anything more useful than the io error a genuinely
+        // broken fd already returns below
         let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
         guard.write_all(bytes)?;
         guard.flush()?;
@@ -491,6 +564,58 @@ impl PtySession {
     }
 }
 
+impl Drop for PtySession {
+    /// Reaps the child, which nothing else guarantees: the writer is shared
+    /// with the reply thread, so this session is no longer its sole owner and
+    /// dropping it does not close the master or deliver the EOF that would
+    /// end the child on its own. Without this, a caller that gives up early
+    /// -- a failing assert, an early `?` -- leaks a live editor process and a
+    /// reader thread parked on it for the rest of the test binary's run.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+// The query responder is pure byte matching with no pty, no child and no
+// platform surface, so it stays off the unix gate below: a Windows run gets
+// the same coverage of the scanner that decides what this pty answers.
+#[cfg(test)]
+mod responder_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn responder_answers_a_da1_query_in_one_chunk() {
+        let mut r = QueryResponder::new();
+        assert_eq!(r.replies_for(DA1_QUERY), DA1_REPLY);
+    }
+
+    #[test]
+    fn responder_answers_a_da1_query_split_across_two_chunks() {
+        let mut r = QueryResponder::new();
+        let (head, tail) = DA1_QUERY.split_at(2);
+        assert!(r.replies_for(head).is_empty(), "no full query yet");
+        assert_eq!(r.replies_for(tail), DA1_REPLY);
+    }
+
+    #[test]
+    fn responder_stays_silent_on_output_that_holds_no_query() {
+        let mut r = QueryResponder::new();
+        assert!(r.replies_for(b"\x1b[1mbold\x1b[0m normal text").is_empty());
+    }
+
+    #[test]
+    fn responder_answers_each_of_two_queries_in_one_chunk() {
+        let mut r = QueryResponder::new();
+        let mut two = DA1_QUERY.to_vec();
+        two.extend_from_slice(DA1_QUERY);
+        let mut both = DA1_REPLY.to_vec();
+        both.extend_from_slice(DA1_REPLY);
+        assert_eq!(r.replies_for(&two), both);
+    }
+}
+
 // Every test here spawns /bin/* or nvim inside a real pty; view's Windows
 // terminal runtime is a tier-2 surface validated on winserver rather than in
 // CI, so these unix-fixture tests are gated off the Windows build.
@@ -588,33 +713,57 @@ mod tests {
     }
 
     #[test]
-    fn responder_answers_a_da1_query_in_one_chunk() {
-        let mut r = QueryResponder::new();
-        assert_eq!(r.replies_for(DA1_QUERY), DA1_REPLY);
-    }
+    fn a_silent_policy_leaves_a_childs_da1_query_unanswered() {
+        // The disconfirming half of the test above: a test asking for the
+        // unanswered-probe path has no way to tell "the pty stayed mute" from
+        // "the pty answered and this scenario never happened" unless silence is
+        // itself pinned. The final send is the positive control -- proof the
+        // child was still parked on the read the whole time rather than dead,
+        // which would produce the same empty file.
+        let mut out = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        out.pop(); // crates/
+        out.pop(); // workspace root
+        let out = out.join("target").join("view-pty-da1-silent.hex");
+        let _ = std::fs::remove_file(&out);
+        let script = format!(
+            "stty raw -echo; printf '\\033[c'; head -c7 | od -An -tx1 | tr -d ' \\n' > '{}'",
+            out.display()
+        );
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(&script);
+            PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::Silent)
+        })
+        .unwrap();
 
-    #[test]
-    fn responder_answers_a_da1_query_split_across_two_chunks() {
-        let mut r = QueryResponder::new();
-        let (head, tail) = DA1_QUERY.split_at(2);
-        assert!(r.replies_for(head).is_empty(), "no full query yet");
-        assert_eq!(r.replies_for(tail), DA1_REPLY);
-    }
+        // Comfortably past the millisecond-scale round trip the answering
+        // policy takes, and past view's own 50ms probe deadline, so a reply
+        // merely being slow cannot be mistaken for one never coming.
+        std::thread::sleep(Duration::from_millis(500));
+        let quiet = std::fs::read_to_string(&out).unwrap_or_default();
+        assert!(
+            quiet.trim().is_empty(),
+            "silent policy still answered the DA1 query with {quiet:?}"
+        );
 
-    #[test]
-    fn responder_stays_silent_on_output_that_holds_no_query() {
-        let mut r = QueryResponder::new();
-        assert!(r.replies_for(b"\x1b[1mbold\x1b[0m normal text").is_empty());
-    }
-
-    #[test]
-    fn responder_answers_each_of_two_queries_in_one_chunk() {
-        let mut r = QueryResponder::new();
-        let mut two = DA1_QUERY.to_vec();
-        two.extend_from_slice(DA1_QUERY);
-        let mut both = DA1_REPLY.to_vec();
-        both.extend_from_slice(DA1_REPLY);
-        assert_eq!(r.replies_for(&two), both);
+        session.send(DA1_REPLY).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if std::fs::read_to_string(&out).is_ok_and(|s| s.trim().len() >= 14) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never consumed a hand-written reply, so the empty file \
+                 above proves nothing about the policy; screen:\n{}",
+                session.screen()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        session.kill();
+        let _ = session.wait_for_exit(Duration::from_secs(2));
+        let _ = std::fs::remove_file(&out);
     }
 
     /// Reports back what a spawned child sees in the two variables that

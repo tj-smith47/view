@@ -7,30 +7,15 @@
 
 use std::time::Duration;
 use view_core::msg::Msg;
-use view_engine::process::{Engine, EngineConfig};
-// only the graceful-vs-forced assertions name a path, and both are unix-only
-#[cfg(unix)]
-use view_engine::process::ShutdownPath;
+use view_engine::process::{Engine, EngineConfig, ShutdownPath};
 
-/// True if a process with the given pid still exists, checked via `kill
-/// -0` rather than a name-based `pgrep`, since the pid is known exactly
-/// and unambiguously identifies the child (unlike matching by binary name,
-/// which risks colliding with unrelated processes on a shared host).
+mod common;
+
+/// Kills `pid` unconditionally, in each platform's own spelling.
 ///
-/// Unix-only: `kill -0` has no Windows equivalent, and shelling out to a
-/// nonexistent `kill` binary would make callers' liveness checks silently
-/// pass via `unwrap_or(false)` instead of actually observing the process.
-#[cfg(unix)]
-fn pid_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-        .args(["-0", &pid.to_string()])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// SIGKILLs `pid`; a no-op where there is no `kill` binary to run, matching
-/// [`pid_alive`]'s own reach.
+/// Windows is covered rather than left a no-op: this is what a failing test
+/// uses to avoid orphaning a wedged editor, and a shared Windows host
+/// collects those just as readily as a unix one.
 fn kill_pid(pid: u32) {
     #[cfg(unix)]
     {
@@ -38,7 +23,13 @@ fn kill_pid(pid: u32) {
             .args(["-KILL", &pid.to_string()])
             .status();
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status();
+    }
+    #[cfg(not(any(unix, windows)))]
     let _ = pid;
 }
 
@@ -78,8 +69,8 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     let handle = engine.handle.clone();
 
     // nvim's event loop is single-threaded: a synchronous sleep keeps this
-    // request genuinely in flight (nvim has not yet replied) for the window
-    // where we drop the Engine underneath it
+    // request genuinely in flight (nvim has not yet replied) across the
+    // window in which the Engine is dropped underneath it
     let in_flight = std::thread::spawn(move || {
         let _ = handle.request("nvim_command", vec![rmpv::Value::from("sleep 200m")]);
     });
@@ -99,13 +90,10 @@ fn drop_with_request_in_flight_does_not_deadlock_and_reaps_child() {
     orphan_guard.disarm();
     let _ = in_flight.join();
 
-    // liveness re-check is unix-only (see pid_alive); the deadlock check
-    // above already exercises Drop's non-blocking behavior on every
-    // platform, so the reap proof is the only part narrowed here
-    #[cfg(unix)]
     assert!(
-        !pid_alive(pid),
-        "child pid {pid} still alive after Engine dropped: not reaped"
+        !common::pid_in_process_table(pid),
+        "child pid {pid} still in the process table after Engine dropped: \
+         not reaped"
     );
 }
 
@@ -167,11 +155,8 @@ fn within_liveness_bound<T: Send + 'static>(
     produced
 }
 
-#[cfg(unix)]
 #[test]
 fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
-    use std::os::unix::process::ExitStatusExt as _;
-
     let cfg = EngineConfig::isolated().with_shutdown_timeout(GRACEFUL_DEADLINE_PAST_THE_TEST);
     let engine = Engine::spawn(cfg).unwrap();
     // named by pid so a failure below points at the process it concerns,
@@ -187,34 +172,47 @@ fn shutdown_exits_gracefully_without_sigkill_when_responsive() {
          own; status {:?}",
         outcome.status
     );
-    assert!(
-        outcome.status.signal().is_none(),
-        "the graceful path ran but the child died by signal {:?}: it went \
-         down of something other than the qa! it was asked to perform",
-        outcome.status.signal()
-    );
+    // which signal ended a process is a unix-only fact; the path assertion
+    // above is the cross-platform half and stays ungated
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        assert!(
+            outcome.status.signal().is_none(),
+            "the graceful path ran but the child died by signal {:?}: it went \
+             down of something other than the qa! it was asked to perform",
+            outcome.status.signal()
+        );
+    }
 }
 
-#[cfg(unix)]
 #[test]
 fn shutdown_force_kills_when_unresponsive_within_timeout() {
-    use std::os::unix::process::ExitStatusExt as _;
-
     let cfg = EngineConfig::isolated().with_shutdown_timeout(Duration::from_millis(50));
     let engine = Engine::spawn(cfg).unwrap();
 
     // `:sleep` alone does not work here: Neovim's sleep implementation
-    // still pumps its event loop (and processes our qa! notification)
+    // still pumps its event loop (and processes the qa! notification)
     // while waiting. `system()` runs the shell command synchronously via a
-    // blocking waitpid on the main thread, which genuinely stalls nvim's
-    // event loop, so qa! cannot be processed until it returns; the SIGKILL
-    // fallback must fire well before this 3s shell command finishes.
+    // blocking wait on the main thread, which genuinely stalls nvim's event
+    // loop, so qa! cannot be processed until it returns; the forced-kill
+    // fallback must fire well before this ~3s shell command finishes.
     // request_timeout itself returns quickly regardless, bounded by its own
     // timeout on the write phase, since the response can never arrive while
     // nvim is blocked.
+    //
+    // The command is spelled per platform because nvim runs it through
+    // `&shell`: `sleep` is not a thing cmd.exe can run, and a stall command
+    // that silently fails to stall would leave a responsive child taking the
+    // graceful path and failing this test for the wrong reason.
+    let stall = if cfg!(windows) {
+        "system('ping -n 4 127.0.0.1')"
+    } else {
+        "system('sleep 3')"
+    };
     let _ = engine.handle.request_timeout(
         "nvim_eval",
-        vec![rmpv::Value::from("system('sleep 3')")],
+        vec![rmpv::Value::from(stall)],
         Duration::from_millis(10),
     );
 
@@ -225,12 +223,18 @@ fn shutdown_force_kills_when_unresponsive_within_timeout() {
         "a stalled nvim was reported as exiting on its own; status {:?}",
         outcome.status
     );
-    assert_eq!(
-        outcome.status.signal(),
-        Some(9),
-        "the forced path ran but the child did not die of SIGKILL; status {:?}",
-        outcome.status
-    );
+    // as above: SIGKILL is the unix spelling of the forced path, while the
+    // path assertion itself holds on every platform
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        assert_eq!(
+            outcome.status.signal(),
+            Some(9),
+            "the forced path ran but the child did not die of SIGKILL; status {:?}",
+            outcome.status
+        );
+    }
 }
 
 /// Drains `msgs` until the reader thread's terminal `Msg::EngineStopped`

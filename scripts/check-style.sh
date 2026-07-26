@@ -32,8 +32,35 @@ check_content() {
   if grep -rnE "(${comment_prefix}).*\\b(we|I|Claude) (added|implemented|changed|fixed|removed)" "$target" "${includes[@]}"; then
     echo "STYLE FAIL: assistant-citation comment"; fail=1
   fi
+  # bare first-person pronouns, which the verb-anchored check above misses:
+  # a comment narrating "the window where we drop the Engine" cites the
+  # session just as much as one saying "we changed", and comments address a
+  # future reader who was never part of that "we". The `us` arm strips the
+  # microsecond unit first, since this tree writes `0.37 us` in prose where
+  # no greppable pronoun sense exists.
+  if grep -rnE "(${comment_prefix}).*\\b(we|our|ours|ourselves|us|my|mine|Claude)\\b" \
+      "$target" "${includes[@]}" \
+      | sed -E -e 's/[0-9]+(\.[0-9]+)? us\b//g' -e 's/\bms([,/ ]+)us\b/ms\1/g' \
+      | grep -E "\\b(we|our|ours|ourselves|us|my|mine|Claude)\\b"; then
+    echo "STYLE FAIL: first-person pronoun in comment"; fail=1
+  fi
+  # standalone `I`, excluding `I/O`: the slash is a non-word character, so a
+  # plain \bI\b would flag every I/O mention in the tree.
+  if grep -rnE "(${comment_prefix}).*(^|[^/[:alnum:]_])I([^/[:alnum:]_]|\$)" "$target" "${includes[@]}"; then
+    echo "STYLE FAIL: first-person pronoun in comment"; fail=1
+  fi
   if grep -rnE '\bFinding [0-9]|\btest gap [0-9]|found in review|\bAudit [A-Z]?[0-9]' "$target" "${includes[@]}"; then
     echo "STYLE FAIL: review-finding reference in comment"; fail=1
+  fi
+  # caller references: a comment states what the code guarantees, never who
+  # happens to call it -- a caller list is stale the moment a second one
+  # appears, and it sends the reader off to a call site instead of telling
+  # them the contract. Anchored on the phrase plus an identifier-shaped
+  # target so ordinary prose ("used by default", "called from within the
+  # same lock hold") does not trip it.
+  if grep -rniE "(${comment_prefix}).*\\b(used by|called from|called by|invoked by|invoked from) [\`\[]*[A-Za-z_][A-Za-z0-9_]*(::|\\.|\\(|\`|\\])" \
+      "$target" "${includes[@]}"; then
+    echo "STYLE FAIL: caller reference in comment"; fail=1
   fi
   # narrative/roadmap pointers: comments must state what the code does now,
   # never when it changes. P[0-9] is intentionally case-sensitive (not -i):

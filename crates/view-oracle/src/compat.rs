@@ -1187,18 +1187,93 @@ mod tests {
         }
     }
 
-    // Spawns /bin/sleep to build a child that outlives its deadline.
-    #[cfg(unix)]
+    /// Selects which fixture behaviour a re-invocation of this test binary
+    /// performs, and by its absence marks an ordinary test run.
+    const FIXTURE_MODE: &str = "VIEW_ORACLE_COMPAT_FIXTURE";
+
+    /// The fixture body the two `wait_with_timeout` tests below drive, run
+    /// by re-invoking this very test binary rather than by spawning
+    /// `/bin/sleep` and `/bin/sh -c 'head -c ... /dev/zero'`.
+    ///
+    /// Those two behaviours -- killing and reaping a child past its
+    /// deadline, and draining a pipe concurrently instead of after exit --
+    /// are platform-independent library code, so unix-only fixtures gated
+    /// them off exactly the platform whose pipe buffering differs most from
+    /// the 64 KB Linux default they were sized against, which is where a
+    /// drain bug would first diverge. A test binary is the one child process
+    /// guaranteed to exist and behave identically on every platform this
+    /// crate builds for.
+    ///
+    /// A normal run reaches this with the variable unset and returns at
+    /// once; it is a `#[test]` only because that is the entry point a
+    /// libtest binary can be asked for by name.
+    ///
+    /// The payload goes to stderr, not stdout: libtest writes its own
+    /// progress lines to the child's stdout even under `--nocapture`, so
+    /// stderr is the one stream whose byte count can be asserted exactly.
     #[test]
-    fn wait_with_timeout_kills_and_reaps_a_process_that_outlives_its_deadline() {
-        let child = testenv::spawning(|| {
-            Command::new("/bin/sleep")
-                .arg("60")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
+    fn fixture_child_body() {
+        let Ok(mode) = std::env::var(FIXTURE_MODE) else {
+            return;
+        };
+        match mode.as_str() {
+            // outlives any deadline its parent sets, so only being killed
+            // can end it
+            "sleep" => std::thread::sleep(Duration::from_secs(60)),
+            "flood" => {
+                let len: usize = FIXTURE_PAYLOAD_LEN;
+                let payload = vec![b'z'; len];
+                use std::io::Write as _;
+                let mut err = std::io::stderr();
+                err.write_all(&payload)
+                    .expect("fixture stderr write failed");
+                err.flush().expect("fixture stderr flush failed");
+            }
+            other => {
+                // exits rather than panicking: a panic here would be
+                // reported as a failure of the fixture test in the child's
+                // own output, which the parent discards, leaving the parent
+                // to fail on a confusing symptom instead of the typo'd mode
+                eprintln!("unknown fixture mode {other:?}");
+                std::process::exit(64);
+            }
+        }
+    }
+
+    /// 200 KB comfortably exceeds a 64 KB pipe buffer (the typical Linux
+    /// default) and Windows' own default, so a `wait_with_timeout` that read
+    /// its pipes only after the child exited would leave the child blocked
+    /// writing into a full pipe until the deadline killed it -- reporting a
+    /// merely slow-draining child as wedged.
+    const FIXTURE_PAYLOAD_LEN: usize = 200_000;
+
+    /// Spawns this test binary again in `mode`, with only the fixture test
+    /// selected so nothing else in the suite runs inside the child.
+    ///
+    /// `--nocapture` is what lets the fixture's own writes reach the pipes
+    /// this returns; without it libtest buffers them and prints them back
+    /// through its own reporting.
+    fn spawn_fixture(mode: &str, stdout: Stdio, stderr: Stdio) -> Child {
+        let exe = std::env::current_exe().expect("the running test binary must be locatable");
+        testenv::spawning(|| {
+            Command::new(&exe)
+                .args([
+                    "--exact",
+                    "compat::tests::fixture_child_body",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FIXTURE_MODE, mode)
+                .stdout(stdout)
+                .stderr(stderr)
                 .spawn()
         })
-        .expect("failed to spawn /bin/sleep");
+        .expect("failed to re-invoke the test binary as a fixture")
+    }
+
+    #[test]
+    fn wait_with_timeout_kills_and_reaps_a_process_that_outlives_its_deadline() {
+        let child = spawn_fixture("sleep", Stdio::null(), Stdio::null());
         // captured before the child is moved into the call
         let pid = child.id();
 
@@ -1249,9 +1324,31 @@ mod tests {
         }
     }
 
-    /// Reports no entry on a platform with neither `/proc` nor a POSIX
-    /// `ps`, so the reaping assertion is inert there rather than failing
-    /// on the absence of a way to look.
+    /// Windows has no zombie state -- a killed child's handle is released
+    /// once nothing holds it -- so `tasklist` reporting the pid at all is
+    /// the same evidence `/proc` and `ps` give elsewhere: the child was
+    /// killed but never waited for.
+    ///
+    /// A `tasklist` that could not run is treated as "still there" for the
+    /// same reason macOS treats an unrunnable `ps` as fatal: reporting no
+    /// entry from a probe that never looked would hand the assertion a
+    /// silent pass.
+    #[cfg(windows)]
+    fn process_table_entry_exists(pid: u32) -> bool {
+        let listing = testenv::spawning(|| {
+            Command::new("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+                .output()
+        })
+        .expect("tasklist must run for the process table to be observable at all");
+        // the no-match case is an INFO line on stdout rather than a nonzero
+        // exit, so the pid's own presence is the only usable signal
+        String::from_utf8_lossy(&listing.stdout).contains(&format!("\"{pid}\""))
+    }
+
+    /// Reports no entry on a platform with neither `/proc`, a POSIX `ps`,
+    /// nor `tasklist`, so the reaping assertion is inert there rather than
+    /// failing on the absence of a way to look.
     #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     fn process_table_entry_exists(_pid: u32) -> bool {
         false
@@ -1402,24 +1499,9 @@ mod tests {
         let _ = session.pty().wait_for_exit(Duration::from_secs(5));
     }
 
-    // Spawns /bin/sh to emit a payload larger than a pipe buffer.
-    #[cfg(unix)]
     #[test]
     fn wait_with_timeout_drains_output_larger_than_a_pipe_buffer_without_blocking_the_child() {
-        // 200KB comfortably exceeds a 64KB pipe buffer (the typical Linux
-        // default): synchronous post-exit reading would leave the child
-        // blocked writing to a full pipe until this call's own deadline
-        // killed it, misreporting a merely slow-draining child as wedged
-        let payload_len: usize = 200_000;
-        let child = testenv::spawning(|| {
-            Command::new("/bin/sh")
-                .arg("-c")
-                .arg(format!("head -c {payload_len} /dev/zero"))
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-        })
-        .expect("failed to spawn /bin/sh");
+        let child = spawn_fixture("flood", Stdio::null(), Stdio::piped());
 
         let start = Instant::now();
         let output = wait_with_timeout(child, Duration::from_secs(10))
@@ -1427,7 +1509,7 @@ mod tests {
         let elapsed = start.elapsed();
 
         assert!(output.status.success());
-        assert_eq!(output.stdout.len(), payload_len);
+        assert_eq!(output.stderr.len(), FIXTURE_PAYLOAD_LEN);
         assert!(
             elapsed < Duration::from_secs(5),
             "took {elapsed:?}, which suggests the child blocked on an \

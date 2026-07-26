@@ -144,7 +144,14 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
-    let dir = std::env::temp_dir().join(format!(
+    // under the build tree, never the system temp dir, which is
+    // world-writable and would let an unrelated process pre-create this
+    // predictable path as a symlink to somewhere the test then writes 5000
+    // lines through
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // crates/
+    dir.pop(); // workspace root
+    let dir = dir.join("target").join(format!(
         "view-engine-redraw-live-storm-{}",
         std::process::id()
     ));

@@ -1,11 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
-#[cfg(unix)]
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::time::Duration;
 use view_engine::process::{Engine, EngineConfig};
-#[cfg(unix)]
 use view_engine::EngineError;
+
+mod common;
 
 #[test]
 fn spawns_and_handshakes_with_real_nvim() {
@@ -29,38 +28,31 @@ fn spawns_and_handshakes_with_real_nvim() {
 
 /// `Engine::spawn` against a binary that accepts `--embed` without erroring
 /// but never replies must not leak the child when the handshake times out.
-///
-/// Unix-only: the fixture is a shell script, which Windows `CreateProcess`
-/// cannot exec directly, and the liveness check below shells out to
-/// `pgrep`, which has no Windows equivalent.
-#[cfg(unix)]
 #[test]
 fn handshake_failure_reaps_child() {
-    let fixture = PathBuf::from(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/tests/fixtures/fake_hang_nvim.sh"
-    ));
+    let marker = marker_path();
+    let _ = std::fs::remove_file(&marker);
     let cfg = EngineConfig::default()
-        .with_nvim_bin(fixture.clone())
+        .with_nvim_bin(env!("CARGO_BIN_EXE_view-engine-hang-fixture"))
+        .with_env("VIEW_ENGINE_HANG_MARKER", &marker)
         .with_handshake_timeout(Duration::from_millis(500));
 
-    // spawn() blocks for ~500ms waiting on the handshake; race a pgrep
-    // against it on another thread to prove the fake process was actually
-    // alive mid-handshake, not just absent for lack of ever starting. All
-    // `cargo test` tests in this binary are threads in one process, so the
-    // fake child's parent pid is our own; scoping pgrep to it (rather than
-    // a bare name match) avoids colliding with unrelated `sleep` processes
-    // elsewhere on the host. The probe repeats until the fixture is seen
-    // or the handshake window is nearly spent: how long fork, exec of the
-    // shell, and its exec of sleep take varies by host and platform, so a
-    // single probe at a fixed offset races the very startup it means to
-    // observe.
+    // spawn() blocks for ~500ms waiting on the handshake; watch for the
+    // fixture's marker on this thread meanwhile, to prove the fake process
+    // was actually alive mid-handshake rather than absent for never having
+    // started -- without which the reap assertion below passes vacuously.
+    // The watch repeats rather than probing once at a fixed offset: how
+    // long fork and exec take varies by host and platform, so a single
+    // probe races the very startup it means to observe.
     let spawn_thread = std::thread::spawn(move || Engine::spawn(cfg));
     let deadline = std::time::Instant::now() + Duration::from_millis(400);
-    let mut seen_alive = false;
+    let mut fixture_pid = None;
     while std::time::Instant::now() < deadline {
-        if fake_child_alive() {
-            seen_alive = true;
+        if let Some(pid) = std::fs::read_to_string(&marker)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+        {
+            fixture_pid = Some(pid);
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -72,33 +64,34 @@ fn handshake_failure_reaps_child() {
         matches!(err, Some(EngineError::Timeout { .. })),
         "expected Some(EngineError::Timeout {{ .. }}), got {err:?}"
     );
-    assert!(
-        seen_alive,
-        "fake nvim process was never observed running; test does not \
-         exercise the reap path"
+    let fixture_pid = fixture_pid.expect(
+        "fake nvim process never wrote its marker, so it was never observed \
+         running; the test does not exercise the reap path",
     );
 
-    // proof of no zombie: by the time spawn() returned to us, ChildGuard's
-    // Drop had already run (it is a local in the now-returned spawn()
-    // stack frame), so kill()+wait() already happened. `exec sleep 100000`
-    // in the fixture replaces the shell's image in place (same pid, no
-    // grandchild), so Child::kill() targets the actual sleeping process
-    // directly and Child::wait() fully reaps it -- this assertion would
-    // fail for either a leaked zombie (pgrep still lists it) or a
-    // leaked-but-still-running child.
+    // proof of no zombie: by the time spawn() returned, ChildGuard's Drop
+    // had already run (it is a local in the now-returned spawn() stack
+    // frame), so kill()+wait() already happened. The fixture is a single
+    // process with no grandchild, so Child::kill() targets the actual
+    // blocked process directly and Child::wait() fully reaps it -- this
+    // assertion fails for either a leaked zombie (still in the process
+    // table) or a leaked-but-still-running child.
     assert!(
-        !fake_child_alive(),
-        "fake nvim process still present after spawn() returned: not reaped"
+        !common::pid_in_process_table(fixture_pid),
+        "fake nvim pid {fixture_pid} still in the process table after \
+         spawn() returned: not reaped"
     );
+    let _ = std::fs::remove_file(&marker);
 }
 
-/// True if a `sleep 100000` process (the fixture's post-`exec` identity) is
-/// currently a child of this test binary's process.
-#[cfg(unix)]
-fn fake_child_alive() -> bool {
-    std::process::Command::new("pgrep")
-        .args(["-P", &std::process::id().to_string(), "-f", "sleep 100000"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Where the hang fixture reports its pid: under the build tree, never the
+/// system temp dir, which is world-writable and would let an unrelated
+/// process pre-create this predictable path as a symlink.
+fn marker_path() -> PathBuf {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop(); // crates/
+    root.pop(); // workspace root
+    let dir = root.join("target").join("view-engine-spawn");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join(format!("hang-marker-{}", std::process::id()))
 }

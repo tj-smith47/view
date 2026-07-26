@@ -26,7 +26,7 @@ mod common;
 use std::path::PathBuf;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
-use view_oracle::PtySession;
+use view_oracle::{PtySession, QueryPolicy};
 
 // The pty-isolation lock. A timing-bound test measures an absolute wall-clock
 // bound (startup+save) that is only meaningful with the host to itself: a
@@ -150,16 +150,22 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
 fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySession {
-    build_view_pty(extra_args, shared_isolation())
+    build_view_pty(extra_args, shared_isolation(), QueryPolicy::AnswerDa1)
 }
 
-/// Builds the raw `view` pty session with a given isolation guard: the read
-/// side of `PTY_ISOLATION` for the common case, or `None` when the spawning
-/// test already holds the exclusive write guard (taking read on that same
-/// thread deadlocks).
+/// Builds the raw `view` pty session with a given isolation guard and query
+/// policy.
+///
+/// The guard is the read side of `PTY_ISOLATION` for the common case, or
+/// `None` when the spawning test already holds the exclusive write guard
+/// (taking read on that same thread deadlocks). The policy decides whether
+/// this pty answers the child's DA1 fence like a real terminal or stays
+/// mute, which is the difference between measuring startup on a normal
+/// terminal and driving the probe's unanswered-deadline path.
 fn build_view_pty(
     extra_args: &[&std::ffi::OsStr],
     isolation: Option<RwLockReadGuard<'static, ()>>,
+    policy: QueryPolicy,
 ) -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
 
@@ -170,7 +176,7 @@ fn build_view_pty(
     cmd.arg(&paths.scratch);
     common::isolate_xdg(&mut cmd, &paths.isolated_home);
 
-    let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
+    let session = PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap();
 
     ViewPtySession {
         session,
@@ -182,8 +188,8 @@ fn build_view_pty(
 /// Like [`spawn_view_pty_raw`] but takes NO isolation read lock, for a timing
 /// test that already holds the exclusive write guard from
 /// `pty_isolation_exclusive`; taking read on that same thread deadlocks.
-fn spawn_view_pty_raw_isolated() -> ViewPtySession {
-    build_view_pty(&[], None)
+fn spawn_view_pty_raw_isolated(policy: QueryPolicy) -> ViewPtySession {
+    build_view_pty(&[], None, policy)
 }
 
 /// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of
@@ -242,14 +248,15 @@ fn view_paints_typed_text_in_a_pty() {
 
 #[test]
 fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries() {
-    // portable-pty's slave side never emulates a real terminal's DECRQM/
-    // kitty/DA1 replies, so every test in this file already exercises the
-    // detection deadline path; this test names that scenario explicitly and
-    // pins the property the deadline path exists to protect: the startup
-    // probe (raw-mode-only, pre-alt-screen) must never leave the terminal
-    // unresponsive or swallow the first real keystroke once the alternate
-    // screen and nvim take over, even though every one of its queries goes
-    // unanswered and it has to run its full deadline out before giving up.
+    // `QueryPolicy::Silent` is what makes this test's name true: every other
+    // test in this file gets a pty that answers the DA1 fence like a real
+    // terminal, which lets the probe finish early and never reaches the
+    // deadline path at all. Opting out of that reply here pins the property
+    // the deadline path exists to protect: the startup probe (raw-mode-only,
+    // pre-alt-screen) must never leave the terminal unresponsive or swallow
+    // the first real keystroke once the alternate screen and nvim take over,
+    // even though every one of its queries goes unanswered and it has to run
+    // its full deadline out before giving up.
     //
     // Typing is sent with zero delay, straight after the pty is opened
     // (`spawn_view_pty_raw`, skipping `spawn_view_pty`'s own "wait for the
@@ -269,7 +276,7 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // a bound that is really about the 50ms probe deadline, not host contention.
     let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw_isolated();
+    let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
 
     session.send(b"ibasic tier still works").unwrap();
     // A fixed sleep, not a screen-content wait, bridges to the save: the
@@ -314,6 +321,12 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // burst below (276 bytes: a 6-byte DA1 reply, `i`, 260 `A`s, then a
     // distinct end marker) exceeds the 256-byte chunk size, so surviving it
     // intact proves the tail isn't getting orphaned in a buffered handle.
+    //
+    // `QueryPolicy::Silent`: this test writes the DA1 reply itself, glued to
+    // the burst so both land in one read. A pty that also answered would get
+    // its reply in first, on its own, letting the probe break out before the
+    // burst ever arrived -- the co-arrival this test is built to exercise
+    // would simply stop happening, and it would still pass.
     // An absolute wall-clock bound is only meaningful with exclusive CPU: take
     // the isolation window BEFORE the clock (its acquisition can block waiting
     // for in-flight sessions to drain, which is not the startup latency under
@@ -321,7 +334,7 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // a bound that is really about the 50ms probe deadline, not host contention.
     let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw_isolated();
+    let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
 
     let da1_reply = b"\x1b[?62c";
     let payload = "A".repeat(260);
@@ -668,10 +681,7 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     .trim()
     .to_string();
 
-    let path = std::env::temp_dir().join(format!(
-        "view-oracle-delayed-nvim-{}.sh",
-        std::process::id()
-    ));
+    let path = common::scratch_root().join(format!("delayed-nvim-{}.sh", std::process::id()));
     let script = format!(
         "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
         f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0

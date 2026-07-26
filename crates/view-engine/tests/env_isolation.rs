@@ -59,6 +59,29 @@ fn scratch(name: &str) -> PathBuf {
     dir.join(name)
 }
 
+/// A listen address to plant in `NVIM_LISTEN_ADDRESS`, in whichever form
+/// this platform's Neovim actually serves on and reports from
+/// `serverlist()`: a unix socket under the build tree, or a named pipe on
+/// Windows, which has no unix sockets at all.
+///
+/// The split is what keeps the pair of socket tests below honest on both
+/// platforms. A unix-socket path planted on Windows could never appear in
+/// `serverlist()` whether the child cleared it or not, which would leave the
+/// isolation assertion passing exactly as quietly against a leaking child as
+/// against a clean one -- the shape this file's own doc argues against.
+fn planted_listen_address(name: &str) -> String {
+    #[cfg(unix)]
+    {
+        let path = scratch(name);
+        let _ = std::fs::remove_file(&path);
+        path.display().to_string()
+    }
+    #[cfg(windows)]
+    {
+        format!(r"\\.\pipe\view-{}-{}", name, std::process::id())
+    }
+}
+
 /// Asks the child which of [`MUST_NOT_LEAK`] carry [`MARKER`], returning
 /// their names.
 ///
@@ -226,12 +249,10 @@ fn every_probed_variable_is_one_getenv_can_report() {
 /// parks an embedded child's `qa!` in `wait_return` with no UI to answer it.
 #[test]
 fn an_isolated_child_opens_no_server_socket_at_a_host_chosen_address() {
-    let planted = scratch("host-listen.sock");
-    let _ = std::fs::remove_file(&planted);
+    let planted = planted_listen_address("host-listen.sock");
     let cfg = EngineConfig::isolated().with_env("NVIM_LISTEN_ADDRESS", &planted);
     let engine = Engine::spawn(cfg).unwrap();
     let servers = engine.handle.eval_str("string(serverlist())").unwrap();
-    let planted = planted.display().to_string();
     assert!(
         !servers.contains(&planted),
         "the child listens at the host's own address ({servers}), so every \
@@ -243,15 +264,9 @@ fn an_isolated_child_opens_no_server_socket_at_a_host_chosen_address() {
 /// written as a `getenv` probe: the same planted address does reach a child
 /// nothing clears it for, and reaches it as a listening socket rather than
 /// as a readable variable.
-// The unix-socket listen address this control checks for in serverlist() is a
-// unix-only shape; on Windows nvim serves over a named pipe, so the planted
-// path never appears. Gated off Windows; its isolated-child counterpart above
-// stays as the Windows-relevant assertion.
-#[cfg(unix)]
 #[test]
 fn the_socket_probe_reports_an_address_that_is_not_cleared() {
-    let planted = scratch("uncleared-listen.sock");
-    let _ = std::fs::remove_file(&planted);
+    let planted = planted_listen_address("uncleared-listen.sock");
     let cfg = EngineConfig::default()
         .with_arg("--clean")
         .with_arg("-n")
@@ -262,9 +277,8 @@ fn the_socket_probe_reports_an_address_that_is_not_cleared() {
         .handle
         .eval_str("string(getenv('NVIM_LISTEN_ADDRESS'))")
         .unwrap();
-    let planted_str = planted.display().to_string();
     assert!(
-        servers.contains(&planted_str),
+        servers.contains(&planted),
         "the probe cannot see an uncleared listen address ({servers}), so it \
          proves nothing about a cleared one"
     );

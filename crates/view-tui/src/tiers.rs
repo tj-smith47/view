@@ -118,7 +118,8 @@ fn truecolor_from_colorterm(value: Option<&str>) -> bool {
 /// every reply this probe cares about (DECRPM, kitty flags, DA1) is one of
 /// those. A byte that is not part of one is appended to `residue` instead
 /// of being discarded: nothing on this fd but the terminal itself can
-/// produce a private-mode CSI sequence in answer to our own query batch, so
+/// produce a private-mode CSI sequence in answer to the probe's own query
+/// batch, so
 /// anything else -- including a plain `ESC [` sequence like an arrow key --
 /// came from somewhere else, almost always keystrokes queued before or
 /// during the probe window, and must survive to be forwarded rather than
@@ -622,7 +623,7 @@ mod tests {
         // an arrow key (`ESC [ A`, no `?`) typed during the probe window
         // does not match the private-mode reply grammar, so it must survive
         // into residue untouched rather than being swallowed as if it were
-        // one of our own DA1/DECRPM/kitty replies
+        // one of the probe's own DA1/DECRPM/kitty replies
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[A\x1b[?62c".as_slice())]);
         let mut sink = Vec::new();
         let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();

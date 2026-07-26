@@ -292,8 +292,11 @@ impl EngineHandle {
                                     } else {
                                         (None, None)
                                     };
-                                    let _ =
-                                        pump.route_msg(Msg::HlProbeReply { generation, fg, bg });
+                                    pump.route_probe_reply(Msg::HlProbeReply {
+                                        generation,
+                                        fg,
+                                        bg,
+                                    });
                                 }
                             }
                             None => {}
@@ -560,7 +563,7 @@ impl EngineHandle {
         }
         if self.write_tx.send(bytes).is_err() {
             // the writer thread is gone, so nothing will ever write this
-            // request or fail it on our behalf; undo the insert ourselves
+            // request or fail it on this call's behalf; undo the insert here
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
             p.waiters.remove(&msgid);
             return Err(EngineError::Closed);
@@ -957,7 +960,7 @@ mod tests {
     /// An incoming `Request` from the peer (e.g. a blocking
     /// `rpcrequest` from nvim's init.lua) must get an immediate reply, or
     /// the peer's main loop blocks forever waiting for one and every
-    /// subsequent call from our side deadlocks against it. Incoming
+    /// subsequent call from this side deadlocks against it. Incoming
     /// requests are not dispatched to real handlers; the reply is a typed
     /// "method not supported" error.
     #[test]

@@ -22,7 +22,15 @@
 //! states it as a property. [`plant`] removes the coincidence from both
 //! ends: it holds the lock exclusively for as long as the plant stands, and
 //! it puts back what it replaced when the plant is dropped, so no test's
-//! environment mutation is visible to another test's child at all.
+//! environment mutation is visible to another test's child.
+//!
+//! One spawn stays outside that guarantee for the same structural reason
+//! the control spawn above does: `CompatSession::probe` spawns the
+//! `--remote-expr` client from library code, which cannot reach this module
+//! at all ([`plant`] and [`spawning`] are `#[cfg(test)]`). Nothing calls
+//! `probe` outside a test today, and the one test that does wraps it in a
+//! plant's own `spawning`, so the gap is structural rather than live -- but
+//! it is stated here rather than left for a future caller to discover.
 //!
 //! Shared/exclusive rather than a plain mutex because that is the shape of
 //! the hazard: two concurrent spawns do not disturb each other, only a
