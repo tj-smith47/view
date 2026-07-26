@@ -328,15 +328,38 @@ fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
 /// Deliberately not a word an editor's own chrome could ever print.
 const FIRST_PAINT_MARKER: &str = "VIEWBENCHCOLDSTARTMARKER";
 
-/// Writes [`FIRST_PAINT_MARKER`] into the scratch file `spec` opens, as
-/// the buffer's first line so it lands in the first painted frame.
+/// How many buffer lines carry the marker.
+///
+/// One line is not enough, and the failure was silent in the worst
+/// direction: a plugin-heavy config raises floating notifications that
+/// overlay the top rows, and the boundary check needs the whole marker
+/// contiguous on one row. Observed on the heavy fixture -- three stacked
+/// `nvim-notify` popups began at column 20 and clipped the marker to
+/// `VIEWBENCHCOLDSTARTM`, so the row did not match until the toasts faded
+/// about seven seconds later. That recorded view at 7133 ms against bare
+/// nvim's 225 ms and read as a 31x cold-start regression; view had in fact
+/// painted the buffer immediately. Bare nvim never showed the artifact
+/// because its messages go to the command line, which sits below the
+/// buffer rather than over it.
+///
+/// Filling well past the terminal's row count means an overlay would have
+/// to cover every visible row to hide the marker -- which is a genuinely
+/// unpainted buffer, exactly what this boundary should refuse to time.
+const FIRST_PAINT_MARKER_LINES: usize = 60;
+
+/// Writes [`FIRST_PAINT_MARKER`] into the scratch file `spec` opens, on
+/// [`FIRST_PAINT_MARKER_LINES`] lines so it lands in the first painted
+/// frame on a row no corner overlay can reach.
 fn plant_first_paint_marker(spec: &SpawnSpec) -> Result<()> {
     let target = spec
         .args
         .first()
         .map(PathBuf::from)
         .context("a paired spawn spec must open the scratch file as its first argument")?;
-    std::fs::write(&target, format!("{FIRST_PAINT_MARKER}\n"))
+    let body = std::iter::repeat_n(FIRST_PAINT_MARKER, FIRST_PAINT_MARKER_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    std::fs::write(&target, format!("{body}\n"))
         .with_context(|| format!("planting the first-paint marker in {}", target.display()))?;
     Ok(())
 }

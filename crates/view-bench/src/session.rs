@@ -7,6 +7,7 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use portable_pty::CommandBuilder;
@@ -38,6 +39,43 @@ pub struct BenchSession {
     pty: PtySession,
 }
 
+/// The environment variable the compat fixtures read their probe-channel
+/// address from. Every bench row reuses those fixtures, so every bench
+/// spawn inherits the `serverstart` call whether or not it wants one.
+const PROBE_SOCKET_VAR: &str = "VIEW_COMPAT_SOCK";
+
+/// Distinguishes the probe-socket path of each spawn from the last one's.
+static SPAWN_SERIAL: AtomicU64 = AtomicU64::new(0);
+
+/// Returns `env` with the probe-socket address made unique to `serial`,
+/// leaving every other entry untouched and adding nothing when the
+/// variable is absent.
+///
+/// The fixtures bind that address as their first statement. A sample
+/// killed at its first painted frame -- which is exactly what the
+/// `first_paint` row does to every one of its spawns -- never runs an exit
+/// path, so the bound socket outlives it, and the next spawn in the same
+/// side directory dies on `EADDRINUSE` before painting anything. Observed:
+/// a `first_paint` cell timing out at 30 seconds against nvim's "Press
+/// ENTER" prompt, with `E5113: Failed to start server: address already in
+/// use` behind it. Unlinking the stale socket first would work only while
+/// no two spawns share a side directory; a per-spawn address does not
+/// depend on that holding. No bench row ever connects to the channel, so
+/// the address has only to be unique and writable.
+fn probe_socket_env(env: &[(OsString, OsString)], serial: u64) -> Vec<(OsString, OsString)> {
+    env.iter()
+        .map(|(key, value)| {
+            if key == PROBE_SOCKET_VAR {
+                let mut unique = value.clone();
+                unique.push(format!(".{serial}"));
+                (key.clone(), unique)
+            } else {
+                (key.clone(), value.clone())
+            }
+        })
+        .collect()
+}
+
 impl BenchSession {
     /// Spawns `spec` inside a [`GRID_COLS`]x[`GRID_ROWS`] pty.
     ///
@@ -50,7 +88,8 @@ impl BenchSession {
         for arg in &spec.args {
             cmd.arg(arg);
         }
-        for (key, value) in &spec.env {
+        let serial = SPAWN_SERIAL.fetch_add(1, Ordering::Relaxed);
+        for (key, value) in probe_socket_env(&spec.env, serial) {
             cmd.env(key, value);
         }
         if let Some(cwd) = &spec.cwd {
@@ -162,5 +201,53 @@ impl Drop for BenchSession {
     fn drop(&mut self) {
         self.pty.kill();
         let _ = self.pty.wait_for_exit(Duration::from_secs(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn env_of(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (OsString::from(*k), OsString::from(*v)))
+            .collect()
+    }
+
+    #[test]
+    fn two_spawns_never_share_a_probe_socket_address() {
+        let env = env_of(&[(PROBE_SOCKET_VAR, "/scratch/nvim/compat.sock")]);
+        let first = probe_socket_env(&env, 0);
+        let second = probe_socket_env(&env, 1);
+        assert_ne!(
+            first[0].1, second[0].1,
+            "a killed sample leaves its socket bound, so a shared address is a spawn the next \
+             sample cannot make"
+        );
+    }
+
+    #[test]
+    fn every_other_environment_entry_survives_untouched() {
+        let env = env_of(&[
+            ("XDG_CONFIG_HOME", "/scratch/nvim/xdg_config_home"),
+            (PROBE_SOCKET_VAR, "/scratch/nvim/compat.sock"),
+            ("TERM", "xterm-256color"),
+        ]);
+        let rewritten = probe_socket_env(&env, 7);
+        assert_eq!(rewritten.len(), env.len());
+        assert_eq!(rewritten[0], env[0]);
+        assert_eq!(rewritten[2], env[2]);
+        assert_eq!(
+            rewritten[1].1,
+            OsString::from("/scratch/nvim/compat.sock.7")
+        );
+    }
+
+    #[test]
+    fn an_environment_without_a_probe_socket_is_unchanged() {
+        let env = env_of(&[("TERM", "xterm-256color")]);
+        assert_eq!(probe_socket_env(&env, 3), env);
     }
 }

@@ -26,8 +26,6 @@ ratio_vs_nvim = 0.04877169855843488
 cadence_p99_ms = 12.80475
 pace_ratio = 1.0125227267569266
 
-[input_path.minimal]
-key_to_rpc_p99_us = 230.0
 
 [memory.minimal]
 phys_footprint_mb = 3.57891845703125

@@ -1,0 +1,53 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(git push:*)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'INPUT=$(cat); FILE=$(printf %s \"$INPUT\" | jq -r \".tool_input.file_path // empty\" 2>/dev/null); if [[ \"$FILE\" == *.rs ]]; then cd /opt/repos/view && bash .claude/hooks/post-edit-rs.sh \"$FILE\"; fi'"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/opt/repos/view/.claude/hooks/validate-commands.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "auto|manual",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'COMPACTION REMINDER: re-read .claude/CLAUDE.md. nvim is the sole buffer owner. Only view-tui touches the terminal; only view-engine speaks RPC; view-core is pure. Plans index: .claude/plans/INDEX.md. Never push.'"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'REMINDER: drain .claude/known-bugs.md before declaring done. Verify claims by running task ci, never by assumption.'"
+          }
+        ]
+      }
+    ]
+  }
+}

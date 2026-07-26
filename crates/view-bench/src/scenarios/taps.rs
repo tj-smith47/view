@@ -283,6 +283,11 @@ pub struct TapsOutcome {
     /// session rather than against an idle host, so the number the bar
     /// compares is the one this row's taps actually paid.
     pub overhead: Distribution,
+    /// The write spacing the characterization above needed to reach full
+    /// delivery on this host. Reported because a host that needs an
+    /// unusual pace is a host whose pipe behaves differently from the one
+    /// the base pace was tuned on, and that is worth seeing in the row.
+    pub overhead_pace: Duration,
 }
 
 /// One observed sub-interval of a taps row.
@@ -376,7 +381,8 @@ pub fn run_input_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
-    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
+    let (overhead, overhead_pace) =
+        characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
     let mut all_records = Vec::new();
     let mut pools: Vec<Vec<f64>> = vec![Vec::new(); INPUT_LABELS.len()];
@@ -444,6 +450,7 @@ pub fn run_input_path(
         trial_distributions,
         segments: summarize_segments(&INPUT_LABELS, &pools),
         overhead,
+        overhead_pace,
     })
 }
 
@@ -462,7 +469,8 @@ pub fn run_output_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
-    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
+    let (overhead, overhead_pace) =
+        characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
     let mut all_records = Vec::new();
     let labels = [
@@ -544,6 +552,7 @@ pub fn run_output_path(
         trial_distributions,
         segments: summarize_segments(&labels, &pools),
         overhead,
+        overhead_pace,
     })
 }
 
@@ -618,6 +627,11 @@ pub struct EchoPathOutcome {
     /// session, so the stage percentiles below can be read against what
     /// the instrumentation between them charged.
     pub overhead: Distribution,
+    /// The write spacing the characterization above needed to reach full
+    /// delivery on this host. Reported because a host that needs an
+    /// unusual pace is a host whose pipe behaves differently from the one
+    /// the base pace was tuned on, and that is worth seeing in the row.
+    pub overhead_pace: Duration,
     /// Measured view samples whose tag chain never resolved. These
     /// contribute to [`Self::view_total`] but to no stage, so a count
     /// above zero is exactly how far the stage percentiles and the total
@@ -742,7 +756,8 @@ pub fn run_echo_path(
     settle_deadline: Duration,
 ) -> Result<EchoPathOutcome, BenchError> {
     let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
-    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
+    let (overhead, overhead_pace) =
+        characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
     let _ = pipe.drain();
 
@@ -848,6 +863,7 @@ pub fn run_echo_path(
         view_total,
         nvim_total,
         overhead,
+        overhead_pace,
         unresolved,
         ambiguous_input_wakes,
         ambiguous_output_wakes,
@@ -988,6 +1004,82 @@ pub fn characterize_overhead(
     iterations: usize,
     pace: Duration,
 ) -> Result<Distribution, BenchError> {
+    let (dist, delivered) = characterize_once(pipe, iterations, pace)?;
+    if delivered < iterations {
+        return Err(BenchError::Desync {
+            context: format!(
+                "tap overhead characterization wrote {iterations} records but the reader received \
+                 {delivered}; the dropped writes cost nothing and would understate the \
+                 instrumentation the rows are about to measure through"
+            ),
+        });
+    }
+    Ok(dist)
+}
+
+/// How many times [`characterize_overhead_adaptive`] may back its pace off.
+/// Each attempt doubles, so five attempts span 20us to 320us and bound the
+/// characterization's wall time at roughly seven seconds.
+const OVERHEAD_PACE_ATTEMPTS: u32 = 5;
+
+/// Characterizes the tap's cost at the slowest pace the host needs, and
+/// reports which pace that was.
+///
+/// [`OVERHEAD_PACE`] was tuned on dev-linux, where a 64 KiB pipe buffer and
+/// the reader's drain cadence leave it comfortable. It is not portable: on
+/// macOS the same pace loses roughly one write in a thousand (observed
+/// 19965 and 19985 of 20000 across two runs at different host loads), which
+/// the delivery guard correctly refuses -- leaving the row unrunnable on
+/// that class rather than merely slow. Doubling until every write lands
+/// self-tunes on any host, including ones this project has not seen, and
+/// keeps the guard absolute rather than trading it for a per-OS constant
+/// that would silently drift as pipe sizes and schedulers change.
+///
+/// The returned pace is reported by the row, so a host that needs an
+/// unusual one is visible in the output instead of hidden inside a retry.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] if full delivery is not achieved within
+/// [`OVERHEAD_PACE_ATTEMPTS`], naming the best delivery seen -- a host that
+/// cannot deliver every write at 320us apart has something wrong with it
+/// that a slower pace will not fix, and the row must not report a number
+/// measured through a lossy pipe.
+pub fn characterize_overhead_adaptive(
+    pipe: &TapPipe,
+    iterations: usize,
+    base_pace: Duration,
+) -> Result<(Distribution, Duration), BenchError> {
+    // a zero base would never escape by doubling
+    let mut pace = base_pace.max(Duration::from_micros(1));
+    let mut best = 0_usize;
+    for _ in 0..OVERHEAD_PACE_ATTEMPTS {
+        let (dist, delivered) = characterize_once(pipe, iterations, pace)?;
+        if delivered >= iterations {
+            return Ok((dist, pace));
+        }
+        best = best.max(delivered);
+        pace = pace.saturating_mul(2);
+    }
+    Err(BenchError::Desync {
+        context: format!(
+            "tap overhead characterization never achieved full delivery: best {best} of \
+             {iterations} records across {OVERHEAD_PACE_ATTEMPTS} attempts, up to {pace:?} \
+             apart; a pipe this lossy would understate the instrumentation the rows measure \
+             through"
+        ),
+    })
+}
+
+/// One characterization pass: writes `iterations` records `pace` apart and
+/// reports the sample distribution alongside how many the reader actually
+/// received. Makes no judgment about delivery -- the callers above differ
+/// only in what they do about a shortfall.
+fn characterize_once(
+    pipe: &TapPipe,
+    iterations: usize,
+    pace: Duration,
+) -> Result<(Distribution, usize), BenchError> {
     use std::io::Write;
     let path = pipe.path();
     let fd = rustix::fs::openat(
@@ -1017,16 +1109,10 @@ pub fn characterize_overhead(
     // last writes need a moment to land before the count means anything
     std::thread::sleep(Duration::from_millis(50));
     let delivered = pipe.drain().iter().filter(|r| r.tag == b'O').count();
-    if delivered < iterations {
-        return Err(BenchError::Desync {
-            context: format!(
-                "tap overhead characterization wrote {iterations} records but the reader received \
-                 {delivered}; the dropped writes cost nothing and would understate the \
-                 instrumentation the rows are about to measure through"
-            ),
-        });
-    }
-    Distribution::from_samples(&samples_us, iterations / 10)
+    Ok((
+        Distribution::from_samples(&samples_us, iterations / 10)?,
+        delivered,
+    ))
 }
 
 #[cfg(test)]
@@ -1459,6 +1545,25 @@ mod tests {
         assert!(
             message.contains("the reader received"),
             "the refusal must name the delivery shortfall, got: {message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_pace_too_fast_for_the_host_is_escalated_until_every_write_lands() {
+        // the same zero pace the guard test above proves is lossy: the
+        // adaptive caller must reach full delivery rather than refuse, and
+        // must report a pace slower than the one it was handed, so a host
+        // needing an unusual pace shows up in the row's output
+        let path = scratch_root().join(format!("adaptive-{}.fifo", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let pipe = TapPipe::create(&path).expect("tap pipe");
+        let (dist, pace) = characterize_overhead_adaptive(&pipe, 2_000, Duration::ZERO)
+            .expect("doubling the pace must reach full delivery");
+        assert_eq!(dist.len(), 2_000 - 2_000 / 10);
+        assert!(
+            pace > Duration::ZERO,
+            "the escalated pace must be reported, got {pace:?}"
         );
         let _ = std::fs::remove_file(&path);
     }

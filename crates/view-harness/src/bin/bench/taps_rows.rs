@@ -97,7 +97,7 @@ pub(crate) fn run_taps_row(
             segment.label, segment.p50_us, segment.p99_us, segment.samples
         );
     }
-    report_overhead(&outcome.overhead)?;
+    report_overhead(&outcome.overhead, outcome.overhead_pace)?;
     println!(
         "{}",
         report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)
@@ -135,12 +135,17 @@ fn taps_side(
 /// The characterization runs inside the live session, not before it: an
 /// idle-host number cannot see the contention the tap sites run under, and
 /// a bar compared against it is a bar against a different operation.
-fn report_overhead(overhead: &view_bench::sampling::Distribution) -> Result<()> {
+fn report_overhead(
+    overhead: &view_bench::sampling::Distribution,
+    pace: std::time::Duration,
+) -> Result<()> {
     println!(
-        "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations (bar {TAP_OVERHEAD_BAR_US}us)",
+        "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations at {}us pace \
+         (bar {TAP_OVERHEAD_BAR_US}us)",
         overhead.p50(),
         overhead.p99(),
-        overhead.len()
+        overhead.len(),
+        pace.as_micros()
     );
     if overhead.p99() > TAP_OVERHEAD_BAR_US {
         bail!(
@@ -230,7 +235,7 @@ pub(crate) fn run_echo_path_row(
         );
     }
 
-    report_overhead(&outcome.overhead)?;
+    report_overhead(&outcome.overhead, outcome.overhead_pace)?;
     let floor = taps::run_pty_floor(
         &cwd,
         PTY_FLOOR_SAMPLES,
