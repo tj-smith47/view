@@ -1182,6 +1182,20 @@ mod tests {
     }
 
     #[test]
+    fn the_taps_rows_are_blocked_exactly_off_unix() {
+        // the tap channel is a unix-only mechanism, so the internal-boundary
+        // rows and the echo_path decomposition it drives run on unix and are
+        // skipped on every other platform
+        for scenario in ["input_path", "output_path", "echo_path"] {
+            assert_eq!(
+                platform_block(scenario).is_some(),
+                cfg!(not(unix)),
+                "{scenario} must be measured on unix and skipped off it"
+            );
+        }
+    }
+
+    #[test]
     fn skip_announcement_adds_a_checks_page_warning_only_under_gha() {
         let plain = skip_announcements("memory", "minimal", "linux-only metric", false);
         assert_eq!(
