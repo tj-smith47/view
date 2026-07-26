@@ -18,7 +18,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // real activity instead of a wall-clock timer the zero-clock
             // runtime has no mechanism for; runs regardless of focus, since
             // the semantic is user activity, not specifically engine input
-            if model.engine.messages.dismiss_transient_on_keypress() {
+            let cmdline_open = model.engine.cmdline.is_some();
+            if model
+                .engine
+                .messages
+                .dismiss_transient_on_keypress(cmdline_open)
+            {
                 model.dirty = true;
             }
             match model.focus {
@@ -1028,6 +1033,74 @@ mod tests {
 
         let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
         assert!(m.engine.cmdline.is_none());
+    }
+
+    #[test]
+    fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
+        // the event order is nvim 0.12.4's own, observed over a real RPC
+        // session driving `confirm('Save changes?', "&Yes\n&No")`: the
+        // question arrives once as msg_show, the answer line separately as
+        // cmdline_show, and a key answering none of the choices re-arms the
+        // prompt with cmdline_hide + cmdline_show and NO second msg_show.
+        let mut m = model();
+        let prompt = || UiEvent::CmdlineShow {
+            content: vec![],
+            pos: 0,
+            firstc: String::new(),
+            prompt: "[Y]es, (N)o: ".into(),
+            indent: 0,
+            level: 1,
+        };
+        let question = || UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "Save changes?".into())],
+            replace_last: false,
+        };
+        let shown = |m: &Model| m.engine.messages.visible_lines(4);
+
+        let _ = update(&mut m, Msg::Redraw(vec![question(), UiEvent::Flush]));
+        let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
+        assert_eq!(shown(&m), vec!["Save changes?"]);
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "q".into(),
+            }),
+        );
+        assert_eq!(
+            shown(&m),
+            vec!["Save changes?"],
+            "a key the prompt refuses must not take the question away with it"
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "y".into(),
+            }),
+        );
+        assert_eq!(shown(&m), vec!["Save changes?"]);
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "j".into(),
+            }),
+        );
+        assert!(
+            shown(&m).is_empty(),
+            "with the prompt closed the question is ordinary transient text"
+        );
     }
 
     #[test]

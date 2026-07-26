@@ -894,10 +894,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
-    // Only the unix spawn fixtures below (which drive /bin/* and nvim) use the
-    // env lock; the pure-logic key/marker tests do not, so on Windows, where
-    // those fixtures are gated off, this import would be unused.
-    #[cfg(unix)]
     use crate::testenv;
 
     #[test]
