@@ -1,11 +1,14 @@
-//! The flood scenario: a `:terminal` buffer draining a fixed line flood,
-//! run paired against the same flood in bare nvim on the same fixture.
-//! Two things are measured, not assumed: total drain time (paired, the
-//! ratio gates) and paint cadence during the drain: the gaps between
-//! successive observed frame changes. A blocked UI thread shows up as a
-//! long no-paint gap while output is still pending, so the cadence
-//! percentile IS the coalescing invariant, observed from outside the
-//! process.
+//! The flood scenario: a `:terminal` buffer draining an unbounded producer
+//! for a fixed wall-clock window, run paired against the same flood in bare
+//! nvim on the same fixture. Two things are measured, not assumed: paint
+//! cadence over the window (the gaps between successive observed frame
+//! changes) and drain throughput (lines drained in the window, paired: the
+//! pace ratio gates). A blocked UI thread shows up as a long no-paint gap
+//! while output is still pending, so the cadence percentile IS the coalescing
+//! invariant, observed from outside the process. The window (not a line
+//! count) bounds the run because hosts drain a fixed count at wildly
+//! different rates, which left a fixed-count flood with far too few cadence
+//! samples on fast hosts to form a percentile.
 
 use std::time::{Duration, Instant};
 
@@ -13,33 +16,78 @@ use crate::sampling::{median_of_trials, Distribution};
 use crate::session::{BenchSession, SpawnSpec};
 use crate::BenchError;
 
-/// The marker the flood command prints when the producer finishes. The
-/// TYPED command must never contain this as contiguous cells (the echoed
-/// command line would satisfy the wait before the flood even ran), so
-/// [`flood_command`] splits it with shell quote concatenation.
-const DONE_MARKER: &str = "FLOODMARK-DONE";
-
-/// The shell command one flood runs inside `:terminal`.
+/// The `:terminal` line that starts one flood's producer.
+///
+/// Runs the producer under a NON-interactive `sh -c` rather than typing it
+/// into `:terminal`'s default interactive `$SHELL`: the interactive shell is
+/// a cross-host measurement variable (zsh's ZLE makes a Linux flood ~20x
+/// slower or never finish; macOS ships an ancient slow-interactive bash),
+/// while a non-interactive `sh -c` is fast on every host. `yes | cat -n` is
+/// the producer: unbounded (the wall-clock window, not a line count, bounds
+/// the run so sample counts are comparable across hosts) and line-varying
+/// (`cat -n`'s incrementing counter changes the visible screen every scroll,
+/// where a bare `yes` would print identical rows and freeze the frame hash).
+/// The counter doubles as the drain-progress meter (see [`max_screen_line`]).
 #[must_use]
-pub fn flood_command(lines: usize) -> String {
-    format!("seq -f 'L%.0f' 1 {lines}; printf 'FLOODMARK''-DONE\\n'\r")
+pub fn flood_command() -> String {
+    String::from(":terminal sh -c 'yes | cat -n'\r")
 }
 
-/// One side's flood measurement.
+/// The largest line number visible on the terminal, i.e. how many lines the
+/// producer has drained so far. `cat -n` right-justifies the counter in a
+/// tab-delimited field; this reads the max integer token on screen, so a
+/// widening field or a partially scrolled top row cannot mislead it.
+#[must_use]
+pub fn max_screen_line(screen_text: &str) -> Option<u64> {
+    screen_text
+        .split(|c: char| !c.is_ascii_digit())
+        .filter_map(|t| t.parse::<u64>().ok())
+        .max()
+}
+
+/// One side's flood measurement over the wall-clock window.
 #[derive(Debug)]
 pub struct FloodSide {
-    pub drain_ms: f64,
-    /// Gaps between successive observed frame changes during the drain,
+    /// Lines the producer drained through the terminal during the window
+    /// (the highest `cat -n` counter reached). The drain-throughput meter:
+    /// with the window fixed, more lines means the side kept pace better.
+    pub lines_drained: f64,
+    /// Gaps between successive observed frame changes during the window,
     /// in milliseconds.
     pub cadence_gaps_ms: Vec<f64>,
 }
 
-/// Spawns `spec`, opens `:terminal`, runs the flood, and observes drain
-/// time plus paint cadence until the done marker is visible.
+/// The idle span with no frame change that declares the producer started
+/// (or, if it elapses first, that it never did): the flood changes the
+/// screen continuously once running, so a quiet gap this long at the head
+/// means the terminal command never produced output.
+const PRODUCER_START_DEADLINE: Duration = Duration::from_secs(15);
+
+/// Reads the current screen's frame hash and its highest `cat -n` counter
+/// in one borrow, so cadence and drain progress come from the same frame.
+fn probe(session: &mut BenchSession) -> (u64, Option<u64>) {
+    session.with_screen(|screen| {
+        let hash = crate::boundaries::screen_hash(screen);
+        let (rows, cols) = screen.size();
+        let mut text = String::new();
+        for row in 0..rows {
+            text.push_str(&crate::boundaries::row_text(screen, row, cols));
+            text.push('\n');
+        }
+        (hash, max_screen_line(&text))
+    })
+}
+
+/// Spawns `spec`, opens `:terminal` on the pinned producer, and samples
+/// paint cadence plus drain throughput for `window` of steady flood.
+///
+/// The window (not a line count) bounds the run, so the sample count is a
+/// property of duration and is comparable across hosts that drain at wildly
+/// different rates (the reason [`flood_command`] runs an unbounded producer).
 fn flood_once(
     spec: &SpawnSpec,
     settle_deadline: Duration,
-    lines: usize,
+    window: Duration,
 ) -> Result<FloodSide, BenchError> {
     let mut session = BenchSession::spawn(spec)?;
     if !session.settle(Duration::from_secs(2), settle_deadline) {
@@ -50,38 +98,36 @@ fn flood_once(
             ),
         });
     }
-    session.send(b":terminal\r")?;
-    if !session.settle(Duration::from_secs(1), Duration::from_secs(30)) {
-        return Err(BenchError::Desync {
-            context: format!(
-                "terminal buffer never settled; screen:\n{}",
-                session.screen_text()
-            ),
-        });
-    }
-    session.send(b"i")?;
-    std::thread::sleep(Duration::from_millis(200));
+    session.send(flood_command().as_bytes())?;
 
-    session.send(flood_command(lines).as_bytes())?;
+    // wait for the producer to begin scrolling before starting the window, so
+    // it measures steady flood rather than the terminal-open transient
+    let (mut last_hash, _) = probe(&mut session);
+    let armed = Instant::now();
+    loop {
+        let (hash, _) = probe(&mut session);
+        if hash != last_hash {
+            last_hash = hash;
+            break;
+        }
+        if armed.elapsed() >= PRODUCER_START_DEADLINE {
+            return Err(BenchError::Desync {
+                context: format!(
+                    "flood producer never scrolled the terminal; screen:\n{}",
+                    session.screen_text()
+                ),
+            });
+        }
+        std::thread::yield_now();
+    }
+
     let start = Instant::now();
-    let deadline = start + Duration::from_secs(120);
-    let mut last_hash = 0_u64;
-    let mut last_change: Option<Instant> = None;
+    let deadline = start + window;
+    let mut last_change: Option<Instant> = Some(start);
     let mut gaps_ms = Vec::new();
-    let drain_ms = loop {
-        let (hash, done) = session.with_screen(|screen| {
-            let hash = crate::boundaries::screen_hash(screen);
-            let (rows, cols) = screen.size();
-            let mut done = false;
-            for row in 0..rows {
-                let text = crate::boundaries::row_text(screen, row, cols);
-                if text.contains(DONE_MARKER) {
-                    done = true;
-                    break;
-                }
-            }
-            (hash, done)
-        });
+    let mut lines_drained = 0_u64;
+    loop {
+        let (hash, max_line) = probe(&mut session);
         let now = Instant::now();
         if hash != last_hash {
             if let Some(previous) = last_change {
@@ -90,26 +136,19 @@ fn flood_once(
             last_change = Some(now);
             last_hash = hash;
         }
-        if done {
-            break now.duration_since(start).as_secs_f64() * 1000.0;
+        if let Some(n) = max_line {
+            lines_drained = lines_drained.max(n);
         }
         if now >= deadline {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "flood done marker never appeared; screen:\n{}",
-                    session.screen_text()
-                ),
-            });
+            break;
         }
         std::thread::yield_now();
-    };
+    }
 
-    // leave terminal-insert mode before the ordinary quit sequence; the
-    // shell would otherwise swallow the Esc that starts it
-    session.send(b"\x1c\x0e")?;
     session.shutdown();
     Ok(FloodSide {
-        drain_ms,
+        #[allow(clippy::cast_precision_loss)]
+        lines_drained: lines_drained as f64,
         cadence_gaps_ms: gaps_ms,
     })
 }
@@ -119,8 +158,10 @@ fn flood_once(
 pub struct FloodOutcome {
     pub view_trials: Vec<FloodSide>,
     pub nvim_trials: Vec<FloodSide>,
-    /// Median across trials of view drain time over nvim drain time.
-    pub gated_drain_ratio: f64,
+    /// Median across trials of nvim lines drained over view lines drained.
+    /// Lower is better: view keeping pace makes the two counts equal (~1.0);
+    /// view falling behind drains fewer lines in the window and lifts it.
+    pub gated_pace_ratio: f64,
     /// Median across trials of the view side's cadence-gap p99 (ms).
     pub gated_cadence_p99_ms: f64,
     /// Worst single view-side no-paint gap observed across all trials
@@ -131,12 +172,12 @@ pub struct FloodOutcome {
 /// Runs `trials` paired floods. A flood is one long macro operation, so
 /// pairing is per trial (view and nvim floods back to back within the
 /// same invocation, order alternating per trial) rather than per-sample
-/// interleaving, which has no meaning inside a single drain.
+/// interleaving, which has no meaning inside a single window.
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] if a flood never completes or a
-/// session misbehaves, and [`BenchError::NotEnoughSamples`] if a drain
+/// Returns [`BenchError::Desync`] if a producer never scrolls the terminal
+/// or a session misbehaves, and [`BenchError::NotEnoughSamples`] if a window
 /// produced fewer observed frame changes than the protocol's floor (the
 /// cadence percentile would be built on too few gaps to mean anything).
 pub fn run(
@@ -145,21 +186,21 @@ pub fn run(
     trials: usize,
     min_gap_samples: usize,
     settle_deadline: Duration,
-    lines: usize,
+    window: Duration,
 ) -> Result<FloodOutcome, BenchError> {
     let mut view_trials = Vec::with_capacity(trials);
     let mut nvim_trials = Vec::with_capacity(trials);
     for trial in 0..trials {
         if trial % 2 == 0 {
             view_trials
-                .push(flood_once(view, settle_deadline, lines).map_err(|e| label("view", e))?);
+                .push(flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?);
             nvim_trials
-                .push(flood_once(nvim, settle_deadline, lines).map_err(|e| label("nvim", e))?);
+                .push(flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?);
         } else {
             nvim_trials
-                .push(flood_once(nvim, settle_deadline, lines).map_err(|e| label("nvim", e))?);
+                .push(flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?);
             view_trials
-                .push(flood_once(view, settle_deadline, lines).map_err(|e| label("view", e))?);
+                .push(flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?);
         }
     }
 
@@ -167,13 +208,13 @@ pub fn run(
     let mut cadence_p99s = Vec::with_capacity(trials);
     let mut stall_max: f64 = 0.0;
     for (view_side, nvim_side) in view_trials.iter().zip(&nvim_trials) {
-        if !(nvim_side.drain_ms.is_finite() && nvim_side.drain_ms > 0.0) {
+        if !(view_side.lines_drained.is_finite() && view_side.lines_drained > 0.0) {
             return Err(BenchError::DegenerateBaselineSide {
-                statistic: "drain_ms",
-                value: nvim_side.drain_ms,
+                statistic: "lines_drained",
+                value: view_side.lines_drained,
             });
         }
-        ratios.push(view_side.drain_ms / nvim_side.drain_ms);
+        ratios.push(nvim_side.lines_drained / view_side.lines_drained);
         if view_side.cadence_gaps_ms.len() < min_gap_samples {
             return Err(BenchError::NotEnoughSamples {
                 collected: view_side.cadence_gaps_ms.len(),
@@ -186,7 +227,7 @@ pub fn run(
     }
 
     Ok(FloodOutcome {
-        gated_drain_ratio: median_of_trials(&ratios)?,
+        gated_pace_ratio: median_of_trials(&ratios)?,
         gated_cadence_p99_ms: median_of_trials(&cadence_p99s)?,
         view_stall_max_ms: stall_max,
         view_trials,
@@ -209,11 +250,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typed_flood_command_never_contains_the_done_marker_contiguously() {
-        let command = flood_command(1000);
+    fn flood_command_pins_a_noninteractive_shell_and_an_unbounded_varying_producer() {
+        let command = flood_command();
         assert!(
-            !command.contains(DONE_MARKER),
-            "the echoed command line would satisfy the done wait early: {command}"
+            command.contains("sh -c"),
+            "the producer must run under a fixed non-interactive shell, not the \
+             host's interactive $SHELL (a cross-host variable): {command}"
         );
+        assert!(
+            command.contains("cat -n"),
+            "the producer must number its lines so the visible screen keeps \
+             changing (a bare `yes` freezes the frame hash): {command}"
+        );
+        assert!(
+            command.starts_with(":terminal ") && command.ends_with('\r'),
+            "the command must be a single :terminal line submitted with CR: {command}"
+        );
+    }
+
+    #[test]
+    fn max_screen_line_reads_the_largest_cat_n_counter_on_screen() {
+        let screen = "     8\ty\n     9\ty\n    10\ty\n    11\ty\n";
+        assert_eq!(
+            max_screen_line(screen),
+            Some(11),
+            "the drain meter is the highest line number the producer has reached"
+        );
+    }
+
+    #[test]
+    fn max_screen_line_is_none_on_a_screen_with_no_digits() {
+        assert_eq!(max_screen_line("waiting for terminal\n~\n~\n"), None);
+    }
+
+    #[test]
+    fn max_screen_line_ignores_a_partially_scrolled_top_row() {
+        // the top row can be clipped mid-number as the buffer scrolls; the
+        // max token still comes from a whole lower line, never the fragment
+        let screen = "34\ty\n   1201\ty\n   1202\ty\n";
+        assert_eq!(max_screen_line(screen), Some(1202));
     }
 }

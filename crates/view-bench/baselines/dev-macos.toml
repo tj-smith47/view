@@ -22,6 +22,10 @@ ratio_vs_nvim = 0.3196956409096161
 cold_ms = 77.228375
 ratio_vs_nvim = 0.3993799050474594
 
+[flood.minimal]
+cadence_p99_ms = 12.80475
+pace_ratio = 1.0125227267569266
+
 [input_path.minimal]
 p99_us = 317.0
 

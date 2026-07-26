@@ -70,12 +70,15 @@ const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 const MIN_RECORDED_SAMPLES: usize = 1000;
 const MIN_RECORDED_WARMUP: usize = 100;
 
-/// Lines one `:terminal` flood produces. Sized from measurement, not
-/// guessed: a 200k-line flood drained in ~850ms with only ~70 observed
-/// frame changes (the UI coalesces to roughly a 12ms cadence), so the
-/// cadence percentile needs a drain long enough for 1000+ painted
-/// frames.
-const FLOOD_LINES: usize = 3_000_000;
+/// How long one `:terminal` flood samples steady output. A duration, not a
+/// line count: hosts drain a fixed line count at wildly different rates (a
+/// 3M-line flood took ~12.6s on dev-linux but ~845ms on mbp, ~1020 vs ~12
+/// observed frame changes), so a line count cannot make the cadence sample
+/// count comparable across hosts, but a fixed window does by construction.
+/// Sized from measurement: at the UI's ~12ms coalesced cadence a 12s window
+/// yielded ~960 gaps on a loaded dev-linux, just under the 1000-gap floor;
+/// 15s clears it with margin on both hosts (dev-linux ~1200, mbp ~1350).
+const FLOOD_WINDOW: Duration = Duration::from_secs(15);
 
 /// Null-pair calibration sampling: two instances of the pinned nvim
 /// interleaved per-sample under the echo driver. 200 measured samples is
@@ -782,7 +785,7 @@ fn run_cell(
                 protocol.trials,
                 protocol.samples,
                 settle_deadline(fixture),
-                FLOOD_LINES,
+                FLOOD_WINDOW,
             )
             .with_context(|| format!("flood/{fixture} run failed"))?;
             for (view_side, nvim_side) in outcome.view_trials.iter().zip(&outcome.nvim_trials) {
@@ -791,18 +794,18 @@ fn run_cell(
                 // while a low count on both points at what the harness can
                 // observe through the pty on this host
                 println!(
-                    "flood/{fixture}: view drain {:.0}ms ({} frame gaps) | nvim drain {:.0}ms \
-                     ({} frame gaps)  ratio {:.2}",
-                    view_side.drain_ms,
+                    "flood/{fixture}: view drained {:.0} lines ({} frame gaps) | nvim drained \
+                     {:.0} lines ({} frame gaps)  pace {:.2}",
+                    view_side.lines_drained,
                     view_side.cadence_gaps_ms.len(),
-                    nvim_side.drain_ms,
+                    nvim_side.lines_drained,
                     nvim_side.cadence_gaps_ms.len(),
-                    view_side.drain_ms / nvim_side.drain_ms
+                    nvim_side.lines_drained / view_side.lines_drained
                 );
             }
             println!(
                 "{}",
-                report::aggregate_line("drain_ratio", outcome.gated_drain_ratio, protocol.trials)
+                report::aggregate_line("pace_ratio", outcome.gated_pace_ratio, protocol.trials)
             );
             println!(
                 "{}",
@@ -817,7 +820,7 @@ fn run_cell(
                 outcome.view_stall_max_ms
             );
             let mut metrics = CellMetrics::new();
-            metrics.insert("drain_ratio".to_string(), outcome.gated_drain_ratio);
+            metrics.insert("pace_ratio".to_string(), outcome.gated_pace_ratio);
             metrics.insert("cadence_p99_ms".to_string(), outcome.gated_cadence_p99_ms);
             Ok(metrics)
         }

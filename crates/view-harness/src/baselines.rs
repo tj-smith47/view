@@ -888,7 +888,7 @@ mod tests {
         for controlled in [false, true] {
             assert_eq!(gate_headroom("ratio_p50", controlled), Some(RATIO_HEADROOM));
             assert_eq!(
-                gate_headroom("drain_ratio", controlled),
+                gate_headroom("pace_ratio", controlled),
                 Some(RATIO_HEADROOM)
             );
             assert_eq!(
