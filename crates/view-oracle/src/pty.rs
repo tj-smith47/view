@@ -21,24 +21,92 @@
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 
 use crate::OracleError;
 
+/// A pty writer shared between the caller (typed input) and the reader
+/// thread (autonomous replies to a child's capability queries).
+type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+
+/// The DA1 (Send Device Attributes) request a capability-probing child writes
+/// to ask what the terminal is, and the reply this pty answers with.
+///
+/// A child such as `view` writes this fence last in its probe batch and reads
+/// its reply as the signal that every earlier query has been answered too, so
+/// a terminal that never sends it forces the child to wait out its whole
+/// fallback deadline. The reply is a private CSI ending in `c` (a VT100-class
+/// terminal with the advanced video option); it answers the fence and nothing
+/// more, so a probe's other capabilities (synchronized output, the kitty
+/// keyboard protocol) stay unresolved and the child's derived tier is
+/// unchanged by this pty's presence.
+const DA1_QUERY: &[u8] = b"\x1b[c";
+const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+
+/// Scans a child's output byte stream for terminal capability queries and
+/// yields the bytes a real terminal would write back. Stateful across chunks:
+/// a query straddling a read boundary is still recognized, because the tail
+/// of one chunk is carried into the scan of the next.
+struct QueryResponder {
+    /// The trailing bytes of the last chunk that could still begin a query
+    /// completed by the next one (bounded by the longest query minus one).
+    tail: Vec<u8>,
+}
+
+impl QueryResponder {
+    fn new() -> Self {
+        Self { tail: Vec::new() }
+    }
+
+    /// The replies (concatenated) for every query found in `chunk`, or empty
+    /// if none. Carries an unmatched tail forward so a split query is caught.
+    fn replies_for(&mut self, chunk: &[u8]) -> Vec<u8> {
+        let mut scan = std::mem::take(&mut self.tail);
+        scan.extend_from_slice(chunk);
+        let mut out = Vec::new();
+        let mut i = 0;
+        let mut consumed = 0;
+        while i + DA1_QUERY.len() <= scan.len() {
+            if &scan[i..i + DA1_QUERY.len()] == DA1_QUERY {
+                out.extend_from_slice(DA1_REPLY);
+                i += DA1_QUERY.len();
+                consumed = i;
+            } else {
+                i += 1;
+            }
+        }
+        // keep only bytes past the last match that could still start a query,
+        // so a query cut by this chunk's end completes against the next
+        let keep_from = scan.len().saturating_sub(DA1_QUERY.len() - 1).max(consumed);
+        self.tail = scan[keep_from..].to_vec();
+        out
+    }
+}
+
 /// Spawns a background thread that forwards every chunk read from `reader`
 /// onto the returned channel, so the caller can poll with a bounded timeout
 /// instead of blocking on a single `read` that may return only part of the
-/// child's output.
-fn spawn_reader(mut reader: Box<dyn Read + Send>) -> mpsc::Receiver<Vec<u8>> {
+/// child's output. The thread also answers the child's terminal capability
+/// queries through `writer`, standing in for the real terminal a child under
+/// a pty would otherwise probe in vain.
+fn spawn_reader(mut reader: Box<dyn Read + Send>, writer: SharedWriter) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
+        let mut responder = QueryResponder::new();
         let mut buf = [0_u8; 65536];
         loop {
             match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
+                    let replies = responder.replies_for(&buf[..n]);
+                    if !replies.is_empty() {
+                        let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                        let _ = guard.write_all(&replies);
+                        let _ = guard.flush();
+                    }
                     if tx.send(buf[..n].to_vec()).is_err() {
                         break;
                     }
@@ -87,7 +155,7 @@ fn hermetic_env(cmd: &mut CommandBuilder) -> Result<(), OracleError> {
 pub struct PtySession {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     rx: mpsc::Receiver<Vec<u8>>,
-    writer: Box<dyn Write + Send>,
+    writer: SharedWriter,
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
 }
@@ -160,15 +228,16 @@ impl PtySession {
             .master
             .try_clone_reader()
             .map_err(|e| OracleError::Pty(e.to_string()))?;
-        let writer = pair
-            .master
-            .take_writer()
-            .map_err(|e| OracleError::Pty(e.to_string()))?;
+        let writer: SharedWriter = Arc::new(Mutex::new(
+            pair.master
+                .take_writer()
+                .map_err(|e| OracleError::Pty(e.to_string()))?,
+        ));
         // the slave fd must not outlive the child's own copy, or the master
         // never sees EOF once the child exits
         drop(pair.slave);
 
-        let rx = spawn_reader(reader);
+        let rx = spawn_reader(reader, Arc::clone(&writer));
         let parser = vt100::Parser::new(rows, cols, 0);
 
         Ok(Self {
@@ -249,8 +318,9 @@ impl PtySession {
     ///
     /// Returns [`OracleError::Io`] if the write or flush fails.
     pub fn send(&mut self, bytes: &[u8]) -> Result<(), OracleError> {
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
+        let mut guard = self.writer.lock().unwrap_or_else(|e| e.into_inner());
+        guard.write_all(bytes)?;
+        guard.flush()?;
         Ok(())
     }
 
@@ -461,6 +531,90 @@ mod tests {
         let mut session =
             testenv::spawning(|| PtySession::spawn("/bin/echo", &["hi"], 80, 24)).unwrap();
         assert!(!session.wait_for("this-never-appears", Duration::from_millis(200)));
+    }
+
+    #[test]
+    fn answers_a_childs_da1_query_the_way_a_real_terminal_does() {
+        // A child probing terminal capabilities writes the DA1 fence and
+        // blocks reading its reply; a real terminal answers within
+        // milliseconds. If this pty stays silent, a probe waits out its whole
+        // fallback deadline instead -- the cost that inflated first_paint's
+        // cold_ms by the probe's 50 ms safety net (see view-tui `tiers`).
+        //
+        // The child records the exact reply bytes to a scratch file under the
+        // build tree (never the system temp dir, matching the other pty
+        // tests). `head -c7` returns only once all seven reply bytes arrive,
+        // so a written file means the whole reply landed; raw mode lets a
+        // reply with no line terminator reach the child at all.
+        let mut out = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        out.pop(); // crates/
+        out.pop(); // workspace root
+        let out = out.join("target").join("view-pty-da1-reply.hex");
+        let _ = std::fs::remove_file(&out);
+        let script = format!(
+            "stty raw -echo; printf '\\033[c'; head -c7 | od -An -tx1 | tr -d ' \\n' > '{}'",
+            out.display()
+        );
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(&script);
+            PtySession::spawn_configured(cmd, 80, 24)
+        })
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let hex = loop {
+            if let Ok(s) = std::fs::read_to_string(&out) {
+                if s.trim().len() >= 14 {
+                    break s;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "child never received a DA1 reply; screen:\n{}",
+                session.screen()
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        };
+        session.kill();
+        let _ = session.wait_for_exit(Duration::from_secs(2));
+        let _ = std::fs::remove_file(&out);
+
+        // exactly the bytes of `\x1b[?1;2c` -- a private CSI ending in `c`,
+        // which view's probe reads as the DA1 fence and nothing more (sync
+        // and kitty stay unanswered, so resolved caps are unchanged).
+        assert_eq!(hex.trim(), "1b5b3f313b3263", "unexpected DA1 reply bytes");
+    }
+
+    #[test]
+    fn responder_answers_a_da1_query_in_one_chunk() {
+        let mut r = QueryResponder::new();
+        assert_eq!(r.replies_for(DA1_QUERY), DA1_REPLY);
+    }
+
+    #[test]
+    fn responder_answers_a_da1_query_split_across_two_chunks() {
+        let mut r = QueryResponder::new();
+        let (head, tail) = DA1_QUERY.split_at(2);
+        assert!(r.replies_for(head).is_empty(), "no full query yet");
+        assert_eq!(r.replies_for(tail), DA1_REPLY);
+    }
+
+    #[test]
+    fn responder_stays_silent_on_output_that_holds_no_query() {
+        let mut r = QueryResponder::new();
+        assert!(r.replies_for(b"\x1b[1mbold\x1b[0m normal text").is_empty());
+    }
+
+    #[test]
+    fn responder_answers_each_of_two_queries_in_one_chunk() {
+        let mut r = QueryResponder::new();
+        let mut two = DA1_QUERY.to_vec();
+        two.extend_from_slice(DA1_QUERY);
+        let mut both = DA1_REPLY.to_vec();
+        both.extend_from_slice(DA1_REPLY);
+        assert_eq!(r.replies_for(&two), both);
     }
 
     /// Reports back what a spawned child sees in the two variables that
