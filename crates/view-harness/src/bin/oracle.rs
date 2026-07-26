@@ -864,7 +864,11 @@ struct ReadyFixture {
 /// against, or a reason to report the scenario SKIPPED without spawning
 /// anything (today, only "fixture-less and `$VIEW_DAILY_CONFIG` unset").
 enum FixtureResolution {
-    Ready(ReadyFixture),
+    // Boxed so the enum is not sized to this large variant next to the tiny
+    // `Skipped`: on the msvc target `PathBuf` is wide enough that the four here
+    // trip clippy::large_enum_variant, which `-D warnings` makes a Windows CI
+    // hard error while linux stays just under the threshold.
+    Ready(Box<ReadyFixture>),
     Skipped { notice: String },
 }
 
@@ -931,7 +935,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
             copy_dir_recursive(&fixture_dir, &xdg_config_home)
                 .with_context(|| format!("copying fixture {name:?} into a hermetic config dir"))?;
 
-            Ok(FixtureResolution::Ready(ReadyFixture {
+            Ok(FixtureResolution::Ready(Box::new(ReadyFixture {
                 xdg_config_home,
                 xdg_data_home,
                 xdg_state_home,
@@ -942,7 +946,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
                     cold_cache_dir,
                     sock_path: sock_path.to_path_buf(),
                 },
-            }))
+            })))
         }
         None => {
             let Ok(daily) = std::env::var("VIEW_DAILY_CONFIG") else {
@@ -959,7 +963,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
             std::fs::create_dir_all(&xdg_config_home)
                 .with_context(|| format!("creating {}", xdg_config_home.display()))?;
             symlink_daily_config(&daily_path, &xdg_config_home.join("nvim"))?;
-            Ok(FixtureResolution::Ready(ReadyFixture {
+            Ok(FixtureResolution::Ready(Box::new(ReadyFixture {
                 xdg_config_home,
                 xdg_data_home: hermetic_dir.join("xdg_data_home"),
                 xdg_state_home,
@@ -970,7 +974,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
                     cold_cache_dir: None,
                     sock_path: sock_path.to_path_buf(),
                 },
-            }))
+            })))
         }
     }
 }

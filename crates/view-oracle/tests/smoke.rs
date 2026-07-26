@@ -18,6 +18,7 @@
 
 mod common;
 
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
@@ -650,6 +651,7 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
 /// Marked executable directly (`portable_pty`/`Command` exec it, not a
 /// shell), and disambiguated by pid the same way this file's scratch paths
 /// are, since parallel tests in this binary could otherwise collide.
+#[cfg(unix)]
 fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     let real_nvim = String::from_utf8(
         std::process::Command::new("which")
@@ -683,6 +685,7 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
 /// The static indicator `view-tui`'s `paint_shell` puts on screen for the
 /// pre-content startup shell. Nothing else paints this text, so its
 /// presence identifies the shell frame specifically.
+#[cfg(unix)]
 const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 
 /// nvim's own empty-buffer line marker, the first thing a fresh buffer's
@@ -690,6 +693,7 @@ const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 /// (only a blank statusline bar and the placeholder label) and no scratch
 /// path this file uses contains one, so its presence on screen means the
 /// engine attached and its grid reached the terminal.
+#[cfg(unix)]
 const ENGINE_CONTENT_MARKER: char = '~';
 
 /// Asserts the ordering the startup shell exists for: the placeholder frame
@@ -711,6 +715,7 @@ const ENGINE_CONTENT_MARKER: char = '~';
 /// Proves only the first half of the ordering: the caller must go on to
 /// establish that the engine really did attach afterwards (otherwise a
 /// `view` that never starts an engine at all would satisfy this vacuously).
+#[cfg(unix)]
 fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
     let ordered = session.wait_for_screen(Duration::from_secs(15), |screen| {
         let text = screen.contents();
@@ -738,6 +743,7 @@ fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
 /// deadlock anywhere in that path would hang this test's `:wq` at the very
 /// end (nvim can never fully start, let alone quit) rather than merely
 /// fail an assertion.
+#[cfg(unix)]
 #[test]
 fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order() {
     let wrapper = write_delayed_nvim_wrapper(500);
@@ -806,6 +812,7 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 /// reproducible through this harness's timing. Kept here anyway as
 /// end-to-end coverage that a heavy, realistic flood against a real engine
 /// still behaves correctly.
+#[cfg(unix)]
 #[test]
 fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let wrapper = write_delayed_nvim_wrapper(300);
