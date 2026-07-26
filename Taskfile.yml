@@ -33,7 +33,15 @@ tasks:
 
   loc:
     desc: Enforce the god-file ceiling (production code lines per file; split modules, separate tests)
-    cmd: bash scripts/audit-god-files.sh
+    cmds:
+      - bash scripts/audit-god-files.sh
+      # the counter is only trustworthy while a second, independently written
+      # one still agrees with it over every file the gate measures. The
+      # interpreter is resolved rather than named: Windows runners ship
+      # `python` with no `python3` alias, and a cross-check that silently
+      # skipped there would leave the counter unverified on the one platform
+      # whose path handling differs most.
+      - bash -o pipefail -c 'scripts/crosscheck-god-files.sh'
 
   ci:
     desc: The full local gate; CI mirrors exactly this

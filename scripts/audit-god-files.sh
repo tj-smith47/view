@@ -41,6 +41,16 @@
 # brace body — and scanning resumes afterward.
 set -euo pipefail
 
+# --counts: emit "<count>\t<path>" for exactly the production files the
+# tree-wide gate measures, and exit. The independent counter reads this on
+# stdin (`--compare`), which is what keeps the port spec's cross-check a
+# runnable gate rather than a claim about a check somebody once ran.
+COUNTS_ONLY=""
+if [[ "${1:-}" == --counts ]]; then
+    COUNTS_ONLY=1
+    shift
+fi
+
 ROOT="${1:-}"
 # A single existing directory arg selects tree-wide mode against that root; any
 # other args are treated as files for the per-file fast path.
@@ -327,6 +337,11 @@ PROD_FILES=()
 for f in "${ALL_RS[@]}"; do
     [[ -n "${IS_TEST_FILE[$f]:-}" ]] || PROD_FILES+=("$f")
 done
+
+if [[ -n "$COUNTS_ONLY" ]]; then
+    count_prod_lines "${PROD_FILES[@]}"
+    exit 0
+fi
 
 declare -A PIN_CEILING=()
 declare -A PIN_REASON=()

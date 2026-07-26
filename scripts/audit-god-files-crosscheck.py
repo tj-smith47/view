@@ -139,6 +139,38 @@ def count(path: str) -> int:
     return prod
 
 
+def compare(stream) -> int:
+    """Re-count every "<count>\tpath" line and report disagreements.
+
+    The shell gate's own `--counts` output is the input, so the two counters
+    are compared over exactly the file set the gate measures -- a comparison
+    that silently checked nothing would be the same class of bug the port
+    spec's property (4) exists to rule out, so an empty input is an error.
+    """
+    checked = 0
+    mismatches = 0
+    for line in stream:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        theirs, path = line.split("\t", 1)
+        mine = count(path)
+        checked += 1
+        if int(theirs) != mine:
+            print(f"CROSSCHECK MISMATCH {path}: gate={theirs} independent={mine}")
+            mismatches += 1
+    if checked == 0:
+        print("CROSSCHECK FAIL: no counts on stdin; the comparison checked nothing")
+        return 1
+    if mismatches:
+        print(f"CROSSCHECK FAIL: {mismatches} of {checked} file(s) disagree")
+        return 1
+    print(f"crosscheck: {checked} file(s), both counters agree")
+    return 0
+
+
 if __name__ == "__main__":
+    if sys.argv[1:2] == ["--compare"]:
+        sys.exit(compare(sys.stdin))
     for p in sys.argv[1:]:
         print(f"{count(p)}\t{p}")
