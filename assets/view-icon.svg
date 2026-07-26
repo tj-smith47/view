@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="view icon">
+  <!-- The contained view icon: the mark on the Dracula base (#282a36) in a
+       rounded square, for a favicon or a social/app tile where a background
+       is idiomatic. The bare mark is assets/view-logo.svg. -->
+  <defs>
+    <linearGradient id="v" x1="60" y1="0" x2="196" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bd93f9"/>
+      <stop offset="0.5" stop-color="#ff79c6"/>
+      <stop offset="1" stop-color="#8be9fd"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#282a36"/>
+  <path d="M64 76 L128 186 L192 76" fill="none" stroke="url(#v)"
+        stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
