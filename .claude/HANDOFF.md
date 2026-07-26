@@ -70,12 +70,10 @@ the same turn or they drift.
 | # | Task | Why it sits here |
 |---|---|---|
 | 53 | P3 exit checklist execution, evidence-cited per plan protocol | Gates the phase, and carries this file's own retirement (section 9) |
-| 22 | Re-record first_paint and split the shell-visible metric | First: it unblocks a `perf-audit` verdict that is not a false breach, which every gate verdict below depends on |
-| 18 | Add the §3.1 budget table to the bench gate | Will be born red (two cells already over budget); that is the correct outcome, not a reason to defer |
 | 19 | Attribute the echo ratio gap | The last claim the README hedges on. Arm 1 is `nvim --remote-ui`; see the correction below |
-| 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | Depends on 18 landing first: the headrooms are only meaningful once a bar exists to size them against |
+| 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | 18 landed, so a spec bar now exists to size the headrooms against; flood's shortfall entry names this task as its resolution |
 | 24 | Allowlist the environment at the bench/oracle spawn funnel | Must land before CI ever runs with a secret configured. Today the funnel is a denylist, into editors that execute fixture Lua and network-fetched plugins |
-| 21 | Record a quiet-host dev-macos input_path baseline | The row is runnable again; it needs a quiet mbp, not more code |
+| 21 | Record a quiet-host dev-macos baseline: input_path and first_paint's split metrics | The rows are runnable again; they need a quiet mbp, not more code. Until it lands, the dev-macos first_paint cell gates red on `unmeasured_metrics` |
 | 25 | noice's `ext_*` disable opts are not suppressing its startup error notifications | Cosmetic in the compat fixture, real as a compat finding |
 | 20 | P4 plan adversarial review | A fresh session; the prompt is written at `.claude/plans/2026-07-26-p4-review-prompt.md` |
 

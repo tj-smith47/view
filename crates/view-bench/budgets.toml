@@ -1,0 +1,151 @@
+schema = 1
+
+# The spec 3.1 budget table, in the form the bench gate can hold a
+# measurement to. The spec states these as prose because it is read by
+# people; this file states them as data because it is read by the gate, and
+# scripts/check-budget-drift.sh fails CI if any number here stops appearing
+# in the spec row it names.
+#
+# `classes` is optional: absent means every machine class. A budget the spec
+# states for only one class, or a quantity a platform names differently, is
+# written as separate entries rather than a per-class map, so a divergence
+# between classes is visible in the file instead of hidden inside a value.
+#
+# A metric with no entry here has no spec budget. That is a real state, not
+# an oversight: first_paint's content boundary and dev-macos's input path
+# both sit there deliberately, and the spec rows say so.
+
+[[budget]]
+spec_row = "view input path: key event read from the terminal -> RPC bytes written"
+scenario = "input_path"
+metric = "key_to_rpc_p99_us"
+max = 232.0
+classes = ["dev-linux"]
+
+[[budget]]
+spec_row = "view output path: redraw event parsed -> terminal write"
+scenario = "output_path"
+metric = "p99_ms"
+max = 1.0
+
+[[budget]]
+spec_row = "Keypress -> cell change end-to-end, steady typing"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+
+[[budget]]
+spec_row = "Keypress -> cell change end-to-end, steady typing"
+scenario = "echo"
+metric = "ratio_p50"
+max = 1.1
+
+[[budget]]
+spec_row = "Sustained scroll, 100k-line file, tier full"
+scenario = "scroll"
+metric = "staleness_p99_ms"
+max = 16.0
+
+[[budget]]
+spec_row = "First paint: view's own UI shell visible, engine still loading"
+scenario = "first_paint"
+metric = "shell_visible_ms"
+max = 50.0
+
+# The flood row states its bound by reference: "coalesced paint stays inside
+# the staleness budget". So the row that carries the number is the scroll
+# row, and that is the one named here. Restating 16.0 against the flood row
+# instead would put the same number in two spec rows, which is the drift this
+# file exists to prevent.
+[[budget]]
+spec_row = "Sustained scroll, 100k-line file, tier full"
+scenario = "flood"
+metric = "cadence_p99_ms"
+max = 16.0
+
+# The spec row says "PSS", which names a Linux quantity. macOS has no PSS;
+# its counterpart is the phys_footprint the memory scenario already records.
+# Two entries rather than one renamed metric, so neither class pretends to
+# measure the other's quantity.
+[[budget]]
+spec_row = "view-side memory (PSS), 10 buffers, post-workload"
+scenario = "memory"
+metric = "pss_mb"
+max = 150.0
+classes = ["dev-linux"]
+
+[[budget]]
+spec_row = "view-side memory (PSS), 10 buffers, post-workload"
+scenario = "memory"
+metric = "phys_footprint_mb"
+max = 150.0
+classes = ["dev-macos"]
+
+# Metrics measured outside their budget today.
+#
+# A shortfall is how an unmet budget is allowed to exist: it must be written
+# down, with the value it was accepted at and why. The gate then fails on a
+# metric outside budget with no entry here (a new shortfall, silently
+# introduced) and on a listed one that got worse than its accepted value (an
+# existing shortfall, quietly widening). It passes a listed one that held or
+# improved, so a budget the project has not met yet does not block work on
+# everything else, and cannot be forgotten either.
+#
+# Improving past the budget does not need an edit here to pass; deleting the
+# entry is the housekeeping that follows.
+
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.3537866848241882
+why = "unattributed. Three explanations were adopted and falsified by measurement (thread-hop floor, pty transport, the instrumentation itself). The nvim --remote-ui control settles whether the residual is inherent to being an out-of-process UI at all."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.2440907023104606
+why = "same residual as echo.minimal on this class."
+
+[[shortfall]]
+scenario = "flood"
+fixture = "minimal"
+metric = "cadence_p99_ms"
+class = "dev-linux"
+accepted = 20.880463
+why = "the stimulus is not comparable across classes (a fixed wall-clock window drains ~65x more lines on one class than the other), so this bar is being read against a harsher stimulus here than the spec row assumed. Re-derive with the row's cross-class divergence."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "view_p99_ms"
+class = "dev-macos"
+accepted = 8.290166999999999
+why = "3.6% over an 8ms bar on a shared laptop whose absolute tails move with ambient load; the paired ratio from the same run is the statistic that is stable here."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "view_p99_ms"
+class = "dev-macos"
+accepted = 12.188708
+why = "same as echo.minimal on this class, with the 14-plugin fixture's own paint cost on top."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p50"
+class = "dev-macos"
+accepted = 1.3436376694300443
+why = "same unattributed residual as dev-linux; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "ratio_p50"
+class = "dev-macos"
+accepted = 1.1083171364614424
+why = "same residual as echo.minimal on this class."

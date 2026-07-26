@@ -26,6 +26,7 @@ tasks:
     cmds:
       - bash scripts/audit-deps.sh
       - bash scripts/check-engine-pin.sh
+      - bash scripts/check-budget-drift.sh
 
   style:
     desc: Enforce comment and doc style rules

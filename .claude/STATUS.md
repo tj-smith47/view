@@ -40,7 +40,7 @@ believed at the start of the session; right is what is now true.
 | dev-macos input_path floor = 230.0 µs | **Fabricated.** Hand-derived, never measured; the row could not even run on macOS. Withdrawn along with the 350 µs budget it supported. Real capture now exists (235.0 µs) but is not recorded — 2× trial spread, host at load 1.78. |
 | input_path row works everywhere | **It did not run on macOS at all.** Fixed with adaptive tap pacing. |
 | "All classes gate ratio_p50 measured-or-better" | **False.** The gate enforces `recorded × 1.25`; echo.minimal gates at 1.692 and can degrade 25% silently. |
-| §3.1 budgets are CI gates | **They are not.** Nothing in the codebase compares any measurement to a spec budget. The gate is a pure regression ratchet. |
+| §3.1 budgets are CI gates | **They were not** — the gate was a pure regression ratchet, comparing nothing to a spec budget. They are now: `crates/view-bench/budgets.toml` states the table as data, the gate checks every measured cell against it, and `scripts/check-budget-drift.sh` fails CI if a number there stops appearing in the spec row it names. Seven metrics are outside budget today and every one is written down as a `[[shortfall]]` with the value it was accepted at and why. |
 | The first-paint row measures one event with one budget | **Two events, now split and re-recorded** (1000 samples/cell, both null-pair brackets clean). `shell_visible_ms` (view's own chrome, unpaired, the ≤50 ms budget's real subject): **4.14 / 4.30 ms** p99 across both fixtures, 12x under. `marker_cold_ms` (the file on screen, paired): **26.5 / 120.5 ms** against nvim's 131.4 / 199.8, `marker_ratio_p50` 0.135 / 0.460. §3.1 states no budget for the content metric at all: gap flagged, not filled. |
 | `screen_holds` matches what is on screen | **It could not match any phrase containing a space.** `row_text` concatenated cell contents, and an unwritten cell holds no contents, so every space was deleted: `"view: waiting for nvim..."` read back as `"view:waitingfornvim..."`. Every marker in the tree was a single word, so nothing had ever exercised it. Fixed; no recorded metric was affected (see the measurement note). |
 
@@ -54,7 +54,7 @@ real and large win on both fixtures. The two genuine losses — typing
 |---|---|
 | Echo ratio 1.2× slower than nvim | Cause unattributed. Three explanations falsified. The `nvim --remote-ui` control settles whether it is protocol-inherent. **#19** |
 | Scroll ratio ~2× slower | Unattributed, and §3.1 budgets no ratio for this row at all. Genuine spec gap. **#23** |
-| Spec budgets unenforced | **#18** |
+| Seven metrics outside their §3.1 budget | Enforced and ledgered as of #18, not fixed. Five are the echo ratio (**#19**), one the flood stimulus divergence (**#23**), one a macOS absolute tail that moves with ambient load (**#21**). |
 | Two spec amendments carry no user sign-off | Both marked provisional in §3.1. Needs a decision after #19 lands. |
 
 ## Open tasks, in the order they should be done
@@ -62,8 +62,8 @@ real and large win on both fixtures. The two genuine losses — typing
 Ordered by information yield: each one's failure would invalidate work below it.
 
 1. ~~**#22**~~ — done: first_paint split and re-recorded on dev-linux.
-2. **#18** — §3.1 budget table in the gate. Will be born red (two cells
-   already over budget); that is correct.
+2. ~~**#18**~~ — done: §3.1 budget table in the gate, with a shortfall
+   ledger for the seven metrics that do not meet it yet.
 3. **#19** — `nvim --remote-ui` control. Settles the echo ratio, which is
    the last claim the README hedges on.
 4. **#23** — re-derive headrooms; fix the scroll row's tier mismatch and

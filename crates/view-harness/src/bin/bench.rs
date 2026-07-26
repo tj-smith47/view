@@ -33,6 +33,7 @@ mod taps_rows;
 
 use view_bench::session::SpawnSpec;
 use view_harness::baselines::{self, CellMetrics};
+use view_harness::budgets;
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
     verify_nvim_matches_pin, workspace_root,
@@ -168,6 +169,17 @@ fn baseline_path(class: &str) -> PathBuf {
         .join("view-bench")
         .join("baselines")
         .join(format!("{class}.toml"))
+}
+
+/// Where the spec 3.1 budget table lives. One file for every class: a
+/// budget is a property of the spec, not of the machine that measures it,
+/// and the entries that do vary by class say so in their own `classes`
+/// field rather than by living in separate files.
+fn budgets_path() -> PathBuf {
+    workspace_root()
+        .join("crates")
+        .join("view-bench")
+        .join("budgets.toml")
 }
 
 /// Hermetic scratch world for one cell run: per-side XDG homes, scratch
@@ -1209,8 +1221,72 @@ fn main() -> Result<()> {
                 );
             }
         }
-        if breaches.is_empty() && uncovered.is_empty() && unmeasured.is_empty() {
-            println!("gate OK: {} cell(s) within recorded bars", measured.len());
+        // the recorded bars answer "is this worse than last time"; the spec
+        // budgets answer "is this where the spec says it must be". Both run,
+        // and they are reported apart, because a metric can be regression
+        // green forever at a value the spec never accepted
+        let budget_path = budgets_path();
+        let budget_file = budgets::load(&budget_path).with_context(|| {
+            format!(
+                "gating requires the budget table at {}",
+                budget_path.display()
+            )
+        })?;
+        let mut findings = Vec::new();
+        for (scenario, fixture, metrics) in &measured {
+            findings.extend(budgets::check_cell(
+                &budget_file,
+                scenario,
+                fixture,
+                metrics,
+                &cli.class,
+            ));
+        }
+        let budget_failures = findings
+            .iter()
+            .filter(|finding| finding.verdict.is_failure())
+            .count();
+        for finding in &findings {
+            // an accepted shortfall prints every run on purpose: it is the
+            // only thing that keeps an unmet budget from going quiet
+            if finding.verdict != budgets::Verdict::Inside {
+                eprintln!("{finding}");
+            }
+        }
+        // a shortfall the run measured back inside its budget has been fixed
+        // and its entry now describes nothing; only a full-coverage run can
+        // tell that apart from a cell it simply did not visit
+        let mut stale_shortfalls = Vec::new();
+        if cli.all {
+            stale_shortfalls = budgets::unreached_shortfalls(&budget_file, &cli.class, &findings);
+            for shortfall in &stale_shortfalls {
+                eprintln!(
+                    "BUDGET SHORTFALL STALE [{}.{}] {} on {}: measured inside its budget this \
+                     run, so the [[shortfall]] entry accepting {} is spent and should be deleted",
+                    shortfall.scenario,
+                    shortfall.fixture,
+                    shortfall.metric,
+                    shortfall.class,
+                    shortfall.accepted
+                );
+            }
+        }
+        let clean = breaches.is_empty()
+            && uncovered.is_empty()
+            && unmeasured.is_empty()
+            && budget_failures == 0
+            && stale_shortfalls.is_empty();
+        if clean {
+            let held = findings
+                .iter()
+                .filter(|finding| matches!(finding.verdict, budgets::Verdict::Held { .. }))
+                .count();
+            println!(
+                "gate OK: {} cell(s) within recorded bars, {} metric(s) checked against spec 3.1 \
+                 budgets, {held} accepted shortfall(s) still held",
+                measured.len(),
+                findings.len()
+            );
         } else {
             std::process::exit(EXIT_GATE_BREACH);
         }
@@ -1224,7 +1300,10 @@ fn main() -> Result<()> {
 }
 
 /// A gate run found a measurement outside its recorded bar, a baseline cell
-/// nothing measured, or a recorded metric this run produced no value for.
+/// nothing measured, a recorded metric this run produced no value for, a
+/// spec 3.1 budget missed with no shortfall recording it (or a recorded one
+/// that widened), or a spent shortfall entry left behind after the metric
+/// came back inside its budget.
 const EXIT_GATE_BREACH: i32 = 1;
 
 /// A record run wrote its baseline, but held at least one bar against a
