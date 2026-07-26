@@ -100,7 +100,7 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.3537866848241882
-why = "unattributed. Three explanations were adopted and falsified by measurement (thread-hop floor, pty transport, the instrumentation itself). The nvim --remote-ui control settles whether the residual is inherent to being an out-of-process UI at all."
+why = "view's own overhead, not the UI protocol's. Four explanations have now been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class while view costs 1.224. Attribution continues in the echo_path stage decomposition."
 
 [[shortfall]]
 scenario = "echo"
@@ -140,7 +140,7 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-macos"
 accepted = 1.3436376694300443
-why = "same unattributed residual as dev-linux; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation."
+why = "same residual as dev-linux, which the echo_control row there attributed to view rather than to the UI protocol; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation."
 
 [[shortfall]]
 scenario = "echo"

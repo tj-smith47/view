@@ -14,6 +14,18 @@ ratio_p50 = 1.3537866848241882
 ratio_p99 = 1.307451781758063
 view_p99_ms = 1.018586
 
+[echo_control.heavy]
+control_delta_p99_ms = 1.043676
+control_p99_ms = 2.048797
+control_ratio_p50 = 1.013475558371977
+control_ratio_p99 = 1.0051157077092974
+
+[echo_control.minimal]
+control_delta_p99_ms = 0.29189099999999996
+control_p99_ms = 0.921106
+control_ratio_p50 = 1.0154611065626815
+control_ratio_p99 = 1.035776855693868
+
 [first_paint.heavy]
 marker_cold_ms = 120.464107
 marker_ratio_p50 = 0.4601985941432818

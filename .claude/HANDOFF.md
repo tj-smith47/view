@@ -70,7 +70,7 @@ the same turn or they drift.
 | # | Task | Why it sits here |
 |---|---|---|
 | 53 | P3 exit checklist execution, evidence-cited per plan protocol | Gates the phase, and carries this file's own retirement (section 9) |
-| 19 | Attribute the echo ratio gap | The last claim the README hedges on. Arm 1 is `nvim --remote-ui`; see the correction below |
+| 26 | Close the attributed echo typing gap in view's input and paint paths | The gap is measured and localized, not guessed: ~215 us input path, ~84 us paint path, no dominant stage. Five budget shortfalls come off the ledger when it lands |
 | 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | 18 landed, so a spec bar now exists to size the headrooms against; flood's shortfall entry names this task as its resolution |
 | 24 | Allowlist the environment at the bench/oracle spawn funnel | Must land before CI ever runs with a secret configured. Today the funnel is a denylist, into editors that execute fixture Lua and network-fetched plugins |
 | 21 | Record a quiet-host dev-macos baseline: input_path and first_paint's split metrics | The rows are runnable again; they need a quiet mbp, not more code. Until it lands, the dev-macos first_paint cell gates red on `unmeasured_metrics` |
@@ -140,20 +140,29 @@ security concerns as it reads. Every amendment in section 5.6's ledger is
 subject to that gate retroactively. The attribution itself is a measurement,
 not a judgment call, and it must run before any further amendment is proposed.
 
-**The control design recorded here was refuted and replaced (2026-07-26).** The
-null-frontend control described in earlier revisions of this file — attach over
-RPC with the identical ext-option set, drain the grid, paint nothing — cannot
-work: a frontend that paints nothing produces no pty output, so the harness
-boundary (the first vt100 frame where the target cell differs) never fires and
-the control has no measurable event at all. Do not implement it. The
-replacement is two arms:
+**The attribution ran and is settled (2026-07-26).** Two earlier control
+designs are recorded here because both were wrong and both cost time.
 
-1. `nvim --remote-ui` as an external RPC client containing none of our code,
-   run paired in the same harness. Verify it exists on the `v0.12.4` pin
-   before building anything on it. If it shows the same gap, the cost is the
-   protocol boundary and it is a permanent limitation to publish as one.
-2. A passthrough frontend that paints at the flush boundary, isolating
-   "external UI at all" from "view's own compositing".
+The *null-frontend* control (attach over RPC with the identical ext-option
+set, drain the grid, paint nothing) cannot work at all: a frontend that
+paints nothing produces no pty output, so the harness boundary (the first
+vt100 frame where the target cell differs) never fires and the control has
+no measurable event. Do not implement it.
+
+The replacement, `nvim --remote-ui` as an external RPC client containing
+none of our code, does work and has run. It is the permanent `echo_control`
+matrix row (`crates/view-bench/src/scenarios/echo_control.rs`), and it
+**refuted** the protocol-inherent hypothesis rather than confirming it:
+nvim's own remote UI costs 1.015 (minimal) and 1.013 (heavy) against bare
+nvim on dev-linux, where view costs 1.354 and 1.244. Being out of process
+costs ~2%; view costs ~22%. There is no permanent limitation to publish.
+
+The second arm, a passthrough frontend painting at the flush boundary, is
+**not needed and should not be built**: the `echo_path` tapped
+decomposition already separates view's compositing from everything else,
+and it resolved every one of 3000 samples with a 0.2% residual on the
+minimal fixture. Building a second frontend would re-derive what the taps
+already measure. The attribution it produced is task #26.
 
 ---
 

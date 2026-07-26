@@ -46,16 +46,17 @@ believed at the start of the session; right is what is now true.
 
 **Net effect on the product story:** better, not worse. Cold start is a
 real and large win on both fixtures. The two genuine losses — typing
-~1.2×, scroll ~2× — are unchanged and still unattributed.
+~1.2×, scroll ~2× — are unchanged. Typing is now attributed to view's own
+code rather than to the protocol boundary; scroll is still unattributed.
 
 ## Still genuinely open (not artifacts)
 
 | What | Status |
 |---|---|
-| Echo ratio 1.2× slower than nvim | Cause unattributed. Three explanations falsified. The `nvim --remote-ui` control settles whether it is protocol-inherent. **#19** |
+| Echo ratio 1.2× slower than nvim | **Attributed to view, not the protocol.** nvim's own remote UI costs 1.015/1.013 against bare nvim where view costs 1.354/1.244, so the fourth explanation (protocol-inherent) is falsified alongside the three before it. `echo_path` puts view's own ~299 µs at ~215 on the input path and ~84 on the paint path, with no single dominant stage. Closing it is optimization work, now scoped rather than blocked. |
 | Scroll ratio ~2× slower | Unattributed, and §3.1 budgets no ratio for this row at all. Genuine spec gap. **#23** |
-| Seven metrics outside their §3.1 budget | Enforced and ledgered as of #18, not fixed. Five are the echo ratio (**#19**), one the flood stimulus divergence (**#23**), one a macOS absolute tail that moves with ambient load (**#21**). |
-| Two spec amendments carry no user sign-off | Both marked provisional in §3.1. Needs a decision after #19 lands. |
+| Seven metrics outside their §3.1 budget | Enforced and ledgered as of #18, not fixed. Five are the echo ratio, now attributed to view's own input and paint paths and awaiting optimization work; one the flood stimulus divergence (**#23**); one a macOS absolute tail that moves with ambient load (**#21**). |
+| Two spec amendments carry no user sign-off | Both marked provisional in §3.1. #19 has landed, so the decision is now unblocked and needs the user. |
 
 ## Open tasks, in the order they should be done
 
@@ -64,8 +65,8 @@ Ordered by information yield: each one's failure would invalidate work below it.
 1. ~~**#22**~~ — done: first_paint split and re-recorded on dev-linux.
 2. ~~**#18**~~ — done: §3.1 budget table in the gate, with a shortfall
    ledger for the seven metrics that do not meet it yet.
-3. **#19** — `nvim --remote-ui` control. Settles the echo ratio, which is
-   the last claim the README hedges on.
+3. ~~**#19**~~ — done: the `nvim --remote-ui` control ran and refuted the
+   protocol-inherent explanation; the README no longer hedges on it.
 4. **#23** — re-derive headrooms; fix the scroll row's tier mismatch and
    the flood row's cross-class stimulus divergence.
 5. **#24** — allowlist the spawn environment. Do before CI runs with any

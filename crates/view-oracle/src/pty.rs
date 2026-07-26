@@ -187,12 +187,60 @@ fn spawn_reader(
 /// established empty, which fails the spawn rather than pointing a session
 /// at a directory somebody may have planted a `plugin/` script in.
 fn hermetic_env(cmd: &mut CommandBuilder) -> Result<(), OracleError> {
+    make_hermetic(cmd)
+}
+
+/// The environment writes a spawn needs for [`make_hermetic`] to reach it,
+/// so one implementation of the rule covers a pty spawn and a plain one
+/// alike.
+///
+/// Two spawn builders in this tree start editor processes and neither is a
+/// superset of the other: [`CommandBuilder`] for anything hosted in a pty,
+/// [`std::process::Command`] for a headless process with no terminal to
+/// give it. A second copy of the rule for the second builder is a copy that
+/// drifts, and the drift is silent -- a child inheriting one host variable
+/// still runs, still measures, and only disagrees with the other class once
+/// somebody compares two machines.
+pub trait SpawnEnv {
+    /// Unsets `name` for the spawned child.
+    fn unset(&mut self, name: &str);
+    /// Sets `name` to `value` for the spawned child.
+    fn set(&mut self, name: &str, value: &std::ffi::OsStr);
+}
+
+impl SpawnEnv for CommandBuilder {
+    fn unset(&mut self, name: &str) {
+        self.env_remove(name);
+    }
+    fn set(&mut self, name: &str, value: &std::ffi::OsStr) {
+        self.env(name, value);
+    }
+}
+
+impl SpawnEnv for std::process::Command {
+    fn unset(&mut self, name: &str) {
+        self.env_remove(name);
+    }
+    fn set(&mut self, name: &str, value: &std::ffi::OsStr) {
+        self.env(name, value);
+    }
+}
+
+/// Applies the hermetic-environment rule to any spawn builder: see
+/// [`hermetic_env`] for what it drops and why every editor process in this
+/// tree passes through it.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Io`] if the empty search path cannot be
+/// established empty.
+pub fn make_hermetic<E: SpawnEnv>(cmd: &mut E) -> Result<(), OracleError> {
     for name in view_engine::env::HOST_REDIRECT_VARS {
-        cmd.env_remove(name);
+        cmd.unset(name);
     }
     let empty = view_engine::env::prepare_empty_search_path()?;
     for name in view_engine::env::HOST_SEARCH_PATH_VARS {
-        cmd.env(name, &empty);
+        cmd.set(name, empty.as_os_str());
     }
     Ok(())
 }
@@ -247,6 +295,11 @@ impl PtySession {
     /// startup initialization to redirect. That exception is pinned by test
     /// (`the_probe_client_runs_none_of_the_hosts_startup_commands`), not
     /// left to this sentence.
+    ///
+    /// An editor with no pty to host it (the bench's headless control
+    /// server) cannot come through here, and does not need an exception:
+    /// it calls [`make_hermetic`] on its own builder, which is the same
+    /// rule this funnel applies.
     ///
     /// # Errors
     ///

@@ -22,6 +22,8 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use view_bench::report;
+#[cfg(unix)]
+use view_bench::scenarios::echo_control;
 use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, Protocol};
 
 // The internal-boundary and echo_path rows run through the unix-only tap
@@ -43,6 +45,8 @@ use view_harness::fixture::{
 const MATRIX: &[(&str, &str)] = &[
     ("echo", "minimal"),
     ("echo", "heavy"),
+    ("echo_control", "minimal"),
+    ("echo_control", "heavy"),
     ("scroll", "minimal"),
     ("scroll", "heavy"),
     ("first_paint", "minimal"),
@@ -59,7 +63,7 @@ const MATRIX: &[(&str, &str)] = &[
 /// decomposition rather than the row it exists to explain, and the
 /// decomposition runs the instrumented build, whose numbers are not the
 /// quantity any recorded bar was taken from.
-const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[("echo_path", "minimal")];
+const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[("echo_path", "minimal"), ("echo_path", "heavy")];
 
 /// Minimum sampling discipline for a number that may be recorded or
 /// gated, per the measurement protocol; ad hoc smaller runs are allowed
@@ -500,6 +504,56 @@ fn run_cell(
         }
         #[cfg(unix)]
         "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol),
+        #[cfg(unix)]
+        "echo_control" => {
+            let control_side = world.side(fixture, "control")?;
+            let socket = control_side.cwd.join("control-ui.sock");
+            let control_spec = nvim_spec_from(control_side, nvim_bin);
+            let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, nvim_bin);
+            let outcome = echo_control::run(
+                &control_spec,
+                &nvim_spec,
+                socket,
+                protocol,
+                settle_deadline(fixture),
+            )
+            .with_context(|| format!("echo_control/{fixture} run failed"))?;
+            for summary in &outcome.trials {
+                println!(
+                    "{}",
+                    report::paired_cell(
+                        scenario,
+                        fixture,
+                        echo_control::MEASURED_SIDE,
+                        summary,
+                        protocol.warmup
+                    )
+                );
+            }
+            // named apart from the echo row's `ratio_p50` on purpose: the
+            // two are read side by side to split that row's overhead, and
+            // a shared name invites the wrong one into a comparison
+            for (metric, value) in [
+                ("control_ratio_p50", outcome.gated_ratio_p50),
+                ("control_ratio_p99", outcome.gated_ratio_p99),
+                ("control_delta_p99_ms", outcome.gated_paired_delta_p99_ms),
+                ("control_p99_ms", outcome.gated_view_p99_ms),
+            ] {
+                println!(
+                    "{}",
+                    report::aggregate_line(metric, value, outcome.trials.len())
+                );
+            }
+            let mut metrics = CellMetrics::new();
+            metrics.insert("control_ratio_p50".to_string(), outcome.gated_ratio_p50);
+            metrics.insert("control_ratio_p99".to_string(), outcome.gated_ratio_p99);
+            metrics.insert(
+                "control_delta_p99_ms".to_string(),
+                outcome.gated_paired_delta_p99_ms,
+            );
+            metrics.insert("control_p99_ms".to_string(), outcome.gated_view_p99_ms);
+            Ok(metrics)
+        }
         "echo" => {
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
             let outcome = echo::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
@@ -507,7 +561,7 @@ fn run_cell(
             for summary in &outcome.trials {
                 println!(
                     "{}",
-                    report::paired_cell(scenario, fixture, summary, protocol.warmup)
+                    report::paired_cell(scenario, fixture, "view", summary, protocol.warmup)
                 );
             }
             println!(
@@ -560,7 +614,7 @@ fn run_cell(
             for summary in &outcome.trials {
                 println!(
                     "{}",
-                    report::paired_cell(scenario, fixture, summary, protocol.warmup)
+                    report::paired_cell(scenario, fixture, "view", summary, protocol.warmup)
                 );
             }
             println!(
@@ -602,7 +656,7 @@ fn run_cell(
             .with_context(|| format!("first_paint/{fixture} run failed"))?;
             println!(
                 "{}",
-                report::paired_cell(scenario, fixture, &outcome.summary, protocol.warmup)
+                report::paired_cell(scenario, fixture, "view", &outcome.summary, protocol.warmup)
             );
             println!(
                 "{}",
@@ -804,6 +858,11 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
     #[cfg(not(unix))]
     if matches!(scenario, "input_path" | "output_path" | "echo_path") {
         return Some("the tap channel (FIFO + raw CLOCK_MONOTONIC) is a unix-only mechanism; the internal-boundary and echo_path rows built on it are not measured off unix");
+    }
+    // The control arm reaches its headless server over a unix socket path.
+    #[cfg(not(unix))]
+    if scenario == "echo_control" {
+        return Some("the out-of-process control arm attaches its remote UI over a unix socket path; the named-pipe equivalent is unvalidated, so the row is not measured off unix");
     }
     None
 }

@@ -80,23 +80,41 @@ by roughly 20% and 2x. Both are sub-millisecond in absolute terms and far
 inside their budgets, so neither is felt today. But the target is to be
 faster, not merely fast enough, and we are not there.
 
-**We are actively working on it, and we do not yet know whether the gap is
-closable.** The cause is unattributed. Three explanations were adopted and
-then falsified by measurement (a thread-hop cost floor, the pty transport,
-and the measurement instrumentation itself), and all three are retracted in
-the design spec rather than quietly dropped. The remaining hypothesis is
-that some of the gap is inherent to being an out-of-process UI speaking
-Neovim's RPC protocol at all. If that is true, no external frontend could
-beat it, and this page will say so plainly. The experiment that settles it
-is a paired run against `nvim --remote-ui`, an external RPC client
-containing none of our code. If it shows the same gap, the cost is the
-protocol boundary and we will publish that as a permanent limitation. If it
-does not, the gap is ours and it is a bug to fix.
+**The typing gap is ours, and it is a bug to fix.** This page previously
+said the remaining hypothesis was that the gap is inherent to being an
+out-of-process UI speaking Neovim's RPC protocol at all, and that a paired
+run against `nvim --remote-ui` would settle it either way. That run has
+happened. Neovim ships its own out-of-process UI, so we measured it under
+the identical protocol:
+
+| steady typing, dev-linux | vs bare Neovim |
+|---|---|
+| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.02x** |
+| view | **1.22x** |
+
+Speaking the protocol from another process costs about 2%. view costs
+about 22%. So roughly nine tenths of the gap is view's own code, not the
+protocol boundary, and the "permanent limitation" explanation is retracted
+along with the three before it (a thread-hop cost floor, the pty transport,
+and the measurement instrumentation itself). All four retractions are
+recorded in the design spec rather than quietly dropped.
+
+Where it goes is now measured rather than guessed. A tapped build times
+every stage of one keystroke's round trip; on the plugin-free fixture the
+chain resolves for all 3000 samples with a 0.2% residual, so the split is
+trustworthy. Of view's 805 microseconds, 463 are spent inside Neovim
+itself, 46 in the terminal and its parser, and the remaining ~300 are
+view's: about 215 to carry a keystroke from the pty into an RPC write, and
+about 84 to paint the redraw that comes back. There is no single hot spot
+to delete, which is why this is honest work rather than a quick fix.
 
 Budgets are recorded per machine class and regression-gated, so a change
-that makes any of these worse fails the build. Gating against the design
-spec's own budget targets, as opposed to against the last recorded value,
-is not yet wired up.
+that makes any of these worse fails the build. Every measurement is also
+checked against the design spec's own budget, not just against the last
+recorded value. Seven metrics do not meet their spec budget today; each one
+is listed in `crates/view-bench/budgets.toml` with the value it was
+accepted at and why, and the build fails if a new one appears, if a listed
+one gets worse, or if a listed one is quietly fixed and left on the list.
 
 ## Requirements
 

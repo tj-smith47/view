@@ -181,7 +181,7 @@ pub(crate) fn run_echo_path_row(
     for summary in &outcome.trials {
         println!(
             "{}",
-            report::paired_cell("echo_path", fixture, summary, protocol.warmup)
+            report::paired_cell("echo_path", fixture, "view", summary, protocol.warmup)
         );
     }
     println!(

@@ -6,6 +6,11 @@
 
 pub mod clock;
 pub mod echo;
+// The control arm reaches its headless server over a unix socket path; the
+// named-pipe equivalent is untested here, so the row loud-skips off unix
+// rather than recording a number nobody has validated.
+#[cfg(unix)]
+pub mod echo_control;
 pub mod first_paint;
 pub mod flood;
 pub mod memory;

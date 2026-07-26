@@ -5,6 +5,7 @@
 
 pub mod boundaries;
 pub mod pairing;
+pub mod remote_ui;
 pub mod report;
 pub mod sampling;
 pub mod scenarios;

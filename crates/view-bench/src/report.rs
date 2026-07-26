@@ -11,15 +11,21 @@ use crate::pairing::PairedSummary;
 /// echo/minimal: view p50 0.612ms p99 0.941ms max 1.203ms | nvim p50 0.550ms p99 0.713ms max 0.881ms
 ///       ratio(p99) 1.318  paired-delta p99 0.291ms  samples 1000 (+100 warmup)
 /// ```
+///
+/// `measured` names the side under test, which is not always `view`: the
+/// control row pairs nvim's own remote UI against bare nvim, and a line
+/// calling that side `view` would attribute nvim's overhead to view in
+/// every report a reader ever compares.
 #[must_use]
 pub fn paired_cell(
     scenario: &str,
     fixture: &str,
+    measured: &str,
     summary: &PairedSummary,
     warmup: usize,
 ) -> String {
     format!(
-        "{scenario}/{fixture}: view p50 {:.3}ms p99 {:.3}ms max {:.3}ms | \
+        "{scenario}/{fixture}: {measured} p50 {:.3}ms p99 {:.3}ms max {:.3}ms | \
          nvim p50 {:.3}ms p99 {:.3}ms max {:.3}ms\n      \
          ratio(p99) {:.3}  paired-delta p99 {:.3}ms  samples {} (+{warmup} warmup)",
         summary.view.p50(),
@@ -82,7 +88,7 @@ mod tests {
         let view: Vec<f64> = vec![2.0; 150];
         let nvim: Vec<f64> = vec![1.0; 150];
         let summary = paired_summary(&view, &nvim, 100).unwrap();
-        let rendered = paired_cell("echo", "minimal", &summary, 100);
+        let rendered = paired_cell("echo", "minimal", "view", &summary, 100);
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
             lines[0],
