@@ -352,6 +352,26 @@ fn null_calibration(bins: &Bins) -> Result<f64> {
     Ok(outcome.gated_ratio_p50)
 }
 
+/// Symmetric deviation of a null-pair ratio from 1.0 (`max(r, 1/r)`): a
+/// pair at 0.87 is exactly as noisy as one at 1.15. Both calibration
+/// brackets reduce their ratio to this before comparing it against
+/// [`NULL_RATIO_FLOOR`].
+fn null_pair_deviation(ratio: f64) -> f64 {
+    ratio.max(1.0 / ratio)
+}
+
+/// Whether the host stayed quiet across the whole cell loop, judged by the
+/// null-pair calibration taken at each end of it. A recording or gating run
+/// needs BOTH brackets under [`NULL_RATIO_FLOOR`], not just the start: the
+/// end bracket is what a mid-run ambient burst trips, closing the window
+/// the start-only gate left open. A burst that lands after the start
+/// calibration and inflates an absolute bar while the cells run leaves the
+/// start bracket quiet and the end bracket noisy, so a start-only gate
+/// would record or gate a contaminated run.
+fn run_stayed_quiet(start_deviation: f64, end_deviation: f64) -> bool {
+    start_deviation <= NULL_RATIO_FLOOR && end_deviation <= NULL_RATIO_FLOOR
+}
+
 /// This host's one-minute load average, or `None` where it cannot be
 /// read.
 ///
@@ -1078,7 +1098,11 @@ fn main() -> Result<()> {
     });
     // gating on a noisy host produces false verdicts, and recording on
     // one poisons the baseline every later quiet run is judged against;
-    // both therefore verify their own precondition before any cell runs
+    // both therefore verify their own precondition before any cell runs.
+    // The deviation is kept for the end bracket below: an absolute bar is
+    // trustworthy only if the host stayed quiet across the whole cell loop,
+    // not merely at the moment it started (see run_stayed_quiet).
+    let mut start_deviation: Option<f64> = None;
     if recording || gating || diagnostic_selected {
         if recording || gating {
             // the class name alone selects the tail-gating policy, so a
@@ -1095,9 +1119,10 @@ fn main() -> Result<()> {
             );
         }
         let ratio = null_calibration(&bins)?;
-        let deviation = ratio.max(1.0 / ratio);
+        let deviation = null_pair_deviation(ratio);
+        start_deviation = Some(deviation);
         println!(
-            "null-pair calibration: ratio_p50 {ratio:.4} (deviation {deviation:.4}, floor \
+            "null-pair calibration (start): ratio_p50 {ratio:.4} (deviation {deviation:.4}, floor \
              {NULL_RATIO_FLOOR})"
         );
         if deviation > NULL_RATIO_FLOOR {
@@ -1124,6 +1149,47 @@ fn main() -> Result<()> {
     }
 
     announce_load("end");
+
+    // The end bracket: the start calibration only certifies the instant
+    // before the cells ran, so a mid-run ambient burst that inflates an
+    // absolute bar (first_paint cold_ms, input_path/scroll p99) while the
+    // cells run leaves the start clean and slips a false breach through. A
+    // second null-pair calibration here brackets the whole cell loop; a run
+    // that did not stay quiet at BOTH ends is refused (record poisons every
+    // later baseline, gate emits a false verdict) rather than trusted. The
+    // per-trial median already absorbs an isolated single-trial burst, so
+    // this specifically guards the sustained-burst case (a foreign build
+    // spanning the run) the median cannot.
+    if let Some(start) = start_deviation {
+        let end_ratio = null_calibration(&bins)?;
+        let end = null_pair_deviation(end_ratio);
+        println!(
+            "null-pair calibration (end): ratio_p50 {end_ratio:.4} (deviation {end:.4}, floor \
+             {NULL_RATIO_FLOOR})"
+        );
+        // A recording/gating run already bailed above if the start was
+        // noisy, so reaching here past the fail-fast means the start was
+        // quiet: run_stayed_quiet turning false is then exactly a noisy end
+        // -- a burst that arrived while the cells ran. A diagnostic-only run
+        // was not bailed, so this warns for either bracket rather than
+        // claiming the noise was mid-run.
+        if !run_stayed_quiet(start, end) {
+            if recording || gating {
+                bail!(
+                    "host became noisy while the cells ran: end null-pair (nvim vs nvim) \
+                     ratio_p50 measured {end_ratio:.4}, deviation {end:.4} from 1.0 exceeds the \
+                     calibration floor {NULL_RATIO_FLOOR}; a mid-run ambient burst may have \
+                     inflated an absolute bar, so this run is refused -- re-run when the host is \
+                     quiet"
+                );
+            }
+            println!(
+                "      WARNING: the host was noisy at the start and/or end bracket (start \
+                 deviation {start:.4}, end {end:.4}, floor {NULL_RATIO_FLOOR}); any absolute bar \
+                 above may carry ambient noise"
+            );
+        }
+    }
 
     if recording {
         let mode = if cli.all {
@@ -1291,6 +1357,26 @@ mod tests {
             );
         }
         assert!(known_scenarios().contains(&"echo_path"));
+    }
+
+    #[test]
+    fn the_end_calibration_bracket_catches_a_burst_the_start_bracket_missed() {
+        let floor = NULL_RATIO_FLOOR;
+        // the mid-run burst: the start bracket saw a quiet host and passed,
+        // then a burst arrived while the cells ran and lifted the end
+        // bracket over the floor. Bracketing both ends is what turns the
+        // false-breach a start-only gate would have shipped into a refusal.
+        assert!(
+            !run_stayed_quiet(1.05, floor + 0.15),
+            "a quiet start with a noisy end is a mid-run burst -- not trustworthy"
+        );
+        // the case the start-only gate already handled stays handled
+        assert!(!run_stayed_quiet(floor + 0.15, 1.05));
+        // a run quiet at both ends is trustworthy; the floor is inclusive
+        assert!(run_stayed_quiet(1.05, 1.08));
+        assert!(run_stayed_quiet(floor, floor));
+        // deviation is symmetric: a null pair at 1/1.15 reads like 1.15
+        assert!((null_pair_deviation(1.0 / 1.15) - 1.15).abs() < 1e-9);
     }
 
     #[test]
