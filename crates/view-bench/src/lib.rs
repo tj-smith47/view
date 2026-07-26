@@ -36,4 +36,15 @@ pub enum BenchError {
     Session(#[from] view_oracle::OracleError),
     #[error("measurement desync (a harness fault, not a latency reading): {context}")]
     Desync { context: String },
+    #[error(
+        "{metric} measured {value:.4} ms, within {factor}x of the harness's own \
+         {resolution:.4} ms probe period: the number describes the instrument, not \
+         the editor"
+    )]
+    BelowInstrumentResolution {
+        metric: &'static str,
+        value: f64,
+        resolution: f64,
+        factor: f64,
+    },
 }

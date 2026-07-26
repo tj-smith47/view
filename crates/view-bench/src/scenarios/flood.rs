@@ -55,6 +55,25 @@ pub struct FloodSide {
     /// Gaps between successive observed frame changes during the window,
     /// in milliseconds.
     pub cadence_gaps_ms: Vec<f64>,
+    /// Mean wall time one probe iteration took during the window, in
+    /// milliseconds: the resolution floor on every gap above, since a frame
+    /// change is only ever observed on a probe.
+    pub probe_period_ms: f64,
+}
+
+/// How far above the probe loop's own period a cadence measurement must
+/// sit to be treated as a measurement of view rather than of the harness.
+///
+/// 2x: at the floor itself every observed gap is one probe iteration and
+/// the number is pure instrument; one factor of two above it, the observed
+/// distribution has room to hold at least two distinguishable outcomes per
+/// gap, so a real change in view's coalescing can still move it.
+const CADENCE_RESOLUTION_FACTOR: f64 = 2.0;
+
+/// Whether a cadence percentile sits far enough above the probe loop's own
+/// period to describe view rather than the harness.
+fn cadence_is_measurable(cadence_p99_ms: f64, probe_period_ms: f64) -> bool {
+    cadence_p99_ms >= probe_period_ms * CADENCE_RESOLUTION_FACTOR
 }
 
 /// The idle span with no frame change that declares the producer started
@@ -63,18 +82,22 @@ pub struct FloodSide {
 /// means the terminal command never produced output.
 const PRODUCER_START_DEADLINE: Duration = Duration::from_secs(15);
 
-/// Reads the current screen's frame hash and its highest `cat -n` counter
-/// in one borrow, so cadence and drain progress come from the same frame.
-fn probe(session: &mut BenchSession) -> (u64, Option<u64>) {
+/// The highest `cat -n` counter currently on screen.
+///
+/// Read once at the window's end rather than every probe: the counters only
+/// grow and the producer's output scrolls, so the final screen already holds
+/// the maximum, while building the whole screen's text on every iteration
+/// only widens the probe loop -- and the probe period is the floor on every
+/// cadence gap this loop can observe.
+fn drained_lines(session: &mut BenchSession) -> Option<u64> {
     session.with_screen(|screen| {
-        let hash = crate::boundaries::screen_hash(screen);
         let (rows, cols) = screen.size();
         let mut text = String::new();
         for row in 0..rows {
             text.push_str(&crate::boundaries::row_text(screen, row, cols));
             text.push('\n');
         }
-        (hash, max_screen_line(&text))
+        max_screen_line(&text)
     })
 }
 
@@ -102,10 +125,10 @@ fn flood_once(
 
     // wait for the producer to begin scrolling before starting the window, so
     // it measures steady flood rather than the terminal-open transient
-    let (mut last_hash, _) = probe(&mut session);
+    let mut last_hash = session.with_screen(crate::boundaries::screen_hash);
     let armed = Instant::now();
     loop {
-        let (hash, _) = probe(&mut session);
+        let hash = session.with_screen(crate::boundaries::screen_hash);
         if hash != last_hash {
             last_hash = hash;
             break;
@@ -125,10 +148,11 @@ fn flood_once(
     let deadline = start + window;
     let mut last_change: Option<Instant> = Some(start);
     let mut gaps_ms = Vec::new();
-    let mut lines_drained = 0_u64;
-    loop {
-        let (hash, max_line) = probe(&mut session);
+    let mut probes = 0_u32;
+    let elapsed = loop {
+        let hash = session.with_screen(crate::boundaries::screen_hash);
         let now = Instant::now();
+        probes = probes.saturating_add(1);
         if hash != last_hash {
             if let Some(previous) = last_change {
                 gaps_ms.push(now.duration_since(previous).as_secs_f64() * 1000.0);
@@ -136,20 +160,20 @@ fn flood_once(
             last_change = Some(now);
             last_hash = hash;
         }
-        if let Some(n) = max_line {
-            lines_drained = lines_drained.max(n);
-        }
         if now >= deadline {
-            break;
+            break now.duration_since(start);
         }
         std::thread::yield_now();
-    }
+    };
+    let lines_drained = drained_lines(&mut session).unwrap_or(0);
 
     session.shutdown();
     Ok(FloodSide {
         #[allow(clippy::cast_precision_loss)]
         lines_drained: lines_drained as f64,
         cadence_gaps_ms: gaps_ms,
+        #[allow(clippy::cast_lossless)]
+        probe_period_ms: elapsed.as_secs_f64() * 1000.0 / f64::from(probes.max(1)),
     })
 }
 
@@ -177,9 +201,11 @@ pub struct FloodOutcome {
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if a producer never scrolls the terminal
-/// or a session misbehaves, and [`BenchError::NotEnoughSamples`] if a window
+/// or a session misbehaves, [`BenchError::NotEnoughSamples`] if a window
 /// produced fewer observed frame changes than the protocol's floor (the
-/// cadence percentile would be built on too few gaps to mean anything).
+/// cadence percentile would be built on too few gaps to mean anything), and
+/// [`BenchError::BelowInstrumentResolution`] if the cadence percentile sits
+/// within [`CADENCE_RESOLUTION_FACTOR`] of the probe loop's own period.
 pub fn run(
     view: &SpawnSpec,
     nvim: &SpawnSpec,
@@ -226,9 +252,30 @@ pub fn run(
         stall_max = stall_max.max(dist.max());
     }
 
+    let gated_cadence_p99_ms = median_of_trials(&cadence_p99s)?;
+    let probe_period_ms = median_of_trials(
+        &view_trials
+            .iter()
+            .map(|t| t.probe_period_ms)
+            .collect::<Vec<_>>(),
+    )?;
+    // a frame change is only ever seen on a probe, so no gap can be finer
+    // than the probe loop's own period: a cadence number down at that floor
+    // is reporting how fast this harness can hash a screen, not how well
+    // view coalesces a flood. Refused rather than recorded, because a bar
+    // set from the instrument gates every later run against the instrument.
+    if !cadence_is_measurable(gated_cadence_p99_ms, probe_period_ms) {
+        return Err(BenchError::BelowInstrumentResolution {
+            metric: "cadence_p99_ms",
+            value: gated_cadence_p99_ms,
+            resolution: probe_period_ms,
+            factor: CADENCE_RESOLUTION_FACTOR,
+        });
+    }
+
     Ok(FloodOutcome {
         gated_pace_ratio: median_of_trials(&ratios)?,
-        gated_cadence_p99_ms: median_of_trials(&cadence_p99s)?,
+        gated_cadence_p99_ms,
         view_stall_max_ms: stall_max,
         view_trials,
         nvim_trials,
@@ -246,8 +293,24 @@ fn label(side: &str, err: BenchError) -> BenchError {
 
 #[cfg(test)]
 mod tests {
+
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn a_cadence_at_the_probe_period_is_not_a_measurement_of_view() {
+        // every observed gap is one probe iteration here: the number is the
+        // harness's screen-hash rate, and recording it would gate every
+        // later run against this machine's hashing speed
+        assert!(!cadence_is_measurable(0.40, 0.40));
+        assert!(!cadence_is_measurable(0.79, 0.40));
+    }
+
+    #[test]
+    fn a_cadence_clear_of_the_probe_period_is_measurable() {
+        assert!(cadence_is_measurable(0.80, 0.40));
+        assert!(cadence_is_measurable(16.0, 0.40));
+    }
 
     #[test]
     fn flood_command_pins_a_noninteractive_shell_and_an_unbounded_varying_producer() {
