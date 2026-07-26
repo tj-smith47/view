@@ -19,8 +19,42 @@
 mod common;
 
 use std::path::PathBuf;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use view_oracle::PtySession;
+
+// The pty-isolation lock. A timing-bound test measures an absolute wall-clock
+// bound (startup+save) that is only meaningful with the host to itself: a
+// parallel run on few cores (e.g. `taskpolicy -b` confining the suite to 2
+// efficiency cores) inflates every session by the scheduling tax and
+// false-trips a bound that is really about the 50ms probe deadline, not
+// contention. Every spawn takes the read side, so ordinary sessions still run
+// in parallel with each other; a timing-bound test takes the write side for a
+// contention-free measurement window.
+static PTY_ISOLATION: RwLock<()> = RwLock::new(());
+
+// The read side of `PTY_ISOLATION`, held for a whole session lifetime.
+// `unwrap_or_else(into_inner)` recovers a poisoned lock: the guarded value is
+// `()` with no invariant to protect, so a panicking test must not cascade into
+// every later session failing to acquire the lock.
+fn shared_isolation() -> Option<RwLockReadGuard<'static, ()>> {
+    Some(
+        PTY_ISOLATION
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+// The write side of `PTY_ISOLATION`: acquire it BEFORE starting a timing clock
+// (the acquisition can block waiting for in-flight sessions to drain, which is
+// not part of the startup latency under test), then spawn via
+// `spawn_view_pty_raw_isolated`. While the guard is held, no other spawn helper
+// can start a session, so the measurement runs on an uncontended host.
+fn pty_isolation_exclusive() -> RwLockWriteGuard<'static, ()> {
+    PTY_ISOLATION
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Wraps the promoted `view_oracle::PtySession` with the `view`-binary
 /// concerns that promotion deliberately left behind: an isolated scratch
@@ -32,6 +66,11 @@ use view_oracle::PtySession;
 struct ViewPtySession {
     session: PtySession,
     paths: common::ScratchPaths,
+    // The isolation read lock, held for this session's whole lifetime so a
+    // timing-bound test's exclusive window (`pty_isolation_exclusive`) cannot
+    // begin mid-session. `None` when the spawning test already holds the
+    // exclusive write guard, since taking read on that same thread deadlocks.
+    _isolation: Option<RwLockReadGuard<'static, ()>>,
 }
 
 impl std::ops::Deref for ViewPtySession {
@@ -106,6 +145,17 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
 fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySession {
+    build_view_pty(extra_args, shared_isolation())
+}
+
+/// Builds the raw `view` pty session with a given isolation guard: the read
+/// side of `PTY_ISOLATION` for the common case, or `None` when the spawning
+/// test already holds the exclusive write guard (taking read on that same
+/// thread deadlocks).
+fn build_view_pty(
+    extra_args: &[&std::ffi::OsStr],
+    isolation: Option<RwLockReadGuard<'static, ()>>,
+) -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
@@ -117,7 +167,18 @@ fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySessi
 
     let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
 
-    ViewPtySession { session, paths }
+    ViewPtySession {
+        session,
+        paths,
+        _isolation: isolation,
+    }
+}
+
+/// Like [`spawn_view_pty_raw`] but takes NO isolation read lock, for a timing
+/// test that already holds the exclusive write guard from
+/// `pty_isolation_exclusive`; taking read on that same thread deadlocks.
+fn spawn_view_pty_raw_isolated() -> ViewPtySession {
+    build_view_pty(&[], None)
 }
 
 /// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of
@@ -196,8 +257,14 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // The oracle is the saved file's real contents, not the pty's screen:
     // see `view_paints_typed_text_in_a_pty`'s comment for why a
     // screen-content assertion here would be vacuous.
+    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
+    // the isolation window BEFORE the clock (its acquisition can block waiting
+    // for in-flight sessions to drain, which is not the startup latency under
+    // test) so a parallel run on few cores cannot inflate this measurement past
+    // a bound that is really about the 50ms probe deadline, not host contention.
+    let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw();
+    let mut session = spawn_view_pty_raw_isolated();
 
     session.send(b"ibasic tier still works").unwrap();
     // A fixed sleep, not a screen-content wait, bridges to the save: the
@@ -242,8 +309,14 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // burst below (276 bytes: a 6-byte DA1 reply, `i`, 260 `A`s, then a
     // distinct end marker) exceeds the 256-byte chunk size, so surviving it
     // intact proves the tail isn't getting orphaned in a buffered handle.
+    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
+    // the isolation window BEFORE the clock (its acquisition can block waiting
+    // for in-flight sessions to drain, which is not the startup latency under
+    // test) so a parallel run on few cores cannot inflate this measurement past
+    // a bound that is really about the 50ms probe deadline, not host contention.
+    let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw();
+    let mut session = spawn_view_pty_raw_isolated();
 
     let da1_reply = b"\x1b[?62c";
     let payload = "A".repeat(260);
@@ -791,7 +864,11 @@ fn spawn_view_pty_with_unwritable_view_log() -> ViewPtySession {
     cmd.env("VIEW_LOG", "/nonexistent-dir-xyz/log.txt");
 
     let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
-    ViewPtySession { session, paths }
+    ViewPtySession {
+        session,
+        paths,
+        _isolation: shared_isolation(),
+    }
 }
 
 /// Regression: an unwritable `VIEW_LOG` path must degrade to no diagnostic
