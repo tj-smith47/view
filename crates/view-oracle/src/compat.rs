@@ -894,6 +894,10 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    // Only the unix spawn fixtures below (which drive /bin/* and nvim) use the
+    // env lock; the pure-logic key/marker tests do not, so on Windows, where
+    // those fixtures are gated off, this import would be unused.
+    #[cfg(unix)]
     use crate::testenv;
 
     #[test]
@@ -1183,6 +1187,8 @@ mod tests {
         }
     }
 
+    // Spawns /bin/sleep to build a child that outlives its deadline.
+    #[cfg(unix)]
     #[test]
     fn wait_with_timeout_kills_and_reaps_a_process_that_outlives_its_deadline() {
         let child = testenv::spawning(|| {
@@ -1246,7 +1252,7 @@ mod tests {
     /// Reports no entry on a platform with neither `/proc` nor a POSIX
     /// `ps`, so the reaping assertion is inert there rather than failing
     /// on the absence of a way to look.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
     fn process_table_entry_exists(_pid: u32) -> bool {
         false
     }
@@ -1259,6 +1265,9 @@ mod tests {
     /// Under the build tree rather than the system temp dir, matching
     /// `pty`'s own planted world: this stands in for host configuration, so
     /// it must not sit somewhere an unrelated process can write into.
+    // Serves only the unix-gated probe-client test below; gated with it so it
+    // is not dead code on Windows.
+    #[cfg(unix)]
     struct ProbeInitWorld {
         empty: PathBuf,
         homes: PathBuf,
@@ -1266,6 +1275,7 @@ mod tests {
         sock: PathBuf,
     }
 
+    #[cfg(unix)]
     impl ProbeInitWorld {
         const XDG_HOMES: [&'static str; 4] = [
             "XDG_CONFIG_HOME",
@@ -1324,6 +1334,8 @@ mod tests {
         }
     }
 
+    // Spawns nvim as both server and --remote-expr client over a real socket.
+    #[cfg(unix)]
     #[test]
     fn the_probe_client_runs_none_of_the_hosts_startup_commands() {
         let world = ProbeInitWorld::plant();
@@ -1390,6 +1402,8 @@ mod tests {
         let _ = session.pty().wait_for_exit(Duration::from_secs(5));
     }
 
+    // Spawns /bin/sh to emit a payload larger than a pipe buffer.
+    #[cfg(unix)]
     #[test]
     fn wait_with_timeout_drains_output_larger_than_a_pipe_buffer_without_blocking_the_child() {
         // 200KB comfortably exceeds a 64KB pipe buffer (the typical Linux

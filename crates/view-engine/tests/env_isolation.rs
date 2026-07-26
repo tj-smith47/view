@@ -243,6 +243,11 @@ fn an_isolated_child_opens_no_server_socket_at_a_host_chosen_address() {
 /// written as a `getenv` probe: the same planted address does reach a child
 /// nothing clears it for, and reaches it as a listening socket rather than
 /// as a readable variable.
+// The unix-socket listen address this control checks for in serverlist() is a
+// unix-only shape; on Windows nvim serves over a named pipe, so the planted
+// path never appears. Gated off Windows; its isolated-child counterpart above
+// stays as the Windows-relevant assertion.
+#[cfg(unix)]
 #[test]
 fn the_socket_probe_reports_an_address_that_is_not_cleared() {
     let planted = scratch("uncleared-listen.sock");

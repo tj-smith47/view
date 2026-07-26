@@ -113,6 +113,10 @@ impl Planted {
     /// [`spawning`], for the planting test's own spawns: the lock is already
     /// held exclusively here, and taking it a second time on the same thread
     /// would deadlock rather than exclude anything new.
+    // Only the unix-gated spawn fixtures (compat's probe test, pty's env
+    // report) plant-then-spawn; on Windows those are gated off, leaving this
+    // method with no caller, so it follows them off the build.
+    #[cfg(unix)]
     pub(crate) fn spawning<R>(&self, f: impl FnOnce() -> R) -> R {
         f()
     }
@@ -143,8 +147,13 @@ fn restore(name: &OsStr, prior: Option<&OsStr>) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    // The inheritance test spawns /bin/sh to read a child's real environment;
+    // it is gated off Windows, and these imports serve only it.
+    #[cfg(unix)]
     use std::process::Command;
+    #[cfg(unix)]
     use std::sync::mpsc;
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// Names of this module's own, cleared by no funnel: a child that
@@ -152,9 +161,13 @@ mod tests {
     /// hermetic spawn path the real plants use. One per test, since the
     /// assertions below read them after releasing the lock, where a
     /// concurrent test planting the same name would answer for it.
+    #[cfg(unix)]
     const INHERIT: &str = "VIEW_TESTENV_INHERIT";
     const RESTORE: &str = "VIEW_TESTENV_RESTORE";
 
+    // Reads a spawned child's real environment via /bin/sh, so it cannot run
+    // on Windows; the plant/restore test below is pure env logic and stays.
+    #[cfg(unix)]
     #[test]
     fn a_child_spawned_while_a_plant_stands_inherits_none_of_it() {
         const NAME: &str = INHERIT;

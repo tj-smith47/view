@@ -421,7 +421,10 @@ impl PtySession {
     }
 }
 
-#[cfg(test)]
+// Every test here spawns /bin/* or nvim inside a real pty; view's Windows
+// terminal runtime is a tier-2 surface validated on winserver rather than in
+// CI, so these unix-fixture tests are gated off the Windows build.
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;

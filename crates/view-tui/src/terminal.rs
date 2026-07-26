@@ -548,6 +548,14 @@ mod tests {
         );
     }
 
+    // restore_bytes drives crossterm's LeaveAlternateScreen/DisableMouseCapture
+    // through execute!; on Windows those touch the WinAPI console layer and
+    // fail ("Initial console modes not set") when no console was entered, so
+    // this ANSI-byte-ordering assertion can only be exercised where crossterm
+    // emits the raw sequences unconditionally. The production restore path is
+    // exercised after a real EnterAlternateScreen; this isolated unit check is
+    // a unix/VT-terminal concern.
+    #[cfg(unix)]
     #[test]
     fn restore_bytes_closes_the_sync_bracket_before_leaving_the_alternate_screen() {
         let mut buf = Vec::new();
@@ -564,6 +572,8 @@ mod tests {
         );
     }
 
+    // Serves only the unix-gated restore_bytes test above.
+    #[cfg(unix)]
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())

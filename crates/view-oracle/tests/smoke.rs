@@ -15,10 +15,14 @@
 //! (`send`, `wait_for`, `wait_for_cell`, `wait_for_exit`, `screen`,
 //! `screen_raw`, `pid`, `wait`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Every test in this file drives the wired `view` binary inside a real pty;
+// view's Windows terminal runtime is a tier-2 surface validated on winserver
+// rather than in CI, so the whole suite is gated off the Windows build. There
+// are no pure-logic tests here to keep running on Windows.
+#![cfg(unix)]
 
 mod common;
 
-#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
