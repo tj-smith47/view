@@ -170,6 +170,18 @@ fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::
     write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
+/// The whole-terminal paint area for one frame, sized from the model's
+/// last-known terminal dimensions rather than an OS query on every frame.
+///
+/// `Model::term_width`/`term_height` are fed by `Msg::Resized` and startup
+/// wiring, so reading them here keeps [`Term::draw_surface`] off the
+/// per-frame `TIOCGWINSZ` syscall while still following every resize on the
+/// next frame: the shadow's own `resize` sees the new area and forces a full
+/// repaint, exactly as it did when the size came from the syscall.
+fn frame_area(model: &Model) -> ratatui::layout::Rect {
+    ratatui::layout::Rect::new(0, 0, model.term_width, model.term_height)
+}
+
 /// A frame-scoped byte accumulator standing in for stdout as ratatui's
 /// backend writer: `write` appends, `flush` is a no-op, so everything
 /// ratatui and the cursor/bracket escapes emit for one frame coalesces
@@ -383,10 +395,13 @@ impl Term {
         let cur_overlay = overlay_rows(surface);
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);
-        let size = self.inner.size()?;
+        // the terminal size comes from the model (fed by Msg::Resized and
+        // startup), not a per-frame TIOCGWINSZ query: the shadow's resize
+        // still forces a full repaint on any change, so a resize is followed
+        // on the next frame without the syscall.
+        let area = frame_area(model);
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_SIZE_PROBED);
-        let area = ratatui::layout::Rect::new(0, 0, size.width, size.height);
         let resized = self.shadow.resize(area);
         let force_full = resized || self.last_offset != Some(offset);
         if resized {
@@ -508,6 +523,30 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn frame_area_is_sourced_from_the_model_terminal_size_and_follows_a_resize() {
+        // the paint area must be the model's last-known terminal size, so a
+        // per-frame OS size query is never needed and a stale size can never
+        // paint.
+        let mut model = Model::with_term_size(80, 24);
+        assert_eq!(
+            frame_area(&model),
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            "the initial paint area must match the startup terminal size"
+        );
+
+        // a resize lands as Msg::Resized, which sets term_width/height (see
+        // view_core::update). the very next frame must paint at the new size,
+        // never the size the previous frame used.
+        model.term_width = 120;
+        model.term_height = 40;
+        assert_eq!(
+            frame_area(&model),
+            ratatui::layout::Rect::new(0, 0, 120, 40),
+            "after a resize the paint area must follow the model, not a cached or queried size"
+        );
+    }
 
     #[test]
     fn restore_bytes_closes_the_sync_bracket_before_leaving_the_alternate_screen() {
