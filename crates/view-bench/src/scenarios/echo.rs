@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
-use crate::scenarios::taps::monotonic_nanos;
+use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::Protocol;
 use crate::session::{BenchSession, SpawnSpec};
 use crate::BenchError;

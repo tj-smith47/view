@@ -4,11 +4,17 @@
 //! resolved [`crate::session::SpawnSpec`]s; which fixture/environment
 //! those represent is the caller's concern.
 
+pub mod clock;
 pub mod echo;
 pub mod first_paint;
 pub mod flood;
 pub mod memory;
 pub mod scroll;
+// The tap channel is FIFO + raw-CLOCK_MONOTONIC based (see taps.rs); neither
+// exists on Windows, so the module and the rows built on it are unix-only and
+// the driver loud-skips them off-unix, the same way the memory row skips where
+// its metric is undefined.
+#[cfg(unix)]
 pub mod taps;
 
 use std::time::Duration;

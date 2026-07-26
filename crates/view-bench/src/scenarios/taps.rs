@@ -17,20 +17,11 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side};
+use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::echo::{label, SideState};
 use crate::scenarios::Protocol;
 use crate::session::{BenchSession, SpawnSpec, GRID_COLS, GRID_ROWS};
 use crate::BenchError;
-
-/// Current `CLOCK_MONOTONIC` in nanoseconds, the same clock and formula
-/// the tap sites use.
-#[must_use]
-pub fn monotonic_nanos() -> i64 {
-    let now = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    now.tv_sec
-        .saturating_mul(1_000_000_000)
-        .saturating_add(now.tv_nsec)
-}
 
 /// One parsed tap record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1471,12 +1462,5 @@ mod tests {
             "bench-taps is reachable from a default feature set:\n{}",
             enabled_by_default.join("\n")
         );
-    }
-
-    #[test]
-    fn monotonic_nanos_is_monotone() {
-        let a = monotonic_nanos();
-        let b = monotonic_nanos();
-        assert!(b >= a);
     }
 }
