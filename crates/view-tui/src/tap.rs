@@ -50,10 +50,11 @@ pub const TAG_FLUSH_START: u8 = b'F';
 /// immediately before the terminal size is queried; with
 /// [`TAG_DRAW_START`] this brackets the frame preamble on its own.
 pub const TAG_FRAME_PREPARED: u8 = b'P';
-/// The frame's terminal size has been read back. With
-/// [`TAG_FRAME_PREPARED`] this isolates the size query, whose backend
-/// implementation opens the controlling terminal on every call, from
-/// everything around it.
+/// The frame's paint area has been resolved from the model's terminal
+/// size. With [`TAG_FRAME_PREPARED`] this isolates area resolution from
+/// everything around it; it bracketed a live size syscall until the area
+/// became a plain `Rect` construction, and still marks that boundary so a
+/// syscall reappearing there shows up as a stage regression.
 pub const TAG_SIZE_PROBED: u8 = b'G';
 /// This frame's damaged rows are composited into the shadow. With
 /// [`TAG_SIZE_PROBED`] this brackets damage resolution and compositing,

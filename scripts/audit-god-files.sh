@@ -123,9 +123,13 @@ count_prod_lines() {
             return t
         }
 
+        # `not(...)` anywhere makes the predicate PRODUCTION-only: a
+        # `#[cfg(not(test))]` item ships in the real binary, so subtracting it
+        # would hide unlimited production code behind one attribute.
         function is_test_only_cfg(l) {
             if (l !~ /^[[:space:]]*#\[cfg\(/) return 0
             if (l ~ /\(any\(/) return 0
+            if (l ~ /not[[:space:]]*\(/) return 0
             return (l ~ /(^|[(,[:space:]])test([),]|$)/)
         }
         function flush() { if (cur != "") printf("%d\t%s\n", prod, cur) }
@@ -151,7 +155,10 @@ count_prod_lines() {
         }
 
         {
-            if (is_test_only_cfg(line)) {
+            # tested against the ELIDED line: a `#[cfg(test)]` sitting inside
+            # a block comment or a raw string is not an attribute, and
+            # starting a region there swallows the production code after it
+            if (is_test_only_cfg(code)) {
                 state = "region"; depth = 0; opened = 0
                 depth += count_char(code, "{") - count_char(code, "}")
                 if (index(code, "{") > 0) opened = 1
@@ -171,9 +178,18 @@ count_prod_lines() {
 if [[ $# -gt 0 ]]; then
     fail=0
     for f in "$@"; do
-        [[ -f "$f" ]] || continue
+        if [[ ! -f "$f" ]]; then
+            # a typo'd path used to exit 0, so a caller could silently check
+            # nothing at all and read it as a pass
+            echo "audit-god-files: not a file: $f" >&2
+            fail=1
+            continue
+        fi
+        # only the two structural exclusions the tree-wide pass also applies.
+        # Filename skips (*_tests.rs and friends) used to live here and made
+        # the hook pass a production module the authoritative gate fails.
         case "$f" in
-            *crates/*/tests/* | *crates/*/benches/* | *_test.rs | *_tests.rs | */tests.rs) continue ;;
+            *crates/*/tests/* | *crates/*/benches/*) continue ;;
         esac
         grep -qE '^[[:space:]]*#!\[cfg\(test\)\]' -- "$f" && continue
         count="$(count_prod_lines "$f" | cut -f1)"
@@ -228,9 +244,14 @@ resolve_mod_file() {
 # gated=1 when a test-only cfg attribute precedes (or shares the line with) it.
 collect_mod_decls() {
     awk '
+        # anchored, matching the counter above: unanchored, a doc comment that
+        # merely MENTIONS `#[cfg(test)]` above a `mod NAME;` marked that
+        # module test-only and excluded its whole file from the census.
+        # `not(...)` is production-only, as in the counter.
         function is_test_only_cfg(l) {
-            if (l !~ /#!?\[cfg\(/) return 0
+            if (l !~ /^[[:space:]]*#!?\[cfg\(/) return 0
             if (l ~ /\(any\(/) return 0
+            if (l ~ /not[[:space:]]*\(/) return 0
             return (l ~ /(^|[(,[:space:]])test([),]|$)/)
         }
         FNR == 1 { pend = 0 }
@@ -327,9 +348,11 @@ exempt_seen=""
 debt_seen=""
 largest_count=0
 largest_path=""
+declare -A MEASURED=()
 
 while IFS=$'\t' read -r count path; do
     [[ -n "$path" ]] || continue
+    MEASURED["$path"]="$count"
 
     matched=""
     ceiling="${PIN_CEILING[$path]:-}"
@@ -341,7 +364,7 @@ while IFS=$'\t' read -r count path; do
             exempt_seen+="  $path: $count prod lines (pinned $ceiling) — $reason"$'\n'
             kind="exempt"
         else
-            debt_seen+="  $path: $count prod lines (pinned $ceiling, over the ${GOD_FILE_LIMIT} ceiling — awaiting a split) — $reason"$'\n'
+            debt_seen+="  $path: $count prod lines (pinned $ceiling) — $reason"$'\n'
             kind="recorded debt"
         fi
         if [[ "$count" -gt "$ceiling" ]]; then
@@ -358,6 +381,25 @@ while IFS=$'\t' read -r count path; do
         violations+="$path: $count production lines (ceiling $GOD_FILE_LIMIT)"$'\n'
     fi
 done < <(count_prod_lines "${PROD_FILES[@]}" | sort -rn)
+
+# Both registers are ratchets, not parking spots: a pin may only fall, and a
+# stale one has to leave. Without this a pinned file could be split, shrink
+# below its pin, or be deleted outright and the entry would sit in the list
+# forever, quietly exempting a path that no longer needs exempting.
+for path in "${!PIN_CEILING[@]}"; do
+    ceiling="${PIN_CEILING[$path]}"
+    listname="${PIN_LIST[$path]}"
+    if [[ -z "${MEASURED[$path]:-}" ]]; then
+        violations+="$path: pinned at $ceiling in $listname, but no such production file was scanned — the pin is stale (split, renamed, deleted, or now classified as test code); remove the entry"$'\n'
+        continue
+    fi
+    count="${MEASURED[$path]}"
+    if [[ "$count" -le "$GOD_FILE_LIMIT" ]]; then
+        violations+="$path: $count production lines is within the ${GOD_FILE_LIMIT} ceiling, so its $listname pin of $ceiling is stale; remove the entry"$'\n'
+    elif [[ "$count" -lt "$ceiling" ]]; then
+        violations+="$path: $count production lines sits below its $listname pin of $ceiling; a pin may only fall, so lower it to $count and lock the gain in"$'\n'
+    fi
+done
 
 if [[ -n "$violations" ]]; then
     echo "GOD FILE — production code over the ${GOD_FILE_LIMIT}-line ceiling."
@@ -381,7 +423,12 @@ if [[ -n "$violations" ]]; then
     exit 1
 fi
 
-echo "audit-god-files: ${#PROD_FILES[@]} production files scanned (${#IS_TEST_FILE[@]} test files excluded); largest is $largest_path at $largest_count production lines, ceiling $GOD_FILE_LIMIT."
+if [[ -n "$largest_path" ]]; then
+    largest_note="largest is $largest_path at $largest_count production lines"
+else
+    largest_note="no unpinned production file was measured"
+fi
+echo "audit-god-files: ${#PROD_FILES[@]} production files scanned (${#IS_TEST_FILE[@]} test files excluded); $largest_note, ceiling $GOD_FILE_LIMIT."
 if [[ -n "$exempt_seen" ]]; then
     echo "audit-god-files: ${#GOD_FILE_EXEMPT[@]} named exemption(s) — deliberate, not going to shrink:"
     printf '%s' "$exempt_seen"

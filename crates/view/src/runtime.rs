@@ -291,7 +291,13 @@ pub fn run(
                     // an engine write failed: the engine is gone, not the
                     // UI; resolve the real exit status and let update()
                     // decide
-                    Flow::EngineLost => queue.push(Msg::EngineDown(engine.wait_exit())),
+                    // the rest of this batch targets an engine that is
+                    // already gone: running it would fail identically and
+                    // queue a duplicate EngineDown per remaining effect
+                    Flow::EngineLost => {
+                        queue.push(Msg::EngineDown(engine.wait_exit()));
+                        break;
+                    }
                 }
             }
             // a RedrawReady is dropped when the shared channel is

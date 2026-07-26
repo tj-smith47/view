@@ -73,6 +73,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Resized { width, height } => {
             model.term_width = width;
             model.term_height = height;
+            // the paint area is sourced from these fields, so the frame that
+            // renders them is this frontend's own concern: `grid_target`
+            // clamps, so a resize that leaves the grid unchanged draws no
+            // engine redraw at all and would otherwise never repaint
+            model.dirty = true;
             let (grid_width, grid_height) = model.grid_target();
             vec![Effect::Rpc(RpcCall::TryResize {
                 width: grid_width,
@@ -895,6 +900,24 @@ mod tests {
                 value: ReplyValue::Nil
             }]
         ));
+    }
+
+    #[test]
+    fn resize_marks_the_model_dirty_so_the_new_area_is_actually_painted() {
+        let mut m = model();
+        m.dirty = false;
+        let _ = update(
+            &mut m,
+            Msg::Resized {
+                width: 120,
+                height: 40,
+            },
+        );
+        assert!(
+            m.dirty,
+            "a resize changes the paint area, so the frontend must repaint on its own \
+             rather than waiting for an engine redraw that a clamped grid_target may never produce"
+        );
     }
 
     #[test]
