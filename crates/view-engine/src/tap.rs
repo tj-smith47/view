@@ -61,8 +61,37 @@ pub fn tap(tag: u8) {
         .saturating_mul(1_000_000_000)
         .saturating_add(now.tv_nsec);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let line = format!("{} {seq} {nanos}\n", tag as char);
+    let mut buf = [0_u8; 64];
+    let mut at = buf.len();
+    push_byte(&mut buf, &mut at, b'\n');
+    push_decimal(&mut buf, &mut at, u64::try_from(nanos).unwrap_or(0));
+    push_byte(&mut buf, &mut at, b' ');
+    push_decimal(&mut buf, &mut at, seq);
+    push_byte(&mut buf, &mut at, b' ');
+    push_byte(&mut buf, &mut at, tag);
     // one write syscall per record: pipe writes below PIPE_BUF are
     // atomic, so records from different threads never interleave
-    let _ = (&mut &*sink).write(line.as_bytes());
+    let _ = (&mut &*sink).write(&buf[at..]);
+}
+
+/// Prepends one byte to the record being built backwards in `buf`.
+fn push_byte(buf: &mut [u8; 64], at: &mut usize, byte: u8) {
+    *at = at.saturating_sub(1);
+    buf[*at] = byte;
+}
+
+/// Prepends `n`'s decimal digits to the record being built backwards in
+/// `buf`. The record is formatted into a stack buffer rather than through
+/// `format!` because the tap runs on the paint and RPC threads, where a
+/// heap allocation is both a cost the measurement would charge to the
+/// code under test and a lock the allocator can contend on.
+fn push_decimal(buf: &mut [u8; 64], at: &mut usize, n: u64) {
+    let mut n = n;
+    loop {
+        push_byte(buf, at, b'0' + u8::try_from(n % 10).unwrap_or(0));
+        n /= 10;
+        if n == 0 {
+            return;
+        }
+    }
 }

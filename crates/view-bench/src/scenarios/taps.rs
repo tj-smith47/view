@@ -112,6 +112,7 @@ fn create_fifo(path: &std::path::Path) -> std::io::Result<()> {
 pub struct TapPipe {
     records: Arc<Mutex<Vec<TapRecord>>>,
     stop: Arc<AtomicBool>,
+    path: std::path::PathBuf,
 }
 
 impl TapPipe {
@@ -164,7 +165,18 @@ impl TapPipe {
                 }
             }
         });
-        Ok(Self { records, stop })
+        Ok(Self {
+            records,
+            stop,
+            path: path.to_path_buf(),
+        })
+    }
+
+    /// The FIFO this pipe reads, so a caller holding the pipe can open a
+    /// second writing end without threading the path alongside it.
+    #[must_use]
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
     }
 
     /// Copies (without draining) every record whose timestamp falls in
@@ -267,6 +279,10 @@ pub struct TapsOutcome {
     /// Attribution evidence only, never gated: the gate stays on the
     /// row's end-to-end boundary.
     pub segments: Vec<Segment>,
+    /// The tap operation's own cost, characterized against the live
+    /// session rather than against an idle host, so the number the bar
+    /// compares is the one this row's taps actually paid.
+    pub overhead: Distribution,
 }
 
 /// One observed sub-interval of a taps row.
@@ -322,14 +338,37 @@ fn delta_us(from: i64, to: i64) -> f64 {
     (to - from) as f64 / 1000.0
 }
 
-/// Measures the key-to-RPC-written path: per sample, one harness-side
-/// timestamp immediately before the key byte is written to the pty
-/// master, matched against the next `W` tap the instrumented view emits.
+/// The input-path row's tap chain, opening at the key's arrival in view
+/// (the gated boundary's start) and closing one tag before the `W` the
+/// caller already holds.
+const INPUT_CHAIN: &[u8] = b"KUS";
+
+/// One label per interval the chain resolves, including the leading
+/// harness-timestamp-to-first-tag one, so there is one more label than
+/// chain tag. Only the first is outside the gated boundary.
+const INPUT_LABELS: [&str; 4] = [
+    "pty->key-read",
+    "key-read->loop-wake",
+    "loop-wake->rpc-handoff",
+    "rpc-handoff->rpc-written",
+];
+
+/// Measures the key-to-RPC-written path: per sample, the instrumented
+/// view's `K` tap (the key event arriving from the host terminal)
+/// matched against the next `W` tap (its RPC bytes written).
+///
+/// The harness-side timestamp taken before the key byte is written to
+/// the pty master opens the *search* window, not the measured interval.
+/// It is deliberately not the boundary: the pty transport between that
+/// write and view's read is the OS's, is the single largest segment of
+/// the round trip, and no view code schedules it, so including it would
+/// gate view on a number view cannot move. The `pty->key-read` segment
+/// below still reports it, as evidence rather than as a bar.
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] on tap loss, missing responses, or
-/// session failures.
+/// Returns [`BenchError::Desync`] on tap loss, missing responses, an
+/// unresolvable tap chain, or session failures.
 pub fn run_input_path(
     spec: &SpawnSpec,
     pipe: &TapPipe,
@@ -337,15 +376,10 @@ pub fn run_input_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
+    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
     let mut all_records = Vec::new();
-    let labels = [
-        "pty->key-decoded",
-        "key-decoded->loop-wake",
-        "loop-wake->rpc-handoff",
-        "rpc-handoff->rpc-written",
-    ];
-    let mut pools: Vec<Vec<f64>> = vec![Vec::new(); labels.len()];
+    let mut pools: Vec<Vec<f64>> = vec![Vec::new(); INPUT_LABELS.len()];
     for _ in 0..protocol.trials {
         let mut deltas_us = Vec::with_capacity(protocol.warmup + protocol.samples);
         for index in 0..(protocol.warmup + protocol.samples) {
@@ -370,19 +404,30 @@ pub fn run_input_path(
                     ),
                 });
             };
-            #[allow(clippy::cast_precision_loss)]
-            deltas_us.push((record.nanos - t0) as f64 / 1000.0);
+            let window = pipe.records_between(t0, record.nanos);
+            let Some(chain) = tag_chain(&window, INPUT_CHAIN, t0) else {
+                return Err(BenchError::Desync {
+                    context: format!(
+                        "keypress reached the RPC write with no resolvable K/U/S chain behind \
+                         it, so the gated boundary has no opening timestamp; screen:\n{}",
+                        session.screen_text()
+                    ),
+                });
+            };
+            let Some(read) = chain.first() else {
+                return Err(BenchError::Desync {
+                    context: "empty tap chain for a keypress".to_string(),
+                });
+            };
+            deltas_us.push(delta_us(read.nanos, record.nanos));
             if index >= protocol.warmup {
-                let window = pipe.records_between(t0, record.nanos);
-                if let Some(chain) = tag_chain(&window, b"KUS", t0) {
-                    let mut prev = t0;
-                    for (pool, hit) in pools.iter_mut().zip(&chain) {
-                        pool.push(delta_us(prev, hit.nanos));
-                        prev = hit.nanos;
-                    }
-                    if let Some(pool) = pools.get_mut(chain.len()) {
-                        pool.push(delta_us(prev, record.nanos));
-                    }
+                let mut prev = t0;
+                for (pool, hit) in pools.iter_mut().zip(&chain) {
+                    pool.push(delta_us(prev, hit.nanos));
+                    prev = hit.nanos;
+                }
+                if let Some(pool) = pools.get_mut(chain.len()) {
+                    pool.push(delta_us(prev, record.nanos));
                 }
             }
             std::thread::sleep(protocol.inter_sample);
@@ -397,7 +442,8 @@ pub fn run_input_path(
     Ok(TapsOutcome {
         gated_p99: crate::sampling::median_of_trials(&p99s)?,
         trial_distributions,
-        segments: summarize_segments(&labels, &pools),
+        segments: summarize_segments(&INPUT_LABELS, &pools),
+        overhead,
     })
 }
 
@@ -416,6 +462,7 @@ pub fn run_output_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
+    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
     let mut all_records = Vec::new();
     let labels = [
@@ -496,6 +543,7 @@ pub fn run_output_path(
         gated_p99: crate::sampling::median_of_trials(&p99s)?,
         trial_distributions,
         segments: summarize_segments(&labels, &pools),
+        overhead,
     })
 }
 
@@ -566,6 +614,10 @@ pub struct EchoPathOutcome {
     pub view_total: Segment,
     /// Bare nvim's whole measured round trip, pooled the same way.
     pub nvim_total: Segment,
+    /// The tap operation's own cost, characterized against the live
+    /// session, so the stage percentiles below can be read against what
+    /// the instrumentation between them charged.
+    pub overhead: Distribution,
     /// Measured view samples whose tag chain never resolved. These
     /// contribute to [`Self::view_total`] but to no stage, so a count
     /// above zero is exactly how far the stage percentiles and the total
@@ -690,6 +742,7 @@ pub fn run_echo_path(
     settle_deadline: Duration,
 ) -> Result<EchoPathOutcome, BenchError> {
     let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
+    let overhead = characterize_overhead(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
     let _ = pipe.drain();
 
@@ -794,6 +847,7 @@ pub fn run_echo_path(
         segments: summarize_segments(ECHO_LABELS, &pools),
         view_total,
         nvim_total,
+        overhead,
         unresolved,
         ambiguous_input_wakes,
         ambiguous_output_wakes,
@@ -884,19 +938,58 @@ pub fn run_pty_floor(
     Distribution::from_samples(&samples_us, warmup)
 }
 
+/// Interval left between characterization writes.
+///
+/// Unpaced, the loop fills the FIFO far faster than the reader drains it,
+/// and once it is full every remaining write fails immediately with
+/// `EAGAIN` -- which is cheap, and nothing like what a tap on the
+/// measured path pays. Observed on dev-linux: 100000 unpaced writes
+/// delivered 39398 records at p50 0.27us, while paced writes delivered
+/// all 20000 of them at p50 1.11us. A bar compared against the unpaced
+/// number is a bar against a mostly-failed operation, so the
+/// characterization pays for the pace.
+pub const OVERHEAD_PACE: Duration = Duration::from_micros(20);
+
+/// Writes the characterization issues. Paced, so this is also a duration:
+/// 20000 at 20us is about half a second per row, spent inside the live
+/// session rather than against an idle host.
+const OVERHEAD_ITERATIONS: usize = 20_000;
+
+/// Spins on the monotonic clock for `pace` instead of sleeping.
+///
+/// A sleeping pace measures every write on a thread that just woke, cold
+/// and possibly on another CPU, which is the one thing the real tap sites
+/// never are: they fire on a thread already running. Observed on
+/// dev-linux, that artifact lands entirely in the tail -- p50 1.07us
+/// either way, p99 6.8us sleeping.
+fn spin_for(pace: Duration) {
+    let until =
+        monotonic_nanos().saturating_add(i64::try_from(pace.as_nanos()).unwrap_or(i64::MAX));
+    while monotonic_nanos() < until {
+        std::hint::spin_loop();
+    }
+}
+
 /// Measures the tap operation's own cost with the identical code shape
 /// the in-process tap sites run (one monotonic clock read, one record
-/// format, one non-blocking FIFO write), against a drained FIFO.
+/// format, one non-blocking FIFO write), left `pace` apart so every write
+/// is one the reader actually receives. Callers pass [`OVERHEAD_PACE`];
+/// the parameter exists so the delivery guard below can be exercised
+/// against a pace that provably violates it.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if the FIFO cannot be opened for
-/// writing.
+/// writing, or if the reader received fewer records than were written --
+/// a dropped write is a write whose cost the samples understate, so a
+/// lossy characterization is reported rather than averaged in.
 pub fn characterize_overhead(
-    path: &std::path::Path,
+    pipe: &TapPipe,
     iterations: usize,
+    pace: Duration,
 ) -> Result<Distribution, BenchError> {
     use std::io::Write;
+    let path = pipe.path();
     let fd = rustix::fs::openat(
         rustix::fs::CWD,
         path,
@@ -910,6 +1003,7 @@ pub fn characterize_overhead(
         ),
     })?;
     let file = std::fs::File::from(fd);
+    let _ = pipe.drain();
     let mut samples_us = Vec::with_capacity(iterations);
     for seq in 0..iterations {
         let start = Instant::now();
@@ -917,6 +1011,20 @@ pub fn characterize_overhead(
         let line = format!("O {seq} {nanos}\n");
         let _ = (&file).write(line.as_bytes());
         samples_us.push(start.elapsed().as_secs_f64() * 1_000_000.0);
+        spin_for(pace);
+    }
+    // the reader polls on a sleep cadence rather than blocking, so the
+    // last writes need a moment to land before the count means anything
+    std::thread::sleep(Duration::from_millis(50));
+    let delivered = pipe.drain().iter().filter(|r| r.tag == b'O').count();
+    if delivered < iterations {
+        return Err(BenchError::Desync {
+            context: format!(
+                "tap overhead characterization wrote {iterations} records but the reader received \
+                 {delivered}; the dropped writes cost nothing and would understate the \
+                 instrumentation the rows are about to measure through"
+            ),
+        });
     }
     Distribution::from_samples(&samples_us, iterations / 10)
 }
@@ -1297,16 +1405,73 @@ mod tests {
 
     #[test]
     fn every_chain_tag_is_one_a_drop_check_covers() {
-        // a tag no origin stream claims would leave a dropped record
-        // undetectable, so the chain and the drop check must name the same
-        // tag set
-        for tag in ECHO_CHAIN {
+        // a tag no origin stream claims is worse than undetectable: it
+        // still consumes its crate's sequence numbers, so the drop check
+        // reads the numbers it skipped as a pipe overflow and fails every
+        // run. Observed when the key-read tag was added to the chain
+        // before this table -- "view-tui tap records dropped between seq
+        // 48 and 50" on a run that dropped nothing
+        for tag in ECHO_CHAIN.iter().chain(INPUT_CHAIN) {
             assert!(
                 TAG_ORIGINS.iter().any(|(_, tags)| tags.contains(tag)),
                 "chain tag {} belongs to no checked origin stream",
                 *tag as char
             );
         }
+    }
+
+    #[test]
+    fn the_input_chain_has_one_label_per_interval_it_resolves() {
+        assert_eq!(INPUT_LABELS.len(), INPUT_CHAIN.len() + 1);
+    }
+
+    /// A directory inside the workspace's own build tree for tests that
+    /// need a real filesystem object. Never `std::env::temp_dir()`: these
+    /// names are predictable, and a checkout's build tree is the one
+    /// directory the test already owns.
+    fn scratch_root() -> std::path::PathBuf {
+        let root = crates_dir()
+            .parent()
+            .expect("crates/ sits under the workspace root")
+            .join("target")
+            .join("view-bench-scratch");
+        std::fs::create_dir_all(&root).expect("failed to create the scratch root");
+        root
+    }
+
+    #[test]
+    fn an_undelivered_characterization_is_refused_rather_than_reported() {
+        // unpaced, the FIFO fills faster than the reader drains it and the
+        // rest of the writes fail immediately with EAGAIN. A failed write
+        // costs nothing, so its samples describe an operation the tap
+        // sites never perform -- which is how the 5us bar came to be
+        // compared against a p99 of 0.53us that no tap ever paid
+        let path = scratch_root().join(format!("unpaced-{}.fifo", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let pipe = TapPipe::create(&path).expect("tap pipe");
+        let err = characterize_overhead(&pipe, 100_000, Duration::ZERO)
+            .expect_err("a saturated FIFO must not report a percentile");
+        assert!(
+            matches!(err, BenchError::Desync { .. }),
+            "a lossy characterization is a harness fault, not a latency reading: {err:?}"
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("the reader received"),
+            "the refusal must name the delivery shortfall, got: {message}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn a_paced_characterization_delivers_every_write() {
+        let path = scratch_root().join(format!("paced-{}.fifo", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let pipe = TapPipe::create(&path).expect("tap pipe");
+        let dist = characterize_overhead(&pipe, 2_000, OVERHEAD_PACE)
+            .expect("a paced characterization delivers every write");
+        assert_eq!(dist.len(), 2_000 - 2_000 / 10);
+        let _ = std::fs::remove_file(&path);
     }
 
     /// The workspace's `crates/` directory, reached from this crate's own
@@ -1465,6 +1630,60 @@ mod tests {
             enabled_by_default.is_empty(),
             "bench-taps is reachable from a default feature set:\n{}",
             enabled_by_default.join("\n")
+        );
+    }
+
+    #[test]
+    fn every_tag_the_measured_crates_declare_is_registered_to_its_origin() {
+        // a tag absent from TAG_ORIGINS still burns its crate's sequence
+        // numbers, so verify_no_drops reads the skipped numbers as a pipe
+        // overflow and every run fails -- even runs whose chain never
+        // walks the new tag. Registration is not bookkeeping, it is what
+        // keeps the drop check honest, so the declarations are the source
+        // of truth and this test reads them rather than trusting the table
+        let mut unregistered = Vec::new();
+        let mut found = 0;
+        for path in measured_sources() {
+            let Some(origin) = TAG_ORIGINS
+                .iter()
+                .find(|(name, _)| path.components().any(|c| c.as_os_str() == *name))
+            else {
+                continue;
+            };
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if !trimmed.starts_with("pub const TAG_") {
+                    continue;
+                }
+                let Some(tag) = trimmed
+                    .split_once("= b'")
+                    .and_then(|(_, rest)| rest.as_bytes().first().copied())
+                else {
+                    continue;
+                };
+                found += 1;
+                if !origin.1.contains(&tag) {
+                    unregistered.push(format!("{}: {trimmed}", path.display()));
+                }
+            }
+        }
+        assert!(
+            found
+                >= TAG_ORIGINS
+                    .iter()
+                    .map(|(_, tags)| tags.len())
+                    .sum::<usize>(),
+            "found {found} tag declarations for a table naming more; the walk is looking in the \
+             wrong place"
+        );
+        assert!(
+            unregistered.is_empty(),
+            "tap tags declared but missing from TAG_ORIGINS (every run through them will report a \
+             phantom pipe overflow):\n{}",
+            unregistered.join("\n")
         );
     }
 }

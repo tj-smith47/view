@@ -3,3 +3,7 @@
 .superpowers/
 /compat/.cache/
 /compat/results.json
+
+# a diagnostic a failed matrix run leaves for hand-diffing against the
+# baseline; committing one would put unratcheted numbers in the repo
+*.partial.toml

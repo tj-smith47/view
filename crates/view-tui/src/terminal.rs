@@ -542,12 +542,9 @@ pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
         while let Ok(event) = crossterm::event::read() {
             let msg = match event {
                 Event::Key(k) => {
-                    let msg = encode_key(&k).map(|notation| Msg::Key(Key { notation }));
                     #[cfg(feature = "bench-taps")]
-                    if msg.is_some() {
-                        crate::tap::tap(crate::tap::TAG_KEY_DECODED);
-                    }
-                    msg
+                    crate::tap::tap(crate::tap::TAG_KEY_READ);
+                    encode_key(&k).map(|notation| Msg::Key(Key { notation }))
                 }
                 Event::Resize(width, height) => {
                     // published before the message is queued: the message

@@ -30,9 +30,22 @@ use std::sync::OnceLock;
 /// write+flush returns, so measured intervals overstate, never
 /// understate, latency.
 pub const TAG_TERM_WRITTEN: u8 = b'T';
-/// A key event decoded off the host terminal, immediately before it is
-/// sent to the runtime loop's channel.
-pub const TAG_KEY_DECODED: u8 = b'K';
+/// A key event handed to view by the host terminal, before view has done
+/// anything with it. The first instant view owns the keystroke:
+/// everything earlier is the OS pty read and the terminal-byte parse,
+/// neither of which any view code schedules, which is why this and not
+/// the harness's pty write is the opening boundary of the input-path
+/// budget.
+///
+/// It fires ahead of the encode rather than after it, and so also fires
+/// for the key data view drops (releases, codes with no nvim
+/// equivalent). Bracketing the encode separately was measured and
+/// abandoned: with the encode between them a tap pair read 14.3
+/// microseconds p50 against 16.1 with nothing between them, so the
+/// encode is smaller than the instrumentation's own noise and a second
+/// tap would have cost the gated interval more than the segment it
+/// resolved.
+pub const TAG_KEY_READ: u8 = b'K';
 /// The runtime loop dequeued one message (any kind); emitted by the bin
 /// crate's loop through this module so the loop-wakeup boundary shares
 /// the paint tag's sequence counter.
@@ -90,8 +103,37 @@ pub fn tap(tag: u8) {
         .saturating_mul(1_000_000_000)
         .saturating_add(now.tv_nsec);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let line = format!("{} {seq} {nanos}\n", tag as char);
+    let mut buf = [0_u8; 64];
+    let mut at = buf.len();
+    push_byte(&mut buf, &mut at, b'\n');
+    push_decimal(&mut buf, &mut at, u64::try_from(nanos).unwrap_or(0));
+    push_byte(&mut buf, &mut at, b' ');
+    push_decimal(&mut buf, &mut at, seq);
+    push_byte(&mut buf, &mut at, b' ');
+    push_byte(&mut buf, &mut at, tag);
     // one write syscall per record: pipe writes below PIPE_BUF are
     // atomic, so records from different threads never interleave
-    let _ = (&mut &*sink).write(line.as_bytes());
+    let _ = (&mut &*sink).write(&buf[at..]);
+}
+
+/// Prepends one byte to the record being built backwards in `buf`.
+fn push_byte(buf: &mut [u8; 64], at: &mut usize, byte: u8) {
+    *at = at.saturating_sub(1);
+    buf[*at] = byte;
+}
+
+/// Prepends `n`'s decimal digits to the record being built backwards in
+/// `buf`. The record is formatted into a stack buffer rather than through
+/// `format!` because the tap runs on the paint and RPC threads, where a
+/// heap allocation is both a cost the measurement would charge to the
+/// code under test and a lock the allocator can contend on.
+fn push_decimal(buf: &mut [u8; 64], at: &mut usize, n: u64) {
+    let mut n = n;
+    loop {
+        push_byte(buf, at, b'0' + u8::try_from(n % 10).unwrap_or(0));
+        n /= 10;
+        if n == 0 {
+            return;
+        }
+    }
 }

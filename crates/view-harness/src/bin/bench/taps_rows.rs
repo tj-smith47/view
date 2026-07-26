@@ -14,9 +14,11 @@ const PTY_FLOOR_SAMPLES: usize = 500;
 const PTY_FLOOR_WARMUP: usize = 50;
 
 /// Ceiling on the measured tap-operation p99 before the taps rows are
-/// allowed to run at all: 5% of the input-path row's 100 microsecond
-/// budget. Above this, the instrumentation itself would materially
-/// distort the number it measures.
+/// allowed to run at all. The gated input-path interval carries two
+/// interior taps (loop-wake, rpc-handoff) plus the tail of the one that
+/// opens it, so a tap at this bar puts ~15 microseconds of
+/// instrumentation inside a boundary whose per-class p99 floors are
+/// ~150-300; above it, the measurement would be reporting mostly itself.
 const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 
 /// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
@@ -45,9 +47,9 @@ fn shim_taps_spec(inner: SpawnSpec, tap_path: &Path) -> SpawnSpec {
     }
 }
 
-/// Runs one taps row (`input_path` or `output_path`) end to end:
-/// characterizes tap overhead first and refuses to measure through taps
-/// that would distort the row's own budget.
+/// Runs one taps row (`input_path` or `output_path`) end to end, then
+/// refuses to report through taps that would distort the row's own
+/// budget.
 pub(crate) fn run_taps_row(
     scenario: &str,
     fixture: &str,
@@ -61,7 +63,7 @@ pub(crate) fn run_taps_row(
         "input_path" => (
             taps::run_input_path(&spec, &pipe, protocol, deadline)
                 .with_context(|| format!("input_path/{fixture} run failed"))?,
-            "p99_us",
+            "key_to_rpc_p99_us",
             "us",
         ),
         _ => (
@@ -95,6 +97,7 @@ pub(crate) fn run_taps_row(
             segment.label, segment.p50_us, segment.p99_us, segment.samples
         );
     }
+    report_overhead(&outcome.overhead)?;
     println!(
         "{}",
         report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)
@@ -104,8 +107,8 @@ pub(crate) fn run_taps_row(
     Ok(metrics)
 }
 
-/// Prepares one instrumented-build side: the tap FIFO, the overhead
-/// characterization that guards it, and the shimmed spawn spec.
+/// Prepares one instrumented-build side: the tap FIFO and the shimmed
+/// spawn spec.
 fn taps_side(
     fixture: &str,
     world: &CellWorld,
@@ -122,7 +125,17 @@ fn taps_side(
     let cwd = side.cwd.clone();
     let tap_path = cwd.join("tap.fifo");
     let pipe = taps::TapPipe::create(&tap_path)?;
-    let overhead = taps::characterize_overhead(&tap_path, 100_000)?;
+    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
+    Ok((pipe, spec, cwd))
+}
+
+/// Prints the row's own tap-overhead characterization and refuses the row
+/// if the instrumentation is a material share of what it measured.
+///
+/// The characterization runs inside the live session, not before it: an
+/// idle-host number cannot see the contention the tap sites run under, and
+/// a bar compared against it is a bar against a different operation.
+fn report_overhead(overhead: &view_bench::sampling::Distribution) -> Result<()> {
     println!(
         "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations (bar {TAP_OVERHEAD_BAR_US}us)",
         overhead.p50(),
@@ -131,13 +144,12 @@ fn taps_side(
     );
     if overhead.p99() > TAP_OVERHEAD_BAR_US {
         bail!(
-            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us (5% of the \
-             input-path budget); the tap design must change before this row can be trusted",
+            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us; the tap design \
+             must change before this row can be trusted",
             overhead.p99()
         );
     }
-    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
-    Ok((pipe, spec, cwd))
+    Ok(())
 }
 
 /// Runs the report-only `echo_path` decomposition: the echo round trip on
@@ -218,6 +230,7 @@ pub(crate) fn run_echo_path_row(
         );
     }
 
+    report_overhead(&outcome.overhead)?;
     let floor = taps::run_pty_floor(
         &cwd,
         PTY_FLOOR_SAMPLES,

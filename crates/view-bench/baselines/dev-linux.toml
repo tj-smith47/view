@@ -27,7 +27,7 @@ cadence_p99_ms = 20.880463
 pace_ratio = 1.0035839351461207
 
 [input_path.minimal]
-p99_us = 269.606
+key_to_rpc_p99_us = 154.749
 
 [memory.minimal]
 pss_mb = 3.3017578125
