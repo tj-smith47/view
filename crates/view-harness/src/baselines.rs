@@ -15,9 +15,14 @@
 //! paired_delta_p99_ms = 0.29
 //! ```
 //!
-//! Every metric is lower-is-better, so one gate rule covers all cells:
-//! a breach is a measured value above `baseline * headroom`, with the
-//! headroom chosen per metric kind and machine class by [`gate_headroom`].
+//! Every metric is lower-is-better, so one gate rule covers all cells: a
+//! breach is a measured value above the bar its recorded value implies,
+//! with the bar policy chosen per metric kind and machine class by
+//! [`gate_headroom`]. Most metrics are positive by construction (a
+//! latency, a ratio, a size) and take proportional headroom; the paired
+//! delta is a signed difference and takes [`Headroom::Signed`], which is
+//! the same allowance measured off the magnitude so it does not invert
+//! below zero.
 //!
 //! Machine classes split into two gate policies, encoded in the class
 //! name itself (see [`is_controlled_class`]): a `controlled-` prefixed
@@ -47,6 +52,72 @@ pub const RATIO_HEADROOM: f64 = 1.25;
 /// under heavy host load is loud and explainable, while a gross
 /// regression (2x) still cannot hide inside it.
 pub const ABSOLUTE_HEADROOM: f64 = 1.5;
+
+/// The smallest allowance [`Headroom::Signed`] grants, in the paired
+/// delta's own unit (ms).
+///
+/// A proportional allowance shrinks to nothing as a value approaches zero,
+/// which is exactly where a signed metric spends its most interesting
+/// range: at a recorded delta of 0.01 ms a x1.25 factor is a 0.0025 ms
+/// band, far under the round trip's own run-to-run jitter. This floor is
+/// the same order as the resolution floor a paired echo round trip is
+/// measured at, so it absorbs that jitter while a real slowdown of view
+/// against nvim still breaches.
+pub const SIGNED_DELTA_FLOOR_MS: f64 = 0.25;
+
+/// How a metric's gated bar follows from its recorded value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
+pub enum Headroom {
+    /// `recorded * factor`. Valid only because these metrics are positive
+    /// by construction.
+    Proportional(f64),
+    /// `recorded + max(|recorded| * (factor - 1), floor)`, for a metric
+    /// that can legitimately be negative.
+    ///
+    /// A proportional factor inverts there: at a recorded -0.20 a x1.25
+    /// "allowance" yields -0.25, a bar *tighter* than the value that
+    /// produced it, so the very measurement just recorded breaches. Taking
+    /// the allowance off the magnitude and adding it keeps the bar above
+    /// the recorded value at every sign, and reduces to the proportional
+    /// answer exactly whenever the recorded value is positive and large
+    /// enough for the factor to clear the floor.
+    Signed { factor: f64, floor: f64 },
+}
+
+impl Headroom {
+    /// The bar `recorded` implies under this policy.
+    #[must_use]
+    pub fn bar(self, recorded: f64) -> f64 {
+        match self {
+            Self::Proportional(factor) => recorded * factor,
+            Self::Signed { factor, floor } => {
+                recorded + (recorded.abs() * (factor - 1.0)).max(floor)
+            }
+        }
+    }
+
+    /// Whether a metric under this policy may legitimately hold a value at
+    /// or below zero, which decides how far its ratchet is allowed to fall.
+    #[must_use]
+    pub fn admits_non_positive(self) -> bool {
+        matches!(self, Self::Signed { .. })
+    }
+}
+
+impl std::fmt::Display for Headroom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Proportional(factor) => write!(f, "x headroom {factor}"),
+            Self::Signed { factor, floor } => {
+                write!(
+                    f,
+                    "+ signed headroom {factor} over magnitude, floor {floor}"
+                )
+            }
+        }
+    }
+}
 
 /// The platforms a machine-class name may claim, spelled as
 /// [`std::env::consts::OS`] spells them so the two can be compared
@@ -135,14 +206,22 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// statistics gate there under the standard ratio headroom, and the spec
 /// p99 budget gets a real bar instead of a reference number.
 #[must_use]
-pub fn gate_headroom(metric: &str, controlled: bool) -> Option<f64> {
-    if metric == "paired_delta_p99_ms" || metric == "ratio_p99" {
-        return controlled.then_some(RATIO_HEADROOM);
+pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
+    if metric == "paired_delta_p99_ms" {
+        // p99(view[i] - nvim[i]): negative whenever view beats nvim, which
+        // is a state the paired scenario is built to reach and report
+        return controlled.then_some(Headroom::Signed {
+            factor: RATIO_HEADROOM,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        });
+    }
+    if metric == "ratio_p99" {
+        return controlled.then_some(Headroom::Proportional(RATIO_HEADROOM));
     }
     if metric.contains("ratio") {
-        Some(RATIO_HEADROOM)
+        Some(Headroom::Proportional(RATIO_HEADROOM))
     } else {
-        Some(ABSOLUTE_HEADROOM)
+        Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
     }
 }
 
@@ -264,7 +343,7 @@ pub struct Breach {
     pub metric: String,
     pub measured: f64,
     pub recorded: f64,
-    pub headroom: f64,
+    pub headroom: Headroom,
     pub bar: f64,
 }
 
@@ -272,7 +351,7 @@ impl std::fmt::Display for Breach {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "GATE BREACH [{}.{}] {}: measured {:.4} > bar {:.4} (recorded {:.4} x headroom {})",
+            "GATE BREACH [{}.{}] {}: measured {:.4} > bar {:.4} (recorded {:.4} {})",
             self.scenario,
             self.fixture,
             self.metric,
@@ -307,7 +386,7 @@ pub fn gate_cell(
         let Some(headroom) = gate_headroom(metric, controlled) else {
             continue;
         };
-        let bar = recorded_value * headroom;
+        let bar = headroom.bar(*recorded_value);
         if measured_value > bar {
             breaches.push(Breach {
                 scenario: scenario.to_string(),
@@ -452,7 +531,7 @@ pub enum RatchetOutcome {
     Improved { metric: String, old: f64, new: f64 },
     /// The measured value did not beat the recorded bar, so the bar is
     /// held. `regression_masked` is set when the measured value also
-    /// exceeds the gated bar (`recorded * headroom`): the record is
+    /// exceeds the gated bar: the record is
     /// refusing to lower a bar the measurement would have breached, which
     /// is a regression signal the operator must see, not noise the ratchet
     /// should silently absorb.
@@ -462,6 +541,14 @@ pub enum RatchetOutcome {
         measured: f64,
         regression_masked: bool,
     },
+    /// The measurement was not a number a bar can be derived from (NaN,
+    /// infinite, or non-positive for a metric whose values are positive by
+    /// construction), so nothing was recorded for it.
+    ///
+    /// Recording it anyway is the worse option in both directions: as a
+    /// fresh value it writes a bar every later honest measurement breaches,
+    /// and as a held one it hides that the run produced no usable number.
+    Rejected { metric: String, value: f64 },
 }
 
 /// Ratchets one cell's `measured` metrics against the `existing` recorded
@@ -495,6 +582,23 @@ pub fn ratchet_cell(
     let mut cell = CellMetrics::new();
     let mut outcomes = Vec::new();
     for (metric, &value) in measured {
+        let headroom = gate_headroom(metric, controlled);
+        // most metrics are a latency, a ratio or a size and cannot be zero
+        // or below without the run having gone wrong; the signed paired
+        // delta reaches negative exactly when view beats nvim, so it is
+        // held to finiteness alone
+        let signed = headroom.is_some_and(Headroom::admits_non_positive);
+        let usable = value.is_finite() && (signed || value > 0.0);
+        if !usable {
+            outcomes.push(RatchetOutcome::Rejected {
+                metric: metric.clone(),
+                value,
+            });
+            if let Some(&recorded) = existing.and_then(|existing| existing.get(metric)) {
+                cell.insert(metric.clone(), recorded);
+            }
+            continue;
+        }
         match existing.and_then(|existing| existing.get(metric)) {
             None => {
                 cell.insert(metric.clone(), value);
@@ -503,11 +607,7 @@ pub fn ratchet_cell(
                     value,
                 });
             }
-            // a non-finite or non-positive measurement is not a real
-            // improvement: every recorded metric is a positive latency, ratio,
-            // or size, and lowering the bar to 0.0 or NaN would make the gate
-            // breach on every later honest measurement
-            Some(&recorded) if value.is_finite() && value > 0.0 && value < recorded => {
+            Some(&recorded) if value < recorded => {
                 cell.insert(metric.clone(), value);
                 outcomes.push(RatchetOutcome::Improved {
                     metric: metric.clone(),
@@ -517,8 +617,8 @@ pub fn ratchet_cell(
             }
             Some(&recorded) => {
                 cell.insert(metric.clone(), recorded);
-                let regression_masked = gate_headroom(metric, controlled)
-                    .is_some_and(|headroom| value > recorded * headroom);
+                let regression_masked =
+                    headroom.is_some_and(|headroom| value > headroom.bar(recorded));
                 outcomes.push(RatchetOutcome::Held {
                     metric: metric.clone(),
                     recorded,
@@ -664,7 +764,21 @@ impl RecordPlan {
     /// cells" as "the bars all moved."
     #[must_use]
     pub fn report_lines(&self, target: &str) -> Vec<String> {
+        self.report(target).info
+    }
+
+    /// The record's report, split by where each line must go: `info` is the
+    /// ordinary per-metric ledger, `alerts` is what an operator must not
+    /// skim past.
+    ///
+    /// A masked regression is the one outcome here that reports a *worse*
+    /// measurement while still succeeding, so it goes to stderr with the
+    /// breaches rather than into the stdout ledger it would otherwise sit
+    /// in the middle of.
+    #[must_use]
+    pub fn report(&self, target: &str) -> RecordReport {
         let mut lines = Vec::new();
+        let mut alerts = Vec::new();
         if let Some(reason) = &self.reset_reason {
             lines.push(format!("      {reason}"));
         }
@@ -694,11 +808,23 @@ impl RecordPlan {
                         recorded,
                         measured,
                         regression_masked: true,
-                    } => format!(
-                        "      REGRESSION MASKED {scenario}.{fixture} {metric}: measured \
-                         {measured:.4} would breach the recorded bar {recorded:.4}, held to keep \
-                         the ratchet; a later --gate will breach on it, so investigate first"
-                    ),
+                    } => {
+                        alerts.push(format!(
+                            "RECORD REGRESSION MASKED [{scenario}.{fixture}] {metric}: measured \
+                             {measured:.4} would breach the recorded bar {recorded:.4}, held to \
+                             keep the ratchet; a later --gate will breach on it, so investigate \
+                             first"
+                        ));
+                        continue;
+                    }
+                    RatchetOutcome::Rejected { metric, value } => {
+                        alerts.push(format!(
+                            "RECORD REJECTED [{scenario}.{fixture}] {metric}: measured {value:.4} \
+                             is not a value a bar can be derived from, so nothing was recorded \
+                             for it this run"
+                        ));
+                        continue;
+                    }
                 });
             }
         }
@@ -708,13 +834,30 @@ impl RecordPlan {
         ));
         let masked = self.masked_regressions();
         if masked > 0 {
-            lines.push(format!(
-                "      WARNING: {masked} held metric(s) would have breached the gate; the record \
+            alerts.push(format!(
+                "RECORD WARNING: {masked} held metric(s) would have breached the gate; the record \
                  kept the better bar but the measurement shows a regression"
             ));
         }
-        lines
+        RecordReport {
+            info: lines,
+            alerts,
+        }
     }
+}
+
+/// A [`RecordPlan`]'s report, split by stream.
+///
+/// Two vectors rather than one tagged list: the caller's only decision is
+/// which stream a line goes to, and a caller that has to match on a tag to
+/// find that out can get it wrong silently.
+#[derive(Debug, Clone, Default)]
+#[non_exhaustive]
+pub struct RecordReport {
+    /// The per-metric ledger and the recorded-cell count, for stdout.
+    pub info: Vec<String>,
+    /// Outcomes an operator must act on, for stderr.
+    pub alerts: Vec<String>,
 }
 
 /// Rejects using a baseline file whose recorded `machine_class` differs
@@ -867,7 +1010,7 @@ mod tests {
         );
         assert_eq!(bad.len(), 1);
         assert_eq!(bad[0].metric, "ratio_p50");
-        assert_eq!(bad[0].headroom, RATIO_HEADROOM);
+        assert_eq!(bad[0].headroom, Headroom::Proportional(RATIO_HEADROOM));
         let rendered = bad[0].to_string();
         assert!(
             rendered.contains("[echo.minimal]"),
@@ -886,32 +1029,44 @@ mod tests {
     #[test]
     fn headroom_policy_maps_metric_kinds() {
         for controlled in [false, true] {
-            assert_eq!(gate_headroom("ratio_p50", controlled), Some(RATIO_HEADROOM));
+            assert_eq!(
+                gate_headroom("ratio_p50", controlled),
+                Some(Headroom::Proportional(RATIO_HEADROOM))
+            );
             assert_eq!(
                 gate_headroom("pace_ratio", controlled),
-                Some(RATIO_HEADROOM)
+                Some(Headroom::Proportional(RATIO_HEADROOM))
             );
             assert_eq!(
                 gate_headroom("ratio_vs_nvim", controlled),
-                Some(RATIO_HEADROOM)
+                Some(Headroom::Proportional(RATIO_HEADROOM))
             );
             assert_eq!(
                 gate_headroom("staleness_p99_ms", controlled),
-                Some(ABSOLUTE_HEADROOM)
+                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
             );
             assert_eq!(
                 gate_headroom("view_p99_ms", controlled),
-                Some(ABSOLUTE_HEADROOM)
+                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
             );
-            assert_eq!(gate_headroom("pss_mb", controlled), Some(ABSOLUTE_HEADROOM));
+            assert_eq!(
+                gate_headroom("pss_mb", controlled),
+                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
+            );
         }
         assert_eq!(gate_headroom("paired_delta_p99_ms", false), None);
         assert_eq!(gate_headroom("ratio_p99", false), None);
         assert_eq!(
             gate_headroom("paired_delta_p99_ms", true),
-            Some(RATIO_HEADROOM)
+            Some(Headroom::Signed {
+                factor: RATIO_HEADROOM,
+                floor: SIGNED_DELTA_FLOOR_MS
+            })
         );
-        assert_eq!(gate_headroom("ratio_p99", true), Some(RATIO_HEADROOM));
+        assert_eq!(
+            gate_headroom("ratio_p99", true),
+            Some(Headroom::Proportional(RATIO_HEADROOM))
+        );
     }
 
     #[test]
@@ -934,9 +1089,23 @@ mod tests {
             2,
             "both tail statistics must gate on a controlled class; got {breaches:?}"
         );
-        for breach in &breaches {
-            assert_eq!(breach.headroom, RATIO_HEADROOM);
-        }
+        assert_eq!(
+            breaches
+                .iter()
+                .find(|b| b.metric == "ratio_p99")
+                .map(|b| b.headroom),
+            Some(Headroom::Proportional(RATIO_HEADROOM))
+        );
+        assert_eq!(
+            breaches
+                .iter()
+                .find(|b| b.metric == "paired_delta_p99_ms")
+                .map(|b| b.headroom),
+            Some(Headroom::Signed {
+                factor: RATIO_HEADROOM,
+                floor: SIGNED_DELTA_FLOOR_MS
+            })
+        );
         let within = metrics(&[("paired_delta_p99_ms", 0.7), ("ratio_p99", 1.2)]);
         assert!(gate_cell("echo", "minimal", &within, &recorded, "controlled-linux").is_empty());
     }
@@ -1003,7 +1172,8 @@ mod tests {
             .find(|o| match o {
                 RatchetOutcome::New { metric, .. }
                 | RatchetOutcome::Improved { metric, .. }
-                | RatchetOutcome::Held { metric, .. } => metric == name,
+                | RatchetOutcome::Held { metric, .. }
+                | RatchetOutcome::Rejected { metric, .. } => metric == name,
             })
             .expect("outcome present for the named metric")
     }
@@ -1308,14 +1478,106 @@ mod tests {
             &measured,
         );
         assert_eq!(plan.masked_regressions(), 1);
-        let lines = plan.report_lines("dev-linux.toml");
+        let report = plan.report("dev-linux.toml");
+        // both belong to the alert stream, not the ledger: a run that
+        // otherwise succeeds is exactly where a worse measurement gets
+        // skimmed past
         assert!(
-            lines.iter().any(|l| l.contains("REGRESSION MASKED")),
-            "a masked regression must be called out: {lines:?}"
+            report
+                .alerts
+                .iter()
+                .any(|l| l.contains("REGRESSION MASKED")),
+            "a masked regression must be called out: {report:?}"
         );
         assert!(
-            lines.iter().any(|l| l.starts_with("      WARNING:")),
-            "a trailing warning must summarize the masked regression: {lines:?}"
+            report.alerts.iter().any(|l| l.contains("RECORD WARNING:")),
+            "a warning must summarize the masked regression: {report:?}"
+        );
+        assert!(
+            !report.info.iter().any(|l| l.contains("MASKED")),
+            "the ledger must not be where a masked regression is reported: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_signed_delta_bar_stays_above_the_value_it_was_recorded_from() {
+        // the bug a proportional factor has on a signed metric: recorded
+        // -0.20 x 1.25 = -0.25, a bar tighter than the recorded value, so
+        // the very measurement just recorded breaches its own bar
+        let recorded = metrics(&[("paired_delta_p99_ms", -0.20)]);
+        let same = metrics(&[("paired_delta_p99_ms", -0.20)]);
+        assert!(
+            gate_cell("echo", "minimal", &same, &recorded, "controlled-linux").is_empty(),
+            "a re-measurement equal to the recorded value must never breach"
+        );
+
+        let worse = metrics(&[("paired_delta_p99_ms", 0.40)]);
+        assert_eq!(
+            gate_cell("echo", "minimal", &worse, &recorded, "controlled-linux").len(),
+            1,
+            "view turning 0.6ms slower than nvim must still breach"
+        );
+    }
+
+    #[test]
+    fn a_signed_delta_bar_matches_the_proportional_one_where_both_are_valid() {
+        // the signed policy is the same allowance measured off the
+        // magnitude, so it must not silently retune the positive range the
+        // recorded baselines actually live in
+        let headroom = Headroom::Signed {
+            factor: RATIO_HEADROOM,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        };
+        let recorded = 8.676_833_f64;
+        assert!(
+            (headroom.bar(recorded) - recorded * RATIO_HEADROOM).abs() < 1e-9,
+            "a value large enough for the factor to clear the floor must gate identically"
+        );
+    }
+
+    #[test]
+    fn a_signed_delta_ratchets_down_across_zero() {
+        // view overtaking nvim is the improvement this metric exists to
+        // report; refusing to record it tells the operator the opposite
+        let existing = metrics(&[("paired_delta_p99_ms", 0.45)]);
+        let measured = metrics(&[("paired_delta_p99_ms", -0.30)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, true);
+        assert_eq!(cell.get("paired_delta_p99_ms"), Some(&-0.30));
+        assert!(
+            matches!(
+                outcome_for(&outcomes, "paired_delta_p99_ms"),
+                RatchetOutcome::Improved { new, .. } if (*new + 0.30).abs() < 1e-9
+            ),
+            "expected an Improved outcome, got {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn a_non_finite_measurement_is_rejected_rather_than_recorded() {
+        let measured = metrics(&[("view_p99_ms", f64::NAN)]);
+        let (cell, outcomes) = ratchet_cell(None, &measured, false);
+        assert!(
+            cell.is_empty(),
+            "a NaN must not be written as a fresh bar: {cell:?}"
+        );
+        assert!(
+            matches!(
+                outcome_for(&outcomes, "view_p99_ms"),
+                RatchetOutcome::Rejected { .. }
+            ),
+            "expected a Rejected outcome, got {outcomes:?}"
+        );
+    }
+
+    #[test]
+    fn a_rejected_measurement_keeps_the_bar_it_could_not_replace() {
+        let existing = metrics(&[("view_p99_ms", 2.0)]);
+        let measured = metrics(&[("view_p99_ms", f64::INFINITY)]);
+        let (cell, _) = ratchet_cell(Some(&existing), &measured, false);
+        assert_eq!(
+            cell.get("view_p99_ms"),
+            Some(&2.0),
+            "rejecting a measurement must not also drop the recorded bar"
         );
     }
 

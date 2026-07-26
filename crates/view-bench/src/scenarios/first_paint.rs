@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::boundaries::any_visible_cell;
+use crate::boundaries::screen_holds;
 use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::Side;
 use crate::scenarios::Protocol;
@@ -24,20 +24,22 @@ use crate::BenchError;
 /// hundreds of milliseconds to its first frame.
 const FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One cold spawn: process start to first visible cell, then a bounded
+/// One cold spawn: process start until `marker` -- content only the
+/// opened fixture buffer can supply -- is on screen, then a bounded
 /// kill+reap so sample teardown can never leak processes across the run.
-fn sample_once(spec: &SpawnSpec) -> Result<f64, BenchError> {
+fn sample_once(spec: &SpawnSpec, marker: &str) -> Result<f64, BenchError> {
     let start = Instant::now();
     let mut session = BenchSession::spawn(spec)?;
     let deadline = start + FIRST_FRAME_TIMEOUT;
     loop {
-        if session.with_screen(any_visible_cell) {
+        if session.with_screen(|screen| screen_holds(screen, marker)) {
             break;
         }
         if Instant::now() >= deadline {
             return Err(BenchError::Desync {
                 context: format!(
-                    "no visible cell within {FIRST_FRAME_TIMEOUT:?} of spawn; screen:\n{}",
+                    "buffer content {marker:?} never painted within {FIRST_FRAME_TIMEOUT:?} of \
+                     spawn; screen:\n{}",
                     session.screen_text()
                 ),
             });
@@ -66,12 +68,13 @@ pub struct FirstPaintOutcome {
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] if any spawn never paints, or any
-/// underlying session error.
+/// Returns [`BenchError::Desync`] if any spawn never paints `marker`, or
+/// any underlying session error.
 pub fn run(
     view: &SpawnSpec,
     nvim: &SpawnSpec,
     protocol: &Protocol,
+    marker: &str,
 ) -> Result<FirstPaintOutcome, BenchError> {
     let per_side = protocol.warmup + protocol.samples;
     let mut view_ms = Vec::with_capacity(per_side);
@@ -89,7 +92,7 @@ pub fn run(
                 Side::View => (view, &mut view_ms, "view"),
                 Side::Nvim => (nvim, &mut nvim_ms, "nvim"),
             };
-            sink.push(sample_once(spec).map_err(|e| label(name, e))?);
+            sink.push(sample_once(spec, marker).map_err(|e| label(name, e))?);
         }
         std::thread::sleep(protocol.inter_sample);
     }

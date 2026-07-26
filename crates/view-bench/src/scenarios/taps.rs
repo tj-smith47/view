@@ -380,7 +380,9 @@ pub fn run_input_path(
                         pool.push(delta_us(prev, hit.nanos));
                         prev = hit.nanos;
                     }
-                    pools[chain.len()].push(delta_us(prev, record.nanos));
+                    if let Some(pool) = pools.get_mut(chain.len()) {
+                        pool.push(delta_us(prev, record.nanos));
+                    }
                 }
             }
             std::thread::sleep(protocol.inter_sample);
@@ -476,7 +478,9 @@ pub fn run_output_path(
                         pool.push(delta_us(prev, hit.nanos));
                         prev = hit.nanos;
                     }
-                    pools[chain.len()].push(delta_us(prev, paint.nanos));
+                    if let Some(pool) = pools.get_mut(chain.len()) {
+                        pool.push(delta_us(prev, paint.nanos));
+                    }
                 }
             }
             std::thread::sleep(protocol.inter_sample);
@@ -499,8 +503,8 @@ pub fn run_output_path(
 /// trip: key decoded off the host terminal, runtime loop woken, RPC
 /// encoded and handed off, RPC bytes written to the engine, then the
 /// engine's redraw parsed, the loop woken again, the frame's draw
-/// started, its frame prepared, its terminal size probed, its damaged
-/// rows composited, its bytes flushed, and the terminal write completed.
+/// started, its frame prepared, its paint area resolved, its damaged rows
+/// composited, its bytes flushed, and the terminal write completed.
 const ECHO_CHAIN: &[u8] = b"KUSWRUBPGCFT";
 
 /// One label per interval of [`ECHO_CHAIN`], anchored at the harness's
@@ -516,8 +520,8 @@ const ECHO_LABELS: &[&str] = &[
     "redraw-parsed->loop-wake",
     "loop-wake->draw-start",
     "draw-start->frame-prepared",
-    "frame-prepared->size-probed",
-    "size-probed->composed",
+    "frame-prepared->area-resolved",
+    "area-resolved->composed",
     "composed->flush-start",
     "flush-start->term-written",
     "term-written->glyph-seen",

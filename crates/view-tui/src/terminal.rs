@@ -401,7 +401,7 @@ impl Term {
         // on the next frame without the syscall.
         let area = frame_area(model);
         #[cfg(feature = "bench-taps")]
-        crate::tap::tap(crate::tap::TAG_SIZE_PROBED);
+        crate::tap::tap(crate::tap::TAG_AREA_RESOLVED);
         let resized = self.shadow.resize(area);
         let force_full = resized || self.last_offset != Some(offset);
         if resized {

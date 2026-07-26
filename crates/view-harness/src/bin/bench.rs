@@ -315,6 +315,32 @@ fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
 }
 
 /// Builds the paired view/nvim spawn specs for one cell.
+/// Buffer content the first-paint boundary waits for.
+///
+/// Both sides open the same scratch path, so this is the one event both
+/// can be timed to: the editor showing the file. Without it the boundary
+/// is "any cell has ink", which view satisfies with its own pre-attach
+/// placeholder chrome and bare nvim satisfies with its empty-buffer
+/// window -- two different events, timed as if they were one, and a view
+/// that stopped attaching its engine at all would still record a healthy
+/// number.
+///
+/// Deliberately not a word an editor's own chrome could ever print.
+const FIRST_PAINT_MARKER: &str = "VIEWBENCHCOLDSTARTMARKER";
+
+/// Writes [`FIRST_PAINT_MARKER`] into the scratch file `spec` opens, as
+/// the buffer's first line so it lands in the first painted frame.
+fn plant_first_paint_marker(spec: &SpawnSpec) -> Result<()> {
+    let target = spec
+        .args
+        .first()
+        .map(PathBuf::from)
+        .context("a paired spawn spec must open the scratch file as its first argument")?;
+    std::fs::write(&target, format!("{FIRST_PAINT_MARKER}\n"))
+        .with_context(|| format!("planting the first-paint marker in {}", target.display()))?;
+    Ok(())
+}
+
 fn paired_specs(
     world: &CellWorld,
     fixture: &str,
@@ -529,7 +555,9 @@ fn run_cell(
         }
         "first_paint" => {
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
-            let outcome = first_paint::run(&view_spec, &nvim_spec, protocol)
+            plant_first_paint_marker(&view_spec)?;
+            plant_first_paint_marker(&nvim_spec)?;
+            let outcome = first_paint::run(&view_spec, &nvim_spec, protocol, FIRST_PAINT_MARKER)
                 .with_context(|| format!("first_paint/{fixture} run failed"))?;
             println!(
                 "{}",
@@ -794,6 +822,7 @@ fn main() -> Result<()> {
     let path = baseline_path(&cli.class);
     let bootstrapping = cli.bootstrap && !path.exists();
     let recording = cli.record || bootstrapping;
+    let mut masked_regressions = 0usize;
     let gating = cli.gate && !bootstrapping;
     if cli.bootstrap {
         if bootstrapping {
@@ -935,9 +964,51 @@ fn main() -> Result<()> {
     }
 
     let mut measured: Vec<baselines::MeasuredCell> = Vec::new();
+    let mut failed: Vec<String> = Vec::new();
     for (scenario, fixture) in &cells {
-        let metrics = run_cell(scenario, fixture, &bins, &protocol)?;
-        measured.push((scenario.clone(), fixture.clone(), metrics));
+        match run_cell(scenario, fixture, &bins, &protocol) {
+            Ok(metrics) => measured.push((scenario.clone(), fixture.clone(), metrics)),
+            // one cell failing says nothing about the cells that already
+            // measured, and the cells still queued behind it are worth the
+            // minutes the matrix has already spent getting here: keep
+            // going, and refuse the run once, at the end, with the whole
+            // picture rather than only the first thing that broke
+            Err(err) => {
+                eprintln!("CELL FAILED [{scenario}.{fixture}]: {err:#}");
+                failed.push(format!("{scenario}.{fixture}: {err:#}"));
+            }
+        }
+    }
+
+    if !failed.is_empty() {
+        // never written into the authoritative baseline: a full-matrix
+        // record rebuilds that file, so recording 11 of 12 cells would
+        // delete the twelfth's bars outright, and a gate verdict drawn from
+        // an incomplete matrix is a pass that proves nothing about the cell
+        // that never ran. The measurements that did land are still real, so
+        // they go somewhere the operator can diff them against the baseline
+        // by hand.
+        let partial_path = path.with_extension("partial.toml");
+        let partial = baselines::plan_record(
+            None,
+            baselines::RecordMode::FullMatrix,
+            &cli.class,
+            &pin,
+            &measured,
+        );
+        baselines::save(&partial_path, &partial.file)?;
+        eprintln!(
+            "MATRIX INCOMPLETE: {} of {} cell(s) measured, {} failed; nothing was recorded and \
+             no gate verdict was reached. The measured cells are in {} (raw, not ratcheted).",
+            measured.len(),
+            cells.len(),
+            failed.len(),
+            partial_path.display()
+        );
+        for line in &failed {
+            eprintln!("  {line}");
+        }
+        std::process::exit(EXIT_INCOMPLETE_MATRIX);
     }
 
     announce_load("end");
@@ -1006,9 +1077,19 @@ fn main() -> Result<()> {
 
         let plan = baselines::plan_record(existing, mode, &cli.class, &pin, &measured);
         baselines::save(&path, &plan.file)?;
-        for line in plan.report_lines(&path.display().to_string()) {
+        let report = plan.report(&path.display().to_string());
+        for line in report.info {
             println!("{line}");
         }
+        for line in &report.alerts {
+            eprintln!("{line}");
+        }
+        // the record itself succeeded, so this is not a failure exit -- but a
+        // masked regression is a worse measurement reported by a command that
+        // otherwise looks entirely successful, and exit 0 is what makes it
+        // skippable in a CI log. A distinct code says "written, and you have
+        // something to look at" without colliding with the gate's own 1.
+        masked_regressions = plan.masked_regressions();
     }
 
     if gating {
@@ -1067,12 +1148,30 @@ fn main() -> Result<()> {
         if breaches.is_empty() && uncovered.is_empty() && unmeasured.is_empty() {
             println!("gate OK: {} cell(s) within recorded bars", measured.len());
         } else {
-            std::process::exit(1);
+            std::process::exit(EXIT_GATE_BREACH);
         }
+    }
+
+    if masked_regressions > 0 {
+        std::process::exit(EXIT_RECORD_MASKED_REGRESSION);
     }
 
     Ok(())
 }
+
+/// A gate run found a measurement outside its recorded bar, a baseline cell
+/// nothing measured, or a recorded metric this run produced no value for.
+const EXIT_GATE_BREACH: i32 = 1;
+
+/// A record run wrote its baseline, but held at least one bar against a
+/// measurement that would breach it: the file is correct and the run is not
+/// a failure, yet there is a regression behind the better recorded number.
+const EXIT_RECORD_MASKED_REGRESSION: i32 = 3;
+
+/// At least one cell failed to measure, so the matrix is incomplete: no
+/// baseline was written and no gate verdict was reached. Distinct from a
+/// breach, which is a complete matrix reporting a real regression.
+const EXIT_INCOMPLETE_MATRIX: i32 = 4;
 
 #[cfg(test)]
 mod tests {
@@ -1091,6 +1190,32 @@ mod tests {
         let bin = Path::new("/nonexistent/never-spawned");
         let (view, nvim) = paired_specs(&world, "minimal", bin, bin).unwrap();
         (world, view, nvim)
+    }
+
+    #[test]
+    fn both_sides_of_a_pair_open_the_scratch_file_as_their_first_argument() {
+        // what plant_first_paint_marker writes through: if either side's
+        // first argument stopped being the opened file, the marker would
+        // land somewhere the editor never shows and every first_paint
+        // sample would time out instead of measuring
+        let (_world, view, nvim) = paired_specs_for_test();
+        for spec in [&view, &nvim] {
+            let first = spec.args.first().map(PathBuf::from);
+            assert_eq!(
+                first.as_ref().and_then(|p| p.file_name()),
+                Some(std::ffi::OsStr::new("scratch.txt")),
+                "expected the scratch file first, got {:?}",
+                spec.args
+            );
+        }
+    }
+
+    #[test]
+    fn planting_the_marker_writes_it_as_the_buffers_first_line() {
+        let (_world, view, _nvim) = paired_specs_for_test();
+        plant_first_paint_marker(&view).unwrap();
+        let planted = std::fs::read_to_string(PathBuf::from(&view.args[0])).unwrap();
+        assert_eq!(planted.lines().next(), Some(FIRST_PAINT_MARKER));
     }
 
     #[test]

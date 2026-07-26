@@ -77,7 +77,13 @@ pub fn single_new_position(before: &[(u16, u16)], now: &[(u16, u16)]) -> Option<
 }
 
 /// Whether any cell on screen holds visible (non-empty, non-space)
-/// contents; the first-frame boundary for a freshly spawned process.
+/// contents.
+///
+/// Deliberately *not* the first-frame boundary for a paired spawn: view
+/// runs nvim as a child and paints its own placeholder chrome well before
+/// the engine attaches, while bare nvim's first visible cell is the buffer
+/// window itself. Timing the two to this predicate times two different
+/// events. Use [`row_holds`] against known fixture content for that.
 #[must_use]
 pub fn any_visible_cell(screen: &vt100::Screen) -> bool {
     let (rows, cols) = screen.size();
@@ -92,6 +98,20 @@ pub fn any_visible_cell(screen: &vt100::Screen) -> bool {
         }
     }
     false
+}
+
+/// Whether `needle` appears anywhere on screen.
+///
+/// The first-frame boundary for a paired spawn, where `needle` is content
+/// only the opened buffer can supply: both sides then time the same event
+/// -- the editor showing the file -- rather than whichever chrome each one
+/// happens to paint first. A view that stopped attaching its engine
+/// entirely still paints chrome, and would time identically under a
+/// "something is on screen" predicate.
+#[must_use]
+pub fn screen_holds(screen: &vt100::Screen, needle: &str) -> bool {
+    let (rows, cols) = screen.size();
+    (0..rows).any(|row| row_text(screen, row, cols).contains(needle))
 }
 
 /// The first `len` cells of `row` joined into a string (cell by cell, so a

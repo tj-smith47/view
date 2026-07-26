@@ -47,17 +47,17 @@ pub const TAG_DRAW_START: u8 = b'B';
 /// by subtraction.
 pub const TAG_FLUSH_START: u8 = b'F';
 /// The frame's mode toggles are queued and its overlay rows resolved,
-/// immediately before the terminal size is queried; with
-/// [`TAG_DRAW_START`] this brackets the frame preamble on its own.
+/// immediately before its paint area is resolved; with [`TAG_DRAW_START`]
+/// this brackets the frame preamble on its own.
 pub const TAG_FRAME_PREPARED: u8 = b'P';
 /// The frame's paint area has been resolved from the model's terminal
 /// size. With [`TAG_FRAME_PREPARED`] this isolates area resolution from
 /// everything around it; it bracketed a live size syscall until the area
 /// became a plain `Rect` construction, and still marks that boundary so a
 /// syscall reappearing there shows up as a stage regression.
-pub const TAG_SIZE_PROBED: u8 = b'G';
+pub const TAG_AREA_RESOLVED: u8 = b'G';
 /// This frame's damaged rows are composited into the shadow. With
-/// [`TAG_SIZE_PROBED`] this brackets damage resolution and compositing,
+/// [`TAG_AREA_RESOLVED`] this brackets damage resolution and compositing,
 /// and with [`TAG_FLUSH_START`] the backend diff and escape encode, so
 /// the two halves of the paint's CPU are separable rather than pooled.
 pub const TAG_COMPOSED: u8 = b'C';
