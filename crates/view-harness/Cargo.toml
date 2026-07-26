@@ -26,3 +26,7 @@ thiserror = "2.0.18"
 toml = "0.8"
 view-bench = { version = "0.0.1", path = "../view-bench" }
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
+# for SHELL_PLACEHOLDER: the first-paint row's shell boundary matches the
+# exact text the product paints, read from the crate that owns the layer
+# rather than hand-copied into the harness where it would drift
+view-surface = { version = "0.0.1", path = "../view-surface" }

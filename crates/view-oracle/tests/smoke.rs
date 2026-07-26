@@ -27,6 +27,7 @@ use std::path::PathBuf;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use view_oracle::{PtySession, QueryPolicy};
+use view_surface::SHELL_PLACEHOLDER;
 
 // The pty-isolation lock. A timing-bound test measures an absolute wall-clock
 // bound (startup+save) that is only meaningful with the host to itself: a
@@ -761,12 +762,6 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
 
     path
 }
-
-/// The static indicator `view-tui`'s `paint_shell` puts on screen for the
-/// pre-content startup shell. Nothing else paints this text, so its
-/// presence identifies the shell frame specifically.
-#[cfg(unix)]
-const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 
 /// nvim's own empty-buffer line marker, the first thing a fresh buffer's
 /// grid content puts on screen. The startup shell paints no `~` of its own

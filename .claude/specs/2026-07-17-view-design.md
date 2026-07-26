@@ -88,7 +88,8 @@ is a faster, smoother UX over nvim."
 | view output path: redraw event parsed → terminal write | p99 ≤ 1 ms | pty harness |
 | Keypress → cell change end-to-end, steady typing | p99 ≤ 8 ms every class; ratio ≤ 1.10× the paired bare-nvim run — **target unmet on every measured class, cause open. This amendment has NO user sign-off; it is provisional.** All classes gate ratio_p50 until the cause is attributed — **not** "measured-or-better", which this row previously claimed and which is false: the gate enforces `recorded × RATIO_HEADROOM` where `RATIO_HEADROOM = 1.25` (`crates/view-harness/src/baselines.rs`), so `echo.minimal` on dev-linux recorded at 1.3538 gates at **1.692** and the metric may silently degrade 25% — to 54% above the 1.10 target — without failing. Measured-or-better describes only the `--record` ratchet, which runs when someone deliberately re-records, not the gate. That headroom is also ~5× the apparatus's own resolvable effect (the resolution campaign measured ratio_p50 half-width 2.66%), so it was never derived from the measured floor and should be re-derived. **No mechanism carries the word "until"**: no open task exists to attribute the cause, so "until the cause is attributed" is currently a label, not a plan. History: the thread-hop explanation adopted at P3 T12 (hops ~100 µs ⇒ floor ≈ 1.19, 1.10 reachable only on bare metal) was **falsified by direct measurement**: the bare-metal M1 Max, whose cross-thread wakes are 3-4× cheaper (1.2 µs vs 4.4 µs), measures a *worse* ratio_p50 than the virtualized host, not a better one, and hops are ~500× too small to account for the view-vs-nvim gap. Do not cite the 1.19 hop floor. Quiet-host figures (mbp load 1.31, Linux calibration 0.9553): mbp 1.337 against Linux 1.199, with recorded baselines 1.3437 and 1.3538. An earlier mbp reading of 1.576 was taken at host load ~1.8-2.0 and is load-inflated by ~17% against both the recorded baseline and a quiet re-measurement; it should not be quoted, though the inversion it was cited for does persist at quiet load. The residual is unattributed and presumed to live in the RPC/UI-protocol process boundary. The taps rows put the largest single input-path segment at the pty transport (`pty->key-read`, 78.6 µs p50 / 139.4 µs p99 on dev-linux), which is ahead of that boundary; it is measured, reported every run, and is now explicitly outside the input-path bar (see the row above), but it is paid identically by bare nvim in the same paired run and so cannot explain a *ratio* — the residual remains open | pty harness, paired |
 | Sustained scroll, 100k-line file, tier full | content staleness p99 ≤ 16 ms (input → corresponding scrolled content on screen) | frame log w/ staleness tags |
-| First paint (UI shell visible, engine still loading) | ≤ 50 ms cold | pty harness |
+| First paint: view's own UI shell visible, engine still loading (`shell_visible_ms`) | p99 ≤ 50 ms cold. View-side absolute, deliberately unpaired: view paints this frame *before it has spawned the nvim child at all*, so bare nvim has no counterpart event and any ratio taken here would divide two different things. Boundary: the screen holding `view_surface::SHELL_PLACEHOLDER`, the exact text the product paints, read from the crate that owns the layer rather than copied. Measured dev-linux p99 **4.08 ms** (20 samples, host load 0.23), 12x under budget | pty harness |
+| First paint: the opened file's content on screen (`marker_cold_ms`, `marker_ratio_vs_nvim`) | **No budget is stated in this spec, and none has been invented here.** Recorded and regression-gated only, against the last recorded value. This is a genuine spec gap, flagged rather than filled: a cold-start bar for the event a user actually waits for (their file, visible) is the number the product claim rests on, and it needs the user's call, not the harness author's. Measured dev-linux p99 24.9 ms against bare nvim's 129.3 ms, ratio 0.193 | pty harness, paired |
 | Picker match: keystroke → first results painted, 100k resident entries | ≤ 16 ms | bench suite |
 | Picker scan: 1M-file tree | streaming (results while scanning, never scan-then-show); first page ≤ 100 ms warm-cache | bench suite |
 | view-side memory (PSS), 10 buffers, post-workload | ≤ 150 MB | bench suite |
@@ -112,6 +113,21 @@ stable within ×1.07 across load regimes whose tails swung ×300):
   engine, interleaved) must sit inside a measured floor of 1.0, else the gate
   refuses and names the noise. A gate result is trustworthy by construction,
   never by hoping the host was quiet.
+
+**Amendment 2026-07-26, first-paint split. This amendment has NO user sign-off;
+it is provisional.** The single first-paint row above was one budget over two
+different events, and the harness measured a third. The recorded metrics
+`cold_ms` (dev-linux 3.583243, dev-macos 8.60825) and `ratio_vs_nvim`
+(0.019123, 0.036566) were taken with an "any cell has ink" boundary, which
+`crates/view-bench/src/boundaries.rs` documents in its own source as the wrong
+predicate for a paired spawn: view satisfies it with pre-attach chrome while
+bare nvim satisfies it with its buffer window. Both keys are withdrawn rather
+than carried forward under a new name; the shell quantity is re-measured
+against the placeholder text itself, and the content quantity is new. The
+re-measured shell p99 (4.08 ms) agrees with the withdrawn `cold_ms` (3.58 ms)
+closely enough to show the old number was not grossly contaminated by the
+per-spawn socket collision fixed the same day, but it was never the paired
+quantity its `ratio_vs_nvim` sibling claimed.
 
 A dedicated bench runner is required before publishing absolute numbers.
 Published comparisons: view vs bare nvim vs an nvim+LazyVim-style stack, same

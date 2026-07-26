@@ -215,7 +215,11 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
             floor: SIGNED_DELTA_FLOOR_MS,
         });
     }
-    if metric == "ratio_p99" {
+    // by suffix, not by exact name: the exemption is a property of the
+    // statistic, so a row that prefixes its own scope onto it (first_paint's
+    // `marker_ratio_p99`) is the same scheduler-dominated tail and must not
+    // gate on a shared class merely because it spelled the metric differently
+    if metric.ends_with("ratio_p99") {
         return controlled.then_some(Headroom::Proportional(RATIO_HEADROOM));
     }
     if metric.contains("ratio") {
@@ -1038,7 +1042,7 @@ mod tests {
                 Some(Headroom::Proportional(RATIO_HEADROOM))
             );
             assert_eq!(
-                gate_headroom("ratio_vs_nvim", controlled),
+                gate_headroom("marker_ratio_p50", controlled),
                 Some(Headroom::Proportional(RATIO_HEADROOM))
             );
             assert_eq!(
@@ -1065,6 +1069,29 @@ mod tests {
         );
         assert_eq!(
             gate_headroom("ratio_p99", true),
+            Some(Headroom::Proportional(RATIO_HEADROOM))
+        );
+    }
+
+    /// The shared-class tail exemption is a property of the statistic, not
+    /// of one spelling of it. A row that scopes the name to its own boundary
+    /// carries the same scheduler-dominated tail and the same +/-50% ambient
+    /// noise floor, so it must inherit the exemption rather than acquire a
+    /// gate by renaming.
+    ///
+    /// Disconfirm: matching the metric name exactly instead of by suffix
+    /// gives `marker_ratio_p99` the ordinary ratio headroom on `dev-linux`,
+    /// so the first assertion returns `Some` and fails.
+    #[test]
+    fn a_scoped_tail_ratio_inherits_the_shared_class_exemption() {
+        assert_eq!(gate_headroom("marker_ratio_p99", false), None);
+        assert_eq!(
+            gate_headroom("marker_ratio_p99", true),
+            Some(Headroom::Proportional(RATIO_HEADROOM))
+        );
+        // the median ratio is the one every class gates, scoped or not
+        assert_eq!(
+            gate_headroom("marker_ratio_p50", false),
             Some(Headroom::Proportional(RATIO_HEADROOM))
         );
     }

@@ -56,8 +56,9 @@ Reproduce with `task perf-audit`.
 
 | What | view | bare Neovim | |
 |---|---|---|---|
-| First paint, cold, no plugins (p99) | **26.5 ms** | 132.2 ms | **5x faster** |
-| First paint, cold, LazyVim-style stack of 14 plugins (p99) | **104.3 ms** | 167.2 ms | **1.6x faster** |
+| UI shell painted, engine still loading (p99) | **4.1 ms** | n/a | budget 50 ms |
+| First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms | **5x faster** |
+| First paint, cold, LazyVim-style stack of 14 plugins (p99) | **120.5 ms** | 199.8 ms | **1.7x faster** |
 | Resident memory (PSS) | **3.4 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.12 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.95 ms | 0.80 ms | **~1.2x slower** |
@@ -67,6 +68,12 @@ Reproduce with `task perf-audit`.
 **Read that honestly.** Cold start and memory are large, real wins. view
 paints usable content while Neovim is still loading, because it is a
 separate process that does not wait for your config.
+
+The first row is unpaired on purpose, and the `n/a` is the point: view
+paints its shell before it has started the Neovim child at all, so bare
+Neovim has no counterpart event to compare against. It shows nothing until
+your config finishes. That 4.1 ms figure is the same on a bare config and
+on a 14-plugin stack, because nothing in your config has run yet.
 
 Steady-state typing and scrolling are currently *slower* than bare Neovim,
 by roughly 20% and 2x. Both are sub-millisecond in absolute terms and far

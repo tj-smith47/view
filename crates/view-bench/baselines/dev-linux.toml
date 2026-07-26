@@ -15,12 +15,16 @@ ratio_p99 = 1.307451781758063
 view_p99_ms = 1.018586
 
 [first_paint.heavy]
-cold_ms = 3.583243
-ratio_vs_nvim = 0.019123350083817887
+marker_cold_ms = 120.464107
+marker_ratio_p50 = 0.4601985941432818
+marker_ratio_p99 = 0.6027915804526288
+shell_visible_ms = 4.297872
 
 [first_paint.minimal]
-cold_ms = 3.6411909999999996
-ratio_vs_nvim = 0.02775004147045586
+marker_cold_ms = 26.507479
+marker_ratio_p50 = 0.13544477259372312
+marker_ratio_p99 = 0.20170704524173708
+shell_visible_ms = 4.144493
 
 [flood.minimal]
 cadence_p99_ms = 20.880463

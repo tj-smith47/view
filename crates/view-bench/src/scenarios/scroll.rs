@@ -165,15 +165,7 @@ fn find_label_origin(session: &mut BenchSession) -> Option<(u16, u16, u32)> {
 }
 
 fn row_text_at(session: &mut BenchSession, row: u16, col: u16) -> String {
-    session.with_screen(|screen| {
-        let mut text = String::new();
-        for offset in 0..LABEL_WIDTH {
-            if let Some(cell) = screen.cell(row, col + offset) {
-                text.push_str(cell.contents());
-            }
-        }
-        text
-    })
+    session.with_screen(|screen| crate::boundaries::row_text_from(screen, row, col, LABEL_WIDTH))
 }
 
 fn looks_like_label(text: &str) -> bool {

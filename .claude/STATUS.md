@@ -20,7 +20,7 @@ no release. The repo now exists: `tj-smith47/view` (public, empty).
 |---|---|---|
 | 1 | Measurement layer tells the truth | **4 of 7 done** — see the ledger below |
 | 2 | `task ci` green | Green as of the last full run |
-| 3 | `task perf-audit` reaches a verdict, not a false breach | Blocked on #22 (stale first_paint bars) |
+| 3 | `task perf-audit` reaches a verdict, not a false breach | **dev-linux unblocked** (#22 re-recorded). dev-macos now fails loudly until re-recorded on mbp (#21) |
 | 4 | `known-bugs.md` drained | 0 unchecked |
 | 5 | README free of unattainable/unearned claims | **Done** — rewritten against measured evidence |
 | 6 | P4 plan authored | **Draft done**, awaiting adversarial review |
@@ -41,6 +41,8 @@ believed at the start of the session; right is what is now true.
 | input_path row works everywhere | **It did not run on macOS at all.** Fixed with adaptive tap pacing. |
 | "All classes gate ratio_p50 measured-or-better" | **False.** The gate enforces `recorded × 1.25`; echo.minimal gates at 1.692 and can degrade 25% silently. |
 | §3.1 budgets are CI gates | **They are not.** Nothing in the codebase compares any measurement to a spec budget. The gate is a pure regression ratchet. |
+| The first-paint row measures one event with one budget | **Two events, now split and re-recorded** (1000 samples/cell, both null-pair brackets clean). `shell_visible_ms` (view's own chrome, unpaired, the ≤50 ms budget's real subject): **4.14 / 4.30 ms** p99 across both fixtures, 12x under. `marker_cold_ms` (the file on screen, paired): **26.5 / 120.5 ms** against nvim's 131.4 / 199.8, `marker_ratio_p50` 0.135 / 0.460. §3.1 states no budget for the content metric at all: gap flagged, not filled. |
+| `screen_holds` matches what is on screen | **It could not match any phrase containing a space.** `row_text` concatenated cell contents, and an unwritten cell holds no contents, so every space was deleted: `"view: waiting for nvim..."` read back as `"view:waitingfornvim..."`. Every marker in the tree was a single word, so nothing had ever exercised it. Fixed; no recorded metric was affected (see the measurement note). |
 
 **Net effect on the product story:** better, not worse. Cold start is a
 real and large win on both fixtures. The two genuine losses — typing
@@ -59,8 +61,7 @@ real and large win on both fixtures. The two genuine losses — typing
 
 Ordered by information yield: each one's failure would invalidate work below it.
 
-1. **#22** — re-record stale first_paint bars + split the shell-visible
-   metric. Unblocks a clean `perf-audit` verdict, which gates everything.
+1. ~~**#22**~~ — done: first_paint split and re-recorded on dev-linux.
 2. **#18** — §3.1 budget table in the gate. Will be born red (two cells
    already over budget); that is correct.
 3. **#19** — `nvim --remote-ui` control. Settles the echo ratio, which is
@@ -69,7 +70,8 @@ Ordered by information yield: each one's failure would invalidate work below it.
    the flood row's cross-class stimulus divergence.
 5. **#24** — allowlist the spawn environment. Do before CI runs with any
    secret configured.
-6. **#21** — record a quiet-host dev-macos input_path baseline.
+6. **#21** — re-record dev-macos on a quiet mbp: input_path, and
+   first_paint's split metrics (its cell gates red until this lands).
 7. **#25** — noice's ext_* disable opts are not suppressing its errors.
 8. **#20** — P4 plan adversarial review (a fresh session; prompt is at
    `.claude/plans/2026-07-26-p4-review-prompt.md`).

@@ -9,13 +9,18 @@ Read this file, then `.claude/CLAUDE.md`, then the ledger tail
 (`.superpowers/sdd/progress.md`). Do not read the spec or plans end-to-end at
 startup; grep them when a question arises.
 
-> **Durability warning:** `.claude/` and `.superpowers/` are BOTH gitignored.
-> This file, the ledger, and `known-bugs.md` exist only on this machine's disk,
-> and no commit can restore them. `git clean` is now denied by the global
-> pre-bash policy for exactly this reason (verified firing) — but that stops the
-> assistant, not a human at a terminal. Treat a rebuildable `target/` dir as
-> never worth risking these. The ledger is reconstructible from `git log`; this
-> file is not.
+> **Durability, corrected 2026-07-26:** `.claude/` is now **tracked** (commit
+> `f52d344`); this file, the spec, the plans, the measurement notes and
+> `known-bugs.md` are in git and a commit restores them. Only machine-local
+> state stays ignored (`tmp/`, `scratch/`, `bench-baselines/`,
+> `settings.local.json`, the scheduler lock). Do not re-add `.claude/` to
+> `.gitignore`.
+>
+> `.superpowers/` **is still gitignored**, so the ledger
+> (`.superpowers/sdd/progress.md`) exists only on this machine's disk. It is
+> reconstructible from `git log`. `git clean` is denied by the global pre-bash
+> policy (verified firing) — but that stops the assistant, not a human at a
+> terminal.
 >
 > **Memory namespace warning:** the prior session's auto-memory lives under a
 > different project key than a session started from `/opt/repos/view`. Assume
@@ -58,9 +63,21 @@ ledger and `git log` outrank your recollection.
 Ordered by the sequencing decisions already made. The dependencies in the
 "why here" column are real; do not reorder without re-deriving them.
 
+`.claude/STATUS.md` is the one-page current view of this list (road-to-push
+gates, the believed-vs-now ledger, and the ordering below). Update both in
+the same turn or they drift.
+
 | # | Task | Why it sits here |
 |---|---|---|
-| 53 | P3 exit checklist execution, evidence-cited per plan protocol | **The only one left.** It gates the phase, and it carries this file's own retirement (section 9) |
+| 53 | P3 exit checklist execution, evidence-cited per plan protocol | Gates the phase, and carries this file's own retirement (section 9) |
+| 22 | Re-record first_paint and split the shell-visible metric | First: it unblocks a `perf-audit` verdict that is not a false breach, which every gate verdict below depends on |
+| 18 | Add the §3.1 budget table to the bench gate | Will be born red (two cells already over budget); that is the correct outcome, not a reason to defer |
+| 19 | Attribute the echo ratio gap | The last claim the README hedges on. Arm 1 is `nvim --remote-ui`; see the correction below |
+| 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | Depends on 18 landing first: the headrooms are only meaningful once a bar exists to size them against |
+| 24 | Allowlist the environment at the bench/oracle spawn funnel | Must land before CI ever runs with a secret configured. Today the funnel is a denylist, into editors that execute fixture Lua and network-fetched plugins |
+| 21 | Record a quiet-host dev-macos input_path baseline | The row is runnable again; it needs a quiet mbp, not more code |
+| 25 | noice's `ext_*` disable opts are not suppressing its startup error notifications | Cosmetic in the compat fixture, real as a compat finding |
+| 20 | P4 plan adversarial review | A fresh session; the prompt is written at `.claude/plans/2026-07-26-p4-review-prompt.md` |
 
 **The publisher-set question moved to P6 and is no longer an open task.**
 The user decided 2026-07-26 that the pre-P4 push cuts no release: its only
@@ -85,7 +102,14 @@ forced them:
 - **49 (first_paint)** was not a view defect at all: the recorded 54.7 ms was
   the capability probe waiting out its 50 ms fallback against a bench pty that
   never answered the DA1 fence. With the pty answering like a real terminal,
-  view's cold path is 3.6 ms, 14x under budget.
+  the number fell to 3.6 ms.
+  **Corrected 2026-07-26 (task 22):** that 3.6 ms was never "view's cold
+  path". It was view's *own shell frame*, timed under an "any cell has ink"
+  boundary and then divided by bare nvim's *buffer window* to produce a
+  `ratio_vs_nvim` comparing two different events. The row now measures both
+  separately: `shell_visible_ms` (view's chrome, unpaired, the ≤50 ms budget's
+  real subject) and `marker_cold_ms` / `marker_ratio_p50` / `marker_ratio_p99`
+  (the opened file on screen, paired). §3.1 carries the amendment.
 - **50 (input_path)** was two defects, neither of them the 100 µs. The gated
   boundary opened at the harness's write to the pty master, so the biggest
   segment of it was the OS pty transport; and the tap-overhead gate that
@@ -116,10 +140,22 @@ less from the user than previously recorded. The user's standing rule as of
 adversarial review by a Fable 5 subagent**, which also watches for safety and
 security concerns as it reads. Every amendment in section 5.6's ledger is
 subject to that gate retroactively. The attribution itself is a measurement,
-not a judgment call: the null-frontend control (attach over RPC with the
-identical ext-option set, drain the grid, paint nothing, run paired in the
-same harness) separates "cost of being an external UI at all" from "cost of
-view", and must run before any further amendment is proposed.
+not a judgment call, and it must run before any further amendment is proposed.
+
+**The control design recorded here was refuted and replaced (2026-07-26).** The
+null-frontend control described in earlier revisions of this file — attach over
+RPC with the identical ext-option set, drain the grid, paint nothing — cannot
+work: a frontend that paints nothing produces no pty output, so the harness
+boundary (the first vt100 frame where the target cell differs) never fires and
+the control has no measurable event at all. Do not implement it. The
+replacement is two arms:
+
+1. `nvim --remote-ui` as an external RPC client containing none of our code,
+   run paired in the same harness. Verify it exists on the `v0.12.4` pin
+   before building anything on it. If it shows the same gap, the cost is the
+   protocol boundary and it is a permanent limitation to publish as one.
+2. A passthrough frontend that paints at the flush boundary, isolating
+   "external UI at all" from "view's own compositing".
 
 ---
 

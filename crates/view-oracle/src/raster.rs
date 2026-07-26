@@ -19,11 +19,9 @@ use std::borrow::Cow;
 
 use view_core::grid::Grid;
 use view_core::hl::HlTable;
-use view_surface::{Layer, LayerKind, Surface};
+use view_surface::{Layer, LayerKind, Surface, SHELL_PLACEHOLDER};
 
 use crate::attr::{row_fingerprint, ResolvedAttr};
-
-const SHELL_PLACEHOLDER: &str = "waiting for nvim";
 
 /// Renders `surface` to a plain-text screen dump: one newline-joined row per
 /// canvas line, each row the concatenation of the canvas's cells (short
@@ -165,7 +163,17 @@ fn joined_content(content: &[(u64, String)]) -> String {
 fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
     match &layer.kind {
         LayerKind::EngineGrid => paint_grid(canvas, layer, grid),
-        LayerKind::Shell => paint_text(canvas, layer.rect.row, layer.rect.col, SHELL_PLACEHOLDER),
+        // vertically centred, matching view-tui's paint_shell; the layer's
+        // own row would put it at the top of the frame, where the real
+        // painter never writes it. The painter's other output, a statusline
+        // bar of spaces on the bottom row, is styling with no text and so
+        // has nothing to represent in a plain-text raster.
+        LayerKind::Shell => paint_text(
+            canvas,
+            layer.rect.row + layer.rect.height / 2,
+            layer.rect.col,
+            SHELL_PLACEHOLDER,
+        ),
         LayerKind::Tabline(state) => paint_tabline(canvas, layer, state),
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
         LayerKind::Messages(entries) => paint_messages(canvas, layer, entries),
@@ -428,6 +436,38 @@ mod tests {
         assert!(
             text.lines().any(|l| l.trim_end().ends_with("hi")),
             "expected a row ending in the message text; screen:\n{text}"
+        );
+    }
+
+    /// The reference raster's shell arm must place the same text on the same
+    /// row as `view-tui`'s `paint_shell`, or the two sides disagree about a
+    /// frame neither can currently be compared on. Both halves had already
+    /// drifted, silently: the raster carried its own `"waiting for nvim"`
+    /// literal against the painter's `"view: waiting for nvim..."`, and put
+    /// it on the layer's own row (0) against the painter's vertical centre.
+    ///
+    /// Disconfirm: painting at `layer.rect.row` instead puts the placeholder
+    /// on row 0 and leaves row 2 blank, failing both assertions.
+    #[test]
+    fn the_startup_shell_rasters_where_the_real_painter_puts_it() {
+        let mut model = Model::with_term_size(40, 5);
+        model.content_painted = false;
+        let surface = view_surface::render(&model);
+
+        let rows = screen_rows(&surface, model.engine.grid());
+
+        assert_eq!(
+            rows.len(),
+            5,
+            "the shell layer sizes the canvas to the terminal even with no grid; rows:\n{rows:#?}"
+        );
+        assert!(
+            rows[2].starts_with(SHELL_PLACEHOLDER),
+            "expected the placeholder at column 0 of the vertically centred row; rows:\n{rows:#?}"
+        );
+        assert!(
+            rows[0].trim().is_empty(),
+            "the painter writes nothing to the top row; rows:\n{rows:#?}"
         );
     }
 }

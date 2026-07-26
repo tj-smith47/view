@@ -114,14 +114,44 @@ pub fn screen_holds(screen: &vt100::Screen, needle: &str) -> bool {
     (0..rows).any(|row| row_text(screen, row, cols).contains(needle))
 }
 
-/// The first `len` cells of `row` joined into a string (cell by cell, so a
-/// wide glyph contributes its own contents once, not a byte-split pair).
+/// The first `len` cells of `row` joined into a string, one character per
+/// column: cell by cell, so a wide glyph contributes its own contents once
+/// rather than a byte-split pair, and a cell with no contents contributes
+/// the space it displays.
+///
+/// The blank case is load-bearing, not tidiness. A terminal cell that was
+/// never written holds no contents at all, and a diffing painter never
+/// writes a space it can leave blank -- so concatenating raw cell contents
+/// silently *deletes* every space from the row. `"view: waiting for
+/// nvim..."` came back as `"view:waitingfornvim..."`, and every
+/// [`screen_holds`] boundary whose needle contained a space therefore
+/// never fired, on a screen plainly showing the text. The word-shaped
+/// markers in use hid it: `VIEWBENCHCOLDSTARTMARKER` has no space to lose.
+///
+/// This matches vt100's own row rendering, which pads the gap before each
+/// cell that has contents and skips wide continuations.
 #[must_use]
 pub fn row_text(screen: &vt100::Screen, row: u16, len: u16) -> String {
+    row_text_from(screen, row, 0, len)
+}
+
+/// [`row_text`] over `len` columns starting at `col`, for a caller reading
+/// a known field out of a row rather than the whole row.
+#[must_use]
+pub fn row_text_from(screen: &vt100::Screen, row: u16, col: u16, len: u16) -> String {
     let mut text = String::new();
-    for col in 0..len {
-        if let Some(cell) = screen.cell(row, col) {
+    for offset in 0..len {
+        let Some(cell) = screen.cell(row, col.saturating_add(offset)) else {
+            break;
+        };
+        // the preceding wide cell already contributed this column's glyph
+        if cell.is_wide_continuation() {
+            continue;
+        }
+        if cell.has_contents() {
             text.push_str(cell.contents());
+        } else {
+            text.push(' ');
         }
     }
     text
@@ -196,5 +226,36 @@ mod tests {
     fn row_text_joins_cells_in_column_order() {
         let parser = screen_from(b"L000042 alpha");
         assert_eq!(row_text(parser.screen(), 0, 7), "L000042");
+    }
+
+    /// A diffing painter leaves a space it does not have to write, so the
+    /// gap cells between two written words hold no contents at all. Read
+    /// back naively they vanish and the row's words run together, which is
+    /// how a `screen_holds` boundary can miss a phrase the terminal is
+    /// plainly showing. Written here the way the real painter emits it:
+    /// absolute cursor moves over the gap, never a space.
+    ///
+    /// Disconfirm: concatenating `cell.contents()` without the blank case
+    /// yields `"twowords"`, and the `screen_holds` assertion below fails
+    /// on a screen that visibly holds the phrase.
+    #[test]
+    fn a_column_the_painter_skipped_reads_back_as_the_space_it_shows() {
+        let parser = screen_from(b"\x1b[1;1Htwo\x1b[1;7Hwords");
+
+        assert_eq!(row_text(parser.screen(), 0, 12), "two   words ");
+        assert!(screen_holds(parser.screen(), "two   words"));
+    }
+
+    /// A wide glyph occupies two columns but is one string in the first of
+    /// them; its continuation column must contribute nothing, or every
+    /// wide character pads the row with a space that is not on screen and
+    /// shifts everything after it.
+    #[test]
+    fn a_wide_glyphs_continuation_column_adds_no_character() {
+        let parser = screen_from("a\u{754c}b".as_bytes());
+
+        // four columns, three characters: the glyph owns two of them
+        assert_eq!(row_text(parser.screen(), 0, 4), "a\u{754c}b");
+        assert_eq!(row_text(parser.screen(), 0, 5), "a\u{754c}b ");
     }
 }

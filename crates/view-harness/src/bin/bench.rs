@@ -580,24 +580,65 @@ fn run_cell(
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
             plant_first_paint_marker(&view_spec)?;
             plant_first_paint_marker(&nvim_spec)?;
-            let outcome = first_paint::run(&view_spec, &nvim_spec, protocol, FIRST_PAINT_MARKER)
-                .with_context(|| format!("first_paint/{fixture} run failed"))?;
+            let outcome = first_paint::run(
+                &view_spec,
+                &nvim_spec,
+                protocol,
+                view_surface::SHELL_PLACEHOLDER,
+                FIRST_PAINT_MARKER,
+            )
+            .with_context(|| format!("first_paint/{fixture} run failed"))?;
             println!(
                 "{}",
                 report::paired_cell(scenario, fixture, &outcome.summary, protocol.warmup)
             );
             println!(
                 "{}",
-                report::aggregate_line("cold_ms", outcome.gated_cold_ms, 1)
+                report::absolute_cell(
+                    scenario,
+                    fixture,
+                    "shell-visible",
+                    report::AbsoluteStats {
+                        p50: outcome.shell.p50(),
+                        p99: outcome.shell.p99(),
+                        max: outcome.shell.max(),
+                        unit: "ms",
+                        samples: outcome.shell.len(),
+                        warmup: protocol.warmup,
+                    }
+                )
             );
             println!(
                 "{}",
-                report::aggregate_line("ratio_vs_nvim", outcome.gated_ratio_vs_nvim, 1)
+                report::aggregate_line("shell_visible_ms", outcome.gated_shell_visible_ms, 1)
+            );
+            println!(
+                "{}",
+                report::aggregate_line("marker_cold_ms", outcome.gated_marker_cold_ms, 1)
+            );
+            println!(
+                "{}",
+                report::aggregate_line("marker_ratio_p50", outcome.gated_marker_ratio_p50, 1)
+            );
+            println!(
+                "{}",
+                report::aggregate_line("marker_ratio_p99", outcome.gated_marker_ratio_p99, 1)
             );
             verify_fixture_copies_untouched(&world, fixture)?;
             let mut metrics = CellMetrics::new();
-            metrics.insert("cold_ms".to_string(), outcome.gated_cold_ms);
-            metrics.insert("ratio_vs_nvim".to_string(), outcome.gated_ratio_vs_nvim);
+            metrics.insert(
+                "shell_visible_ms".to_string(),
+                outcome.gated_shell_visible_ms,
+            );
+            metrics.insert("marker_cold_ms".to_string(), outcome.gated_marker_cold_ms);
+            metrics.insert(
+                "marker_ratio_p50".to_string(),
+                outcome.gated_marker_ratio_p50,
+            );
+            metrics.insert(
+                "marker_ratio_p99".to_string(),
+                outcome.gated_marker_ratio_p99,
+            );
             Ok(metrics)
         }
         "memory" => {

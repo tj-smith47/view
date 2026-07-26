@@ -2056,6 +2056,7 @@ dependencies = [
  "toml",
  "view-bench",
  "view-oracle",
+ "view-surface",
 ]
 
 [[package]]

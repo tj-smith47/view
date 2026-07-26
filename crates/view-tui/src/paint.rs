@@ -879,8 +879,10 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
         buf,
     );
 
-    let label = "view: waiting for nvim...";
-    let text: String = label.chars().take(usize::from(area.width)).collect();
+    let text: String = view_surface::SHELL_PLACEHOLDER
+        .chars()
+        .take(usize::from(area.width))
+        .collect();
     let mid_row = area.height / 2;
     paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, buf);
 }
