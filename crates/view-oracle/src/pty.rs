@@ -326,6 +326,15 @@ impl SpawnEnv for std::process::Command {
 /// setting a name to exactly what the host already holds -- fails loudly:
 /// the child simply does not receive the variable.
 ///
+/// `EngineConfig::env_plan` applies the same layers in the same order but
+/// decides the sweep by *name*, keeping anything a caller planned, because
+/// it holds the caller's entries as a list and can tell. Neither builder
+/// here can: `CommandBuilder` answers for every host variable and
+/// `std::process::Command` for none. So the two funnels part company on
+/// exactly one input -- a caller setting a swept name to the host's own
+/// value, kept there and dropped here -- and this side takes the loud half
+/// of that rather than guessing.
+///
 /// # Errors
 ///
 /// Returns [`OracleError::Io`] if the empty search path cannot be
@@ -342,6 +351,10 @@ pub fn make_hermetic<E: SpawnEnv>(cmd: &mut E) -> Result<(), OracleError> {
     let empty = view_engine::env::prepare_empty_search_path()?;
     for name in view_engine::env::HOST_SEARCH_PATH_VARS {
         cmd.set(OsStr::new(name), empty.as_os_str());
+    }
+    let absent = view_engine::env::absent_config_file().into_os_string();
+    for name in view_engine::env::HOST_SUBPROCESS_CONFIG_VARS {
+        cmd.set(OsStr::new(name), absent.as_os_str());
     }
     Ok(())
 }
@@ -1151,7 +1164,6 @@ mod tests {
     /// pty test reaches: the headless editors in this tree spawn that way,
     /// and a rule holding on one builder but not the other would leave the
     /// two arms of a comparison measuring differently-configured children.
-    ///
     #[test]
     fn a_plain_command_spawn_obeys_the_same_rule_a_pty_spawn_does() {
         let planted_value = "/host/nvim/config";
@@ -1174,6 +1186,102 @@ mod tests {
                 view_engine::env::empty_search_path().display()
             )),
             "the child searches somewhere other than the empty directory; report:\n{report}"
+        );
+    }
+
+    /// A `HOME` of this file's own holding a `.gitconfig` that rewrites
+    /// every GitHub fetch to a host that cannot resolve.
+    ///
+    /// The rewrite is the payload because it is the consequence, not the
+    /// mechanism: it reports whether an operator's configuration reached the
+    /// programs a hermetic child runs, and says so without consulting a
+    /// variable name or anything the funnel does. A fixture that installs
+    /// plugins clones from inside such a child, so this is the live shape of
+    /// the channel, not an invented one.
+    struct HostileHome {
+        dir: PathBuf,
+    }
+
+    impl HostileHome {
+        /// The prefix the planted rewrite matches, which is where a plugin
+        /// fixture's clones actually go.
+        const REWRITTEN_FROM: &'static str = "https://github.com/";
+
+        /// The rewritten-to host, which no name server resolves.
+        const REWRITTEN_TO: &'static str = "https://view-test.invalid/";
+
+        fn plant() -> Self {
+            let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+            root.pop(); // crates/
+            root.pop(); // workspace root
+                        // under the build tree, never the system temp dir: this is the
+                        // host configuration a leak would read, so it must not be
+                        // somewhere an unrelated process can reach into
+            let dir = root.join("target").join("view-hostile-home");
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join(".gitconfig"),
+                format!(
+                    "[url \"{}\"]\n\tinsteadOf = {}\n",
+                    Self::REWRITTEN_TO,
+                    Self::REWRITTEN_FROM
+                ),
+            )
+            .unwrap();
+            Self { dir }
+        }
+
+        /// What `git` reports for the planted rewrite, run through `build`.
+        fn rewrite_seen_by(&self, build: impl FnOnce(&mut std::process::Command)) -> String {
+            let mut cmd = std::process::Command::new("git");
+            cmd.arg("config")
+                .arg("--get")
+                .arg(format!("url.{}.insteadOf", Self::REWRITTEN_TO));
+            build(&mut cmd);
+            let out = cmd.output().expect("failed to run git");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        }
+    }
+
+    /// `HOME` reaches a hermetic child by design -- the editor cannot resolve
+    /// its own home without it -- and the programs that child then spawns
+    /// resolve *their* configuration through it too, which the editor's
+    /// `XDG_*_HOME` overrides do nothing about. An operator's `insteadOf`
+    /// rewrite, proxy, disabled certificate check or credential helper would
+    /// otherwise decide what a measured plugin bootstrap fetches and from
+    /// where, and report nothing: the clone succeeds and the run is green.
+    ///
+    /// Gated off Windows with this module's other real-subprocess fixtures.
+    #[test]
+    fn a_hermetic_childs_own_subprocesses_read_none_of_the_hosts_configuration() {
+        let home = HostileHome::plant();
+        let planted = testenv::plant(&[("HOME", &*home.dir.to_string_lossy())]);
+
+        // the control: the same plant reaching a spawn no funnel touched.
+        // Without it a silent subject below would equally describe a
+        // .gitconfig git never read, a key it does not recognize, or a git
+        // that failed to run at all
+        let uncontrolled = planted.spawning(|| home.rewrite_seen_by(|_| {}));
+        assert_eq!(
+            uncontrolled,
+            HostileHome::REWRITTEN_FROM,
+            "the planted host configuration reached no subprocess even \
+             unguarded, so this test proves nothing about a guarded one"
+        );
+
+        let guarded = planted.spawning(|| {
+            home.rewrite_seen_by(|cmd| {
+                make_hermetic(cmd).unwrap();
+            })
+        });
+        drop(planted);
+        assert!(
+            guarded.is_empty(),
+            "a hermetic child's own git still answers to the operator's \
+             configuration ({guarded}), so which repository a measured \
+             bootstrap clones, over what transport and with whose \
+             credentials, are all properties of the machine it ran on"
         );
     }
 

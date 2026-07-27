@@ -117,6 +117,26 @@ pub const HOST_REDIRECT_VARS: &[&str] = &[
 /// `$XDG_DATA_DIRS/nvim/site/plugin/`).
 pub const HOST_SEARCH_PATH_VARS: &[&str] = &["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"];
 
+/// Environment variables overridden so that the programs a hermetic child
+/// *itself* spawns read no configuration out of the host's `HOME`, which
+/// [`HERMETIC_PASSTHROUGH_VARS`] keeps because the editor needs it.
+///
+/// The editor's own lookups are diverted by the `XDG_*_HOME` overrides a
+/// caller sets, but a subprocess does not consult those and resolves its own
+/// configuration from `HOME` directly. Git is the live case: a fixture that
+/// installs plugins runs `git clone` from inside a supposedly hermetic
+/// child, and `$HOME/.gitconfig` can carry an `insteadOf` rewrite, an
+/// `http.proxy`, `http.sslVerify = false`, or a credential helper -- so
+/// which repository the child fetches, over what transport, and with whose
+/// credentials all become properties of the operator's machine. That is
+/// host state deciding what a measurement measures, and it reports nothing:
+/// the clone succeeds, the plugins load, and the run is green.
+///
+/// Both layers are named because either alone leaves the other live, and
+/// both are pointed at [`absent_config_file`] rather than emptied, since
+/// Git skips a configuration file it cannot read and reads an empty one.
+pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"];
+
 /// The host environment variables a hermetic child keeps. Every other
 /// variable the host exports is dropped before the child sees it.
 ///
@@ -137,9 +157,11 @@ pub const HOST_SEARCH_PATH_VARS: &[&str] = &["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"]
 ///   directly.
 /// - `HOME`, `USER`, `LOGNAME`, `SHELL` and the Windows profile variables:
 ///   identity and home resolution that libc, LuaJIT and the child's own
-///   `expand('~')` read. The `XDG_*_HOME` overrides a caller sets already
-///   divert every configuration lookup away from `HOME`, so keeping it
-///   costs no hermeticity.
+///   `expand('~')` read. Keeping `HOME` does open a channel the editor's
+///   own `XDG_*_HOME` overrides do not close, because the child's
+///   *subprocesses* resolve their configuration through it independently;
+///   [`HOST_SUBPROCESS_CONFIG_VARS`] closes that channel rather than
+///   leaving it to the entry above to disclaim.
 /// - `TERM`, `COLORTERM`: what the child derives its capability tier from,
 ///   which a measurement pins deliberately.
 /// - `TMPDIR`, `XDG_RUNTIME_DIR` and the Windows temp variables: where the
@@ -213,18 +235,79 @@ pub fn is_hermetic_passthrough(name: &OsStr) -> bool {
         })
 }
 
-/// Compares two environment variable names under the host's own rule:
-/// Windows folds case, Unix does not, and on Unix `path` and `PATH` are two
-/// different variables of which only one is the allowlisted one.
+/// Compares two environment variable names under the rule of the host this
+/// is running on: Windows folds case, Unix does not, and on Unix `path` and
+/// `PATH` are two different variables of which only one is the allowlisted
+/// one.
 ///
-/// A name that is not valid UTF-8 compares byte for byte: the folding rule
-/// is an ASCII one, so a name this tree cannot render has no case to fold.
+/// The two rules are [`names_eq_folding_case`] and plain equality, each a
+/// function of its arguments alone so that both are exercised on every
+/// platform and only the one-line choice between them is left to `cfg!`.
 #[must_use]
 pub fn env_names_eq(left: &OsStr, right: &OsStr) -> bool {
+    if cfg!(windows) {
+        names_eq_folding_case(left, right)
+    } else {
+        left == right
+    }
+}
+
+/// Windows' own rule for whether two environment variable names denote one
+/// variable, as closely as this tree can restate it.
+///
+/// Windows collapses the names in a process environment with
+/// `CompareStringOrdinal(bIgnoreCase = TRUE)`, which applies the system's
+/// *simple* uppercase mapping -- one code unit to one code unit, never an
+/// expansion. [`simple_uppercase`] is that mapping: `char::to_uppercase`
+/// where it yields a single character, and the character unchanged where it
+/// would expand, so `ss` and the sharp s stay distinct here exactly as they
+/// do to the operating system.
+///
+/// An ASCII-only fold would be strictly narrower than the rule it claims to
+/// implement, leaving a cased non-ASCII pair riding a plan as two entries
+/// that the spawned child then collapses into one -- the plan disagreeing
+/// with the child, which is the whole failure this comparison exists to
+/// prevent. What remains divergent is the Unicode table itself: this reads
+/// Rust's, the child is collapsed against the operating system's, and the
+/// two can differ for characters added between their versions.
+///
+/// A name that is not valid UTF-8 compares byte for byte, having no case to
+/// fold that this can see.
+#[must_use]
+pub fn names_eq_folding_case(left: &OsStr, right: &OsStr) -> bool {
     match (left.to_str(), right.to_str()) {
-        (Some(left), Some(right)) if cfg!(windows) => left.eq_ignore_ascii_case(right),
+        (Some(left), Some(right)) => left
+            .chars()
+            .map(simple_uppercase)
+            .eq(right.chars().map(simple_uppercase)),
         _ => left == right,
     }
+}
+
+/// `c` uppercased where that is a one-to-one mapping, and `c` itself where
+/// uppercasing it would produce more than one character.
+fn simple_uppercase(c: char) -> char {
+    let mut upper = c.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(only), None) => only,
+        _ => c,
+    }
+}
+
+/// The path [`HOST_SUBPROCESS_CONFIG_VARS`] are pointed at: a file that does
+/// not exist, so every configuration layer they select is missing rather
+/// than empty.
+///
+/// Inside [`empty_search_path`] rather than beside it, because that is the
+/// directory [`prepare_empty_search_path`] makes unwritable. A path under a
+/// writable directory with a predictable name is one anybody can create a
+/// configuration file at, and a child pointed there would then read it --
+/// the same plant this tree refuses to leave open for `plugin/` scripts.
+/// Nothing ever creates it, so the emptiness that same function checks is
+/// unaffected.
+#[must_use]
+pub fn absent_config_file() -> PathBuf {
+    empty_search_path().join("absent")
 }
 
 /// Every variable this process exports that [`is_hermetic_passthrough`]
@@ -439,10 +522,88 @@ mod tests {
         }
         for name in HERMETIC_PASSTHROUGH_VARS {
             assert!(
-                !swept.iter().any(|(swept, _)| swept == OsStr::new(name)),
+                !swept
+                    .iter()
+                    .any(|(swept, _)| env_names_eq(swept, OsStr::new(name))),
                 "{name} is allowlisted and reached the sweep"
             );
         }
+    }
+
+    /// The case-folding rule, exercised on every platform rather than only
+    /// on the one that selects it. Written against
+    /// [`names_eq_folding_case`] directly because a `cfg!(windows)` arm
+    /// tested only under `cfg(windows)` is tested nowhere the suite
+    /// ordinarily runs.
+    #[test]
+    fn the_folding_rule_collapses_a_pair_of_spellings_windows_collapses() {
+        for (left, right) in [
+            ("PATH", "path"),
+            ("Path", "pAtH"),
+            ("SystemRoot", "SYSTEMROOT"),
+            // beyond ASCII, where an `eq_ignore_ascii_case` fold answers no
+            // and the operating system answers yes
+            ("VIEWé", "VIEWÉ"),
+            ("Ünicode", "ÜNICODE"),
+            ("ЯName", "яNAME"),
+        ] {
+            assert!(
+                names_eq_folding_case(OsStr::new(left), OsStr::new(right)),
+                "{left} and {right} are one variable to Windows and two here"
+            );
+        }
+    }
+
+    #[test]
+    fn the_folding_rule_keeps_apart_what_windows_keeps_apart() {
+        for (left, right) in [
+            ("PATH", "PATHEXT"),
+            ("MY_PATH", "PATH"),
+            ("", "PATH"),
+            // the sharp s uppercases to two characters, which the system's
+            // one-to-one mapping does not do, so these stay two variables
+            ("straße", "STRASSE"),
+        ] {
+            assert!(
+                !names_eq_folding_case(OsStr::new(left), OsStr::new(right)),
+                "{left} and {right} are two variables to Windows and one here"
+            );
+        }
+    }
+
+    /// The other rule, and the one-line choice between them: whichever arm
+    /// this platform selects, the public comparison must answer as that arm
+    /// does.
+    #[test]
+    fn the_host_comparison_is_the_rule_this_platform_actually_applies() {
+        assert_eq!(
+            env_names_eq(OsStr::new("Path"), OsStr::new("PATH")),
+            cfg!(windows),
+            "the case rule in force is not the one this platform applies"
+        );
+        assert!(env_names_eq(OsStr::new("PATH"), OsStr::new("PATH")));
+        assert!(!env_names_eq(OsStr::new("PATH"), OsStr::new("PATHEXT")));
+    }
+
+    /// The path the subprocess-configuration layers select must be missing,
+    /// and must sit where nobody can create it: a readable file there is a
+    /// host configuration reaching the child's own subprocesses, which is
+    /// the channel those layers exist to close.
+    #[test]
+    fn the_absent_config_file_is_absent_and_cannot_be_planted() {
+        let prepared = prepare_empty_search_path().unwrap();
+        let absent = absent_config_file();
+        assert!(
+            !absent.exists(),
+            "{} exists, so a hermetic child's git reads it",
+            absent.display()
+        );
+        assert_eq!(
+            absent.parent(),
+            Some(prepared.as_path()),
+            "the absent config path sits outside the directory that is made \
+             unwritable, so anybody can plant a config file at it"
+        );
     }
 
     #[cfg(unix)]

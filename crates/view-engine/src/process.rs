@@ -180,11 +180,12 @@ impl EngineConfig {
     ///    the allowlist does not name, and skips a name a caller already
     ///    planned: the sweep drops what the host merely happens to export,
     ///    and a variable a caller asked for is not that.
-    /// 2. [`crate::env::HOST_REDIRECT_VARS`] and
-    ///    [`crate::env::HOST_SEARCH_PATH_VARS`], unconditionally. The sweep
-    ///    already covers a host that exports them; this layer also covers the
-    ///    caller who set one deliberately, which is what an isolated config
-    ///    must refuse whoever asks.
+    /// 2. [`crate::env::HOST_REDIRECT_VARS`],
+    ///    [`crate::env::HOST_SEARCH_PATH_VARS`] and
+    ///    [`crate::env::HOST_SUBPROCESS_CONFIG_VARS`], unconditionally. The
+    ///    sweep already covers a host that exports them; this layer also
+    ///    covers the caller who set one deliberately, which is what an
+    ///    isolated config must refuse whoever asks.
     #[must_use]
     pub fn env_plan(&self) -> Vec<(OsString, Option<OsString>)> {
         let mut plan: Vec<(OsString, Option<OsString>)> = Vec::new();
@@ -204,6 +205,10 @@ impl EngineConfig {
             let empty = crate::env::empty_search_path().into_os_string();
             for name in crate::env::HOST_SEARCH_PATH_VARS {
                 plan_set(&mut plan, OsStr::new(name), Some(empty.clone()));
+            }
+            let absent = crate::env::absent_config_file().into_os_string();
+            for name in crate::env::HOST_SUBPROCESS_CONFIG_VARS {
+                plan_set(&mut plan, OsStr::new(name), Some(absent.clone()));
             }
         }
         plan
@@ -233,6 +238,17 @@ fn plan_set(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr, value: O
 /// deliberately gets to keep it, and one that asked for something an
 /// isolated spawn refuses outright loses it to the layer applied after this
 /// one instead.
+///
+/// The name is the whole test here, and that is deliberately *not* the test
+/// the pty and plain-`Command` funnel applies, which compares the builder's
+/// value against the host's because those builders cannot report whether a
+/// caller set a name at all. The two rules agree everywhere except one
+/// edge: a caller that sets a swept name to exactly the value the host
+/// already holds is kept here and dropped there. This side is the one with
+/// the caller's intent in hand -- `env` and `env_remove` say so outright --
+/// so it is the side that answers correctly, and matching the weaker rule
+/// to make the two identical would mean discarding a variable a caller
+/// asked for because of what some unrelated machine happens to export.
 fn plan_sweep(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr) {
     if !plan
         .iter()
@@ -764,11 +780,88 @@ mod config_tests {
         let plan = spawned_env(&EngineConfig::isolated());
         for name in crate::env::HERMETIC_PASSTHROUGH_VARS {
             assert!(
-                !plan.iter().any(|(planned, _)| planned == OsStr::new(name)),
+                !plan
+                    .iter()
+                    .any(|(planned, _)| crate::env::env_names_eq(planned, OsStr::new(name))),
                 "{name} is allowlisted and the isolated plan touches it anyway; \
                  plan {plan:?}"
             );
         }
+    }
+
+    /// `HOME` reaches a hermetic child, so the programs that child spawns
+    /// resolve their own configuration through it. An isolated plan has to
+    /// close that separately: the editor's `XDG_*_HOME` overrides divert the
+    /// editor's lookups and nothing else's.
+    #[test]
+    fn an_isolated_plan_closes_the_config_layers_a_child_subprocess_reads_from_home() {
+        let plan = spawned_env(&EngineConfig::isolated());
+        let absent = crate::env::absent_config_file().into_os_string();
+        for name in crate::env::HOST_SUBPROCESS_CONFIG_VARS {
+            assert!(
+                plan.contains(&(OsString::from(*name), Some(absent.clone()))),
+                "{name} does not select a missing configuration file, so a \
+                 subprocess of an isolated child reads the operator's own; \
+                 plan {plan:?}"
+            );
+        }
+        assert!(
+            plan.iter()
+                .all(|(name, _)| !crate::env::env_names_eq(name, OsStr::new("HOME"))),
+            "HOME is planned after all, which would defeat the child itself \
+             rather than its subprocesses; plan {plan:?}"
+        );
+    }
+
+    /// One entry per variable means one entry per *variable*, not per
+    /// spelling: a process environment folds names exactly where its host
+    /// does, so a plan that kept two spellings apart where the child merges
+    /// them would report a disposition the child does not apply.
+    ///
+    /// The expectation is `cfg!(windows)` rather than the comparison the
+    /// code under test uses, so this states something on both platforms and
+    /// cannot agree with a broken rule by consulting it: Windows must fold
+    /// the two spellings into one entry, Unix must keep them as the two
+    /// variables they are there.
+    #[test]
+    fn the_plan_folds_two_spellings_of_a_name_exactly_where_the_host_does() {
+        let cfg = EngineConfig::default()
+            .with_env("Path", "first")
+            .with_env("PATH", "second");
+        let plan = cfg.env_plan();
+        let expected = if cfg!(windows) { 1 } else { 2 };
+        assert_eq!(
+            plan.len(),
+            expected,
+            "the plan carries {} entries for two spellings the host treats as \
+             {expected}; plan {plan:?}",
+            plan.len()
+        );
+    }
+
+    /// The one edge on which this funnel and the pty/`Command` funnel
+    /// disagree, pinned so the divergence stays a decision rather than an
+    /// accident: a caller who sets a swept name to exactly the host's own
+    /// value keeps it here, because this side knows the caller set it.
+    #[test]
+    fn a_callers_override_matching_the_hosts_value_survives_the_engine_sweep() {
+        let (host, value) = crate::env::hermetic_sweep()
+            .into_iter()
+            .find(|(name, _)| {
+                !crate::env::HOST_REDIRECT_VARS
+                    .iter()
+                    .chain(crate::env::HOST_SEARCH_PATH_VARS)
+                    .chain(crate::env::HOST_SUBPROCESS_CONFIG_VARS)
+                    .any(|fixed| crate::env::env_names_eq(name, OsStr::new(fixed)))
+            })
+            .expect("this host exports nothing the sweep would drop");
+        let plan = spawned_env(&EngineConfig::isolated().with_env(&host, &value));
+        assert!(
+            plan.contains(&(host.clone(), Some(value.clone()))),
+            "{host:?} was swept though the caller planned it; the value \
+             matching the host's own is not what decides it on this side; \
+             plan {plan:?}"
+        );
     }
 
     /// A caller's own override of a name the sweep would otherwise drop
