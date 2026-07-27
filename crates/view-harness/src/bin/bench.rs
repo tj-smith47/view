@@ -272,6 +272,15 @@ impl CellWorld {
             ),
             ("VIEW_COMPAT_SOCK", sock.as_os_str()),
             ("TERM", "xterm-256color".as_ref()),
+            // the only input to view's truecolor bit, and `Tier::Full` --
+            // the tier the budget rows name -- requires it, so a session
+            // without it measures a child that never reached the stated
+            // condition. Today only the sync bit changes emitted bytes, so
+            // this costs nothing measurable; it is set now because the
+            // alternative is a bench that starts measuring the cheap path
+            // silently on the day theming consumes the bit. Set on both
+            // sides of a pair, because the two arms must face one terminal
+            ("COLORTERM", "truecolor".as_ref()),
         ]
         .into_iter()
         .map(|(k, v)| (OsString::from(k), v.to_os_string()))

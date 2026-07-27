@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use portable_pty::CommandBuilder;
-use view_oracle::PtySession;
+use view_oracle::{PtySession, QueryPolicy};
 
 use crate::boundaries;
 use crate::BenchError;
@@ -95,7 +95,17 @@ impl BenchSession {
         if let Some(cwd) = &spec.cwd {
             cmd.cwd(cwd);
         }
-        let pty = PtySession::spawn_configured(cmd, GRID_COLS, GRID_ROWS)?;
+        // a measurement must face the terminal its budget row names. Answering
+        // only the DA1 fence resolves neither synchronized output nor the
+        // kitty keyboard protocol, so the child derives its most conservative
+        // tier and every frame skips the sync bracket the stated tier pays
+        // for -- less work than the bar was written against.
+        let pty = PtySession::spawn_configured_with(
+            cmd,
+            GRID_COLS,
+            GRID_ROWS,
+            QueryPolicy::AnswerFullTier,
+        )?;
         Ok(Self { pty })
     }
 

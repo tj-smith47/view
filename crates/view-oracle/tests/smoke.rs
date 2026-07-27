@@ -980,3 +980,131 @@ fn view_degrades_gracefully_when_view_log_path_is_unwritable() {
          path must never take the session down with it; contents:\n{saved:?}"
     );
 }
+
+/// The synchronized-output bracket `view` writes around a frame once it
+/// believes the terminal supports mode 2026. Its presence is the only
+/// external evidence of the derived tier: a private mode leaves no cell for
+/// a screen assertion to read.
+const SYNC_BRACKET_OPEN: &[u8] = b"\x1b[?2026h";
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Pins the chain a benchmark's stated tier depends on: the pty's answers
+/// decide what the child's probe resolves, which decides how much work each
+/// of its frames does.
+///
+/// Without this, a session could silently downgrade every child it hosts and
+/// nothing would fail -- the screen looks identical either way, because the
+/// difference is a mode the terminal applies and the parser discards. A row
+/// promised at the full tier would then be timed against cheaper frames than
+/// it names.
+#[test]
+fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
+    for (policy, want_sync) in [
+        (QueryPolicy::AnswerDa1, false),
+        (QueryPolicy::AnswerFullTier, true),
+    ] {
+        let mut session = build_view_pty(&[], shared_isolation(), policy);
+        // before any drain: recording captures from the next drain onward,
+        // and the probe traffic under test is the first thing the child writes
+        session.record_raw_output();
+        assert!(
+            session.wait_for("~", Duration::from_secs(5)),
+            "view never painted a buffer under {policy:?}"
+        );
+
+        session.send(b"itier probe").unwrap();
+        session.send(b"\x1b:wq\r").unwrap();
+        let exit = session.wait().expect("view never exited after :wq");
+        assert!(exit.success(), "view did not exit cleanly under {policy:?}");
+
+        assert_eq!(
+            contains_subslice(session.raw_output(), SYNC_BRACKET_OPEN),
+            want_sync,
+            "under {policy:?} the synchronized-output bracket should{} have been \
+             written; a child derives that capability only from the reply this \
+             pty chose to send",
+            if want_sync { "" } else { " not" }
+        );
+    }
+}
+
+/// The tier `view` derives, read from its own startup log line rather than
+/// inferred from what it painted.
+///
+/// The two inputs are independent and neither is visible on screen: the
+/// probe replies this pty chooses to send, and `COLORTERM` in the child's
+/// environment. `Tier::Full` -- the tier the measurement protocol's budget
+/// rows name -- needs both, so a bench that set only one would report a row
+/// at a tier its child never reached.
+fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
+    let paths = common::ScratchPaths::new("smoke-tier");
+    let log_path = paths.isolated_home.join("view.log");
+
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", &log_path);
+    if let Some(value) = colorterm {
+        cmd.env("COLORTERM", value);
+    }
+
+    let mut session = ViewPtySession {
+        session: PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap(),
+        paths,
+        _isolation: shared_isolation(),
+    };
+    assert!(
+        session.wait_for("~", Duration::from_secs(5)),
+        "view never painted a buffer under {policy:?} / COLORTERM={colorterm:?}"
+    );
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    let tier = log
+        .lines()
+        .find_map(|line| line.split("caps tier=").nth(1))
+        .and_then(|after| after.split_whitespace().next())
+        .map(str::to_string);
+    assert!(
+        tier.is_some(),
+        "no startup line in VIEW_LOG; the log was:\n{log}"
+    );
+    tier.unwrap_or_default()
+}
+
+/// Pins the condition the budget rows are stated at, against the child's own
+/// report of it.
+///
+/// Both inputs are load-bearing and each fails silently on its own: a probe
+/// reply this pty withholds and an environment variable it forgets produce
+/// the same screen as the full tier, so nothing but this assertion stands
+/// between a row that says `tier full` and a child that painted at `Basic`.
+#[test]
+fn the_bench_configuration_is_the_only_one_that_reaches_the_full_tier() {
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerDa1, None),
+        "Basic",
+        "a DA1-only terminal resolves no optional capability"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTier, None),
+        "Basic",
+        "answering the whole probe batch is not enough on its own: COLORTERM \
+         is the sole input to the truecolor bit that Full also requires"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerDa1, Some("truecolor")),
+        "Standard",
+        "COLORTERM alone reaches Standard, not Full"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTier, Some("truecolor")),
+        "Full",
+        "the configuration `BenchSession::spawn` and the bench environment \
+         set together is what the budget rows name"
+    );
+}

@@ -35,34 +35,68 @@ type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 /// Whether a session answers the terminal capability queries its child
 /// writes, which decides which startup path that child then takes.
 ///
-/// A real terminal answers, so that is the default and what a measurement
-/// must see: left unanswered, a probing child waits out its whole fallback
-/// deadline and every timing taken through the session carries it.
-/// [`Silent`](Self::Silent) is the deliberate opposite, for a test whose
-/// subject IS the deadline path -- without it, no session in the tree can
-/// reach that path at all.
+/// A real terminal answers, so answering is what a measurement must see:
+/// left unanswered, a probing child waits out its whole fallback deadline
+/// and every timing taken through the session carries it. Which *set* of
+/// queries gets answered is the second axis, because it decides the
+/// capability tier the child then derives and therefore how much work each
+/// of its frames does. [`Silent`](Self::Silent) is the deliberate opposite,
+/// for a test whose subject IS the deadline path -- without it, no session
+/// in the tree can reach that path at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum QueryPolicy {
-    /// Answer the DA1 fence the way a real terminal does.
+    /// Answer only the DA1 fence, as a VT100-class terminal does. The child
+    /// resolves no optional capability and derives its most conservative
+    /// tier, which keeps an assertion about *content* free of the escapes a
+    /// richer tier would interleave.
     AnswerDa1,
+    /// Answer the whole probe batch, as a modern terminal does, so the child
+    /// derives its full tier. A benchmark wants this: the budget table names
+    /// the tier its rows were promised at, and a session that silently
+    /// downgraded the child would time less work than the row claims.
+    AnswerFullTier,
     /// Answer nothing, modelling a terminal that ignores every query.
     Silent,
 }
 
-/// The DA1 (Send Device Attributes) request a capability-probing child writes
-/// to ask what the terminal is, and the reply this pty answers with.
+/// A capability query a probing child writes, paired with the reply a
+/// terminal possessing that capability answers with.
+type Answer = (&'static [u8], &'static [u8]);
+
+/// The DA1 (Send Device Attributes) request, and a reply naming a VT100-class
+/// terminal with the advanced video option.
 ///
 /// A child such as `view` writes this fence last in its probe batch and reads
 /// its reply as the signal that every earlier query has been answered too, so
 /// a terminal that never sends it forces the child to wait out its whole
-/// fallback deadline. The reply is a private CSI ending in `c` (a VT100-class
-/// terminal with the advanced video option); it answers the fence and nothing
-/// more, so a probe's other capabilities (synchronized output, the kitty
-/// keyboard protocol) stay unresolved and the child's derived tier is
-/// unchanged by this pty's presence.
-const DA1_QUERY: &[u8] = b"\x1b[c";
-const DA1_REPLY: &[u8] = b"\x1b[?1;2c";
+/// fallback deadline.
+const DA1: Answer = (b"\x1b[c", b"\x1b[?1;2c");
+
+/// The DECRQM request for synchronized output (mode 2026), and a reply
+/// setting `Pm = 1` (permanently set). A child that sees this brackets each
+/// frame in begin/end-sync escapes, which is real per-frame work a session
+/// measuring frame cost must not silently omit.
+const SYNC: Answer = (b"\x1b[?2026$p", b"\x1b[?2026;1$y");
+
+/// The kitty keyboard protocol progressive-enhancement query, and a reply
+/// reporting flags set. A child that sees this enables the protocol's
+/// disambiguating key encoding.
+const KITTY: Answer = (b"\x1b[?u", b"\x1b[?1u");
+
+const DA1_ONLY: &[Answer] = &[DA1];
+const FULL_TIER: &[Answer] = &[SYNC, KITTY, DA1];
+
+impl QueryPolicy {
+    /// The query/reply pairs a session under this policy answers.
+    fn answers(self) -> &'static [Answer] {
+        match self {
+            Self::AnswerDa1 => DA1_ONLY,
+            Self::AnswerFullTier => FULL_TIER,
+            Self::Silent => &[],
+        }
+    }
+}
 
 /// Scans a child's output byte stream for terminal capability queries and
 /// yields the bytes a real terminal would write back. Stateful across chunks:
@@ -72,11 +106,20 @@ struct QueryResponder {
     /// The trailing bytes of the last chunk that could still begin a query
     /// completed by the next one (bounded by the longest query minus one).
     tail: Vec<u8>,
+    answers: &'static [Answer],
 }
 
 impl QueryResponder {
-    fn new() -> Self {
-        Self { tail: Vec::new() }
+    fn new(answers: &'static [Answer]) -> Self {
+        Self {
+            tail: Vec::new(),
+            answers,
+        }
+    }
+
+    /// How far back a chunk boundary can cut a query this responder answers.
+    fn longest_query(&self) -> usize {
+        self.answers.iter().map(|(q, _)| q.len()).max().unwrap_or(1)
     }
 
     /// The replies (concatenated) for every query found in `chunk`, or empty
@@ -87,10 +130,17 @@ impl QueryResponder {
         let mut out = Vec::new();
         let mut i = 0;
         let mut consumed = 0;
-        while i + DA1_QUERY.len() <= scan.len() {
-            if &scan[i..i + DA1_QUERY.len()] == DA1_QUERY {
-                out.extend_from_slice(DA1_REPLY);
-                i += DA1_QUERY.len();
+        while i < scan.len() {
+            // longest match wins, so a table where one query is a prefix of
+            // another cannot answer the short one and swallow the rest
+            let matched = self
+                .answers
+                .iter()
+                .filter(|(query, _)| scan[i..].starts_with(query))
+                .max_by_key(|(query, _)| query.len());
+            if let Some((query, reply)) = matched {
+                out.extend_from_slice(reply);
+                i += query.len();
                 consumed = i;
             } else {
                 i += 1;
@@ -98,7 +148,10 @@ impl QueryResponder {
         }
         // keep only bytes past the last match that could still start a query,
         // so a query cut by this chunk's end completes against the next
-        let keep_from = scan.len().saturating_sub(DA1_QUERY.len() - 1).max(consumed);
+        let keep_from = scan
+            .len()
+            .saturating_sub(self.longest_query() - 1)
+            .max(consumed);
         self.tail = scan[keep_from..].to_vec();
         out
     }
@@ -121,30 +174,30 @@ fn spawn_reader(
     // pty write, and this is the only thread draining the child: a write that
     // blocked (tty input queue full) would stop the drain, the child would
     // block writing, and neither side could ever make progress again.
-    let reply_tx = match policy {
-        QueryPolicy::Silent => None,
-        QueryPolicy::AnswerDa1 => {
-            let (reply_tx, reply_rx) = mpsc::channel::<Vec<u8>>();
-            let writer = Arc::clone(writer);
-            std::thread::spawn(move || {
-                while let Ok(bytes) = reply_rx.recv() {
-                    // poison is recovered rather than propagated: what this
-                    // mutex guards is a `Box<dyn Write>` over a file
-                    // descriptor, which holds no invariant a panicking
-                    // writer could leave half-updated, and a silent responder
-                    // would present as the same unexplained hang a real
-                    // deadlock does
-                    let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
-                    if guard.write_all(&bytes).is_err() || guard.flush().is_err() {
-                        break;
-                    }
+    let answers = policy.answers();
+    let reply_tx = if answers.is_empty() {
+        None
+    } else {
+        let (reply_tx, reply_rx) = mpsc::channel::<Vec<u8>>();
+        let writer = Arc::clone(writer);
+        std::thread::spawn(move || {
+            while let Ok(bytes) = reply_rx.recv() {
+                // poison is recovered rather than propagated: what this
+                // mutex guards is a `Box<dyn Write>` over a file
+                // descriptor, which holds no invariant a panicking
+                // writer could leave half-updated, and a silent responder
+                // would present as the same unexplained hang a real
+                // deadlock does
+                let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+                if guard.write_all(&bytes).is_err() || guard.flush().is_err() {
+                    break;
                 }
-            });
-            Some(reply_tx)
-        }
+            }
+        });
+        Some(reply_tx)
     };
     std::thread::spawn(move || {
-        let mut responder = QueryResponder::new();
+        let mut responder = QueryResponder::new(answers);
         let mut buf = [0_u8; 65536];
         loop {
             match reader.read(&mut buf) {
@@ -255,7 +308,16 @@ pub struct PtySession {
     writer: SharedWriter,
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
+    raw: Option<Vec<u8>>,
 }
+
+/// How much of a child's raw output a recording session keeps.
+///
+/// Bounded rather than open-ended because the escape traffic worth asserting
+/// on is what a child writes near its start -- its capability probe, the
+/// modes it sets, its first frames -- while an editor driven by the flood row
+/// writes megabytes no assertion has a use for.
+const RAW_RECORD_LIMIT: usize = 256 * 1024;
 
 impl PtySession {
     /// Opens a `cols`x`rows` pty and spawns `cmd` with `args` inside it.
@@ -367,7 +429,34 @@ impl PtySession {
             writer,
             parser,
             master: pair.master,
+            raw: None,
         })
+    }
+
+    /// Starts keeping the child's raw output bytes, up to
+    /// [`RAW_RECORD_LIMIT`], alongside the parsed screen.
+    ///
+    /// The parsed screen cannot answer every question about a terminal
+    /// child: a private mode it sets (synchronized output, the kitty
+    /// keyboard protocol) leaves no cell to inspect, so an assertion about
+    /// whether the child took that path has to read the bytes themselves.
+    ///
+    /// Recording happens where the caller drains, so it costs the reader
+    /// thread nothing and costs an unrecording session nothing at all. The
+    /// consequence is that it captures from the next drain onward: call this
+    /// before [`screen`](Self::screen), [`with_screen`](Self::with_screen),
+    /// [`wait_for`](Self::wait_for) or any other method that drains, or the
+    /// bytes those already parsed are gone.
+    pub fn record_raw_output(&mut self) {
+        self.raw.get_or_insert_with(Vec::new);
+    }
+
+    /// Every recorded byte the child has written so far, or empty if
+    /// [`record_raw_output`](Self::record_raw_output) was never called.
+    #[must_use]
+    pub fn raw_output(&mut self) -> &[u8] {
+        self.drain_available();
+        self.raw.as_deref().unwrap_or_default()
     }
 
     /// Resizes the pty to `cols`x`rows`: informs the kernel (which delivers
@@ -483,6 +572,10 @@ impl PtySession {
 
     fn drain_available(&mut self) {
         while let Ok(chunk) = self.rx.try_recv() {
+            if let Some(raw) = &mut self.raw {
+                let room = RAW_RECORD_LIMIT.saturating_sub(raw.len());
+                raw.extend_from_slice(&chunk[..room.min(chunk.len())]);
+            }
             self.parser.process(&chunk);
         }
     }
@@ -638,34 +731,79 @@ mod responder_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// The probe batch `view-tui` writes, in the order it writes it.
+    fn probe_batch() -> Vec<u8> {
+        let mut batch = SYNC.0.to_vec();
+        batch.extend_from_slice(KITTY.0);
+        batch.extend_from_slice(DA1.0);
+        batch
+    }
+
     #[test]
     fn responder_answers_a_da1_query_in_one_chunk() {
-        let mut r = QueryResponder::new();
-        assert_eq!(r.replies_for(DA1_QUERY), DA1_REPLY);
+        let mut r = QueryResponder::new(DA1_ONLY);
+        assert_eq!(r.replies_for(DA1.0), DA1.1);
     }
 
     #[test]
     fn responder_answers_a_da1_query_split_across_two_chunks() {
-        let mut r = QueryResponder::new();
-        let (head, tail) = DA1_QUERY.split_at(2);
+        let mut r = QueryResponder::new(DA1_ONLY);
+        let (head, tail) = DA1.0.split_at(2);
         assert!(r.replies_for(head).is_empty(), "no full query yet");
-        assert_eq!(r.replies_for(tail), DA1_REPLY);
+        assert_eq!(r.replies_for(tail), DA1.1);
     }
 
     #[test]
     fn responder_stays_silent_on_output_that_holds_no_query() {
-        let mut r = QueryResponder::new();
+        let mut r = QueryResponder::new(DA1_ONLY);
         assert!(r.replies_for(b"\x1b[1mbold\x1b[0m normal text").is_empty());
     }
 
     #[test]
     fn responder_answers_each_of_two_queries_in_one_chunk() {
-        let mut r = QueryResponder::new();
-        let mut two = DA1_QUERY.to_vec();
-        two.extend_from_slice(DA1_QUERY);
-        let mut both = DA1_REPLY.to_vec();
-        both.extend_from_slice(DA1_REPLY);
+        let mut r = QueryResponder::new(DA1_ONLY);
+        let mut two = DA1.0.to_vec();
+        two.extend_from_slice(DA1.0);
+        let mut both = DA1.1.to_vec();
+        both.extend_from_slice(DA1.1);
         assert_eq!(r.replies_for(&two), both);
+    }
+
+    #[test]
+    fn a_da1_only_responder_leaves_the_optional_capabilities_unresolved() {
+        let mut r = QueryResponder::new(DA1_ONLY);
+        assert_eq!(r.replies_for(&probe_batch()), DA1.1);
+    }
+
+    #[test]
+    fn a_full_tier_responder_answers_the_whole_batch_in_query_order() {
+        let mut r = QueryResponder::new(FULL_TIER);
+        let mut expected = SYNC.1.to_vec();
+        expected.extend_from_slice(KITTY.1);
+        expected.extend_from_slice(DA1.1);
+        assert_eq!(r.replies_for(&probe_batch()), expected);
+    }
+
+    // The sync query is the longest in the table, so it is the one a chunk
+    // boundary can cut furthest from its start; a tail sized for DA1 alone
+    // would drop it and the child would derive the wrong tier.
+    #[test]
+    fn a_full_tier_responder_rejoins_a_sync_query_cut_anywhere() {
+        for split in 1..SYNC.0.len() {
+            let mut r = QueryResponder::new(FULL_TIER);
+            let (head, tail) = SYNC.0.split_at(split);
+            let first = r.replies_for(head);
+            let mut got = first;
+            got.extend_from_slice(&r.replies_for(tail));
+            assert_eq!(got, SYNC.1, "split after {split} bytes");
+        }
+    }
+
+    #[test]
+    fn a_silent_policy_answers_nothing_it_would_otherwise_answer() {
+        assert!(QueryPolicy::Silent.answers().is_empty());
+        let mut r = QueryResponder::new(QueryPolicy::Silent.answers());
+        assert!(r.replies_for(&probe_batch()).is_empty());
     }
 }
 
@@ -800,7 +938,7 @@ mod tests {
             "silent policy still answered the DA1 query with {quiet:?}"
         );
 
-        session.send(DA1_REPLY).unwrap();
+        session.send(DA1.1).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if std::fs::read_to_string(&out).is_ok_and(|s| s.trim().len() >= 14) {
