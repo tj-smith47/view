@@ -36,11 +36,17 @@ use std::sync::{mpsc, Mutex, PoisonError};
 /// a poll reporting writability mean at least that much room is free. Both
 /// halves are needed: without the size bound a writable answer permits a
 /// short write, and a short write inline would have to leave its remainder
-/// somewhere, which is precisely the overtaking this module forbids. RPC
-/// notifications carrying a keystroke are tens of bytes, so the bound
-/// costs the fast path nothing that matters.
+/// somewhere, which is precisely the overtaking this module forbids.
+///
+/// Taken from the platform rather than written as a number, because the
+/// number differs: 4096 on Linux but 512 on macOS and the BSDs. A fixed
+/// 4096 would let a 4096-byte inline write start on a macOS pipe holding
+/// only 512 bytes of room, and `write_all` would then block the caller
+/// mid-message -- the one thing the fast path exists to avoid. RPC
+/// notifications carrying a keystroke are tens of bytes, so even the
+/// smaller bound costs the fast path nothing that matters.
 #[cfg(unix)]
-const MAX_INLINE_WRITE: usize = 4096;
+const MAX_INLINE_WRITE: usize = rustix::pipe::PIPE_BUF;
 
 /// The write side of an engine connection.
 pub(crate) struct Outbox {
@@ -285,45 +291,235 @@ mod tests {
         assert_eq!(outbox.handed_off.load(Ordering::Acquire), 0);
     }
 
-    /// Drives the outbox over a real pipe whose reader is deliberately
-    /// slower than the sender, so the pipe spends the run oscillating
-    /// between full and writable.
+    /// Bytes per message on a real pipe.
     ///
-    /// That oscillation is the whole test. A reader that keeps up lets
-    /// every message take the inline path, and a run where only one path
-    /// ever runs cannot detect reordering between the two. Verified by
-    /// removing the `handed_off` gate from [`Outbox::send`]: with the gate
-    /// this passes, without it the assertion below fires.
+    /// Under `PIPE_BUF` on every unix, which is 512 on some and not the
+    /// 4096 Linux uses: a pipe that answers "writable" is only promised to
+    /// hold `PIPE_BUF` more bytes, and a message above that could block the
+    /// test's own inline write instead of measuring the outbox.
+    #[cfg(unix)]
+    const MESSAGE_LEN: usize = 64;
+
+    /// Bytes a fill loop will push before declaring the pipe unfillable.
+    ///
+    /// Well past the largest pipe capacity in play (64 KiB by default on
+    /// Linux and macOS alike). Reaching it means `poll` never withheld
+    /// writability, so no message was ever handed to the writer thread and
+    /// the run cannot say anything about ordering between the two paths --
+    /// a result to report loudly, not to keep sending through.
+    #[cfg(unix)]
+    const FILL_CEILING: usize = 4 << 20;
+
+    /// Seconds a test will wait on the pipe for bytes that were sent.
+    #[cfg(unix)]
+    const READ_WAIT_SECS: i64 = 30;
+
+    /// Sends messages until one is handed to the writer thread, returning
+    /// every byte sent.
+    ///
+    /// This is how a backlog gets arranged rather than hoped for. Nothing
+    /// drains the pipe while this runs, so sends take the inline path until
+    /// `poll` stops reporting writability, and that first refusal is a
+    /// hand-off that has provably happened -- no scheduling decision, and
+    /// no reader that happens to keep up, can take it away afterwards.
+    #[cfg(unix)]
+    fn fill_until_handed_off(outbox: &Outbox) -> Vec<u8> {
+        let mut sent: Vec<u8> = Vec::new();
+        let mut tag = 0_u8;
+        while outbox.path_counts().1 == 0 {
+            assert!(
+                sent.len() < FILL_CEILING,
+                "the pipe accepted {} bytes of inline writes without once \
+                 refusing, so nothing was ever handed to the writer thread \
+                 and this run proves nothing about ordering across the two \
+                 paths",
+                sent.len()
+            );
+            assert!(outbox.send(vec![tag; MESSAGE_LEN]), "send failed");
+            sent.extend(std::iter::repeat_n(tag, MESSAGE_LEN));
+            tag = (tag + 1) % 251;
+        }
+        sent
+    }
+
+    /// Reads exactly `len` bytes, refusing to wait forever for them.
+    ///
+    /// A pipe read has no timeout of its own, so a defect that leaves bytes
+    /// unwritten would stall the whole suite on a blocked `read` rather than
+    /// naming itself. Running out of patience is a failure, not a retry.
+    #[cfg(unix)]
+    fn read_exactly(pipe: &std::fs::File, len: usize) -> Vec<u8> {
+        use rustix::event::{poll, PollFd, PollFlags};
+        use std::io::Read;
+
+        let mut got: Vec<u8> = Vec::with_capacity(len);
+        let mut buf = vec![0_u8; len];
+        while got.len() < len {
+            let mut fds = [PollFd::new(pipe, PollFlags::IN)];
+            let ready = poll(
+                &mut fds,
+                Some(&rustix::event::Timespec {
+                    tv_sec: READ_WAIT_SECS,
+                    tv_nsec: 0,
+                }),
+            )
+            .expect("poll the read end");
+            assert!(
+                ready > 0,
+                "the pipe delivered {} of {len} bytes and then went quiet",
+                got.len()
+            );
+            let remaining = len - got.len();
+            let mut source = pipe;
+            let n = source.read(&mut buf[..remaining]).expect("read the pipe");
+            assert!(
+                n > 0,
+                "the write end closed after {} of {len} bytes",
+                got.len()
+            );
+            got.extend_from_slice(&buf[..n]);
+        }
+        got
+    }
+
+    /// Bytes of context shown either side of a byte-stream divergence.
+    #[cfg(unix)]
+    const DIVERGENCE_WINDOW: usize = 3 * MESSAGE_LEN;
+
+    /// Asserts two byte streams match, reporting the first byte they differ
+    /// on instead of both streams.
+    ///
+    /// The streams here run to megabytes, and a bare `assert_eq!` over them
+    /// prints both operands in full: the single index that identifies the
+    /// reordering ends up buried in megabytes of test output that has to be
+    /// searched before the failure can be read at all.
+    #[cfg(unix)]
+    fn assert_same_bytes(seen: &[u8], expected: &[u8], what: &str) {
+        assert_eq!(
+            seen.len(),
+            expected.len(),
+            "{what}: the pipe delivered a different number of bytes than were \
+             sent"
+        );
+        let Some(at) = seen
+            .iter()
+            .zip(expected)
+            .position(|(got, want)| got != want)
+        else {
+            return;
+        };
+        let from = at.saturating_sub(DIVERGENCE_WINDOW);
+        let to = (at + DIVERGENCE_WINDOW).min(seen.len());
+        assert_eq!(
+            &seen[from..to],
+            &expected[from..to],
+            "{what}: first divergence at byte {at} of this stream, within \
+             message {} of it, shown from byte {from}",
+            at / MESSAGE_LEN
+        );
+    }
+
+    /// Builds an outbox over a real pipe, returning it with the read end and
+    /// the queue the writer thread would drain.
+    #[cfg(unix)]
+    fn outbox_on_a_pipe() -> (Arc<Outbox>, std::fs::File, mpsc::Receiver<Vec<u8>>) {
+        let (read_end, write_end) = rustix::pipe::pipe().expect("pipe");
+        let dup: std::os::fd::OwnedFd = write_end.try_clone().expect("dup the write end");
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let outbox = Arc::new(Outbox::new(
+            Box::new(std::fs::File::from(write_end)),
+            tx,
+            Some(dup),
+        ));
+        (outbox, std::fs::File::from(read_end), rx)
+    }
+
+    /// The ordering guarantee at the one point it can fail: a message the
+    /// writer thread still owns, and a later message sent once the pipe is
+    /// writable again.
+    ///
+    /// Every step is arranged, none is waited for. The pipe is filled until
+    /// it refuses an inline write, which hands one message to the thread;
+    /// the thread is held back so that message stays unwritten; the pipe is
+    /// then drained, so `poll` answers "writable" once more. The next send
+    /// therefore meets a writable pipe with a message still queued ahead of
+    /// it, and only [`Outbox`]'s own hand-off gate can hold it back. Remove
+    /// that gate and the two assertions below fire on every run rather than
+    /// on a lucky one.
     #[cfg(unix)]
     #[test]
     fn a_backlogged_pipe_keeps_order_while_both_paths_are_live() {
-        use std::io::Read;
-        use std::os::fd::OwnedFd;
+        let (outbox, reader, rx) = outbox_on_a_pipe();
 
-        let (read_end, write_end) = rustix::pipe::pipe().expect("pipe");
-        let dup: OwnedFd = write_end.try_clone().expect("dup the write end");
-        let writer = std::fs::File::from(write_end);
-
-        let (done_tx, done_rx) = mpsc::channel::<Vec<u8>>();
+        // held back rather than left to drain: a message the thread has
+        // already written is no longer in front of anything, and the send
+        // that must not overtake it needs it still pending
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let thread_outbox = Arc::clone(&outbox);
         std::thread::spawn(move || {
-            let mut r = std::fs::File::from(read_end);
-            let mut seen = Vec::with_capacity(MESSAGES);
-            let mut buf = [0_u8; 64];
-            while seen.len() < MESSAGES {
-                match r.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => seen.extend_from_slice(&buf[..n]),
-                }
-                // slower than the sender on purpose: this is what keeps a
-                // backlog in front of the writer thread for an unguarded
-                // inline write to jump
-                std::thread::sleep(std::time::Duration::from_micros(50));
+            if release_rx.recv().is_err() {
+                return;
             }
-            let _ = done_tx.send(seen);
+            while let Ok(bytes) = rx.recv() {
+                if !thread_outbox.write_from_thread(&bytes) {
+                    break;
+                }
+            }
         });
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
-        let outbox = Arc::new(Outbox::new(Box::new(writer), tx, Some(dup)));
+        let mut expected = fill_until_handed_off(&outbox);
+        let (inline, threaded) = outbox.path_counts();
+        assert!(
+            inline > 0,
+            "an empty pipe must accept the first send inline"
+        );
+        assert_eq!(threaded, 1, "the fill stops at the first hand-off");
+
+        // draining what the inline path wrote is what makes the pipe answer
+        // "writable" again while the handed-off message is still unwritten
+        let inline_bytes = inline * MESSAGE_LEN;
+        let head = read_exactly(&reader, inline_bytes);
+        assert_same_bytes(
+            &head,
+            &expected[..inline_bytes],
+            "the inline path reordered its own writes",
+        );
+
+        let overtaker = u8::try_from((inline + 1) % 251).unwrap_or(0);
+        assert!(outbox.send(vec![overtaker; MESSAGE_LEN]), "send failed");
+        expected.extend(std::iter::repeat_n(overtaker, MESSAGE_LEN));
+        let (inline_after, _) = outbox.path_counts();
+
+        release_tx.send(()).expect("release the writer thread");
+        let tail = read_exactly(&reader, expected.len() - inline_bytes);
+        assert_same_bytes(
+            &tail,
+            &expected[inline_bytes..],
+            "a message sent while the writer thread still owned an earlier \
+             one reached the pipe ahead of it",
+        );
+        assert_eq!(
+            inline_after, inline,
+            "the send made while a message was still queued took the inline \
+             path; the bytes came out in order this run by luck, not by the \
+             gate that is supposed to guarantee it"
+        );
+    }
+
+    /// The same guarantee under real contention: inline writes from the
+    /// caller, queued writes from the writer thread, and a reader draining
+    /// the pipe, all at once.
+    ///
+    /// Arming does not depend on the race. The pipe is filled with nothing
+    /// reading it, so a hand-off is a fact before the reader thread exists;
+    /// what the contention that follows decides is only which path each
+    /// later message takes, never whether both paths ran at all.
+    #[cfg(unix)]
+    #[test]
+    fn both_paths_keep_order_while_a_reader_drains_concurrently() {
+        use std::io::Read;
+
+        let (outbox, mut reader, rx) = outbox_on_a_pipe();
         let thread_outbox = Arc::clone(&outbox);
         std::thread::spawn(move || {
             while let Ok(bytes) = rx.recv() {
@@ -333,35 +529,76 @@ mod tests {
             }
         });
 
-        let expected: Vec<u8> = (0..MESSAGES)
-            .map(|i| u8::try_from(i % 251).unwrap_or(0))
-            .collect();
-        for byte in &expected {
-            assert!(outbox.send(vec![*byte]), "send failed");
-        }
-        let seen = done_rx
-            .recv_timeout(std::time::Duration::from_secs(60))
-            .expect("reader drained the pipe");
-
+        let mut expected = fill_until_handed_off(&outbox);
         let (inline, threaded) = outbox.path_counts();
         assert!(
-            inline > 0 && threaded > 0,
-            "both paths must run for this to be an ordering proof; inline {inline}, threaded \
-             {threaded}"
+            inline > 0,
+            "an empty pipe must accept the first send inline"
         );
-        assert_eq!(
-            seen.len(),
-            expected.len(),
-            "the pipe delivered a different number of bytes than were sent"
-        );
-        assert_eq!(
-            seen, expected,
-            "the outbox reordered messages: inline {inline}, threaded {threaded}"
+        assert!(threaded > 0, "the fill stops at the first hand-off");
+
+        let total = expected.len() + CONTENDED_MESSAGES * MESSAGE_LEN;
+        let (done_tx, done_rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut seen: Vec<u8> = Vec::with_capacity(total);
+            let mut buf = [0_u8; 4096];
+            while seen.len() < total {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = done_tx.send(seen);
+        });
+
+        let mut tag = u8::try_from((inline + 1) % 251).unwrap_or(0);
+        for _ in 0..CONTENDED_MESSAGES {
+            assert!(outbox.send(vec![tag; MESSAGE_LEN]), "send failed");
+            expected.extend(std::iter::repeat_n(tag, MESSAGE_LEN));
+            tag = (tag + 1) % 251;
+        }
+
+        let seen = done_rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("the reader drained every byte that was sent");
+        let (inline, threaded) = outbox.path_counts();
+        assert_same_bytes(
+            &seen,
+            &expected,
+            &format!("the outbox reordered messages: inline {inline}, threaded {threaded}"),
         );
     }
 
-    /// Enough sends to keep the slow reader behind for the whole run, so
-    /// the writer thread always has a backlog in front of it.
+    /// Sends made once the pipe is live and a reader is draining it, enough
+    /// for the two paths to interleave many times over.
     #[cfg(unix)]
-    const MESSAGES: usize = 200_000;
+    const CONTENDED_MESSAGES: usize = 20_000;
+
+    /// The size bound is half of what makes an inline write safe: a pipe
+    /// answering "writable" promises room for `PIPE_BUF` bytes and no more,
+    /// so a message above that must take the writer thread even when the
+    /// pipe is empty and every other condition for going inline holds.
+    #[cfg(unix)]
+    #[test]
+    fn a_message_larger_than_the_pipes_atomic_write_never_goes_inline() {
+        let (outbox, reader, _rx) = outbox_on_a_pipe();
+
+        assert!(outbox.send(vec![7_u8; MAX_INLINE_WRITE]), "send failed");
+        assert_eq!(
+            outbox.path_counts(),
+            (1, 0),
+            "a message of exactly the atomic-write size fits the promise an \
+             empty pipe just made, so it belongs on the inline path"
+        );
+        let written = read_exactly(&reader, MAX_INLINE_WRITE);
+        assert_eq!(written, vec![7_u8; MAX_INLINE_WRITE]);
+
+        assert!(outbox.send(vec![9_u8; MAX_INLINE_WRITE + 1]), "send failed");
+        assert_eq!(
+            outbox.path_counts(),
+            (1, 1),
+            "one byte past the atomic-write size the pipe's answer stops \
+             being binding, and an inline write could block the caller"
+        );
+    }
 }
