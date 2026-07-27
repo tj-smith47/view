@@ -1000,7 +1000,7 @@ fn main() -> Result<()> {
             // the findings; refusing here instead would end the run at the
             // first missing cell with no verdict printed for any of the
             // cells already measured
-            let Some(recorded) = file.cell(&cell.id.scenario, &cell.id.fixture) else {
+            let Some(recorded) = file.cell(&cell.id) else {
                 continue;
             };
             breaches.extend(baselines::gate_cell(

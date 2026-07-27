@@ -508,17 +508,23 @@ impl BaselineFile {
     }
 
     /// Inserts or replaces one cell's metrics.
-    pub fn upsert_cell(&mut self, scenario: &str, fixture: &str, metrics: CellMetrics) {
+    pub fn upsert_cell(&mut self, id: &CellId, metrics: CellMetrics) {
         self.cells
-            .entry(scenario.to_string())
+            .entry(id.scenario.clone())
             .or_default()
-            .insert(fixture.to_string(), metrics);
+            .insert(id.fixture.clone(), metrics);
     }
 
     /// The recorded metrics for one cell, if present.
+    ///
+    /// Both keys arrive inside one [`CellId`] rather than as two strings
+    /// the caller orders itself. Named the other way round a lookup simply
+    /// misses, and a miss is a legitimate answer everywhere this is called:
+    /// the gate walk skips the cell, so every recorded bar goes untested
+    /// while the run still reports the cells as within them.
     #[must_use]
-    pub fn cell(&self, scenario: &str, fixture: &str) -> Option<&CellMetrics> {
-        self.cells.get(scenario)?.get(fixture)
+    pub fn cell(&self, id: &CellId) -> Option<&CellMetrics> {
+        self.cells.get(&id.scenario)?.get(&id.fixture)
     }
 }
 
@@ -638,7 +644,7 @@ pub fn uncovered_cells(
 pub fn unrecorded_cells(baseline: &BaselineFile, measured: &[MeasuredCell]) -> Vec<CellId> {
     measured
         .iter()
-        .filter(|cell| baseline.cell(&cell.id.scenario, &cell.id.fixture).is_none())
+        .filter(|cell| baseline.cell(&cell.id).is_none())
         .map(|cell| cell.id.clone())
         .collect()
 }
@@ -958,10 +964,9 @@ pub fn plan_record(
 
     let mut cells = Vec::new();
     for cell in measured {
-        let existing_cell =
-            reference.and_then(|file| file.cell(&cell.id.scenario, &cell.id.fixture));
+        let existing_cell = reference.and_then(|file| file.cell(&cell.id));
         let (ratcheted, outcomes) = ratchet_cell(existing_cell, &cell.metrics, controlled);
-        file.upsert_cell(&cell.id.scenario, &cell.id.fixture, ratcheted);
+        file.upsert_cell(&cell.id, ratcheted);
         cells.push(CellRatchet {
             scenario: cell.id.scenario.clone(),
             fixture: cell.id.fixture.clone(),
@@ -1160,14 +1165,16 @@ mod tests {
     fn round_trips_through_toml_with_scenario_fixture_tables() {
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
         file.upsert_cell(
-            "echo",
-            "minimal",
+            &CellId::new("echo", "minimal"),
             metrics(&[("ratio_p99", 1.21), ("paired_delta_p99_ms", 0.29)]),
         );
         let text = toml::to_string_pretty(&file).unwrap();
         assert!(text.contains("[echo.minimal]"), "actual TOML:\n{text}");
         let parsed: BaselineFile = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.cell("echo", "minimal").unwrap()["ratio_p99"], 1.21);
+        assert_eq!(
+            parsed.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p99"],
+            1.21
+        );
         assert_eq!(parsed.machine_class, "dev-linux");
     }
 
@@ -1179,7 +1186,10 @@ mod tests {
     #[test]
     fn a_measured_headroom_survives_a_rewrite() {
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.17)]));
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p50", 1.17)]),
+        );
         file.headroom.insert("ratio_p50".to_string(), 1.06);
 
         let text = toml::to_string_pretty(&file).unwrap();
@@ -1200,7 +1210,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("view-headroom-{}", std::process::id()));
         let path = dir.join("dev-linux.toml");
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.17)]));
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p50", 1.17)]),
+        );
 
         file.headroom.insert("ratoi_p50".to_string(), 1.06);
         save(&path, &file).unwrap();
@@ -1227,11 +1240,26 @@ mod tests {
     #[test]
     fn upsert_replaces_only_the_named_cell() {
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p99", 1.2)]));
-        file.upsert_cell("echo", "heavy", metrics(&[("ratio_p99", 1.4)]));
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p99", 1.1)]));
-        assert_eq!(file.cell("echo", "minimal").unwrap()["ratio_p99"], 1.1);
-        assert_eq!(file.cell("echo", "heavy").unwrap()["ratio_p99"], 1.4);
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p99", 1.2)]),
+        );
+        file.upsert_cell(
+            &CellId::new("echo", "heavy"),
+            metrics(&[("ratio_p99", 1.4)]),
+        );
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p99", 1.1)]),
+        );
+        assert_eq!(
+            file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p99"],
+            1.1
+        );
+        assert_eq!(
+            file.cell(&CellId::new("echo", "heavy")).unwrap()["ratio_p99"],
+            1.4
+        );
     }
 
     fn pairs(list: &[(&str, &str)]) -> Vec<CellId> {
@@ -1243,7 +1271,10 @@ mod tests {
         // every one, not the first: a gate that stops at the first missing
         // cell reports one problem where it could have reported all of them
         let mut file = BaselineFile::new("dev-macos", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p50", 1.5)]),
+        );
         let measured = vec![
             measured_cell("first_paint", "minimal", &[("shell_visible_ms", 4.3)]),
             measured_cell("echo", "minimal", &[("ratio_p50", 1.4)]),
@@ -1262,8 +1293,14 @@ mod tests {
     #[test]
     fn uncovered_cells_names_a_baseline_cell_the_run_never_touched() {
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
-        file.upsert_cell("memory", "minimal", metrics(&[("pss_mb", 3.4)]));
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p50", 1.5)]),
+        );
+        file.upsert_cell(
+            &CellId::new("memory", "minimal"),
+            metrics(&[("pss_mb", 3.4)]),
+        );
         let uncovered = uncovered_cells(&file, &pairs(&[("echo", "minimal")]), &[]);
         assert_eq!(uncovered, pairs(&[("memory", "minimal")]));
     }
@@ -1273,8 +1310,14 @@ mod tests {
         // a baseline holding a cell whose scenario this platform has no
         // measurement for, which is the shape the skip list exists for
         let mut file = BaselineFile::new("gh-windows", "v0.12.4");
-        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
-        file.upsert_cell("memory", "minimal", metrics(&[("pss_mb", 3.4)]));
+        file.upsert_cell(
+            &CellId::new("echo", "minimal"),
+            metrics(&[("ratio_p50", 1.5)]),
+        );
+        file.upsert_cell(
+            &CellId::new("memory", "minimal"),
+            metrics(&[("pss_mb", 3.4)]),
+        );
         let uncovered = uncovered_cells(
             &file,
             &pairs(&[("echo", "minimal")]),
@@ -1645,11 +1688,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("view-baselines-rt-{}", std::process::id()));
         let path = dir.join("dev-linux.toml");
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell("first_paint", "heavy", metrics(&[("cold_ms", 38.0)]));
+        file.upsert_cell(
+            &CellId::new("first_paint", "heavy"),
+            metrics(&[("cold_ms", 38.0)]),
+        );
         save(&path, &file).unwrap();
         let loaded = load(&path).unwrap();
         assert_eq!(
-            loaded.cell("first_paint", "heavy").unwrap()["cold_ms"],
+            loaded.cell(&CellId::new("first_paint", "heavy")).unwrap()["cold_ms"],
             38.0
         );
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1794,7 +1840,7 @@ mod tests {
     fn baseline_with(pin: &str, class: &str, cells: &[CellSpec]) -> BaselineFile {
         let mut file = BaselineFile::new(class, pin);
         for (scenario, fixture, pairs) in cells {
-            file.upsert_cell(scenario, fixture, metrics(pairs));
+            file.upsert_cell(&CellId::new(scenario, fixture), metrics(pairs));
         }
         file
     }
@@ -1815,7 +1861,7 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20
         );
         assert!(plan.reset_reason.is_none());
@@ -1840,7 +1886,7 @@ mod tests {
             &measured,
         );
         assert!(
-            plan.file.cell("scroll", "minimal").is_none(),
+            plan.file.cell(&CellId::new("scroll", "minimal")).is_none(),
             "a full-matrix record must not carry a cell the run no longer measures"
         );
     }
@@ -1861,7 +1907,7 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20,
             "a baseline under another pin must not ratchet the fresh measurement down to its own number"
         );
@@ -1883,7 +1929,7 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20
         );
         assert!(
@@ -1911,12 +1957,12 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("scroll", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("scroll", "minimal")).unwrap()["ratio_p50"],
             1.70,
             "a single-cell record must leave the other cells untouched"
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20
         );
     }
@@ -2158,7 +2204,7 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20,
             "a worse full-matrix remeasure must hold the better recorded bar"
         );
@@ -2180,7 +2226,7 @@ mod tests {
             &measured,
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20
         );
         assert_eq!(plan.file.machine_class, "dev-linux");
@@ -2217,11 +2263,11 @@ mod tests {
             "the saved file must carry the run's pin, not the drifted one"
         );
         assert!(
-            plan.file.cell("scroll", "minimal").is_none(),
+            plan.file.cell(&CellId::new("scroll", "minimal")).is_none(),
             "cells measured under the old pin must not survive relabeled under the new one"
         );
         assert_eq!(
-            plan.file.cell("echo", "minimal").unwrap()["ratio_p50"],
+            plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
             1.20,
             "the fresh measurement, not the drifted 0.5, must be recorded"
         );
