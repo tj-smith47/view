@@ -18,6 +18,7 @@ done
 
 fail=0
 entries=0
+arrow=$'\xe2\x86\x92'
 
 # Reads the [[budget]] blocks: spec_row, max. Deliberately not a TOML parser;
 # the file's own loader is the parser of record and its schema test guards
@@ -29,7 +30,10 @@ while IFS=$'\t' read -r spec_row max; do
   # budgets.toml writes them plainly, so both sides are normalised and then
   # matched whole. Matching a prefix instead would accept a spec_row edited to
   # point at a different row that merely starts the same way.
-  row="$(sed 's/\xe2\x86\x92/->/g; s/`//g' "$spec" | grep -F "$spec_row" | head -1 || true)"
+  # The arrow's bytes are expanded by the shell, not by sed: \xNN inside a sed
+  # expression is a GNU extension, so spelling it there would make the
+  # normalisation, and with it the gate's verdict, depend on the host's sed.
+  row="$(sed "s/$arrow/->/g; s/\`//g" "$spec" | grep -F "$spec_row" | head -1 || true)"
   if [[ -z "$row" ]]; then
     echo "BUDGET DRIFT FAIL: spec_row \"$spec_row\" matches no line in the spec" >&2
     fail=1

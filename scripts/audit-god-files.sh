@@ -218,15 +218,43 @@ fi
 # not yet git-added is exactly what this guard exists to catch. -f drops index
 # entries with no file on disk (a split deletes foo.rs in the worktree before
 # that deletion is staged), which would otherwise fail every downstream reader.
-mapfile -t ALL_RS < <(
+ALL_RS=()
+while IFS= read -r _f; do
+    [[ -f "$_f" ]] && ALL_RS+=("$_f")
+done < <(
     git ls-files --cached --others --exclude-standard -- 'crates/**/*.rs' 'crates/*.rs' 2>/dev/null |
-        sort -u |
-        while IFS= read -r _f; do [[ -f "$_f" ]] && printf '%s\n' "$_f"; done
+        sort -u
 )
 if [[ ${#ALL_RS[@]} -eq 0 ]]; then
     echo "audit-god-files: no crates/**/*.rs tracked; nothing to scan." >&2
     exit 1
 fi
+
+# The file-keyed maps below live in ordinary shell variables named after an
+# injective encoding of the path, because bash 3.2 -- Apple's /bin/bash, and
+# the only bash a stock macOS runner has -- predates associative arrays.
+# Encoding the escape character first is what keeps the mapping injective:
+# without it `a-b.rs` and `a_2d_b.rs` would share one slot, and two paths in
+# one slot mark the wrong file test-only and hide a god file with no error.
+map_name() {
+    local s=$2
+    s=${s//_/_5f}
+    s=${s//\//_2f}
+    s=${s//./_2e}
+    s=${s//-/_2d}
+    MAP_NAME="GODMAP_$1_$s"
+}
+
+# a path outside the encoded alphabet would produce an invalid variable name,
+# so it is refused here where the message can name the file
+for _f in "${ALL_RS[@]}"; do
+    case "$_f" in
+        *[!A-Za-z0-9_/.-]*)
+            echo "audit-god-files: $_f has characters this gate cannot key on" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Resolve `mod NAME;` declared in DECL_FILE to the file that provides it, into
 # the global RESOLVED (empty when the module has no file). rustc looks in the
@@ -281,40 +309,54 @@ collect_mod_decls() {
     ' "$@"
 }
 
-declare -A GATED_DECLS=()
-declare -A ALL_DECLS=()
-declare -A IS_TEST_FILE=()
 WORKLIST=()
+IS_TEST_COUNT=0
+
+mark_test_file() {
+    map_name IS_TEST_FILE "$1"
+    printf -v "$MAP_NAME" '%s' 1
+    WORKLIST+=("$1")
+    IS_TEST_COUNT=$((IS_TEST_COUNT + 1))
+}
+
+is_test_file() {
+    map_name IS_TEST_FILE "$1"
+    [[ -n "${!MAP_NAME-}" ]]
+}
 
 while IFS=$'\t' read -r file gated name; do
     [[ -n "$file" ]] || continue
-    ALL_DECLS["$file"]+="$name "
-    [[ "$gated" == "1" ]] && GATED_DECLS["$file"]+="$name "
+    map_name ALL_DECLS "$file"
+    printf -v "$MAP_NAME" '%s' "${!MAP_NAME-}$name "
+    if [[ "$gated" == "1" ]]; then
+        map_name GATED_DECLS "$file"
+        printf -v "$MAP_NAME" '%s' "${!MAP_NAME-}$name "
+    fi
 done < <(collect_mod_decls "${ALL_RS[@]}")
 
-declare -A INNER_CFG_TEST=()
 while IFS= read -r f; do
-    [[ -n "$f" ]] && INNER_CFG_TEST["$f"]=1
+    [[ -n "$f" ]] || continue
+    map_name INNER_CFG_TEST "$f"
+    printf -v "$MAP_NAME" '%s' 1
 done < <(grep -rlE '^[[:space:]]*#!\[cfg\(test\)\]' -- "${ALL_RS[@]}" 2>/dev/null || true)
 
 for f in "${ALL_RS[@]}"; do
     case "$f" in
         crates/*/tests/* | crates/*/benches/*)
-            IS_TEST_FILE["$f"]=1
-            WORKLIST+=("$f")
+            mark_test_file "$f"
             continue
             ;;
     esac
-    if [[ -n "${INNER_CFG_TEST[$f]:-}" ]]; then
-        IS_TEST_FILE["$f"]=1
-        WORKLIST+=("$f")
+    map_name INNER_CFG_TEST "$f"
+    if [[ -n "${!MAP_NAME-}" ]]; then
+        mark_test_file "$f"
         continue
     fi
-    for name in ${GATED_DECLS[$f]:-}; do
+    map_name GATED_DECLS "$f"
+    for name in ${!MAP_NAME-}; do
         resolve_mod_file "$f" "$name"
-        if [[ -n "$RESOLVED" && -z "${IS_TEST_FILE[$RESOLVED]:-}" ]]; then
-            IS_TEST_FILE["$RESOLVED"]=1
-            WORKLIST+=("$RESOLVED")
+        if [[ -n "$RESOLVED" ]] && ! is_test_file "$RESOLVED"; then
+            mark_test_file "$RESOLVED"
         fi
     done
 done
@@ -324,18 +366,18 @@ wl_head=0
 while [[ $wl_head -lt ${#WORKLIST[@]} ]]; do
     f="${WORKLIST[$wl_head]}"
     wl_head=$((wl_head + 1))
-    for name in ${ALL_DECLS[$f]:-}; do
+    map_name ALL_DECLS "$f"
+    for name in ${!MAP_NAME-}; do
         resolve_mod_file "$f" "$name"
-        if [[ -n "$RESOLVED" && -z "${IS_TEST_FILE[$RESOLVED]:-}" ]]; then
-            IS_TEST_FILE["$RESOLVED"]=1
-            WORKLIST+=("$RESOLVED")
+        if [[ -n "$RESOLVED" ]] && ! is_test_file "$RESOLVED"; then
+            mark_test_file "$RESOLVED"
         fi
     done
 done
 
 PROD_FILES=()
 for f in "${ALL_RS[@]}"; do
-    [[ -n "${IS_TEST_FILE[$f]:-}" ]] || PROD_FILES+=("$f")
+    is_test_file "$f" || PROD_FILES+=("$f")
 done
 
 if [[ -n "$COUNTS_ONLY" ]]; then
@@ -343,37 +385,49 @@ if [[ -n "$COUNTS_ONLY" ]]; then
     exit 0
 fi
 
-declare -A PIN_CEILING=()
-declare -A PIN_REASON=()
-declare -A PIN_LIST=()
-for listname in GOD_FILE_EXEMPT GOD_FILE_DEBT; do
-    declare -n _list="$listname"
-    for e in ${_list[@]+"${_list[@]}"}; do
-        _path="${e%%:*}"
-        _rest="${e#*:}"
-        PIN_CEILING["$_path"]="${_rest%%:*}"
-        PIN_REASON["$_path"]="${_rest#*:}"
-        PIN_LIST["$_path"]="$listname"
+PIN_PATHS=()
+add_pin() { # usage: add_pin <listname> "<path>:<ceiling>:<why>"
+    local listname="$1" entry="$2" _path _rest _seen _dup=""
+    _path="${entry%%:*}"
+    _rest="${entry#*:}"
+    # a path named in both registers keeps one slot, so the staleness sweep
+    # below reports it once rather than once per register
+    for _seen in ${PIN_PATHS[@]+"${PIN_PATHS[@]}"}; do
+        if [[ "$_seen" == "$_path" ]]; then
+            _dup=1
+            break
+        fi
     done
-    unset -n _list
-done
+    [[ -n "$_dup" ]] || PIN_PATHS+=("$_path")
+    map_name PIN_CEILING "$_path"
+    printf -v "$MAP_NAME" '%s' "${_rest%%:*}"
+    map_name PIN_REASON "$_path"
+    printf -v "$MAP_NAME" '%s' "${_rest#*:}"
+    map_name PIN_LIST "$_path"
+    printf -v "$MAP_NAME" '%s' "$listname"
+}
+for e in ${GOD_FILE_EXEMPT[@]+"${GOD_FILE_EXEMPT[@]}"}; do add_pin GOD_FILE_EXEMPT "$e"; done
+for e in ${GOD_FILE_DEBT[@]+"${GOD_FILE_DEBT[@]}"}; do add_pin GOD_FILE_DEBT "$e"; done
 
 violations=""
 exempt_seen=""
 debt_seen=""
 largest_count=0
 largest_path=""
-declare -A MEASURED=()
 
 while IFS=$'\t' read -r count path; do
     [[ -n "$path" ]] || continue
-    MEASURED["$path"]="$count"
+    map_name MEASURED "$path"
+    printf -v "$MAP_NAME" '%s' "$count"
 
     matched=""
-    ceiling="${PIN_CEILING[$path]:-}"
+    map_name PIN_CEILING "$path"
+    ceiling="${!MAP_NAME-}"
     if [[ -n "$ceiling" ]]; then
-        reason="${PIN_REASON[$path]}"
-        listname="${PIN_LIST[$path]}"
+        map_name PIN_REASON "$path"
+        reason="${!MAP_NAME-}"
+        map_name PIN_LIST "$path"
+        listname="${!MAP_NAME-}"
         matched=1
         if [[ "$listname" == GOD_FILE_EXEMPT ]]; then
             exempt_seen+="  $path: $count prod lines (pinned $ceiling) — $reason"$'\n'
@@ -401,14 +455,17 @@ done < <(count_prod_lines "${PROD_FILES[@]}" | sort -rn)
 # stale one has to leave. Without this a pinned file could be split, shrink
 # below its pin, or be deleted outright and the entry would sit in the list
 # forever, quietly exempting a path that no longer needs exempting.
-for path in "${!PIN_CEILING[@]}"; do
-    ceiling="${PIN_CEILING[$path]}"
-    listname="${PIN_LIST[$path]}"
-    if [[ -z "${MEASURED[$path]:-}" ]]; then
+for path in ${PIN_PATHS[@]+"${PIN_PATHS[@]}"}; do
+    map_name PIN_CEILING "$path"
+    ceiling="${!MAP_NAME-}"
+    map_name PIN_LIST "$path"
+    listname="${!MAP_NAME-}"
+    map_name MEASURED "$path"
+    count="${!MAP_NAME-}"
+    if [[ -z "$count" ]]; then
         violations+="$path: pinned at $ceiling in $listname, but no such production file was scanned — the pin is stale (split, renamed, deleted, or now classified as test code); remove the entry"$'\n'
         continue
     fi
-    count="${MEASURED[$path]}"
     if [[ "$count" -le "$GOD_FILE_LIMIT" ]]; then
         violations+="$path: $count production lines is within the ${GOD_FILE_LIMIT} ceiling, so its $listname pin of $ceiling is stale; remove the entry"$'\n'
     elif [[ "$count" -lt "$ceiling" ]]; then
@@ -443,7 +500,7 @@ if [[ -n "$largest_path" ]]; then
 else
     largest_note="no unpinned production file was measured"
 fi
-echo "audit-god-files: ${#PROD_FILES[@]} production files scanned (${#IS_TEST_FILE[@]} test files excluded); $largest_note, ceiling $GOD_FILE_LIMIT."
+echo "audit-god-files: ${#PROD_FILES[@]} production files scanned ($IS_TEST_COUNT test files excluded); $largest_note, ceiling $GOD_FILE_LIMIT."
 if [[ -n "$exempt_seen" ]]; then
     echo "audit-god-files: ${#GOD_FILE_EXEMPT[@]} named exemption(s) — deliberate, not going to shrink:"
     printf '%s' "$exempt_seen"

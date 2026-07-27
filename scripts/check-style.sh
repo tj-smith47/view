@@ -37,10 +37,20 @@ check_content() {
   # session just as much as one saying "we changed", and comments address a
   # future reader who was never part of that "we". The `us` arm strips the
   # microsecond unit first, since this tree writes `0.37 us` in prose where
-  # no greppable pronoun sense exists.
+  # no greppable pronoun sense exists. Both strips spell their word
+  # boundaries as a consumed-then-reinstated character class rather than
+  # `\b`, which is a GNU sed extension: BSD sed accepts the expression and
+  # silently substitutes nothing, so on a BSD userland the strip no-ops, the
+  # microsecond prose survives into the grep below, and the gate's verdict
+  # depends on which sed the host happens to ship. The unit-list strip loops
+  # because its leading boundary consumes a character that an immediately
+  # adjacent second match would otherwise need.
   if grep -rnE "(${comment_prefix}).*\\b(we|our|ours|ourselves|us|my|mine|Claude)\\b" \
       "$target" "${includes[@]}" \
-      | sed -E -e 's/[0-9]+(\.[0-9]+)? us\b//g' -e 's/\bms([,/ ]+)us\b/ms\1/g' \
+      | sed -E -e 's/[0-9]+(\.[0-9]+)? us([^[:alnum:]_]|$)/\2/g' \
+               -e ':m' \
+               -e 's/(^|[^[:alnum:]_])ms([,/ ]+)us([^[:alnum:]_]|$)/\1ms\2\3/g' \
+               -e 'tm' \
       | grep -E "\\b(we|our|ours|ourselves|us|my|mine|Claude)\\b"; then
     echo "STYLE FAIL: first-person pronoun in comment"; fail=1
   fi
