@@ -9,54 +9,29 @@ pushed.**
 
 ## Uncommitted working tree
 
-```
- M crates/view-engine/src/env.rs
-```
+Nothing of this file's own. The env.rs allowlist that sat here uncommitted
+landed in `efb594d`; everything else it recorded landed earlier.
 
-That one file has not been through `task ci` in its current shape; the rest of
-this file's earlier contents landed as the flood commit.
+### Task 24, the spawn-environment allowlist -- LANDED in `efb594d`
 
-### Task 24, the spawn-environment allowlist -- PARTIAL, NOTHING CONSUMES IT
+`env::hermetic_sweep()` is the single primitive; `make_hermetic` (pty and
+plain `Command` alike) and `EngineConfig::env_plan` both consume it, and the
+`HOST_REDIRECT_VARS`/`HOST_SEARCH_PATH_VARS` enumerations stay as the second
+layer applied after the sweep, since only they bind a caller who sets one of
+those names deliberately. `SpawnEnv` gained `value_of` rather than an `is_set`
+query: a swept name is dropped only while the builder still holds the host's
+own value for it.
 
-`crates/view-engine/src/env.rs` only. This is the one piece of the tree that is
-**half-landed**: it adds `HERMETIC_PASSTHROUGH_VARS`,
-`HERMETIC_PASSTHROUGH_PREFIXES`, `is_hermetic_passthrough` and `env_names_eq`,
-with the reasoning for each entry in their doc comments, but **no caller uses
-them yet**. It compiles (they are `pub`, so no dead-code warning) and changes
-no behavior. Either finish it or revert that file; do not leave unconsumed
-public API in the tree.
+What the next session needs from it:
 
-The design it was heading for, worth not re-deriving:
-
-- The funnel today is a **denylist** (`HOST_REDIRECT_VARS` removed,
-  `HOST_SEARCH_PATH_VARS` pointed at an empty dir). A denylist built from a
-  documentation sweep can only be complete about the day it ran, and its
-  incompleteness is silent: an unenumerated variable reaches a child, changes
-  what it loads, and the child still starts and still measures.
-- `make_hermetic` should sweep `std::env::vars_os()` and unset every name that
-  is not passthrough. Keep the existing `HOST_REDIRECT_VARS` removal *after*
-  the sweep as a second layer -- `env_isolation.rs` sets each of those to a
-  marker to prove removal wins, so the ordering is load-bearing.
-- **Do not add an `is_set` query to `SpawnEnv`.** It cannot mean the same
-  thing on both builders: `portable_pty::CommandBuilder::new` pre-populates its
-  map with the whole base environment, so `get_env` returns `Some` for every
-  host variable and cannot distinguish caller-set from inherited (`EnvEntry`'s
-  `is_from_base_env` is private). `std::process::Command::get_envs` returns
-  overrides only. A trait method whose semantics differ per implementation is
-  exactly the silent drift the `SpawnEnv` doc comment warns about.
-- The rule that **does** behave identically on both: skip the sweep for a name
-  whose builder value *differs* from the host's, since that difference is what
-  a caller override looks like on either builder. Its one hole -- a caller
-  setting a name to exactly the host's value -- fails loudly (the child simply
-  lacks the variable) rather than silently.
-- `EngineConfig::env_plan` in `view-engine/src/process.rs` is a **third** copy
-  of the hermetic rule. It should consume the same primitive, or the engine's
-  hermetic spawn and the oracle's will disagree across hosts, which is the
-  divergence this task exists to kill. Its sweep entries must skip names the
-  caller already planned (`plan_set` gives that test).
-- Ordering constraint that is not obvious: the allowlist changes the spawn
-  environment, so it **must land before any re-record**, or the recording is
-  invalidated twice.
+- Baselines recorded before `efb594d` measured children with a far larger
+  environment and are invalid. Task 32's re-record must run against this
+  commit or later, never across it.
+- The allowlist keeps neither `SSL_CERT_FILE`/`SSL_CERT_DIR` nor any proxy
+  variable, and the compat fixture git-clones plugins from inside a hermetic
+  child. Verified fine on dev-linux (`cold-bootstrap` green, real network) and
+  unverified on any host whose CA bundle or proxy is non-default; the failure
+  there is a loud clone failure, not a silent measurement.
 
 ## The adversarial review, and what remains of it
 
@@ -98,8 +73,8 @@ returns nothing for them; that is not evidence the store is unreachable.
 | 30 | Fold the adversarial review's findings into the flood work | Done; landed with the flood commit |
 | 23 | Re-derive gate headroom; fix the tier and stimulus mismatches | Sub-problem B committed in `c819428`; sub-problem C landed with the flood commit. Closed |
 | 31 | Rewrite the flood `[[shortfall]]` `why` in `crates/view-bench/budgets.toml` | It still blames the measurement, an attribution now refuted. Unblocked |
-| 24 | Allowlist the environment at the bench/oracle spawn funnel | Partial, see above. Must land before any re-record |
-| 32 | Re-record dev-linux baselines after the tier and spawn-env changes | Blocked on 24. Numbers will move worse; record as measured, and name the instrument change in the commit message. `cadence_p99_ratio` is a new recorded metric this record must pick up |
+| 24 | Allowlist the environment at the bench/oracle spawn funnel | Landed in `efb594d`. Closed |
+| 32 | Re-record dev-linux baselines after the tier and spawn-env changes | Unblocked by `efb594d`; the re-record must run at or after that commit. Numbers will move worse; record as measured, and name the instrument change in the commit message. `cadence_p99_ratio` is a new recorded metric this record must pick up |
 | 21 | Re-record dev-macos on a quiet mbp: `input_path` and `first_paint`'s split metrics | Needs a quiet mbp, not more code. Until it lands, the dev-macos `first_paint` cell gates red on `unmeasured_metrics` |
 | 33 | Close the `Verdict::New` budget-check flake risk for absolute tails on shared classes | Same flake shape the ratchet had; untouched |
 | 25 | noice's `ext_*` disable opts are not suppressing its startup error notifications | Untouched |
