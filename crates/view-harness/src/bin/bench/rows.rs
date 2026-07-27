@@ -37,6 +37,9 @@ fn measure_cell(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
+    // the only arm that reads this is unix-only, so on Windows the binding
+    // has no reader at all and `-D warnings` fails the build there
+    #[cfg(unix)]
     let nvim_bin = bins.nvim.as_path();
     let world = CellWorld::create(fixture)?;
     match scenario {
