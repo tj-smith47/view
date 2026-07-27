@@ -556,11 +556,16 @@ impl std::fmt::Display for Breach {
 /// lower-is-better, with per-metric headroom from [`gate_headroom`].
 /// Takes the machine class name, not a pre-derived flag, so no caller can
 /// pair one class's cells with another class's gate policy.
+///
+/// The measured side arrives as the whole [`MeasuredCell`] and the recorded
+/// side as bare [`CellMetrics`]: the two are different types, so the
+/// comparison cannot be handed its arguments the other way round. Passing
+/// the recorded numbers as the measurement and the measurement as the bar
+/// inverts the gate into the direction CI reads as green, and nothing about
+/// the resulting numbers looks wrong.
 #[must_use]
 pub fn gate_cell(
-    scenario: &str,
-    fixture: &str,
-    measured: &CellMetrics,
+    measured: &MeasuredCell,
     recorded: &CellMetrics,
     class: &str,
     headroom_table: &HeadroomTable,
@@ -568,7 +573,7 @@ pub fn gate_cell(
     let controlled = is_controlled_class(class);
     let mut breaches = Vec::new();
     for (metric, recorded_value) in recorded {
-        let Some(&measured_value) = measured.get(metric) else {
+        let Some(&measured_value) = measured.metrics.get(metric) else {
             continue;
         };
         let Some(headroom) = headroom_for(headroom_table, metric, controlled) else {
@@ -577,8 +582,8 @@ pub fn gate_cell(
         let bar = headroom.bar(*recorded_value);
         if measured_value > bar {
             breaches.push(Breach {
-                scenario: scenario.to_string(),
-                fixture: fixture.to_string(),
+                scenario: measured.id.scenario.clone(),
+                fixture: measured.id.fixture.clone(),
                 metric: metric.clone(),
                 measured: measured_value,
                 recorded: *recorded_value,
@@ -648,11 +653,16 @@ pub fn unrecorded_cells(baseline: &BaselineFile, measured: &[MeasuredCell]) -> V
 /// silently untested. This is [`uncovered_cells`] one level down: cell
 /// coverage proves the row ran, metric coverage proves it produced what
 /// the baseline gates.
+///
+/// Same asymmetric argument types as [`gate_cell`], for the same reason:
+/// the reversed direction (measured metrics the baseline does not record)
+/// is a legitimate, empty-looking answer, so a swap here would report full
+/// coverage for a cell that stopped producing a gated number.
 #[must_use]
-pub fn unmeasured_metrics(measured: &CellMetrics, recorded: &CellMetrics) -> Vec<String> {
+pub fn unmeasured_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Vec<String> {
     recorded
         .keys()
-        .filter(|metric| !measured.contains_key(*metric))
+        .filter(|metric| !measured.metrics.contains_key(*metric))
         .cloned()
         .collect()
 }
@@ -1132,9 +1142,10 @@ mod tests {
         class: &str,
     ) -> Vec<Breach> {
         super::gate_cell(
-            scenario,
-            fixture,
-            measured,
+            &MeasuredCell {
+                id: CellId::new(scenario, fixture),
+                metrics: measured.clone(),
+            },
             recorded,
             class,
             &HeadroomTable::new(),
@@ -1305,14 +1316,27 @@ mod tests {
 
     #[test]
     fn a_recorded_metric_the_run_never_measured_is_named() {
-        let recorded = metrics(&[("pss_mb", 3.4)]);
-        let measured = metrics(&[("phys_footprint_mb", 41.0)]);
+        const RECORDED: &[(&str, f64)] = &[("pss_mb", 3.4)];
+        const MEASURED: &[(&str, f64)] = &[("phys_footprint_mb", 41.0)];
+        let recorded = metrics(RECORDED);
         assert!(
-            gate_cell("memory", "minimal", &measured, &recorded, "dev-linux").is_empty(),
+            gate_cell(
+                "memory",
+                "minimal",
+                &metrics(MEASURED),
+                &recorded,
+                "dev-linux"
+            )
+            .is_empty(),
             "a differently named metric cannot breach, which is why coverage must catch it"
         );
-        assert_eq!(unmeasured_metrics(&measured, &recorded), vec!["pss_mb"]);
-        assert!(unmeasured_metrics(&recorded, &recorded).is_empty());
+        assert_eq!(
+            unmeasured_metrics(&measured_cell("memory", "minimal", MEASURED), &recorded),
+            vec!["pss_mb"]
+        );
+        assert!(
+            unmeasured_metrics(&measured_cell("memory", "minimal", RECORDED), &recorded).is_empty()
+        );
     }
 
     #[test]

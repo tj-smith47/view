@@ -804,7 +804,7 @@ pub fn run_echo_path(
                         // cross the fifo before it is read
                         all_records.extend(pipe.drain());
                         let (t0, seen) = view_state
-                            .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                            .sample_one(protocol)
                             .map_err(|e| label("view", e))?;
                         if view_taken >= protocol.warmup {
                             view_totals.push(delta_us(t0, seen));
@@ -829,7 +829,7 @@ pub fn run_echo_path(
                     }
                     Side::Nvim => {
                         let (t0, seen) = nvim_state
-                            .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                            .sample_one(protocol)
                             .map_err(|e| label("nvim", e))?;
                         if nvim_taken >= protocol.warmup {
                             nvim_totals.push(delta_us(t0, seen));

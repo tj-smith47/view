@@ -103,12 +103,18 @@ impl SideState {
     /// took to appear. The first scroll of a session discovers the
     /// editor's constant per-scroll delta (waiting only for the label to
     /// change); every later scroll requires exactly `top + delta`.
-    fn sample_one(&mut self, timeout: Duration, inter_sample: Duration) -> Result<(), BenchError> {
+    ///
+    /// Reads its own bound and gap off the protocol instead of taking them
+    /// as two `Duration`s: handed over the other way round, the scroll
+    /// still times the same wait and the row still prints a plausible
+    /// ratio, paying a 5s gap per sample against a 10ms bound with nothing
+    /// but wall-clock time to say so.
+    fn sample_one(&mut self, protocol: &Protocol) -> Result<(), BenchError> {
         let previous = self.top_line;
         let expected = self.delta.map(|d| previous + d);
         let start = Instant::now();
         self.session.send(b"\x04")?;
-        let deadline = start + timeout;
+        let deadline = start + protocol.sample_timeout;
         let new_top = loop {
             if let Some(label) = label_at(&mut self.session, self.label_at) {
                 match expected {
@@ -134,7 +140,7 @@ impl SideState {
             self.delta = Some(new_top - previous);
         }
         self.top_line = new_top;
-        std::thread::sleep(inter_sample);
+        std::thread::sleep(protocol.inter_sample);
         Ok(())
     }
 }
@@ -236,7 +242,7 @@ pub fn run(
             };
             for _ in 0..block.count {
                 state
-                    .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                    .sample_one(protocol)
                     .map_err(|e| label(side_name, e))?;
             }
         }

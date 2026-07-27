@@ -84,17 +84,22 @@ impl SideState {
     /// intersected directly with the tap stream; the paired milliseconds
     /// below are derived from it rather than timed by a second clock, which
     /// keeps one sample at exactly two clock reads either way.
-    pub(crate) fn sample_one(
-        &mut self,
-        timeout: Duration,
-        inter_sample: Duration,
-    ) -> Result<(i64, i64), BenchError> {
+    ///
+    /// Reads its own bound and gap off the protocol instead of taking them
+    /// as two `Duration`s: handed over the other way round, the sample
+    /// still measures the same window and the row still prints a plausible
+    /// ratio, paying a 5s gap per sample against a 10ms bound with nothing
+    /// but wall-clock time to say so.
+    pub(crate) fn sample_one(&mut self, protocol: &Protocol) -> Result<(i64, i64), BenchError> {
         if self.line_len >= LINE_LIMIT {
             self.open_fresh_line()?;
         }
         let start = monotonic_nanos();
         self.session.send(SAMPLE_CHAR.as_bytes())?;
-        if !self.session.wait_cell(self.at, SAMPLE_CHAR, timeout) {
+        if !self
+            .session
+            .wait_cell(self.at, SAMPLE_CHAR, protocol.sample_timeout)
+        {
             return Err(BenchError::Desync {
                 context: format!(
                     "sample never appeared at ({}, {}); screen:\n{}",
@@ -108,7 +113,7 @@ impl SideState {
         self.windows.push((start, seen));
         self.at.col += 1;
         self.line_len += 1;
-        std::thread::sleep(inter_sample);
+        std::thread::sleep(protocol.inter_sample);
         Ok((start, seen))
     }
 
@@ -276,7 +281,7 @@ pub fn run(
             };
             for _ in 0..block.count {
                 state
-                    .sample_one(protocol.sample_timeout, protocol.inter_sample)
+                    .sample_one(protocol)
                     .map_err(|e| label(side_name, e))?;
             }
         }

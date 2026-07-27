@@ -996,23 +996,20 @@ fn main() -> Result<()> {
         let mut unmeasured = Vec::new();
         let unrecorded = baselines::unrecorded_cells(&file, &measured);
         for cell in &measured {
-            let (scenario, fixture) = (&cell.id.scenario, &cell.id.fixture);
             // named by unrecorded_cells above and reported with the rest of
             // the findings; refusing here instead would end the run at the
             // first missing cell with no verdict printed for any of the
             // cells already measured
-            let Some(recorded) = file.cell(scenario, fixture) else {
+            let Some(recorded) = file.cell(&cell.id.scenario, &cell.id.fixture) else {
                 continue;
             };
             breaches.extend(baselines::gate_cell(
-                scenario,
-                fixture,
-                &cell.metrics,
+                cell,
                 recorded,
                 &cli.class,
                 &file.headroom,
             ));
-            for metric in baselines::unmeasured_metrics(&cell.metrics, recorded) {
+            for metric in baselines::unmeasured_metrics(cell, recorded) {
                 unmeasured.push((cell.id.clone(), metric));
             }
         }
@@ -1066,9 +1063,7 @@ fn main() -> Result<()> {
         for cell in &measured {
             findings.extend(budgets::check_cell(
                 &budget_file,
-                &cell.id.scenario,
-                &cell.id.fixture,
-                &cell.metrics,
+                cell,
                 &cli.class,
                 &file.headroom,
             ));

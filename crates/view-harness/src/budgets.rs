@@ -353,17 +353,23 @@ fn shortfall_ceiling(
 ///
 /// Metrics with no budget produce no finding: a metric the spec states no
 /// bound for is a real state, not a gap (see `budgets.toml`).
+///
+/// The cell arrives whole rather than as its scenario and fixture names
+/// side by side, because those two are interchangeable strings: named the
+/// other way round every budget lookup misses, every finding disappears,
+/// and the gate reports the same zero failures a fully compliant matrix
+/// does. `unreached_budgets` cannot see it either -- that walk reads the
+/// measured ids, which are still correct.
 #[must_use]
 pub fn check_cell(
     file: &BudgetFile,
-    scenario: &str,
-    fixture: &str,
-    metrics: &crate::baselines::CellMetrics,
+    cell: &crate::baselines::MeasuredCell,
     class: &str,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> Vec<Finding> {
+    let (scenario, fixture) = (cell.id.scenario.as_str(), cell.id.fixture.as_str());
     let mut findings = Vec::new();
-    for (metric, &measured) in metrics {
+    for (metric, &measured) in &cell.metrics {
         let Some(budget) = find_budget(file, scenario, metric, class) else {
             continue;
         };
@@ -495,9 +501,10 @@ mod tests {
     ) -> Vec<Finding> {
         super::check_cell(
             file,
-            scenario,
-            fixture,
-            metrics,
+            &crate::baselines::MeasuredCell {
+                id: crate::baselines::CellId::new(scenario, fixture),
+                metrics: metrics.clone(),
+            },
             class,
             &crate::baselines::HeadroomTable::new(),
         )
@@ -519,13 +526,11 @@ accepted = 9.0
 why = \"because\"
 "
         ));
-        let measured = metrics(&[("view_p99_ms", 10.0)]);
+        let measured = measured_cell("echo", "minimal", &[("view_p99_ms", 10.0)]);
         // default ABSOLUTE_HEADROOM 1.5 admits 13.5
         assert!(matches!(
             super::check_cell(
                 &file,
-                "echo",
-                "minimal",
                 &measured,
                 "controlled-linux",
                 &crate::baselines::HeadroomTable::new()
@@ -537,15 +542,7 @@ why = \"because\"
         let tight: crate::baselines::HeadroomTable =
             [("view_p99_ms".to_string(), 1.05)].into_iter().collect();
         assert!(matches!(
-            super::check_cell(
-                &file,
-                "echo",
-                "minimal",
-                &measured,
-                "controlled-linux",
-                &tight
-            )[0]
-            .verdict,
+            super::check_cell(&file, &measured, "controlled-linux", &tight)[0].verdict,
             Verdict::Widened { .. }
         ));
     }
