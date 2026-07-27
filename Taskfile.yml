@@ -79,6 +79,7 @@ tasks:
       - cargo bench -p view-core --bench input_handoff
       - cargo bench -p view-engine --bench damage_fold --features bench-support
       - cargo bench -p view-surface --bench render_frame
+      - cargo bench -p view-tui --bench paint_frame
 
   perf-audit:
     desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class, then every hot-path micro-bench (task perf-audit CLASS=dev-linux)

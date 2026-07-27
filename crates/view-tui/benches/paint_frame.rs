@@ -3,7 +3,15 @@
 //! then the shadow's diff of what changed against what the terminal shows --
 //! against a populated 120x40 grid.
 //!
-//! Four functions bracket the damage-clipping lever:
+//! **These numbers are relative instruments, not absolute per-keystroke
+//! costs.** Every function below except the last runs its frames back to
+//! back, which keeps the whole paint path's working set resident; steady
+//! typing leaves the core idle between frames and pays cold. The same frame
+//! measures 2.94us hot and 21.27us cold, so a hot number understates what a
+//! keystroke actually costs by roughly 7x. Use them to tell whether a change
+//! made the code worse, never to answer how long a keystroke takes.
+//!
+//! Five functions bracket the damage-clipping lever:
 //!
 //! - `paint_frame_full_recomposite` recomposites every cell and diffs the
 //!   whole grid each frame (the pre-clipping behavior), the "before" number.
@@ -16,10 +24,15 @@
 //!   row, the "after" number for a single typed character.
 //! - `paint_frame_steady_state_crossterm` runs the clipped path over a real
 //!   `CrosstermBackend` so its escape-encoding cost is included.
+//! - `paint_frame_cold/steady_state_crossterm_cold` is that same frame with
+//!   a keystroke interval of idle before each one, which is the state the
+//!   editor actually meets.
 //!
-//! All four absorb terminal write syscalls into their backend.
+//! All five absorb terminal write syscalls into their backend.
 
 #![allow(clippy::expect_used)]
+
+use std::time::{Duration, Instant};
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use ratatui::backend::{Backend, TestBackend};
@@ -28,6 +41,11 @@ use std::hint::black_box;
 use view_core::grid::GridOp;
 use view_core::model::Model;
 use view_tui::paint::{overlay_rows, Damage, Shadow};
+
+/// Idle between frames in the cold variant. The `echo` bench row paces its
+/// keystrokes at this interval and a human types slower still, so this is
+/// the gap the paint path actually meets rather than a pathological one.
+const KEYSTROKE_GAP: Duration = Duration::from_millis(10);
 
 const WIDTH: u16 = 120;
 const HEIGHT: u16 = 40;
@@ -270,11 +288,73 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
     });
 }
 
+/// The same frame as `paint_frame_steady_state_crossterm`, but with a
+/// keystroke interval of idle before each one and only the frame itself
+/// timed.
+///
+/// The tapped production run puts the two stages this covers at 28.4us p50
+/// while the back-to-back version of it measures 2.9us. A tight loop keeps
+/// every cache line, branch predictor entry and page mapping the paint path
+/// touches resident, and steady typing never presents that state: a human
+/// leaves the core idle between keystrokes and each frame starts cold. This
+/// function is the falsifiable form of that explanation -- if the gap is
+/// cache residency, the cost here rises toward the tapped number, and if it
+/// does not, the explanation is wrong and the difference is elsewhere.
+fn bench_paint_frame_cold(c: &mut Criterion) {
+    let mut model = populated_model();
+    let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    let (mut shadow, mut prev_overlay) = primed_shadow(&mut backend, &mut model);
+
+    let mut flip = false;
+    let mut group = c.benchmark_group("paint_frame_cold");
+    // one frame per KEYSTROKE_GAP, so the sample count is what bounds the
+    // wall clock rather than criterion's usual throughput target
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(12));
+    group.bench_function("steady_state_crossterm_cold", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                std::thread::sleep(KEYSTROKE_GAP);
+                flip = !flip;
+                model.engine.apply_grid(GridOp::PutLine {
+                    row: 5,
+                    col_start: 5,
+                    cells: vec![((if flip { "x" } else { "y" }).to_string(), 0, 1)],
+                });
+                let started = Instant::now();
+                let grid_damage = model.take_paint_damage();
+                let surface = view_surface::render(&model);
+                let cur_overlay = overlay_rows(&surface);
+                let damage = Damage::from_frame(
+                    &grid_damage,
+                    model.chrome_rows(),
+                    &prev_overlay,
+                    &cur_overlay,
+                    false,
+                );
+                emit_frame(
+                    black_box(&mut backend),
+                    black_box(&mut shadow),
+                    &model,
+                    &surface,
+                    &damage,
+                );
+                elapsed += started.elapsed();
+                prev_overlay = cur_overlay;
+            }
+            elapsed
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_paint_frame_full,
     bench_paint_frame_full_wide,
     bench_paint_frame,
-    bench_paint_frame_crossterm
+    bench_paint_frame_crossterm,
+    bench_paint_frame_cold
 );
 criterion_main!(benches);

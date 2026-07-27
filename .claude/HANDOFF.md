@@ -421,9 +421,26 @@ most load-bearing code in the project, for a win that is real but bounded. It
 is P4-scale work, not a P3 patch, and the P4 plan does not currently contain
 it.
 
-**The call the user has to make:** does this go into P4's scope, or does the
-project accept ~1.17x typing through P4 and revisit later? Both are
-defensible; the evidence does not decide it.
+**The second lever, on the paint side, is the same shape.** view's 68 us of
+paint path is not instruction count -- it is cache residency. The identical
+frame costs 2.94 us back to back and **21.27 us with a 10 ms keystroke gap
+before it**, a 7.2x difference from idle alone
+(`.claude/measurements/2026-07-27-the-paint-path-is-cold-cache-not-instructions.md`).
+Cost is therefore proportional to memory touched per frame, and
+`view_surface::render` builds a fresh full-screen `Surface` every frame even
+when one cell changed. Trading that for incremental rendering would cut it,
+and it is a deliberate property of the Elm-style runtime, not an oversight.
+
+**The call the user has to make:** do either of these go into P4's scope --
+unifying the input thread with the runtime loop, incremental rendering, or
+both -- or does the project accept ~1.17x typing through P4 and revisit
+later? All are defensible; the evidence sizes them but does not decide it.
+
+**A caveat that outlives this pitch:** every criterion micro-bench in the
+repo measures the hot state. They are sound relative instruments and wrong
+as absolute costs, by roughly the factor above. Task 29 gives the rest of
+them cold variants; until it lands, do not quote a hot number as what a
+keystroke pays.
 
 ---
 
