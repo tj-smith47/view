@@ -302,9 +302,14 @@ fn find_shortfall<'a>(
 /// absorb. A metric the class does not gate at all (shared-class tail
 /// statistics) gets no ceiling here either, for the same reason it gets
 /// none there: on a shared host that number is not a property of the code.
-fn shortfall_ceiling(metric: &str, class: &str, accepted: f64) -> f64 {
+fn shortfall_ceiling(
+    metric: &str,
+    class: &str,
+    accepted: f64,
+    headroom_table: &crate::baselines::HeadroomTable,
+) -> f64 {
     let controlled = crate::baselines::is_controlled_class(class);
-    crate::baselines::gate_headroom(metric, controlled)
+    crate::baselines::headroom_for(headroom_table, metric, controlled)
         .map_or(f64::INFINITY, |headroom| headroom.bar(accepted))
 }
 
@@ -320,6 +325,7 @@ pub fn check_cell(
     fixture: &str,
     metrics: &crate::baselines::CellMetrics,
     class: &str,
+    headroom_table: &crate::baselines::HeadroomTable,
 ) -> Vec<Finding> {
     let mut findings = Vec::new();
     for (metric, &measured) in metrics {
@@ -332,7 +338,8 @@ pub fn check_cell(
             match find_shortfall(file, scenario, fixture, metric, class) {
                 None => Verdict::New,
                 Some(shortfall) => {
-                    let ceiling = shortfall_ceiling(metric, class, shortfall.accepted);
+                    let ceiling =
+                        shortfall_ceiling(metric, class, shortfall.accepted, headroom_table);
                     if measured > ceiling {
                         Verdict::Widened {
                             accepted: shortfall.accepted,
@@ -400,6 +407,73 @@ mod tests {
 
     fn file_from(text: &str) -> BudgetFile {
         parse(text, "test").unwrap()
+    }
+
+    /// [`super::check_cell`] with no measured per-class headroom, so every
+    /// case below reads against the policy defaults. The override path has
+    /// its own test rather than being threaded through all of them.
+    fn check_cell(
+        file: &BudgetFile,
+        scenario: &str,
+        fixture: &str,
+        metrics: &CellMetrics,
+        class: &str,
+    ) -> Vec<Finding> {
+        super::check_cell(
+            file,
+            scenario,
+            fixture,
+            metrics,
+            class,
+            &crate::baselines::HeadroomTable::new(),
+        )
+    }
+
+    /// A shortfall ceiling must move with the class's measured headroom, not
+    /// with the compiled-in default: the two gates agreeing is the whole
+    /// reason the ceiling is derived from the ratchet's policy at all.
+    #[test]
+    fn a_measured_headroom_resizes_the_shortfall_ceiling() {
+        let file = file_from(&format!(
+            "{ONE_BUDGET}
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"minimal\"
+metric = \"view_p99_ms\"
+class = \"controlled-linux\"
+accepted = 9.0
+why = \"because\"
+"
+        ));
+        let measured = metrics(&[("view_p99_ms", 10.0)]);
+        // default ABSOLUTE_HEADROOM 1.5 admits 13.5
+        assert!(matches!(
+            super::check_cell(
+                &file,
+                "echo",
+                "minimal",
+                &measured,
+                "controlled-linux",
+                &crate::baselines::HeadroomTable::new()
+            )[0]
+            .verdict,
+            Verdict::Held { .. }
+        ));
+
+        let tight: crate::baselines::HeadroomTable =
+            [("view_p99_ms".to_string(), 1.05)].into_iter().collect();
+        assert!(matches!(
+            super::check_cell(
+                &file,
+                "echo",
+                "minimal",
+                &measured,
+                "controlled-linux",
+                &tight
+            )[0]
+            .verdict,
+            Verdict::Widened { .. }
+        ));
     }
 
     fn metrics(pairs: &[(&str, f64)]) -> CellMetrics {
@@ -500,7 +574,7 @@ why = \"because\"
 scenario = \"echo\"
 fixture = \"minimal\"
 metric = \"view_p99_ms\"
-class = \"dev-linux\"
+class = \"controlled-linux\"
 accepted = 9.0
 why = \"because\"
 "
@@ -511,7 +585,7 @@ why = \"because\"
                 "echo",
                 "minimal",
                 &metrics(&[("view_p99_ms", measured)]),
-                "dev-linux",
+                "controlled-linux",
             )[0]
             .verdict
             .clone()

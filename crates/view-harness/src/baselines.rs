@@ -38,19 +38,32 @@ use thiserror::Error;
 /// The one schema this loader understands.
 pub const SUPPORTED_SCHEMA: u32 = 1;
 
-/// Headroom for gated ratio metrics (view vs nvim from one interleaved
-/// run). Medians are robust to ambient tail noise, and per-sample
-/// alternation keeps both sides under the same ambient median shift:
-/// measured echo ratio_p50 stayed inside a x1.07 band (1.51..1.62)
-/// across host-load regimes whose absolute tails swung x300. 1.25
-/// covers that band with margin while a real regression still breaches.
+/// Default headroom for gated ratio metrics (view vs nvim from one
+/// interleaved run), used where a class has not measured its own.
+///
+/// Medians are robust to ambient tail noise, and per-sample alternation
+/// keeps both sides under the same ambient median shift: measured echo
+/// ratio_p50 stayed inside a x1.07 band (1.51..1.62) across host-load
+/// regimes whose absolute tails swung x300.
+///
+/// **1.25 is deliberately conservative and is not a target.** Where a
+/// class has characterised the spread it should say so in its own
+/// `[headroom]` table (see [`HeadroomTable`]) rather than inherit this:
+/// dev-linux measured `ratio_p50` to a 1.70% half-width over eight
+/// replicates spanning host loads 0.44 to 8.53, so 1.25 admitted a 25%
+/// regression on a number that host resolves to under 2%, and it now
+/// gates at 1.06 there. This value remains the floor for every metric and
+/// class that has not been measured, because guessing tighter than the
+/// evidence is how a gate starts failing on weather.
 pub const RATIO_HEADROOM: f64 = 1.25;
 
-/// Headroom for absolute metrics (ms/us/MB budgets). Absolute tails on a
-/// shared dev host move with ambient load (taps p99 varied x1.5 between
-/// quiet invocations), so the band is wider than for ratios; a breach
-/// under heavy host load is loud and explainable, while a gross
-/// regression (2x) still cannot hide inside it.
+/// Default headroom for absolute metrics (ms/us/MB budgets), used where a
+/// class has not measured its own.
+///
+/// Absolute tails on a shared dev host move with ambient load, which is
+/// why [`is_absolute_tail`] metrics do not gate on a shared class at all;
+/// what remains under this constant on such a class is the sizes, which do
+/// not move with load. On a controlled class the tails gate here too.
 pub const ABSOLUTE_HEADROOM: f64 = 1.5;
 
 /// The smallest allowance [`Headroom::Signed`] grants, in the paired
@@ -207,7 +220,12 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// p99 budget gets a real bar instead of a reference number.
 #[must_use]
 pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
-    if metric == "paired_delta_p99_ms" {
+    // by suffix, not by exact name: the exemption is a property of the
+    // statistic, so a row that prefixes its own scope onto it (first_paint's
+    // `marker_ratio_p99`, echo_control's `control_delta_p99_ms`) is the same
+    // scheduler-dominated tail and must not gate on a shared class merely
+    // because it spelled the metric differently
+    if metric.ends_with("delta_p99_ms") {
         // p99(view[i] - nvim[i]): negative whenever view beats nvim, which
         // is a state the paired scenario is built to reach and report
         return controlled.then_some(Headroom::Signed {
@@ -215,18 +233,52 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
             floor: SIGNED_DELTA_FLOOR_MS,
         });
     }
-    // by suffix, not by exact name: the exemption is a property of the
-    // statistic, so a row that prefixes its own scope onto it (first_paint's
-    // `marker_ratio_p99`) is the same scheduler-dominated tail and must not
-    // gate on a shared class merely because it spelled the metric differently
     if metric.ends_with("ratio_p99") {
         return controlled.then_some(Headroom::Proportional(RATIO_HEADROOM));
+    }
+    if is_absolute_tail(metric) {
+        return controlled.then_some(Headroom::Proportional(ABSOLUTE_HEADROOM));
     }
     if metric.contains("ratio") {
         Some(Headroom::Proportional(RATIO_HEADROOM))
     } else {
         Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
     }
+}
+
+/// The gate policy for `metric`, preferring `table`'s measured headroom for
+/// this class over the default for the metric's kind.
+///
+/// An override only resizes an allowance that already exists: a metric the
+/// class does not gate at all stays ungated, because that exemption is about
+/// whether the number means anything here, not about how far it moves.
+#[must_use]
+pub fn headroom_for(table: &HeadroomTable, metric: &str, controlled: bool) -> Option<Headroom> {
+    let policy = gate_headroom(metric, controlled)?;
+    match (table.get(metric), policy) {
+        (Some(&factor), Headroom::Signed { floor, .. }) => Some(Headroom::Signed { factor, floor }),
+        (Some(&factor), Headroom::Proportional(_)) => Some(Headroom::Proportional(factor)),
+        (None, policy) => Some(policy),
+    }
+}
+
+/// Whether `metric` is an absolute latency tail: a percentile of a latency
+/// distribution, as opposed to a ratio between two of them or a size.
+///
+/// A percentile's value is set by the worst samples in the run, and on a
+/// shared host the worst samples are the ones a foreign process preempted.
+/// Measured on this class with one unchanged binary pair: `view_p99_ms`
+/// spans 0.925ms to 6.676ms across host loads 0.44 to 8.53, a 7.4x range,
+/// while the `ratio_p50` from those same eight runs stays inside 1.70%. No
+/// fixed allowance can tell a 7x regression from a busy afternoon, so the
+/// statistic is recorded here and gated on a controlled class, exactly as
+/// `paired_delta_p99_ms` and `ratio_p99` already are for the same reason.
+///
+/// The regression protection is not lost: a real slowdown in view's own
+/// tail moves the paired ratio from the same interleaved run, and that does
+/// gate.
+fn is_absolute_tail(metric: &str) -> bool {
+    !metric.contains("ratio") && (metric.contains("_p99") || metric == "p99_ms")
 }
 
 /// Metric values for one `[scenario.fixture]` cell.
@@ -240,6 +292,20 @@ pub type MeasuredCell = (String, String, CellMetrics);
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BaselineError {
+    #[error(
+        "{path}: [headroom] names {metric}, which no recorded cell measures; a headroom entry \
+         binds nothing unless its metric exists"
+    )]
+    UnknownHeadroomMetric { path: String, metric: String },
+    #[error(
+        "{path}: [headroom] gives {metric} a factor of {factor}; a gate allowance must be finite \
+         and above 1.0, since at or below it the recorded measurement breaches its own bar"
+    )]
+    UnusableHeadroom {
+        path: String,
+        metric: String,
+        factor: f64,
+    },
     #[error("reading {path}: {source}")]
     Read {
         path: String,
@@ -301,12 +367,25 @@ pub enum BaselineError {
     },
 }
 
+/// Per-metric gate headroom measured on one class, overriding the policy
+/// default from [`gate_headroom`].
+///
+/// A default is a guess about how much a number moves between runs on a
+/// host nobody has characterised. An entry here is that number, measured.
+/// Absence is therefore meaningful and is not a gap to be filled with a
+/// plausible value: it says this metric's spread on this class has not been
+/// established, so it gates on the conservative default until it has.
+pub type HeadroomTable = BTreeMap<String, f64>;
+
 /// One recorded machine class's baselines.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaselineFile {
     pub schema: u32,
     pub engine_pin: String,
     pub machine_class: String,
+    /// Measured per-metric headroom for this class; see [`HeadroomTable`].
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headroom: HeadroomTable,
     /// scenario -> fixture -> metric -> recorded value.
     #[serde(flatten)]
     pub cells: BTreeMap<String, BTreeMap<String, CellMetrics>>,
@@ -320,6 +399,7 @@ impl BaselineFile {
             schema: SUPPORTED_SCHEMA,
             engine_pin: pin.to_string(),
             machine_class: class.to_string(),
+            headroom: HeadroomTable::new(),
             cells: BTreeMap::new(),
         }
     }
@@ -380,6 +460,7 @@ pub fn gate_cell(
     measured: &CellMetrics,
     recorded: &CellMetrics,
     class: &str,
+    headroom_table: &HeadroomTable,
 ) -> Vec<Breach> {
     let controlled = is_controlled_class(class);
     let mut breaches = Vec::new();
@@ -387,7 +468,7 @@ pub fn gate_cell(
         let Some(&measured_value) = measured.get(metric) else {
             continue;
         };
-        let Some(headroom) = gate_headroom(metric, controlled) else {
+        let Some(headroom) = headroom_for(headroom_table, metric, controlled) else {
             continue;
         };
         let bar = headroom.bar(*recorded_value);
@@ -477,6 +558,30 @@ pub fn load(path: &Path) -> Result<BaselineFile, BaselineError> {
             path: display,
             found: file.schema,
         });
+    }
+    // a [headroom] key that matches no recorded metric would silently do
+    // nothing: the lookup misses, the policy default applies, and the file
+    // reads as though a measured allowance is in force when none is. That is
+    // the one way this table can lie, so it is a load error
+    for (metric, &factor) in &file.headroom {
+        if !file
+            .cells
+            .values()
+            .flat_map(BTreeMap::values)
+            .any(|cell| cell.contains_key(metric))
+        {
+            return Err(BaselineError::UnknownHeadroomMetric {
+                path: display,
+                metric: metric.clone(),
+            });
+        }
+        if !factor.is_finite() || factor <= 1.0 {
+            return Err(BaselineError::UnusableHeadroom {
+                path: display,
+                metric: metric.clone(),
+                factor,
+            });
+        }
     }
     Ok(file)
 }
@@ -892,6 +997,26 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
     use super::*;
 
+    /// [`super::gate_cell`] with no measured per-class headroom, so every
+    /// case below reads against the policy defaults. The override path has
+    /// its own test rather than being threaded through all of them.
+    fn gate_cell(
+        scenario: &str,
+        fixture: &str,
+        measured: &CellMetrics,
+        recorded: &CellMetrics,
+        class: &str,
+    ) -> Vec<Breach> {
+        super::gate_cell(
+            scenario,
+            fixture,
+            measured,
+            recorded,
+            class,
+            &HeadroomTable::new(),
+        )
+    }
+
     fn metrics(pairs: &[(&str, f64)]) -> CellMetrics {
         pairs.iter().map(|(k, v)| ((*k).to_string(), *v)).collect()
     }
@@ -909,6 +1034,59 @@ mod tests {
         let parsed: BaselineFile = toml::from_str(&text).unwrap();
         assert_eq!(parsed.cell("echo", "minimal").unwrap()["ratio_p99"], 1.21);
         assert_eq!(parsed.machine_class, "dev-linux");
+    }
+
+    /// A measured headroom must survive `--record`, which rewrites the whole
+    /// file. If the save path dropped the table, the entry would vanish in
+    /// silence and every metric would quietly fall back to the default it
+    /// was measured to replace -- the gate would loosen 4x with nothing in
+    /// the diff to say so but a missing table.
+    #[test]
+    fn a_measured_headroom_survives_a_rewrite() {
+        let mut file = BaselineFile::new("dev-linux", "v0.12.4");
+        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.17)]));
+        file.headroom.insert("ratio_p50".to_string(), 1.06);
+
+        let text = toml::to_string_pretty(&file).unwrap();
+        let parsed: BaselineFile = toml::from_str(&text).unwrap();
+        assert_eq!(parsed.headroom.get("ratio_p50"), Some(&1.06));
+        assert_eq!(
+            headroom_for(&parsed.headroom, "ratio_p50", false),
+            Some(Headroom::Proportional(1.06)),
+            "actual TOML:\n{text}"
+        );
+    }
+
+    /// The one way this table can lie is an entry that binds nothing: a key
+    /// nothing measures looks like an allowance in force while the default
+    /// silently applies. Both malformed shapes are load errors.
+    #[test]
+    fn a_headroom_entry_that_binds_nothing_is_a_load_error() {
+        let dir = std::env::temp_dir().join(format!("view-headroom-{}", std::process::id()));
+        let path = dir.join("dev-linux.toml");
+        let mut file = BaselineFile::new("dev-linux", "v0.12.4");
+        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.17)]));
+
+        file.headroom.insert("ratoi_p50".to_string(), 1.06);
+        save(&path, &file).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(BaselineError::UnknownHeadroomMetric { .. })
+        ));
+
+        file.headroom.clear();
+        file.headroom.insert("ratio_p50".to_string(), 0.9);
+        save(&path, &file).unwrap();
+        assert!(matches!(
+            load(&path),
+            Err(BaselineError::UnusableHeadroom { .. })
+        ));
+
+        file.headroom.clear();
+        file.headroom.insert("ratio_p50".to_string(), 1.06);
+        save(&path, &file).unwrap();
+        assert!(load(&path).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1045,17 +1223,30 @@ mod tests {
                 gate_headroom("marker_ratio_p50", controlled),
                 Some(Headroom::Proportional(RATIO_HEADROOM))
             );
-            assert_eq!(
-                gate_headroom("staleness_p99_ms", controlled),
-                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
-            );
-            assert_eq!(
-                gate_headroom("view_p99_ms", controlled),
-                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
-            );
+            // a size is not a latency tail: it does not move with ambient
+            // load, so it gates on every class
             assert_eq!(
                 gate_headroom("pss_mb", controlled),
                 Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
+            );
+            assert_eq!(
+                gate_headroom("shell_visible_ms", controlled),
+                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
+            );
+        }
+        for tail in [
+            "staleness_p99_ms",
+            "view_p99_ms",
+            "cadence_p99_ms",
+            "key_to_rpc_p99_us",
+            "control_p99_ms",
+            "p99_ms",
+        ] {
+            assert_eq!(gate_headroom(tail, false), None, "{tail} on a shared class");
+            assert_eq!(
+                gate_headroom(tail, true),
+                Some(Headroom::Proportional(ABSOLUTE_HEADROOM)),
+                "{tail} on a controlled class"
             );
         }
         assert_eq!(gate_headroom("paired_delta_p99_ms", false), None);
@@ -1070,6 +1261,64 @@ mod tests {
         assert_eq!(
             gate_headroom("ratio_p99", true),
             Some(Headroom::Proportional(RATIO_HEADROOM))
+        );
+    }
+
+    /// `control_delta_p99_ms` is `paired_delta_p99_ms` for the control row:
+    /// the same signed statistic, scoped by a prefix. Matching the delta by
+    /// exact name gave it `Proportional(ABSOLUTE_HEADROOM)` on every class,
+    /// which is wrong twice over -- it gates a scheduler-dominated tail on a
+    /// shared host, and a proportional bar inverts once the value goes
+    /// negative, which is precisely the state a paired delta is built to
+    /// reach when view wins.
+    ///
+    /// Disconfirm: restore the exact-name match and the first assertion
+    /// returns `Some(Proportional(..))` instead of `None`.
+    #[test]
+    fn a_scoped_paired_delta_inherits_the_signed_policy() {
+        assert_eq!(gate_headroom("control_delta_p99_ms", false), None);
+        assert_eq!(
+            gate_headroom("control_delta_p99_ms", true),
+            Some(Headroom::Signed {
+                factor: RATIO_HEADROOM,
+                floor: SIGNED_DELTA_FLOOR_MS
+            })
+        );
+        assert!(
+            gate_headroom("control_delta_p99_ms", true).is_some_and(Headroom::admits_non_positive)
+        );
+    }
+
+    /// A measured entry resizes the allowance; absence leaves the default.
+    /// An entry cannot resurrect a gate the class does not have, because the
+    /// exemption answers "does this number mean anything here", which no
+    /// amount of measured spread changes.
+    #[test]
+    fn a_measured_headroom_resizes_but_never_resurrects_a_gate() {
+        let table: HeadroomTable = [
+            ("ratio_p50".to_string(), 1.06),
+            ("view_p99_ms".to_string(), 1.10),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            headroom_for(&table, "ratio_p50", false),
+            Some(Headroom::Proportional(1.06))
+        );
+        assert_eq!(
+            headroom_for(&table, "marker_ratio_p50", false),
+            Some(Headroom::Proportional(RATIO_HEADROOM)),
+            "a metric with no entry keeps the default"
+        );
+        assert_eq!(
+            headroom_for(&table, "view_p99_ms", false),
+            None,
+            "a shared-class tail stays ungated however well its spread is known"
+        );
+        assert_eq!(
+            headroom_for(&table, "view_p99_ms", true),
+            Some(Headroom::Proportional(1.10))
         );
     }
 

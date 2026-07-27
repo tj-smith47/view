@@ -2,6 +2,19 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
+# Gate headroom measured on this host, overriding the compiled-in default
+# for the metric's kind. A metric absent here has not had its run-to-run
+# spread established on this class and gates on the conservative default;
+# absence is a statement, not a gap to fill with a plausible number.
+[headroom]
+# 8 report-only replicates, 2026-07-27, host loads 0.44 to 8.53, one
+# unchanged binary pair. Median 1.1735, half-width 1.70%, and the worst
+# excursion above the recorded value was 2.14%. The pre-registered rule for
+# distinguishing two conditions from single measurements is 2x half-width,
+# here 3.4%. 1.06 clears both, and replaces a default of 1.25 that admitted a
+# 25% regression on a statistic this host resolves to under 2%.
+ratio_p50 = 1.06
+
 [echo.heavy]
 paired_delta_p99_ms = 0.975764
 ratio_p50 = 1.1837936337116466

@@ -1247,7 +1247,12 @@ fn main() -> Result<()> {
                 );
             };
             breaches.extend(baselines::gate_cell(
-                scenario, fixture, metrics, recorded, &cli.class,
+                scenario,
+                fixture,
+                metrics,
+                recorded,
+                &cli.class,
+                &file.headroom,
             ));
             for metric in baselines::unmeasured_metrics(metrics, recorded) {
                 unmeasured.push((scenario.clone(), fixture.clone(), metric));
@@ -1299,6 +1304,7 @@ fn main() -> Result<()> {
                 fixture,
                 metrics,
                 &cli.class,
+                &file.headroom,
             ));
         }
         let budget_failures = findings
