@@ -218,11 +218,28 @@ fi
 # not yet git-added is exactly what this guard exists to catch. -f drops index
 # entries with no file on disk (a split deletes foo.rs in the worktree before
 # that deletion is staged), which would otherwise fail every downstream reader.
+#
+# core.quotepath=false is load-bearing, not tidiness. Under git's default the
+# listing renders any path holding a non-ASCII byte in C-quoted form
+# ("crates/x/src/na\303\257ve.rs"), a string that names no file on disk, so the
+# -f test drops it and the gate reports a clean scan of a tree it never fully
+# read -- a 1500-line file behind a legal non-ASCII module name would pass
+# unmeasured. The quoted form survives for the two characters no setting can
+# render on one line (a newline or a double quote in the name), so a line that
+# still arrives quoted is refused rather than dropped.
 ALL_RS=()
 while IFS= read -r _f; do
+    case "$_f" in
+        '"'*)
+            echo "audit-god-files: git could not list $_f literally, so this gate" >&2
+            echo "  cannot tell which file it names; rename it out of the quoted form" >&2
+            exit 1
+            ;;
+    esac
     [[ -f "$_f" ]] && ALL_RS+=("$_f")
 done < <(
-    git ls-files --cached --others --exclude-standard -- 'crates/**/*.rs' 'crates/*.rs' 2>/dev/null |
+    git -c core.quotepath=false ls-files --cached --others --exclude-standard \
+        -- 'crates/**/*.rs' 'crates/*.rs' 2>/dev/null |
         sort -u
 )
 if [[ ${#ALL_RS[@]} -eq 0 ]]; then
@@ -246,14 +263,20 @@ map_name() {
 }
 
 # a path outside the encoded alphabet would produce an invalid variable name,
-# so it is refused here where the message can name the file
-for _f in "${ALL_RS[@]}"; do
-    case "$_f" in
+# so it is refused where the message can still name the file. Every path that
+# reaches map_name passes through here first: the scanned set below, and the
+# pinned paths, which are hand-written and reach the maps by another route.
+refuse_unkeyable() {
+    case "$1" in
         *[!A-Za-z0-9_/.-]*)
-            echo "audit-god-files: $_f has characters this gate cannot key on" >&2
+            echo "audit-god-files: $1 has characters this gate cannot key on;" >&2
+            echo "  rename it, or widen both the alphabet here and map_name's escapes" >&2
             exit 1
             ;;
     esac
+}
+for _f in "${ALL_RS[@]}"; do
+    refuse_unkeyable "$_f"
 done
 
 # Resolve `mod NAME;` declared in DECL_FILE to the file that provides it, into
@@ -313,6 +336,12 @@ WORKLIST=()
 IS_TEST_COUNT=0
 
 mark_test_file() {
+    # idempotent: a #![cfg(test)] file that an earlier-sorted file also reaches
+    # through a #[cfg(test)] mod declaration arrives here twice, and counting it
+    # twice puts a wrong number in gate output wearing the shape of a right one
+    if is_test_file "$1"; then
+        return 0
+    fi
     map_name IS_TEST_FILE "$1"
     printf -v "$MAP_NAME" '%s' 1
     WORKLIST+=("$1")
@@ -390,6 +419,7 @@ add_pin() { # usage: add_pin <listname> "<path>:<ceiling>:<why>"
     local listname="$1" entry="$2" _path _rest _seen _dup=""
     _path="${entry%%:*}"
     _rest="${entry#*:}"
+    refuse_unkeyable "$_path"
     # a path named in both registers keeps one slot, so the staleness sweep
     # below reports it once rather than once per register
     for _seen in ${PIN_PATHS[@]+"${PIN_PATHS[@]}"}; do
