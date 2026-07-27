@@ -33,6 +33,16 @@ pub enum BenchError {
          ratio would be meaningless"
     )]
     DegenerateBaselineSide { statistic: &'static str, value: f64 },
+    #[error(
+        "the {side} side observed {collected} frame-change gaps, under this row's \
+         {floor}-gap floor; a cadence percentile over that few gaps describes the \
+         window's luck, not the editor"
+    )]
+    TooFewCadenceGaps {
+        side: &'static str,
+        collected: usize,
+        floor: usize,
+    },
     #[error("pty session error: {0}")]
     Session(#[from] view_oracle::OracleError),
     #[error("measurement desync (a harness fault, not a latency reading): {context}")]

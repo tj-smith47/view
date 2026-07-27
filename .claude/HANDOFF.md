@@ -30,6 +30,11 @@ startup; grep them when a question arises.
 
 ## 1. First actions in the new session
 
+0. **Read `.claude/IN-FLIGHT.md` first.** As of 2026-07-27 there is
+   uncommitted work in the tree, one half-landed change, and an adversarial
+   review whose findings are pre-commit blockers. That file supersedes
+   section 3's task table where the two disagree, and it is deleted once its
+   contents land as commits.
 1. Create tasks from section 3 below, verbatim, in the order listed. The
    harness task store does not persist across sessions and is not
    shell-accessible, so this file is the only carrier.

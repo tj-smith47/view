@@ -177,21 +177,87 @@ fn flood_once(
     })
 }
 
+/// One side's cadence distribution for one trial, in milliseconds.
+///
+/// p50 and p90 are carried alongside the gated p99 because they are what
+/// separates the two readings this row can produce: a coalescing failure
+/// detaches the p99 from the bulk, while a redraw cadence puts its p99 on
+/// the jitter edge of a p50 it stays close to. A p99 reported alone cannot
+/// be told apart.
+#[derive(Debug, Clone, Copy)]
+pub struct SideCadence {
+    pub p50_ms: f64,
+    pub p90_ms: f64,
+    pub p99_ms: f64,
+    pub max_ms: f64,
+}
+
+/// One paired trial: both sides' raw measurement, both sides' cadence
+/// distributions, and the two quotients the trial contributes.
+#[derive(Debug)]
+pub struct FloodTrial {
+    pub view: FloodSide,
+    pub nvim: FloodSide,
+    pub view_cadence: SideCadence,
+    pub nvim_cadence: SideCadence,
+    /// nvim lines drained over view lines drained, this trial.
+    pub pace_ratio: f64,
+    /// `view_cadence.p99_ms / nvim_cadence.p99_ms`, this trial.
+    pub cadence_p99_ratio: f64,
+}
+
 /// The flood run's outcome.
 #[derive(Debug)]
 pub struct FloodOutcome {
-    pub view_trials: Vec<FloodSide>,
-    pub nvim_trials: Vec<FloodSide>,
+    pub trials: Vec<FloodTrial>,
     /// Median across trials of nvim lines drained over view lines drained.
     /// Lower is better: view keeping pace makes the two counts equal (~1.0);
     /// view falling behind drains fewer lines in the window and lifts it.
     pub gated_pace_ratio: f64,
     /// Median across trials of the view side's cadence-gap p99 (ms).
     pub gated_cadence_p99_ms: f64,
+    /// Median across trials of the nvim side's cadence-gap p99 (ms), the
+    /// denominator of [`gated_cadence_p99_ratio`](Self::gated_cadence_p99_ratio).
+    pub nvim_cadence_p99_ms: f64,
+    /// Median across trials of the view side's cadence-gap p99 over the
+    /// nvim side's, both taken on the same host inside the same run.
+    ///
+    /// The cross-class statistic for this row, because the absolute one
+    /// cannot be: how many bytes a flood delivers per read into the editor
+    /// is set by the kernel's pty output buffer, which no producer can
+    /// choose (measured: neither a block-writing producer nor disabling
+    /// output post-processing moves either host onto the other's value --
+    /// see the flood-stimulus measurement note). Both arms meet whatever
+    /// this host's buffer does, so the quotient survives a difference the
+    /// millisecond number cannot.
+    ///
+    /// A ratio of two p99s, not the p99 of a paired ratio: the two sides
+    /// run in sequence over one window each and their gaps have no
+    /// per-sample correspondence to pair. The name says which it is.
+    pub gated_cadence_p99_ratio: f64,
     /// Worst single view-side no-paint gap observed across all trials
     /// (ms); reported, not gated: the max of a scheduler-noisy quantity.
     pub view_stall_max_ms: f64,
 }
+
+/// The two names one side is reported under: the side itself, and the
+/// metric name its cadence percentile is recorded and refused under. Paired
+/// so no call site can raise a refusal that names one side while carrying
+/// the other's number.
+#[derive(Clone, Copy)]
+struct SideNames {
+    side: &'static str,
+    cadence_metric: &'static str,
+}
+
+const VIEW_NAMES: SideNames = SideNames {
+    side: "view",
+    cadence_metric: "cadence_p99_ms",
+};
+const NVIM_NAMES: SideNames = SideNames {
+    side: "nvim",
+    cadence_metric: "nvim cadence_p99_ms",
+};
 
 /// Runs `trials` paired floods. A flood is one long macro operation, so
 /// pairing is per trial (view and nvim floods back to back within the
@@ -201,11 +267,8 @@ pub struct FloodOutcome {
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if a producer never scrolls the terminal
-/// or a session misbehaves, [`BenchError::NotEnoughSamples`] if a window
-/// produced fewer observed frame changes than the protocol's floor (the
-/// cadence percentile would be built on too few gaps to mean anything), and
-/// [`BenchError::BelowInstrumentResolution`] if the cadence percentile sits
-/// within [`CADENCE_RESOLUTION_FACTOR`] of the probe loop's own period.
+/// or a session misbehaves, and propagates every per-trial refusal
+/// [`paired_trial`] raises.
 pub fn run(
     view: &SpawnSpec,
     nvim: &SpawnSpec,
@@ -214,71 +277,131 @@ pub fn run(
     settle_deadline: Duration,
     window: Duration,
 ) -> Result<FloodOutcome, BenchError> {
-    let mut view_trials = Vec::with_capacity(trials);
-    let mut nvim_trials = Vec::with_capacity(trials);
+    let mut paired = Vec::with_capacity(trials);
     for trial in 0..trials {
-        if trial % 2 == 0 {
-            view_trials
-                .push(flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?);
-            nvim_trials
-                .push(flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?);
+        let (view_side, nvim_side) = if trial % 2 == 0 {
+            let view_side =
+                flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
+            let nvim_side =
+                flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
+            (view_side, nvim_side)
         } else {
-            nvim_trials
-                .push(flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?);
-            view_trials
-                .push(flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?);
-        }
+            let nvim_side =
+                flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
+            let view_side =
+                flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
+            (view_side, nvim_side)
+        };
+        paired.push(paired_trial(view_side, nvim_side, min_gap_samples)?);
     }
 
-    let mut ratios = Vec::with_capacity(trials);
-    let mut cadence_p99s = Vec::with_capacity(trials);
-    let mut stall_max: f64 = 0.0;
-    for (view_side, nvim_side) in view_trials.iter().zip(&nvim_trials) {
-        if !(view_side.lines_drained.is_finite() && view_side.lines_drained > 0.0) {
-            return Err(BenchError::DegenerateBaselineSide {
-                statistic: "lines_drained",
-                value: view_side.lines_drained,
-            });
-        }
-        ratios.push(nvim_side.lines_drained / view_side.lines_drained);
-        if view_side.cadence_gaps_ms.len() < min_gap_samples {
-            return Err(BenchError::NotEnoughSamples {
-                collected: view_side.cadence_gaps_ms.len(),
-                warmup: min_gap_samples,
-            });
-        }
-        let dist = Distribution::from_samples(&view_side.cadence_gaps_ms, 0)?;
-        cadence_p99s.push(dist.p99());
-        stall_max = stall_max.max(dist.max());
-    }
-
-    let gated_cadence_p99_ms = median_of_trials(&cadence_p99s)?;
-    let probe_period_ms = median_of_trials(
-        &view_trials
+    let across = |pick: fn(&FloodTrial) -> f64| {
+        median_of_trials(&paired.iter().map(pick).collect::<Vec<_>>())
+    };
+    Ok(FloodOutcome {
+        gated_pace_ratio: across(|t| t.pace_ratio)?,
+        gated_cadence_p99_ms: across(|t| t.view_cadence.p99_ms)?,
+        nvim_cadence_p99_ms: across(|t| t.nvim_cadence.p99_ms)?,
+        gated_cadence_p99_ratio: across(|t| t.cadence_p99_ratio)?,
+        view_stall_max_ms: paired
             .iter()
-            .map(|t| t.probe_period_ms)
-            .collect::<Vec<_>>(),
-    )?;
-    // a frame change is only ever seen on a probe, so no gap can be finer
-    // than the probe loop's own period: a cadence number down at that floor
-    // is reporting how fast this harness can hash a screen, not how well
-    // view coalesces a flood. Refused rather than recorded, because a bar
-    // set from the instrument gates every later run against the instrument.
-    if !cadence_is_measurable(gated_cadence_p99_ms, probe_period_ms) {
+            .fold(0.0_f64, |worst, t| worst.max(t.view_cadence.max_ms)),
+        trials: paired,
+    })
+}
+
+/// Reduces one trial's two measurements to the statistics the row records.
+///
+/// Every refusal here is per trial and per side rather than run-level: the
+/// quotients the run aggregates are formed at this granularity, so a single
+/// contaminated trial can carry the median ratio while a run-level check on
+/// the median of p99s still reads clean.
+///
+/// # Errors
+///
+/// Returns [`BenchError::DegenerateBaselineSide`] if the view side drained
+/// no lines to pace against, or if the nvim side's percentile is not a
+/// positive finite number to divide by; and propagates the per-side
+/// refusals [`side_cadence`] raises.
+///
+/// Those per-side refusals come first, so a side that never repainted is
+/// reported as sitting under the instrument's own floor -- naming both the
+/// percentile and the probe period it failed against -- rather than as a
+/// bare unusable denominator. The denominator check still runs, because a
+/// probe period of zero is the one arrangement that clears the floor with a
+/// zero percentile.
+fn paired_trial(
+    view: FloodSide,
+    nvim: FloodSide,
+    min_gap_samples: usize,
+) -> Result<FloodTrial, BenchError> {
+    if !(view.lines_drained.is_finite() && view.lines_drained > 0.0) {
+        return Err(BenchError::DegenerateBaselineSide {
+            statistic: "lines_drained",
+            value: view.lines_drained,
+        });
+    }
+    let view_cadence = side_cadence(&view, VIEW_NAMES, min_gap_samples)?;
+    let nvim_cadence = side_cadence(&nvim, NVIM_NAMES, min_gap_samples)?;
+    if !(nvim_cadence.p99_ms.is_finite() && nvim_cadence.p99_ms > 0.0) {
+        return Err(BenchError::DegenerateBaselineSide {
+            statistic: NVIM_NAMES.cadence_metric,
+            value: nvim_cadence.p99_ms,
+        });
+    }
+    Ok(FloodTrial {
+        pace_ratio: nvim.lines_drained / view.lines_drained,
+        cadence_p99_ratio: view_cadence.p99_ms / nvim_cadence.p99_ms,
+        view,
+        nvim,
+        view_cadence,
+        nvim_cadence,
+    })
+}
+
+/// One side's cadence distribution for one trial, refused rather than
+/// returned when the window cannot support one.
+///
+/// # Errors
+///
+/// Returns [`BenchError::TooFewCadenceGaps`] if this side observed fewer
+/// gaps than `min_gap_samples` -- checked on both sides by the caller,
+/// because a ratio is only as trustworthy as its denominator, and a
+/// percentile built on a handful of nvim gaps would let the paired
+/// statistic look precise while resting on nothing. Returns
+/// [`BenchError::BelowInstrumentResolution`] if this side's p99 sits within
+/// [`CADENCE_RESOLUTION_FACTOR`] of *this side's own* probe period: a frame
+/// change is only ever seen on a probe, so a cadence number down at that
+/// floor reports how fast this harness can hash a screen, not how well the
+/// side coalesces a flood. Refused rather than recorded, because a bar set
+/// from the instrument gates every later run against the instrument.
+fn side_cadence(
+    side: &FloodSide,
+    names: SideNames,
+    min_gap_samples: usize,
+) -> Result<SideCadence, BenchError> {
+    if side.cadence_gaps_ms.len() < min_gap_samples {
+        return Err(BenchError::TooFewCadenceGaps {
+            side: names.side,
+            collected: side.cadence_gaps_ms.len(),
+            floor: min_gap_samples,
+        });
+    }
+    let dist = Distribution::from_samples(&side.cadence_gaps_ms, 0)?;
+    let p99_ms = dist.p99();
+    if !cadence_is_measurable(p99_ms, side.probe_period_ms) {
         return Err(BenchError::BelowInstrumentResolution {
-            metric: "cadence_p99_ms",
-            value: gated_cadence_p99_ms,
-            resolution: probe_period_ms,
+            metric: names.cadence_metric,
+            value: p99_ms,
+            resolution: side.probe_period_ms,
             factor: CADENCE_RESOLUTION_FACTOR,
         });
     }
-
-    Ok(FloodOutcome {
-        gated_pace_ratio: median_of_trials(&ratios)?,
-        gated_cadence_p99_ms,
-        view_stall_max_ms: stall_max,
-        view_trials,
-        nvim_trials,
+    Ok(SideCadence {
+        p50_ms: dist.p50(),
+        p90_ms: dist.percentile(90.0),
+        p99_ms,
+        max_ms: dist.max(),
     })
 }
 
@@ -296,6 +419,188 @@ mod tests {
 
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    fn side(gaps_ms: &[f64]) -> FloodSide {
+        side_probing_every(gaps_ms, 0.05)
+    }
+
+    /// A side whose probe loop ran at `probe_period_ms`, for the guards that
+    /// read one side's resolution floor rather than the gap values.
+    fn side_probing_every(gaps_ms: &[f64], probe_period_ms: f64) -> FloodSide {
+        FloodSide {
+            lines_drained: 1000.0,
+            cadence_gaps_ms: gaps_ms.to_vec(),
+            probe_period_ms,
+        }
+    }
+
+    /// A gap series repeated enough times to clear any sample-count floor a
+    /// test sets, without the values themselves varying.
+    fn repeated(gaps_ms: &[f64], times: usize) -> Vec<f64> {
+        gaps_ms
+            .iter()
+            .copied()
+            .cycle()
+            .take(gaps_ms.len() * times)
+            .collect()
+    }
+
+    #[test]
+    fn the_cadence_ratio_is_the_two_sides_percentiles_divided() {
+        let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
+        let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
+        let trial = paired_trial(view, nvim, 100).unwrap();
+        assert!(
+            (trial.cadence_p99_ratio - trial.view_cadence.p99_ms / trial.nvim_cadence.p99_ms).abs()
+                < 1e-12
+        );
+        assert!(
+            trial.cadence_p99_ratio > 1.9 && trial.cadence_p99_ratio < 2.1,
+            "a side with uniformly doubled gaps should read about 2x, got {}",
+            trial.cadence_p99_ratio
+        );
+    }
+
+    // The property the row exists for: a host that delivers a flood in
+    // coarser chunks lifts BOTH sides' gaps, and no producer-side pin can
+    // equalize that across kernels. The quotient is what survives it.
+    #[test]
+    fn scaling_both_sides_gaps_leaves_the_cadence_ratio_where_it_was() {
+        let view_gaps = repeated(&[2.0, 4.0, 20.0], 40);
+        let nvim_gaps = repeated(&[1.0, 2.0, 10.0], 40);
+        let coarse = |gaps: &[f64]| gaps.iter().map(|g| g * 7.5).collect::<Vec<_>>();
+
+        let fine = paired_trial(side(&view_gaps), side(&nvim_gaps), 100).unwrap();
+        let coarser =
+            paired_trial(side(&coarse(&view_gaps)), side(&coarse(&nvim_gaps)), 100).unwrap();
+
+        assert!(
+            (coarser.view_cadence.p99_ms - fine.view_cadence.p99_ms * 7.5).abs() < 1e-9,
+            "the absolute number must move with the stimulus, or this test proves nothing"
+        );
+        assert!((coarser.cadence_p99_ratio - fine.cadence_p99_ratio).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_thin_nvim_side_refuses_the_pair_rather_than_dividing_by_it() {
+        let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
+        let nvim = side(&[1.0, 2.0]);
+        assert!(matches!(
+            paired_trial(view, nvim, 100),
+            Err(BenchError::TooFewCadenceGaps {
+                side: "nvim",
+                collected: 2,
+                floor: 100,
+            })
+        ));
+    }
+
+    #[test]
+    fn a_thin_view_side_names_the_view_side_in_the_refusal() {
+        // the two sides share one refusal path, so which side tripped it is
+        // only in the error's own field: a report naming the wrong side sends
+        // the reader to the wrong half of the run
+        let thin = side(&[1.0, 2.0]);
+        let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
+        assert!(matches!(
+            paired_trial(thin, nvim, 100),
+            Err(BenchError::TooFewCadenceGaps { side: "view", .. })
+        ));
+    }
+
+    #[test]
+    fn an_nvim_side_that_never_moved_is_degenerate_not_infinite() {
+        // probe period 0 is the one arrangement that reaches the denominator
+        // guard: with any real probe period a zero percentile is refused one
+        // step earlier, as sitting under the instrument's own floor
+        let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
+        let nvim = side_probing_every(&repeated(&[0.0], 120), 0.0);
+        assert!(matches!(
+            paired_trial(view, nvim, 100),
+            Err(BenchError::DegenerateBaselineSide {
+                statistic: "nvim cadence_p99_ms",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn each_side_is_held_to_its_own_probe_period_not_the_other_sides() {
+        // the nvim side probed 10x coarser than the view side here. Judged
+        // against view's period its p99 clears the floor; against its own it
+        // does not, and the refusal must carry the period that tripped it or
+        // the diagnostic points at the wrong instrument
+        let view = side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
+        let nvim = side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
+        let refused = paired_trial(view, nvim, 100);
+        assert!(
+            matches!(
+                refused,
+                Err(BenchError::BelowInstrumentResolution {
+                    metric: "nvim cadence_p99_ms",
+                    resolution: 0.5,
+                    ..
+                })
+            ),
+            "expected the nvim side refused against its own 0.5ms period, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn one_contaminated_trial_is_refused_where_a_median_would_have_absorbed_it() {
+        // the run aggregates medians across trials, so a floor-contaminated
+        // trial can sit under a clean median and still be the median RATIO.
+        // The guard therefore runs here, per trial, not on the aggregate
+        let clean = || side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
+        let floor_bound = side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
+        assert!(paired_trial(clean(), clean(), 100).is_ok());
+        assert!(matches!(
+            paired_trial(floor_bound, clean(), 100),
+            Err(BenchError::BelowInstrumentResolution {
+                metric: "cadence_p99_ms",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn the_reported_percentiles_separate_a_jitter_tail_from_a_stall() {
+        // the two readings this row can produce sit at the SAME p99: a
+        // redraw cadence whose tail is a jitter edge above its bulk, and a
+        // fast side that stalls one gap in four. Only the p50 tells them
+        // apart, which is why the trial report carries it
+        let jitter_gaps = repeated(&[12.0, 12.5, 13.0, 16.5], 40);
+        let stall_gaps = repeated(&[0.5, 0.5, 0.5, 16.5], 40);
+        let jitter = paired_trial(side(&jitter_gaps), side(&jitter_gaps), 100)
+            .unwrap()
+            .view_cadence;
+        let stall = paired_trial(side(&stall_gaps), side(&stall_gaps), 100)
+            .unwrap()
+            .view_cadence;
+
+        assert!(
+            (jitter.p99_ms - stall.p99_ms).abs() < 1e-9,
+            "the two shapes must share a p99 or this test proves nothing: {} vs {}",
+            jitter.p99_ms,
+            stall.p99_ms
+        );
+        assert!(
+            jitter.p99_ms / jitter.p50_ms < 1.5,
+            "a cadence tail hugs its bulk, got p99 {} over p50 {}",
+            jitter.p99_ms,
+            jitter.p50_ms
+        );
+        assert!(
+            stall.p99_ms / stall.p50_ms > 10.0,
+            "a stall detaches from its bulk, got p99 {} over p50 {}",
+            stall.p99_ms,
+            stall.p50_ms
+        );
+        for cadence in [jitter, stall] {
+            assert!(cadence.p50_ms <= cadence.p90_ms && cadence.p90_ms <= cadence.p99_ms);
+            assert!(cadence.p99_ms <= cadence.max_ms);
+        }
+    }
 
     #[test]
     fn a_cadence_at_the_probe_period_is_not_a_measurement_of_view() {

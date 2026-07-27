@@ -4,6 +4,7 @@
 //! scenario produced the numbers.
 
 use crate::pairing::PairedSummary;
+use crate::scenarios::flood::FloodTrial;
 
 /// The two-line paired-cell report:
 ///
@@ -37,6 +38,47 @@ pub fn paired_cell(
         summary.ratio_p99,
         summary.paired_delta_p99_ms,
         summary.view.len(),
+    )
+}
+
+/// The two-line paired flood trial report:
+///
+/// ```text
+/// flood/minimal: view 41233 lines p50 12.40ms p90 14.90ms p99 16.43ms | nvim 41102 lines p50 12.35ms p90 14.85ms p99 16.45ms
+///       pace 0.997  cadence(p99) 0.999  gaps 1180/1190  probe 0.42/0.41ms (view/nvim)
+/// ```
+///
+/// Every number is read off the trial the run aggregates, so the log and
+/// the gate cannot disagree about what this trial measured.
+///
+/// The p50 and p90 are here because the p99 alone cannot be read: a
+/// coalescing failure detaches the tail from the bulk, a redraw cadence
+/// keeps it a jitter edge above a p50 it stays near, and those are opposite
+/// findings at the same p99. Both sides' gap counts print for the same
+/// reason -- a low count on the view side alone points at view's painting,
+/// while a low count on both points at what the harness can observe through
+/// the pty on this host -- and each side's probe period prints because it is
+/// the resolution floor under that side's own percentiles.
+#[must_use]
+pub fn flood_trial(scenario: &str, fixture: &str, trial: &FloodTrial) -> String {
+    format!(
+        "{scenario}/{fixture}: view {:.0} lines p50 {:.2}ms p90 {:.2}ms p99 {:.2}ms | \
+         nvim {:.0} lines p50 {:.2}ms p90 {:.2}ms p99 {:.2}ms\n      \
+         pace {:.3}  cadence(p99) {:.3}  gaps {}/{}  probe {:.2}/{:.2}ms (view/nvim)",
+        trial.view.lines_drained,
+        trial.view_cadence.p50_ms,
+        trial.view_cadence.p90_ms,
+        trial.view_cadence.p99_ms,
+        trial.nvim.lines_drained,
+        trial.nvim_cadence.p50_ms,
+        trial.nvim_cadence.p90_ms,
+        trial.nvim_cadence.p99_ms,
+        trial.pace_ratio,
+        trial.cadence_p99_ratio,
+        trial.view.cadence_gaps_ms.len(),
+        trial.nvim.cadence_gaps_ms.len(),
+        trial.view.probe_period_ms,
+        trial.nvim.probe_period_ms,
     )
 }
 
@@ -82,6 +124,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::pairing::paired_summary;
+    use crate::scenarios::flood::{FloodSide, SideCadence};
 
     #[test]
     fn paired_cell_renders_the_documented_two_line_shape() {
@@ -98,6 +141,47 @@ mod tests {
         assert_eq!(
             lines[1],
             "      ratio(p99) 2.000  paired-delta p99 1.000ms  samples 50 (+100 warmup)"
+        );
+    }
+
+    #[test]
+    fn flood_trial_renders_both_sides_full_distributions_and_both_probe_periods() {
+        let trial = FloodTrial {
+            view: FloodSide {
+                lines_drained: 41233.0,
+                cadence_gaps_ms: vec![12.0, 13.0, 16.4],
+                probe_period_ms: 0.42,
+            },
+            nvim: FloodSide {
+                lines_drained: 41102.0,
+                cadence_gaps_ms: vec![12.0, 13.0, 16.5],
+                probe_period_ms: 0.41,
+            },
+            view_cadence: SideCadence {
+                p50_ms: 12.40,
+                p90_ms: 14.90,
+                p99_ms: 16.43,
+                max_ms: 18.0,
+            },
+            nvim_cadence: SideCadence {
+                p50_ms: 12.35,
+                p90_ms: 14.85,
+                p99_ms: 16.45,
+                max_ms: 18.1,
+            },
+            pace_ratio: 0.9968,
+            cadence_p99_ratio: 0.9988,
+        };
+        let rendered = flood_trial("flood", "minimal", &trial);
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines[0],
+            "flood/minimal: view 41233 lines p50 12.40ms p90 14.90ms p99 16.43ms | \
+             nvim 41102 lines p50 12.35ms p90 14.85ms p99 16.45ms"
+        );
+        assert_eq!(
+            lines[1],
+            "      pace 0.997  cadence(p99) 0.999  gaps 3/3  probe 0.42/0.41ms (view/nvim)"
         );
     }
 

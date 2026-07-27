@@ -61,7 +61,7 @@ pub const RATIO_HEADROOM: f64 = 1.25;
 /// class has not measured its own.
 ///
 /// Absolute tails on a shared dev host move with ambient load, which is
-/// why [`is_absolute_tail`] metrics do not gate on a shared class at all;
+/// why [`derives_from_tail`] metrics do not gate on a shared class at all;
 /// what remains under this constant on such a class is the sizes, which do
 /// not move with load. On a controlled class the tails gate here too.
 pub const ABSOLUTE_HEADROOM: f64 = 1.5;
@@ -205,9 +205,14 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// The gate policy for one metric on one machine class: `None` means
 /// recorded for reference but never gated on this mechanism.
 ///
-/// The paired tail statistics gate only on controlled classes. Both
-/// earned the shared-class exemption by measurement of one unchanged
-/// binary pair across host-load regimes:
+/// Every statistic that [`derives_from_tail`] is exempt on a shared class;
+/// a size or a median is not, and gates everywhere. Ratios take
+/// [`RATIO_HEADROOM`] and everything else [`ABSOLUTE_HEADROOM`], except a
+/// paired delta, which is signed and so cannot take a proportional
+/// allowance at all.
+///
+/// The shared-class exemption is lifted per statistic, by measuring one
+/// unchanged binary pair across host-load regimes. Two have been measured:
 /// - `paired_delta_p99_ms` tracked ambient load x149 (0.62ms..92.5ms);
 ///   its regression protection is duplicated by the ratio from the same
 ///   paired run.
@@ -215,17 +220,27 @@ pub fn is_controlled_class(class: &str) -> bool {
 ///   1.05..1.95): shared tails are scheduler-dominated, and load
 ///   compresses the ratio toward 1.
 ///
+/// Neither result transfers to a quotient of two tails taken over
+/// consecutive windows, which is what flood's `cadence_p99_ratio` is: the
+/// interleaved pairing that lets `ratio_p99` cancel ambient load has no
+/// counterpart when a spike lands inside one 15-second window and not the
+/// other. Until that statistic has its own load-regime characterization it
+/// is recorded and left ungated on a shared class, like every other tail.
+///
 /// On a dedicated runner those load regimes cannot occur, so the same
 /// statistics gate there under the standard ratio headroom, and the spec
 /// p99 budget gets a real bar instead of a reference number.
 #[must_use]
 pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
-    // by suffix, not by exact name: the exemption is a property of the
-    // statistic, so a row that prefixes its own scope onto it (first_paint's
-    // `marker_ratio_p99`, echo_control's `control_delta_p99_ms`) is the same
-    // scheduler-dominated tail and must not gate on a shared class merely
-    // because it spelled the metric differently
-    if metric.ends_with("delta_p99_ms") {
+    let factor = if metric.contains("ratio") {
+        RATIO_HEADROOM
+    } else {
+        ABSOLUTE_HEADROOM
+    };
+    if !derives_from_tail(metric) {
+        return Some(Headroom::Proportional(factor));
+    }
+    if metric.contains("delta") {
         // p99(view[i] - nvim[i]): negative whenever view beats nvim, which
         // is a state the paired scenario is built to reach and report
         return controlled.then_some(Headroom::Signed {
@@ -233,17 +248,7 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
             floor: SIGNED_DELTA_FLOOR_MS,
         });
     }
-    if metric.ends_with("ratio_p99") {
-        return controlled.then_some(Headroom::Proportional(RATIO_HEADROOM));
-    }
-    if is_absolute_tail(metric) {
-        return controlled.then_some(Headroom::Proportional(ABSOLUTE_HEADROOM));
-    }
-    if metric.contains("ratio") {
-        Some(Headroom::Proportional(RATIO_HEADROOM))
-    } else {
-        Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
-    }
+    controlled.then_some(Headroom::Proportional(factor))
 }
 
 /// The gate policy for `metric`, preferring `table`'s measured headroom for
@@ -262,23 +267,29 @@ pub fn headroom_for(table: &HeadroomTable, metric: &str, controlled: bool) -> Op
     }
 }
 
-/// Whether `metric` is an absolute latency tail: a percentile of a latency
-/// distribution, as opposed to a ratio between two of them or a size.
+/// Whether `metric` names a statistic whose value is a function of a tail
+/// percentile -- the percentile itself, a ratio of two, or a percentile of
+/// a paired difference.
 ///
 /// A percentile's value is set by the worst samples in the run, and on a
 /// shared host the worst samples are the ones a foreign process preempted.
 /// Measured on this class with one unchanged binary pair: `view_p99_ms`
 /// spans 0.925ms to 6.676ms across host loads 0.44 to 8.53, a 7.4x range,
 /// while the `ratio_p50` from those same eight runs stays inside 1.70%. No
-/// fixed allowance can tell a 7x regression from a busy afternoon, so the
-/// statistic is recorded here and gated on a controlled class, exactly as
-/// `paired_delta_p99_ms` and `ratio_p99` already are for the same reason.
+/// fixed allowance can tell a 7x regression from a busy afternoon, so such
+/// a statistic is recorded on a shared class and gated on a controlled one.
 ///
 /// The regression protection is not lost: a real slowdown in view's own
 /// tail moves the paired ratio from the same interleaved run, and that does
 /// gate.
-fn is_absolute_tail(metric: &str) -> bool {
-    !metric.contains("ratio") && (metric.contains("_p99") || metric == "p99_ms")
+///
+/// Matched on name components rather than on a suffix, because word order
+/// is not a property of a statistic. `ratio_p99` and `cadence_p99_ratio`
+/// are both quotients of tails and carry the same ambient noise, so a
+/// suffix rule that separates them makes spelling into gate policy: a
+/// consistency rename would flip a class's gate with no test failing.
+fn derives_from_tail(metric: &str) -> bool {
+    metric.split('_').any(|component| component == "p99")
 }
 
 /// Metric values for one `[scenario.fixture]` cell.
@@ -1208,72 +1219,76 @@ mod tests {
         assert!(!is_controlled_class("linux-controlled"));
     }
 
+    /// Every metric any row records, with the policy it gets on a shared and
+    /// on a controlled class. Exhaustive on purpose: the classification rule
+    /// reads name components, so a change to it can move a policy nobody
+    /// intended, and only a metric-by-metric table shows which ones moved.
+    ///
+    /// Disconfirm: give `derives_from_tail` the word-order-sensitive rule it
+    /// replaced -- `ends_with("ratio_p99") || ends_with("delta_p99_ms") ||
+    /// (!contains("ratio") && (contains("_p99") || == "p99_ms"))` -- and the
+    /// failure names exactly one moved policy, `cadence_p99_ratio` on a
+    /// shared class, going from `None` to `Some(Proportional(1.25))`.
     #[test]
-    fn headroom_policy_maps_metric_kinds() {
-        for controlled in [false, true] {
-            assert_eq!(
-                gate_headroom("ratio_p50", controlled),
-                Some(Headroom::Proportional(RATIO_HEADROOM))
-            );
-            assert_eq!(
-                gate_headroom("pace_ratio", controlled),
-                Some(Headroom::Proportional(RATIO_HEADROOM))
-            );
-            assert_eq!(
-                gate_headroom("marker_ratio_p50", controlled),
-                Some(Headroom::Proportional(RATIO_HEADROOM))
-            );
-            // a size is not a latency tail: it does not move with ambient
-            // load, so it gates on every class
-            assert_eq!(
-                gate_headroom("pss_mb", controlled),
-                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
-            );
-            assert_eq!(
-                gate_headroom("shell_visible_ms", controlled),
-                Some(Headroom::Proportional(ABSOLUTE_HEADROOM))
-            );
+    fn headroom_policy_maps_every_recorded_metric() {
+        let ratio = Some(Headroom::Proportional(RATIO_HEADROOM));
+        let absolute = Some(Headroom::Proportional(ABSOLUTE_HEADROOM));
+        let signed = Some(Headroom::Signed {
+            factor: RATIO_HEADROOM,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        });
+        // a median and a size do not move with ambient load, so they gate on
+        // every class; everything built on a p99 does not, until that
+        // statistic has its own load-regime characterization
+        let roster = [
+            ("ratio_p50", ratio, ratio),
+            ("pace_ratio", ratio, ratio),
+            ("marker_ratio_p50", ratio, ratio),
+            ("control_ratio_p50", ratio, ratio),
+            ("shell_visible_ms", absolute, absolute),
+            ("marker_cold_ms", absolute, absolute),
+            ("pss_mb", absolute, absolute),
+            ("phys_footprint_mb", absolute, absolute),
+            ("ratio_p99", None, ratio),
+            ("marker_ratio_p99", None, ratio),
+            ("control_ratio_p99", None, ratio),
+            ("cadence_p99_ratio", None, ratio),
+            ("view_p99_ms", None, absolute),
+            ("staleness_p99_ms", None, absolute),
+            ("cadence_p99_ms", None, absolute),
+            ("control_p99_ms", None, absolute),
+            ("key_to_rpc_p99_us", None, absolute),
+            ("p99_ms", None, absolute),
+            ("paired_delta_p99_ms", None, signed),
+            ("control_delta_p99_ms", None, signed),
+        ];
+        // every mismatch is collected rather than asserted one at a time, so
+        // a rule change reports the full set of policies it moved instead of
+        // stopping at the first: "only this metric moved" is the claim being
+        // checked, and one panic cannot support it
+        let mut moved = Vec::new();
+        for (metric, shared, controlled) in roster {
+            for (class, expected) in [("shared", shared), ("controlled", controlled)] {
+                let actual = gate_headroom(metric, class == "controlled");
+                if actual != expected {
+                    moved.push(format!(
+                        "{metric} on a {class} class: expected {expected:?}, got {actual:?}"
+                    ));
+                }
+            }
         }
-        for tail in [
-            "staleness_p99_ms",
-            "view_p99_ms",
-            "cadence_p99_ms",
-            "key_to_rpc_p99_us",
-            "control_p99_ms",
-            "p99_ms",
-        ] {
-            assert_eq!(gate_headroom(tail, false), None, "{tail} on a shared class");
-            assert_eq!(
-                gate_headroom(tail, true),
-                Some(Headroom::Proportional(ABSOLUTE_HEADROOM)),
-                "{tail} on a controlled class"
-            );
-        }
-        assert_eq!(gate_headroom("paired_delta_p99_ms", false), None);
-        assert_eq!(gate_headroom("ratio_p99", false), None);
-        assert_eq!(
-            gate_headroom("paired_delta_p99_ms", true),
-            Some(Headroom::Signed {
-                factor: RATIO_HEADROOM,
-                floor: SIGNED_DELTA_FLOOR_MS
-            })
-        );
-        assert_eq!(
-            gate_headroom("ratio_p99", true),
-            Some(Headroom::Proportional(RATIO_HEADROOM))
-        );
+        assert!(moved.is_empty(), "gate policy moved:\n{}", moved.join("\n"));
     }
 
     /// `control_delta_p99_ms` is `paired_delta_p99_ms` for the control row:
-    /// the same signed statistic, scoped by a prefix. Matching the delta by
-    /// exact name gave it `Proportional(ABSOLUTE_HEADROOM)` on every class,
-    /// which is wrong twice over -- it gates a scheduler-dominated tail on a
-    /// shared host, and a proportional bar inverts once the value goes
-    /// negative, which is precisely the state a paired delta is built to
-    /// reach when view wins.
+    /// the same signed statistic, scoped by a prefix. A proportional bar
+    /// inverts once the value goes negative, which is precisely the state a
+    /// paired delta is built to reach when view wins, so a scoped delta that
+    /// misses the signed policy is gated by a bar that reads backwards.
     ///
-    /// Disconfirm: restore the exact-name match and the first assertion
-    /// returns `Some(Proportional(..))` instead of `None`.
+    /// Disconfirm: narrow the delta arm in `gate_headroom` to the exact name
+    /// `paired_delta_p99_ms`, and this row falls through to the proportional
+    /// tail policy instead of the signed one.
     #[test]
     fn a_scoped_paired_delta_inherits_the_signed_policy() {
         assert_eq!(gate_headroom("control_delta_p99_ms", false), None);
