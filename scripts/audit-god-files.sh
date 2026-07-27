@@ -266,9 +266,17 @@ map_name() {
 # so it is refused where the message can still name the file. Every path that
 # reaches map_name passes through here first: the scanned set below, and the
 # pinned paths, which are hand-written and reach the maps by another route.
+#
+# The alphabet is enumerated rather than written as A-Z / a-z / 0-9 ranges: a
+# bracket RANGE is resolved through the locale's collation, and in a UTF-8
+# locale a stock macOS bash 3.2 folds accented letters into a-z, so the range
+# form accepted `naïve.rs` and let it reach printf as an invalid variable name.
+# Observed across six combinations (bash 3.2 and 5.3, C and UTF-8, both
+# platforms): only the enumerated form refuses in every one. `[[:alnum:]]` is
+# worse -- it admits the accented letter in every UTF-8 locale, on both.
 refuse_unkeyable() {
     case "$1" in
-        *[!A-Za-z0-9_/.-]*)
+        *[!ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_/.-]*)
             echo "audit-god-files: $1 has characters this gate cannot key on;" >&2
             echo "  rename it, or widen both the alphabet here and map_name's escapes" >&2
             exit 1
