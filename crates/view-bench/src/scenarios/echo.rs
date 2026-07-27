@@ -26,8 +26,7 @@ const SAMPLE_CHAR: &str = "x";
 /// One side's typing state: where the next character will land.
 pub(crate) struct SideState {
     session: BenchSession,
-    row: u16,
-    col: u16,
+    at: crate::boundaries::CellPos,
     origin_col: u16,
     line_len: usize,
     windows: Vec<(i64, i64)>,
@@ -67,12 +66,11 @@ impl SideState {
                 ),
             });
         }
-        let (row, col) = probe_origin(&mut session)?;
+        let at = probe_origin(&mut session)?;
         Ok(Self {
             session,
-            row,
-            col,
-            origin_col: col,
+            at,
+            origin_col: at.col,
             line_len: 0,
             windows: Vec::new(),
         })
@@ -96,22 +94,19 @@ impl SideState {
         }
         let start = monotonic_nanos();
         self.session.send(SAMPLE_CHAR.as_bytes())?;
-        if !self
-            .session
-            .wait_cell(self.row, self.col, SAMPLE_CHAR, timeout)
-        {
+        if !self.session.wait_cell(self.at, SAMPLE_CHAR, timeout) {
             return Err(BenchError::Desync {
                 context: format!(
                     "sample never appeared at ({}, {}); screen:\n{}",
-                    self.row,
-                    self.col,
+                    self.at.row,
+                    self.at.col,
                     self.session.screen_text()
                 ),
             });
         }
         let seen = monotonic_nanos();
         self.windows.push((start, seen));
-        self.col += 1;
+        self.at.col += 1;
         self.line_len += 1;
         std::thread::sleep(inter_sample);
         Ok((start, seen))
@@ -143,8 +138,8 @@ impl SideState {
     /// line management is driver bookkeeping, not a sample.
     fn open_fresh_line(&mut self) -> Result<(), BenchError> {
         self.session.send(b"\x1bo")?;
-        self.row += 1;
-        self.col = self.origin_col;
+        self.at.row += 1;
+        self.at.col = self.origin_col;
         self.line_len = 0;
         // the new line starts empty; give the paint a bounded moment so
         // the first sample of the line cannot race the line-open redraw
@@ -160,10 +155,8 @@ impl SideState {
         std::thread::sleep(Duration::from_millis(200));
         self.session.send(b"i")?;
         std::thread::sleep(Duration::from_millis(100));
-        let (row, col) = probe_origin(&mut self.session)?;
-        self.row = row;
-        self.col = col;
-        self.origin_col = col;
+        self.at = probe_origin(&mut self.session)?;
+        self.origin_col = self.at.col;
         self.line_len = 0;
         Ok(())
     }
@@ -174,7 +167,7 @@ impl SideState {
 /// the pre-probe screen, then erasing the probe again. A whole-screen
 /// uniqueness search would race chrome: a statusline rendering
 /// `scratch.txt` already holds an `x` cell before the probe ever paints.
-fn probe_origin(session: &mut BenchSession) -> Result<(u16, u16), BenchError> {
+fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos, BenchError> {
     let baseline =
         session.with_screen(|screen| crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR));
     session.send(SAMPLE_CHAR.as_bytes())?;

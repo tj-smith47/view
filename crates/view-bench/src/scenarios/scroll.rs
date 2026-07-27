@@ -35,18 +35,10 @@ pub fn fixture_content() -> String {
     content
 }
 
-/// Parses the line label at `(row, col)`, returning its number when the
-/// cells hold a well-formed `L%06d`.
-fn label_at(session: &mut BenchSession, row: u16, col: u16) -> Option<u32> {
-    let text = session.with_screen(|screen| {
-        let mut text = String::new();
-        for offset in 0..LABEL_WIDTH {
-            if let Some(cell) = screen.cell(row, col + offset) {
-                text.push_str(cell.contents());
-            }
-        }
-        text
-    });
+/// Parses the line label at `at`, returning its number when the cells hold
+/// a well-formed `L%06d`.
+fn label_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> Option<u32> {
+    let text = row_text_at(session, at);
     let digits = text.strip_prefix('L')?;
     if digits.len() != 6 {
         return None;
@@ -58,8 +50,7 @@ fn label_at(session: &mut BenchSession, row: u16, col: u16) -> Option<u32> {
 /// label currently reads.
 struct SideState {
     session: BenchSession,
-    label_row: u16,
-    label_col: u16,
+    label_at: crate::boundaries::CellPos,
     top_line: u32,
     /// Lines one `<C-d>` advances the top row by; discovered from the
     /// first warmup scroll rather than assumed, then required constant.
@@ -75,7 +66,7 @@ impl SideState {
         // attaches and the fixture renders. Readiness here is the fixture
         // label actually being on screen, re-settling until the deadline.
         let deadline = Instant::now() + settle_deadline;
-        let (label_row, label_col, top_line) = loop {
+        let (label_at, top_line) = loop {
             if !session.settle(SettleBound {
                 quiet: Duration::from_secs(2),
                 deadline: settle_deadline,
@@ -101,8 +92,7 @@ impl SideState {
         };
         Ok(Self {
             session,
-            label_row,
-            label_col,
+            label_at,
             top_line,
             delta: None,
             raw_ms: Vec::new(),
@@ -120,7 +110,7 @@ impl SideState {
         self.session.send(b"\x04")?;
         let deadline = start + timeout;
         let new_top = loop {
-            if let Some(label) = label_at(&mut self.session, self.label_row, self.label_col) {
+            if let Some(label) = label_at(&mut self.session, self.label_at) {
                 match expected {
                     Some(target) if label == target => break label,
                     None if label > previous => break label,
@@ -152,14 +142,14 @@ impl SideState {
 /// Scans the screen for the first row whose leading cells parse as a
 /// `L%06d` label, trying a handful of left offsets so a number/sign
 /// gutter cannot hide the label column.
-fn find_label_origin(session: &mut BenchSession) -> Option<(u16, u16, u32)> {
+fn find_label_origin(session: &mut BenchSession) -> Option<(crate::boundaries::CellPos, u32)> {
     let (rows, cols) = session.with_screen(vt100::Screen::size);
     for row in 0..rows {
         for col in 0..cols.saturating_sub(LABEL_WIDTH).min(16) {
-            let text = row_text_at(session, row, col);
-            if looks_like_label(&text) {
-                if let Some(line) = label_at(session, row, col) {
-                    return Some((row, col, line));
+            let at = crate::boundaries::CellPos { row, col };
+            if looks_like_label(&row_text_at(session, at)) {
+                if let Some(line) = label_at(session, at) {
+                    return Some((at, line));
                 }
             }
         }
@@ -167,8 +157,16 @@ fn find_label_origin(session: &mut BenchSession) -> Option<(u16, u16, u32)> {
     None
 }
 
-fn row_text_at(session: &mut BenchSession, row: u16, col: u16) -> String {
-    session.with_screen(|screen| crate::boundaries::row_text_from(screen, row, col, LABEL_WIDTH))
+fn row_text_at(session: &mut BenchSession, at: crate::boundaries::CellPos) -> String {
+    session.with_screen(|screen| {
+        crate::boundaries::row_text_from(
+            screen,
+            crate::boundaries::RowSpan {
+                start: at,
+                len: LABEL_WIDTH,
+            },
+        )
+    })
 }
 
 fn looks_like_label(text: &str) -> bool {

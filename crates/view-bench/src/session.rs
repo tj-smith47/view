@@ -169,14 +169,17 @@ impl BenchSession {
     /// its own interval into every sample; a spinning poll on a busy host
     /// starves the measured child of scheduler time and biases ratios.
     #[must_use]
-    pub fn wait_cell(&mut self, row: u16, col: u16, expected: &str, timeout: Duration) -> bool {
+    pub fn wait_cell(
+        &mut self,
+        at: boundaries::CellPos,
+        expected: &str,
+        timeout: Duration,
+    ) -> bool {
         let deadline = Instant::now() + timeout;
         loop {
-            let hit = self.pty.with_screen(|screen| {
-                screen
-                    .cell(row, col)
-                    .is_some_and(|cell| cell.contents() == expected)
-            });
+            let hit = self
+                .pty
+                .with_screen(|screen| boundaries::cell_holds(screen, at, expected));
             if hit {
                 return true;
             }

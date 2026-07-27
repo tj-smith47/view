@@ -18,10 +18,13 @@ view_p99_ms = 8.290166999999999
 # emitted one cold_ms plus a ratio taken across two unlike events; both names
 # were withdrawn when the row split into shell_visible_ms (view's own shell,
 # unpaired) and marker_cold_ms with marker_ratio_p50/p99 (the opened file, and
-# the only boundary both sides reach). Neither withdrawn number is either of
-# those quantities, so carrying them forward under the new names would gate
-# this class against a bar no run here ever measured. Absent, the row refuses
-# for want of a recorded cell, which is the true state.
+# the only boundary both sides reach). 38dccdf, which made that split, opens
+# by saying the old row "had one budget over two different events and measured
+# a third": cold_ms timed a boundary neither surviving metric times. And one
+# metric became four, so there is no 1:1 rename to carry forward -- a partial
+# one would leave this class gating one metric of four while every log read it
+# as a class that gates first_paint. Absent, the row is reported as a cell the
+# baseline holds no bar for, which is the true state.
 
 [flood.minimal]
 cadence_p99_ms = 12.80475

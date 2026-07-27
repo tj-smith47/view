@@ -51,12 +51,12 @@ fn shim_taps_spec(inner: SpawnSpec, tap_path: &Path) -> SpawnSpec {
 /// refuses to report through taps that would distort the row's own
 /// budget.
 pub(crate) fn run_taps_row(
-    scenario: &str,
-    fixture: &str,
+    cell: &CellId,
     world: &CellWorld,
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
+    let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
     let (pipe, spec, _cwd) = taps_side(fixture, world, bins)?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {

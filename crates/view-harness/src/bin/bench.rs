@@ -44,7 +44,7 @@ mod rows;
 use rows::run_cell;
 
 use view_bench::session::SpawnSpec;
-use view_harness::baselines::{self, CellMetrics};
+use view_harness::baselines::{self, CellId, CellMetrics};
 use view_harness::budgets;
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
@@ -731,17 +731,17 @@ fn main() -> Result<()> {
     let gating = cli.gate;
 
     let under_gha = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
-    let mut skipped: Vec<(String, String)> = Vec::new();
-    let cells: Vec<(String, String)> = if cli.all {
+    let mut skipped: Vec<CellId> = Vec::new();
+    let cells: Vec<CellId> = if cli.all {
         let mut selected = Vec::new();
         for &(scenario, fixture) in MATRIX {
             if let Some(reason) = platform_block(scenario) {
                 for line in skip_announcements(scenario, fixture, reason, under_gha) {
                     println!("{line}");
                 }
-                skipped.push((scenario.to_string(), fixture.to_string()));
+                skipped.push(CellId::new(scenario, fixture));
             } else {
-                selected.push((scenario.to_string(), fixture.to_string()));
+                selected.push(CellId::new(scenario, fixture));
             }
         }
         selected
@@ -780,7 +780,7 @@ fn main() -> Result<()> {
         if let Some(reason) = platform_block(&scenario) {
             bail!("{scenario}/{fixture} cannot run on this platform: {reason}");
         }
-        vec![(scenario, fixture)]
+        vec![CellId { scenario, fixture }]
     };
 
     let protocol = Protocol {
@@ -798,10 +798,10 @@ fn main() -> Result<()> {
     // It is not refused on a noisy host the way a record or a gate is: a
     // decomposition of a loaded run is still a decomposition, as long as
     // the number it must be divided by is measured beside it.
-    let diagnostic_selected = cells.iter().any(|(scenario, fixture)| {
+    let diagnostic_selected = cells.iter().any(|cell| {
         DIAGNOSTIC_MATRIX
             .iter()
-            .any(|(s, f)| *s == scenario.as_str() && *f == fixture.as_str())
+            .any(|(s, f)| *s == cell.scenario.as_str() && *f == cell.fixture.as_str())
     });
     // gating on a noisy host produces false verdicts, and recording on
     // one poisons the baseline every later quiet run is judged against;
@@ -851,9 +851,13 @@ fn main() -> Result<()> {
 
     let mut measured: Vec<baselines::MeasuredCell> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
-    for (scenario, fixture) in &cells {
-        match run_cell(scenario, fixture, &bins, &protocol) {
-            Ok(metrics) => measured.push((scenario.clone(), fixture.clone(), metrics)),
+    for cell in &cells {
+        let (scenario, fixture) = (&cell.scenario, &cell.fixture);
+        match run_cell(cell, &bins, &protocol) {
+            Ok(metrics) => measured.push(baselines::MeasuredCell {
+                id: cell.clone(),
+                metrics,
+            }),
             // one cell failing says nothing about the cells that already
             // measured, and the cells still queued behind it are worth the
             // minutes the matrix has already spent getting here: keep
@@ -990,32 +994,45 @@ fn main() -> Result<()> {
         // metrics both sides hold; naming those makes a silently
         // untested bar as loud as a dropped cell
         let mut unmeasured = Vec::new();
-        for (scenario, fixture, metrics) in &measured {
+        let unrecorded = baselines::unrecorded_cells(&file, &measured);
+        for cell in &measured {
+            let (scenario, fixture) = (&cell.id.scenario, &cell.id.fixture);
+            // named by unrecorded_cells above and reported with the rest of
+            // the findings; refusing here instead would end the run at the
+            // first missing cell with no verdict printed for any of the
+            // cells already measured
             let Some(recorded) = file.cell(scenario, fixture) else {
-                bail!(
-                    "{} has no [{scenario}.{fixture}] cell; record it before gating",
-                    path.display()
-                );
+                continue;
             };
             breaches.extend(baselines::gate_cell(
                 scenario,
                 fixture,
-                metrics,
+                &cell.metrics,
                 recorded,
                 &cli.class,
                 &file.headroom,
             ));
-            for metric in baselines::unmeasured_metrics(metrics, recorded) {
-                unmeasured.push((scenario.clone(), fixture.clone(), metric));
+            for metric in baselines::unmeasured_metrics(&cell.metrics, recorded) {
+                unmeasured.push((cell.id.clone(), metric));
             }
         }
         for breach in &breaches {
             eprintln!("{breach}");
         }
-        for (scenario, fixture, metric) in &unmeasured {
+        for (id, metric) in &unmeasured {
             eprintln!(
-                "GATE COVERAGE FAIL [{scenario}.{fixture}] {metric}: the baseline records this \
-                 metric but the run measured no value for it"
+                "GATE COVERAGE FAIL [{}.{}] {metric}: the baseline records this metric but the \
+                 run measured no value for it",
+                id.scenario, id.fixture
+            );
+        }
+        for id in &unrecorded {
+            eprintln!(
+                "GATE COVERAGE FAIL [{}.{}]: {} has no cell for this row; record it before \
+                 gating",
+                id.scenario,
+                id.fixture,
+                path.display()
             );
         }
         // the forward walk proves measured cells sit inside their bars; a
@@ -1024,15 +1041,13 @@ fn main() -> Result<()> {
         // stays green forever with bars that are never re-tested
         let mut uncovered = Vec::new();
         if cli.all {
-            let measured_cells: Vec<(String, String)> = measured
-                .iter()
-                .map(|(scenario, fixture, _)| (scenario.clone(), fixture.clone()))
-                .collect();
+            let measured_cells: Vec<CellId> = measured.iter().map(|c| c.id.clone()).collect();
             uncovered = baselines::uncovered_cells(&file, &measured_cells, &skipped);
-            for (scenario, fixture) in &uncovered {
+            for id in &uncovered {
                 eprintln!(
-                    "GATE COVERAGE FAIL [{scenario}.{fixture}]: baseline cell was neither \
-                     measured nor platform-skipped this run"
+                    "GATE COVERAGE FAIL [{}.{}]: baseline cell was neither measured nor \
+                     platform-skipped this run",
+                    id.scenario, id.fixture
                 );
             }
         }
@@ -1048,12 +1063,12 @@ fn main() -> Result<()> {
             )
         })?;
         let mut findings = Vec::new();
-        for (scenario, fixture, metrics) in &measured {
+        for cell in &measured {
             findings.extend(budgets::check_cell(
                 &budget_file,
-                scenario,
-                fixture,
-                metrics,
+                &cell.id.scenario,
+                &cell.id.fixture,
+                &cell.metrics,
                 &cli.class,
                 &file.headroom,
             ));
@@ -1100,13 +1115,16 @@ fn main() -> Result<()> {
                 );
             }
         }
-        let clean = breaches.is_empty()
-            && uncovered.is_empty()
-            && unmeasured.is_empty()
-            && budget_failures == 0
-            && stale_shortfalls.is_empty()
-            && dead_budgets.is_empty();
-        if clean {
+        let tally = GateTally {
+            breaches: breaches.len(),
+            uncovered_cells: uncovered.len(),
+            unmeasured_metrics: unmeasured.len(),
+            unrecorded_cells: unrecorded.len(),
+            budget_failures,
+            stale_shortfalls: stale_shortfalls.len(),
+            dead_budgets: dead_budgets.len(),
+        };
+        if tally.findings() == 0 {
             let held = findings
                 .iter()
                 .filter(|finding| matches!(finding.verdict, budgets::Verdict::Held { .. }))
@@ -1129,12 +1147,53 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Every category of finding one gate run produced, as counts.
+///
+/// The verdict is read off this rather than off a hand-written conjunction
+/// over the vectors that hold them. A category added to the report and left
+/// out of such a conjunction prints a `GATE ... FAIL` line and then exits 0
+/// -- a gate that lies in the one direction CI reads. [`GateTally::findings`]
+/// destructures every field, so a category added here and not added to the
+/// sum does not compile.
+struct GateTally {
+    breaches: usize,
+    uncovered_cells: usize,
+    unmeasured_metrics: usize,
+    unrecorded_cells: usize,
+    budget_failures: usize,
+    stale_shortfalls: usize,
+    dead_budgets: usize,
+}
+
+impl GateTally {
+    /// How many findings the run produced across every category; zero is
+    /// the only clean verdict.
+    fn findings(&self) -> usize {
+        let Self {
+            breaches,
+            uncovered_cells,
+            unmeasured_metrics,
+            unrecorded_cells,
+            budget_failures,
+            stale_shortfalls,
+            dead_budgets,
+        } = *self;
+        breaches
+            + uncovered_cells
+            + unmeasured_metrics
+            + unrecorded_cells
+            + budget_failures
+            + stale_shortfalls
+            + dead_budgets
+    }
+}
+
 /// A gate run found a measurement outside its recorded bar, a baseline cell
-/// nothing measured, a recorded metric this run produced no value for, a
-/// spec 3.1 budget missed with no shortfall recording it (or a recorded one
-/// that widened), a spent shortfall entry left behind after the metric came
-/// back inside its budget, or a budget bound to a metric its own scenario
-/// never produces.
+/// nothing measured, a measured cell the baseline holds no bar for, a
+/// recorded metric this run produced no value for, a spec 3.1 budget missed
+/// with no shortfall recording it (or a recorded one that widened), a spent
+/// shortfall entry left behind after the metric came back inside its
+/// budget, or a budget bound to a metric its own scenario never produces.
 const EXIT_GATE_BREACH: i32 = 1;
 
 /// A record run wrote its baseline, but held at least one bar against a
@@ -1156,20 +1215,96 @@ mod tests {
     /// configuration the cell exists to measure it under.
     const CONFIG_STRIPPING_ARGS: &[&str] = &["--clean", "-u", "-U", "--noplugin"];
 
+    /// Binary paths that are never spawned, one distinguishable path per
+    /// role.
+    ///
+    /// Distinct on purpose: a helper that gave all three roles the same
+    /// path cannot tell a pair that measured view from a pair that ran
+    /// bare nvim on both sides, so every assertion built on it is blind to
+    /// the one failure that reports a fabricated 1.0 ratio and gates green.
+    const VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view";
+    #[cfg(unix)]
+    const TAPS_VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view-taps";
+    const NVIM_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/nvim";
+
+    fn bins_for_test() -> Bins {
+        Bins {
+            view: PathBuf::from(VIEW_BIN_FOR_TEST),
+            #[cfg(unix)]
+            taps_view: PathBuf::from(TAPS_VIEW_BIN_FOR_TEST),
+            nvim: PathBuf::from(NVIM_BIN_FOR_TEST),
+        }
+    }
+
+    /// The engine path a view-side spec tells the editor to spawn, read
+    /// back off the argument vector.
+    fn nvim_bin_argument(spec: &SpawnSpec) -> Option<PathBuf> {
+        let flag = spec
+            .args
+            .iter()
+            .position(|arg| arg == std::ffi::OsStr::new("--nvim-bin"))?;
+        spec.args.get(flag + 1).map(PathBuf::from)
+    }
+
     /// A pair of specs built the way a cell builds them, against binary
-    /// paths that are never spawned: what the arguments and environment
-    /// say is the whole subject here.
+    /// paths that are never spawned: what the program, the arguments and
+    /// the environment say is the whole subject here.
     fn paired_specs_for_test() -> (CellWorld, PairedSpecs) {
         let world = CellWorld::create("minimal").unwrap();
-        let bin = PathBuf::from("/nonexistent/never-spawned");
-        let bins = Bins {
-            view: bin.clone(),
-            #[cfg(unix)]
-            taps_view: bin.clone(),
-            nvim: bin,
-        };
-        let pair = paired_specs(&world, "minimal", &bins).unwrap();
+        let pair = paired_specs(&world, "minimal", &bins_for_test()).unwrap();
         (world, pair)
+    }
+
+    #[test]
+    fn each_side_of_a_pair_spawns_the_binary_its_field_name_claims() {
+        // the failure this catches leaves no trace in any number: bare nvim
+        // spawned as the measured editor takes `--nvim-bin <view>` as more
+        // files to open, so both sides settle, both measure, and every
+        // paired row reports nvim against nvim as a view result near 1.0
+        let (_world, pair) = paired_specs_for_test();
+        assert_eq!(
+            pair.view.program,
+            PathBuf::from(VIEW_BIN_FOR_TEST),
+            "the view side of the pair spawned {} instead of the editor under measurement",
+            pair.view.program.display()
+        );
+        assert_eq!(
+            pair.nvim.program,
+            PathBuf::from(NVIM_BIN_FOR_TEST),
+            "the nvim side of the pair spawned {} instead of the pinned engine",
+            pair.nvim.program.display()
+        );
+        assert_eq!(
+            nvim_bin_argument(&pair.view),
+            Some(PathBuf::from(NVIM_BIN_FOR_TEST)),
+            "the view side must be told to spawn the same pinned engine the nvim side runs, \
+             got args {:?}",
+            pair.view.args
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_taps_side_spawns_the_instrumented_build_against_the_same_engine() {
+        // taps_bins is the second producer of the same pair, reached only
+        // from the input_path/output_path rows: a pair written wrong here
+        // measures the uninstrumented editor and records it under the
+        // boundary metric's name
+        let world = CellWorld::create("minimal").unwrap();
+        let bins = bins_for_test();
+        let spec = view_spec_from(world.side("minimal", "view").unwrap(), bins.taps_bins());
+        assert_eq!(
+            spec.program,
+            PathBuf::from(TAPS_VIEW_BIN_FOR_TEST),
+            "a taps row spawned {} instead of the bench-taps build",
+            spec.program.display()
+        );
+        assert_eq!(
+            nvim_bin_argument(&spec),
+            Some(PathBuf::from(NVIM_BIN_FOR_TEST)),
+            "got args {:?}",
+            spec.args
+        );
     }
 
     #[test]
@@ -1239,6 +1374,59 @@ mod tests {
             "both sides share one config copy, so whichever runs first can rewrite \
              what the other measures"
         );
+    }
+
+    /// A gate that prints a finding and exits 0 is worse than one that
+    /// prints nothing, because CI reads the code and not the log. Each
+    /// category is set alone here, so a category that stops reaching the
+    /// verdict fails on its own line rather than hiding behind another.
+    ///
+    /// Disconfirm: dropping any one term from `GateTally::findings` fails
+    /// exactly the entry named for it.
+    #[test]
+    fn every_category_of_gate_finding_reaches_the_verdict_on_its_own() {
+        let zero = GateTally {
+            breaches: 0,
+            uncovered_cells: 0,
+            unmeasured_metrics: 0,
+            unrecorded_cells: 0,
+            budget_failures: 0,
+            stale_shortfalls: 0,
+            dead_budgets: 0,
+        };
+        assert_eq!(
+            zero.findings(),
+            0,
+            "a run with nothing to report must gate clean"
+        );
+
+        type Category = (&'static str, fn(&mut GateTally));
+        let categories: [Category; 7] = [
+            ("breaches", |t| t.breaches = 1),
+            ("uncovered_cells", |t| t.uncovered_cells = 1),
+            ("unmeasured_metrics", |t| t.unmeasured_metrics = 1),
+            ("unrecorded_cells", |t| t.unrecorded_cells = 1),
+            ("budget_failures", |t| t.budget_failures = 1),
+            ("stale_shortfalls", |t| t.stale_shortfalls = 1),
+            ("dead_budgets", |t| t.dead_budgets = 1),
+        ];
+        for (name, set) in categories {
+            let mut tally = GateTally {
+                breaches: 0,
+                uncovered_cells: 0,
+                unmeasured_metrics: 0,
+                unrecorded_cells: 0,
+                budget_failures: 0,
+                stale_shortfalls: 0,
+                dead_budgets: 0,
+            };
+            set(&mut tally);
+            assert_eq!(
+                tally.findings(),
+                1,
+                "a run whose only finding is {name} would print it and exit 0"
+            );
+        }
     }
 
     #[test]

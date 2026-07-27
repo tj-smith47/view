@@ -353,9 +353,43 @@ pub fn undeclared_metrics(measured: &CellMetrics) -> Vec<String> {
         .collect()
 }
 
-/// One measured cell as the record path carries it: scenario, fixture, and
-/// the metrics produced for that pair.
-pub type MeasuredCell = (String, String, CellMetrics);
+/// The two names that identify one matrix cell.
+///
+/// Both are `String` and both name the cell, so as a tuple they can be
+/// written in one order and read back in the other with nothing in between
+/// able to notice: no scenario name is checked against a vocabulary at
+/// record time, so an inverted pair writes `[minimal.flood]` where
+/// `[flood.minimal]` belongs and the run that wrote it reports success.
+/// The next gate is loud about it, one full bench run later. Named fields
+/// take the order out of it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CellId {
+    /// The row's scenario name, the baseline's outer table key.
+    pub scenario: String,
+    /// The fixture the row ran against, the inner table key.
+    pub fixture: String,
+}
+
+impl CellId {
+    /// A cell identified by borrowed names.
+    #[must_use]
+    pub fn new(scenario: &str, fixture: &str) -> Self {
+        Self {
+            scenario: scenario.to_string(),
+            fixture: fixture.to_string(),
+        }
+    }
+}
+
+/// One measured cell as the record path carries it: which cell it is, and
+/// the metrics produced for it.
+#[derive(Debug, Clone)]
+pub struct MeasuredCell {
+    /// Which cell of the matrix produced these metrics.
+    pub id: CellId,
+    /// Every metric that cell produced this run.
+    pub metrics: CellMetrics,
+}
 
 /// Errors loading, saving, or gating against a baseline file.
 #[derive(Debug, Error)]
@@ -566,24 +600,42 @@ pub fn gate_cell(
 #[must_use]
 pub fn uncovered_cells(
     baseline: &BaselineFile,
-    measured: &[(String, String)],
-    skipped: &[(String, String)],
-) -> Vec<(String, String)> {
-    let covered = |scenario: &str, fixture: &str| {
-        measured
-            .iter()
-            .chain(skipped.iter())
-            .any(|(s, f)| s == scenario && f == fixture)
-    };
+    measured: &[CellId],
+    skipped: &[CellId],
+) -> Vec<CellId> {
     let mut uncovered = Vec::new();
     for (scenario, fixtures) in &baseline.cells {
         for fixture in fixtures.keys() {
-            if !covered(scenario, fixture) {
-                uncovered.push((scenario.clone(), fixture.clone()));
+            let id = CellId::new(scenario, fixture);
+            if !measured
+                .iter()
+                .chain(skipped.iter())
+                .any(|seen| *seen == id)
+            {
+                uncovered.push(id);
             }
         }
     }
     uncovered
+}
+
+/// Cells this run measured that the baseline holds no bar for, in run
+/// order.
+///
+/// The mirror of [`uncovered_cells`]: that one names baseline cells the run
+/// never measured, this one names measured cells the baseline never
+/// recorded. Both are coverage gaps and both are collected rather than
+/// raised at the first occurrence -- a gate that stops at the first missing
+/// cell tells the operator about one problem when it could have told them
+/// about every one in the same run, and prints none of the verdicts the
+/// cells behind it already earned.
+#[must_use]
+pub fn unrecorded_cells(baseline: &BaselineFile, measured: &[MeasuredCell]) -> Vec<CellId> {
+    measured
+        .iter()
+        .filter(|cell| baseline.cell(&cell.id.scenario, &cell.id.fixture).is_none())
+        .map(|cell| cell.id.clone())
+        .collect()
 }
 
 /// Recorded metrics of one cell that the run produced no value for, in
@@ -895,13 +947,14 @@ pub fn plan_record(
     let reference = comparable.then_some(existing.as_ref()).flatten();
 
     let mut cells = Vec::new();
-    for (scenario, fixture, metrics) in measured {
-        let existing_cell = reference.and_then(|file| file.cell(scenario, fixture));
-        let (ratcheted, outcomes) = ratchet_cell(existing_cell, metrics, controlled);
-        file.upsert_cell(scenario, fixture, ratcheted);
+    for cell in measured {
+        let existing_cell =
+            reference.and_then(|file| file.cell(&cell.id.scenario, &cell.id.fixture));
+        let (ratcheted, outcomes) = ratchet_cell(existing_cell, &cell.metrics, controlled);
+        file.upsert_cell(&cell.id.scenario, &cell.id.fixture, ratcheted);
         cells.push(CellRatchet {
-            scenario: scenario.clone(),
-            fixture: fixture.clone(),
+            scenario: cell.id.scenario.clone(),
+            fixture: cell.id.fixture.clone(),
             outcomes,
         });
     }
@@ -1170,10 +1223,29 @@ mod tests {
         assert_eq!(file.cell("echo", "heavy").unwrap()["ratio_p99"], 1.4);
     }
 
-    fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        list.iter()
-            .map(|(s, f)| ((*s).to_string(), (*f).to_string()))
-            .collect()
+    fn pairs(list: &[(&str, &str)]) -> Vec<CellId> {
+        list.iter().map(|(s, f)| CellId::new(s, f)).collect()
+    }
+
+    #[test]
+    fn unrecorded_cells_names_every_measured_cell_the_baseline_has_no_bar_for() {
+        // every one, not the first: a gate that stops at the first missing
+        // cell reports one problem where it could have reported all of them
+        let mut file = BaselineFile::new("dev-macos", "v0.12.4");
+        file.upsert_cell("echo", "minimal", metrics(&[("ratio_p50", 1.5)]));
+        let measured = vec![
+            measured_cell("first_paint", "minimal", &[("shell_visible_ms", 4.3)]),
+            measured_cell("echo", "minimal", &[("ratio_p50", 1.4)]),
+            measured_cell("first_paint", "heavy", &[("shell_visible_ms", 9.1)]),
+        ];
+        assert_eq!(
+            unrecorded_cells(&file, &measured),
+            vec![
+                CellId::new("first_paint", "minimal"),
+                CellId::new("first_paint", "heavy"),
+            ]
+        );
+        assert!(unrecorded_cells(&file, &measured[1..2]).is_empty());
     }
 
     #[test]
@@ -1687,7 +1759,10 @@ mod tests {
     }
 
     fn measured_cell(scenario: &str, fixture: &str, pairs: &[(&str, f64)]) -> MeasuredCell {
-        (scenario.to_string(), fixture.to_string(), metrics(pairs))
+        MeasuredCell {
+            id: CellId::new(scenario, fixture),
+            metrics: metrics(pairs),
+        }
     }
 
     type CellSpec<'a> = (&'a str, &'a str, &'a [(&'a str, f64)]);

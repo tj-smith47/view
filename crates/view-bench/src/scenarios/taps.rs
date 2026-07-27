@@ -929,35 +929,37 @@ pub fn run_pty_floor(
         });
     }
     let mut samples_us = Vec::with_capacity(samples + warmup);
-    let (mut row, mut col) = (0_u16, 0_u16);
+    let mut at = crate::boundaries::CellPos { row: 0, col: 0 };
     for _ in 0..(samples + warmup) {
-        if col >= FLOOR_COLS {
+        if at.col >= FLOOR_COLS {
             session.send(b"\r\n")?;
-            col = 0;
-            row += 1;
+            at.col = 0;
+            at.row += 1;
         }
-        if row >= GRID_ROWS - 1 {
+        if at.row >= GRID_ROWS - 1 {
             session.send(b"\x1b[2J\x1b[H")?;
-            if !session.wait_cell(0, 0, " ", timeout) {
+            let home = crate::boundaries::CellPos { row: 0, col: 0 };
+            if !session.wait_cell(home, " ", timeout) {
                 return Err(BenchError::Desync {
                     context: "pty floor control never cleared its screen".to_string(),
                 });
             }
-            row = 0;
-            col = 0;
+            at = home;
         }
         let t0 = monotonic_nanos();
         session.send(b"x")?;
-        if !session.wait_cell(row, col, "x", timeout) {
+        if !session.wait_cell(at, "x", timeout) {
             return Err(BenchError::Desync {
                 context: format!(
-                    "pty floor control never echoed at ({row}, {col}); screen:\n{}",
+                    "pty floor control never echoed at ({}, {}); screen:\n{}",
+                    at.row,
+                    at.col,
                     session.screen_text()
                 ),
             });
         }
         samples_us.push(delta_us(t0, monotonic_nanos()));
-        col += 1;
+        at.col += 1;
     }
     session.shutdown();
     Distribution::from_samples(&samples_us, warmup)

@@ -462,9 +462,9 @@ pub fn unreached_budgets<'a>(
         .filter(|budget| {
             let ran = measured
                 .iter()
-                .any(|(scenario, _, _)| *scenario == budget.scenario);
-            let produced = measured.iter().any(|(scenario, _, metrics)| {
-                *scenario == budget.scenario && metrics.contains_key(&budget.metric)
+                .any(|cell| cell.id.scenario == budget.scenario);
+            let produced = measured.iter().any(|cell| {
+                cell.id.scenario == budget.scenario && cell.metrics.contains_key(&budget.metric)
             });
             ran && !produced
         })
@@ -555,6 +555,17 @@ why = \"because\"
             .iter()
             .map(|(k, v)| ((*k).to_string(), *v))
             .collect::<CellMetrics>()
+    }
+
+    fn measured_cell(
+        scenario: &str,
+        fixture: &str,
+        pairs: &[(&str, f64)],
+    ) -> crate::baselines::MeasuredCell {
+        crate::baselines::MeasuredCell {
+            id: crate::baselines::CellId::new(scenario, fixture),
+            metrics: metrics(pairs),
+        }
     }
 
     const ONE_BUDGET: &str = r#"
@@ -957,16 +968,8 @@ max = 150.0
 "#,
         );
         let measured = vec![
-            (
-                "output_path".to_string(),
-                "minimal".to_string(),
-                metrics(&[("p99_ms", 0.5)]),
-            ),
-            (
-                "echo".to_string(),
-                "minimal".to_string(),
-                metrics(&[("ratio_p50", 1.0)]),
-            ),
+            measured_cell("output_path", "minimal", &[("p99_ms", 0.5)]),
+            measured_cell("echo", "minimal", &[("ratio_p50", 1.0)]),
         ];
         let unreached = unreached_budgets(&file, "dev-linux", &measured);
         assert_eq!(
@@ -996,16 +999,8 @@ max = 150.0
 "#,
         );
         let measured = vec![
-            (
-                "output_path".to_string(),
-                "minimal".to_string(),
-                metrics(&[("p99_ms", 0.5)]),
-            ),
-            (
-                "memory".to_string(),
-                "minimal".to_string(),
-                metrics(&[("pss_mb", 3.4)]),
-            ),
+            measured_cell("output_path", "minimal", &[("p99_ms", 0.5)]),
+            measured_cell("memory", "minimal", &[("pss_mb", 3.4)]),
         ];
         let unreached = unreached_budgets(&file, "dev-linux", &measured);
         assert_eq!(
@@ -1043,11 +1038,7 @@ max = 150.0
 classes = ["dev-macos"]
 "#,
         );
-        let measured = vec![(
-            "memory".to_string(),
-            "minimal".to_string(),
-            metrics(&[("pss_mb", 3.4)]),
-        )];
+        let measured = vec![measured_cell("memory", "minimal", &[("pss_mb", 3.4)])];
         assert!(unreached_budgets(&file, "dev-linux", &measured).is_empty());
         assert_eq!(unreached_budgets(&file, "dev-macos", &measured).len(), 1);
     }
@@ -1113,9 +1104,12 @@ classes = ["dev-macos"]
                 .cells
                 .iter()
                 .flat_map(|(scenario, fixtures)| {
-                    fixtures.iter().map(move |(fixture, metrics)| {
-                        (scenario.clone(), fixture.clone(), metrics.clone())
-                    })
+                    fixtures
+                        .iter()
+                        .map(move |(fixture, metrics)| crate::baselines::MeasuredCell {
+                            id: crate::baselines::CellId::new(scenario, fixture),
+                            metrics: metrics.clone(),
+                        })
                 })
                 .collect();
             for budget in unreached_budgets(&file, &recorded.machine_class, &measured) {

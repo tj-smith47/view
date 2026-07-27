@@ -14,13 +14,9 @@ use super::*;
 /// gate policy from a rule over its components: an undeclared one is not
 /// rejected downstream, it is silently gated on every class under whichever
 /// arm its spelling happens to reach.
-pub(super) fn run_cell(
-    scenario: &str,
-    fixture: &str,
-    bins: &Bins,
-    protocol: &Protocol,
-) -> Result<CellMetrics> {
-    let metrics = measure_cell(scenario, fixture, bins, protocol)?;
+pub(super) fn run_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellMetrics> {
+    let (scenario, fixture) = (&cell.scenario, &cell.fixture);
+    let metrics = measure_cell(cell, bins, protocol)?;
     let undeclared = baselines::undeclared_metrics(&metrics);
     ensure!(
         undeclared.is_empty(),
@@ -31,12 +27,8 @@ pub(super) fn run_cell(
     Ok(metrics)
 }
 
-fn measure_cell(
-    scenario: &str,
-    fixture: &str,
-    bins: &Bins,
-    protocol: &Protocol,
-) -> Result<CellMetrics> {
+fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellMetrics> {
+    let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
     // the only arm that reads this is unix-only, so on Windows the binding
     // has no reader at all and `-D warnings` fails the build there
     #[cfg(unix)]
@@ -44,9 +36,7 @@ fn measure_cell(
     let world = CellWorld::create(fixture)?;
     match scenario {
         #[cfg(unix)]
-        "input_path" | "output_path" => {
-            taps_rows::run_taps_row(scenario, fixture, &world, bins, protocol)
-        }
+        "input_path" | "output_path" => taps_rows::run_taps_row(cell, &world, bins, protocol),
         #[cfg(unix)]
         "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol),
         #[cfg(unix)]
