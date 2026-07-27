@@ -130,7 +130,7 @@ fixture = "minimal"
 metric = "cadence_p99_ms"
 class = "dev-linux"
 accepted = 20.880463
-why = "the stimulus is not comparable across classes (a fixed wall-clock window drains ~65x more lines on one class than the other), so this bar is being read against a harsher stimulus here than the spec row assumed. Re-derive with the row's cross-class divergence."
+why = "a jitter tail, not a hard throttle. On this class the cadence gap p50 measures 12.24 ms against a p99 of 15.39 ms, so the p99 is the upper edge of a regular redraw cadence rather than a tail detached from the bulk; the criterion for that reading was pre-registered before the number existed (p50 near 12-13 ms means jitter, p50 near 16.4 ms means a throttle, anything between licenses neither). The metric also tracks ambient host load: the same row reads 15.385 ms at load average 1.04 and 16.429 ms at load 3.9, so a single value carries the host's weather with it, and neither reading located a view defect. The accepted figure is deliberately not the best observation for that reason, since a never-widen ratchet pinned to one sample of a noisy statistic fails on the next jitter excursion. The absolute bar stays gated regardless: a stall that hits view and nvim together leaves the paired cadence ratio near 1, so this is the metric that has to express it. Evidence: .claude/measurements/2026-07-27-the-flood-stimulus-cannot-be-pinned.md"
 
 [[shortfall]]
 scenario = "echo"
