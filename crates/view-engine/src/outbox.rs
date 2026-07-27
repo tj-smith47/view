@@ -143,7 +143,11 @@ impl Outbox {
 
     /// How many messages went inline and how many went to the writer
     /// thread, in that order.
-    #[cfg(test)]
+    ///
+    /// Unix as well as test: the inline path exists only there, so every
+    /// reader of this is unix-gated and on Windows the method would have
+    /// none at all.
+    #[cfg(all(test, unix))]
     pub(crate) fn path_counts(&self) -> (usize, usize) {
         (
             self.took_inline.load(Ordering::Relaxed),
