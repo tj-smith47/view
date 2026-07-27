@@ -1,5 +1,7 @@
 //! Host environment variables that redirect where a spawned Neovim looks
-//! for configuration, and the hermetic values that neutralize them.
+//! for configuration, the hermetic values that neutralize them, and the
+//! allowlist deciding which of everything else on the host reaches a
+//! hermetic child at all.
 //!
 //! Pointing the four `XDG_*_HOME` variables at private directories does not
 //! by itself detach a child from the host's editor setup. A handful of
@@ -43,6 +45,7 @@
 //!   live under it: a hermetic path selected by a host variable would be a
 //!   host path with extra steps.
 
+use std::ffi::{OsStr, OsString};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -113,6 +116,141 @@ pub const HOST_REDIRECT_VARS: &[&str] = &[
 /// differ: `$XDG_CONFIG_DIRS/nvim/plugin/` and
 /// `$XDG_DATA_DIRS/nvim/site/plugin/`).
 pub const HOST_SEARCH_PATH_VARS: &[&str] = &["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"];
+
+/// The host environment variables a hermetic child keeps. Every other
+/// variable the host exports is dropped before the child sees it.
+///
+/// This inverts [`HOST_REDIRECT_VARS`], which stays as the second layer
+/// rather than being subsumed: that list names what a documentation sweep
+/// found, and a sweep can only ever be complete about the day it ran. A
+/// variable nobody enumerated reaches a child, changes what it loads, and
+/// reports nothing -- the child still starts, still measures, and disagrees
+/// with the other host only once somebody compares two machines. An
+/// allowlist cannot have that failure: an unenumerated variable is dropped,
+/// and a child that turns out to need one fails loudly and immediately.
+///
+/// Each entry earns its place by being something the child needs rather
+/// than something the host happens to export:
+///
+/// - `PATH`, and on Windows `COMSPEC`/`PATHEXT`: how the child resolves the
+///   shell that `:terminal` and `system()` run, which the flood row drives
+///   directly.
+/// - `HOME`, `USER`, `LOGNAME`, `SHELL` and the Windows profile variables:
+///   identity and home resolution that libc, LuaJIT and the child's own
+///   `expand('~')` read. The `XDG_*_HOME` overrides a caller sets already
+///   divert every configuration lookup away from `HOME`, so keeping it
+///   costs no hermeticity.
+/// - `TERM`, `COLORTERM`: what the child derives its capability tier from,
+///   which a measurement pins deliberately.
+/// - `TMPDIR`, `XDG_RUNTIME_DIR` and the Windows temp variables: where the
+///   child writes scratch files and its server socket. Replacing
+///   `XDG_RUNTIME_DIR` risks overflowing the 104-byte Unix socket path
+///   limit, turning a hygiene measure into a spawn failure.
+/// - `LANG`, `LANGUAGE` and the `LC_` prefix: the locale reaches the child
+///   either way, and the module documentation above records why pinning it
+///   would trade a measured non-effect for a real one.
+/// - The Windows system variables: process creation itself fails without
+///   `SYSTEMROOT`, so dropping them would not isolate a child, it would
+///   stop there being one.
+pub const HERMETIC_PASSTHROUGH_VARS: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "COLORTERM",
+    "TMPDIR",
+    "XDG_RUNTIME_DIR",
+    "LANG",
+    "LANGUAGE",
+    "COMSPEC",
+    "PATHEXT",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "USERNAME",
+    "HOMEDRIVE",
+    "HOMEPATH",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROGRAMFILES(X86)",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "OS",
+];
+
+/// Name prefixes whose every variable passes through, for families whose
+/// membership is open-ended: `LC_COLLATE`, `LC_CTYPE`, `LC_MESSAGES` and the
+/// rest are one decision, not eleven, and a locale category added by a libc
+/// this tree has not seen belongs on the same side as the ones it has.
+pub const HERMETIC_PASSTHROUGH_PREFIXES: &[&str] = &["LC_"];
+
+/// Whether `name` survives into a hermetic child.
+///
+/// A name that is not valid UTF-8 is not passthrough. The lists are ASCII,
+/// so such a name cannot be on them, and dropping is the safe answer for a
+/// variable this tree cannot even render.
+#[must_use]
+pub fn is_hermetic_passthrough(name: &OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    HERMETIC_PASSTHROUGH_VARS
+        .iter()
+        .any(|allowed| env_names_eq(OsStr::new(name), OsStr::new(allowed)))
+        || HERMETIC_PASSTHROUGH_PREFIXES.iter().any(|prefix| {
+            // a fallible slice rather than an index: a prefix length landing
+            // inside a multi-byte character would panic, and `LC_` is three
+            // bytes into names like `abé` that Unix accepts as variables
+            name.get(..prefix.len())
+                .is_some_and(|head| env_names_eq(OsStr::new(head), OsStr::new(prefix)))
+        })
+}
+
+/// Compares two environment variable names under the host's own rule:
+/// Windows folds case, Unix does not, and on Unix `path` and `PATH` are two
+/// different variables of which only one is the allowlisted one.
+///
+/// A name that is not valid UTF-8 compares byte for byte: the folding rule
+/// is an ASCII one, so a name this tree cannot render has no case to fold.
+#[must_use]
+pub fn env_names_eq(left: &OsStr, right: &OsStr) -> bool {
+    match (left.to_str(), right.to_str()) {
+        (Some(left), Some(right)) if cfg!(windows) => left.eq_ignore_ascii_case(right),
+        _ => left == right,
+    }
+}
+
+/// Every variable this process exports that [`is_hermetic_passthrough`]
+/// rejects, each paired with the value the host holds for it: what a
+/// hermetic spawn must drop before the child inherits it.
+///
+/// A snapshot taken at the moment of the call, not a lazy view. A spawn
+/// builder copies the host environment when it is constructed, so a sweep
+/// that read the environment again later would disagree with that copy about
+/// any name changed in between -- and a disagreement is exactly the signal a
+/// caller's deliberate override produces. A test that mutates the process
+/// environment must therefore bracket the builder's construction and the
+/// sweep together, which is what an environment-mutation guard is for.
+///
+/// The host's value travels with each name because a spawn builder cannot be
+/// asked whether a caller set a variable: `portable_pty`'s builder
+/// pre-populates its map from the whole host environment and answers `Some`
+/// for every name, while [`std::process::Command`] reports overrides only.
+/// A value that differs from the host's is what a caller override looks like
+/// on either of them, and is the one test that means the same thing on both.
+#[must_use]
+pub fn hermetic_sweep() -> Vec<(OsString, OsString)> {
+    std::env::vars_os()
+        .filter(|(name, _)| !is_hermetic_passthrough(name))
+        .collect()
+}
 
 /// The directory [`HOST_SEARCH_PATH_VARS`] are pointed at, whose emptiness
 /// [`prepare_empty_search_path`] establishes before a hermetic child is
@@ -231,6 +369,80 @@ mod tests {
             refused.to_string().contains("nvim"),
             "the refusal does not name what it found: {refused}"
         );
+    }
+
+    #[test]
+    fn the_allowlist_admits_every_name_it_enumerates() {
+        for name in HERMETIC_PASSTHROUGH_VARS {
+            assert!(
+                is_hermetic_passthrough(OsStr::new(name)),
+                "{name} is on the allowlist and is dropped anyway, so a \
+                 hermetic child loses a variable it was meant to keep"
+            );
+        }
+        for prefix in HERMETIC_PASSTHROUGH_PREFIXES {
+            let member = format!("{prefix}VIEW_MEMBER");
+            assert!(
+                is_hermetic_passthrough(OsStr::new(&member)),
+                "{member} carries an allowlisted prefix and is dropped anyway"
+            );
+        }
+    }
+
+    #[test]
+    fn the_allowlist_drops_a_name_no_list_enumerates() {
+        assert!(
+            !is_hermetic_passthrough(OsStr::new("VIEW_UNENUMERATED_HOST_VAR")),
+            "an unenumerated name is treated as passthrough, so the allowlist \
+             is a denylist wearing the other name"
+        );
+        // a name that merely contains an allowlisted one, and one that would
+        // match a prefix only after folding case: neither is the variable the
+        // allowlist named, and admitting either would widen the list silently
+        assert!(!is_hermetic_passthrough(OsStr::new("MY_PATH")));
+        assert_eq!(
+            is_hermetic_passthrough(OsStr::new("lc_view_member")),
+            cfg!(windows),
+            "a lowercase prefix must be admitted exactly where the host's own \
+             name comparison folds case, and nowhere else"
+        );
+    }
+
+    /// The `LC_` prefix is three bytes long, which is inside a multi-byte
+    /// character for names of this shape. Unix accepts any byte but `=` and
+    /// NUL in a variable name, so such a name reaches this from a real host
+    /// environment, and slicing a `str` at that index panics.
+    #[test]
+    fn a_prefix_test_survives_a_name_that_is_not_sliceable_there() {
+        assert!(!is_hermetic_passthrough(OsStr::new("abé")));
+    }
+
+    #[test]
+    fn the_sweep_names_a_host_variable_the_allowlist_rejects() {
+        let swept = hermetic_sweep();
+        assert!(
+            !swept.is_empty(),
+            "this host exports nothing the allowlist rejects, so every \
+             assertion about the sweep here passes vacuously"
+        );
+        for (name, value) in &swept {
+            assert!(
+                !is_hermetic_passthrough(name),
+                "{name:?} is allowlisted and swept anyway"
+            );
+            assert_eq!(
+                std::env::var_os(name).as_ref(),
+                Some(value),
+                "{name:?} is swept with a value the host does not hold, so a \
+                 caller's own override cannot be told apart from it"
+            );
+        }
+        for name in HERMETIC_PASSTHROUGH_VARS {
+            assert!(
+                !swept.iter().any(|(swept, _)| swept == OsStr::new(name)),
+                "{name} is allowlisted and reached the sweep"
+            );
+        }
     }
 
     #[cfg(unix)]

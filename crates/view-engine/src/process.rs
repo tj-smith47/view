@@ -173,6 +173,18 @@ impl EngineConfig {
     /// anything: an override or removal that silently stopped being applied
     /// would leave a child reading the host's own editor configuration, and
     /// nothing about that fails visibly.
+    ///
+    /// The hermetic plan itself is two layers, in this order:
+    ///
+    /// 1. [`crate::env::hermetic_sweep`], which removes every host variable
+    ///    the allowlist does not name, and skips a name a caller already
+    ///    planned: the sweep drops what the host merely happens to export,
+    ///    and a variable a caller asked for is not that.
+    /// 2. [`crate::env::HOST_REDIRECT_VARS`] and
+    ///    [`crate::env::HOST_SEARCH_PATH_VARS`], unconditionally. The sweep
+    ///    already covers a host that exports them; this layer also covers the
+    ///    caller who set one deliberately, which is what an isolated config
+    ///    must refuse whoever asks.
     #[must_use]
     pub fn env_plan(&self) -> Vec<(OsString, Option<OsString>)> {
         let mut plan: Vec<(OsString, Option<OsString>)> = Vec::new();
@@ -183,6 +195,9 @@ impl EngineConfig {
             plan_set(&mut plan, name, None);
         }
         if self.hermetic {
+            for (name, _) in crate::env::hermetic_sweep() {
+                plan_sweep(&mut plan, &name);
+            }
             for name in crate::env::HOST_REDIRECT_VARS {
                 plan_set(&mut plan, OsStr::new(name), None);
             }
@@ -201,9 +216,29 @@ impl EngineConfig {
 /// entry silently winning over an earlier one in `Command`'s own map would
 /// make the inspectable plan disagree with the spawned child.
 fn plan_set(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr, value: Option<OsString>) {
-    match plan.iter_mut().find(|(known, _)| known.as_os_str() == name) {
+    match plan
+        .iter_mut()
+        .find(|(known, _)| crate::env::env_names_eq(known, name))
+    {
         Some(entry) => entry.1 = value,
         None => plan.push((name.to_os_string(), value)),
+    }
+}
+
+/// Records `name` as removed by the hermetic sweep, leaving any entry the
+/// plan already carries for it alone.
+///
+/// The sweep's subject is what the host happens to export, which a caller's
+/// own entry for the same name is not: a caller that set a variable
+/// deliberately gets to keep it, and one that asked for something an
+/// isolated spawn refuses outright loses it to the layer applied after this
+/// one instead.
+fn plan_sweep(plan: &mut Vec<(OsString, Option<OsString>)>, name: &OsStr) {
+    if !plan
+        .iter()
+        .any(|(known, _)| crate::env::env_names_eq(known, name))
+    {
+        plan.push((name.to_os_string(), None));
     }
 }
 
@@ -686,6 +721,82 @@ mod config_tests {
         names.sort_unstable();
         names.dedup();
         assert_eq!(total, names.len(), "the plan names a variable twice");
+    }
+
+    /// The enumerations are the second layer, not the whole rule: a variable
+    /// nobody wrote down still must not reach an isolated child. A denylist
+    /// cannot state this, and its incompleteness reports nothing -- the child
+    /// starts, measures, and disagrees with another host only once somebody
+    /// compares the two.
+    #[test]
+    fn an_isolated_plan_removes_every_host_variable_the_allowlist_does_not_name() {
+        let plan = spawned_env(&EngineConfig::isolated());
+        let swept = crate::env::hermetic_sweep();
+        assert!(
+            !swept.is_empty(),
+            "this host exports nothing outside the allowlist, so nothing here \
+             is actually asserted"
+        );
+        let overridden = crate::env::empty_search_path().into_os_string();
+        for (name, _) in swept {
+            let expected = if crate::env::HOST_SEARCH_PATH_VARS
+                .iter()
+                .any(|search| crate::env::env_names_eq(&name, OsStr::new(search)))
+            {
+                Some(overridden.clone())
+            } else {
+                None
+            };
+            assert!(
+                plan.contains(&(name.clone(), expected.clone())),
+                "{name:?} is exported by this host, is on no allowlist, and \
+                 the isolated plan does not give it {expected:?}; plan {plan:?}"
+            );
+        }
+    }
+
+    /// The other half: the sweep is a filter, not an `env_clear`. A child
+    /// handed nothing at all cannot resolve a shell, a home directory or its
+    /// own runtime files, and every assertion about what the sweep drops
+    /// would pass just as green against it.
+    #[test]
+    fn an_isolated_plan_leaves_the_allowlisted_variables_alone() {
+        let plan = spawned_env(&EngineConfig::isolated());
+        for name in crate::env::HERMETIC_PASSTHROUGH_VARS {
+            assert!(
+                !plan.iter().any(|(planned, _)| planned == OsStr::new(name)),
+                "{name} is allowlisted and the isolated plan touches it anyway; \
+                 plan {plan:?}"
+            );
+        }
+    }
+
+    /// A caller's own override of a name the sweep would otherwise drop
+    /// survives it. The variables a measurement delivers to its child --
+    /// fixture `XDG_*_HOME` directories, a tap descriptor, a probe socket --
+    /// are all of this shape, and a sweep that took them would leave the
+    /// child measuring something other than what the row named.
+    #[test]
+    fn a_callers_own_override_survives_the_sweep() {
+        // taken from the host's own environment rather than invented: a name
+        // the sweep never visits would demonstrate nothing about surviving it
+        let host = crate::env::hermetic_sweep()
+            .into_iter()
+            .map(|(name, _)| name)
+            .find(|name| {
+                !crate::env::HOST_REDIRECT_VARS
+                    .iter()
+                    .chain(crate::env::HOST_SEARCH_PATH_VARS)
+                    .any(|fixed| crate::env::env_names_eq(name, OsStr::new(fixed)))
+            })
+            .expect("this host exports nothing the sweep would drop");
+        let cfg = EngineConfig::isolated().with_env(&host, "caller-chose-this");
+        let plan = spawned_env(&cfg);
+        assert!(
+            plan.contains(&(host.clone(), Some(OsString::from("caller-chose-this")))),
+            "the sweep dropped {host:?} though the caller set it deliberately; \
+             plan {plan:?}"
+        );
     }
 }
 

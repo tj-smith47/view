@@ -19,6 +19,7 @@
 //! [`PtySession::spawn_configured`] instead of duplicating the pty-opening
 //! logic itself.
 
+use std::ffi::{OsStr, OsString};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
@@ -219,11 +220,11 @@ fn spawn_reader(
     rx
 }
 
-/// Detaches `cmd` from the host's own editor configuration: drops every
-/// variable that redirects where an editor finds config, runtime files,
-/// plugin manifests or startup commands, and points the two search-path
-/// variables at an empty directory, whose system-wide defaults would
-/// otherwise apply (see [`view_engine::env`] for the enumeration).
+/// Detaches `cmd` from the host: drops every variable the host exports that
+/// [`view_engine::env`]'s allowlist does not name, then drops every variable
+/// that redirects where an editor finds config, runtime files, plugin
+/// manifests or startup commands, and points the two search-path variables
+/// at an empty directory, whose system-wide defaults would otherwise apply.
 ///
 /// Applied to every pty spawn rather than left to each caller. Pointing the
 /// four `XDG_*_HOME` variables at private directories, which the callers do
@@ -233,6 +234,14 @@ fn spawn_reader(
 /// not set. Nothing spawned through a pty here is a user's editor: these
 /// are measured and asserted-on sessions, one and all, so there is no
 /// caller for which inheriting the host's setup is the wanted behavior.
+///
+/// The allowlist leads because an enumeration of what to drop can only be
+/// complete about the day it was written, and its incompleteness is silent:
+/// an unenumerated variable reaches a child, changes what it loads or hands
+/// it a credential the host happens to carry, and the child still starts and
+/// still measures. The enumerations stay behind it because they also bind a
+/// caller who sets one of those names deliberately, which the allowlist by
+/// design does not.
 ///
 /// # Errors
 ///
@@ -256,26 +265,54 @@ fn hermetic_env(cmd: &mut CommandBuilder) -> Result<(), OracleError> {
 /// somebody compares two machines.
 pub trait SpawnEnv {
     /// Unsets `name` for the spawned child.
-    fn unset(&mut self, name: &str);
+    fn unset(&mut self, name: &OsStr);
     /// Sets `name` to `value` for the spawned child.
-    fn set(&mut self, name: &str, value: &std::ffi::OsStr);
+    fn set(&mut self, name: &OsStr, value: &OsStr);
+    /// The value the child would see for `name` if the spawn happened now:
+    /// what a caller set, or what the host exports and the builder is
+    /// letting through, with no distinction drawn between the two.
+    ///
+    /// Deliberately not a "did the caller set this" query, which cannot mean
+    /// one thing on both builders: [`CommandBuilder`] pre-populates its map
+    /// with the entire host environment and answers for every host variable,
+    /// while [`std::process::Command`] records overrides only and knows
+    /// nothing about the rest. A trait method whose semantics turn on the
+    /// implementation is the drift this trait exists to prevent.
+    ///
+    /// Owned rather than borrowed so a sweep can read a name and then act on
+    /// the same builder.
+    fn value_of(&self, name: &OsStr) -> Option<OsString>;
 }
 
 impl SpawnEnv for CommandBuilder {
-    fn unset(&mut self, name: &str) {
+    fn unset(&mut self, name: &OsStr) {
         self.env_remove(name);
     }
-    fn set(&mut self, name: &str, value: &std::ffi::OsStr) {
+    fn set(&mut self, name: &OsStr, value: &OsStr) {
         self.env(name, value);
+    }
+    fn value_of(&self, name: &OsStr) -> Option<OsString> {
+        self.get_env(name).map(OsStr::to_os_string)
     }
 }
 
 impl SpawnEnv for std::process::Command {
-    fn unset(&mut self, name: &str) {
+    fn unset(&mut self, name: &OsStr) {
         self.env_remove(name);
     }
-    fn set(&mut self, name: &str, value: &std::ffi::OsStr) {
+    fn set(&mut self, name: &OsStr, value: &OsStr) {
         self.env(name, value);
+    }
+    fn value_of(&self, name: &OsStr) -> Option<OsString> {
+        // this builder reports only what a caller pushed, so a name it says
+        // nothing about is one the child inherits from the host as-is
+        match self
+            .get_envs()
+            .find(|(known, _)| view_engine::env::env_names_eq(known, name))
+        {
+            Some((_, value)) => value.map(OsStr::to_os_string),
+            None => std::env::var_os(name),
+        }
     }
 }
 
@@ -283,17 +320,28 @@ impl SpawnEnv for std::process::Command {
 /// [`hermetic_env`] for what it drops and why every editor process in this
 /// tree passes through it.
 ///
+/// A swept name is dropped only while the builder still holds the host's own
+/// value for it, since a value that differs is what a caller's deliberate
+/// override looks like on either builder. The hole in that test -- a caller
+/// setting a name to exactly what the host already holds -- fails loudly:
+/// the child simply does not receive the variable.
+///
 /// # Errors
 ///
 /// Returns [`OracleError::Io`] if the empty search path cannot be
 /// established empty.
 pub fn make_hermetic<E: SpawnEnv>(cmd: &mut E) -> Result<(), OracleError> {
+    for (name, host_value) in view_engine::env::hermetic_sweep() {
+        if cmd.value_of(&name).as_deref() == Some(host_value.as_os_str()) {
+            cmd.unset(&name);
+        }
+    }
     for name in view_engine::env::HOST_REDIRECT_VARS {
-        cmd.unset(name);
+        cmd.unset(OsStr::new(name));
     }
     let empty = view_engine::env::prepare_empty_search_path()?;
     for name in view_engine::env::HOST_SEARCH_PATH_VARS {
-        cmd.set(name, empty.as_os_str());
+        cmd.set(OsStr::new(name), empty.as_os_str());
     }
     Ok(())
 }
@@ -957,8 +1005,92 @@ mod tests {
         let _ = std::fs::remove_file(&out);
     }
 
-    /// Reports back what a spawned child sees in the two variables that
-    /// stand for the whole enumeration: one removed, one overridden.
+    /// A name on none of the lists in [`view_engine::env`]: not a redirect,
+    /// not a search path, not allowlisted. It stands for every variable a
+    /// host exports that nobody enumerated -- a CI credential, a preload
+    /// hook, some other tool's configuration -- which is what the allowlist
+    /// catches and no enumeration of what to drop ever can.
+    const UNENUMERATED: &str = "VIEW_PTY_UNENUMERATED_HOST_VAR";
+
+    /// A name the allowlist's `LC_` prefix admits, standing for the other
+    /// side of the same rule: a sweep that simply emptied the environment
+    /// would satisfy every assertion about the name above while handing
+    /// children an environment nothing can run in.
+    const PASSTHROUGH: &str = "LC_VIEW_PTY_PASSTHROUGH";
+
+    /// A name the host exports *and* a caller then overrides on the builder.
+    /// It is the one shape that tells the sweep's rule -- drop a name the
+    /// builder still holds the host's own value for -- apart from an
+    /// unconditional drop, and the shape every measurement uses to hand its
+    /// child a fixture directory, a tap descriptor or a probe socket.
+    const OVERRIDDEN: &str = "VIEW_PTY_CALLER_OVERRIDE";
+
+    /// The value the planted names carry, distinct from the caller's preset
+    /// so a failing screen names which channel actually leaked.
+    const HOST_VALUE: &str = "host-exported-value";
+
+    /// What a caller sets [`OVERRIDDEN`] to, over the host's own value.
+    const CALLER_VALUE: &str = "caller-chose-this";
+
+    /// The names [`env_report`] and its plain-`Command` counterpart plant in
+    /// this process's environment, one per rule the funnel applies.
+    fn planted_vars(preset: &str) -> [(&str, &str); 5] {
+        [
+            ("VIMINIT", preset),
+            ("XDG_CONFIG_DIRS", preset),
+            (UNENUMERATED, HOST_VALUE),
+            (PASSTHROUGH, HOST_VALUE),
+            (OVERRIDDEN, HOST_VALUE),
+        ]
+    }
+
+    /// The shell command both report helpers run: one labelled line per
+    /// planted name, `XDG_CONFIG_DIRS` last so its arrival proves the
+    /// earlier lines are final.
+    fn report_command() -> String {
+        format!(
+            r#"echo "VIMINIT=[${{VIMINIT-unset}}]"; \
+               echo "UNENUMERATED=[${{{UNENUMERATED}-unset}}]"; \
+               echo "PASSTHROUGH=[${{{PASSTHROUGH}-unset}}]"; \
+               echo "OVERRIDDEN=[${{{OVERRIDDEN}-unset}}]"; \
+               echo "DIRS=[${{XDG_CONFIG_DIRS-unset}}]""#
+        )
+    }
+
+    /// What every spawn through the funnel must hand its child, whichever
+    /// builder it went through.
+    fn assert_hermetic_report(report: &str, preset: &str) {
+        assert!(
+            report.contains("VIMINIT=[unset]"),
+            "the host's startup commands reached the child; report:\n{report}"
+        );
+        assert!(
+            !report.contains(preset),
+            "the host's config search path reached the child; report:\n{report}"
+        );
+        assert!(
+            report.contains("UNENUMERATED=[unset]"),
+            "a variable on none of the hermetic lists reached the child, so \
+             the funnel guards only against what somebody remembered to write \
+             down and every measured session carries whatever the host \
+             exports; report:\n{report}"
+        );
+        assert!(
+            report.contains(&format!("PASSTHROUGH=[{HOST_VALUE}]")),
+            "the sweep dropped a name the allowlist names, so it is an \
+             emptied environment with extra steps and the assertion above \
+             says nothing about selectivity; report:\n{report}"
+        );
+        assert!(
+            report.contains(&format!("OVERRIDDEN=[{CALLER_VALUE}]")),
+            "the sweep took a variable the caller set deliberately, so a \
+             measurement cannot deliver its child a fixture at all; \
+             report:\n{report}"
+        );
+    }
+
+    /// Reports back what a spawned child sees in the five planted variables,
+    /// one per rule the funnel applies.
     ///
     /// `sh` rather than the `Command` builder's own accessors: the question
     /// is what a real child's environment holds after the spawn, and a
@@ -966,22 +1098,23 @@ mod tests {
     /// else would satisfy every accessor while still leaking.
     ///
     /// The variables are planted in *this process's* environment rather than
-    /// through `CommandBuilder::env`. The property under test is that a
-    /// child inherits neither of them, and a builder-set value only stands
-    /// in for an inherited one while the pty layer happens to seed its map
-    /// from `std::env::vars_os()`, which is its implementation's choice to
-    /// change. The plant is process-wide while it stands, so it is made
-    /// through [`crate::testenv::plant`], which excludes every other spawn in
-    /// this binary for its duration and puts the two names back afterwards.
+    /// through `CommandBuilder::env`. The property under test is inheritance,
+    /// and a builder-set value only stands in for an inherited one while the
+    /// pty layer happens to seed its map from `std::env::vars_os()`, which is
+    /// its implementation's choice to change. It is also the distinction the
+    /// sweep itself turns on, so a builder-set plant would be skipped as a
+    /// caller override and prove the opposite of what it was written for. The
+    /// plant is process-wide while it stands, so it is made through
+    /// [`crate::testenv::plant`], which excludes every other spawn in this
+    /// binary for its duration and puts the names back afterwards.
     fn env_report(preset: &str) -> String {
-        let planted = testenv::plant(&[("VIMINIT", preset), ("XDG_CONFIG_DIRS", preset)]);
+        let planted = testenv::plant(&planted_vars(preset));
         let mut session = planted
             .spawning(|| {
                 let mut cmd = CommandBuilder::new("/bin/sh");
                 cmd.arg("-c");
-                cmd.arg(
-                    r#"echo "VIMINIT=[${VIMINIT-unset}]"; echo "DIRS=[${XDG_CONFIG_DIRS-unset}]""#,
-                );
+                cmd.arg(report_command());
+                cmd.env(OVERRIDDEN, CALLER_VALUE);
                 PtySession::spawn_configured(cmd, 200, 24)
             })
             .unwrap();
@@ -989,7 +1122,7 @@ mod tests {
         // the plant is released before the wait rather than blocking every
         // other test's spawn for the length of it
         drop(planted);
-        // the second line's arrival proves the first line is final, so an
+        // the last line's arrival proves the earlier ones are final, so an
         // absent needle below means the child never printed it rather than
         // that this read was early
         assert!(
@@ -1004,20 +1137,43 @@ mod tests {
     fn a_pty_spawn_hands_the_child_none_of_the_hosts_editor_configuration() {
         let planted = "/host/nvim/config";
         let screen = env_report(planted);
-        assert!(
-            screen.contains("VIMINIT=[unset]"),
-            "the host's startup commands reached the child; screen:\n{screen}"
-        );
-        assert!(
-            !screen.contains(planted),
-            "the host's config search path reached the child; screen:\n{screen}"
-        );
+        assert_hermetic_report(&screen, planted);
         assert!(
             screen.contains(&format!(
                 "DIRS=[{}]",
                 view_engine::env::empty_search_path().display()
             )),
             "the child searches somewhere other than the empty directory; screen:\n{screen}"
+        );
+    }
+
+    /// The plain-[`std::process::Command`] half of the same funnel, which no
+    /// pty test reaches: the headless editors in this tree spawn that way,
+    /// and a rule holding on one builder but not the other would leave the
+    /// two arms of a comparison measuring differently-configured children.
+    ///
+    #[test]
+    fn a_plain_command_spawn_obeys_the_same_rule_a_pty_spawn_does() {
+        let planted_value = "/host/nvim/config";
+        let planted = testenv::plant(&planted_vars(planted_value));
+        let output = planted
+            .spawning(|| {
+                let mut cmd = std::process::Command::new("/bin/sh");
+                cmd.arg("-c").arg(report_command());
+                cmd.env(OVERRIDDEN, CALLER_VALUE);
+                make_hermetic(&mut cmd).unwrap();
+                cmd.output()
+            })
+            .unwrap();
+        drop(planted);
+        let report = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_hermetic_report(&report, planted_value);
+        assert!(
+            report.contains(&format!(
+                "DIRS=[{}]",
+                view_engine::env::empty_search_path().display()
+            )),
+            "the child searches somewhere other than the empty directory; report:\n{report}"
         );
     }
 
