@@ -278,45 +278,71 @@ pub fn run(
     settle_deadline: Duration,
     window: Duration,
 ) -> Result<FloodOutcome, BenchError> {
-    let mut pairs = Vec::with_capacity(trials);
-    for trial in 0..trials {
-        let pair = if trial % 2 == 0 {
-            let view_side =
-                flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
-            let nvim_side =
-                flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
-            (view_side, nvim_side)
-        } else {
-            let nvim_side =
-                flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
-            let view_side =
-                flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
-            (view_side, nvim_side)
-        };
-        pairs.push(pair);
-    }
-    aggregate(pairs, min_gap_samples)
+    aggregate(trials, min_gap_samples, |trial| {
+        flood_pair(view, nvim, trial, settle_deadline, window)
+    })
 }
 
-/// Reduces every collected pair to the run's outcome, refusing the whole
-/// run if any one trial is refused.
-///
-/// Kept apart from the spawning loop so this path is exercisable without a
-/// pty: the reduction is where a refused trial could be dropped and the
-/// survivors aggregated anyway, which would produce a clean-looking median
-/// out of a contaminated run -- the exact outcome the per-trial guards
-/// exist to prevent.
+/// Which side floods first in `trial`. Alternated, so a systematic
+/// difference between the first and second window of an invocation (a
+/// warmer page cache, a busier host by the time the second one starts)
+/// falls on both sides equally instead of on whichever is always second.
+fn view_goes_first(trial: usize) -> bool {
+    trial.is_multiple_of(2)
+}
+
+/// Spawns one trial's two floods back to back, in this trial's order.
 ///
 /// # Errors
 ///
-/// Propagates every per-trial refusal [`paired_trial`] raises, and returns
-/// [`BenchError::NoTrials`] if no pair was collected.
-fn aggregate(
-    pairs: Vec<(FloodSide, FloodSide)>,
+/// Propagates whatever [`flood_once`] refuses, labelled with the side that
+/// raised it.
+fn flood_pair(
+    view: &SpawnSpec,
+    nvim: &SpawnSpec,
+    trial: usize,
+    settle_deadline: Duration,
+    window: Duration,
+) -> Result<(FloodSide, FloodSide), BenchError> {
+    if view_goes_first(trial) {
+        let view_side = flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
+        let nvim_side = flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
+        Ok((view_side, nvim_side))
+    } else {
+        let nvim_side = flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
+        let view_side = flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
+        Ok((view_side, nvim_side))
+    }
+}
+
+/// Reduces `trials` paired measurements to the run's outcome, refusing the
+/// whole run at the first trial any guard refuses.
+///
+/// Takes a function producing one trial's pair rather than the pairs
+/// themselves, for two reasons. It makes this path exercisable without a
+/// pty, and the reduction is where a refused trial could be dropped and the
+/// survivors aggregated anyway -- which would build a clean-looking median
+/// out of a contaminated run, the exact outcome the per-trial guards exist
+/// to prevent. And a trial is only produced once the previous one has been
+/// accepted, so a refusal costs nothing beyond the trial that raised it
+/// rather than the remaining windows of a run whose result is already gone.
+///
+/// # Errors
+///
+/// Propagates whatever `pair` refuses and every per-trial refusal
+/// [`paired_trial`] raises, and returns [`BenchError::NoTrials`] if
+/// `trials` is zero.
+fn aggregate<F>(
+    trials: usize,
     min_gap_samples: usize,
-) -> Result<FloodOutcome, BenchError> {
-    let mut paired = Vec::with_capacity(pairs.len());
-    for (view_side, nvim_side) in pairs {
+    mut pair: F,
+) -> Result<FloodOutcome, BenchError>
+where
+    F: FnMut(usize) -> Result<(FloodSide, FloodSide), BenchError>,
+{
+    let mut paired = Vec::with_capacity(trials);
+    for trial in 0..trials {
+        let (view_side, nvim_side) = pair(trial)?;
         paired.push(paired_trial(view_side, nvim_side, min_gap_samples)?);
     }
 
@@ -577,16 +603,28 @@ mod tests {
 
     #[test]
     fn a_floor_bound_side_is_refused_in_the_trial_that_measured_it() {
-        let clean = || side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
-        let floor_bound = side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
-        assert!(paired_trial(clean(), clean(), 100).is_ok());
+        assert!(paired_trial(clean_side(), clean_side(), 100).is_ok());
         assert!(matches!(
-            paired_trial(floor_bound, clean(), 100),
+            paired_trial(floor_bound_side(), clean_side(), 100),
             Err(BenchError::BelowInstrumentResolution {
                 metric: "cadence_p99_ms",
                 ..
             })
         ));
+    }
+
+    fn clean_side() -> FloodSide {
+        side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05)
+    }
+
+    fn clean_pair() -> (FloodSide, FloodSide) {
+        (clean_side(), clean_side())
+    }
+
+    /// A side whose p99 sits under its own probe period, so the trial
+    /// carrying it is refused as instrument-bound.
+    fn floor_bound_side() -> FloodSide {
+        side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5)
     }
 
     #[test]
@@ -595,17 +633,13 @@ mod tests {
         // trial can sit under a clean median and still be the median RATIO.
         // Aggregating the survivors of a refusal is therefore not an option:
         // the refusal has to take the whole run down with it
-        let clean = || side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
-        let floor_bound = || side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
-
-        assert!(aggregate(vec![(clean(), clean()), (clean(), clean())], 100).is_ok());
-
-        let contaminated = vec![
-            (clean(), clean()),
-            (floor_bound(), clean()),
-            (clean(), clean()),
-        ];
-        let refused = aggregate(contaminated, 100);
+        let mut queue = vec![
+            clean_pair(),
+            (floor_bound_side(), clean_side()),
+            clean_pair(),
+        ]
+        .into_iter();
+        let refused = aggregate(3, 100, |_| queue.next().ok_or(BenchError::NoTrials));
         assert!(
             matches!(
                 refused,
@@ -628,6 +662,84 @@ mod tests {
             cadence_is_measurable(median_p99, median_probe),
             "a run-level check would have passed this run"
         );
+    }
+
+    #[test]
+    fn every_trial_the_run_was_asked_for_is_measured_and_reduced() {
+        let mut measured = 0_usize;
+        let outcome = aggregate(3, 100, |_| {
+            measured += 1;
+            Ok(clean_pair())
+        })
+        .unwrap();
+        assert_eq!(measured, 3, "the run must measure the trials it was given");
+        assert_eq!(
+            outcome.trials.len(),
+            3,
+            "and reduce over all of them, not a prefix"
+        );
+    }
+
+    #[test]
+    fn a_refused_trial_ends_the_run_before_the_next_one_is_measured() {
+        // a flood trial is two 15-second windows, so producing them eagerly
+        // would spend the rest of the run on a result already thrown away
+        let mut measured = 0_usize;
+        let mut queue = vec![
+            clean_pair(),
+            (floor_bound_side(), clean_side()),
+            clean_pair(),
+        ]
+        .into_iter();
+        let refused = aggregate(3, 100, |_| {
+            measured += 1;
+            queue.next().ok_or(BenchError::NoTrials)
+        });
+        assert!(refused.is_err());
+        assert_eq!(
+            measured, 2,
+            "the third trial must never be measured once the second is refused"
+        );
+    }
+
+    #[test]
+    fn the_gap_floor_the_run_was_given_reaches_every_trial() {
+        // 120 gaps per side clears a floor of 100 and misses one of 200, so
+        // a run that forwarded the wrong floor reads as a clean pass
+        let mut queue = vec![clean_pair(), clean_pair()].into_iter();
+        assert!(aggregate(2, 100, |_| queue.next().ok_or(BenchError::NoTrials)).is_ok());
+
+        let refused = aggregate(2, 200, |_| Ok(clean_pair()));
+        assert!(
+            matches!(
+                refused,
+                Err(BenchError::TooFewCadenceGaps {
+                    collected: 120,
+                    floor: 200,
+                    ..
+                })
+            ),
+            "expected the floor the run was given, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_run_of_no_trials_is_refused_rather_than_reduced() {
+        // a median over nothing would be a number no measurement produced,
+        // and every gate this row feeds is lower-is-better
+        let mut measured = 0_usize;
+        let refused = aggregate(0, 100, |_| {
+            measured += 1;
+            Ok(clean_pair())
+        });
+        assert!(matches!(refused, Err(BenchError::NoTrials)));
+        assert_eq!(measured, 0);
+    }
+
+    #[test]
+    fn the_side_that_floods_first_alternates_by_trial() {
+        let order: Vec<bool> = (0..4).map(view_goes_first).collect();
+        assert_eq!(order, vec![true, false, true, false]);
     }
 
     #[test]

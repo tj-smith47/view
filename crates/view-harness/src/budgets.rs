@@ -204,6 +204,17 @@ pub enum BudgetError {
         metric: String,
         class: String,
     },
+    #[error(
+        "{path}: [[{table}]] for {scenario} names metric {metric}, which \
+         baselines::RECORDED_METRICS does not declare; no row produces it, so the bound would \
+         never be checked against anything"
+    )]
+    UnknownMetric {
+        path: String,
+        table: &'static str,
+        scenario: String,
+        metric: String,
+    },
 }
 
 /// Loads and validates the budget file.
@@ -242,6 +253,30 @@ pub fn parse(text: &str, display: &str) -> Result<BudgetFile, BudgetError> {
             path: display,
             found: file.schema,
         });
+    }
+    // a bound on a metric no row produces is checked against nothing and
+    // reports nothing: the spec row it quotes silently stops being enforced,
+    // which is exactly what a bound exists to prevent. A typo is the usual
+    // way in, so the name is held to the same declared vocabulary the
+    // measured side is
+    for (table, scenario, metric) in file
+        .budget
+        .iter()
+        .map(|b| ("budget", &b.scenario, &b.metric))
+        .chain(
+            file.shortfall
+                .iter()
+                .map(|s| ("shortfall", &s.scenario, &s.metric)),
+        )
+    {
+        if !crate::baselines::RECORDED_METRICS.contains(&metric.as_str()) {
+            return Err(BudgetError::UnknownMetric {
+                path: display.clone(),
+                table,
+                scenario: scenario.clone(),
+                metric: metric.clone(),
+            });
+        }
     }
     // a shortfall against no budget is dead weight that reads as an accepted
     // gap: it would sit in the file forever describing a bound nobody checks
@@ -759,7 +794,8 @@ classes = ["dev-linux"]
     }
 
     /// A shortfall naming a budget that does not exist would read as an
-    /// accepted gap while binding nothing, so the file refuses to load.
+    /// accepted gap while binding nothing, so the file refuses to load. The
+    /// metric it names is real; what is missing is the bound.
     #[test]
     fn a_shortfall_against_no_budget_is_a_load_error() {
         let text = format!(
@@ -767,7 +803,7 @@ classes = ["dev-linux"]
 [[shortfall]]
 scenario = \"echo\"
 fixture = \"minimal\"
-metric = \"no_such_metric\"
+metric = \"ratio_p50\"
 class = \"dev-linux\"
 accepted = 9.0
 why = \"because\"
@@ -776,6 +812,53 @@ why = \"because\"
         assert!(matches!(
             parse(&text, "test"),
             Err(BudgetError::OrphanShortfall { .. })
+        ));
+    }
+
+    /// A budget on a metric no row produces is compared with nothing and
+    /// reports nothing: the spec row it quotes stops being enforced without
+    /// anything failing. A typo is the usual way in, and the declared
+    /// vocabulary is the only thing that can tell one from a real name.
+    #[test]
+    fn a_budget_on_a_metric_no_row_produces_is_a_load_error() {
+        let text = "
+schema = 1
+[[budget]]
+spec_row = \"row\"
+scenario = \"echo\"
+metric = \"veiw_p99_ms\"
+max = 8.0
+";
+        assert!(
+            matches!(
+                parse(text, "test"),
+                Err(BudgetError::UnknownMetric {
+                    table: "budget",
+                    ref metric,
+                    ..
+                }) if metric == "veiw_p99_ms"
+            ),
+            "a transposed metric name must refuse the file, got {:?}",
+            parse(text, "test")
+        );
+
+        let shortfall = format!(
+            "{ONE_BUDGET}
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"minimal\"
+metric = \"veiw_p99_ms\"
+class = \"dev-linux\"
+accepted = 9.0
+why = \"because\"
+"
+        );
+        assert!(matches!(
+            parse(&shortfall, "test"),
+            Err(BudgetError::UnknownMetric {
+                table: "shortfall",
+                ..
+            })
         ));
     }
 
@@ -814,6 +897,8 @@ why = \"because\"
 
     /// The shipped file is the one the gate actually reads; a typo in it
     /// would surface as a confusing gate failure rather than a load error.
+    /// Loading it here holds every one of its metric names to the declared
+    /// vocabulary as well, since that check is part of the load.
     #[test]
     fn the_shipped_budget_file_loads_and_binds_every_shortfall() {
         let path = crate::fixture::workspace_root()

@@ -118,14 +118,15 @@ Host load average (1 min), all three readings from that log:
 
 | reading | value | taken |
 |---|---:|---|
-| `uptime` before the task ran | 0.17 | 02:42:05, ahead of four release builds |
+| `uptime` before the task ran | 0.17 | 02:42:05, ahead of three release builds |
 | harness, start of the measured window | **1.04** | after those builds, before the first trial |
 | harness, end of the measured window | 2.03 | after the sixth pty session |
 | `uptime` after the task ran | 2.03 | 02:43:55 |
 
 **The load this row was measured at is 1.04, not 0.17.** The 0.17 reading
-predates the run's own `cargo build --release` steps, which are what lift it to
-1.04; the harness prints its own figure at the start of the measured window for
+predates the run's own three `cargo` steps (two `build --release` and the
+`run --release` that compiles four crates), which are what lift it to 1.04;
+the harness prints its own figure at the start of the measured window for
 exactly this reason. The further rise to 2.03 covers the six pty sessions and
 the builds still decaying out of a one-minute average, and the log does not
 separate those two contributions.
