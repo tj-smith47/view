@@ -285,14 +285,16 @@ fn measure_cell(
         }
         "flood" => {
             let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
-            let outcome = flood::run(
-                &view_spec,
-                &nvim_spec,
-                protocol.trials,
-                protocol.samples,
-                settle_deadline(fixture),
-                FLOOD_WINDOW,
-            )
+            let outcome = flood::run(&flood::RunSpec {
+                view: &view_spec,
+                nvim: &nvim_spec,
+                plan: flood::TrialPlan {
+                    trials: protocol.trials,
+                    min_gap_samples: protocol.samples,
+                },
+                settle_deadline: settle_deadline(fixture),
+                window: FLOOD_WINDOW,
+            })
             .with_context(|| format!("flood/{fixture} run failed"))?;
             for trial in &outcome.trials {
                 println!("{}", report::flood_trial(scenario, fixture, trial));

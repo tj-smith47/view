@@ -1041,11 +1041,25 @@ fn main() -> Result<()> {
                 );
             }
         }
+        // a budget whose scenario ran without producing its metric matched
+        // nothing and reported nothing, which is the shape of a pass
+        let mut dead_budgets = Vec::new();
+        if cli.all {
+            dead_budgets = budgets::unreached_budgets(&budget_file, &cli.class, &measured);
+            for budget in &dead_budgets {
+                eprintln!(
+                    "BUDGET UNENFORCED [{}] {} on {}: the run measured this scenario and it \
+                     produced no such metric, so the spec bound {} checked nothing [{}]",
+                    budget.scenario, budget.metric, cli.class, budget.max, budget.spec_row
+                );
+            }
+        }
         let clean = breaches.is_empty()
             && uncovered.is_empty()
             && unmeasured.is_empty()
             && budget_failures == 0
-            && stale_shortfalls.is_empty();
+            && stale_shortfalls.is_empty()
+            && dead_budgets.is_empty();
         if clean {
             let held = findings
                 .iter()
@@ -1072,8 +1086,9 @@ fn main() -> Result<()> {
 /// A gate run found a measurement outside its recorded bar, a baseline cell
 /// nothing measured, a recorded metric this run produced no value for, a
 /// spec 3.1 budget missed with no shortfall recording it (or a recorded one
-/// that widened), or a spent shortfall entry left behind after the metric
-/// came back inside its budget.
+/// that widened), a spent shortfall entry left behind after the metric came
+/// back inside its budget, or a budget bound to a metric its own scenario
+/// never produces.
 const EXIT_GATE_BREACH: i32 = 1;
 
 /// A record run wrote its baseline, but held at least one bar against a

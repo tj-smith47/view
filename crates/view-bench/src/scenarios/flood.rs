@@ -102,18 +102,20 @@ fn drained_lines(session: &mut BenchSession) -> Option<u64> {
 }
 
 /// Spawns `spec`, opens `:terminal` on the pinned producer, and samples
-/// paint cadence plus drain throughput for `window` of steady flood.
+/// paint cadence plus drain throughput for one window of steady flood.
 ///
 /// The window (not a line count) bounds the run, so the sample count is a
 /// property of duration and is comparable across hosts that drain at wildly
 /// different rates (the reason [`flood_command`] runs an unbounded producer).
-fn flood_once(
-    spec: &SpawnSpec,
-    settle_deadline: Duration,
-    window: Duration,
-) -> Result<FloodSide, BenchError> {
+///
+/// Reads both durations off `run_spec` rather than taking them as adjacent
+/// parameters of the same type, which a caller can transpose silently: a
+/// settle deadline in the window's place measures nothing and a window in
+/// the deadline's place refuses every startup.
+fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, BenchError> {
+    let window = run_spec.window;
     let mut session = BenchSession::spawn(spec)?;
-    if !session.settle(Duration::from_secs(2), settle_deadline) {
+    if !session.settle(Duration::from_secs(2), run_spec.settle_deadline) {
         return Err(BenchError::Desync {
             context: format!(
                 "startup never went quiet; screen:\n{}",
@@ -260,26 +262,53 @@ const NVIM_NAMES: SideNames = SideNames {
     cadence_metric: "nvim cadence_p99_ms",
 };
 
-/// Runs `trials` paired floods. A flood is one long macro operation, so
-/// pairing is per trial (view and nvim floods back to back within the
-/// same invocation, order alternating per trial) rather than per-sample
-/// interleaving, which has no meaning inside a single window.
+/// How many paired trials a run measures, and the gap floor each side of
+/// each trial must clear.
+///
+/// The two counts are carried as named fields rather than as adjacent
+/// `usize` parameters: transposing them compiles, lints clean and reads as
+/// a plausible call, while turning a three-trial run with a floor of 200
+/// into a two-hundred-trial run with a floor of three.
+#[derive(Debug, Clone, Copy)]
+pub struct TrialPlan {
+    pub trials: usize,
+    pub min_gap_samples: usize,
+}
+
+/// Everything one flood run measures against: the two sides, how many
+/// trials to take, and the two durations that bound each one.
+///
+/// Named fields for the same reason [`TrialPlan`] has them. The two
+/// `&SpawnSpec` and the two [`Duration`] arguments this replaces were
+/// adjacent and same-typed, so a transposition compiled: swapping the specs
+/// inverts the whole view-against-nvim comparison the row exists to make,
+/// and the gate cannot see it because both sides still measure something.
+#[derive(Debug, Clone, Copy)]
+pub struct RunSpec<'a> {
+    /// The side under measurement.
+    pub view: &'a SpawnSpec,
+    /// The bare-editor control the view side is read against.
+    pub nvim: &'a SpawnSpec,
+    pub plan: TrialPlan,
+    /// How long a side's startup has to go quiet before it is refused.
+    pub settle_deadline: Duration,
+    /// The wall-clock span of steady flood each side is measured over.
+    pub window: Duration,
+}
+
+/// Runs the paired floods `run_spec` describes. A flood is one long macro
+/// operation, so pairing is per trial (view and nvim floods back to back
+/// within the same invocation, order alternating per trial) rather than
+/// per-sample interleaving, which has no meaning inside a single window.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if a producer never scrolls the terminal
 /// or a session misbehaves, and propagates every refusal [`aggregate`]
 /// raises.
-pub fn run(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
-    trials: usize,
-    min_gap_samples: usize,
-    settle_deadline: Duration,
-    window: Duration,
-) -> Result<FloodOutcome, BenchError> {
-    aggregate(trials, min_gap_samples, |trial| {
-        flood_pair(view, nvim, trial, settle_deadline, window)
+pub fn run(run_spec: &RunSpec<'_>) -> Result<FloodOutcome, BenchError> {
+    aggregate(run_spec.plan, |trial| {
+        flood_pair(run_spec, trial, |spec| flood_once(spec, run_spec))
     })
 }
 
@@ -291,31 +320,39 @@ fn view_goes_first(trial: usize) -> bool {
     trial.is_multiple_of(2)
 }
 
-/// Spawns one trial's two floods back to back, in this trial's order.
+/// Measures one trial's two sides in this trial's order, returning them in
+/// view-then-nvim order whichever way round they ran.
+///
+/// Takes the per-side measurement as a function so both the order and the
+/// attribution are observable without a pty: the two are independent, and
+/// swapping the returned pair on the trials that run nvim first would carry
+/// nvim's flood as view's through every quotient the run reports, with
+/// nothing in the numbers to show it.
 ///
 /// # Errors
 ///
-/// Propagates whatever [`flood_once`] refuses, labelled with the side that
+/// Propagates whatever `measure` refuses, labelled with the side that
 /// raised it.
-fn flood_pair(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
+fn flood_pair<F>(
+    run_spec: &RunSpec<'_>,
     trial: usize,
-    settle_deadline: Duration,
-    window: Duration,
-) -> Result<(FloodSide, FloodSide), BenchError> {
+    mut measure: F,
+) -> Result<(FloodSide, FloodSide), BenchError>
+where
+    F: FnMut(&SpawnSpec) -> Result<FloodSide, BenchError>,
+{
     if view_goes_first(trial) {
-        let view_side = flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
-        let nvim_side = flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
+        let view_side = measure(run_spec.view).map_err(|e| label("view", e))?;
+        let nvim_side = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
         Ok((view_side, nvim_side))
     } else {
-        let nvim_side = flood_once(nvim, settle_deadline, window).map_err(|e| label("nvim", e))?;
-        let view_side = flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
+        let nvim_side = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
+        let view_side = measure(run_spec.view).map_err(|e| label("view", e))?;
         Ok((view_side, nvim_side))
     }
 }
 
-/// Reduces `trials` paired measurements to the run's outcome, refusing the
+/// Reduces the trials `plan` asks for to the run's outcome, refusing the
 /// whole run at the first trial any guard refuses.
 ///
 /// Takes a function producing one trial's pair rather than the pairs
@@ -330,20 +367,16 @@ fn flood_pair(
 /// # Errors
 ///
 /// Propagates whatever `pair` refuses and every per-trial refusal
-/// [`paired_trial`] raises, and returns [`BenchError::NoTrials`] if
-/// `trials` is zero.
-fn aggregate<F>(
-    trials: usize,
-    min_gap_samples: usize,
-    mut pair: F,
-) -> Result<FloodOutcome, BenchError>
+/// [`paired_trial`] raises, and returns [`BenchError::NoTrials`] if the
+/// plan asks for no trials.
+fn aggregate<F>(plan: TrialPlan, mut pair: F) -> Result<FloodOutcome, BenchError>
 where
     F: FnMut(usize) -> Result<(FloodSide, FloodSide), BenchError>,
 {
-    let mut paired = Vec::with_capacity(trials);
-    for trial in 0..trials {
+    let mut paired = Vec::with_capacity(plan.trials);
+    for trial in 0..plan.trials {
         let (view_side, nvim_side) = pair(trial)?;
-        paired.push(paired_trial(view_side, nvim_side, min_gap_samples)?);
+        paired.push(paired_trial(view_side, nvim_side, plan.min_gap_samples)?);
     }
 
     let across = |pick: fn(&FloodTrial) -> f64| {
@@ -613,6 +646,35 @@ mod tests {
         ));
     }
 
+    fn plan(trials: usize, min_gap_samples: usize) -> TrialPlan {
+        TrialPlan {
+            trials,
+            min_gap_samples,
+        }
+    }
+
+    /// A spec naming a program that cannot be spawned, so any test whose
+    /// subject is supposed to refuse before reaching a session fails loudly
+    /// if it reaches one instead of quietly measuring something.
+    fn unspawnable(name: &str) -> SpawnSpec {
+        SpawnSpec {
+            program: std::path::PathBuf::from(format!("/nonexistent/view-bench-{name}")),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+        }
+    }
+
+    fn run_spec_over<'a>(view: &'a SpawnSpec, nvim: &'a SpawnSpec, plan: TrialPlan) -> RunSpec<'a> {
+        RunSpec {
+            view,
+            nvim,
+            plan,
+            settle_deadline: Duration::from_millis(1),
+            window: Duration::from_millis(1),
+        }
+    }
+
     fn clean_side() -> FloodSide {
         side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05)
     }
@@ -639,7 +701,7 @@ mod tests {
             clean_pair(),
         ]
         .into_iter();
-        let refused = aggregate(3, 100, |_| queue.next().ok_or(BenchError::NoTrials));
+        let refused = aggregate(plan(3, 100), |_| queue.next().ok_or(BenchError::NoTrials));
         assert!(
             matches!(
                 refused,
@@ -667,7 +729,7 @@ mod tests {
     #[test]
     fn every_trial_the_run_was_asked_for_is_measured_and_reduced() {
         let mut measured = 0_usize;
-        let outcome = aggregate(3, 100, |_| {
+        let outcome = aggregate(plan(3, 100), |_| {
             measured += 1;
             Ok(clean_pair())
         })
@@ -691,7 +753,7 @@ mod tests {
             clean_pair(),
         ]
         .into_iter();
-        let refused = aggregate(3, 100, |_| {
+        let refused = aggregate(plan(3, 100), |_| {
             measured += 1;
             queue.next().ok_or(BenchError::NoTrials)
         });
@@ -707,9 +769,9 @@ mod tests {
         // 120 gaps per side clears a floor of 100 and misses one of 200, so
         // a run that forwarded the wrong floor reads as a clean pass
         let mut queue = vec![clean_pair(), clean_pair()].into_iter();
-        assert!(aggregate(2, 100, |_| queue.next().ok_or(BenchError::NoTrials)).is_ok());
+        assert!(aggregate(plan(2, 100), |_| queue.next().ok_or(BenchError::NoTrials)).is_ok());
 
-        let refused = aggregate(2, 200, |_| Ok(clean_pair()));
+        let refused = aggregate(plan(2, 200), |_| Ok(clean_pair()));
         assert!(
             matches!(
                 refused,
@@ -728,7 +790,7 @@ mod tests {
         // a median over nothing would be a number no measurement produced,
         // and every gate this row feeds is lower-is-better
         let mut measured = 0_usize;
-        let refused = aggregate(0, 100, |_| {
+        let refused = aggregate(plan(0, 100), |_| {
             measured += 1;
             Ok(clean_pair())
         });
@@ -740,6 +802,63 @@ mod tests {
     fn the_side_that_floods_first_alternates_by_trial() {
         let order: Vec<bool> = (0..4).map(view_goes_first).collect();
         assert_eq!(order, vec![true, false, true, false]);
+    }
+
+    #[test]
+    fn each_trial_returns_each_sides_own_measurement_whichever_ran_first() {
+        // the alternation exists so neither side is always second, and it is
+        // only sound while the returned pair still says which side is which:
+        // a swap on the trials that run nvim first would carry nvim's flood
+        // as view's through every quotient, with nothing in the numbers to
+        // show it
+        let view = unspawnable("view");
+        let nvim = unspawnable("nvim");
+        let run_spec = run_spec_over(&view, &nvim, plan(2, 100));
+        let marked = |spec: &SpawnSpec| FloodSide {
+            lines_drained: if spec.program == view.program {
+                1.0
+            } else {
+                2.0
+            },
+            cadence_gaps_ms: Vec::new(),
+            probe_period_ms: 0.0,
+        };
+
+        for (trial, expected_order) in [(0, ["view", "nvim"]), (1, ["nvim", "view"])] {
+            let mut measured = Vec::new();
+            let (view_side, nvim_side) = flood_pair(&run_spec, trial, |spec| {
+                measured.push(if spec.program == view.program {
+                    "view"
+                } else {
+                    "nvim"
+                });
+                Ok(marked(spec))
+            })
+            .unwrap();
+            assert_eq!(
+                measured, expected_order,
+                "trial {trial} measured the sides in the wrong order"
+            );
+            assert_eq!(
+                (view_side.lines_drained, nvim_side.lines_drained),
+                (1.0, 2.0),
+                "trial {trial} attributed a side's measurement to the other side"
+            );
+        }
+    }
+
+    #[test]
+    fn a_run_of_no_trials_refuses_before_it_spawns_anything() {
+        // run's own forwarding of its plan is otherwise only observable
+        // through a pty; a zero-trial run reaches the refusal without one,
+        // and an unspawnable program makes any spawn a different error
+        let view = unspawnable("view");
+        let nvim = unspawnable("nvim");
+        let refused = run(&run_spec_over(&view, &nvim, plan(0, 100)));
+        assert!(
+            matches!(refused, Err(BenchError::NoTrials)),
+            "a zero-trial run must refuse before any spawn, got {refused:?}"
+        );
     }
 
     #[test]

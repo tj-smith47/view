@@ -434,6 +434,45 @@ pub fn unreached_shortfalls<'a>(
     unreached
 }
 
+/// Budgets covering `class` whose scenario ran but never produced the
+/// metric they bound, in deterministic order.
+///
+/// A budget only binds while some row produces its metric under its
+/// scenario. One that pairs a real metric with a scenario that does not
+/// measure it matches nothing in [`check_cell`], produces no finding, and
+/// so reports exactly as a scenario inside its budget would: the spec row
+/// it quotes stops being enforced without anything failing. The load-time
+/// vocabulary check cannot see this, because a name only becomes wrong once
+/// it is paired with a scenario, and that pairing is only observable after
+/// the matrix has run.
+///
+/// A scenario that did not run at all this invocation is not reported: a
+/// platform that skips a row, or a single-cell invocation, is a coverage
+/// question the caller already answers elsewhere, not a dead bound.
+#[must_use]
+pub fn unreached_budgets<'a>(
+    file: &'a BudgetFile,
+    class: &str,
+    measured: &[crate::baselines::MeasuredCell],
+) -> Vec<&'a Budget> {
+    let mut unreached: Vec<&Budget> = file
+        .budget
+        .iter()
+        .filter(|budget| budget.covers(class))
+        .filter(|budget| {
+            let ran = measured
+                .iter()
+                .any(|(scenario, _, _)| *scenario == budget.scenario);
+            let produced = measured.iter().any(|(scenario, _, metrics)| {
+                *scenario == budget.scenario && metrics.contains_key(&budget.metric)
+            });
+            ran && !produced
+        })
+        .collect();
+    unreached.sort_by(|a, b| (&a.scenario, &a.metric).cmp(&(&b.scenario, &b.metric)));
+    unreached
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -893,6 +932,84 @@ why = \"because\"
             "dev-linux",
         );
         assert!(unreached_shortfalls(&file, "dev-linux", &still_short).is_empty());
+    }
+
+    /// A bound whose metric is declared but whose scenario never produces it
+    /// is invisible to every other check: it parses, it names a real metric,
+    /// and it matches nothing, so the run reports exactly what a scenario
+    /// inside its budget reports. Only the measured cells can tell them
+    /// apart.
+    #[test]
+    fn a_budget_no_row_ever_matches_is_reported_once_the_matrix_has_run() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "output_path"
+metric = "p99_ms"
+max = 1.0
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "pss_mb"
+max = 150.0
+"#,
+        );
+        let measured = vec![
+            (
+                "output_path".to_string(),
+                "minimal".to_string(),
+                metrics(&[("p99_ms", 0.5)]),
+            ),
+            (
+                "echo".to_string(),
+                "minimal".to_string(),
+                metrics(&[("ratio_p50", 1.0)]),
+            ),
+        ];
+        let unreached = unreached_budgets(&file, "dev-linux", &measured);
+        assert_eq!(
+            unreached
+                .iter()
+                .map(|budget| (budget.scenario.as_str(), budget.metric.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("echo", "pss_mb")],
+            "the bound the run never matched is the one to report"
+        );
+    }
+
+    /// A row a platform does not run leaves its budgets unmatched for a
+    /// reason that is not a dead bound, and the coverage question it raises
+    /// is answered by the cell-level check rather than here.
+    #[test]
+    fn a_budget_whose_scenario_never_ran_is_not_reported() {
+        let file = file_from(ONE_BUDGET);
+        assert!(unreached_budgets(&file, "dev-linux", &[]).is_empty());
+    }
+
+    /// Class scoping is what keeps the two platform memory metrics from
+    /// reporting each other as dead on every run.
+    #[test]
+    fn a_budget_scoped_to_another_class_is_not_reported() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "memory"
+metric = "phys_footprint_mb"
+max = 150.0
+classes = ["dev-macos"]
+"#,
+        );
+        let measured = vec![(
+            "memory".to_string(),
+            "minimal".to_string(),
+            metrics(&[("pss_mb", 3.4)]),
+        )];
+        assert!(unreached_budgets(&file, "dev-linux", &measured).is_empty());
+        assert_eq!(unreached_budgets(&file, "dev-macos", &measured).len(), 1);
     }
 
     /// The shipped file is the one the gate actually reads; a typo in it
