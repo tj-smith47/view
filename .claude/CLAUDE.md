@@ -1,5 +1,28 @@
 # view — session context
 
+## What view is
+
+**view is the first fully native AI-first TUI terminal editor for agentic
+development.** It is Neovim (painless migration), written in Rust (objectively
+faster), with a modern, cohesive — but still configurable — UI.
+
+That sentence is the differentiator, and it is the thing sessions lose first.
+The three user contracts in spec §1 (painless migration, objectively faster,
+modern coherent UI) are the **benefits** that follow from it, and the
+performance mandate in §3 is a **quality bar**. Do not restate a benefit or a
+quality goal when asked what makes this tool unique, and do not let a long
+stretch of harness or budget work convince you the measurement layer is the
+point.
+
+None of that relaxes the bar. "Objectively faster, smoother UX than nvim" is a
+shipping contract with CI-gated budgets, and "we are not done if we cannot
+objectively say there is a faster, smoother UX over nvim" still governs every
+change. This section exists to stop tunnel vision, never to license a weaker
+standard: the goal is both, always. The durable moat is the differential
+oracle and the accumulated compat/perf evidence (§1, §13.2) — that is what
+makes the strangler roadmap (§15) possible, and it is a different thing from
+the differentiator.
+
 **START HERE:** read `.claude/HANDOFF.md` before acting. It carries the working
 mode, the open task list, and the judgment that no other file records. Create
 tasks from its open-task section at startup — the harness task store does not

@@ -9,8 +9,18 @@ Implementation plans are derived from this document; they do not override it.
 
 ## 1. Product definition
 
-**view** is a terminal-first modal editor whose engine is an embedded, pinned Neovim.
-It makes three contracts to its users:
+**view is the first fully native AI-first TUI terminal editor for agentic
+development.** It is Neovim (painless migration), written in Rust (objectively
+faster), with a modern, cohesive — but still configurable — UI.
+
+That is the differentiator. Everything below is how it is delivered: the three
+contracts are the benefits that follow from it, the performance mandate (§3) is
+a quality bar rather than the reason the product exists, and the moat (§13.2)
+is what makes the strangler roadmap (§15) possible. The AI architecture that
+the positioning rests on is §10, not an appendix to the editor.
+
+Structurally, **view** is a terminal-first modal editor whose engine is an
+embedded, pinned Neovim. It makes three contracts to its users:
 
 1. **Painless migration.** Your `init.lua`, plugins, LSP servers, and treesitter
    config run unmodified, because a real Neovim runs them. Compat is total by
