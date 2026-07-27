@@ -28,9 +28,12 @@
 //! enough that the accepting answer is binding. And waiting on the lock the
 //! writer thread holds across that stalled write: a caller only ever *tries*
 //! that lock, and reads a refusal as one more reason to hand the message
-//! over. So no path through [`Outbox::send`] waits on anything, and the
-//! longest a caller can spend there is one write the pipe already promised
-//! to take.
+//! over. So no path through [`Outbox::send`] waits on the writer, and the
+//! longest a caller can spend holding it is one write the pipe already
+//! promised to take. That is a claim about this module's own lock and not
+//! about every instruction underneath: enqueueing still touches the
+//! channel's waker lock and can allocate, neither of which waits on the
+//! peer, and both of which were on this path before the fast path existed.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -131,8 +134,13 @@ impl Outbox {
             self.count_hand_off();
             drop(writer);
         } else {
-            // the lock is held, so no inline write can be starting under it,
-            // and the count is safe to raise from outside
+            // raised outside the lock, which the refusal says someone else
+            // holds. The holder may release before this lands, so a send
+            // from some other thread can still go inline in between -- but
+            // that send and this one are concurrent, with no order between
+            // them for anything to violate. What must hold is that this
+            // thread's own next send sees the count, and a thread observes
+            // its own writes in order.
             self.count_hand_off();
         }
         if self.tx.send(bytes).is_err() {
@@ -452,8 +460,20 @@ mod tests {
     /// no reader that happens to keep up, can take it away afterwards.
     #[cfg(unix)]
     fn fill_until_handed_off(outbox: &Outbox) -> Vec<u8> {
+        fill_until_handed_off_with(outbox, |n| {
+            vec![u8::try_from(n % 251).unwrap_or(0); MESSAGE_LEN]
+        })
+    }
+
+    /// The same fill over messages a caller builds, for tests that need to
+    /// tell one sender's bytes from another's afterwards.
+    #[cfg(unix)]
+    fn fill_until_handed_off_with(
+        outbox: &Outbox,
+        mut message: impl FnMut(usize) -> Vec<u8>,
+    ) -> Vec<u8> {
         let mut sent: Vec<u8> = Vec::new();
-        let mut tag = 0_u8;
+        let mut n = 0_usize;
         while outbox.path_counts().1 == 0 {
             assert!(
                 sent.len() < FILL_CEILING,
@@ -463,9 +483,11 @@ mod tests {
                  paths",
                 sent.len()
             );
-            assert!(outbox.send(vec![tag; MESSAGE_LEN]), "send failed");
-            sent.extend(std::iter::repeat_n(tag, MESSAGE_LEN));
-            tag = (tag + 1) % 251;
+            let bytes = message(n);
+            assert_eq!(bytes.len(), MESSAGE_LEN, "the fill frames are fixed width");
+            sent.extend_from_slice(&bytes);
+            assert!(outbox.send(bytes), "send failed");
+            n += 1;
         }
         sent
     }
@@ -701,6 +723,152 @@ mod tests {
     /// for the two paths to interleave many times over.
     #[cfg(unix)]
     const CONTENDED_MESSAGES: usize = 20_000;
+
+    /// Caller threads sending into one outbox at once.
+    #[cfg(unix)]
+    const CONTENDING_CALLERS: u8 = 2;
+
+    /// Messages each contending caller sends per round.
+    #[cfg(unix)]
+    const MESSAGES_PER_CALLER: u64 = 20_000;
+
+    /// Nanoseconds a contending caller leaves between its sends, one round
+    /// per entry.
+    ///
+    /// The branch under test needs two things at once, and no single rate
+    /// supplies both. Sending flat out maximises lock refusals but latches
+    /// the outbox into threaded mode within a few hundred messages, after
+    /// which the ordering gate closes on the backlog instead of on the
+    /// branch. Pacing the callers to the writer thread's own rate keeps the
+    /// hand-off count crossing zero all run but lets the callers miss each
+    /// other on the lock. Measured against a deliberately broken branch, the
+    /// flat-out rate caught it 3 times in 3 and the paced rate 2 times in 5,
+    /// so the rate is swept rather than chosen. A host too slow to keep a
+    /// pace falls back to sending flat out, which is a covered round rather
+    /// than a failure.
+    #[cfg(unix)]
+    const CALLER_GAPS_NANOS: [u64; 3] = [0, 2_000, 5_000];
+
+    /// Stamps a message with its sender and that sender's position in its own
+    /// stream, in a fixed-width frame a reader can split without a parser.
+    ///
+    /// Every frame is under `PIPE_BUF`, and a pipe write of at most that many
+    /// bytes is atomic on both paths, so a frame reaches the reader whole and
+    /// the split is a division rather than a guess.
+    #[cfg(unix)]
+    fn stamped(caller: u8, seq: u64) -> Vec<u8> {
+        let mut bytes = vec![caller; MESSAGE_LEN];
+        bytes[1..9].copy_from_slice(&seq.to_le_bytes());
+        bytes
+    }
+
+    /// The order two concurrent callers are owed: each one's own messages,
+    /// in the order that caller produced them.
+    ///
+    /// This is the interleaving a single-caller test cannot reach. A caller
+    /// refused the writer lock takes a branch that raises the hand-off count
+    /// from outside that lock, and if the count did not go up, the same
+    /// caller's *next* send would find the gate open and go inline past the
+    /// message it just queued. Nothing about cross-caller order is asserted,
+    /// because concurrent senders establish none.
+    #[cfg(unix)]
+    #[test]
+    fn each_callers_own_messages_keep_their_order_while_two_callers_contend() {
+        for gap in CALLER_GAPS_NANOS {
+            two_callers_keep_their_own_order(gap);
+        }
+    }
+
+    /// One round of the two-caller ordering check, at one send rate.
+    #[cfg(unix)]
+    fn two_callers_keep_their_own_order(gap_nanos: u64) {
+        use std::io::Read;
+
+        let (outbox, mut reader, rx) = outbox_on_a_pipe();
+        let thread_outbox = Arc::clone(&outbox);
+        std::thread::spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                if !thread_outbox.write_from_thread(&bytes) {
+                    break;
+                }
+            }
+        });
+
+        // armed before either caller starts, so both paths are live by
+        // construction and no scheduling decision can take that away
+        let prologue = fill_until_handed_off_with(&outbox, |n| {
+            stamped(CONTENDING_CALLERS, u64::try_from(n).unwrap_or(0))
+        });
+        let (inline, threaded) = outbox.path_counts();
+        assert!(
+            inline > 0,
+            "an empty pipe must accept the first send inline"
+        );
+        assert!(threaded > 0, "the fill stops at the first hand-off");
+
+        let total = prologue.len()
+            + usize::from(CONTENDING_CALLERS) * MESSAGES_PER_CALLER as usize * MESSAGE_LEN;
+        let (done_tx, done_rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut seen: Vec<u8> = Vec::with_capacity(total);
+            let mut buf = [0_u8; 4096];
+            while seen.len() < total {
+                match reader.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => seen.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = done_tx.send(seen);
+        });
+
+        let callers: Vec<_> = (0..CONTENDING_CALLERS)
+            .map(|caller| {
+                let outbox = Arc::clone(&outbox);
+                std::thread::spawn(move || {
+                    let gap = std::time::Duration::from_nanos(gap_nanos);
+                    let mut due = std::time::Instant::now();
+                    for seq in 0..MESSAGES_PER_CALLER {
+                        while std::time::Instant::now() < due {
+                            std::thread::yield_now();
+                        }
+                        due += gap;
+                        assert!(outbox.send(stamped(caller, seq)), "send failed");
+                    }
+                })
+            })
+            .collect();
+        for caller in callers {
+            caller.join().expect("a caller thread finished");
+        }
+
+        let seen = done_rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("the reader drained every byte that was sent");
+        assert_eq!(
+            seen.len(),
+            total,
+            "the pipe delivered a different number of bytes than were sent"
+        );
+        let mut next = vec![0_u64; usize::from(CONTENDING_CALLERS) + 1];
+        for (frame, bytes) in seen.chunks_exact(MESSAGE_LEN).enumerate() {
+            let caller = usize::from(bytes[0]);
+            assert!(caller < next.len(), "frame {frame} names no sender");
+            let seq = u64::from_le_bytes(bytes[1..9].try_into().unwrap_or([0; 8]));
+            assert_eq!(
+                seq, next[caller],
+                "at a {gap_nanos} ns send gap, caller {caller}'s messages \
+                 left the outbox out of their own order at pipe frame {frame}"
+            );
+            next[caller] += 1;
+        }
+        let (inline, threaded) = outbox.path_counts();
+        assert!(
+            inline > 0 && threaded > 0,
+            "at a {gap_nanos} ns send gap: inline {inline}, threaded \
+             {threaded}. One path never ran, so this round says nothing about \
+             order across them"
+        );
+    }
 
     /// The size bound is half of what makes an inline write safe: a pipe
     /// answering "writable" promises room for `PIPE_BUF` bytes and no more,
