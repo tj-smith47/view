@@ -988,11 +988,14 @@ governs on shared runners; the spec wins on conflict):**
   the user's visibility at plan review.
 
 **Baseline provenance (the mechanism, or the gate can never arm):**
-`--gate` HARD-FAILS when no baseline exists for its class UNLESS the
-workflow passes `--bootstrap`, which runs record-mode and uploads the
-baseline TOML as a CI artifact. The T11 implementer's flow: push the
-branch with `--bootstrap` set, download the two gh-class artifacts,
-commit them, remove `--bootstrap` in the same commit. From then on a
+`--gate` HARD-FAILS when no baseline exists for its class, with no
+fallback: a mode that quietly records instead would exit 0 having
+compared nothing, which no CI log can tell from a gate that compared
+everything and passed. A class is armed by a separate `--record` run
+whose command line says so, and which uploads the baseline TOML as a CI
+artifact. The T11 implementer's flow: push the branch with the bench
+legs on `--record`, download the two gh-class artifacts, commit them,
+and switch those legs to `--gate` in the same commit. From then on a
 missing baseline is a loud failure and every baseline change is a
 reviewed diff. (CI-runner verification itself remains push-gated —
 known-bugs.md item, user-owned; the flow above is written into the

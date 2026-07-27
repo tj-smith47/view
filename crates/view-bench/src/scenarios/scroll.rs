@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
 /// Width of the `L%06d` line label every fixture line starts with.
@@ -76,7 +76,10 @@ impl SideState {
         // label actually being on screen, re-settling until the deadline.
         let deadline = Instant::now() + settle_deadline;
         let (label_row, label_col, top_line) = loop {
-            if !session.settle(Duration::from_secs(2), settle_deadline) {
+            if !session.settle(SettleBound {
+                quiet: Duration::from_secs(2),
+                deadline: settle_deadline,
+            }) {
                 return Err(BenchError::Desync {
                     context: format!(
                         "startup never went quiet within {settle_deadline:?}; screen:\n{}",

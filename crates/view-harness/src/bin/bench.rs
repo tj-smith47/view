@@ -6,13 +6,19 @@
 //! bench --scenario echo --fixture minimal --class dev-linux
 //! bench --all --class dev-linux --record   # writes baselines/<class>.toml
 //! bench --all --class dev-linux --gate     # exit 1 on any breach
-//! bench --all --class gh-linux --gate --bootstrap   # record instead if no baseline yet
 //! ```
 //!
 //! The machine class is a required argument: shared-runner numbers must
 //! never silently gate as if they came from a dedicated box, so the
 //! harness refuses to run at all without an explicit class naming where
 //! the numbers came from.
+//!
+//! `--record` and `--gate` are the two modes and neither ever stands in for
+//! the other. A class with no committed baseline is armed by a `--record`
+//! run whose output is reviewed and committed; `--gate` against a class
+//! without one refuses before it measures anything, because a gate with
+//! nothing to compare cannot fail and its exit 0 is indistinguishable from
+//! a gate that compared everything and passed.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -139,15 +145,9 @@ struct Cli {
     #[arg(long, conflicts_with = "gate")]
     record: bool,
     /// Gate measured values against baselines/<class>.toml; exits 1 on
-    /// any breach
+    /// any breach, and refuses to start if the class has no baseline
     #[arg(long)]
     gate: bool,
-    /// With --gate: when no baseline exists for this class yet, record
-    /// one instead of failing the provenance rule. Intended for a class's
-    /// first CI run, which uploads the recorded TOML for review and
-    /// commit; once the baseline is committed the flag comes back out
-    #[arg(long, requires = "gate")]
-    bootstrap: bool,
     /// Path to the release view binary
     #[arg(long)]
     view_bin: Option<PathBuf>,
@@ -177,6 +177,27 @@ fn baseline_path(class: &str) -> PathBuf {
         .join("view-bench")
         .join("baselines")
         .join(format!("{class}.toml"))
+}
+
+/// Refuses a gate run whose class has no recorded baseline to gate
+/// against.
+///
+/// The alternative shape -- fall back to recording and exit 0 -- makes the
+/// gate silently inert: every comparison is skipped, no verdict is reached,
+/// and the run reports success in a log where that is indistinguishable
+/// from a gate that compared every cell and passed. Arming a new class is
+/// therefore a `--record` invocation, which says in the command line what
+/// the run actually did, and `--gate` from then on either produces a
+/// verdict or does not start.
+fn require_gatable(gating: bool, class: &str, path: &Path) -> Result<()> {
+    ensure!(
+        !gating || path.exists(),
+        "--gate has no baseline for class {class} at {}, so it would compare nothing and exit as \
+         though it had passed. Arm the class first with `task bench -- --all --class {class} \
+         --record`, review the file it writes, and commit it",
+        path.display()
+    );
+    Ok(())
 }
 
 /// Where the spec 3.1 budget table lives. One file for every class: a
@@ -320,13 +341,13 @@ fn settle_deadline(fixture: &str) -> Duration {
 /// config swapped in below `view`, would measure a plugin-free editor
 /// against baselines recorded with the fixture's full plugin set, report it
 /// as a large improvement, and gate green.
-fn view_spec_from(side: SideSetup, view_bin: &Path, nvim_bin: &Path) -> SpawnSpec {
+fn view_spec_from(side: SideSetup, bins: ViewBins<'_>) -> SpawnSpec {
     SpawnSpec {
-        program: view_bin.to_path_buf(),
+        program: bins.view.to_path_buf(),
         args: vec![
             side.scratch_file.into_os_string(),
             OsString::from("--nvim-bin"),
-            nvim_bin.as_os_str().to_os_string(),
+            bins.nvim.as_os_str().to_os_string(),
         ],
         env: side.env,
         cwd: Some(side.cwd),
@@ -343,7 +364,6 @@ fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
     }
 }
 
-/// Builds the paired view/nvim spawn specs for one cell.
 /// Buffer content the first-paint boundary waits for.
 ///
 /// Both sides open the same scratch path, so this is the one event both
@@ -393,17 +413,27 @@ fn plant_first_paint_marker(spec: &SpawnSpec) -> Result<()> {
     Ok(())
 }
 
-fn paired_specs(
-    world: &CellWorld,
-    fixture: &str,
-    view_bin: &Path,
-    nvim_bin: &Path,
-) -> Result<(SpawnSpec, SpawnSpec)> {
+/// One cell's two spawn specs, named rather than positional.
+///
+/// A tuple lets a caller destructure it in the wrong order, which builds a
+/// row that runs both binaries correctly, refuses nothing, produces
+/// entirely plausible numbers, and reports the comparison inverted --
+/// view's result under nvim's name and back again. Named fields make that
+/// binding say what it is doing.
+struct PairedSpecs {
+    view: SpawnSpec,
+    nvim: SpawnSpec,
+}
+
+/// Builds one cell's paired view/nvim spawn specs against its hermetic
+/// world.
+fn paired_specs(world: &CellWorld, fixture: &str, bins: &Bins) -> Result<PairedSpecs> {
     let view_side = world.side(fixture, "view")?;
     let nvim_side = world.side(fixture, "nvim")?;
-    let view_spec = view_spec_from(view_side, view_bin, nvim_bin);
-    let nvim_spec = nvim_spec_from(nvim_side, nvim_bin);
-    Ok((view_spec, nvim_spec))
+    Ok(PairedSpecs {
+        view: view_spec_from(view_side, bins.view_bins()),
+        nvim: nvim_spec_from(nvim_side, &bins.nvim),
+    })
 }
 
 /// Measures the host's ambient pairing noise before any cell is recorded
@@ -497,6 +527,41 @@ struct Bins {
     #[cfg(unix)]
     taps_view: PathBuf,
     nvim: PathBuf,
+}
+
+/// The two binaries one view-side spawn names: the editor under
+/// measurement, and the engine it is told to spawn.
+///
+/// Both are paths, so passing them as adjacent positional arguments lets a
+/// caller transpose them into a spec that spawns bare nvim as the editor
+/// and hands it `--nvim-bin <view>` -- which nvim treats as more files to
+/// open, so the pair still measures, still settles, and reports nvim
+/// against nvim as a view result near 1.0. Naming them at the point they
+/// are chosen removes the order from the problem.
+#[derive(Clone, Copy)]
+struct ViewBins<'a> {
+    view: &'a Path,
+    nvim: &'a Path,
+}
+
+impl Bins {
+    /// The measured editor and its engine.
+    fn view_bins(&self) -> ViewBins<'_> {
+        ViewBins {
+            view: &self.view,
+            nvim: &self.nvim,
+        }
+    }
+
+    /// The bench-taps build of the editor and its engine, for the rows
+    /// that measure an internal boundary rather than the terminal.
+    #[cfg(unix)]
+    fn taps_bins(&self) -> ViewBins<'_> {
+        ViewBins {
+            view: &self.taps_view,
+            nvim: &self.nvim,
+        }
+    }
 }
 
 /// Confirms the per-side fixture config copies still match the committed
@@ -660,29 +725,10 @@ fn main() -> Result<()> {
     // going to fail the provenance rule must say so up front, not after
     // half an hour of measurement
     let path = baseline_path(&cli.class);
-    let bootstrapping = cli.bootstrap && !path.exists();
-    let recording = cli.record || bootstrapping;
+    require_gatable(cli.gate, &cli.class, &path)?;
+    let recording = cli.record;
     let mut masked_regressions = 0usize;
-    let gating = cli.gate && !bootstrapping;
-    if cli.bootstrap {
-        if bootstrapping {
-            println!(
-                "--bootstrap: no baseline at {}; this run records one instead of gating",
-                path.display()
-            );
-        } else {
-            println!(
-                "--bootstrap: baseline {} already exists; gating normally",
-                path.display()
-            );
-        }
-    } else if gating && !path.exists() {
-        bail!(
-            "gating requires a recorded baseline at {}; run --record for this class (or pass \
-             --bootstrap in CI) before gating",
-            path.display()
-        );
-    }
+    let gating = cli.gate;
 
     let under_gha = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
     let mut skipped: Vec<(String, String)> = Vec::new();
@@ -1113,11 +1159,17 @@ mod tests {
     /// A pair of specs built the way a cell builds them, against binary
     /// paths that are never spawned: what the arguments and environment
     /// say is the whole subject here.
-    fn paired_specs_for_test() -> (CellWorld, SpawnSpec, SpawnSpec) {
+    fn paired_specs_for_test() -> (CellWorld, PairedSpecs) {
         let world = CellWorld::create("minimal").unwrap();
-        let bin = Path::new("/nonexistent/never-spawned");
-        let (view, nvim) = paired_specs(&world, "minimal", bin, bin).unwrap();
-        (world, view, nvim)
+        let bin = PathBuf::from("/nonexistent/never-spawned");
+        let bins = Bins {
+            view: bin.clone(),
+            #[cfg(unix)]
+            taps_view: bin.clone(),
+            nvim: bin,
+        };
+        let pair = paired_specs(&world, "minimal", &bins).unwrap();
+        (world, pair)
     }
 
     #[test]
@@ -1126,8 +1178,8 @@ mod tests {
         // first argument stopped being the opened file, the marker would
         // land somewhere the editor never shows and every first_paint
         // sample would time out instead of measuring
-        let (_world, view, nvim) = paired_specs_for_test();
-        for spec in [&view, &nvim] {
+        let (_world, pair) = paired_specs_for_test();
+        for spec in [&pair.view, &pair.nvim] {
             let first = spec.args.first().map(PathBuf::from);
             assert_eq!(
                 first.as_ref().and_then(|p| p.file_name()),
@@ -1140,16 +1192,16 @@ mod tests {
 
     #[test]
     fn planting_the_marker_writes_it_as_the_buffers_first_line() {
-        let (_world, view, _nvim) = paired_specs_for_test();
-        plant_first_paint_marker(&view).unwrap();
-        let planted = std::fs::read_to_string(PathBuf::from(&view.args[0])).unwrap();
+        let (_world, pair) = paired_specs_for_test();
+        plant_first_paint_marker(&pair.view).unwrap();
+        let planted = std::fs::read_to_string(PathBuf::from(&pair.view.args[0])).unwrap();
         assert_eq!(planted.lines().next(), Some(FIRST_PAINT_MARKER));
     }
 
     #[test]
     fn neither_side_of_a_pair_is_stripped_of_the_fixture_config() {
-        let (_world, view, nvim) = paired_specs_for_test();
-        for spec in [&view, &nvim] {
+        let (_world, pair) = paired_specs_for_test();
+        for spec in [&pair.view, &pair.nvim] {
             for arg in &spec.args {
                 let arg = arg.to_string_lossy().to_string();
                 assert!(
@@ -1166,9 +1218,9 @@ mod tests {
 
     #[test]
     fn each_side_is_pointed_at_its_own_copy_of_the_fixture_config() {
-        let (_world, view, nvim) = paired_specs_for_test();
+        let (_world, pair) = paired_specs_for_test();
         let mut homes = vec![];
-        for spec in [&view, &nvim] {
+        for spec in [&pair.view, &pair.nvim] {
             let home = spec
                 .env
                 .iter()
@@ -1202,6 +1254,28 @@ mod tests {
             );
         }
         assert!(known_scenarios().contains(&"echo_path"));
+    }
+
+    #[test]
+    fn a_gate_with_no_baseline_refuses_instead_of_reporting_a_pass() {
+        // the failure this forbids is silent by construction: with no
+        // baseline every comparison is skipped, the run exits 0, and a CI
+        // log cannot tell that from a gate that compared every cell
+        let dir = scratch_root().join(format!("gatable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let missing = dir.join("gh-linux.toml");
+        let refusal = require_gatable(true, "gh-linux", &missing)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            refusal.contains("gh-linux") && refusal.contains("--record"),
+            "the refusal must name the class and how to arm it, got: {refusal}"
+        );
+        // a run that is not gating has nothing to compare and never asks
+        require_gatable(false, "gh-linux", &missing).unwrap();
+        std::fs::write(&missing, "schema = 1\n").unwrap();
+        require_gatable(true, "gh-linux", &missing).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

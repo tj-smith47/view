@@ -11,7 +11,7 @@ use crate::pairing::{paired_summary, PairedSummary};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
 /// Characters typed per line before the driver opens a fresh line:
@@ -40,7 +40,10 @@ impl SideState {
     /// editors and any chrome/gutter layout).
     pub(crate) fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
         let mut session = BenchSession::spawn(spec)?;
-        if !session.settle(Duration::from_millis(500), settle_deadline) {
+        if !session.settle(SettleBound {
+            quiet: Duration::from_millis(500),
+            deadline: settle_deadline,
+        }) {
             return Err(BenchError::Desync {
                 context: format!(
                     "startup never went quiet within {settle_deadline:?}; screen:\n{}",
@@ -53,7 +56,10 @@ impl SideState {
         // lazy-loading config (completion engines, noice warning toasts
         // that float over the text area); a second, stricter settle here
         // absorbs that churn so no toast can occlude the sampled cells
-        if !session.settle(Duration::from_secs(2), settle_deadline) {
+        if !session.settle(SettleBound {
+            quiet: Duration::from_secs(2),
+            deadline: settle_deadline,
+        }) {
             return Err(BenchError::Desync {
                 context: format!(
                     "insert-mode entry never went quiet within {settle_deadline:?}; screen:\n{}",

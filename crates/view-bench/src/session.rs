@@ -34,6 +34,21 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
 }
 
+/// The two bounds a quiescence wait needs.
+///
+/// Both are durations, so as adjacent positional arguments they transpose
+/// silently: a 30-second quiet span inside a 2-second deadline refuses
+/// every startup, and a 2-second deadline read as the quiet span accepts a
+/// screen that never settled. Named fields make the pair say which is
+/// which at the call site.
+#[derive(Debug, Clone, Copy)]
+pub struct SettleBound {
+    /// How long the screen must hold still to count as settled.
+    pub quiet: Duration,
+    /// How long to wait for that to happen before giving up.
+    pub deadline: Duration,
+}
+
 /// A spawned editor under measurement.
 pub struct BenchSession {
     pty: PtySession,
@@ -118,12 +133,14 @@ impl BenchSession {
         self.pty.send(bytes).map_err(Into::into)
     }
 
-    /// Blocks until the screen content has stayed unchanged for `quiet`
-    /// (checked by whole-screen cell hash), returning `false` if that
-    /// never happens within `deadline`. The settle gate before any
-    /// sampling starts: startup traffic (plugin manager output, theme
-    /// paints) must never be mistaken for a response to a sample input.
-    pub fn settle(&mut self, quiet: Duration, deadline: Duration) -> bool {
+    /// Blocks until the screen content has stayed unchanged for
+    /// `bound.quiet` (checked by whole-screen cell hash), returning `false`
+    /// if that never happens within `bound.deadline`. The settle gate
+    /// before any sampling starts: startup traffic (plugin manager output,
+    /// theme paints) must never be mistaken for a response to a sample
+    /// input.
+    pub fn settle(&mut self, bound: SettleBound) -> bool {
+        let SettleBound { quiet, deadline } = bound;
         let overall = Instant::now() + deadline;
         let mut last_hash = self.pty.with_screen(boundaries::screen_hash);
         let mut quiet_since = Instant::now();

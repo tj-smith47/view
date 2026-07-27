@@ -14,13 +14,14 @@ ratio_p50 = 1.3436376694300443
 ratio_p99 = 1.1942595941636012
 view_p99_ms = 8.290166999999999
 
-[first_paint.heavy]
-cold_ms = 8.60825
-ratio_vs_nvim = 0.03656594650877671
-
-[first_paint.minimal]
-cold_ms = 9.094166000000001
-ratio_vs_nvim = 0.04877169855843488
+# This class records no first_paint cell. It was last recorded when the row
+# emitted one cold_ms plus a ratio taken across two unlike events; both names
+# were withdrawn when the row split into shell_visible_ms (view's own shell,
+# unpaired) and marker_cold_ms with marker_ratio_p50/p99 (the opened file, and
+# the only boundary both sides reach). Neither withdrawn number is either of
+# those quantities, so carrying them forward under the new names would gate
+# this class against a bar no run here ever measured. Absent, the row refuses
+# for want of a recorded cell, which is the true state.
 
 [flood.minimal]
 cadence_p99_ms = 12.80475

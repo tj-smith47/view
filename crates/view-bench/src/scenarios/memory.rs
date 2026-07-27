@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::sampling::Distribution;
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
 /// Buffers the standard workload opens.
@@ -182,7 +182,10 @@ pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, Bench
         });
     };
     let mut session = BenchSession::spawn(view)?;
-    if !session.settle(Duration::from_secs(2), Duration::from_secs(60)) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_secs(2),
+        deadline: Duration::from_secs(60),
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "startup never went quiet; screen:\n{}",
@@ -204,7 +207,10 @@ pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, Bench
         session.send(b"gg")?;
         std::thread::sleep(Duration::from_millis(150));
     }
-    if !session.settle(Duration::from_secs(1), Duration::from_secs(30)) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_secs(1),
+        deadline: Duration::from_secs(30),
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "workload never went quiet; screen:\n{}",

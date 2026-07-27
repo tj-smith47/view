@@ -15,7 +15,7 @@ use std::time::Duration;
 
 use view_bench::boundaries::screen_holds;
 use view_bench::remote_ui::RemoteUiServer;
-use view_bench::session::{BenchSession, SpawnSpec};
+use view_bench::session::{BenchSession, SettleBound, SpawnSpec};
 
 /// Resolves the engine the rest of the harness measures, skipping rather
 /// than failing when it is absent: this is a mechanism proof, not a
@@ -62,7 +62,10 @@ fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
     let server = RemoteUiServer::start(&bare, dir.join("ui.sock")).expect("headless server");
     let mut client = BenchSession::spawn(&server.client_spec(&bare)).expect("remote ui client");
     assert!(
-        client.settle(Duration::from_millis(500), Duration::from_secs(30)),
+        client.settle(SettleBound {
+            quiet: Duration::from_millis(500),
+            deadline: Duration::from_secs(30),
+        }),
         "the client never went quiet; screen:\n{}",
         client.screen_text()
     );

@@ -37,7 +37,6 @@ fn measure_cell(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
-    let view_bin = bins.view.as_path();
     let nvim_bin = bins.nvim.as_path();
     let world = CellWorld::create(fixture)?;
     match scenario {
@@ -98,8 +97,8 @@ fn measure_cell(
             Ok(metrics)
         }
         "echo" => {
-            let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
-            let outcome = echo::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
+            let pair = paired_specs(&world, fixture, bins)?;
+            let outcome = echo::run(&pair.view, &pair.nvim, protocol, settle_deadline(fixture))
                 .with_context(|| format!("echo/{fixture} run failed"))?;
             for summary in &outcome.trials {
                 println!(
@@ -142,8 +141,8 @@ fn measure_cell(
             Ok(metrics)
         }
         "scroll" => {
-            let (mut view_spec, mut nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
-            for spec in [&mut view_spec, &mut nvim_spec] {
+            let mut pair = paired_specs(&world, fixture, bins)?;
+            for spec in [&mut pair.view, &mut pair.nvim] {
                 let file = spec
                     .args
                     .first()
@@ -152,7 +151,7 @@ fn measure_cell(
                 std::fs::write(&file, scroll::fixture_content())
                     .with_context(|| format!("writing scroll fixture {}", file.display()))?;
             }
-            let outcome = scroll::run(&view_spec, &nvim_spec, protocol, settle_deadline(fixture))
+            let outcome = scroll::run(&pair.view, &pair.nvim, protocol, settle_deadline(fixture))
                 .with_context(|| format!("scroll/{fixture} run failed"))?;
             for summary in &outcome.trials {
                 println!(
@@ -186,12 +185,12 @@ fn measure_cell(
             Ok(metrics)
         }
         "first_paint" => {
-            let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
-            plant_first_paint_marker(&view_spec)?;
-            plant_first_paint_marker(&nvim_spec)?;
+            let pair = paired_specs(&world, fixture, bins)?;
+            plant_first_paint_marker(&pair.view)?;
+            plant_first_paint_marker(&pair.nvim)?;
             let outcome = first_paint::run(
-                &view_spec,
-                &nvim_spec,
+                &pair.view,
+                &pair.nvim,
                 protocol,
                 view_surface::SHELL_PLACEHOLDER,
                 FIRST_PAINT_MARKER,
@@ -256,7 +255,7 @@ fn measure_cell(
                 std::fs::write(side.cwd.join(name), memory::workload_content(index + 1))
                     .with_context(|| format!("writing workload buffer {name}"))?;
             }
-            let view_spec = view_spec_from(side, view_bin, nvim_bin);
+            let view_spec = view_spec_from(side, bins.view_bins());
             let outcome = memory::run(&view_spec, protocol)
                 .with_context(|| format!("memory/{fixture} run failed"))?;
             println!(
@@ -284,10 +283,10 @@ fn measure_cell(
             Ok(metrics)
         }
         "flood" => {
-            let (view_spec, nvim_spec) = paired_specs(&world, fixture, view_bin, nvim_bin)?;
+            let pair = paired_specs(&world, fixture, bins)?;
             let outcome = flood::run(&flood::RunSpec {
-                view: &view_spec,
-                nvim: &nvim_spec,
+                view: &pair.view,
+                nvim: &pair.nvim,
                 plan: flood::TrialPlan {
                     trials: protocol.trials,
                     min_gap_samples: protocol.samples,

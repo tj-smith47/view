@@ -20,7 +20,7 @@ use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side}
 use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::echo::{label, SideState};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec, GRID_COLS, GRID_ROWS};
+use crate::session::{BenchSession, SettleBound, SpawnSpec, GRID_COLS, GRID_ROWS};
 use crate::BenchError;
 
 /// One parsed tap record.
@@ -245,7 +245,10 @@ fn prepare(
     settle_deadline: Duration,
 ) -> Result<BenchSession, BenchError> {
     let mut session = BenchSession::spawn(spec)?;
-    if !session.settle(Duration::from_secs(2), settle_deadline) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_secs(2),
+        deadline: settle_deadline,
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "startup never went quiet; screen:\n{}",
@@ -254,7 +257,10 @@ fn prepare(
         });
     }
     session.send(b"i")?;
-    if !session.settle(Duration::from_secs(2), settle_deadline) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_secs(2),
+        deadline: settle_deadline,
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "insert-mode entry never went quiet; screen:\n{}",
@@ -911,7 +917,10 @@ pub fn run_pty_floor(
         cwd: Some(cwd.to_path_buf()),
     };
     let mut session = BenchSession::spawn(&spec)?;
-    if !session.settle(Duration::from_millis(200), Duration::from_secs(10)) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_millis(200),
+        deadline: Duration::from_secs(10),
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "pty floor control never went quiet; screen:\n{}",

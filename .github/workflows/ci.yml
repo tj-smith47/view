@@ -187,12 +187,14 @@ jobs:
       - name: Run compat harness
         run: task compat
 
-  # Shared-runner bench legs: every row gates its view/nvim median ratio
-  # and its view-side absolute p99 against the class baseline; tail
-  # statistics are recorded but not gated because gh-* runners are not
-  # controlled classes (spec section 3.1). The null-pair calibration
-  # inside --gate refuses loudly if ambient runner noise exceeds the
-  # measured floor rather than producing an untrustworthy verdict.
+  # Shared-runner bench legs. These record rather than gate until a
+  # reviewed gh-* baseline is committed; once it is, every row gates its
+  # view/nvim median ratio and its view-side absolute p99 against that
+  # baseline, while tail statistics stay recorded but ungated because gh-*
+  # runners are not controlled classes (spec section 3.1). The null-pair
+  # calibration refuses a record or a gate alike if ambient runner noise
+  # exceeds the measured floor, rather than writing or comparing numbers
+  # taken on a noisy host.
   bench:
     strategy:
       fail-fast: false
@@ -254,13 +256,15 @@ jobs:
           ENGINE_PIN=$(cat .engine-pin)
           nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
-      # --bootstrap arms a class whose baseline is not committed yet: the
-      # run records instead of gating, and the TOML is uploaded below for
-      # review. Once the gh-* baselines land in the repo, --bootstrap and
-      # the upload step come out in that same commit, and from then on a
-      # missing baseline is a loud provenance failure
-      - name: Run gated bench matrix (${{ matrix.class }})
-        run: task bench -- --all --class ${{ matrix.class }} --gate --bootstrap
+      # No gh-* baseline is committed, so there is nothing on this runner
+      # class to gate against and this leg records one instead: the TOML is
+      # uploaded below for review. It says --record rather than --gate
+      # because a gate with no baseline compares nothing, and a leg that
+      # reports success having compared nothing is worse than one that
+      # plainly records. This becomes --gate in the same commit that lands
+      # the reviewed baselines, and the upload step comes out with it
+      - name: Record bench matrix baseline (${{ matrix.class }})
+        run: task bench -- --all --class ${{ matrix.class }} --record
 
       - name: Upload recorded baseline
         uses: actions/upload-artifact@v4

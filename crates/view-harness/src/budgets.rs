@@ -979,6 +979,46 @@ max = 150.0
         );
     }
 
+    /// The metric a dead bound names can be entirely real and produced on
+    /// every run -- by a different row. Matching the name alone would read
+    /// that as reached, and a bound retired by moving it onto a metric its
+    /// own scenario never measures takes exactly that shape.
+    #[test]
+    fn a_budget_whose_metric_only_another_scenario_produces_is_reported() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "output_path"
+metric = "pss_mb"
+max = 150.0
+"#,
+        );
+        let measured = vec![
+            (
+                "output_path".to_string(),
+                "minimal".to_string(),
+                metrics(&[("p99_ms", 0.5)]),
+            ),
+            (
+                "memory".to_string(),
+                "minimal".to_string(),
+                metrics(&[("pss_mb", 3.4)]),
+            ),
+        ];
+        let unreached = unreached_budgets(&file, "dev-linux", &measured);
+        assert_eq!(
+            unreached
+                .iter()
+                .map(|budget| (budget.scenario.as_str(), budget.metric.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("output_path", "pss_mb")],
+            "the metric is produced this run, by another scenario, so the bound still checks \
+             nothing"
+        );
+    }
+
     /// A row a platform does not run leaves its budgets unmatched for a
     /// reason that is not a dead bound, and the coverage question it raises
     /// is answered by the cell-level check rather than here.
@@ -1036,5 +1076,57 @@ classes = ["dev-macos"]
                 "{shortfall:?} names no budget"
             );
         }
+    }
+
+    /// The shipped budget table against every shipped baseline, which is
+    /// what makes [`unreached_budgets`] more than a unit-tested function: a
+    /// bound moved onto a metric its own scenario never produces is dead,
+    /// and nothing else in the tree can see it. The gate that would catch it
+    /// needs a full matrix run; a recorded baseline is the same
+    /// scenario-to-metric map that run would produce, already committed.
+    ///
+    /// This reads what each class last recorded, so a row that renames a
+    /// metric without the class being re-recorded shows up here as a dead
+    /// bound on that class. That is the same staleness the gate's own
+    /// coverage walk reports, and the file is the thing to correct.
+    #[test]
+    fn every_shipped_budget_is_reached_by_the_baselines_that_recorded_its_scenario() {
+        let root = crate::fixture::workspace_root();
+        let bench = root.join("crates").join("view-bench");
+        let file = load(&bench.join("budgets.toml")).expect("the shipped budgets.toml must load");
+        let dir = bench.join("baselines");
+        let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+            .expect("the baselines directory must exist")
+            .map(|entry| entry.expect("readable directory entry").path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        paths.sort();
+        assert!(
+            !paths.is_empty(),
+            "no baseline under {} would make this assert nothing",
+            dir.display()
+        );
+        let mut dead = Vec::new();
+        for path in &paths {
+            let recorded = crate::baselines::load(path).expect("every shipped baseline must load");
+            let measured: Vec<crate::baselines::MeasuredCell> = recorded
+                .cells
+                .iter()
+                .flat_map(|(scenario, fixtures)| {
+                    fixtures.iter().map(move |(fixture, metrics)| {
+                        (scenario.clone(), fixture.clone(), metrics.clone())
+                    })
+                })
+                .collect();
+            for budget in unreached_budgets(&file, &recorded.machine_class, &measured) {
+                dead.push(format!(
+                    "{}: [{}] {} bounds a metric that scenario did not record",
+                    path.display(),
+                    budget.scenario,
+                    budget.metric
+                ));
+            }
+        }
+        assert!(dead.is_empty(), "dead spec bounds:\n{}", dead.join("\n"));
     }
 }

@@ -114,6 +114,29 @@ pub fn screen_holds(screen: &vt100::Screen, needle: &str) -> bool {
     (0..rows).any(|row| row_text(screen, row, cols).contains(needle))
 }
 
+/// The whole screen as text, one line per row, rendered by [`row_text`].
+///
+/// The row index and the column count are both `u16` and both come from
+/// `screen.size()`, so a caller assembling this itself has two adjacent
+/// same-typed arguments to get wrong: transposed, every row reads past the
+/// bottom of the screen and comes back empty, and a caller searching the
+/// result finds nothing on a screen full of text. Assembled once here
+/// instead.
+///
+/// Whole-screen rather than short-circuiting, so a caller polling for one
+/// needle should use [`screen_holds`] instead: this one is for the readers
+/// that need every row.
+#[must_use]
+pub fn screen_lines(screen: &vt100::Screen) -> String {
+    let (rows, cols) = screen.size();
+    let mut text = String::new();
+    for row in 0..rows {
+        text.push_str(&row_text(screen, row, cols));
+        text.push('\n');
+    }
+    text
+}
+
 /// The first `len` cells of `row` joined into a string, one character per
 /// column: cell by cell, so a wide glyph contributes its own contents once
 /// rather than a byte-split pair, and a cell with no contents contributes

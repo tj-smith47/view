@@ -125,7 +125,7 @@ fn taps_side(
     let cwd = side.cwd.clone();
     let tap_path = cwd.join("tap.fifo");
     let pipe = taps::TapPipe::create(&tap_path)?;
-    let spec = shim_taps_spec(view_spec_from(side, &bins.taps_view, &bins.nvim), &tap_path);
+    let spec = shim_taps_spec(view_spec_from(side, bins.taps_bins()), &tap_path);
     Ok((pipe, spec, cwd))
 }
 

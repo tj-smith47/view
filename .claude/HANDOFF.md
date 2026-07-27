@@ -87,7 +87,7 @@ the same turn or they drift.
 The user decided 2026-07-26 that the pre-P4 push cuts no release: its only
 purpose is the two items in `.claude/pending-first-push.md` (the CI
 status-badge slug, and GHA workflow verification on real runners including
-the bench-baseline `--bootstrap` flow). Neither needs anodizer, and spec §16
+the bench-baseline recording flow). Neither needs anodizer, and spec §16
 already fixes anodizer's arrival at P6. What P6 inherits: the standard is
 match-or-exceed any publisher comparative tooling offers; the crates.io
 closure for the `view` binary is view-core, view-surface, view-engine,

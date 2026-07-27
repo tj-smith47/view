@@ -13,7 +13,7 @@
 use std::time::{Duration, Instant};
 
 use crate::sampling::{median_of_trials, Distribution};
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, SettleBound, SpawnSpec};
 use crate::BenchError;
 
 /// The `:terminal` line that starts one flood's producer.
@@ -70,10 +70,22 @@ pub struct FloodSide {
 /// gap, so a real change in view's coalescing can still move it.
 const CADENCE_RESOLUTION_FACTOR: f64 = 2.0;
 
+/// A cadence percentile and the probe period it has to clear, both in
+/// milliseconds.
+///
+/// Named fields rather than two adjacent `f64` parameters: transposed, the
+/// comparison inverts, and it then refuses every side whose cadence is well
+/// resolved while accepting every side reporting pure instrument.
+#[derive(Debug, Clone, Copy)]
+struct CadenceResolution {
+    p99_ms: f64,
+    probe_period_ms: f64,
+}
+
 /// Whether a cadence percentile sits far enough above the probe loop's own
 /// period to describe view rather than the harness.
-fn cadence_is_measurable(cadence_p99_ms: f64, probe_period_ms: f64) -> bool {
-    cadence_p99_ms >= probe_period_ms * CADENCE_RESOLUTION_FACTOR
+fn cadence_is_measurable(cadence: CadenceResolution) -> bool {
+    cadence.p99_ms >= cadence.probe_period_ms * CADENCE_RESOLUTION_FACTOR
 }
 
 /// The idle span with no frame change that declares the producer started
@@ -90,15 +102,7 @@ const PRODUCER_START_DEADLINE: Duration = Duration::from_secs(15);
 /// only widens the probe loop -- and the probe period is the floor on every
 /// cadence gap this loop can observe.
 fn drained_lines(session: &mut BenchSession) -> Option<u64> {
-    session.with_screen(|screen| {
-        let (rows, cols) = screen.size();
-        let mut text = String::new();
-        for row in 0..rows {
-            text.push_str(&crate::boundaries::row_text(screen, row, cols));
-            text.push('\n');
-        }
-        max_screen_line(&text)
-    })
+    session.with_screen(|screen| max_screen_line(&crate::boundaries::screen_lines(screen)))
 }
 
 /// Spawns `spec`, opens `:terminal` on the pinned producer, and samples
@@ -115,7 +119,10 @@ fn drained_lines(session: &mut BenchSession) -> Option<u64> {
 fn flood_once(spec: &SpawnSpec, run_spec: &RunSpec<'_>) -> Result<FloodSide, BenchError> {
     let window = run_spec.window;
     let mut session = BenchSession::spawn(spec)?;
-    if !session.settle(Duration::from_secs(2), run_spec.settle_deadline) {
+    if !session.settle(SettleBound {
+        quiet: Duration::from_secs(2),
+        deadline: run_spec.settle_deadline,
+    }) {
         return Err(BenchError::Desync {
             context: format!(
                 "startup never went quiet; screen:\n{}",
@@ -275,6 +282,19 @@ pub struct TrialPlan {
     pub min_gap_samples: usize,
 }
 
+/// One trial's two measured sides.
+///
+/// Named fields rather than a `(FloodSide, FloodSide)` tuple: the two are
+/// the same type, so producing or destructuring the pair in the wrong order
+/// compiles, keeps every guard satisfied, and inverts every quotient the
+/// trial forms -- view's drain rate over nvim's becomes nvim's over view's,
+/// with both numbers still entirely plausible.
+#[derive(Debug)]
+struct TrialPair {
+    view: FloodSide,
+    nvim: FloodSide,
+}
+
 /// Everything one flood run measures against: the two sides, how many
 /// trials to take, and the two durations that bound each one.
 ///
@@ -337,18 +357,18 @@ fn flood_pair<F>(
     run_spec: &RunSpec<'_>,
     trial: usize,
     mut measure: F,
-) -> Result<(FloodSide, FloodSide), BenchError>
+) -> Result<TrialPair, BenchError>
 where
     F: FnMut(&SpawnSpec) -> Result<FloodSide, BenchError>,
 {
     if view_goes_first(trial) {
-        let view_side = measure(run_spec.view).map_err(|e| label("view", e))?;
-        let nvim_side = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
-        Ok((view_side, nvim_side))
+        let view = measure(run_spec.view).map_err(|e| label("view", e))?;
+        let nvim = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
+        Ok(TrialPair { view, nvim })
     } else {
-        let nvim_side = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
-        let view_side = measure(run_spec.view).map_err(|e| label("view", e))?;
-        Ok((view_side, nvim_side))
+        let nvim = measure(run_spec.nvim).map_err(|e| label("nvim", e))?;
+        let view = measure(run_spec.view).map_err(|e| label("view", e))?;
+        Ok(TrialPair { view, nvim })
     }
 }
 
@@ -371,12 +391,11 @@ where
 /// plan asks for no trials.
 fn aggregate<F>(plan: TrialPlan, mut pair: F) -> Result<FloodOutcome, BenchError>
 where
-    F: FnMut(usize) -> Result<(FloodSide, FloodSide), BenchError>,
+    F: FnMut(usize) -> Result<TrialPair, BenchError>,
 {
     let mut paired = Vec::with_capacity(plan.trials);
     for trial in 0..plan.trials {
-        let (view_side, nvim_side) = pair(trial)?;
-        paired.push(paired_trial(view_side, nvim_side, plan.min_gap_samples)?);
+        paired.push(paired_trial(pair(trial)?, plan.min_gap_samples)?);
     }
 
     let across = |pick: fn(&FloodTrial) -> f64| {
@@ -414,11 +433,8 @@ where
 /// bare unusable denominator. The denominator check still runs, because a
 /// probe period of zero is the one arrangement that clears the floor with a
 /// zero percentile.
-fn paired_trial(
-    view: FloodSide,
-    nvim: FloodSide,
-    min_gap_samples: usize,
-) -> Result<FloodTrial, BenchError> {
+fn paired_trial(pair: TrialPair, min_gap_samples: usize) -> Result<FloodTrial, BenchError> {
+    let TrialPair { view, nvim } = pair;
     if !(view.lines_drained.is_finite() && view.lines_drained > 0.0) {
         return Err(BenchError::DegenerateBaselineSide {
             statistic: "lines_drained",
@@ -477,7 +493,10 @@ fn side_cadence(
     }
     let dist = Distribution::from_samples(&side.cadence_gaps_ms, 0)?;
     let p99_ms = dist.p99();
-    if !cadence_is_measurable(p99_ms, side.probe_period_ms) {
+    if !cadence_is_measurable(CadenceResolution {
+        p99_ms,
+        probe_period_ms: side.probe_period_ms,
+    }) {
         return Err(BenchError::BelowInstrumentResolution {
             metric: names.cadence_metric,
             value: p99_ms,
@@ -537,7 +556,7 @@ mod tests {
     fn the_cadence_ratio_is_the_two_sides_percentiles_divided() {
         let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
         let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
-        let trial = paired_trial(view, nvim, 100).unwrap();
+        let trial = paired_trial(TrialPair { view, nvim }, 100).unwrap();
         assert!(
             (trial.cadence_p99_ratio - trial.view_cadence.p99_ms / trial.nvim_cadence.p99_ms).abs()
                 < 1e-12
@@ -558,9 +577,22 @@ mod tests {
         let nvim_gaps = repeated(&[1.0, 2.0, 10.0], 40);
         let coarse = |gaps: &[f64]| gaps.iter().map(|g| g * 7.5).collect::<Vec<_>>();
 
-        let fine = paired_trial(side(&view_gaps), side(&nvim_gaps), 100).unwrap();
-        let coarser =
-            paired_trial(side(&coarse(&view_gaps)), side(&coarse(&nvim_gaps)), 100).unwrap();
+        let fine = paired_trial(
+            TrialPair {
+                view: side(&view_gaps),
+                nvim: side(&nvim_gaps),
+            },
+            100,
+        )
+        .unwrap();
+        let coarser = paired_trial(
+            TrialPair {
+                view: side(&coarse(&view_gaps)),
+                nvim: side(&coarse(&nvim_gaps)),
+            },
+            100,
+        )
+        .unwrap();
 
         assert!(
             (coarser.view_cadence.p99_ms - fine.view_cadence.p99_ms * 7.5).abs() < 1e-9,
@@ -574,7 +606,7 @@ mod tests {
         let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
         let nvim = side(&[1.0, 2.0]);
         assert!(matches!(
-            paired_trial(view, nvim, 100),
+            paired_trial(TrialPair { view, nvim }, 100),
             Err(BenchError::TooFewCadenceGaps {
                 side: "nvim",
                 collected: 2,
@@ -591,7 +623,7 @@ mod tests {
         let thin = side(&[1.0, 2.0]);
         let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
         assert!(matches!(
-            paired_trial(thin, nvim, 100),
+            paired_trial(TrialPair { view: thin, nvim }, 100),
             Err(BenchError::TooFewCadenceGaps { side: "view", .. })
         ));
     }
@@ -604,7 +636,7 @@ mod tests {
         let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
         let nvim = side_probing_every(&repeated(&[0.0], 120), 0.0);
         assert!(matches!(
-            paired_trial(view, nvim, 100),
+            paired_trial(TrialPair { view, nvim }, 100),
             Err(BenchError::DegenerateBaselineSide {
                 statistic: "nvim cadence_p99_ms",
                 ..
@@ -620,7 +652,7 @@ mod tests {
         // the diagnostic points at the wrong instrument
         let view = side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
         let nvim = side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
-        let refused = paired_trial(view, nvim, 100);
+        let refused = paired_trial(TrialPair { view, nvim }, 100);
         assert!(
             matches!(
                 refused,
@@ -636,9 +668,22 @@ mod tests {
 
     #[test]
     fn a_floor_bound_side_is_refused_in_the_trial_that_measured_it() {
-        assert!(paired_trial(clean_side(), clean_side(), 100).is_ok());
+        assert!(paired_trial(
+            TrialPair {
+                view: clean_side(),
+                nvim: clean_side(),
+            },
+            100
+        )
+        .is_ok());
         assert!(matches!(
-            paired_trial(floor_bound_side(), clean_side(), 100),
+            paired_trial(
+                TrialPair {
+                    view: floor_bound_side(),
+                    nvim: clean_side(),
+                },
+                100
+            ),
             Err(BenchError::BelowInstrumentResolution {
                 metric: "cadence_p99_ms",
                 ..
@@ -679,8 +724,11 @@ mod tests {
         side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05)
     }
 
-    fn clean_pair() -> (FloodSide, FloodSide) {
-        (clean_side(), clean_side())
+    fn clean_pair() -> TrialPair {
+        TrialPair {
+            view: clean_side(),
+            nvim: clean_side(),
+        }
     }
 
     /// A side whose p99 sits under its own probe period, so the trial
@@ -697,7 +745,10 @@ mod tests {
         // the refusal has to take the whole run down with it
         let mut queue = vec![
             clean_pair(),
-            (floor_bound_side(), clean_side()),
+            TrialPair {
+                view: floor_bound_side(),
+                nvim: clean_side(),
+            },
             clean_pair(),
         ]
         .into_iter();
@@ -721,7 +772,10 @@ mod tests {
         let median_p99 = median_of_trials(&[20.0, 0.6, 20.0]).unwrap();
         let median_probe = median_of_trials(&[0.05, 0.5, 0.05]).unwrap();
         assert!(
-            cadence_is_measurable(median_p99, median_probe),
+            cadence_is_measurable(CadenceResolution {
+                p99_ms: median_p99,
+                probe_period_ms: median_probe,
+            }),
             "a run-level check would have passed this run"
         );
     }
@@ -749,7 +803,10 @@ mod tests {
         let mut measured = 0_usize;
         let mut queue = vec![
             clean_pair(),
-            (floor_bound_side(), clean_side()),
+            TrialPair {
+                view: floor_bound_side(),
+                nvim: clean_side(),
+            },
             clean_pair(),
         ]
         .into_iter();
@@ -826,7 +883,7 @@ mod tests {
 
         for (trial, expected_order) in [(0, ["view", "nvim"]), (1, ["nvim", "view"])] {
             let mut measured = Vec::new();
-            let (view_side, nvim_side) = flood_pair(&run_spec, trial, |spec| {
+            let measured_pair = flood_pair(&run_spec, trial, |spec| {
                 measured.push(if spec.program == view.program {
                     "view"
                 } else {
@@ -840,7 +897,10 @@ mod tests {
                 "trial {trial} measured the sides in the wrong order"
             );
             assert_eq!(
-                (view_side.lines_drained, nvim_side.lines_drained),
+                (
+                    measured_pair.view.lines_drained,
+                    measured_pair.nvim.lines_drained,
+                ),
                 (1.0, 2.0),
                 "trial {trial} attributed a side's measurement to the other side"
             );
@@ -870,7 +930,7 @@ mod tests {
         // tells the operator the run was instrument-bound
         let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
         let nvim = side_probing_every(&repeated(&[0.0], 120), 0.05);
-        let refused = paired_trial(view, nvim, 100);
+        let refused = paired_trial(TrialPair { view, nvim }, 100);
         assert!(
             matches!(
                 refused,
@@ -893,7 +953,7 @@ mod tests {
         let view = side(&[]);
         let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
         assert!(matches!(
-            paired_trial(view, nvim, 0),
+            paired_trial(TrialPair { view, nvim }, 0),
             Err(BenchError::TooFewCadenceGaps {
                 side: "view",
                 collected: 0,
@@ -910,12 +970,24 @@ mod tests {
         // apart, which is why the trial report carries it
         let jitter_gaps = repeated(&[12.0, 12.5, 13.0, 16.5], 40);
         let stall_gaps = repeated(&[0.5, 0.5, 0.5, 16.5], 40);
-        let jitter = paired_trial(side(&jitter_gaps), side(&jitter_gaps), 100)
-            .unwrap()
-            .view_cadence;
-        let stall = paired_trial(side(&stall_gaps), side(&stall_gaps), 100)
-            .unwrap()
-            .view_cadence;
+        let jitter = paired_trial(
+            TrialPair {
+                view: side(&jitter_gaps),
+                nvim: side(&jitter_gaps),
+            },
+            100,
+        )
+        .unwrap()
+        .view_cadence;
+        let stall = paired_trial(
+            TrialPair {
+                view: side(&stall_gaps),
+                nvim: side(&stall_gaps),
+            },
+            100,
+        )
+        .unwrap()
+        .view_cadence;
 
         assert!(
             (jitter.p99_ms - stall.p99_ms).abs() < 1e-9,
@@ -946,14 +1018,26 @@ mod tests {
         // every observed gap is one probe iteration here: the number is the
         // harness's screen-hash rate, and recording it would gate every
         // later run against this machine's hashing speed
-        assert!(!cadence_is_measurable(0.40, 0.40));
-        assert!(!cadence_is_measurable(0.79, 0.40));
+        assert!(!cadence_is_measurable(CadenceResolution {
+            p99_ms: 0.40,
+            probe_period_ms: 0.40,
+        }));
+        assert!(!cadence_is_measurable(CadenceResolution {
+            p99_ms: 0.79,
+            probe_period_ms: 0.40,
+        }));
     }
 
     #[test]
     fn a_cadence_clear_of_the_probe_period_is_measurable() {
-        assert!(cadence_is_measurable(0.80, 0.40));
-        assert!(cadence_is_measurable(16.0, 0.40));
+        assert!(cadence_is_measurable(CadenceResolution {
+            p99_ms: 0.80,
+            probe_period_ms: 0.40,
+        }));
+        assert!(cadence_is_measurable(CadenceResolution {
+            p99_ms: 16.0,
+            probe_period_ms: 0.40,
+        }));
     }
 
     #[test]
