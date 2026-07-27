@@ -27,17 +27,11 @@ test-support = []
 # boundaries (src/tap.rs) for the measurement harness. Off by default:
 # without it the tap module does not exist in the compilation at all, so
 # shipping builds carry zero tap code or cost.
-bench-taps = ["dep:rustix"]
+bench-taps = []
 
 [dependencies]
 rmpv = "1.3.1"
-# Raw CLOCK_MONOTONIC reads for tap records (std's Instant is opaque and
-# cannot be compared across processes); only compiled under bench-taps.
-rustix = { version = "1", default-features = false, features = [
-    "std",
-    "time",
-    "fs",
-], optional = true }
+
 thiserror = "2.0.18"
 view-core = { version = "0.0.1", path = "../view-core" }
 
@@ -66,3 +60,20 @@ doc = false
 name = "damage_fold"
 harness = false
 required-features = ["bench-support"]
+
+# Unix-only, and not optional: the outbox's inline-write fast path asks the
+# engine pipe whether a small write can complete without blocking, which is
+# what lets the runtime loop write RPC itself instead of waking a thread to
+# do it (see handle::Outbox). `time` additionally serves the bench-taps
+# records, whose CLOCK_MONOTONIC reads must be comparable across processes
+# in a way std's opaque Instant is not.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "time",
+    "event",
+    "fs",
+    # a real pipe is the only configuration in which the outbox's inline
+    # path is live, so the ordering proof cannot be written without one
+    "pipe",
+] }

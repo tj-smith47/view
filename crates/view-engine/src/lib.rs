@@ -4,6 +4,7 @@ pub mod damage;
 pub mod env;
 pub mod handle;
 pub mod nvim_api;
+mod outbox;
 pub mod process;
 pub mod rpc;
 #[cfg(feature = "bench-taps")]

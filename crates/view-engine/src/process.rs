@@ -341,6 +341,16 @@ impl Engine {
         // fold and stage from its very first message, before start_pump is
         // ever called
         let pump = PumpShared::new();
+        // a second handle on the same pipe, so the outbox can ask whether a
+        // small write completes now without borrowing the writer it would
+        // then have to write through
+        #[cfg(unix)]
+        let handle = {
+            use std::os::fd::AsFd;
+            let pipe = stdin.as_fd().try_clone_to_owned().ok();
+            EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump), pipe)
+        };
+        #[cfg(not(unix))]
         let handle = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
         let api_info = decode_api_info(handle.request_timeout(
             "nvim_get_api_info",
