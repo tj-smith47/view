@@ -34,6 +34,13 @@ microseconds and someone pays to bring it back.
 | 1 ms | 20.56 | 41.87 | +21.3 |
 | 10 ms | 40.04 | 71.25 | +31.2 |
 
+Sampling note: these rows are 20 000 handoffs each. The bench has since
+been given a per-row wall-clock budget so it can live in `task
+bench-micro`, which leaves the three shallow rows at 20 000 and drops the
+10 ms row to 5 000. A re-run therefore reads a slightly different deep-end
+number (36.02 p50 on the next run) from a smaller tail sample, not a
+changed cost.
+
 Two things fall out.
 
 **A hop's cost is a function of idle depth, not of the channel.** The same
@@ -95,6 +102,11 @@ queue is empty (so nothing can be overtaken), write non-blocking, and push
 any unwritten remainder back for the writer thread to finish. Ordering
 then follows from lock acquisition order exactly as it followed from
 channel order before.
+
+**Outcome:** done, and it paid what this note predicted.
+`2026-07-27-collapsing-the-writer-hop.md` records the implementation, the
+ordering test that can reintroduce the bug on demand, and the measured
+42.5 -> 14.1 us.
 
 ## Reproducing
 

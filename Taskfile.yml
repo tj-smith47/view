@@ -76,6 +76,7 @@ tasks:
     cmds:
       - cargo bench -p view-core --bench grid_apply
       - cargo bench -p view-core --bench update_key
+      - cargo bench -p view-core --bench input_handoff
       - cargo bench -p view-engine --bench damage_fold --features bench-support
       - cargo bench -p view-surface --bench render_frame
 

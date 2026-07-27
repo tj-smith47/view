@@ -61,7 +61,7 @@ Reproduce with `task perf-audit`.
 | First paint, cold, LazyVim-style stack of 14 plugins (p99) | **120.5 ms** | 199.8 ms | **1.7x faster** |
 | Resident memory (PSS) | **3.4 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.12 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing (p99) | 0.95 ms | 0.80 ms | **~1.2x slower** |
+| Keystroke to cell change, steady typing (p99) | 0.90 ms | 0.81 ms | **~1.12x slower** |
 | Sustained scroll, 100k lines (p99 staleness) | 1.40 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | n/a | n/a | **~1.8 to 2.0x slower** |
 
@@ -76,7 +76,7 @@ your config finishes. That 4.1 ms figure is the same on a bare config and
 on a 14-plugin stack, because nothing in your config has run yet.
 
 Steady-state typing and scrolling are currently *slower* than bare Neovim,
-by roughly 20% and 2x. Both are sub-millisecond in absolute terms and far
+by roughly 17% and 2x. Both are sub-millisecond in absolute terms and far
 inside their budgets, so neither is felt today. But the target is to be
 faster, not merely fast enough, and we are not there.
 
@@ -90,28 +90,48 @@ the identical protocol:
 | steady typing, dev-linux | vs bare Neovim |
 |---|---|
 | Neovim's own TUI driving a headless Neovim over the UI protocol | **1.02x** |
-| view | **1.22x** |
+| view, when that was measured | **1.22x** |
 
-Speaking the protocol from another process costs about 2%. view costs
-about 22%. So roughly nine tenths of the gap is view's own code, not the
-protocol boundary, and the "permanent limitation" explanation is retracted
-along with the three before it (a thread-hop cost floor, the pty transport,
-and the measurement instrumentation itself). All four retractions are
-recorded in the design spec rather than quietly dropped.
+Speaking the protocol from another process costs about 2%. So roughly nine
+tenths of the gap was view's own code, not the protocol boundary, and the
+"permanent limitation" explanation is retracted along with the three before
+it (a thread-hop cost floor, the pty transport, and the measurement
+instrumentation itself). All four retractions are recorded in the design
+spec rather than quietly dropped.
 
-Where it goes is now measured rather than guessed. A tapped build times
-every stage of one keystroke's round trip; on the plugin-free fixture the
-chain resolves for all 3000 samples with a 0.2% residual, so the split is
-trustworthy. Of view's 805 microseconds, 463 are spent inside Neovim
-itself, 46 in the terminal and its parser, and the remaining ~300 are
-view's: about 215 to carry a keystroke from the pty into an RPC write, and
-about 84 to paint the redraw that comes back. There is no single hot spot
-to delete, which is why this is honest work rather than a quick fix.
+Then we acted on it. A tapped build times every stage of one keystroke's
+round trip, and the largest stage view actually owned turned out to be a
+handoff to a background thread whose only job was to write bytes to a pipe.
+That thread exists so a wedged Neovim stalls a background thread instead of
+the screen, but that goal needs the write to never *block*, not to always
+*defer*. So the main loop now writes the bytes itself whenever the pipe has
+confirmed it can accept them and nothing is queued ahead. Waking an idle
+core costs about 40 microseconds; skipping that wake is most of what
+follows:
+
+| | before | after |
+|---|---|---|
+| RPC handoff → bytes written | 42.5 µs | **10.5 µs** |
+| Keystroke → RPC bytes written (p99) | 154.7 µs | **117.7 µs** |
+| Steady typing vs Neovim, no plugins | 1.354x | **1.172x** |
+| Steady typing vs Neovim, 14 plugins | 1.244x | **1.184x** |
+| Tail (p99) typing ratio, 14 plugins | 1.142x | **1.010x** |
+
+What remains is measured, not guessed. Of the 644 microseconds it takes a
+keypress to become a glyph, 366 are spent inside Neovim itself, 80 in the
+operating system's terminal plumbing before view sees anything, and 36 in
+the terminal emulator drawing it. view's own share is **139**: 71 to carry
+the keystroke out and 68 to paint the answer. Half of that 71 is a single
+unavoidable-today cost: handing the keystroke from the thread that reads
+your terminal to the thread that owns the editor state, which must happen
+because view has to decide whether a key belongs to Neovim or to view's own
+UI. Nothing else on either path costs more than 21 microseconds, so there is
+no hot spot left to delete.
 
 Budgets are recorded per machine class and regression-gated, so a change
 that makes any of these worse fails the build. Every measurement is also
 checked against the design spec's own budget, not just against the last
-recorded value. Seven metrics do not meet their spec budget today; each one
+recorded value. Eight metrics do not meet their spec budget today; each one
 is listed in `crates/view-bench/budgets.toml` with the value it was
 accepted at and why, and the build fails if a new one appears, if a listed
 one gets worse, or if a listed one is quietly fixed and left on the list.

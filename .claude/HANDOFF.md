@@ -70,7 +70,8 @@ the same turn or they drift.
 | # | Task | Why it sits here |
 |---|---|---|
 | 53 | P3 exit checklist execution, evidence-cited per plan protocol | Gates the phase, and carries this file's own retirement (section 9) |
-| 26 | Close the attributed echo typing gap in view's input and paint paths | The gap is measured and localized, not guessed: ~215 us input path, ~84 us paint path, no dominant stage. Five budget shortfalls come off the ledger when it lands |
+| 26 | Close the attributed echo typing gap in view's input and paint paths | **Half done.** The writer hop is gone (`outbox.rs`: the loop writes inline when the pipe says it can and nothing is queued). `echo.minimal` ratio_p50 1.354 -> 1.172, `input_path` p99 154.7 -> 117.7. view's own share is now 139 us p50 of a 644 us round trip: 71 input, 68 paint. What remains is one architectural lever, not tuning -- see the pitch in section 5.7 |
+| 28 | Give Windows an inline-write fast path, or record why it cannot have one | `can_write_inline` is `false` off unix, so the typing win is unix-only today. The two POSIX guarantees it rests on (PIPE_BUF atomicity, POLLOUT meaning PIPE_BUF of room) do not transfer; overlapped I/O on a named pipe would give an equivalent proof. winserver can measure it |
 | 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | 18 landed, so a spec bar now exists to size the headrooms against; flood's shortfall entry names this task as its resolution |
 | 24 | Allowlist the environment at the bench/oracle spawn funnel | Must land before CI ever runs with a secret configured. Today the funnel is a denylist, into editors that execute fixture Lua and network-fetched plugins |
 | 21 | Record a quiet-host dev-macos baseline: input_path and first_paint's split metrics | The rows are runnable again; they need a quiet mbp, not more code. Until it lands, the dev-macos first_paint cell gates red on `unmeasured_metrics` |
@@ -378,6 +379,51 @@ Two process lessons:
 - **Over-hedging is its own inaccuracy.** A reviewer had to correct an
   *apologetic* framing: the load figures actually ruled contention out. State
   what the evidence supports, in both directions.
+
+**A fourth measurement lesson, added 2026-07-27.** *"It is a wake, and the
+rules mandate a wake"* was treated as *"the cost is fixed"*, and that closed
+the attribution one step early. It is wrong twice over: a hop's price is set
+by how deeply the receiving core has parked (7.5 us at 50 us idle, 36 us at
+10 ms, same primitive), and *how many hops the path takes* is a design
+variable, not a rule. Sizing the primitive directly with a microbench is what
+reopened it, and that is now `cargo bench -p view-core --bench input_handoff`,
+wired into `task bench-micro` so it cannot rot. **When a cost is attributed to
+something mandated, measure the mandated thing in isolation before accepting
+the attribution.**
+
+### 5.8 PITCH, needs the user's call: unify the input thread and the runtime loop
+
+This is the last lever on typing, and it is architectural, so it is a pitch
+rather than a task already in flight.
+
+**Where the remaining gap is.** view's own share of a keystroke round trip is
+139 us p50 (71 input, 68 paint). The largest single item is
+`key-decoded->loop-wake` at **49.1 us p50 / 91.0 p99** -- the hop from the
+thread that blocks on `crossterm::event::read()` to the runtime loop that owns
+the model. It is expensive because a human pauses between keystrokes, so the
+loop is always deeply parked when the next key lands. Nothing else on either
+path exceeds 21 us p50.
+
+**Why nvim's own remote UI does not pay it.** That client reads its pty and
+writes its socket *on one thread*, and measures 1.015 against bare nvim where
+view measures 1.172. The structural difference is the hop, not the protocol
+(that was already falsified).
+
+**The change.** Replace the blocking-read input thread with one loop that
+polls the terminal fd and the engine's stdout together. Both hard rules
+survive: the loop still never *awaits* RPC (a readiness poll is not an await),
+and only view-tui still touches the terminal. Expected: ~49 us off 139, which
+would put `echo.minimal` near 1.10 -- the spec bar -- and `input_path` near the
+restored 100 us bar.
+
+**The cost, honestly.** It rewrites the runtime loop's driver, which is the
+most load-bearing code in the project, for a win that is real but bounded. It
+is P4-scale work, not a P3 patch, and the P4 plan does not currently contain
+it.
+
+**The call the user has to make:** does this go into P4's scope, or does the
+project accept ~1.17x typing through P4 and revisit later? Both are
+defensible; the evidence does not decide it.
 
 ---
 

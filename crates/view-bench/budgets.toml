@@ -15,11 +15,17 @@ schema = 1
 # an oversight: first_paint's content boundary and dev-macos's input path
 # both sit there deliberately, and the spec rows say so.
 
+# 100, not the 232 this row carried until 2026-07-27. That 232 was the
+# then-recorded 154.749 times ABSOLUTE_HEADROOM 1.5: a bound computed from
+# the measurement it bounds, which no measurement can fail by construction.
+# 100 is the bar the spec stated before anyone measured anything, so it is a
+# promise rather than a restatement, and the gap to it is carried as a
+# shortfall the way every other unmet budget is.
 [[budget]]
 spec_row = "view input path: key event read from the terminal -> RPC bytes written"
 scenario = "input_path"
 metric = "key_to_rpc_p99_us"
-max = 232.0
+max = 100.0
 classes = ["dev-linux"]
 
 [[budget]]
@@ -99,16 +105,24 @@ scenario = "echo"
 fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-linux"
-accepted = 1.3537866848241882
-why = "view's own overhead, not the UI protocol's. Four explanations have now been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class while view costs 1.224. Attribution continues in the echo_path stage decomposition."
+accepted = 1.1719342968313597
+why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. What remains is per-hop wake cost on view's own path: collapsing the runtime-loop-to-writer-thread hop into an inline write took this from 1.3538, and the paint path's hops have not been attacked yet."
 
 [[shortfall]]
 scenario = "echo"
 fixture = "heavy"
 metric = "ratio_p50"
 class = "dev-linux"
-accepted = 1.2440907023104606
-why = "same residual as echo.minimal on this class."
+accepted = 1.1837936337116466
+why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large."
+
+[[shortfall]]
+scenario = "input_path"
+fixture = "minimal"
+metric = "key_to_rpc_p99_us"
+class = "dev-linux"
+accepted = 117.739
+why = "18% over the spec's 100us, down from 154.7 before the writer hop was collapsed into an inline write. What is left is close to the floor: the single cross-thread hop this path is architecturally required to make (input thread to runtime loop, because the model decides whether a key is view's or nvim's) costs 80.0us p99 on its own on this class, measured without the editor by the input_handoff microbench at a 10ms idle gap. So 100us leaves about 20us for the model dispatch, the msgpack encode, the poll and the write. Reaching it means removing the hop, not tuning around it."
 
 [[shortfall]]
 scenario = "flood"
@@ -140,7 +154,7 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-macos"
 accepted = 1.3436376694300443
-why = "same residual as dev-linux, which the echo_control row there attributed to view rather than to the UI protocol; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation."
+why = "same residual as dev-linux, which the echo_control row there attributed to view rather than to the UI protocol; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation. This value predates the inline-write change and so is stale in the improving direction; re-recording it is task 21's job, and until then it is a ceiling this class has already beaten."
 
 [[shortfall]]
 scenario = "echo"

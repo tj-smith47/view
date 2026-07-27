@@ -33,10 +33,16 @@
 //!
 //! The shortfall list is what makes an unmet budget representable without
 //! being ignorable. Outside budget with no entry is a new shortfall and
-//! fails; outside budget and worse than the accepted value is a widening
-//! shortfall and fails; outside budget but holding or improving passes and
-//! is reported every run. There is no fourth state, and in particular no
-//! way to be quietly outside budget.
+//! fails; outside budget and past the ceiling its accepted value earns is a
+//! widening shortfall and fails; outside budget but inside that ceiling
+//! passes and is reported every run. There is no fourth state, and in
+//! particular no way to be quietly outside budget.
+//!
+//! The ceiling is the one [`crate::baselines`] already grants the recorded
+//! bar for that metric on that class, not the accepted value itself. An
+//! accepted value is one sample of a noisy statistic; comparing the next
+//! sample to it exactly makes every listed shortfall a coin flip rather
+//! than a gate.
 
 use std::path::Path;
 
@@ -102,14 +108,14 @@ pub struct BudgetFile {
 pub enum Verdict {
     /// Inside the spec bound.
     Inside,
-    /// Outside the bound, listed as a shortfall, and no worse than the
-    /// value that shortfall was accepted at.
+    /// Outside the bound, listed as a shortfall, and inside the ceiling
+    /// that shortfall's accepted value earns.
     Held { accepted: f64, why: String },
     /// Outside the bound with no shortfall entry: a budget the project
     /// stopped meeting without recording that it had.
     New,
-    /// Outside the bound and worse than the accepted shortfall value.
-    Widened { accepted: f64 },
+    /// Outside the bound and past the ceiling the accepted value earns.
+    Widened { accepted: f64, ceiling: f64 },
 }
 
 impl Verdict {
@@ -160,11 +166,12 @@ impl std::fmt::Display for Finding {
                  {budget:.3}, and no shortfall records it. Either fix it, or add a [[shortfall]] \
                  entry to budgets.toml saying why it stands [{spec_row}]"
             ),
-            Verdict::Widened { accepted } => write!(
+            Verdict::Widened { accepted, ceiling } => write!(
                 f,
                 "BUDGET FAIL [{scenario}.{fixture}] {metric}: {measured:.3} against spec \
-                 {budget:.3} is worse than the accepted shortfall {accepted:.3}; a shortfall may \
-                 hold or improve, never widen [{spec_row}]"
+                 {budget:.3} is past {ceiling:.3}, the ceiling the accepted shortfall \
+                 {accepted:.3} earns under this class's gate headroom; a shortfall may hold or \
+                 improve, never widen [{spec_row}]"
             ),
         }
     }
@@ -282,6 +289,25 @@ fn find_shortfall<'a>(
     })
 }
 
+/// The worst value a shortfall accepted at `accepted` may still measure.
+///
+/// An accepted value is one sample of a noisy statistic, not a constant, so
+/// comparing the next sample to it exactly makes any listed shortfall a
+/// coin flip: the first re-run after this ledger was written measured
+/// `echo.minimal` ratio_p50 at 1.176 against an accepted 1.172 and failed
+/// the gate on a 0.35% difference. The ceiling is therefore the same one
+/// [`crate::baselines`] grants the recorded bar for this metric on this
+/// class, so the two gates agree about what counts as a regression instead
+/// of one of them firing on measurement noise the other was built to
+/// absorb. A metric the class does not gate at all (shared-class tail
+/// statistics) gets no ceiling here either, for the same reason it gets
+/// none there: on a shared host that number is not a property of the code.
+fn shortfall_ceiling(metric: &str, class: &str, accepted: f64) -> f64 {
+    let controlled = crate::baselines::is_controlled_class(class);
+    crate::baselines::gate_headroom(metric, controlled)
+        .map_or(f64::INFINITY, |headroom| headroom.bar(accepted))
+}
+
 /// Checks one cell's measured metrics against the budgets that cover
 /// `class`, in deterministic (metric-name) order.
 ///
@@ -305,13 +331,20 @@ pub fn check_cell(
         } else {
             match find_shortfall(file, scenario, fixture, metric, class) {
                 None => Verdict::New,
-                Some(shortfall) if measured > shortfall.accepted => Verdict::Widened {
-                    accepted: shortfall.accepted,
-                },
-                Some(shortfall) => Verdict::Held {
-                    accepted: shortfall.accepted,
-                    why: shortfall.why.clone(),
-                },
+                Some(shortfall) => {
+                    let ceiling = shortfall_ceiling(metric, class, shortfall.accepted);
+                    if measured > ceiling {
+                        Verdict::Widened {
+                            accepted: shortfall.accepted,
+                            ceiling,
+                        }
+                    } else {
+                        Verdict::Held {
+                            accepted: shortfall.accepted,
+                            why: shortfall.why.clone(),
+                        }
+                    }
+                }
             }
         };
         findings.push(Finding {
@@ -447,11 +480,20 @@ why = \"because\"
     }
 
     /// A shortfall is a ceiling of its own, not an amnesty. Letting it
-    /// widen would make the entry a licence to keep getting worse, which is
-    /// exactly the state the baseline ratchet exists to prevent one level
-    /// down.
+    /// widen without limit would make the entry a licence to keep getting
+    /// worse, which is exactly the state the baseline ratchet exists to
+    /// prevent one level down.
+    ///
+    /// The ceiling is that same ratchet's, not the accepted value itself.
+    /// `view_p99_ms` is an absolute metric, so it earns
+    /// [`crate::baselines::ABSOLUTE_HEADROOM`]: 9.0 accepted admits 13.5.
+    ///
+    /// Disconfirm: comparing the next sample to `accepted` exactly is what
+    /// this replaced, and it failed on the first re-run of a freshly
+    /// written ledger over a 0.35% difference. Both directions are asserted
+    /// here, because a ceiling that only ever passes is not a gate.
     #[test]
-    fn a_listed_shortfall_that_widens_fails() {
+    fn a_listed_shortfall_widens_only_past_the_ratchet_it_shares() {
         let file = file_from(&format!(
             "{ONE_BUDGET}
 [[shortfall]]
@@ -463,15 +505,120 @@ accepted = 9.0
 why = \"because\"
 "
         ));
+        let verdict = |measured| {
+            check_cell(
+                &file,
+                "echo",
+                "minimal",
+                &metrics(&[("view_p99_ms", measured)]),
+                "dev-linux",
+            )[0]
+            .verdict
+            .clone()
+        };
+
+        // noise past the accepted value is absorbed, not failed
+        assert!(matches!(verdict(9.01), Verdict::Held { .. }));
+        assert!(matches!(verdict(13.5), Verdict::Held { .. }));
+
+        let widened = verdict(13.51);
+        assert_eq!(
+            widened,
+            Verdict::Widened {
+                accepted: 9.0,
+                ceiling: 13.5
+            }
+        );
+        assert!(widened.is_failure());
+    }
+
+    /// A ratio takes the tighter of the two headrooms, so the same accepted
+    /// value buys a different ceiling depending on what kind of number it
+    /// is. Without this the ratio metrics that carry most of the shortfall
+    /// ledger would inherit the absolute metric's wider band.
+    #[test]
+    fn a_ratio_shortfall_takes_the_ratio_headroom() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "ratio_p50"
+max = 1.1
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.2
+why = "because"
+"#,
+        );
+        let verdict = |measured| {
+            check_cell(
+                &file,
+                "echo",
+                "minimal",
+                &metrics(&[("ratio_p50", measured)]),
+                "dev-linux",
+            )[0]
+            .verdict
+            .clone()
+        };
+        assert!(matches!(verdict(1.5), Verdict::Held { .. }));
+        assert!(matches!(verdict(1.51), Verdict::Widened { .. }));
+    }
+
+    /// A tail statistic the class does not gate is not gated here either.
+    /// `ratio_p99` on a shared class tracks ambient load by +/-50%, which is
+    /// why the baseline ratchet exempts it; enforcing a shortfall ceiling on
+    /// it would reintroduce that noise as a build failure through the other
+    /// door.
+    #[test]
+    fn a_shortfall_on_a_metric_the_class_does_not_gate_has_no_ceiling() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "ratio_p99"
+max = 1.1
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p99"
+class = "dev-linux"
+accepted = 1.2
+why = "because"
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p99"
+class = "controlled-linux"
+accepted = 1.2
+why = "the same entry on a class that gates this statistic"
+"#,
+        );
         let found = check_cell(
             &file,
             "echo",
             "minimal",
-            &metrics(&[("view_p99_ms", 9.01)]),
+            &metrics(&[("ratio_p99", 99.0)]),
             "dev-linux",
         );
-        assert_eq!(found[0].verdict, Verdict::Widened { accepted: 9.0 });
-        assert!(found[0].verdict.is_failure());
+        assert!(matches!(found[0].verdict, Verdict::Held { .. }));
+
+        // and the same metric on a controlled class does have one
+        let gated = check_cell(
+            &file,
+            "echo",
+            "minimal",
+            &metrics(&[("ratio_p99", 99.0)]),
+            "controlled-linux",
+        );
+        assert!(matches!(gated[0].verdict, Verdict::Widened { .. }));
     }
 
     /// A shortfall is keyed on the fixture too: `echo.heavy` missing its

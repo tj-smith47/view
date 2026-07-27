@@ -3,16 +3,16 @@ engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
 [echo.heavy]
-paired_delta_p99_ms = 1.003552
-ratio_p50 = 1.2440907023104606
-ratio_p99 = 1.142328576060916
-view_p99_ms = 1.905853
+paired_delta_p99_ms = 0.975764
+ratio_p50 = 1.1837936337116466
+ratio_p99 = 1.0103236390160557
+view_p99_ms = 1.779872
 
 [echo.minimal]
-paired_delta_p99_ms = 0.45641
-ratio_p50 = 1.3537866848241882
-ratio_p99 = 1.307451781758063
-view_p99_ms = 1.018586
+paired_delta_p99_ms = 0.366723
+ratio_p50 = 1.1719342968313597
+ratio_p99 = 1.0916525318862538
+view_p99_ms = 0.904254
 
 [echo_control.heavy]
 control_delta_p99_ms = 1.043676
@@ -43,7 +43,7 @@ cadence_p99_ms = 20.880463
 pace_ratio = 1.0035839351461207
 
 [input_path.minimal]
-key_to_rpc_p99_us = 154.749
+key_to_rpc_p99_us = 117.739
 
 [memory.minimal]
 pss_mb = 3.3017578125

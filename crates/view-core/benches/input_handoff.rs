@@ -23,9 +23,16 @@ use std::time::{Duration, Instant};
 /// `view-core` sits below the binary crate that defines it.
 const MSG_CHANNEL_CAPACITY: usize = 66;
 
-/// Handoffs measured. Large enough for a stable p99 at this cost scale,
-/// small enough that the whole bench stays under a few seconds.
-const SAMPLES: usize = 20_000;
+/// Ceiling on handoffs measured per row. Large enough for a stable p99 at
+/// this cost scale.
+const MAX_SAMPLES: usize = 20_000;
+
+/// Wall-clock each row is allowed. The sweep spans a 200x range of idle
+/// gaps, so a fixed sample count spends 200x longer on the deep end than
+/// the shallow one and puts the whole bench out of reach of a gate. A
+/// fixed time budget instead gives every row the same attention and caps
+/// the total, at the cost of fewer tail samples where the gap is widest.
+const ROW_BUDGET: Duration = Duration::from_secs(50);
 
 /// Idle gaps swept between handoffs. How long the receiver has been parked
 /// is not a nuisance parameter here: a core idle for milliseconds sits in a
@@ -47,9 +54,18 @@ struct Keystroke {
     sent_at: Instant,
 }
 
+/// How many handoffs fit in [`ROW_BUDGET`] at this idle gap, capped at
+/// [`MAX_SAMPLES`].
+fn samples_for(gap: Duration) -> usize {
+    let gap_nanos = gap.as_nanos().max(1);
+    let fits = usize::try_from(ROW_BUDGET.as_nanos() / gap_nanos).unwrap_or(MAX_SAMPLES);
+    fits.clamp(1, MAX_SAMPLES)
+}
+
 fn run(tx: &SyncSender<Keystroke>, gap: Duration) -> Vec<f64> {
-    let mut out = Vec::with_capacity(SAMPLES);
-    for _ in 0..SAMPLES {
+    let samples = samples_for(gap);
+    let mut out = Vec::with_capacity(samples);
+    for _ in 0..samples {
         std::thread::sleep(gap);
         let sent_at = Instant::now();
         if tx
@@ -102,7 +118,7 @@ fn measure(gap: Duration, hops: usize) -> Vec<f64> {
         rx = add_hop(rx);
     }
     let receiver = std::thread::spawn(move || {
-        let mut latencies = Vec::with_capacity(SAMPLES);
+        let mut latencies = Vec::with_capacity(samples_for(gap));
         while let Ok(key) = rx.recv() {
             let woke = Instant::now();
             #[allow(clippy::cast_precision_loss)]
@@ -124,17 +140,16 @@ fn measure(gap: Duration, hops: usize) -> Vec<f64> {
 fn main() {
     println!(
         "input handoff: SyncSender<Keystroke> capacity {MSG_CHANNEL_CAPACITY}, parked receivers, \
-         {SAMPLES} samples per row"
+         up to {MAX_SAMPLES} samples per row within {ROW_BUDGET:?}"
     );
-    println!("  tapped key-decoded->loop-wake on dev-linux: 60.8us p50 / 100.9us p99");
-    println!("  tapped rpc-handoff->rpc-written on dev-linux: 42.5us p50 /  81.6us p99");
-    println!("  idle gap | hops |    p50 |    p90 |    p99");
+    println!("  idle gap | hops | samples |    p50 |    p90 |    p99");
     for gap in IDLE_GAPS {
         for hops in [1_usize, 2] {
             let latencies = measure(*gap, hops);
             println!(
-                "  {:>7?} | {hops:>4} | {:6.2} | {:6.2} | {:6.2}",
+                "  {:>7?} | {hops:>4} | {:>7} | {:6.2} | {:6.2} | {:6.2}",
                 gap,
+                latencies.len(),
                 percentile(&latencies, 0.50),
                 percentile(&latencies, 0.90),
                 percentile(&latencies, 0.99),
