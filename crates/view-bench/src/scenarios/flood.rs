@@ -241,9 +241,10 @@ pub struct FloodOutcome {
 }
 
 /// The two names one side is reported under: the side itself, and the
-/// metric name its cadence percentile is recorded and refused under. Paired
-/// so no call site can raise a refusal that names one side while carrying
-/// the other's number.
+/// metric name its cadence percentile is refused and reported under (the
+/// nvim side's label is a report line, not a recorded metric). Paired so no
+/// call site can raise a refusal that names one side while carrying the
+/// other's number.
 #[derive(Clone, Copy)]
 struct SideNames {
     side: &'static str,
@@ -267,8 +268,8 @@ const NVIM_NAMES: SideNames = SideNames {
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if a producer never scrolls the terminal
-/// or a session misbehaves, and propagates every per-trial refusal
-/// [`paired_trial`] raises.
+/// or a session misbehaves, and propagates every refusal [`aggregate`]
+/// raises.
 pub fn run(
     view: &SpawnSpec,
     nvim: &SpawnSpec,
@@ -277,9 +278,9 @@ pub fn run(
     settle_deadline: Duration,
     window: Duration,
 ) -> Result<FloodOutcome, BenchError> {
-    let mut paired = Vec::with_capacity(trials);
+    let mut pairs = Vec::with_capacity(trials);
     for trial in 0..trials {
-        let (view_side, nvim_side) = if trial % 2 == 0 {
+        let pair = if trial % 2 == 0 {
             let view_side =
                 flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
             let nvim_side =
@@ -292,6 +293,30 @@ pub fn run(
                 flood_once(view, settle_deadline, window).map_err(|e| label("view", e))?;
             (view_side, nvim_side)
         };
+        pairs.push(pair);
+    }
+    aggregate(pairs, min_gap_samples)
+}
+
+/// Reduces every collected pair to the run's outcome, refusing the whole
+/// run if any one trial is refused.
+///
+/// Kept apart from the spawning loop so this path is exercisable without a
+/// pty: the reduction is where a refused trial could be dropped and the
+/// survivors aggregated anyway, which would produce a clean-looking median
+/// out of a contaminated run -- the exact outcome the per-trial guards
+/// exist to prevent.
+///
+/// # Errors
+///
+/// Propagates every per-trial refusal [`paired_trial`] raises, and returns
+/// [`BenchError::NoTrials`] if no pair was collected.
+fn aggregate(
+    pairs: Vec<(FloodSide, FloodSide)>,
+    min_gap_samples: usize,
+) -> Result<FloodOutcome, BenchError> {
+    let mut paired = Vec::with_capacity(pairs.len());
+    for (view_side, nvim_side) in pairs {
         paired.push(paired_trial(view_side, nvim_side, min_gap_samples)?);
     }
 
@@ -365,10 +390,13 @@ fn paired_trial(
 /// # Errors
 ///
 /// Returns [`BenchError::TooFewCadenceGaps`] if this side observed fewer
-/// gaps than `min_gap_samples` -- checked on both sides by the caller,
-/// because a ratio is only as trustworthy as its denominator, and a
-/// percentile built on a handful of nvim gaps would let the paired
-/// statistic look precise while resting on nothing. Returns
+/// gaps than `min_gap_samples`, or none at all -- a distribution needs one
+/// gap however low the configured floor is, and a floor of zero would
+/// otherwise let an empty side reach a sampling refusal phrased in terms of
+/// a warmup this scenario does not have. Both sides are checked, because a
+/// ratio is only as trustworthy as its denominator, and a percentile built
+/// on a handful of nvim gaps would let the paired statistic look precise
+/// while resting on nothing. Returns
 /// [`BenchError::BelowInstrumentResolution`] if this side's p99 sits within
 /// [`CADENCE_RESOLUTION_FACTOR`] of *this side's own* probe period: a frame
 /// change is only ever seen on a probe, so a cadence number down at that
@@ -380,11 +408,12 @@ fn side_cadence(
     names: SideNames,
     min_gap_samples: usize,
 ) -> Result<SideCadence, BenchError> {
-    if side.cadence_gaps_ms.len() < min_gap_samples {
+    let floor = min_gap_samples.max(1);
+    if side.cadence_gaps_ms.len() < floor {
         return Err(BenchError::TooFewCadenceGaps {
             side: names.side,
             collected: side.cadence_gaps_ms.len(),
-            floor: min_gap_samples,
+            floor,
         });
     }
     let dist = Distribution::from_samples(&side.cadence_gaps_ms, 0)?;
@@ -547,10 +576,7 @@ mod tests {
     }
 
     #[test]
-    fn one_contaminated_trial_is_refused_where_a_median_would_have_absorbed_it() {
-        // the run aggregates medians across trials, so a floor-contaminated
-        // trial can sit under a clean median and still be the median RATIO.
-        // The guard therefore runs here, per trial, not on the aggregate
+    fn a_floor_bound_side_is_refused_in_the_trial_that_measured_it() {
         let clean = || side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
         let floor_bound = side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
         assert!(paired_trial(clean(), clean(), 100).is_ok());
@@ -559,6 +585,88 @@ mod tests {
             Err(BenchError::BelowInstrumentResolution {
                 metric: "cadence_p99_ms",
                 ..
+            })
+        ));
+    }
+
+    #[test]
+    fn one_contaminated_trial_is_refused_where_a_median_would_have_absorbed_it() {
+        // the run aggregates medians across trials, so a floor-contaminated
+        // trial can sit under a clean median and still be the median RATIO.
+        // Aggregating the survivors of a refusal is therefore not an option:
+        // the refusal has to take the whole run down with it
+        let clean = || side_probing_every(&repeated(&[2.0, 4.0, 20.0], 40), 0.05);
+        let floor_bound = || side_probing_every(&repeated(&[0.4, 0.4, 0.6], 40), 0.5);
+
+        assert!(aggregate(vec![(clean(), clean()), (clean(), clean())], 100).is_ok());
+
+        let contaminated = vec![
+            (clean(), clean()),
+            (floor_bound(), clean()),
+            (clean(), clean()),
+        ];
+        let refused = aggregate(contaminated, 100);
+        assert!(
+            matches!(
+                refused,
+                Err(BenchError::BelowInstrumentResolution {
+                    metric: "cadence_p99_ms",
+                    ..
+                })
+            ),
+            "the run must be refused whole, not aggregated from the two clean \
+             trials, got {refused:?}"
+        );
+
+        // and the same three trials read clean at the run level, which is
+        // what makes dropping the refused one so quiet: 0.6ms is the middle
+        // trial's p99, so the median p99 is a clean 20.0 and the median
+        // probe period a clean 0.05
+        let median_p99 = median_of_trials(&[20.0, 0.6, 20.0]).unwrap();
+        let median_probe = median_of_trials(&[0.05, 0.5, 0.05]).unwrap();
+        assert!(
+            cadence_is_measurable(median_p99, median_probe),
+            "a run-level check would have passed this run"
+        );
+    }
+
+    #[test]
+    fn a_side_that_never_repainted_is_refused_against_the_instrument_not_the_denominator() {
+        // a real probe period with an all-zero cadence is the case the two
+        // guards disagree on: the denominator guard would report only that
+        // the number cannot be divided by, while the resolution guard names
+        // the percentile, the period it failed against and the factor, which
+        // tells the operator the run was instrument-bound
+        let view = side(&repeated(&[2.0, 4.0, 20.0], 40));
+        let nvim = side_probing_every(&repeated(&[0.0], 120), 0.05);
+        let refused = paired_trial(view, nvim, 100);
+        assert!(
+            matches!(
+                refused,
+                Err(BenchError::BelowInstrumentResolution {
+                    metric: "nvim cadence_p99_ms",
+                    value: 0.0,
+                    resolution: 0.05,
+                    ..
+                })
+            ),
+            "expected the resolution refusal ahead of the denominator one, got {refused:?}"
+        );
+    }
+
+    #[test]
+    fn a_side_with_no_gaps_at_all_is_refused_as_a_gap_floor() {
+        // a configured floor of zero admits an empty side, which would then
+        // be refused by the sampling layer in terms of a warmup this
+        // scenario has none of
+        let view = side(&[]);
+        let nvim = side(&repeated(&[1.0, 2.0, 10.0], 40));
+        assert!(matches!(
+            paired_trial(view, nvim, 0),
+            Err(BenchError::TooFewCadenceGaps {
+                side: "view",
+                collected: 0,
+                floor: 1,
             })
         ));
     }

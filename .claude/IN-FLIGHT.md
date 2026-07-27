@@ -84,11 +84,14 @@ What the review left open, none of it blocking the commit:
 
 ## Open task list at handoff
 
-The harness task store does not persist, and in the 2026-07-27 session it was
-not reachable at all (`TaskCreate`/`TaskUpdate`/`TaskList` are advertised as
-deferred tools but no `select:` query surfaces them). This table is therefore
-the live task list, not just a handoff copy: it is updated in the same turn an
-item changes state.
+The harness task store does not persist across sessions, so this table is the
+carrier between them. **The live task list is the harness one**, created from
+this table at session start; this table is the handoff copy.
+
+`TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` are deferred tools, reached with
+`ToolSearch` (the one taking a `query`) via `select:TaskCreate,TaskUpdate,...`.
+The regex-only tool-search variant does not index deferred tool names and
+returns nothing for them; that is not evidence the store is unreachable.
 
 | # | Task | State |
 |---|---|---|

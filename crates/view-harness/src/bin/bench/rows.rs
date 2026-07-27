@@ -8,8 +8,30 @@
 use super::*;
 
 /// Runs one matrix cell and returns the metrics the baseline records for
-/// it.
+/// it, refusing any metric name the gate policy has not classified.
+///
+/// The refusal lands here rather than at record time because a name gets a
+/// gate policy from a rule over its components: an undeclared one is not
+/// rejected downstream, it is silently gated on every class under whichever
+/// arm its spelling happens to reach.
 pub(super) fn run_cell(
+    scenario: &str,
+    fixture: &str,
+    bins: &Bins,
+    protocol: &Protocol,
+) -> Result<CellMetrics> {
+    let metrics = measure_cell(scenario, fixture, bins, protocol)?;
+    let undeclared = baselines::undeclared_metrics(&metrics);
+    ensure!(
+        undeclared.is_empty(),
+        "{scenario}/{fixture} recorded {}, which baselines::RECORDED_METRICS does not declare; \
+         add the name there and give it a policy row before the row can record it",
+        undeclared.join(", ")
+    );
+    Ok(metrics)
+}
+
+fn measure_cell(
     scenario: &str,
     fixture: &str,
     bins: &Bins,

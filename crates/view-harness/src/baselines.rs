@@ -230,6 +230,12 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// On a dedicated runner those load regimes cannot occur, so the same
 /// statistics gate there under the standard ratio headroom, and the spec
 /// p99 budget gets a real bar instead of a reference number.
+///
+/// Lifting an exemption is a change to this function and nothing else. A
+/// measured `[headroom]` entry resizes an allowance that already exists and
+/// cannot restore one this returns `None` for (see [`headroom_for`]), so
+/// giving a shared class an entry for `cadence_p99_ratio` leaves it ungated
+/// there however well its spread has been characterized.
 #[must_use]
 pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     let factor = if metric.contains("ratio") {
@@ -288,12 +294,64 @@ pub fn headroom_for(table: &HeadroomTable, metric: &str, controlled: bool) -> Op
 /// are both quotients of tails and carry the same ambient noise, so a
 /// suffix rule that separates them makes spelling into gate policy: a
 /// consistency rename would flip a class's gate with no test failing.
+///
+/// A component rather than a substring, and any percentile at p99 or
+/// deeper: `p999_ms` is a further-out tail than `p99_ms` and so is more
+/// scheduler-dominated, not less, while `warmup99_ms` holds the letters of
+/// a percentile without being one, and a substring rule would exempt it
+/// from gating on the strength of a coincidence.
 fn derives_from_tail(metric: &str) -> bool {
-    metric.split('_').any(|component| component == "p99")
+    metric
+        .split('_')
+        .any(|component| component.starts_with("p99"))
 }
 
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
+
+/// Every metric name a row may record, and so the vocabulary
+/// [`gate_headroom`] is proven exhaustive over.
+///
+/// A classification rule reads name components, which means a name nobody
+/// classified still gets a policy -- silently, and usually the wrong one,
+/// since the fall-through arm gates on every class. Declaring the vocabulary
+/// makes that impossible to reach by accident: a row producing a name absent
+/// from this list is refused at the moment it produces it, before anything
+/// is recorded, and the per-metric policy table in this module's tests is
+/// checked against this list rather than hand-kept beside it.
+pub const RECORDED_METRICS: [&str; 20] = [
+    "ratio_p50",
+    "ratio_p99",
+    "paired_delta_p99_ms",
+    "view_p99_ms",
+    "staleness_p99_ms",
+    "shell_visible_ms",
+    "marker_cold_ms",
+    "marker_ratio_p50",
+    "marker_ratio_p99",
+    "pss_mb",
+    "phys_footprint_mb",
+    "control_ratio_p50",
+    "control_ratio_p99",
+    "control_delta_p99_ms",
+    "control_p99_ms",
+    "pace_ratio",
+    "cadence_p99_ms",
+    "cadence_p99_ratio",
+    "key_to_rpc_p99_us",
+    "p99_ms",
+];
+
+/// Metric names in `measured` that [`RECORDED_METRICS`] does not declare,
+/// in deterministic (sorted) order.
+#[must_use]
+pub fn undeclared_metrics(measured: &CellMetrics) -> Vec<String> {
+    measured
+        .keys()
+        .filter(|metric| !RECORDED_METRICS.contains(&metric.as_str()))
+        .cloned()
+        .collect()
+}
 
 /// One measured cell as the record path carries it: scenario, fixture, and
 /// the metrics produced for that pair.
@@ -1006,6 +1064,8 @@ pub fn require_class_match(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+    use std::collections::BTreeSet;
+
     use super::*;
 
     /// [`super::gate_cell`] with no measured per-class headroom, so every
@@ -1262,6 +1322,17 @@ mod tests {
             ("paired_delta_p99_ms", None, signed),
             ("control_delta_p99_ms", None, signed),
         ];
+        // the table above classifies the declared vocabulary, so the two
+        // cannot drift: a metric declared and left unclassified, or
+        // classified here and never declared, fails before any policy is
+        // compared
+        let listed: BTreeSet<&str> = roster.iter().map(|(metric, _, _)| *metric).collect();
+        let declared: BTreeSet<&str> = RECORDED_METRICS.iter().copied().collect();
+        assert_eq!(
+            listed, declared,
+            "every declared metric needs a policy row and vice versa"
+        );
+
         // every mismatch is collected rather than asserted one at a time, so
         // a rule change reports the full set of policies it moved instead of
         // stopping at the first: "only this metric moved" is the claim being
@@ -1278,6 +1349,37 @@ mod tests {
             }
         }
         assert!(moved.is_empty(), "gate policy moved:\n{}", moved.join("\n"));
+    }
+
+    /// The tail rule reads a name component, not the letters anywhere in the
+    /// name, and it covers every percentile from p99 outward. A deeper tail
+    /// carries more of the ambient noise the shared-class exemption exists
+    /// for, while a name that merely contains the letters of one carries
+    /// none of it and must keep gating.
+    ///
+    /// Disconfirm: match `metric.contains("p99")` instead, and `warmup99_ms`
+    /// loses its gate on a shared class; match the component exactly against
+    /// `"p99"`, and `p999_ms` acquires one.
+    #[test]
+    fn the_tail_rule_reads_percentile_components_not_the_letters_p99() {
+        let absolute = Some(Headroom::Proportional(ABSOLUTE_HEADROOM));
+        assert_eq!(gate_headroom("p999_ms", false), None);
+        assert_eq!(gate_headroom("p999_ms", true), absolute);
+        assert_eq!(gate_headroom("warmup99_ms", false), absolute);
+        assert_eq!(gate_headroom("warmup99_ms", true), absolute);
+    }
+
+    /// A metric no policy row classifies would still get one from the
+    /// fall-through arm -- gating on every class, on a rule nobody applied
+    /// to it. The declared vocabulary is what keeps that unreachable, so a
+    /// name outside it has to be visible to the row that produced it.
+    #[test]
+    fn a_metric_outside_the_declared_vocabulary_is_named() {
+        let recorded = metrics(&[("ratio_p50", 1.0), ("cadence_p99_ratio", 1.0)]);
+        assert!(undeclared_metrics(&recorded).is_empty());
+
+        let with_a_stray = metrics(&[("ratio_p50", 1.0), ("cadence_p50_ms", 12.2)]);
+        assert_eq!(undeclared_metrics(&with_a_stray), vec!["cadence_p50_ms"]);
     }
 
     /// `control_delta_p99_ms` is `paired_delta_p99_ms` for the control row:

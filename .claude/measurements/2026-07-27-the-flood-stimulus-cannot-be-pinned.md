@@ -112,8 +112,23 @@ hard throttle. Anything between licenses neither.
 
 Report-only run, `--scenario flood --fixture minimal --class dev-linux`, no
 `--record`, no `--gate`. dev-linux, 12 cores, engine pin NVIM v0.12.4, three
-trials. Host load average (1 min): **0.17 at start, 2.03 at end** -- the rise
-is the run's own six pty sessions. Raw log: `~/.claude/tmp/t30-flood-p50.log`.
+trials. Raw log: `~/.claude/tmp/t30-flood-p50.log`.
+
+Host load average (1 min), all three readings from that log:
+
+| reading | value | taken |
+|---|---:|---|
+| `uptime` before the task ran | 0.17 | 02:42:05, ahead of four release builds |
+| harness, start of the measured window | **1.04** | after those builds, before the first trial |
+| harness, end of the measured window | 2.03 | after the sixth pty session |
+| `uptime` after the task ran | 2.03 | 02:43:55 |
+
+**The load this row was measured at is 1.04, not 0.17.** The 0.17 reading
+predates the run's own `cargo build --release` steps, which are what lift it to
+1.04; the harness prints its own figure at the start of the measured window for
+exactly this reason. The further rise to 2.03 covers the six pty sessions and
+the builds still decaying out of a one-minute average, and the log does not
+separate those two contributions.
 
 | trial | view p50 | view p90 | view p99 | nvim p50 | nvim p90 | nvim p99 | cadence ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -127,12 +142,24 @@ from the bulk instead. Both sides paint at ~82 Hz and their p50s agree to
 0.9%, which is what a shared upstream cadence looks like -- view's paint
 stream is downstream of the same nvim the control side measures.
 
+**Scope of that reading.** It is measured on a run whose gated
+`cadence_p99_ms` was **15.385**, not on the **16.429** excursion the
+acceptance concerns. So the p50 characterizes the shape of a distribution
+that passed the bar. The 16.429 run's shape is not measured here: it is
+carried over from the mean gaps derived in the 2026-07-27 flood-concession
+review (12.30-12.53 ms mean against a 16.43 p99, p99/mean 1.32), which agrees
+with this p99/p50 of 1.26. Agreement of the two supports the jitter-tail
+reading for both runs; only the 15.385 one has a measured p50.
+
 Two consequences worth carrying forward:
 
-- **The 16 ms bar is not what this row failed.** At this host load the view
-  side's gated `cadence_p99_ms` is **15.385 ms**, inside the spec 3.1 bar of
-  16.0, where the earlier run at host load 3.9 read 16.429. The metric tracks
-  ambient load; it did not measure a view defect at either value.
+- **The 16 ms bar is not what this row failed.** At start-of-window load 1.04
+  the view side's gated `cadence_p99_ms` is **15.385 ms**, inside the spec 3.1
+  bar of 16.0, where the earlier run at load 3.9 read 16.429. The metric
+  tracks ambient load; it did not measure a view defect at either value.
+  The slope those two points define is 1.04 ms of p99 across a 3.7x load
+  range -- not the 23x range the pre-build 0.17 reading would imply, so any
+  extrapolation from this pair is far weaker than two points already make it.
 - **The ratio's own spread argues against gating it on a shared class.**
   Inside this single run, at near-constant load, `cadence_p99_ratio` moved
   0.972 to 1.035 -- a 6.3% spread. Echo's `ratio_p50` moved 1.70% across a
