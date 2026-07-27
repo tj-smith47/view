@@ -164,13 +164,27 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
         }
     }
 
+    // a request rather than a notification, and a length check after it:
+    // nvim answers this only once the command has run, so the scrolling
+    // below cannot start against a buffer that is still loading. A notified
+    // open races the paced keystrokes, and when the open loses, every
+    // `<C-e>` lands on a single blank line, emits no scroll at all, and the
+    // failure names the missing scroll rather than the race that caused it
     engine
         .handle
-        .notify(
+        .request_timeout(
             "nvim_command",
             vec![rmpv::Value::from(format!("e {}", file_path.display()))],
+            Duration::from_secs(10),
         )
         .unwrap();
+    let loaded = engine.handle.eval_str("line('$')").unwrap();
+    assert_eq!(
+        loaded, "5000",
+        "the child holds {loaded} lines rather than the 5000 generated, so \
+         paging through it says nothing about scroll traffic"
+    );
+
     // scroll down one line at a time, pacing each keystroke so nvim
     // actually redraws between them: a same-frame burst of many small
     // scrolls (or one big multi-page jump) leaves no overlap between the
