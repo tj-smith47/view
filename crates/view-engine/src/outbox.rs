@@ -20,15 +20,21 @@
 //! handed to the thread, so there is nothing in flight for it to pass.
 //!
 //! **The caller may not block.** "The paint loop never awaits RPC" exists
-//! so a wedged engine costs a background thread rather than the UI: today
-//! a full pipe stalls the writer thread and view keeps painting. An inline
-//! `write_all` would move that stall onto the paint loop. The fast path is
-//! taken only after the pipe has said it can accept the write, and only
-//! for a message small enough that the accepting answer is binding.
+//! so a wedged engine costs a background thread rather than the UI: a full
+//! pipe stalls the writer thread, and view keeps painting. Two things could
+//! move that stall back onto the caller, and both are refused. An inline
+//! `write_all` into a pipe with no room: the fast path is taken only after
+//! the pipe has said it can accept the write, and only for a message small
+//! enough that the accepting answer is binding. And waiting on the lock the
+//! writer thread holds across that stalled write: a caller only ever *tries*
+//! that lock, and reads a refusal as one more reason to hand the message
+//! over. So no path through [`Outbox::send`] waits on anything, and the
+//! longest a caller can spend there is one write the pipe already promised
+//! to take.
 
 use std::io::Write;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Mutex, PoisonError};
+use std::sync::{mpsc, Mutex, PoisonError, TryLockError};
 
 /// Largest message the inline path will attempt.
 ///
@@ -50,8 +56,10 @@ const MAX_INLINE_WRITE: usize = rustix::pipe::PIPE_BUF;
 
 /// The write side of an engine connection.
 pub(crate) struct Outbox {
-    /// Serializes writers against each other. Held across a write, by
-    /// whichever thread is doing it.
+    /// Serializes writers against each other. Held across a write by
+    /// whichever thread is doing it, so its holder may be parked in a write
+    /// that cannot finish until nvim reads: a caller therefore only ever
+    /// tries to take it, and never waits for it.
     writer: Mutex<Box<dyn Write + Send>>,
     /// Messages handed to the writer thread and not yet written. Read and
     /// written only while [`Self::writer`] is held, which is what makes
@@ -98,27 +106,46 @@ impl Outbox {
     /// Returns `false` if the connection is gone, matching what a failed
     /// channel send used to mean to every caller.
     pub(crate) fn send(&self, bytes: Vec<u8>) -> bool {
-        let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        // ordering gate: a message already queued for the thread has not
-        // been written yet, and writing here would put this one ahead of it
-        if self.handed_off.load(Ordering::Acquire) == 0 && self.can_write_inline(bytes.len()) {
-            let sent = writer.write_all(&bytes).and_then(|()| writer.flush());
-            self.took_inline.fetch_add(1, Ordering::Relaxed);
+        // `try_lock`, never `lock`: the holder may be the writer thread,
+        // parked inside a write for as long as nvim declines to read its
+        // stdin. A refusal is not a reason to wait, it is a reason to hand
+        // the message over -- which is what the thread is for.
+        let claimed = match self.writer.try_lock() {
+            Ok(writer) => Some(writer),
+            Err(TryLockError::Poisoned(poisoned)) => Some(poisoned.into_inner()),
+            Err(TryLockError::WouldBlock) => None,
+        };
+        if let Some(mut writer) = claimed {
+            // ordering gate: a message already queued for the thread has not
+            // been written yet, and writing here would put this one ahead of it
+            if self.handed_off.load(Ordering::Acquire) == 0 && self.can_write_inline(bytes.len()) {
+                let sent = writer.write_all(&bytes).and_then(|()| writer.flush());
+                self.took_inline.fetch_add(1, Ordering::Relaxed);
+                drop(writer);
+                #[cfg(feature = "bench-taps")]
+                crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
+                return sent.is_ok();
+            }
+            // counted before the lock is released, so no inline writer can see
+            // zero while this message is on its way to the thread
+            self.count_hand_off();
             drop(writer);
-            #[cfg(feature = "bench-taps")]
-            crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
-            return sent.is_ok();
+        } else {
+            // the lock is held, so no inline write can be starting under it,
+            // and the count is safe to raise from outside
+            self.count_hand_off();
         }
-        // counted before the lock is released, so no inline writer can see
-        // zero while this message is on its way to the thread
-        self.handed_off.fetch_add(1, Ordering::Release);
-        self.took_thread.fetch_add(1, Ordering::Relaxed);
-        drop(writer);
         if self.tx.send(bytes).is_err() {
             self.handed_off.fetch_sub(1, Ordering::Release);
             return false;
         }
         true
+    }
+
+    /// Records one more message as the writer thread's and not yet written.
+    fn count_hand_off(&self) {
+        self.handed_off.fetch_add(1, Ordering::Release);
+        self.took_thread.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Writes one message from the writer thread, releasing its
@@ -212,6 +239,103 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    /// A sink that reports entering a write and then stays inside it until
+    /// it is released, standing in for a pipe whose peer stopped reading.
+    struct StuckSink {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Write for StuckSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            // dropping the release end frees this and every later write, so
+            // a run that has taken its reading can let the thread finish
+            let _ = self.release.recv();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Seconds the writer thread is given to reach the sink.
+    ///
+    /// Arming rather than measurement: until the thread is provably inside a
+    /// write it cannot finish, a caller's timing says nothing.
+    const STUCK_WRITE_ARM_SECS: u64 = 30;
+
+    /// Seconds a `send` is given to return while the writer thread is stuck.
+    ///
+    /// Wide because it separates two outcomes rather than grading one: a
+    /// `send` that does not wait costs microseconds, and a `send` that waits
+    /// on the writer thread waits as long as the peer refuses to read, which
+    /// is unbounded rather than merely slow. No duration between the two is
+    /// reachable, so no threshold in the gap can be too tight.
+    const CALLER_PATIENCE_SECS: u64 = 5;
+
+    /// The second half of the module's contract, at the one point it can
+    /// fail: the writer thread inside a write that cannot finish, and a
+    /// caller sending while it is stuck there.
+    ///
+    /// Nothing here is timed into existence. The sink announces that it has
+    /// been entered, so the stall is a fact before the caller's send begins,
+    /// and the send runs on its own thread so a caller that never returns
+    /// fails the test instead of hanging the suite.
+    #[test]
+    fn a_caller_does_not_wait_for_a_writer_thread_stuck_inside_a_write() {
+        let (entered_tx, entered_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let outbox = Arc::new(Outbox::new(
+            Box::new(StuckSink {
+                entered: entered_tx,
+                release: release_rx,
+            }),
+            tx,
+            #[cfg(unix)]
+            None,
+        ));
+        let writer = Arc::clone(&outbox);
+        std::thread::spawn(move || {
+            while let Ok(bytes) = rx.recv() {
+                if !writer.write_from_thread(&bytes) {
+                    break;
+                }
+            }
+        });
+
+        // with no pipe the fast path is off, so this message is the thread's
+        assert!(outbox.send(vec![1]));
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(STUCK_WRITE_ARM_SECS))
+            .expect("the writer thread reached the sink");
+
+        let caller = Arc::clone(&outbox);
+        let (returned_tx, returned_rx) = mpsc::channel::<bool>();
+        std::thread::spawn(move || {
+            let _ = returned_tx.send(caller.send(vec![2]));
+        });
+        let returned =
+            returned_rx.recv_timeout(std::time::Duration::from_secs(CALLER_PATIENCE_SECS));
+        let queued = outbox.handed_off.load(Ordering::Acquire);
+        // released before the assertions so a failing run unwedges its own
+        // threads rather than leaving them stuck for the rest of the suite
+        drop(release_tx);
+        assert_eq!(
+            returned.ok(),
+            Some(true),
+            "a send made while the writer thread sat inside a write it could \
+             not finish never returned: the caller took on the peer's stall, \
+             which is the stall the writer thread exists to absorb"
+        );
+        assert_eq!(
+            queued, 2,
+            "the send went behind the message still in flight, so nothing \
+             was overtaken to keep the caller free"
+        );
     }
 
     /// Builds an outbox plus a drained writer thread, as `start_with_pipe`
