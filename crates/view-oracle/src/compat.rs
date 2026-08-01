@@ -72,6 +72,25 @@ use crate::OracleError;
 /// promptly instead of hanging the whole compat run.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Silence window [`Step::Send`] requires the pty's rendered screen to hold
+/// before treating the keys as delivered. Matches the differential oracle's
+/// own quiesce convention (`corpus::DEFAULT_QUIESCE_SILENCE_MS`): long
+/// enough that ordinary key-processing latency never trips it, short enough
+/// that a step's own deadline (below) is reached in a handful of polls once
+/// the screen has genuinely gone quiet.
+const SEND_SETTLE_SILENCE: Duration = Duration::from_millis(200);
+
+/// Bound on how long [`Step::Send`] waits for [`SEND_SETTLE_SILENCE`] before
+/// giving up on confirming delivery and letting the step return anyway (see
+/// its own doc comment for why giving up is safe). A plugin that keeps a
+/// floating notification animating indefinitely (fidget's progress spinner,
+/// live-confirmed) never holds the whole screen still for
+/// [`SEND_SETTLE_SILENCE`], so this bounds the wasted wait at a small
+/// multiple of the forwarding latency this step actually needs to outrun --
+/// live-confirmed at zero failures across 200 bounded repetitions of the
+/// scenario that first exposed the race, both idle and under host load.
+const SEND_SETTLE_DEADLINE: Duration = Duration::from_millis(1_000);
+
 /// Which of the design spec's three config-reconciliation classes a
 /// scenario's plugin belongs to. Purely descriptive at this schema layer --
 /// no class-specific driving logic exists yet -- but recorded per scenario
@@ -113,7 +132,11 @@ pub enum ScenarioState {
 /// exactly that reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Types `keys` into the pty verbatim, as a user would.
+    /// Types `keys` into the pty verbatim, as a user would, then waits
+    /// (best-effort, bounded) for the resulting screen output to quiesce
+    /// before returning, closing the ordinary-case gap between typing and
+    /// forwarding without demanding a guarantee an animating target could
+    /// never give.
     Send(String),
     /// Blocks until the pty's rendered screen contains `needle`, or `timeout`
     /// elapses.
@@ -447,7 +470,11 @@ impl CompatSession {
     /// `init.lua` calls `serverstart` as its very first statement, well
     /// before any redraw), a daily config's own startup content is
     /// unknown to this harness, so there is no fixed needle to `wait_for`
-    /// instead.
+    /// instead. Equally applicable wherever keys are typed into the pty
+    /// and a later check reads nvim state over a wholly separate channel:
+    /// the two channels carry no ordering guarantee between them on their
+    /// own, so nothing else confirms nvim has actually forwarded and
+    /// applied the keys before that later check runs.
     ///
     /// Returns whether the screen was observed to settle before `deadline`.
     #[must_use]
@@ -484,6 +511,18 @@ impl CompatSession {
         match step {
             Step::Send(keys) => {
                 self.pty.send(&resolve_send_keys(keys)?)?;
+                // Best-effort, like wait_for_screen_quiescence's other
+                // caller: a plugin that keeps something animating (a
+                // progress spinner) never reports settled, and this step
+                // has no way to tell that apart from a target that is
+                // genuinely still forwarding the keys. Failing loudly here
+                // would turn a legitimate animation into a hard error; the
+                // steps that actually need delivery confirmed already poll
+                // for it themselves (`wait_for`, `wait_for_probe`), so a
+                // step that gives up after this bound loses only the
+                // narrower race a single-shot `probe`/`assert_absent`
+                // would otherwise be exposed to immediately afterward.
+                let _ = self.wait_for_screen_quiescence(SEND_SETTLE_SILENCE, SEND_SETTLE_DEADLINE);
                 Ok(())
             }
             Step::WaitFor { needle, timeout } => {
@@ -1489,6 +1528,58 @@ mod tests {
             "the probe client executed the host's startup command, so it is \
              an editor session after all and belongs behind a hermetic spawn \
              funnel like every other one"
+        );
+
+        session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+    }
+
+    // A `Step::Send` step's pty channel and a following `probe`/`assert_absent`
+    // step's subprocess channel are independent (this module's own docs);
+    // nothing else in the driver ties one to the other. The fake target below
+    // reads exactly the bytes a real `send` step writes, then keeps changing
+    // the screen every 50ms for five more polls before its one distinguishing
+    // write -- long enough that a `drive_step` returning as soon as the bytes
+    // are written (rather than once the screen has genuinely gone quiet)
+    // reliably races ahead of that write, and specific enough that a
+    // quiescence check cannot mistake "nothing has happened yet" for "the
+    // target is done".
+    #[cfg(unix)]
+    #[test]
+    fn send_step_blocks_until_the_pty_screen_reflects_its_keys() {
+        let keys = "ix<Esc>";
+        let payload = resolve_send_keys(keys).expect("resolving test keys");
+        let script = format!(
+            "stty raw -echo; head -c{} >/dev/null; \
+             for _ in 1 2 3 4 5; do printf .; sleep 0.05; done; \
+             printf 'SETTLED\\r\\n'",
+            payload.len()
+        );
+
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(&script);
+            CompatSession::spawn_configured(
+                cmd,
+                80,
+                24,
+                PathBuf::from("nvim"),
+                PathBuf::from("/dev/null"),
+            )
+        })
+        .expect("spawning the fake pty target");
+
+        session
+            .drive_step(&Step::Send(keys.to_string()))
+            .expect("the send step itself must report success");
+
+        assert!(
+            session.pty().screen().contains("SETTLED"),
+            "drive_step returned before the target's delayed output reached \
+             the screen -- the same race a probe step reads through when it \
+             runs immediately after a send step; screen:\n{}",
+            session.pty().screen()
         );
 
         session.pty().kill();
