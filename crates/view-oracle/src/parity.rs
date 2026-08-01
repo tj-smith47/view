@@ -471,7 +471,43 @@ pub struct Screen {
     pub attr_rows: Vec<String>,
 }
 
-/// Diffs `view_state` against `ref_state` field by field, then the two
+/// One side of a comparison: the state probe and the rendered screen taken
+/// from the same frame of the side under test.
+///
+/// The two sides carry distinct types so that a call transposing them
+/// cannot compile. A transposed pair diffs the same two frames and finds
+/// the same disagreements, reporting each one with view's content under
+/// `reference` and the reference applier's under `view` -- the differential
+/// read backwards, attributing view's own rendering bug to the side that
+/// exists to be trusted. Each side's state and screen travel together so a
+/// half-swap, pairing one side's probe with the other side's frame, is
+/// equally unrepresentable.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewSide<'a> {
+    pub state: &'a StateSnapshot,
+    pub screen: &'a Screen,
+}
+
+/// The reference applier's side of a comparison. See [`ViewSide`] for why
+/// the sides are separate types.
+#[derive(Debug, Clone, Copy)]
+pub struct ReferenceSide<'a> {
+    pub state: &'a StateSnapshot,
+    pub screen: &'a Screen,
+}
+
+/// One side's row vector under diff. See [`ViewSide`]: [`diff_rows`] takes
+/// the same treatment because its two vectors are same-typed and adjacent,
+/// and a transposition there inverts the `view`/`reference` attribution of
+/// every [`Divergence::Grid`] and [`Divergence::Attr`] it produces.
+#[derive(Debug, Clone, Copy)]
+struct ViewRows<'a>(&'a [String]);
+
+/// The reference applier's rows under diff. See [`ViewRows`].
+#[derive(Debug, Clone, Copy)]
+struct RefRows<'a>(&'a [String]);
+
+/// Diffs `view`'s state against `reference`'s field by field, then the two
 /// screens' glyph rows, then their attribute rows, skipping any row index
 /// present in `mask` (see [`masked_rows`]) -- the ordering is arbitrary and
 /// not load-bearing; every field/row that disagrees produces its own
@@ -490,13 +526,15 @@ pub struct Screen {
 /// the shorter side, rather than being silently skipped: a row count mismatch
 /// is itself real signal a differential oracle must surface.
 #[must_use]
-pub fn compare(
-    view_state: &StateSnapshot,
-    ref_state: &StateSnapshot,
-    view: &Screen,
-    reference: &Screen,
-    mask: &[u16],
-) -> Vec<Divergence> {
+pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -> Vec<Divergence> {
+    let ViewSide {
+        state: view_state,
+        screen: view_screen,
+    } = view;
+    let ReferenceSide {
+        state: ref_state,
+        screen: ref_screen,
+    } = reference;
     let mut divergences = Vec::new();
 
     if view_state.buffer_lines != ref_state.buffer_lines {
@@ -543,8 +581,8 @@ pub fn compare(
     }
 
     diff_rows(
-        &view.rows,
-        &reference.rows,
+        ViewRows(&view_screen.rows),
+        RefRows(&ref_screen.rows),
         mask,
         &mut divergences,
         |row, v, r| Divergence::Grid {
@@ -554,8 +592,8 @@ pub fn compare(
         },
     );
     diff_rows(
-        &view.attr_rows,
-        &reference.attr_rows,
+        ViewRows(&view_screen.attr_rows),
+        RefRows(&ref_screen.attr_rows),
         mask,
         &mut divergences,
         |row, v, r| Divergence::Attr {
@@ -575,12 +613,14 @@ pub fn compare(
 /// mask identically -- the only thing that differs between the two passes is
 /// which [`Divergence`] variant a disagreement becomes.
 fn diff_rows(
-    view_rows: &[String],
-    ref_rows: &[String],
+    view: ViewRows<'_>,
+    reference: RefRows<'_>,
     mask: &[u16],
     out: &mut Vec<Divergence>,
     make: impl Fn(u16, &str, &str) -> Divergence,
 ) {
+    let ViewRows(view_rows) = view;
+    let RefRows(ref_rows) = reference;
     let row_count = view_rows.len().max(ref_rows.len());
     for index in 0..row_count {
         // Unreachable in practice: both sides' canvases are u16-bounded
@@ -685,10 +725,14 @@ mod tests {
         let rows = rows_fixture();
 
         let divergences = compare(
-            &view_state,
-            &ref_state,
-            &screen(rows.clone()),
-            &screen(rows),
+            ViewSide {
+                state: &view_state,
+                screen: &screen(rows.clone()),
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &screen(rows),
+            },
             &[],
         );
 
@@ -711,10 +755,14 @@ mod tests {
         let rows = rows_fixture();
 
         let divergences = compare(
-            &view_state,
-            &ref_state,
-            &screen(rows.clone()),
-            &screen(rows),
+            ViewSide {
+                state: &view_state,
+                screen: &screen(rows.clone()),
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &screen(rows),
+            },
             &[],
         );
 
@@ -793,7 +841,17 @@ mod tests {
         let mut ref_rows = rows_fixture();
         ref_rows[1] = "CORRUPTED ".to_string();
 
-        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &screen(view_rows),
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &screen(ref_rows),
+            },
+            &[],
+        );
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -812,7 +870,17 @@ mod tests {
         let mut ref_rows = rows_fixture();
         ref_rows[1] = "CORRUPTED ".to_string();
 
-        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[1]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &screen(view_rows),
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &screen(ref_rows),
+            },
+            &[1],
+        );
 
         assert!(
             divergences.is_empty(),
@@ -855,7 +923,17 @@ mod tests {
         let state = snapshot_fixture();
         let rows = rows_fixture();
 
-        let divergences = compare(&state, &state, &screen(rows.clone()), &screen(rows), &[]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &screen(rows.clone()),
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &screen(rows),
+            },
+            &[],
+        );
 
         assert!(
             divergences.is_empty(),
@@ -881,7 +959,17 @@ mod tests {
             attr_rows: vec![".....".to_string(), ".....".to_string()],
         };
 
-        let divergences = compare(&state, &state, &view, &reference, &[]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &view,
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &reference,
+            },
+            &[],
+        );
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -914,7 +1002,17 @@ mod tests {
             attr_rows: vec![".....".to_string(), ".....".to_string()],
         };
 
-        let divergences = compare(&state, &state, &view, &reference, &[1]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &view,
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &reference,
+            },
+            &[1],
+        );
 
         assert!(
             divergences.is_empty(),
@@ -930,7 +1028,17 @@ mod tests {
         let view_rows = rows_fixture();
         let ref_rows = vec![view_rows[0].clone()];
 
-        let divergences = compare(&state, &state, &screen(view_rows), &screen(ref_rows), &[]);
+        let divergences = compare(
+            ViewSide {
+                state: &state,
+                screen: &screen(view_rows),
+            },
+            ReferenceSide {
+                state: &state,
+                screen: &screen(ref_rows),
+            },
+            &[],
+        );
 
         assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
         match &divergences[0] {
@@ -1100,7 +1208,17 @@ mod tests {
         let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
         let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
 
-        let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
+        let divergences = compare(
+            ViewSide {
+                state: &view_state,
+                screen: &view_screen,
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &ref_screen,
+            },
+            &mask,
+        );
 
         assert!(
             divergences.is_empty(),
@@ -1208,7 +1326,17 @@ mod tests {
 
         let view_state = snapshot(&mut engine_side).expect("snapshot EngineSession");
         let ref_state = snapshot(&mut reference_side).expect("snapshot ReferenceSession");
-        let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
+        let divergences = compare(
+            ViewSide {
+                state: &view_state,
+                screen: &view_screen,
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &ref_screen,
+            },
+            &mask,
+        );
 
         assert!(
             divergences.is_empty(),

@@ -42,7 +42,7 @@ use view_harness::scenario::{self, ScenarioFile};
 use view_oracle::compat::{CompatSession, PluginClass, ScenarioState};
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
-    ReferenceSession,
+    ReferenceSession, ReferenceSide, ViewSide,
 };
 
 /// Terminal size every corpus entry runs at. Fixed rather than a
@@ -323,7 +323,17 @@ fn run_tokens(
     let view_state = snapshot(&mut engine)?;
     let ref_state = snapshot(&mut reference)?;
 
-    let divergences = compare(&view_state, &ref_state, &view_screen, &ref_screen, &mask);
+    let divergences = compare(
+        ViewSide {
+            state: &view_state,
+            screen: &view_screen,
+        },
+        ReferenceSide {
+            state: &ref_state,
+            screen: &ref_screen,
+        },
+        &mask,
+    );
 
     Ok(EntryOutcome {
         engine_settled,
@@ -1081,6 +1091,24 @@ fn scenario_result(
     }
 }
 
+/// The binary under test: the `view` build a scenario spawns as its
+/// session.
+///
+/// The two sides carry distinct types so that a call transposing them
+/// cannot compile. Both are paths, and a scenario driven with the sides
+/// swapped runs bare nvim as the session and hands `view` to it as the
+/// engine to embed: the run still spawns, still settles and still reports,
+/// with the reference side of the differential recorded as the side under
+/// test and every PARITY line describing nvim against itself.
+#[derive(Debug, Clone, Copy)]
+struct ViewBin<'a>(&'a Path);
+
+/// The pinned engine binary a scenario's session embeds, and the reference
+/// side of the differential. See [`ViewBin`] for why the sides are separate
+/// types.
+#[derive(Debug, Clone, Copy)]
+struct NvimBin<'a>(&'a Path);
+
 /// Drives one scenario end to end: resolves its fixture, spawns `view`
 /// against it, opens the probe channel, runs every step in order, then the
 /// implicit zero-error epilogue, and always attempts a clean `:qa!` shutdown
@@ -1098,9 +1126,11 @@ fn run_scenario(
     scenario_path: &Path,
     scenario: &ScenarioFile,
     pin: &str,
-    view_bin: &Path,
-    nvim_bin: &Path,
+    view_bin: ViewBin<'_>,
+    nvim_bin: NvimBin<'_>,
 ) -> Result<ScenarioResult> {
+    let ViewBin(view_bin) = view_bin;
+    let NvimBin(nvim_bin) = nvim_bin;
     let start = Instant::now();
     let sock_path = compat_scratch_root().join(format!(
         "view-compat-{}-{}.sock",
@@ -1322,7 +1352,13 @@ fn compat_command(path: &Path) -> Result<()> {
     let mut results = ResultsFile::default();
     let mut any_failed = false;
     for (scenario_path, scenario) in &scenarios {
-        let result = match run_scenario(scenario_path, scenario, &pin, &view_bin, &nvim_bin) {
+        let result = match run_scenario(
+            scenario_path,
+            scenario,
+            &pin,
+            ViewBin(&view_bin),
+            NvimBin(&nvim_bin),
+        ) {
             Ok(result) => result,
             Err(err) => scenario_result(
                 scenario_path,

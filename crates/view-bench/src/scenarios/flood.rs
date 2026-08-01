@@ -526,6 +526,7 @@ mod tests {
 
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::session::{NvimSpec, ViewSpec};
 
     fn side(gaps_ms: &[f64]) -> FloodSide {
         side_probing_every(gaps_ms, 0.05)
@@ -710,7 +711,9 @@ mod tests {
         }
     }
 
-    fn run_spec_over<'a>(view: &'a SpawnSpec, nvim: &'a SpawnSpec, plan: TrialPlan) -> RunSpec<'a> {
+    fn run_spec_over<'a>(view: ViewSpec<'a>, nvim: NvimSpec<'a>, plan: TrialPlan) -> RunSpec<'a> {
+        let ViewSpec(view) = view;
+        let NvimSpec(nvim) = nvim;
         RunSpec {
             view,
             nvim,
@@ -870,7 +873,7 @@ mod tests {
         // show it
         let view = unspawnable("view");
         let nvim = unspawnable("nvim");
-        let run_spec = run_spec_over(&view, &nvim, plan(2, 100));
+        let run_spec = run_spec_over(ViewSpec(&view), NvimSpec(&nvim), plan(2, 100));
         let marked = |spec: &SpawnSpec| FloodSide {
             lines_drained: if spec.program == view.program {
                 1.0
@@ -914,7 +917,11 @@ mod tests {
         // and an unspawnable program makes any spawn a different error
         let view = unspawnable("view");
         let nvim = unspawnable("nvim");
-        let refused = run(&run_spec_over(&view, &nvim, plan(0, 100)));
+        let refused = run(&run_spec_over(
+            ViewSpec(&view),
+            NvimSpec(&nvim),
+            plan(0, 100),
+        ));
         assert!(
             matches!(refused, Err(BenchError::NoTrials)),
             "a zero-trial run must refuse before any spawn, got {refused:?}"

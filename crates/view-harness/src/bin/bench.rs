@@ -43,7 +43,7 @@ mod taps_rows;
 mod rows;
 use rows::run_cell;
 
-use view_bench::session::SpawnSpec;
+use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::baselines::{self, CellId, CellMetrics};
 use view_harness::budgets;
 use view_harness::fixture::{
@@ -452,8 +452,13 @@ fn null_calibration(bins: &Bins) -> Result<f64> {
         trials: 1,
         ..Protocol::default()
     };
-    let outcome = echo::run(&spec_a, &spec_b, &protocol, settle_deadline("minimal"))
-        .context("null-pair calibration run failed")?;
+    let outcome = echo::run(
+        ViewSpec(&spec_a),
+        NvimSpec(&spec_b),
+        &protocol,
+        settle_deadline("minimal"),
+    )
+    .context("null-pair calibration run failed")?;
     Ok(outcome.gated_ratio_p50)
 }
 

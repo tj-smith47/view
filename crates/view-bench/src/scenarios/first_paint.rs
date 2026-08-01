@@ -33,7 +33,7 @@ use crate::boundaries::screen_holds;
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{Distribution, Side};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SpawnSpec};
+use crate::session::{BenchSession, NvimSpec, SpawnSpec, ViewSpec};
 use crate::BenchError;
 
 /// Bound on one spawn-to-first-frame wait before the run is declared
@@ -147,12 +147,14 @@ pub struct FirstPaintOutcome {
 /// view spawn reaches `marker` without ever showing `shell`, or any
 /// underlying session error.
 pub fn run(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
+    view_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
     shell: &str,
     marker: &str,
 ) -> Result<FirstPaintOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
+    let NvimSpec(nvim) = nvim_spec;
     let per_side = protocol.warmup + protocol.samples;
     let mut view_ms = Vec::with_capacity(per_side);
     let mut shell_ms = Vec::with_capacity(per_side);

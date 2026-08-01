@@ -56,7 +56,8 @@ use view_surface::Surface;
 pub use compat::CompatSession;
 pub use minimize::{ddmin, join_tokens, tokenize};
 pub use parity::{
-    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, Screen, StateSnapshot,
+    compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, ReferenceSide, Screen,
+    StateSnapshot, ViewSide,
 };
 pub use pty::{make_hermetic, PtySession, QueryPolicy, SpawnEnv};
 pub use reference::ReferenceSession;

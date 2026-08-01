@@ -34,6 +34,22 @@ pub struct SpawnSpec {
     pub cwd: Option<PathBuf>,
 }
 
+/// The spawn spec for the side under measurement.
+///
+/// The two sides carry distinct types so that a call transposing them
+/// cannot compile. A transposed pair spawns each side in the other's role,
+/// so the run still settles, still samples and still reports -- with the
+/// baseline recorded as the measured side and every ratio the perf gate
+/// reads inverted, and the numbers stay plausible enough that nothing
+/// downstream can detect the swap.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewSpec<'a>(pub &'a SpawnSpec);
+
+/// The spawn spec for the bare-editor baseline the measured side is paired
+/// against. See [`ViewSpec`] for why the sides are separate types.
+#[derive(Debug, Clone, Copy)]
+pub struct NvimSpec<'a>(pub &'a SpawnSpec);
+
 /// The two bounds a quiescence wait needs.
 ///
 /// Both are durations, so as adjacent positional arguments they transpose

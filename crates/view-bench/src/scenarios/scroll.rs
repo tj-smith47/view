@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SettleBound, SpawnSpec};
+use crate::session::{BenchSession, NvimSpec, SettleBound, SpawnSpec, ViewSpec};
 use crate::BenchError;
 
 /// Width of the `L%06d` line label every fixture line starts with.
@@ -203,11 +203,13 @@ pub struct ScrollOutcome {
 /// Returns [`BenchError::Desync`] if either editor's top label stops
 /// advancing as predicted, or any underlying session error.
 pub fn run(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
+    view_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
     settle_deadline: Duration,
 ) -> Result<ScrollOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
+    let NvimSpec(nvim) = nvim_spec;
     let per_side_total = protocol.trials * (protocol.warmup + protocol.samples);
     // a half-page scroll advances by at most half the grid height;
     // refusing here beats a mid-run desync at the file's bottom edge

@@ -20,7 +20,9 @@ use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side}
 use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::echo::{label, SideState};
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SettleBound, SpawnSpec, GRID_COLS, GRID_ROWS};
+use crate::session::{
+    BenchSession, NvimSpec, SettleBound, SpawnSpec, ViewSpec, GRID_COLS, GRID_ROWS,
+};
 use crate::BenchError;
 
 /// One parsed tap record.
@@ -755,12 +757,14 @@ fn accumulate_chain(
 /// Returns [`BenchError::Desync`] on tap loss, an editor that stops
 /// responding within the sample timeout, or any underlying session error.
 pub fn run_echo_path(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
+    view_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
     pipe: &TapPipe,
     protocol: &Protocol,
     settle_deadline: Duration,
 ) -> Result<EchoPathOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
+    let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
     let (overhead, overhead_pace) =
         characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;

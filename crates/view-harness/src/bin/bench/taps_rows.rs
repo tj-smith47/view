@@ -170,8 +170,8 @@ pub(crate) fn run_echo_path_row(
     let (pipe, view_spec, cwd) = taps_side(fixture, world, bins)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = taps::run_echo_path(
-        &view_spec,
-        &nvim_spec,
+        ViewSpec(&view_spec),
+        NvimSpec(&nvim_spec),
         &pipe,
         protocol,
         settle_deadline(fixture),

@@ -11,7 +11,7 @@ use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SettleBound, SpawnSpec};
+use crate::session::{BenchSession, NvimSpec, SettleBound, SpawnSpec, ViewSpec};
 use crate::BenchError;
 
 /// Characters typed per line before the driver opens a fresh line:
@@ -249,11 +249,13 @@ pub struct EchoOutcome {
 /// Returns [`BenchError::Desync`] if either editor stops responding to
 /// typed input within the sample timeout, or any underlying session error.
 pub fn run(
-    view: &SpawnSpec,
-    nvim: &SpawnSpec,
+    view_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
     settle_deadline: Duration,
 ) -> Result<EchoOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
+    let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
     let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
 

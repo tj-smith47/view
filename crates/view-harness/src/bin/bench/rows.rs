@@ -46,8 +46,8 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             let control_spec = nvim_spec_from(control_side, nvim_bin);
             let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, nvim_bin);
             let outcome = echo_control::run(
-                &control_spec,
-                &nvim_spec,
+                ViewSpec(&control_spec),
+                NvimSpec(&nvim_spec),
                 socket,
                 protocol,
                 settle_deadline(fixture),
@@ -91,8 +91,13 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
         }
         "echo" => {
             let pair = paired_specs(&world, fixture, bins)?;
-            let outcome = echo::run(&pair.view, &pair.nvim, protocol, settle_deadline(fixture))
-                .with_context(|| format!("echo/{fixture} run failed"))?;
+            let outcome = echo::run(
+                ViewSpec(&pair.view),
+                NvimSpec(&pair.nvim),
+                protocol,
+                settle_deadline(fixture),
+            )
+            .with_context(|| format!("echo/{fixture} run failed"))?;
             for summary in &outcome.trials {
                 println!(
                     "{}",
@@ -144,8 +149,13 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 std::fs::write(&file, scroll::fixture_content())
                     .with_context(|| format!("writing scroll fixture {}", file.display()))?;
             }
-            let outcome = scroll::run(&pair.view, &pair.nvim, protocol, settle_deadline(fixture))
-                .with_context(|| format!("scroll/{fixture} run failed"))?;
+            let outcome = scroll::run(
+                ViewSpec(&pair.view),
+                NvimSpec(&pair.nvim),
+                protocol,
+                settle_deadline(fixture),
+            )
+            .with_context(|| format!("scroll/{fixture} run failed"))?;
             for summary in &outcome.trials {
                 println!(
                     "{}",
@@ -182,8 +192,8 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             plant_first_paint_marker(&pair.view)?;
             plant_first_paint_marker(&pair.nvim)?;
             let outcome = first_paint::run(
-                &pair.view,
-                &pair.nvim,
+                ViewSpec(&pair.view),
+                NvimSpec(&pair.nvim),
                 protocol,
                 view_surface::SHELL_PLACEHOLDER,
                 FIRST_PAINT_MARKER,

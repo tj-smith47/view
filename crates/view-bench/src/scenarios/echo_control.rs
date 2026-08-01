@@ -20,36 +20,40 @@ use std::time::Duration;
 use crate::remote_ui::RemoteUiServer;
 use crate::scenarios::echo::{self, EchoOutcome};
 use crate::scenarios::Protocol;
-use crate::session::SpawnSpec;
+use crate::session::{NvimSpec, ViewSpec};
 use crate::BenchError;
 
 /// The measured side's name in this row's report lines.
 pub const MEASURED_SIDE: &str = "remote-ui";
 
-/// Runs the control row: a headless server started from `control`, its
-/// `--remote-ui` client paired against the bare nvim `nvim` describes.
+/// Runs the control row: a headless server started from `control_spec`, its
+/// `--remote-ui` client paired against the bare nvim `nvim_spec` describes.
 ///
-/// `control` and `nvim` are two separately resolved sides of the same
-/// fixture, so the control's server and the bare arm never share a config
-/// directory, plugin state or probe socket.
+/// `control_spec` and `nvim_spec` are two separately resolved sides of the
+/// same fixture, so the control's server and the bare arm never share a
+/// config directory, plugin state or probe socket. The control arm takes
+/// the measured side's type because that is the role it plays here: this
+/// row's ratio is nvim's own TUI charged against the same bare-nvim
+/// baseline the echo row uses.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if the headless server never listens, or
 /// any error the echo protocol itself raises.
 pub fn run(
-    control: &SpawnSpec,
-    nvim: &SpawnSpec,
+    control_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
     socket: PathBuf,
     protocol: &Protocol,
     settle_deadline: Duration,
 ) -> Result<EchoOutcome, BenchError> {
+    let ViewSpec(control) = control_spec;
     let server = RemoteUiServer::start(control, socket)?;
     // the client takes the server's side, not the bare arm's: the two arms
     // hold separate config directories and probe-socket addresses, and a
     // client resolving the bare arm's paths would contend for both
     let client = server.client_spec(control);
-    let outcome = echo::run(&client, nvim, protocol, settle_deadline);
+    let outcome = echo::run(ViewSpec(&client), nvim_spec, protocol, settle_deadline);
     // the server outlives the sampling deliberately: dropping it mid-run
     // would tear the client's buffer out from under a sample in flight and
     // report the resulting desync as a latency reading
