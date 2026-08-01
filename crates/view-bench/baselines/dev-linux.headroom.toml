@@ -1,0 +1,56 @@
+# Gate headroom measured on this host, overriding the compiled-in default
+# for the metric's kind. Hand-curated characterization: --record rewrites
+# dev-linux.toml and never this file, so entries and their provenance
+# comments survive every record pass. A metric absent here has not had its
+# run-to-run spread established on this class and gates on the conservative
+# default; absence is a statement, not a gap to fill with a plausible number.
+# A bare key characterizes the statistic host-wide; a quoted
+# "scenario.metric" key scopes it to one scenario and wins there, for a
+# statistic whose spread is a property of the scenario rather than of the
+# host.
+machine_class = "dev-linux"
+
+[headroom]
+# 8 report-only replicates, 2026-07-27, host loads 0.44 to 8.53, one
+# unchanged binary pair. Median 1.1735, half-width 1.70%, and the worst
+# excursion above the recorded value was 2.14%. The pre-registered rule for
+# distinguishing two conditions from single measurements is 2x half-width,
+# here 3.4%. 1.06 clears both, and replaces a default of 1.25 that admitted a
+# 25% regression on a statistic this host resolves to under 2%.
+ratio_p50 = 1.06
+
+# 8 report-only replicates, 2026-08-01, host loads 1.26 to 7.35, one
+# unchanged binary pair, both scroll fixtures, gated statistic per replicate
+# (median ratio_p50 of 3 trials). Scoped to scroll because its spread is not
+# the host's ratio resolution: minimal median 1.9530, half-width 3.53%;
+# heavy median 2.1060, half-width 4.89% -- two to three times echo's 1.70%
+# -- and the min-ratcheted floors sit 9-13% below the medians (minimal
+# recorded 1.7778, heavy 1.9907). Worst excursion above a recorded value
+# 1.14x (2.013 against minimal's 1.7778); the 2x half-width rule asks
+# 1.18x (1.9530 + 2 x 0.069 against 1.7778). 1.18 clears both; under the
+# host-wide 1.06 the same unchanged pair breached on two independent runs
+# (minimal 1.9008 > 1.8844, heavy 2.115 > 2.1102).
+"scroll.ratio_p50" = 1.18
+
+# 8 report-only replicates, 2026-08-01, host loads 0.79 to 5.74, one
+# unchanged binary pair, both first_paint fixtures (16 observations of a p99
+# over 1000 cold spawns; the name carries no percentile component, so this
+# escapes the shared-class tail exemption and gates here). Pooled median
+# 3.72 ms, half-width 2.63 ms (70.7% of median): the six quiet replicates
+# per fixture sit inside 3.62..3.78 ms, and the elevated-load ones measured
+# 6.08, 6.13 and 8.88 ms on unchanged code. Worst excursion above the
+# recorded value 2.34x (8.881 against heavy's recorded 3.788); the 2x
+# half-width rule asks 2.41x. 2.5 clears both, and replaces a default of 1.5
+# that this host's own weather breaches -- the quiet-recorded bar was broken
+# by an ambient excursion, not by a change to view.
+shell_visible_ms = 2.5
+
+# Same 8 replicates as shell_visible_ms, same statistic shape (a p99 of
+# 1000 cold spawns whose name carries no percentile component). Relative
+# half-width agrees across fixtures: minimal median 23.6 ms, half-width
+# 42.3%; heavy median 84.4 ms, half-width 42.1%. Worst excursion above the
+# recorded value 1.91x (151.206 against heavy's recorded 79.267); the 2x
+# half-width rule asks 1.85x. 2.0 clears both. The minimal fixture's spec
+# budget of 30 ms sits far under this ratchet ceiling and stays the bar
+# that actually fires there.
+marker_cold_ms = 2.0

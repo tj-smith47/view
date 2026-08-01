@@ -735,6 +735,11 @@ fn main() -> Result<()> {
     // half an hour of measurement
     let path = baseline_path(&cli.class);
     require_gatable(cli.gate, &cli.class, &path)?;
+    // the measured-headroom sidecar is hand-curated and never rewritten by
+    // --record; loaded before anything expensive runs for the same reason
+    // the baseline path is resolved here
+    let headroom_file = baselines::headroom_path(&path);
+    let headroom = baselines::load_headroom(&headroom_file, &cli.class)?;
     let recording = cli.record;
     let mut masked_regressions = 0usize;
     let gating = cli.gate;
@@ -894,6 +899,7 @@ fn main() -> Result<()> {
             &cli.class,
             &pin,
             &measured,
+            &headroom,
         );
         baselines::save(&partial_path, &partial.file)?;
         eprintln!(
@@ -974,7 +980,12 @@ fn main() -> Result<()> {
             None
         };
 
-        let plan = baselines::plan_record(existing, mode, &cli.class, &pin, &measured);
+        let plan = baselines::plan_record(existing, mode, &cli.class, &pin, &measured, &headroom);
+        // checked against the file about to be written, not the one being
+        // replaced: a record that drops the last cell measuring a
+        // characterised metric must refuse rather than orphan the sidecar
+        // entry and fail the next load
+        baselines::require_headroom_bound(&headroom, &plan.file, &headroom_file)?;
         baselines::save(&path, &plan.file)?;
         let report = plan.report(&path.display().to_string());
         for line in report.info {
@@ -997,6 +1008,7 @@ fn main() -> Result<()> {
         })?;
         baselines::require_pin_match(&file, &pin, &path)?;
         baselines::require_class_match(&file, &cli.class, &path)?;
+        baselines::require_headroom_bound(&headroom, &file, &headroom_file)?;
         let mut breaches = Vec::new();
         // a cell that ran but stopped producing one of its recorded
         // numbers passes the forward walk, which compares only the
@@ -1012,12 +1024,7 @@ fn main() -> Result<()> {
             let Some(recorded) = file.cell(&cell.id) else {
                 continue;
             };
-            breaches.extend(baselines::gate_cell(
-                cell,
-                recorded,
-                &cli.class,
-                &file.headroom,
-            ));
+            breaches.extend(baselines::gate_cell(cell, recorded, &cli.class, &headroom));
             for metric in baselines::unmeasured_metrics(cell, recorded) {
                 unmeasured.push((cell.id.clone(), metric));
             }
@@ -1074,7 +1081,7 @@ fn main() -> Result<()> {
                 &budget_file,
                 cell,
                 &cli.class,
-                &file.headroom,
+                &headroom,
             ));
         }
         let budget_failures = findings

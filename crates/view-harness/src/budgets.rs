@@ -338,13 +338,14 @@ fn find_shortfall<'a>(
 /// statistics) gets no ceiling here either, for the same reason it gets
 /// none there: on a shared host that number is not a property of the code.
 fn shortfall_ceiling(
+    scenario: &str,
     metric: &str,
     class: &str,
     accepted: f64,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> f64 {
     let controlled = crate::baselines::is_controlled_class(class);
-    crate::baselines::headroom_for(headroom_table, metric, controlled)
+    crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)
         .map_or(f64::INFINITY, |headroom| headroom.bar(accepted))
 }
 
@@ -379,8 +380,13 @@ pub fn check_cell(
             match find_shortfall(file, scenario, fixture, metric, class) {
                 None => Verdict::New,
                 Some(shortfall) => {
-                    let ceiling =
-                        shortfall_ceiling(metric, class, shortfall.accepted, headroom_table);
+                    let ceiling = shortfall_ceiling(
+                        scenario,
+                        metric,
+                        class,
+                        shortfall.accepted,
+                        headroom_table,
+                    );
                     if measured > ceiling {
                         Verdict::Widened {
                             accepted: shortfall.accepted,
@@ -1087,6 +1093,15 @@ classes = ["dev-macos"]
             .expect("the baselines directory must exist")
             .map(|entry| entry.expect("readable directory entry").path())
             .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            // headroom sidecars are hand-curated characterization, not
+            // recorded baselines; their own shipped-tree guard lives with
+            // the baselines tests
+            .filter(|path| {
+                !path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".headroom.toml"))
+            })
             .collect();
         paths.sort();
         assert!(

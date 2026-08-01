@@ -15,6 +15,13 @@
 //! paired_delta_p99_ms = 0.29
 //! ```
 //!
+//! Measured gate headroom lives in a hand-curated sidecar next to it
+//! (`<class>.headroom.toml`, see [`HeadroomTable`]), never in this file:
+//! `--record` rewrites the baseline wholesale through a serializer that
+//! keeps no comments, and a characterization's provenance comment is as
+//! load-bearing as its factor. Keeping the two lifecycles in two files is
+//! what lets every record pass leave the characterization untouched.
+//!
 //! Every metric is lower-is-better, so one gate rule covers all cells: a
 //! breach is a measured value above the bar its recorded value implies,
 //! with the bar policy chosen per metric kind and machine class by
@@ -47,8 +54,8 @@ pub const SUPPORTED_SCHEMA: u32 = 1;
 /// regimes whose absolute tails swung x300.
 ///
 /// **1.25 is deliberately conservative and is not a target.** Where a
-/// class has characterised the spread it should say so in its own
-/// `[headroom]` table (see [`HeadroomTable`]) rather than inherit this:
+/// class has characterised the spread it should say so in its headroom
+/// sidecar (see [`HeadroomTable`]) rather than inherit this:
 /// dev-linux measured `ratio_p50` to a 1.70% half-width over eight
 /// replicates spanning host loads 0.44 to 8.53, so 1.25 admitted a 25%
 /// regression on a number that host resolves to under 2%, and it now
@@ -257,16 +264,32 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     controlled.then_some(Headroom::Proportional(factor))
 }
 
-/// The gate policy for `metric`, preferring `table`'s measured headroom for
-/// this class over the default for the metric's kind.
+/// The gate policy for `scenario`'s `metric`, preferring `table`'s measured
+/// headroom for this class over the default for the metric's kind.
+///
+/// A `"scenario.metric"` entry wins over a bare `"metric"` entry, because
+/// the same statistic name carries a different run-to-run spread in
+/// different scenarios: on this class the echo replicates resolve
+/// `ratio_p50` to under 2%, while the scroll replicates put the same name's
+/// spread several times wider, and one factor cannot be honest about both.
+/// A bare entry stays the host-wide characterization for every scenario
+/// without a qualified one.
 ///
 /// An override only resizes an allowance that already exists: a metric the
 /// class does not gate at all stays ungated, because that exemption is about
 /// whether the number means anything here, not about how far it moves.
 #[must_use]
-pub fn headroom_for(table: &HeadroomTable, metric: &str, controlled: bool) -> Option<Headroom> {
+pub fn headroom_for(
+    table: &HeadroomTable,
+    scenario: &str,
+    metric: &str,
+    controlled: bool,
+) -> Option<Headroom> {
     let policy = gate_headroom(metric, controlled)?;
-    match (table.get(metric), policy) {
+    let factor = table
+        .get(&format!("{scenario}.{metric}"))
+        .or_else(|| table.get(metric));
+    match (factor, policy) {
         (Some(&factor), Headroom::Signed { floor, .. }) => Some(Headroom::Signed { factor, floor }),
         (Some(&factor), Headroom::Proportional(_)) => Some(Headroom::Proportional(factor)),
         (None, policy) => Some(policy),
@@ -401,6 +424,12 @@ pub enum BaselineError {
     )]
     UnknownHeadroomMetric { path: String, metric: String },
     #[error(
+        "{path}: carries a [headroom] table, but measured characterization lives in the \
+         hand-curated sidecar {sidecar}; --record rewrites this file through a serializer that \
+         keeps no comments, so a table here would lose its provenance on the next record"
+    )]
+    HeadroomInBaseline { path: String, sidecar: String },
+    #[error(
         "{path}: [headroom] gives {metric} a factor of {factor}; a gate allowance must be finite \
          and above 1.0, since at or below it the recorded measurement breaches its own bar"
     )]
@@ -438,8 +467,8 @@ pub enum BaselineError {
         current: String,
     },
     #[error(
-        "baseline {path} declares machine_class {recorded:?} but this run named class \
-         {current:?}; the gate policy is derived from the class, so the two must agree"
+        "{path} declares machine_class {recorded:?} but this run named class {current:?}; the \
+         gate policy is derived from the class, so the two must agree"
     )]
     ClassMismatch {
         path: String,
@@ -478,7 +507,136 @@ pub enum BaselineError {
 /// Absence is therefore meaningful and is not a gap to be filled with a
 /// plausible value: it says this metric's spread on this class has not been
 /// established, so it gates on the conservative default until it has.
+///
+/// Loaded from the class's hand-curated sidecar
+/// (`baselines/<class>.headroom.toml`, see [`headroom_path`]) via
+/// [`load_headroom`], never from the recorded baseline itself: a
+/// characterization has a different lifecycle than a recorded measurement,
+/// and [`load`] refuses a baseline that carries one.
 pub type HeadroomTable = BTreeMap<String, f64>;
+
+/// The measured-headroom sidecar shape (`baselines/<class>.headroom.toml`):
+///
+/// ```toml
+/// machine_class = "dev-linux"
+///
+/// [headroom]
+/// ratio_p50 = 1.06
+/// "scroll.ratio_p50" = 1.12
+/// ```
+///
+/// A bare key characterizes the statistic host-wide; a quoted
+/// `"scenario.metric"` key scopes it to one scenario and wins there (see
+/// [`headroom_for`]). The quotes are TOML syntax, not decoration: unquoted,
+/// the dot would open a nested table and the file would fail to load.
+///
+/// Unknown fields are refused so a recorded cell pasted in here is a load
+/// error rather than a table that silently binds nothing.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HeadroomFile {
+    machine_class: String,
+    #[serde(default)]
+    headroom: HeadroomTable,
+}
+
+/// Where one class's measured-headroom sidecar lives: next to its baseline,
+/// as `<class>.headroom.toml`. Derived from the baseline path rather than
+/// passed separately so the two files can never be selected from different
+/// classes.
+#[must_use]
+pub fn headroom_path(baseline_path: &Path) -> std::path::PathBuf {
+    baseline_path.with_extension("headroom.toml")
+}
+
+/// Loads the measured-headroom sidecar at `path` for `class`.
+///
+/// A missing file is the legitimate "nothing characterised yet" state and
+/// loads as an empty table; every metric then gates on its policy default.
+///
+/// # Errors
+///
+/// Returns [`BaselineError::Read`]/[`BaselineError::Parse`] on I/O or TOML
+/// failures, [`BaselineError::ClassMismatch`] when the file declares a
+/// class other than `class` (a sidecar copied across classes would apply
+/// one host's measured spread to another), and
+/// [`BaselineError::UnusableHeadroom`] on a factor no gate can apply.
+pub fn load_headroom(path: &Path, class: &str) -> Result<HeadroomTable, BaselineError> {
+    if !path.exists() {
+        return Ok(HeadroomTable::new());
+    }
+    let display = path.display().to_string();
+    let text = std::fs::read_to_string(path).map_err(|source| BaselineError::Read {
+        path: display.clone(),
+        source,
+    })?;
+    let file: HeadroomFile = toml::from_str(&text).map_err(|source| BaselineError::Parse {
+        path: display.clone(),
+        source: Box::new(source),
+    })?;
+    if file.machine_class != class {
+        return Err(BaselineError::ClassMismatch {
+            path: display,
+            recorded: file.machine_class,
+            current: class.to_string(),
+        });
+    }
+    for (metric, &factor) in &file.headroom {
+        if !factor.is_finite() || factor <= 1.0 {
+            return Err(BaselineError::UnusableHeadroom {
+                path: display,
+                metric: metric.clone(),
+                factor,
+            });
+        }
+    }
+    Ok(file.headroom)
+}
+
+/// Rejects a headroom table whose entries name metrics no cell of
+/// `baseline` records.
+///
+/// Such an entry would silently do nothing: the lookup misses, the policy
+/// default applies, and the sidecar reads as though a measured allowance is
+/// in force when none is. That is the one way the table can lie, so it is
+/// checked against every baseline the table is about to be used with --
+/// including the one a record is about to write, so a record that drops the
+/// last cell measuring a characterised metric refuses instead of orphaning
+/// the entry.
+///
+/// # Errors
+///
+/// Returns [`BaselineError::UnknownHeadroomMetric`] naming the unbound
+/// entry.
+pub fn require_headroom_bound(
+    table: &HeadroomTable,
+    baseline: &BaselineFile,
+    table_path: &Path,
+) -> Result<(), BaselineError> {
+    for key in table.keys() {
+        // a dotted key scopes the entry to one scenario, so it binds only
+        // if that scenario's own cells record the metric; a bare key binds
+        // through any cell
+        let bound = match key.split_once('.') {
+            Some((scenario, metric)) => baseline
+                .cells
+                .get(scenario)
+                .is_some_and(|fixtures| fixtures.values().any(|cell| cell.contains_key(metric))),
+            None => baseline
+                .cells
+                .values()
+                .flat_map(BTreeMap::values)
+                .any(|cell| cell.contains_key(key)),
+        };
+        if !bound {
+            return Err(BaselineError::UnknownHeadroomMetric {
+                path: table_path.display().to_string(),
+                metric: key.clone(),
+            });
+        }
+    }
+    Ok(())
+}
 
 /// One recorded machine class's baselines.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -486,9 +644,13 @@ pub struct BaselineFile {
     pub schema: u32,
     pub engine_pin: String,
     pub machine_class: String,
-    /// Measured per-metric headroom for this class; see [`HeadroomTable`].
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headroom: HeadroomTable,
+    /// Deserialize-only trap for a `[headroom]` table that belongs in the
+    /// sidecar (see [`HeadroomTable`]). Never serialized, so a recorded
+    /// file cannot carry one by construction; [`load`] turns a non-empty
+    /// value here into [`BaselineError::HeadroomInBaseline`] instead of
+    /// letting the next record silently destroy it.
+    #[serde(default, skip_serializing)]
+    headroom: HeadroomTable,
     /// scenario -> fixture -> metric -> recorded value.
     #[serde(flatten)]
     pub cells: BTreeMap<String, BTreeMap<String, CellMetrics>>,
@@ -582,7 +744,9 @@ pub fn gate_cell(
         let Some(&measured_value) = measured.metrics.get(metric) else {
             continue;
         };
-        let Some(headroom) = headroom_for(headroom_table, metric, controlled) else {
+        let Some(headroom) =
+            headroom_for(headroom_table, &measured.id.scenario, metric, controlled)
+        else {
             continue;
         };
         let bar = headroom.bar(*recorded_value);
@@ -696,29 +860,14 @@ pub fn load(path: &Path) -> Result<BaselineFile, BaselineError> {
             found: file.schema,
         });
     }
-    // a [headroom] key that matches no recorded metric would silently do
-    // nothing: the lookup misses, the policy default applies, and the file
-    // reads as though a measured allowance is in force when none is. That is
-    // the one way this table can lie, so it is a load error
-    for (metric, &factor) in &file.headroom {
-        if !file
-            .cells
-            .values()
-            .flat_map(BTreeMap::values)
-            .any(|cell| cell.contains_key(metric))
-        {
-            return Err(BaselineError::UnknownHeadroomMetric {
-                path: display,
-                metric: metric.clone(),
-            });
-        }
-        if !factor.is_finite() || factor <= 1.0 {
-            return Err(BaselineError::UnusableHeadroom {
-                path: display,
-                metric: metric.clone(),
-                factor,
-            });
-        }
+    // save() cannot write a [headroom] table, so one here is hand-added and
+    // about to be destroyed by the next record; refusing is what routes the
+    // characterization to the file records never rewrite
+    if !file.headroom.is_empty() {
+        return Err(BaselineError::HeadroomInBaseline {
+            sidecar: headroom_path(path).display().to_string(),
+            path: display,
+        });
     }
     Ok(file)
 }
@@ -801,8 +950,11 @@ pub enum RatchetOutcome {
 /// cell (if any), so a recorded bar moves only in the improving (lower)
 /// direction. Every metric is lower-is-better (see the module invariant),
 /// so the ratchet keeps `min(recorded, measured)` per metric; a metric the
-/// baseline never held is recorded as-is. `controlled` selects the headroom
-/// used to flag a masked regression via [`gate_headroom`].
+/// baseline never held is recorded as-is. `controlled` and `headroom` select
+/// the same per-metric allowance the gate applies (via [`headroom_for`]), so
+/// the ratchet and the gate agree about what a masked regression is: a
+/// record run must not stay quiet about a value the very next gate would
+/// breach, nor cry regression at one the class's measured spread accepts.
 ///
 /// The returned cell carries exactly the measured metric keys: an existing
 /// metric the run did not remeasure is not carried forward, matching the
@@ -823,12 +975,14 @@ pub enum RatchetOutcome {
 pub fn ratchet_cell(
     existing: Option<&CellMetrics>,
     measured: &CellMetrics,
+    scenario: &str,
     controlled: bool,
+    headroom: &HeadroomTable,
 ) -> (CellMetrics, Vec<RatchetOutcome>) {
     let mut cell = CellMetrics::new();
     let mut outcomes = Vec::new();
     for (metric, &value) in measured {
-        let headroom = gate_headroom(metric, controlled);
+        let headroom = headroom_for(headroom, scenario, metric, controlled);
         // most metrics are a latency, a ratio or a size and cannot be zero
         // or below without the run having gone wrong; the signed paired
         // delta reaches negative exactly when view beats nvim, so it is
@@ -931,6 +1085,7 @@ pub fn plan_record(
     class: &str,
     pin: &str,
     measured: &[MeasuredCell],
+    headroom: &HeadroomTable,
 ) -> RecordPlan {
     let controlled = is_controlled_class(class);
     let comparable = existing
@@ -965,7 +1120,13 @@ pub fn plan_record(
     let mut cells = Vec::new();
     for cell in measured {
         let existing_cell = reference.and_then(|file| file.cell(&cell.id));
-        let (ratcheted, outcomes) = ratchet_cell(existing_cell, &cell.metrics, controlled);
+        let (ratcheted, outcomes) = ratchet_cell(
+            existing_cell,
+            &cell.metrics,
+            &cell.id.scenario,
+            controlled,
+            headroom,
+        );
         file.upsert_cell(&cell.id, ratcheted);
         cells.push(CellRatchet {
             scenario: cell.id.scenario.clone(),
@@ -1178,62 +1339,184 @@ mod tests {
         assert_eq!(parsed.machine_class, "dev-linux");
     }
 
-    /// A measured headroom must survive `--record`, which rewrites the whole
-    /// file. If the save path dropped the table, the entry would vanish in
-    /// silence and every metric would quietly fall back to the default it
-    /// was measured to replace -- the gate would loosen 4x with nothing in
-    /// the diff to say so but a missing table.
+    /// A record pass over a class with a measured headroom characterization
+    /// must leave both the factor and the comment documenting its
+    /// measurement protocol in force afterwards: the factor is what the
+    /// gate applies, and the comment is the only record of the replicate
+    /// protocol that justifies it. The sidecar survives byte-for-byte
+    /// because the record flow writes only the baseline path.
     #[test]
-    fn a_measured_headroom_survives_a_rewrite() {
-        let mut file = BaselineFile::new("dev-linux", "v0.12.4");
-        file.upsert_cell(
-            &CellId::new("echo", "minimal"),
-            metrics(&[("ratio_p50", 1.17)]),
-        );
-        file.headroom.insert("ratio_p50".to_string(), 1.06);
+    fn a_record_pass_preserves_the_headroom_characterization() {
+        let dir = std::env::temp_dir().join(format!("view-headroom-record-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dev-linux.toml");
+        std::fs::write(
+            &path,
+            "schema = 1\nengine_pin = \"v0.12.4\"\nmachine_class = \"dev-linux\"\n\n\
+             [echo.minimal]\nratio_p50 = 1.17\n",
+        )
+        .unwrap();
+        let sidecar = headroom_path(&path);
+        let curated = "machine_class = \"dev-linux\"\n\n[headroom]\n\
+                       # 8 report-only replicates, one unchanged binary pair.\n\
+                       ratio_p50 = 1.06\n";
+        std::fs::write(&sidecar, curated).unwrap();
 
-        let text = toml::to_string_pretty(&file).unwrap();
-        let parsed: BaselineFile = toml::from_str(&text).unwrap();
-        assert_eq!(parsed.headroom.get("ratio_p50"), Some(&1.06));
+        let headroom = load_headroom(&sidecar, "dev-linux").unwrap();
+        let existing = load(&path).unwrap();
+        let measured = vec![MeasuredCell {
+            id: CellId::new("echo", "minimal"),
+            metrics: metrics(&[("ratio_p50", 1.18)]),
+        }];
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::FullMatrix,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+            &headroom,
+        );
+        require_headroom_bound(&headroom, &plan.file, &sidecar).unwrap();
+        save(&path, &plan.file).unwrap();
+
+        let text = std::fs::read_to_string(&sidecar).unwrap();
         assert_eq!(
-            headroom_for(&parsed.headroom, "ratio_p50", false),
-            Some(Headroom::Proportional(1.06)),
-            "actual TOML:\n{text}"
+            text, curated,
+            "the record flow rewrote the hand-curated sidecar"
+        );
+        let survived = load_headroom(&sidecar, "dev-linux").unwrap();
+        assert_eq!(survived.get("ratio_p50"), Some(&1.06));
+        assert_eq!(
+            headroom_for(&survived, "echo", "ratio_p50", false),
+            Some(Headroom::Proportional(1.06))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A `[headroom]` table inside the baseline is exactly what the next
+    /// `--record` destroys, so it is refused at load with the sidecar named.
+    #[test]
+    fn a_baseline_carrying_a_headroom_table_is_refused() {
+        let dir = std::env::temp_dir().join(format!("view-headroom-inline-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("dev-linux.toml");
+        std::fs::write(
+            &path,
+            "schema = 1\nengine_pin = \"v0.12.4\"\nmachine_class = \"dev-linux\"\n\n\
+             [headroom]\nratio_p50 = 1.06\n\n[echo.minimal]\nratio_p50 = 1.17\n",
+        )
+        .unwrap();
+        let err = load(&path).unwrap_err();
+        assert!(matches!(err, BaselineError::HeadroomInBaseline { .. }));
+        assert!(
+            err.to_string().contains("dev-linux.headroom.toml"),
+            "the refusal must name the sidecar the table belongs in: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every shipped headroom sidecar against the baseline it characterises:
+    /// the committed pair is what the gate will actually load, and a record
+    /// that had orphaned or dropped a shipped characterization would
+    /// otherwise only surface one full bench run later. This is the shipped
+    /// counterpart of [`a_record_pass_preserves_the_headroom_characterization`].
+    #[test]
+    fn every_shipped_headroom_sidecar_binds_to_its_baseline() {
+        let dir = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("baselines");
+        let mut checked = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("the baselines directory must exist") {
+            let path = entry.expect("readable directory entry").path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(class) = name.strip_suffix(".headroom.toml") else {
+                continue;
+            };
+            let table = load_headroom(&path, class).expect("every shipped sidecar must load");
+            assert!(
+                !table.is_empty(),
+                "{} characterises nothing; delete it rather than shipping an empty statement",
+                path.display()
+            );
+            let baseline =
+                load(&dir.join(format!("{class}.toml"))).expect("a sidecar's baseline must exist");
+            require_headroom_bound(&table, &baseline, &path)
+                .expect("every shipped headroom entry must bind to a recorded metric");
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "dev-linux ships a characterization, so this walk must find at least one sidecar"
         );
     }
 
     /// The one way this table can lie is an entry that binds nothing: a key
     /// nothing measures looks like an allowance in force while the default
-    /// silently applies. Both malformed shapes are load errors.
+    /// silently applies. Malformed factors and wrong-class sidecars are
+    /// load errors; an unbound entry is refused against the baseline it
+    /// would be used with.
     #[test]
     fn a_headroom_entry_that_binds_nothing_is_a_load_error() {
         let dir = std::env::temp_dir().join(format!("view-headroom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("dev-linux.toml");
+        let sidecar = headroom_path(&path);
         let mut file = BaselineFile::new("dev-linux", "v0.12.4");
         file.upsert_cell(
             &CellId::new("echo", "minimal"),
             metrics(&[("ratio_p50", 1.17)]),
         );
-
-        file.headroom.insert("ratoi_p50".to_string(), 1.06);
         save(&path, &file).unwrap();
+
+        let write = |body: &str| {
+            std::fs::write(&sidecar, format!("machine_class = \"dev-linux\"\n{body}")).unwrap();
+        };
+
+        write("[headroom]\nratoi_p50 = 1.06\n");
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
         assert!(matches!(
-            load(&path),
+            require_headroom_bound(&table, &file, &sidecar),
             Err(BaselineError::UnknownHeadroomMetric { .. })
         ));
 
-        file.headroom.clear();
-        file.headroom.insert("ratio_p50".to_string(), 0.9);
-        save(&path, &file).unwrap();
+        write("[headroom]\nratio_p50 = 0.9\n");
         assert!(matches!(
-            load(&path),
+            load_headroom(&sidecar, "dev-linux"),
             Err(BaselineError::UnusableHeadroom { .. })
         ));
 
-        file.headroom.clear();
-        file.headroom.insert("ratio_p50".to_string(), 1.06);
-        save(&path, &file).unwrap();
-        assert!(load(&path).is_ok());
+        write("[headroom]\nratio_p50 = 1.06\n");
+        assert!(matches!(
+            load_headroom(&sidecar, "gh-linux"),
+            Err(BaselineError::ClassMismatch { .. })
+        ));
+
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
+        assert!(require_headroom_bound(&table, &file, &sidecar).is_ok());
+
+        // a qualified entry binds through its own scenario's cells only: the
+        // metric existing elsewhere in the file must not satisfy it, or a
+        // scoped characterization typo'd against the wrong scenario would
+        // read as an allowance in force
+        write("[headroom]\n\"echo.ratio_p50\" = 1.06\n");
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
+        assert!(require_headroom_bound(&table, &file, &sidecar).is_ok());
+
+        write("[headroom]\n\"scroll.ratio_p50\" = 1.12\n");
+        let table = load_headroom(&sidecar, "dev-linux").unwrap();
+        assert!(matches!(
+            require_headroom_bound(&table, &file, &sidecar),
+            Err(BaselineError::UnknownHeadroomMetric { .. })
+        ));
+
+        std::fs::remove_file(&sidecar).unwrap();
+        assert!(
+            load_headroom(&sidecar, "dev-linux").unwrap().is_empty(),
+            "no sidecar means nothing characterised, which loads as an empty table"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1559,22 +1842,54 @@ mod tests {
         .collect();
 
         assert_eq!(
-            headroom_for(&table, "ratio_p50", false),
+            headroom_for(&table, "echo", "ratio_p50", false),
             Some(Headroom::Proportional(1.06))
         );
         assert_eq!(
-            headroom_for(&table, "marker_ratio_p50", false),
+            headroom_for(&table, "echo", "marker_ratio_p50", false),
             Some(Headroom::Proportional(RATIO_HEADROOM)),
             "a metric with no entry keeps the default"
         );
         assert_eq!(
-            headroom_for(&table, "view_p99_ms", false),
+            headroom_for(&table, "echo", "view_p99_ms", false),
             None,
             "a shared-class tail stays ungated however well its spread is known"
         );
         assert_eq!(
-            headroom_for(&table, "view_p99_ms", true),
+            headroom_for(&table, "echo", "view_p99_ms", true),
             Some(Headroom::Proportional(1.10))
+        );
+    }
+
+    /// A `"scenario.metric"` entry wins over the bare entry in its own
+    /// scenario and binds nowhere else, because the same statistic name
+    /// carries a different measured spread per scenario.
+    ///
+    /// Disconfirm: a bare-key-only lookup gives every scenario 1.06 and the
+    /// first assertion fails; a qualified key that leaked host-wide would
+    /// fail the third.
+    #[test]
+    fn a_scenario_qualified_headroom_wins_only_in_its_scenario() {
+        let table: HeadroomTable = [
+            ("ratio_p50".to_string(), 1.06),
+            ("scroll.ratio_p50".to_string(), 1.12),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            headroom_for(&table, "scroll", "ratio_p50", false),
+            Some(Headroom::Proportional(1.12))
+        );
+        assert_eq!(
+            headroom_for(&table, "echo", "ratio_p50", false),
+            Some(Headroom::Proportional(1.06)),
+            "the bare entry stays the host-wide characterization"
+        );
+        assert_eq!(
+            headroom_for(&table, "flood", "ratio_p50", false),
+            Some(Headroom::Proportional(1.06)),
+            "a qualified entry must not leak outside its scenario"
         );
     }
 
@@ -1717,7 +2032,13 @@ mod tests {
     fn ratchet_holds_the_bar_when_the_measurement_regresses() {
         let existing = metrics(&[("ratio_p50", 1.20)]);
         let measured = metrics(&[("ratio_p50", 1.35)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             cell["ratio_p50"], 1.20,
             "a worse measurement must not raise the recorded bar"
@@ -1737,7 +2058,13 @@ mod tests {
     fn ratchet_lowers_the_bar_when_the_measurement_improves() {
         let existing = metrics(&[("ratio_p50", 1.35)]);
         let measured = metrics(&[("ratio_p50", 1.20)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             cell["ratio_p50"], 1.20,
             "a better measurement must lower the recorded bar to it"
@@ -1756,7 +2083,13 @@ mod tests {
     fn ratchet_records_a_metric_the_baseline_never_held() {
         let existing = metrics(&[("ratio_p50", 1.20)]);
         let measured = metrics(&[("ratio_p50", 1.15), ("view_p99_ms", 2.0)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(cell["view_p99_ms"], 2.0);
         assert_eq!(
             outcome_for(&outcomes, "view_p99_ms"),
@@ -1770,7 +2103,7 @@ mod tests {
     #[test]
     fn ratchet_with_no_existing_cell_records_every_metric_as_new() {
         let measured = metrics(&[("ratio_p50", 1.20), ("view_p99_ms", 2.0)]);
-        let (cell, outcomes) = ratchet_cell(None, &measured, false);
+        let (cell, outcomes) = ratchet_cell(None, &measured, "echo", false, &HeadroomTable::new());
         assert_eq!(cell, measured);
         assert!(outcomes
             .iter()
@@ -1785,7 +2118,13 @@ mod tests {
         // the bar hides a real regression the operator must be told about.
         let existing = metrics(&[("ratio_p50", 1.0)]);
         let measured = metrics(&[("ratio_p50", 1.40)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(cell["ratio_p50"], 1.0);
         assert_eq!(
             outcome_for(&outcomes, "ratio_p50"),
@@ -1802,7 +2141,13 @@ mod tests {
     fn ratchet_does_not_carry_forward_a_metric_the_run_did_not_remeasure() {
         let existing = metrics(&[("ratio_p50", 1.20), ("stale_metric", 9.0)]);
         let measured = metrics(&[("ratio_p50", 1.15)]);
-        let (cell, _outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, _outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert!(
             !cell.contains_key("stale_metric"),
             "an existing metric the run did not remeasure must not survive: {cell:?}"
@@ -1816,7 +2161,13 @@ mod tests {
         // bar for it to have breached.
         let existing = metrics(&[("ratio_p99", 1.0)]);
         let measured = metrics(&[("ratio_p99", 5.0)]);
-        let (_cell, outcomes) = ratchet_cell(Some(&existing), &measured, false);
+        let (_cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             outcome_for(&outcomes, "ratio_p99"),
             &RatchetOutcome::Held {
@@ -1859,6 +2210,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
@@ -1884,6 +2236,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert!(
             plan.file.cell(&CellId::new("scroll", "minimal")).is_none(),
@@ -1905,6 +2258,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
@@ -1927,6 +2281,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
@@ -1955,6 +2310,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("scroll", "minimal")).unwrap()["ratio_p50"],
@@ -1981,6 +2337,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(plan.masked_regressions(), 0);
         let lines = plan.report_lines("dev-linux.toml");
@@ -2014,6 +2371,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(plan.masked_regressions(), 1);
         let report = plan.report("dev-linux.toml");
@@ -2079,7 +2437,13 @@ mod tests {
         // report; refusing to record it tells the operator the opposite
         let existing = metrics(&[("paired_delta_p99_ms", 0.45)]);
         let measured = metrics(&[("paired_delta_p99_ms", -0.30)]);
-        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, true);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            true,
+            &HeadroomTable::new(),
+        );
         assert_eq!(cell.get("paired_delta_p99_ms"), Some(&-0.30));
         assert!(
             matches!(
@@ -2093,7 +2457,7 @@ mod tests {
     #[test]
     fn a_non_finite_measurement_is_rejected_rather_than_recorded() {
         let measured = metrics(&[("view_p99_ms", f64::NAN)]);
-        let (cell, outcomes) = ratchet_cell(None, &measured, false);
+        let (cell, outcomes) = ratchet_cell(None, &measured, "echo", false, &HeadroomTable::new());
         assert!(
             cell.is_empty(),
             "a NaN must not be written as a fresh bar: {cell:?}"
@@ -2111,7 +2475,13 @@ mod tests {
     fn a_rejected_measurement_keeps_the_bar_it_could_not_replace() {
         let existing = metrics(&[("view_p99_ms", 2.0)]);
         let measured = metrics(&[("view_p99_ms", f64::INFINITY)]);
-        let (cell, _) = ratchet_cell(Some(&existing), &measured, false);
+        let (cell, _) = ratchet_cell(
+            Some(&existing),
+            &measured,
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             cell.get("view_p99_ms"),
             Some(&2.0),
@@ -2126,7 +2496,13 @@ mod tests {
         // measurement forever; a metric that cannot physically be <= 0 must
         // never ratchet the bar there.
         let existing = metrics(&[("view_p99_ms", 2.0)]);
-        let (cell, _) = ratchet_cell(Some(&existing), &metrics(&[("view_p99_ms", 0.0)]), false);
+        let (cell, _) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("view_p99_ms", 0.0)]),
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             cell["view_p99_ms"], 2.0,
             "a 0.0 measurement must not install a 0.0 bar"
@@ -2139,7 +2515,9 @@ mod tests {
         let (cell, _) = ratchet_cell(
             Some(&existing),
             &metrics(&[("view_p99_ms", f64::NAN)]),
+            "echo",
             false,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             cell["view_p99_ms"], 2.0,
@@ -2153,8 +2531,13 @@ mod tests {
         // value that would breach must be flagged, exactly opposite to the
         // shared-class case tested above.
         let existing = metrics(&[("ratio_p99", 1.0)]);
-        let (_cell, outcomes) =
-            ratchet_cell(Some(&existing), &metrics(&[("ratio_p99", 1.40)]), true);
+        let (_cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p99", 1.40)]),
+            "echo",
+            true,
+            &HeadroomTable::new(),
+        );
         assert_eq!(
             outcome_for(&outcomes, "ratio_p99"),
             &RatchetOutcome::Held {
@@ -2180,6 +2563,7 @@ mod tests {
             "controlled-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.masked_regressions(),
@@ -2202,6 +2586,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
@@ -2224,6 +2609,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.cell(&CellId::new("echo", "minimal")).unwrap()["ratio_p50"],
@@ -2257,6 +2643,7 @@ mod tests {
             "dev-linux",
             "v0.12.4",
             &measured,
+            &HeadroomTable::new(),
         );
         assert_eq!(
             plan.file.engine_pin, "v0.12.4",

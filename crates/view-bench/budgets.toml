@@ -19,8 +19,8 @@ schema = 1
 # then-recorded 154.749 times ABSOLUTE_HEADROOM 1.5: a bound computed from
 # the measurement it bounds, which no measurement can fail by construction.
 # 100 is the bar the spec stated before anyone measured anything, so it is a
-# promise rather than a restatement, and the gap to it is carried as a
-# shortfall the way every other unmet budget is.
+# promise rather than a restatement; the gap to it was carried as a
+# shortfall until the row measured inside the bar.
 [[budget]]
 spec_row = "view input path: key event read from the terminal -> RPC bytes written"
 scenario = "input_path"
@@ -59,11 +59,11 @@ metric = "shell_visible_ms"
 max = 50.0
 
 # 30 ms, not a rounder number, because the ratchet already bounds this
-# metric at the recorded 26.507 times ABSOLUTE_HEADROOM 1.5 = 39.8 ms. Any
-# budget above that is one the ratchet always reaches first, so the budget
-# could never be the thing that fires -- the same defect the withdrawn
-# cold_ms bar had. 30 sits under the ratchet and over the measurement, so it
-# can break. 0.30 bounds the paired quantity the absolute cannot: a class
+# metric above it (the recorded 25.151 times the class's measured headroom;
+# 50.3 ms on dev-linux under the 2.0 in its headroom sidecar). Any budget
+# above that is one the ratchet always reaches first, so the budget could
+# never be the thing that fires -- the same defect the withdrawn cold_ms bar
+# had. 30 sits under the ratchet and over the measurement, so it can break. 0.30 bounds the paired quantity the absolute cannot: a class
 # whose cold start is slow for reasons outside view still has to show view
 # reaching the file in under a third of bare nvim's time. marker_cold_ms is
 # a p99 gated on the shared dev-linux class only because its name carries no
@@ -138,22 +138,6 @@ metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1837936337116466
 why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large."
-
-[[shortfall]]
-scenario = "input_path"
-fixture = "minimal"
-metric = "key_to_rpc_p99_us"
-class = "dev-linux"
-accepted = 117.739
-why = "18% over the spec's 100us, down from 154.7 before the writer hop was collapsed into an inline write. What is left is close to the floor: the single cross-thread hop this path is architecturally required to make (input thread to runtime loop, because the model decides whether a key is view's or nvim's) costs 80.0us p99 on its own on this class, measured without the editor by the input_handoff microbench at a 10ms idle gap. So 100us leaves about 20us for the model dispatch, the msgpack encode, the poll and the write. Reaching it means removing the hop, not tuning around it."
-
-[[shortfall]]
-scenario = "flood"
-fixture = "minimal"
-metric = "cadence_p99_ms"
-class = "dev-linux"
-accepted = 20.880463
-why = "a jitter tail, not a hard throttle. On this class the cadence gap p50 measures 12.24 ms against a p99 of 15.39 ms, so the p99 is the upper edge of a regular redraw cadence rather than a tail detached from the bulk; the criterion for that reading was pre-registered before the number existed (p50 near 12-13 ms means jitter, p50 near 16.4 ms means a throttle, anything between licenses neither). The metric also tracks ambient host load: the same row reads 15.385 ms at load average 1.04 and 16.429 ms at load 3.9, so a single value carries the host's weather with it, and neither reading located a view defect. The accepted figure is deliberately not the best observation for that reason, since a never-widen ratchet pinned to one sample of a noisy statistic fails on the next jitter excursion. The absolute bar stays gated regardless: a stall that hits view and nvim together leaves the paired cadence ratio near 1, so this is the metric that has to express it. Evidence: .claude/measurements/2026-07-27-the-flood-stimulus-cannot-be-pinned.md"
 
 [[shortfall]]
 scenario = "first_paint"
