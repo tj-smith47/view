@@ -7,6 +7,7 @@ pub mod nvim_api;
 mod outbox;
 pub mod process;
 pub mod rpc;
+pub mod stall;
 #[cfg(feature = "bench-taps")]
 mod tap;
 pub mod ui_events;
@@ -21,3 +22,4 @@ pub use handle::{EngineError, EngineHandle};
 pub use handle::EngineNotification;
 pub use process::{ApiInfo, Engine, EngineConfig, ShutdownOutcome, ShutdownPath};
 pub use rpc::{RpcError, RpcMessage};
+pub use stall::{OutboxStallWatch, WRITER_STALL_THRESHOLD};

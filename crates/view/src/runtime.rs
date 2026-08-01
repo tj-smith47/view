@@ -20,7 +20,18 @@ use view_core::msg::{Effect, ExitInfo, Msg, ReplyToken, ReplyValue, RpcCall};
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::process::Engine;
+use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
+
+/// What the user is told while the engine has stopped accepting view's
+/// output.
+///
+/// Fixed text, carrying neither a live duration nor a queue depth: the
+/// notice is re-asserted on every loop pass for as long as the stall lasts,
+/// and text that changed between passes would repaint the toast on each of
+/// them to tell the operator nothing they can act on that this does not.
+const ENGINE_STALLED_NOTICE: &str =
+    "nvim has stopped reading view's input; keystrokes are queued until it resumes";
 
 /// The notify surface [`Executor`] drives, factored out from [`EngineHandle`]
 /// so its effect-to-call mapping is testable against a recording fake
@@ -210,6 +221,31 @@ pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, 
     flow
 }
 
+/// Reads the engine's write side once and raises or retracts the stalled-
+/// engine notice on `model` to match what it finds. Returns whether the
+/// visible message set changed, which is the caller's cue to repaint.
+///
+/// Costs two relaxed atomic loads plus one walk of the message log per
+/// call, and never takes the engine's writer lock --
+/// a wedge is precisely the state in which that lock is held by a thread
+/// parked inside a write, so a check that wanted it could not report the
+/// one condition it exists for.
+///
+/// Re-asserted rather than edge-triggered: `msg_clear` empties the log
+/// wholesale, and a notice raised once on the way in would be gone for good
+/// while the condition it describes is still true.
+fn note_write_stall(
+    model: &mut Model,
+    watch: &mut OutboxStallWatch,
+    handle: &EngineHandle,
+) -> bool {
+    let stalled = watch.observe(handle);
+    model
+        .engine
+        .messages
+        .set_native_condition(stalled.then_some(ENGINE_STALLED_NOTICE))
+}
+
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
 /// terminal I/O error occurs, returning the final `Model` alongside the
 /// process exit code on the former (the caller persists the model's
@@ -244,6 +280,7 @@ pub fn run(
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
+    let mut write_stall = OutboxStallWatch::default();
 
     loop {
         // a resize the input thread has already seen describes the terminal
@@ -263,6 +300,14 @@ pub fn run(
                     }
                 }
             }
+        }
+        // checked here, immediately before the paint that would show it: an
+        // engine that has stopped reading view's output also sends no
+        // redraws, so nothing else in this loop can notice, and the
+        // keystrokes the operator keeps typing at an editor that has gone
+        // quiet are the wakeups that bring the check back around
+        if note_write_stall(&mut model, &mut write_stall, &engine.handle) {
+            model.dirty = true;
         }
         // paint before blocking, not after processing: state mutated ahead
         // of the loop (the startup cutover replays staged messages straight
@@ -684,5 +729,179 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(ops.calls.borrow().len(), 1000);
+    }
+
+    /// A write sink that reports entering a write and then stays inside it
+    /// until released, standing in for a peer that has stopped reading its
+    /// stdin.
+    struct StuckSink {
+        entered: mpsc::Sender<()>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl std::io::Write for StuckSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _ = self.entered.send(());
+            // dropping the release end frees this and every later write, so
+            // a run that has taken its reading can let the peer recover
+            let _ = self.release.recv();
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A read source that never yields and never ends, so the connection's
+    /// reader thread cannot close the connection out from under a test that
+    /// is only interested in the write side.
+    struct IdleSource(mpsc::Receiver<()>);
+
+    impl std::io::Read for IdleSource {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            let _ = self.0.recv();
+            Ok(0)
+        }
+    }
+
+    /// Seconds a run is given to observe the writer thread reach the sink.
+    ///
+    /// Arming rather than measurement: until the writer is provably inside
+    /// a write that cannot finish, there is no stall to detect and a
+    /// reading taken early says nothing.
+    const STUCK_WRITE_ARM_SECS: u64 = 30;
+
+    /// The stall threshold the tests below run against, in place of the
+    /// shipping ten seconds.
+    ///
+    /// The predicate is the same one either way -- it compares an elapsed
+    /// duration against whatever threshold the watch was built with -- so
+    /// the only thing a real-length run would add to these assertions is
+    /// ten seconds of suite time per test.
+    const TEST_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// Waits for `probe` to hold, failing the test rather than hanging if
+    /// it never does.
+    fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !probe() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// Runs `body` against a live connection whose peer never reads: the
+    /// writer thread parks inside its first write until `body` drops the
+    /// release it is handed, exactly as a wedged nvim would park it.
+    ///
+    /// Both the notification receiver and the reader's block outlive the
+    /// body here rather than inside it: dropping either ends the reader
+    /// thread and closes the connection, which would retire the write side
+    /// under measurement for a reason that has nothing to do with the peer.
+    fn with_wedged_peer(body: impl FnOnce(&EngineHandle, &mpsc::Receiver<()>, mpsc::Sender<()>)) {
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (reader_tx, reader_rx) = mpsc::channel();
+        let (handle, notifications) = EngineHandle::start(
+            IdleSource(reader_rx),
+            StuckSink {
+                entered: entered_tx,
+                release: release_rx,
+            },
+        );
+        body(&handle, &entered_rx, release_tx);
+        drop(notifications);
+        drop(reader_tx);
+    }
+
+    #[test]
+    fn a_wedged_engine_raises_the_notice_and_retracts_it_when_the_writer_moves_again() {
+        with_wedged_peer(|handle, entered_rx, release_tx| {
+            let mut model = Model::with_term_size(80, 24);
+            let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+
+            handle.input("a").unwrap();
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(STUCK_WRITE_ARM_SECS))
+                .expect("the writer thread reached the sink");
+            // queued behind a write that cannot finish, so the backlog
+            // outlives the message the writer is holding
+            handle.input("b").unwrap();
+
+            // the stall is measured from an observation, never asserted by
+            // the first one: nothing has yet been seen to stop moving
+            assert!(!note_write_stall(&mut model, &mut watch, handle));
+            assert!(model.engine.messages.entries.is_empty());
+
+            std::thread::sleep(TEST_STALL_THRESHOLD * 3);
+            assert!(note_write_stall(&mut model, &mut watch, handle));
+            assert_eq!(
+                model.engine.messages.visible_lines(4),
+                vec![ENGINE_STALLED_NOTICE.to_string()]
+            );
+
+            // asked again while nothing changed: the notice is re-asserted
+            // on every pass, and an unchanged notice must not repaint
+            assert!(!note_write_stall(&mut model, &mut watch, handle));
+
+            // a keypress dismisses transient toasts; this one describes a
+            // condition that is still true, and the keypress that would
+            // drop it is the one it exists to explain
+            assert!(!model.engine.messages.dismiss_transient_on_keypress(false));
+            assert_eq!(
+                model.engine.messages.visible_lines(4),
+                vec![ENGINE_STALLED_NOTICE.to_string()]
+            );
+
+            drop(release_tx);
+            wait_until("the writer drains its backlog", || {
+                handle.write_progress().0 == 0
+            });
+            assert!(note_write_stall(&mut model, &mut watch, handle));
+            assert!(model.engine.messages.entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn an_engine_that_keeps_writing_never_raises_the_notice() {
+        with_wedged_peer(|handle, entered_rx, release_tx| {
+            let mut model = Model::with_term_size(80, 24);
+            let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+            // released up front: every write returns as soon as it starts,
+            // which is a healthy peer expressed through the same sink as
+            // the wedged one
+            drop(release_tx);
+
+            for i in 0..20 {
+                handle.input("a").unwrap();
+                entered_rx
+                    .recv_timeout(std::time::Duration::from_secs(STUCK_WRITE_ARM_SECS))
+                    .expect("the writer thread reached the sink");
+                assert!(
+                    !note_write_stall(&mut model, &mut watch, handle),
+                    "a delivering writer read as stalled on write {i}"
+                );
+                std::thread::sleep(TEST_STALL_THRESHOLD / 2);
+            }
+            assert!(model.engine.messages.entries.is_empty());
+        });
+    }
+
+    #[test]
+    fn an_idle_engine_with_nothing_queued_never_raises_the_notice() {
+        with_wedged_peer(|handle, _entered_rx, release_tx| {
+            let mut model = Model::with_term_size(80, 24);
+            let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+            drop(release_tx);
+
+            handle.input("a").unwrap();
+            wait_until("the writer drains its backlog", || {
+                handle.write_progress().0 == 0
+            });
+            assert!(!note_write_stall(&mut model, &mut watch, handle));
+            std::thread::sleep(TEST_STALL_THRESHOLD * 3);
+            assert!(!note_write_stall(&mut model, &mut watch, handle));
+            assert!(model.engine.messages.entries.is_empty());
+        });
     }
 }

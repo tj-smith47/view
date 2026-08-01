@@ -502,6 +502,20 @@ impl EngineHandle {
         }
     }
 
+    /// How many messages the writer thread still owes the peer, paired with
+    /// how many it has delivered since the connection opened.
+    ///
+    /// A reading, not a verdict: a queue is only alarming if it stops
+    /// draining, which takes a second reading to establish (see
+    /// [`OutboxStallWatch`](crate::stall::OutboxStallWatch), which is what
+    /// callers should reach for). Lock-free and non-blocking on both loads,
+    /// so it answers while the writer is parked inside a write that cannot
+    /// finish.
+    #[must_use]
+    pub fn write_progress(&self) -> (usize, u64) {
+        self.outbox.write_progress()
+    }
+
     /// Sends a fire-and-forget notification: encodes and enqueues it on the
     /// writer thread's channel, same as a request, but returns as soon as
     /// it is queued rather than waiting for any reply (notifications have

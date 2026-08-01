@@ -36,7 +36,7 @@
 //! peer, and both of which were on this path before the fast path existed.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Mutex, PoisonError, TryLockError};
 
 /// Largest message the inline path will attempt.
@@ -64,10 +64,14 @@ pub(crate) struct Outbox {
     /// that cannot finish until nvim reads: a caller therefore only ever
     /// tries to take it, and never waits for it.
     writer: Mutex<Box<dyn Write + Send>>,
-    /// Messages handed to the writer thread and not yet written. Read and
-    /// written only while [`Self::writer`] is held, which is what makes
-    /// "zero" mean "nothing is in flight" rather than "nothing was in
-    /// flight a moment ago".
+    /// Messages handed to the writer thread and not yet written. The
+    /// ordering gate reads and writes it while [`Self::writer`] is held,
+    /// which is what makes a zero seen there mean "nothing is in flight"
+    /// rather than "nothing was in flight a moment ago".
+    /// [`Self::write_progress`] deliberately reads it outside that lock: a
+    /// report about a writer stuck holding the lock cannot be gated on
+    /// acquiring it, and a depth read one message stale is still a depth
+    /// this outbox genuinely had.
     handed_off: AtomicUsize,
     /// How many messages each path has taken. The inline path is
     /// conditional on a runtime answer from the pipe, so without a count
@@ -76,6 +80,15 @@ pub(crate) struct Outbox {
     /// between a latency reading that means something and one that does not.
     took_inline: AtomicUsize,
     took_thread: AtomicUsize,
+    /// Messages the writer thread has finished writing, counted only after
+    /// the bytes are out. Nothing reads its absolute value: it is the
+    /// writer's proof of forward motion, so a watcher holding an earlier
+    /// reading can tell "wrote something since you last looked" from "has
+    /// not moved" without sharing a clock with, or a lock with, a thread
+    /// that may be parked inside a write that cannot finish. A lock would
+    /// defeat the purpose outright -- the one state worth reporting is the
+    /// one in which the writer is stuck holding [`Self::writer`].
+    wrote: AtomicU64,
     /// The queue the writer thread drains.
     tx: mpsc::Sender<Vec<u8>>,
     /// The engine pipe, when it is one this platform can ask about
@@ -97,6 +110,7 @@ impl Outbox {
             handed_off: AtomicUsize::new(0),
             took_inline: AtomicUsize::new(0),
             took_thread: AtomicUsize::new(0),
+            wrote: AtomicU64::new(0),
             tx,
             #[cfg(unix)]
             pipe,
@@ -163,6 +177,14 @@ impl Outbox {
     pub(crate) fn write_from_thread(&self, bytes: &[u8]) -> bool {
         let mut writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
         let sent = writer.write_all(bytes).and_then(|()| writer.flush());
+        if sent.is_ok() {
+            // counted here and nowhere else: a write that returned is the
+            // only evidence the peer accepted bytes. Counting a hand-off or
+            // a write's start instead would report motion for a message the
+            // peer never took, which is precisely the state a stall watcher
+            // exists to distinguish
+            self.wrote.fetch_add(1, Ordering::Relaxed);
+        }
         // decremented under the same lock the inline path tests it under:
         // releasing it earlier would let an inline write start while these
         // bytes are still going out
@@ -174,6 +196,30 @@ impl Outbox {
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
         true
+    }
+
+    /// Messages the writer thread still owes the peer, paired with the
+    /// count of those it has already delivered, in that order.
+    ///
+    /// Both loads are relaxed and neither takes a lock, so this is
+    /// answerable while the writer is parked inside a write that cannot
+    /// finish -- the only situation in which the answer matters. Relaxed is
+    /// enough because the numbers publish nothing but themselves: a
+    /// consumer compares the delivered count against an earlier reading of
+    /// its own and reads no other memory on the strength of it. The pair
+    /// can likewise be read slightly apart, which costs nothing: a torn
+    /// pair reports the state either just before or just after one write,
+    /// and both are states this outbox really was in.
+    ///
+    /// The inline path is deliberately absent from the delivered count: it
+    /// runs only while nothing is handed off, so it can never be what
+    /// drains a backlog, and a backlog is the only condition under which
+    /// the count is consulted at all.
+    pub(crate) fn write_progress(&self) -> (usize, u64) {
+        (
+            self.handed_off.load(Ordering::Relaxed),
+            self.wrote.load(Ordering::Relaxed),
+        )
     }
 
     /// How many messages went inline and how many went to the writer

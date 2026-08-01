@@ -27,3 +27,15 @@ view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 view-tui = { version = "0.0.1", path = "../view-tui" }
+
+[dev-dependencies]
+# The same view-engine, with the constructor that builds a connection over
+# an arbitrary reader/writer pair rather than a spawned nvim (see that
+# feature's note in view-engine's own manifest). Cargo enables it only for
+# this package's test targets, so the shipped binary is built from exactly
+# the dependency declared above; the runtime's wedged-peer tests need a
+# connection whose peer can be made to stop reading on command, which no
+# real nvim will do.
+view-engine = { version = "0.0.1", path = "../view-engine", features = [
+    "test-support",
+] }

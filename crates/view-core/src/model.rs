@@ -298,6 +298,11 @@ pub struct MessageEntry {
     /// `MessageEntry` is built by `Messages::push`, which stamps this from
     /// its own counter.
     shown_at_flush: u64,
+    /// Whether this entry is the one locally-raised condition notice (see
+    /// `Messages::set_native_condition`) rather than a record of something
+    /// that happened. Marked rather than matched on text or kind, so
+    /// retracting the condition can never take a real message with it.
+    condition: bool,
 }
 
 impl MessageEntry {
@@ -334,12 +339,21 @@ impl MessageEntry {
     /// `"shell_err"` is a `:!cmd`'s stderr: the one channel a failing
     /// external command has to explain itself, and the only reason to look
     /// at the output of a command that went wrong.
+    ///
+    /// A locally-raised condition notice (`Messages::set_native_condition`)
+    /// is persistent by the same argument arrived at from the other side:
+    /// it describes a state that is still true, and the user activity that
+    /// dismisses a transient entry is exactly the activity a stalled engine
+    /// is swallowing, so dismissing on a keypress would erase the notice
+    /// with the very keystroke it is there to explain. It is retracted by
+    /// whoever raised it, when the condition ends.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
-        )
+        self.condition
+            || matches!(
+                self.kind.as_str(),
+                "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
+            )
     }
 
     /// Whether this entry is the question text of a cmdline prompt that is
@@ -396,6 +410,7 @@ impl Messages {
             kind,
             content,
             shown_at_flush: self.flush_generation,
+            condition: false,
         };
         if replace_last {
             if let Some(last) = self.entries.last_mut() {
@@ -421,6 +436,50 @@ impl Messages {
     /// occurrence.
     pub fn push_native(&mut self, text: String, replace_last: bool) {
         self.push("native".to_string(), vec![(0, text)], replace_last);
+    }
+
+    /// Raises (`Some`) or retracts (`None`) the one locally-raised
+    /// *condition* notice, through the same overlay as `push_native` and
+    /// for the same reason: a native condition reaches the user over the
+    /// message surface that already exists, never a second one built
+    /// alongside it.
+    ///
+    /// A condition differs from `push_native`'s notice in lifetime, not in
+    /// origin. `push_native` records that something happened, and the
+    /// record stays true forever; a condition asserts that something *is
+    /// true now* -- an engine that has stopped reading view's output, say --
+    /// and must disappear by itself the moment it stops being true. At most
+    /// one is ever shown, since a second simultaneous condition would need
+    /// its own retraction and there is nothing to key one off. It is
+    /// persistent while raised (see `MessageEntry::is_persistent`), so the
+    /// keypresses that dismiss ordinary transient text leave it alone.
+    ///
+    /// Idempotent, and cheap enough to call unconditionally on every loop
+    /// pass: re-asserting the text already showing changes nothing and
+    /// reports so. Returns whether the visible set changed, which is the
+    /// caller's cue to repaint.
+    #[must_use]
+    pub fn set_native_condition(&mut self, text: Option<&str>) -> bool {
+        let Some(text) = text else {
+            let before = self.entries.len();
+            self.entries.retain(|e| !e.condition);
+            return self.entries.len() != before;
+        };
+        let content = vec![(0, text.to_string())];
+        if let Some(raised) = self.entries.iter_mut().find(|e| e.condition) {
+            if raised.content == content {
+                return false;
+            }
+            raised.content = content;
+            return true;
+        }
+        self.entries.push(MessageEntry {
+            kind: "native".to_string(),
+            content,
+            shown_at_flush: self.flush_generation,
+            condition: true,
+        });
+        true
     }
 
     /// Marks one full paint cycle as having happened -- one call per
@@ -762,6 +821,65 @@ mod tests {
         messages.note_flush();
         assert!(!messages.dismiss_transient_on_keypress(false));
         assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_condition_notice_is_raised_once_and_retracted_once() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+        // re-asserting the same condition is not a change, so a caller that
+        // asks on every pass never repaints for it
+        assert!(!messages.set_native_condition(Some("engine stalled")));
+        assert_eq!(messages.entries.len(), 1);
+
+        assert!(messages.set_native_condition(None));
+        assert!(messages.entries.is_empty());
+        assert!(!messages.set_native_condition(None));
+    }
+
+    #[test]
+    fn re_raising_a_condition_with_new_text_replaces_it_rather_than_stacking() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("first")));
+        assert!(messages.set_native_condition(Some("second")));
+        assert_eq!(messages.visible_lines(4), vec!["second"]);
+        assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_condition_notice_survives_the_keypresses_that_dismiss_transient_text() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        messages.note_flush();
+        messages.note_flush();
+        assert!(messages.dismiss_transient_on_keypress(false));
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+    }
+
+    #[test]
+    fn retracting_a_condition_leaves_every_other_entry_alone() {
+        let mut messages = Messages::default();
+        messages.push("emsg".to_string(), vec![(0, "boom".into())], false);
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        assert!(messages.set_native_condition(None));
+        assert_eq!(messages.visible_lines(4), vec!["boom", "info"]);
+    }
+
+    #[test]
+    fn a_condition_notice_keeps_its_row_when_a_burst_of_transient_text_overflows_the_box() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        for i in 0..5 {
+            messages.push("echomsg".to_string(), vec![(0, format!("info {i}"))], false);
+        }
+        assert_eq!(
+            messages.visible_lines(2),
+            vec!["engine stalled", "info 4"],
+            "a stall notice must not be evicted by the messages that follow it"
+        );
     }
 
     #[test]
