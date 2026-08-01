@@ -88,18 +88,27 @@ require("lazy").setup({
       -- above -- confirmed live (compat repro) and upstream
       -- (github.com/folke/noice.nvim#1137, closed stale, unfixed, present on
       -- current main as of this fixture's pin). No noice option gates this
-      -- check, so the opts table alone can never silence it; stubbing
-      -- health.check for this fixture's own noice load is the only way to
-      -- keep the compat evidence free of it. Left in place for the whole
-      -- session (not restored after setup): health.check() also reruns on a
-      -- 1s interval for as long as noice is enabled
-      -- (Health.checker = Util.interval(1000, ...)), so restoring the real
-      -- implementation right after setup() would only delay the same
-      -- spurious notifications by about a second, not remove them.
+      -- check, so the opts table alone can never silence it. Overriding
+      -- health.check itself would also swallow its other diagnostics --
+      -- e.g. the LSP-handler/vim.notify ownership conflict check
+      -- (lua/noice/health.lua, run again by Health.checker's 1s interval
+      -- for the whole session) that this multi-plugin fixture exists to
+      -- exercise -- so instead this pre-seeds noice's own once-only notify
+      -- dedup table (lua/noice/util/init.lua: `M._once`, keyed by
+      -- `level .. msg`, read by `error_once` before it ever calls
+      -- `notify()`) with exactly the three messages health.check emits for
+      -- these three exts. That marks only those three specific messages as
+      -- already-sent -- every other health.check diagnostic, including the
+      -- 1s interval's later runs, is untouched and stays live.
       config = function(_, opts)
-        local health = require("noice.health")
-        health.check = function()
-          return true
+        local once = require("noice.util")._once
+        for _, ext in ipairs({ "ext_cmdline", "ext_popupmenu", "ext_messages" }) do
+          local msg = "You're using a GUI that uses "
+            .. ext
+            .. ". Noice can't work when the GUI has "
+            .. ext
+            .. " enabled."
+          once[vim.log.levels.ERROR .. msg] = true
         end
         require("noice").setup(opts)
       end,
