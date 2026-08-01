@@ -73,12 +73,36 @@ require("lazy").setup({
       "folke/noice.nvim",
       dependencies = { "MunifTanjim/nui.nvim" },
       -- view attaches to nvim with ext_cmdline/ext_messages/ext_popupmenu
-      -- externalized, and noice refuses to take over a surface the GUI has
-      -- already externalized (it raises one error notification per ext and
-      -- disables itself). Disabling those three components is noice's own
-      -- supported configuration for such GUIs; its message router (the
-      -- vim.notify path) still runs, which is what the noice scenario
-      -- asserts on.
+      -- externalized. Disabling those three noice components is noice's own
+      -- supported configuration for such a GUI, and its message router (the
+      -- vim.notify path, patched in by noice's deferred M.enable()) does
+      -- honor it -- that's what the noice scenario's "routed" assertion
+      -- proves. But noice.health.check() (lua/noice/health.lua) runs
+      -- synchronously from noice's setup(), before that setup call has
+      -- parsed these very opts into noice's Config.options (still `{}` at
+      -- that point -- read from noice's own source, lua/noice/config/init.lua
+      -- populates it only inside the *deferred* load() this setup call
+      -- schedules). health.check() unconditionally raises one ERROR
+      -- notification per ext_cmdline/ext_popupmenu/ext_messages any attached
+      -- UI has enabled, with no regard for the disabled-components config
+      -- above -- confirmed live (compat repro) and upstream
+      -- (github.com/folke/noice.nvim#1137, closed stale, unfixed, present on
+      -- current main as of this fixture's pin). No noice option gates this
+      -- check, so the opts table alone can never silence it; stubbing
+      -- health.check for this fixture's own noice load is the only way to
+      -- keep the compat evidence free of it. Left in place for the whole
+      -- session (not restored after setup): health.check() also reruns on a
+      -- 1s interval for as long as noice is enabled
+      -- (Health.checker = Util.interval(1000, ...)), so restoring the real
+      -- implementation right after setup() would only delay the same
+      -- spurious notifications by about a second, not remove them.
+      config = function(_, opts)
+        local health = require("noice.health")
+        health.check = function()
+          return true
+        end
+        require("noice").setup(opts)
+      end,
       opts = {
         cmdline = { enabled = false },
         messages = { enabled = false },

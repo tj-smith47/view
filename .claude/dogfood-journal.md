@@ -24,3 +24,14 @@ plugin's startup error toasts through view's native message path: plugin
 compat holding on a heavyweight config with zero view-side changes.
 Residual echo-latency ratio 1.21x vs paired nvim (budget ≤1.10x) is P3's
 first gate. Guided QA doc for a human pass: .claude/qa/p2-guided-qa.md.
+
+P3 exit (2026-08-01, tip 94f8732): scripted tmux session against the
+release binary opened a scratch file, inserted a line in normal->insert
+flow, and persisted it via :wq — file contents verified after exit,
+terminal intact. The user's real config rendered NvimTree and lualine
+through view, and noice.nvim's ext_cmdline startup warning surfaced as a
+native toast — the exact open item tracked as the noice ext_* suppression
+task, observed in real use rather than a harness. The differential oracle
+now watches this surface: corpus 24/24 PARITY at 56177dd (ten fuzz-found
+scripts promoted to regression entries) and seeded fuzz runs recorded in
+the P3 exit checklist evidence.
