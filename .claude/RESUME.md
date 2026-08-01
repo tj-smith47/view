@@ -149,7 +149,7 @@ false-flagging — it is DEFENSIVE, hardening our own guard):
 | 4  | Spawn-env allowlist (task 24) | Code landed + green. Remaining: §3.3 (re-review). Then CLOSE |
 | 16 | Outbox backlog under wedged peer | **Design decided** (see below). Implement BEFORE #5 |
 | 14 | marker_cold_ms budget | §4 — needs Fable concession review, then land |
-| 5  | Re-record dev-linux baselines | Blocked by #4 landing + #16; run at/after `d32daf0` |
+| 5  | Re-record dev-linux baselines | Blocked by #4 landing + #16; run at/after `0299417` (the `HOME` re-point, the last revision to change a hermetic child's environment) |
 | 6  | Re-record dev-macos baselines | Needs a quiet mbp (Parallels off), not code |
 | 7  | `Verdict::New` budget-check flake for absolute tails on shared classes | Untouched |
 | 8  | noice `ext_*` startup notifications not suppressed | Untouched |

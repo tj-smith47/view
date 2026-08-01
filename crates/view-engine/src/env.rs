@@ -463,11 +463,19 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
         // filesystem a case-variant of a tolerated name reaches the child
         // as the same directory, and refusing it is the safe side of that
         // ambiguity
-        let name = entry?.file_name();
+        let entry = entry?;
+        let name = entry.file_name();
         if name == ".cache" {
             continue;
         }
         if name == ".local" {
+            // a `.local` that is not a real directory -- a planted file, or
+            // a symlink resolving elsewhere -- is not the state a child
+            // leaves either, and reading through it would surface a raw
+            // io error naming neither the entry nor the recovery
+            if !entry.file_type()?.is_dir() {
+                return Err(home_refusal(path, Path::new(".local")));
+            }
             // tolerated for the state below it only: `.local/share` is
             // `XDG_DATA_HOME`'s fallback, and `<data>/nvim/site/plugin/`
             // sits on 'runtimepath' -- executable ground, unlike the logs
@@ -790,6 +798,26 @@ mod tests {
             refused.to_string().contains("delete"),
             "the refusal names no recovery, leaving a workspace-wide spawn \
              stop that only source-reading resolves: {refused}"
+        );
+    }
+
+    /// `.local` is tolerated as the directory a child's state lives under;
+    /// the same name as a file (or a symlink resolving elsewhere) is not
+    /// that state, and the refusal must name it and its recovery rather
+    /// than surface the raw error reading through it would raise.
+    #[test]
+    fn a_home_whose_local_is_not_a_directory_refuses_the_next_spawn() {
+        let dir = scratch("home-local-file");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".local"), "not a directory").unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains(".local"),
+            "the refusal does not name the non-directory entry: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("delete"),
+            "the refusal names no recovery: {refused}"
         );
     }
 

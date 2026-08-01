@@ -1358,41 +1358,63 @@ mod tests {
         );
     }
 
-    /// The funnel must *establish* the two directories it points a child
-    /// at, not merely name them: the preparation is where the plant refusal
-    /// runs, so a funnel that stopped calling it would keep every
-    /// value-shaped assertion green -- a missing home reads as empty just
-    /// as a guarded one does -- while never refusing anything.
+    /// The funnel must *run* the preparation of both directories it points
+    /// a child at, not merely name them: the preparation is where the plant
+    /// and emptiness refusals live, so a funnel that stopped calling either
+    /// would keep every value-shaped assertion green while never refusing
+    /// anything. A plant in each directory that the funnel then refuses by
+    /// name is the observation nothing but the preparation can produce.
     ///
-    /// The directories are removed first, under the environment lock's
-    /// exclusive side so no concurrent spawn is mid-flight: without the
-    /// removal, a directory left behind by any earlier spawn would satisfy
-    /// the assertion whether or not this funnel prepared it. A child never
-    /// requires the directories to pre-exist, only the funnel does, so the
-    /// removal endangers nothing else.
+    /// Plants rather than removal: the two directories are shared with
+    /// every live child in this binary, and a child that loses its home
+    /// mid-run drops its fallback log wherever it can -- an entry the next
+    /// preparation then refuses suite-wide. A single planted file disturbs
+    /// no live child (children write only their tolerated state), and the
+    /// environment lock's exclusive side keeps any concurrent funnel from
+    /// meeting it. Both plants are removed and the funnel re-run clean
+    /// before the lock is released, so no later spawn inherits them.
     #[test]
-    fn the_funnel_establishes_the_directories_it_points_a_child_at() {
+    fn the_funnel_refuses_a_plant_in_either_directory_it_points_a_child_at() {
         let planted = testenv::plant(&[]);
         let home = view_engine::env::hermetic_home();
         let empty = view_engine::env::empty_search_path();
-        let _ = std::fs::remove_dir_all(&home);
-        let _ = std::fs::remove_dir_all(&empty);
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".netrc"), "machine github.com").unwrap();
         let mut cmd = std::process::Command::new("true");
-        let funneled = make_hermetic(&mut cmd);
+        let refused = make_hermetic(&mut cmd);
+        let _ = std::fs::remove_file(home.join(".netrc"));
+        assert!(
+            refused.is_err_and(|err| err.to_string().contains(".netrc")),
+            "the funnel accepted a hermetic home holding a planted \
+             credential file, so its plant refusal never ran"
+        );
+
+        std::fs::create_dir_all(&empty).unwrap();
+        // the preparation hardened this directory read-only on unix, and
+        // planting through that is exactly what an unprivileged run cannot
+        // do; restored below by the clean re-run's own preparation
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&empty, std::fs::Permissions::from_mode(0o700));
+        }
+        std::fs::write(empty.join("planted"), "-- planted").unwrap();
+        let mut cmd = std::process::Command::new("true");
+        let refused = make_hermetic(&mut cmd);
+        let _ = std::fs::remove_file(empty.join("planted"));
+        assert!(
+            refused.is_err_and(|err| err.to_string().contains("planted")),
+            "the funnel accepted a search path holding a planted entry, so \
+             its emptiness refusal never ran"
+        );
+
+        // both directories verified clean and re-hardened before any other
+        // spawn can reach them
+        let mut cmd = std::process::Command::new("true");
+        make_hermetic(&mut cmd).unwrap();
+        assert!(home.is_dir() && empty.is_dir());
         drop(planted);
-        funneled.unwrap();
-        assert!(
-            home.is_dir(),
-            "the funnel pointed a child's HOME at {} without establishing \
-             it, so the plant refusal never ran",
-            home.display()
-        );
-        assert!(
-            empty.is_dir(),
-            "the funnel pointed a child's search path at {} without \
-             establishing it, so the emptiness refusal never ran",
-            empty.display()
-        );
     }
 
     /// A scratch world holding one plugin planted under each of the two

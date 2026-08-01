@@ -7,7 +7,36 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
+use std::sync::{PoisonError, RwLock};
 use view_engine::process::{Engine, EngineConfig};
+
+/// Orders the tests that remove or plant in the shared hermetic directories
+/// (exclusive) against the isolated spawns whose funnel prepares them
+/// (shared).
+///
+/// The preparation is a create/read/chmod sequence over paths every
+/// isolated spawn in this binary shares, so a removal landing inside a
+/// concurrent preparation surfaces as a spurious I/O failure from a test
+/// that touched nothing. Only isolated spawns take the shared side: a
+/// non-hermetic spawn never runs the preparation, and its child's `HOME` is
+/// the host's, so it neither reads nor writes the shared directories.
+///
+/// Poisoning is ignored on both sides: the lock orders operations and
+/// guards no data, so a test that panicked while holding it left nothing
+/// behind for the next one to find broken.
+static HERMETIC_DIRS: RwLock<()> = RwLock::new(());
+
+/// Runs `f` -- an isolated spawn plus everything driving its child -- with
+/// the shared hermetic directories held stable.
+///
+/// Held for the child's whole lifetime rather than just the spawn: an
+/// isolated child writes its state under the hermetic home, so an exclusive
+/// section entered while a child is still alive would race that write, not
+/// only the funnel's preparation.
+fn with_prepared_dirs<R>(f: impl FnOnce() -> R) -> R {
+    let _shared = HERMETIC_DIRS.read().unwrap_or_else(PoisonError::into_inner);
+    f()
+}
 
 /// The value planted in every variable under test. Recognizable on sight in
 /// a failure message, and unlike anything Neovim would derive for itself.
@@ -119,18 +148,21 @@ fn planted_config() -> EngineConfig {
 
 #[test]
 fn an_isolated_child_reads_none_of_the_hosts_config_variables() {
-    // a spawn failure here is a leak too, not an unrelated fault: the only
-    // thing separating this child from an ordinary isolated one is a marker
-    // planted in variables it is supposed to be blind to, and several of
-    // them (a bogus $VIMRUNTIME above all) cripple a child that reads them
-    let engine = Engine::spawn(planted_config())
-        .expect("an isolated child failed to start with host config variables planted");
-    let leaked = leaked_vars(&engine);
-    assert!(
-        leaked.is_empty(),
-        "{leaked:?} reached the child, so an isolated spawn still answers \
-         to the host's editor configuration"
-    );
+    with_prepared_dirs(|| {
+        // a spawn failure here is a leak too, not an unrelated fault: the
+        // only thing separating this child from an ordinary isolated one is
+        // a marker planted in variables it is supposed to be blind to, and
+        // several of them (a bogus $VIMRUNTIME above all) cripple a child
+        // that reads them
+        let engine = Engine::spawn(planted_config())
+            .expect("an isolated child failed to start with host config variables planted");
+        let leaked = leaked_vars(&engine);
+        assert!(
+            leaked.is_empty(),
+            "{leaked:?} reached the child, so an isolated spawn still answers \
+             to the host's editor configuration"
+        );
+    });
 }
 
 /// The control for the assertion above: the same probe, against a child
@@ -160,32 +192,35 @@ fn the_leak_probe_reports_a_variable_that_is_not_cleared() {
 
 #[test]
 fn an_isolated_child_searches_no_system_wide_config_directory() {
-    let planted = scratch("host-search-path");
-    let planted = planted.display().to_string();
-    let mut cfg = EngineConfig::isolated();
-    for name in MUST_BE_NEUTRALIZED {
-        cfg = cfg.with_env(*name, &planted);
-    }
-    let engine = Engine::spawn(cfg).unwrap();
-    for name in MUST_BE_NEUTRALIZED {
-        let seen = engine
-            .handle
-            .eval_str(&format!("getenv('{name}')"))
-            .unwrap();
-        assert_ne!(
-            seen, planted,
-            "{name} still names the host's own search path, so the child \
-             sources whatever plugins it holds"
+    with_prepared_dirs(|| {
+        let planted = scratch("host-search-path");
+        let planted = planted.display().to_string();
+        let mut cfg = EngineConfig::isolated();
+        for name in MUST_BE_NEUTRALIZED {
+            cfg = cfg.with_env(*name, &planted);
+        }
+        let engine = Engine::spawn(cfg).unwrap();
+        for name in MUST_BE_NEUTRALIZED {
+            let seen = engine
+                .handle
+                .eval_str(&format!("getenv('{name}')"))
+                .unwrap();
+            assert_ne!(
+                seen, planted,
+                "{name} still names the host's own search path, so the child \
+                 sources whatever plugins it holds"
+            );
+        }
+        // the variables are only the mechanism; 'runtimepath' is where a
+        // leaked search path becomes sourced code, and it is what the child
+        // answers for
+        let rtp = engine.handle.eval_str("&runtimepath").unwrap();
+        assert!(
+            !rtp.contains(&planted),
+            "the host's search path reached 'runtimepath' ({rtp}), so the \
+             child sources plugins from it"
         );
-    }
-    // the variables are only the mechanism; 'runtimepath' is where a leaked
-    // search path becomes sourced code, and it is what the child answers for
-    let rtp = engine.handle.eval_str("&runtimepath").unwrap();
-    assert!(
-        !rtp.contains(&planted),
-        "the host's search path reached 'runtimepath' ({rtp}), so the child \
-         sources plugins from it"
-    );
+    });
 }
 
 /// The assumption every assertion against [`MUST_NOT_LEAK`] rests on: each
@@ -249,15 +284,17 @@ fn every_probed_variable_is_one_getenv_can_report() {
 /// parks an embedded child's `qa!` in `wait_return` with no UI to answer it.
 #[test]
 fn an_isolated_child_opens_no_server_socket_at_a_host_chosen_address() {
-    let planted = planted_listen_address("host-listen.sock");
-    let cfg = EngineConfig::isolated().with_env("NVIM_LISTEN_ADDRESS", &planted);
-    let engine = Engine::spawn(cfg).unwrap();
-    let servers = engine.handle.eval_str("string(serverlist())").unwrap();
-    assert!(
-        !servers.contains(&planted),
-        "the child listens at the host's own address ({servers}), so every \
-         measured session answers to whoever holds it"
-    );
+    with_prepared_dirs(|| {
+        let planted = planted_listen_address("host-listen.sock");
+        let cfg = EngineConfig::isolated().with_env("NVIM_LISTEN_ADDRESS", &planted);
+        let engine = Engine::spawn(cfg).unwrap();
+        let servers = engine.handle.eval_str("string(serverlist())").unwrap();
+        assert!(
+            !servers.contains(&planted),
+            "the child listens at the host's own address ({servers}), so \
+             every measured session answers to whoever holds it"
+        );
+    });
 }
 
 /// The control for the socket assertion above, and the reason it is not
@@ -291,19 +328,25 @@ fn the_socket_probe_reports_an_address_that_is_not_cleared() {
     let _ = std::fs::remove_file(&planted);
 }
 
-/// An isolated spawn must *establish* the directories its plan points a
-/// child at, not merely name them: the preparation is where the plant and
-/// emptiness refusals run, so a spawn that stopped calling it would keep
-/// every plan-shaped assertion green -- a missing home reads as empty just
-/// as a guarded one does -- while never refusing anything.
+/// An isolated spawn must *establish* the search path its plan points a
+/// child at, not merely name it: the preparation is where the emptiness
+/// refusal runs, so a spawn that stopped calling it would keep every
+/// plan-shaped assertion green while never refusing anything.
 ///
 /// The directories are removed first, because one left behind by any
 /// earlier spawn would satisfy the assertion whether or not this spawn
-/// prepared it. The removal endangers no concurrent spawn in this binary: a
-/// child never requires the directories to pre-exist, only the spawn funnel
-/// does, and every concurrent funnel re-establishes them.
+/// prepared it, and under [`HERMETIC_DIRS`]'s exclusive side, because the
+/// removal ruins any preparation it lands in the middle of. The search path
+/// carries the whole discrimination: nothing but the preparation ever
+/// creates it, and the mode it leaves is one `create_dir_all` never yields.
+/// The home's existence proves nothing by itself -- this spawn's own child
+/// establishes a state directory under its `HOME` moments after starting --
+/// so the home preparation is pinned by the refusal test below instead.
 #[test]
 fn an_isolated_spawn_establishes_the_directories_its_plan_points_at() {
+    let _exclusive = HERMETIC_DIRS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
     let home = view_engine::env::hermetic_home();
     let empty = view_engine::env::empty_search_path();
     let _ = std::fs::remove_dir_all(&home);
@@ -311,8 +354,7 @@ fn an_isolated_spawn_establishes_the_directories_its_plan_points_at() {
     let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     assert!(
         home.is_dir(),
-        "the spawn pointed its child's HOME at {} without establishing it, \
-         so the plant refusal never ran",
+        "the spawn pointed its child's HOME at {} without establishing it",
         home.display()
     );
     assert!(
@@ -321,5 +363,44 @@ fn an_isolated_spawn_establishes_the_directories_its_plan_points_at() {
          establishing it, so the emptiness refusal never ran",
         empty.display()
     );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&empty).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o500,
+            "the spawn left the search path writable, so a plugin can be \
+             planted in it between spawns"
+        );
+    }
     drop(engine);
+}
+
+/// An isolated spawn must *run* the plant refusal against the home its plan
+/// points a child's `HOME` at: the directory existing proves nothing about
+/// who prepared it (see the test above), but only the preparation can
+/// refuse, so a planted credential file turning the spawn itself into a
+/// refusal that names the plant is the one observation a child cannot fake.
+#[test]
+fn an_isolated_spawn_refuses_a_home_holding_a_planted_credential() {
+    let _exclusive = HERMETIC_DIRS
+        .write()
+        .unwrap_or_else(PoisonError::into_inner);
+    let home = view_engine::env::hermetic_home();
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join(".netrc"), "machine github.com").unwrap();
+    let spawned = Engine::spawn(EngineConfig::isolated());
+    // unplanted before any assertion can panic: a `.netrc` left behind
+    // refuses every isolated spawn in every later test
+    let _ = std::fs::remove_file(home.join(".netrc"));
+    // the map drops a wrongly-spawned engine, which shuts its child down
+    // before the failure is reported
+    let refused = spawned.map(drop).expect_err(
+        "an isolated spawn ran against a hermetic home holding a planted \
+         credential file, so the refusal never ran",
+    );
+    assert!(
+        refused.to_string().contains(".netrc"),
+        "the refusal does not name the planted credential file: {refused}"
+    );
 }
