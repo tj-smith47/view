@@ -20,3 +20,8 @@
 # a diagnostic a failed matrix run leaves for hand-diffing against the
 # baseline; committing one would put unratcheted numbers in the repo
 *.partial.toml
+
+# the pinned engine's crash-fallback log: a child whose log directory is
+# momentarily absent (the funnel-establishment tests remove the hermetic
+# home on purpose) falls back to writing nvim.log in its cwd
+nvim.log

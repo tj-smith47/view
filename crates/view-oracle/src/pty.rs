@@ -1358,6 +1358,43 @@ mod tests {
         );
     }
 
+    /// The funnel must *establish* the two directories it points a child
+    /// at, not merely name them: the preparation is where the plant refusal
+    /// runs, so a funnel that stopped calling it would keep every
+    /// value-shaped assertion green -- a missing home reads as empty just
+    /// as a guarded one does -- while never refusing anything.
+    ///
+    /// The directories are removed first, under the environment lock's
+    /// exclusive side so no concurrent spawn is mid-flight: without the
+    /// removal, a directory left behind by any earlier spawn would satisfy
+    /// the assertion whether or not this funnel prepared it. A child never
+    /// requires the directories to pre-exist, only the funnel does, so the
+    /// removal endangers nothing else.
+    #[test]
+    fn the_funnel_establishes_the_directories_it_points_a_child_at() {
+        let planted = testenv::plant(&[]);
+        let home = view_engine::env::hermetic_home();
+        let empty = view_engine::env::empty_search_path();
+        let _ = std::fs::remove_dir_all(&home);
+        let _ = std::fs::remove_dir_all(&empty);
+        let mut cmd = std::process::Command::new("true");
+        let funneled = make_hermetic(&mut cmd);
+        drop(planted);
+        funneled.unwrap();
+        assert!(
+            home.is_dir(),
+            "the funnel pointed a child's HOME at {} without establishing \
+             it, so the plant refusal never ran",
+            home.display()
+        );
+        assert!(
+            empty.is_dir(),
+            "the funnel pointed a child's search path at {} without \
+             establishing it, so the emptiness refusal never ran",
+            empty.display()
+        );
+    }
+
     /// A scratch world holding one plugin planted under each of the two
     /// layouts the search-path variables feed into 'runtimepath'
     /// (`$XDG_CONFIG_DIRS/nvim/plugin/` and

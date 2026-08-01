@@ -32,9 +32,10 @@ and the ignore-file default in one move. Windows OpenSSH resolves the profile ra
 
 What the next session needs from it:
 
-- Baselines recorded before `d32daf0` measured children with a far larger
-  environment and are invalid. Task 32's re-record must run against that
-  revision or later, never across it.
+- Baselines recorded before `0299417` measured children with a different
+  environment (first a far larger one, then a host-resolved `HOME`) and are
+  invalid. Task 32's re-record must run against that revision or later,
+  never across it.
 - The allowlist keeps neither `SSL_CERT_FILE`/`SSL_CERT_DIR` nor any proxy
   variable, and the compat fixture git-clones plugins from inside a hermetic
   child. Verified fine on dev-linux (`cold-bootstrap` green, real network) and
@@ -82,7 +83,7 @@ returns nothing for them; that is not evidence the store is unreachable.
 | 23 | Re-derive gate headroom; fix the tier and stimulus mismatches | Sub-problem B committed in `c819428`; sub-problem C landed with the flood commit. Closed |
 | 31 | Rewrite the flood `[[shortfall]]` `why` in `crates/view-bench/budgets.toml` | It still blames the measurement, an attribution now refuted. Unblocked |
 | 24 | Allowlist the environment at the bench/oracle spawn funnel | Landed in `efb594d`, review findings closed in `d32daf0`. `task ci` green on dev-linux (717 tests) and natively on windows-msvc (654 tests). Closed |
-| 32 | Re-record dev-linux baselines after the tier and spawn-env changes | Unblocked by `d32daf0`, the last revision to change a hermetic child's environment; the re-record must run at or after it. Numbers will move worse; record as measured, and name the instrument change in the commit message. `cadence_p99_ratio` is a new recorded metric this record must pick up |
+| 32 | Re-record dev-linux baselines after the tier and spawn-env changes | Unblocked by `0299417`, the last revision to change a hermetic child's environment (`HOME` re-pointed); the re-record must run at or after it. Numbers will move worse; record as measured, and name the instrument change in the commit message. `cadence_p99_ratio` is a new recorded metric this record must pick up |
 | 21 | Re-record dev-macos on a quiet mbp: `input_path` and `first_paint`'s split metrics | Needs a quiet mbp, not more code. Until it lands, the dev-macos `first_paint` cell gates red on `unmeasured_metrics` |
 | 33 | Close the `Verdict::New` budget-check flake risk for absolute tails on shared classes | Same flake shape the ratchet had; untouched |
 | 25 | noice's `ext_*` disable opts are not suppressing its startup error notifications | Untouched |

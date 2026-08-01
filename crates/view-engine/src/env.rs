@@ -165,11 +165,12 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 ///
 /// The value is [`hermetic_home`], a directory of the harness's own whose
 /// preparation ([`prepare_hermetic_home`]) refuses every entry outside the
-/// state names a child legitimately creates: the configuration and
-/// credential paths a subprocess derives from this `HOME` are therefore
-/// absent at every spawn, and a plant is a refused spawn rather than a
-/// silent read. Removal instead of override would leave libc, LuaJIT and
-/// the child's own `expand('~')` with no home at all.
+/// state a child legitimately leaves (`.cache`, `.local/state` -- read by
+/// nothing that resolves configuration, credentials, or code): the paths a
+/// subprocess derives from this `HOME` are therefore absent at every spawn,
+/// and a plant is a refused spawn rather than a silent read. Removal
+/// instead of override would leave libc, LuaJIT and the child's own
+/// `expand('~')` with no home at all.
 ///
 /// On Windows this diverts the tooling that resolves its home through
 /// `HOME` first (git and the curl it bundles do); tooling that resolves the
@@ -426,28 +427,25 @@ pub fn hermetic_home() -> PathBuf {
     build_target_dir().join("view-hermetic-home")
 }
 
-/// The entries a hermetic child may leave under [`hermetic_home`]: the XDG
-/// state and cache fallbacks, which a child derives from `HOME` exactly
-/// when a caller redirects neither.
-const HERMETIC_HOME_STATE_DIRS: &[&str] = &[".local", ".cache"];
-
 /// Creates [`hermetic_home`] if absent and verifies it holds nothing a
-/// child's subprocess would read configuration or credentials out of,
-/// returning the path a hermetic spawn points [`HERMETIC_HOME_VAR`] at.
+/// child's subprocess would read configuration, credentials, or code out
+/// of, returning the path a hermetic spawn points [`HERMETIC_HOME_VAR`] at.
 ///
 /// Emptiness is the wrong invariant for a home -- its holders write state
-/// under it, see [`hermetic_home`] -- so the check is a refusal of every
-/// entry outside the two state names instead. The entries that must never
-/// appear are the ones a subprocess resolves *inputs* through (`.netrc`,
-/// `.gitconfig`, `.ssh/`, `.config/`), and rather than enumerate those and
-/// miss one, an unexpected name is treated as a plant: the spawn fails
-/// naming it, never runs against it.
+/// under it, see [`hermetic_home`] -- so the check tolerates exactly the
+/// entries a child leaves behind (`.cache`, and `.local` holding only
+/// `state`) and refuses everything else. The entries that must never appear
+/// are the ones a subprocess resolves *inputs* through (`.netrc`,
+/// `.gitconfig`, `.ssh/`, `.config/`, and `.local/share`, whose
+/// `nvim/site/plugin/` sits on 'runtimepath'), and rather than enumerate
+/// those and miss one, an unexpected name is treated as a plant: the spawn
+/// fails naming it, never runs against it.
 ///
 /// # Errors
 ///
 /// Returns the underlying `std::io::Error` if the directory cannot be
 /// created or read, and an [`io::Error::other`] naming the offending entry
-/// if it holds anything outside the state names.
+/// and the recovery if it holds anything outside the tolerated state.
 pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
     let path = hermetic_home();
     prepare_home_dir(&path)?;
@@ -461,21 +459,49 @@ pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
 fn prepare_home_dir(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     for entry in std::fs::read_dir(path)? {
+        // byte-exact comparisons on purpose: on a case-insensitive
+        // filesystem a case-variant of a tolerated name reaches the child
+        // as the same directory, and refusing it is the safe side of that
+        // ambiguity
         let name = entry?.file_name();
-        if !HERMETIC_HOME_STATE_DIRS
-            .iter()
-            .any(|allowed| name == *allowed)
-        {
-            return Err(io::Error::other(format!(
-                "the hermetic home {} holds {:?}: a child's own subprocesses \
-                 would read configuration or credentials planted there, so \
-                 the spawn is refused rather than silently measured against it",
-                path.display(),
-                name
-            )));
+        if name == ".cache" {
+            continue;
         }
+        if name == ".local" {
+            // tolerated for the state below it only: `.local/share` is
+            // `XDG_DATA_HOME`'s fallback, and `<data>/nvim/site/plugin/`
+            // sits on 'runtimepath' -- executable ground, unlike the logs
+            // and shada a child leaves in `.local/state`
+            for entry in std::fs::read_dir(path.join(".local"))? {
+                let name = entry?.file_name();
+                if name != "state" {
+                    return Err(home_refusal(path, &Path::new(".local").join(name)));
+                }
+            }
+            continue;
+        }
+        return Err(home_refusal(path, Path::new(&name)));
     }
     Ok(())
+}
+
+/// The refusal [`prepare_home_dir`] raises, naming the entry and the way
+/// out: the directory holds nothing durable, so deleting it is always a
+/// correct recovery, and a message that only cried "plant" would leave the
+/// realistic other cause -- a child's own subprocess writing an unexpected
+/// dotfile, `ssh` creating `known_hosts` first of all -- looking
+/// unrecoverable.
+fn home_refusal(home: &Path, entry: &Path) -> io::Error {
+    io::Error::other(format!(
+        "the hermetic home {} holds {:?}, which is not among the state \
+         entries a child leaves behind: whether it was planted or written by \
+         a child's own subprocess, a subprocess would read configuration or \
+         credentials from it, so the spawn is refused. The directory holds \
+         nothing durable; delete that entry (or the whole directory) to \
+         recover",
+        home.display(),
+        entry
+    ))
 }
 
 /// Creates [`empty_search_path`] if absent, verifies it holds nothing, and
@@ -747,7 +773,9 @@ mod tests {
 
     /// Anything else under a hermetic home is input a child's subprocess
     /// would read -- a credential file first of all -- and the spawn must
-    /// refuse it by name rather than run against it.
+    /// refuse it by name rather than run against it. The refusal must also
+    /// name the recovery, because it stops every spawn workspace-wide until
+    /// someone acts on it.
     #[test]
     fn a_credential_planted_in_the_hermetic_home_refuses_the_next_spawn() {
         let dir = scratch("home-planted");
@@ -757,6 +785,27 @@ mod tests {
         assert!(
             refused.to_string().contains(".netrc"),
             "the refusal does not name the planted credential file: {refused}"
+        );
+        assert!(
+            refused.to_string().contains("delete"),
+            "the refusal names no recovery, leaving a workspace-wide spawn \
+             stop that only source-reading resolves: {refused}"
+        );
+    }
+
+    /// `.local` earns its tolerance for the state below it, not wholesale:
+    /// `.local/share` is `XDG_DATA_HOME`'s fallback, and a file under
+    /// `<data>/nvim/site/plugin/` is sourced by any child that neither
+    /// redirects the data home nor passes `--clean` -- executable ground,
+    /// not state.
+    #[test]
+    fn a_plugin_planted_under_the_homes_data_fallback_refuses_the_next_spawn() {
+        let dir = scratch("home-data-planted");
+        std::fs::create_dir_all(dir.join(".local/share/nvim/site/plugin")).unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains("share"),
+            "the refusal does not name the planted data entry: {refused}"
         );
     }
 

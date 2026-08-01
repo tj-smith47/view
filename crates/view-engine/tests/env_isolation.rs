@@ -290,3 +290,36 @@ fn the_socket_probe_reports_an_address_that_is_not_cleared() {
     drop(engine);
     let _ = std::fs::remove_file(&planted);
 }
+
+/// An isolated spawn must *establish* the directories its plan points a
+/// child at, not merely name them: the preparation is where the plant and
+/// emptiness refusals run, so a spawn that stopped calling it would keep
+/// every plan-shaped assertion green -- a missing home reads as empty just
+/// as a guarded one does -- while never refusing anything.
+///
+/// The directories are removed first, because one left behind by any
+/// earlier spawn would satisfy the assertion whether or not this spawn
+/// prepared it. The removal endangers no concurrent spawn in this binary: a
+/// child never requires the directories to pre-exist, only the spawn funnel
+/// does, and every concurrent funnel re-establishes them.
+#[test]
+fn an_isolated_spawn_establishes_the_directories_its_plan_points_at() {
+    let home = view_engine::env::hermetic_home();
+    let empty = view_engine::env::empty_search_path();
+    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_dir_all(&empty);
+    let engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    assert!(
+        home.is_dir(),
+        "the spawn pointed its child's HOME at {} without establishing it, \
+         so the plant refusal never ran",
+        home.display()
+    );
+    assert!(
+        empty.is_dir(),
+        "the spawn pointed its child's search path at {} without \
+         establishing it, so the emptiness refusal never ran",
+        empty.display()
+    );
+    drop(engine);
+}
