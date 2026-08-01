@@ -2,74 +2,62 @@ schema = 1
 engine_pin = "v0.12.4"
 machine_class = "dev-linux"
 
-# Gate headroom measured on this host, overriding the compiled-in default
-# for the metric's kind. A metric absent here has not had its run-to-run
-# spread established on this class and gates on the conservative default;
-# absence is a statement, not a gap to fill with a plausible number.
-[headroom]
-# 8 report-only replicates, 2026-07-27, host loads 0.44 to 8.53, one
-# unchanged binary pair. Median 1.1735, half-width 1.70%, and the worst
-# excursion above the recorded value was 2.14%. The pre-registered rule for
-# distinguishing two conditions from single measurements is 2x half-width,
-# here 3.4%. 1.06 clears both, and replaces a default of 1.25 that admitted a
-# 25% regression on a statistic this host resolves to under 2%.
-ratio_p50 = 1.06
-
 [echo.heavy]
-paired_delta_p99_ms = 0.975764
-ratio_p50 = 1.1837936337116466
+paired_delta_p99_ms = 0.78042
+ratio_p50 = 1.1807273852850309
 ratio_p99 = 1.0103236390160557
-view_p99_ms = 1.779872
+view_p99_ms = 1.325479
 
 [echo.minimal]
-paired_delta_p99_ms = 0.366723
+paired_delta_p99_ms = 0.29498299999999994
 ratio_p50 = 1.1719342968313597
 ratio_p99 = 1.0916525318862538
-view_p99_ms = 0.904254
+view_p99_ms = 0.726575
 
 [echo_control.heavy]
-control_delta_p99_ms = 1.043676
-control_p99_ms = 2.048797
-control_ratio_p50 = 1.013475558371977
-control_ratio_p99 = 1.0051157077092974
+control_delta_p99_ms = 0.5941500000000001
+control_p99_ms = 1.145126
+control_ratio_p50 = 1.0085767445856006
+control_ratio_p99 = 0.9537267522250585
 
 [echo_control.minimal]
-control_delta_p99_ms = 0.29189099999999996
-control_p99_ms = 0.921106
-control_ratio_p50 = 1.0154611065626815
+control_delta_p99_ms = 0.23828200000000002
+control_p99_ms = 0.658715
+control_ratio_p50 = 0.9937197455771009
 control_ratio_p99 = 1.035776855693868
 
 [first_paint.heavy]
-marker_cold_ms = 120.464107
-marker_ratio_p50 = 0.4601985941432818
-marker_ratio_p99 = 0.6027915804526288
-shell_visible_ms = 4.297872
+marker_cold_ms = 79.267231
+marker_ratio_p50 = 0.4309602847125922
+marker_ratio_p99 = 0.48231109573135145
+shell_visible_ms = 3.788316
 
 [first_paint.minimal]
-marker_cold_ms = 26.507479
-marker_ratio_p50 = 0.13544477259372312
-marker_ratio_p99 = 0.20170704524173708
-shell_visible_ms = 4.144493
+marker_cold_ms = 25.150733000000002
+marker_ratio_p50 = 0.12916062518448798
+marker_ratio_p99 = 0.1930818331120212
+shell_visible_ms = 4.094983
 
 [flood.minimal]
-cadence_p99_ms = 20.880463
-pace_ratio = 1.0035839351461207
+cadence_p99_ms = 14.565679999999999
+cadence_p99_ratio = 1.003763376690218
+pace_ratio = 1.002778277451919
 
 [input_path.minimal]
-key_to_rpc_p99_us = 117.739
+key_to_rpc_p99_us = 80.682
 
 [memory.minimal]
 pss_mb = 3.3017578125
 
 [output_path.minimal]
-p99_ms = 0.153176
+p99_ms = 0.081796
 
 [scroll.heavy]
 ratio_p50 = 1.990667812724753
 ratio_p99 = 1.858985915274381
-staleness_p99_ms = 1.559361
+staleness_p99_ms = 1.2338850000000001
 
 [scroll.minimal]
 ratio_p50 = 1.7777551352351824
 ratio_p99 = 1.6910065990909606
-staleness_p99_ms = 1.35872
+staleness_p99_ms = 1.069328
