@@ -632,9 +632,11 @@ impl CompatSession {
                     // just burn its full deadline every time. Retrying a
                     // live probe until it actually reports the effect
                     // (never a fixed sleep, never trusting a single
-                    // best-effort read) gives the same positive-confirmation
-                    // guarantee task 22 required, on a channel that can see
-                    // a silent effect.
+                    // best-effort read) is the same positively-confirmed
+                    // standard: a probe result can only ever be "not yet"
+                    // while the keys are still in flight, never a false
+                    // "delivered" that ends the loop early, on a channel
+                    // that can observe a silent effect the screen cannot.
                     let deadline = Instant::now() + SEND_CONFIRM_DEADLINE;
                     loop {
                         if self.probe(expr).is_ok_and(|actual| &actual == expect) {
@@ -1815,6 +1817,60 @@ mod tests {
              cannot tell an unstarted delivery from a settled one; \
              screen:\n{}",
             session.pty().screen()
+        );
+
+        session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+    }
+
+    // A confirm probe against a socket that will never exist fails every
+    // single attempt (connection refused), which is exactly the "always
+    // not-yet" condition a stalled forwarding path also produces -- so this
+    // is the same shape of evidence the two mechanism tests above establish
+    // for the screen channel, pinned here for the probe channel's own hard-
+    // failure exit instead of its success exit.
+    #[cfg(unix)]
+    #[test]
+    fn send_step_with_confirm_hard_fails_when_the_probe_channel_never_confirms() {
+        let keys = "ix<Esc>";
+        let script = "stty raw -echo; sleep 5";
+
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(script);
+            CompatSession::spawn_configured(
+                cmd,
+                80,
+                24,
+                PathBuf::from("nvim"),
+                PathBuf::from("/nonexistent/view-compat-test.sock"),
+            )
+        })
+        .expect("spawning the fake pty target");
+
+        let start = Instant::now();
+        let err = session
+            .drive_step(&Step::Send {
+                keys: keys.to_string(),
+                confirm: Some(SendConfirm {
+                    expr: "1".to_string(),
+                    expect: "1".to_string(),
+                }),
+            })
+            .expect_err(
+                "a confirm probe against a socket that never exists must hard-fail, not \
+                 silently give up the way the unconfirmed screen-based path does",
+            );
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, CompatError::SendConfirmTimedOut { .. }),
+            "expected SendConfirmTimedOut, got {err:?}"
+        );
+        assert!(
+            elapsed < SEND_CONFIRM_DEADLINE + Duration::from_secs(2),
+            "confirm loop ran well past its own {SEND_CONFIRM_DEADLINE:?} deadline: {elapsed:?}"
         );
 
         session.pty().kill();

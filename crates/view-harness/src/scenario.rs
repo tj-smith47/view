@@ -175,18 +175,51 @@ pub enum ScenarioError {
     /// confirmation together and neither means anything alone.
     #[error("step {index} sets confirm_probe/confirm_expect but not both")]
     ConfirmMissingPartner { index: usize },
-    /// A `send` step's key text opens with `:silent `, the codebase's own
-    /// idiom for a send that produces no screen delta, but sets no
-    /// `confirm_probe`: unconfirmed, `Step::Send`'s screen-based wait can
-    /// never observe this step's effect, so it would burn its own full
-    /// deadline on every run with nothing in the scenario file explaining
-    /// why. Add `confirm_probe`/`confirm_expect`, or drop `:silent` so the
-    /// command produces a visible delta the default path can confirm.
+    /// A `send` step's key text opens with an invocation of nvim's
+    /// `:silent` ex command (see [`starts_with_silent_command`] for exactly
+    /// which spellings that covers), the codebase's own idiom for a send
+    /// that produces no screen delta, but sets no `confirm_probe`:
+    /// unconfirmed, `Step::Send`'s screen-based wait can never observe this
+    /// step's effect, so it would burn its own full deadline on every run
+    /// with nothing in the scenario file explaining why. Add
+    /// `confirm_probe`/`confirm_expect`, or drop `:silent` so the command
+    /// produces a visible delta the default path can confirm.
     #[error(
-        "step {index} sends a :silent command with no confirm_probe; \
-         add confirm_probe/confirm_expect or drop :silent"
+        "step {index} sends a :silent[!] command (full spelling or nvim's own \
+         sil/sile/silen abbreviations) with no confirm_probe; add \
+         confirm_probe/confirm_expect or drop :silent"
     )]
     SilentSendWithoutConfirm { index: usize },
+}
+
+/// True if `keys` opens with an invocation of nvim's `:silent` ex command --
+/// the idiom [`ScenarioError::SilentSendWithoutConfirm`] exists to catch.
+/// Recognizes the full spelling and nvim's own shortest-to-longest
+/// abbreviations (`sil`, `sile`, `silen`, `silent`), each with or without
+/// the `!` bang variant, with any amount of whitespace after the leading
+/// `:` (nvim's own command-line parser skips it there). Confirmed live
+/// against the pinned nvim (`getcompletion("sil", "command")` returns
+/// exactly `["silent"]`; `getcompletion("si", "command")` also matches
+/// `sign`/`simalt`) -- `sil` is nvim's own shortest unambiguous
+/// abbreviation for this command, so no shorter prefix belongs in this set:
+/// a scenario typing `:si` would not actually invoke `:silent` either, it
+/// would hit nvim's own ambiguous-command error.
+///
+/// Deliberately does not scan for `:silent` anywhere inside `keys`, only at
+/// its very start: a `Send` step's text before any leading `:` is real
+/// keystrokes (e.g. a literal insertion of the word "silent"), not command
+/// syntax, and matching them as this idiom would be a false positive this
+/// function must not produce.
+fn starts_with_silent_command(keys: &str) -> bool {
+    let Some(after_colon) = keys.strip_prefix(':') else {
+        return false;
+    };
+    let after_colon = after_colon.trim_start();
+    ["silent", "silen", "sile", "sil"].iter().any(|form| {
+        after_colon.strip_prefix(form).is_some_and(|rest| {
+            rest.is_empty() || rest.starts_with('!') || rest.starts_with(char::is_whitespace)
+        })
+    })
 }
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
@@ -236,7 +269,7 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
             (Some(expr), Some(expect)) => Some(SendConfirm { expr, expect }),
             _ => None,
         };
-        if confirm.is_none() && keys.starts_with(":silent ") {
+        if confirm.is_none() && starts_with_silent_command(&keys) {
             return Err(ScenarioError::SilentSendWithoutConfirm { index });
         }
         return Ok(Step::Send { keys, confirm });
@@ -673,6 +706,78 @@ steps = []
                     expect: "/tmp".to_string(),
                 }),
             }
+        );
+    }
+
+    #[test]
+    fn starts_with_silent_command_catches_every_recognized_spelling() {
+        for keys in [
+            ":silent cd /tmp<CR>",
+            ":silent!cd /tmp<CR>",
+            ":silent! cd /tmp<CR>",
+            ":silen cd /tmp<CR>",
+            ":sile cd /tmp<CR>",
+            ":sil cd /tmp<CR>",
+            ":sil!cd /tmp<CR>",
+            ": silent cd /tmp<CR>",
+            ":  silent cd /tmp<CR>",
+            ":silent",
+        ] {
+            assert!(
+                starts_with_silent_command(keys),
+                "expected {keys:?} to be recognized as a :silent-family command"
+            );
+        }
+    }
+
+    #[test]
+    fn starts_with_silent_command_does_not_false_positive() {
+        for keys in [
+            ":sign place 1 line=1 name=x",
+            ":simalt ~x",
+            ":si cd /tmp<CR>",
+            "ihello silent world<Esc>",
+            "isilent<Esc>",
+            ":silentx cd /tmp<CR>",
+            ":silence cd /tmp<CR>",
+            "cd /tmp<CR>",
+        ] {
+            assert!(
+                !starts_with_silent_command(keys),
+                "expected {keys:?} to NOT be recognized as a :silent-family command"
+            );
+        }
+    }
+
+    #[test]
+    fn a_silent_bang_send_with_no_confirm_probe_is_rejected() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \":silent! cd /tmp<CR>\" },",
+        );
+        let err = parse(&toml).expect_err(
+            "a :silent! send step with no confirm_probe must be a hard error, matching the \
+             bare :silent case",
+        );
+        assert!(
+            matches!(err, ScenarioError::SilentSendWithoutConfirm { index: 0 }),
+            "expected SilentSendWithoutConfirm{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_sil_abbreviation_send_with_no_confirm_probe_is_rejected() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \":sil cd /tmp<CR>\" },",
+        );
+        let err = parse(&toml).expect_err(
+            "a :sil send step with no confirm_probe must be a hard error, matching the \
+             full :silent spelling",
+        );
+        assert!(
+            matches!(err, ScenarioError::SilentSendWithoutConfirm { index: 0 }),
+            "expected SilentSendWithoutConfirm{{index: 0}}, got {err:?}"
         );
     }
 }
