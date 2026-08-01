@@ -72,7 +72,8 @@ use crate::OracleError;
 /// promptly instead of hanging the whole compat run.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Silence window [`Step::Send`] requires the pty's rendered screen to hold
+/// Silence window [`Step::Send`] requires the pty's rendered screen to hold,
+/// *after* it has first been observed to differ from its pre-send baseline,
 /// before treating the keys as delivered. Matches the differential oracle's
 /// own quiesce convention (`corpus::DEFAULT_QUIESCE_SILENCE_MS`): long
 /// enough that ordinary key-processing latency never trips it, short enough
@@ -80,15 +81,16 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 /// the screen has genuinely gone quiet.
 const SEND_SETTLE_SILENCE: Duration = Duration::from_millis(200);
 
-/// Bound on how long [`Step::Send`] waits for [`SEND_SETTLE_SILENCE`] before
-/// giving up on confirming delivery and letting the step return anyway (see
-/// its own doc comment for why giving up is safe). A plugin that keeps a
-/// floating notification animating indefinitely (fidget's progress spinner,
-/// live-confirmed) never holds the whole screen still for
-/// [`SEND_SETTLE_SILENCE`], so this bounds the wasted wait at a small
-/// multiple of the forwarding latency this step actually needs to outrun --
-/// live-confirmed at zero failures across 200 bounded repetitions of the
-/// scenario that first exposed the race, both idle and under host load.
+/// Bound on how long [`Step::Send`] waits for a delivered-and-settled screen
+/// before giving up on confirming delivery and letting the step return
+/// anyway (see its own doc comment for why giving up is safe). A plugin that
+/// keeps a floating notification animating indefinitely (fidget's progress
+/// spinner, live-confirmed) never holds the whole screen still for
+/// [`SEND_SETTLE_SILENCE`] once it has changed, so this bounds the wasted
+/// wait at a small multiple of the forwarding latency this step actually
+/// needs to outrun -- live-confirmed at zero failures across 200 bounded
+/// repetitions of the scenario that first exposed the race, both idle and
+/// under host load.
 const SEND_SETTLE_DEADLINE: Duration = Duration::from_millis(1_000);
 
 /// Which of the design spec's three config-reconciliation classes a
@@ -133,10 +135,10 @@ pub enum ScenarioState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
     /// Types `keys` into the pty verbatim, as a user would, then waits
-    /// (best-effort, bounded) for the resulting screen output to quiesce
-    /// before returning, closing the ordinary-case gap between typing and
-    /// forwarding without demanding a guarantee an animating target could
-    /// never give.
+    /// (bounded) for the screen to actually show the keys' effect and
+    /// settle before returning, closing the ordinary-case gap between
+    /// typing and forwarding without demanding a guarantee an animating
+    /// target could never give.
     Send(String),
     /// Blocks until the pty's rendered screen contains `needle`, or `timeout`
     /// elapses.
@@ -470,26 +472,71 @@ impl CompatSession {
     /// `init.lua` calls `serverstart` as its very first statement, well
     /// before any redraw), a daily config's own startup content is
     /// unknown to this harness, so there is no fixed needle to `wait_for`
-    /// instead. Equally applicable wherever keys are typed into the pty
-    /// and a later check reads nvim state over a wholly separate channel:
-    /// the two channels carry no ordering guarantee between them on their
-    /// own, so nothing else confirms nvim has actually forwarded and
-    /// applied the keys before that later check runs.
+    /// instead. An already-quiet screen at the moment this is called counts
+    /// as settled here, which is the right reading for "has this session's
+    /// startup content finished rendering" -- there is nothing upstream of
+    /// this call whose delivery is still in flight, unlike
+    /// [`wait_for_send_delivery`](Self::wait_for_send_delivery)'s narrower
+    /// question.
     ///
     /// Returns whether the screen was observed to settle before `deadline`.
     #[must_use]
     pub fn wait_for_screen_quiescence(&mut self, silence: Duration, deadline: Duration) -> bool {
+        self.poll_screen_settle(None, silence, deadline)
+    }
+
+    /// Blocks until the pty's rendered screen is observed to *change* from
+    /// `baseline` and then hold unchanged for `silence`, or `deadline`
+    /// elapses. Unlike [`wait_for_screen_quiescence`](Self::wait_for_screen_quiescence),
+    /// a screen that still equals `baseline` at every poll can never satisfy
+    /// this, however long it holds still: an unmoved screen is a delivery
+    /// that has not landed yet, not one that settled instantly, so this is
+    /// the check [`drive_step`](Self::drive_step)'s `Send` arm uses to
+    /// confirm the keys it just wrote actually reached the screen before
+    /// treating them as delivered. `baseline` must be captured by the
+    /// caller *before* the keys are written -- capturing it here, after the
+    /// write, would already have missed a change fast enough to land before
+    /// the first poll, which is exactly the false "nothing happened"
+    /// reading this exists to rule out.
+    ///
+    /// Returns whether a change-then-settle was observed before `deadline`.
+    #[must_use]
+    fn wait_for_send_delivery(
+        &mut self,
+        baseline: String,
+        silence: Duration,
+        deadline: Duration,
+    ) -> bool {
+        self.poll_screen_settle(Some(baseline), silence, deadline)
+    }
+
+    /// Shared polling loop behind [`wait_for_screen_quiescence`](Self::wait_for_screen_quiescence)
+    /// and [`wait_for_send_delivery`](Self::wait_for_send_delivery): re-reads
+    /// the real screen every 50ms and declares settled once it has held
+    /// unchanged for `silence`, bounded by `deadline`. `require_change_from`
+    /// is the two callers' one behavioral difference: `None` treats
+    /// "unchanged since the first poll" as already settled; `Some(baseline)`
+    /// refuses to settle until the screen has been observed to differ from
+    /// `baseline` at least once first.
+    fn poll_screen_settle(
+        &mut self,
+        require_change_from: Option<String>,
+        silence: Duration,
+        deadline: Duration,
+    ) -> bool {
         let start = Instant::now();
-        let mut last = self.pty.screen();
+        let mut changed = require_change_from.is_none();
+        let mut last = require_change_from.unwrap_or_else(|| self.pty.screen());
         let mut quiet_since = Instant::now();
         loop {
             std::thread::sleep(Duration::from_millis(50));
             let current = self.pty.screen();
             if current == last {
-                if Instant::now().duration_since(quiet_since) >= silence {
+                if changed && Instant::now().duration_since(quiet_since) >= silence {
                     return true;
                 }
             } else {
+                changed = true;
                 last = current;
                 quiet_since = Instant::now();
             }
@@ -510,19 +557,35 @@ impl CompatSession {
     pub fn drive_step(&mut self, step: &Step) -> Result<(), CompatError> {
         match step {
             Step::Send(keys) => {
+                // Captured before the write, not after: the pipeline from
+                // "bytes on the pty" to "nvim has forwarded and applied
+                // them" can take long enough that an effect landing between
+                // the write and a post-write capture would already be
+                // baked into the baseline, and wait_for_send_delivery would
+                // then read a screen that never again differs from it as
+                // "nothing happened" for the rest of the poll.
+                let baseline = self.pty.screen();
                 self.pty.send(&resolve_send_keys(keys)?)?;
-                // Best-effort, like wait_for_screen_quiescence's other
-                // caller: a plugin that keeps something animating (a
-                // progress spinner) never reports settled, and this step
-                // has no way to tell that apart from a target that is
+                // Best-effort past this point: a plugin that keeps
+                // something animating (a progress spinner) never lets the
+                // screen re-settle once it has changed, and this step has
+                // no way to tell that apart from a target that is
                 // genuinely still forwarding the keys. Failing loudly here
                 // would turn a legitimate animation into a hard error; the
                 // steps that actually need delivery confirmed already poll
                 // for it themselves (`wait_for`, `wait_for_probe`), so a
                 // step that gives up after this bound loses only the
                 // narrower race a single-shot `probe`/`assert_absent`
-                // would otherwise be exposed to immediately afterward.
-                let _ = self.wait_for_screen_quiescence(SEND_SETTLE_SILENCE, SEND_SETTLE_DEADLINE);
+                // would otherwise be exposed to immediately afterward. What
+                // giving up can no longer mean is a false "delivered": the
+                // deadline can only be reached by a screen that has never
+                // shown the keys' effect at all, never by one this call
+                // mistook a stall for settling on.
+                let _ = self.wait_for_send_delivery(
+                    baseline,
+                    SEND_SETTLE_SILENCE,
+                    SEND_SETTLE_DEADLINE,
+                );
                 Ok(())
             }
             Step::WaitFor { needle, timeout } => {
@@ -1534,6 +1597,28 @@ mod tests {
         let _ = session.pty().wait_for_exit(Duration::from_secs(5));
     }
 
+    // A freshly opened pty runs its child's `stty raw -echo` asynchronously
+    // relative to the parent's first write: until that command actually
+    // executes, the kernel's own line discipline is still echoing input
+    // back onto the screen, so a `send()` landing in that window shows up
+    // as a screen change indistinguishable from one the target itself
+    // produced. Both fake targets below print a marker right after their
+    // `stty raw -echo`, and the driver blocks on it before sending anything,
+    // so the baseline `drive_step` captures is never mid-echo -- the same
+    // "observe positive evidence before proceeding" standard the fix under
+    // test applies to the real pty channel applies here to the test's own
+    // synchronization with its fake target.
+    fn wait_for_ready_marker(session: &mut CompatSession, marker: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !session.pty().screen().contains(marker) {
+            assert!(
+                Instant::now() < deadline,
+                "fake target never printed its readiness marker {marker:?}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     // A `Step::Send` step's pty channel and a following `probe`/`assert_absent`
     // step's subprocess channel are independent (this module's own docs);
     // nothing else in the driver ties one to the other. The fake target below
@@ -1541,16 +1626,18 @@ mod tests {
     // the screen every 50ms for five more polls before its one distinguishing
     // write -- long enough that a `drive_step` returning as soon as the bytes
     // are written (rather than once the screen has genuinely gone quiet)
-    // reliably races ahead of that write, and specific enough that a
-    // quiescence check cannot mistake "nothing has happened yet" for "the
-    // target is done".
+    // reliably races ahead of that write. Covers the ongoing-animation case
+    // (the target keeps moving right up to its distinguishing write); the
+    // stalls-with-no-movement-at-all case below is a distinct failure mode
+    // this one does not exercise, since the target here starts changing the
+    // screen on essentially its first poll.
     #[cfg(unix)]
     #[test]
     fn send_step_blocks_until_the_pty_screen_reflects_its_keys() {
         let keys = "ix<Esc>";
         let payload = resolve_send_keys(keys).expect("resolving test keys");
         let script = format!(
-            "stty raw -echo; head -c{} >/dev/null; \
+            "stty raw -echo; printf 'READY\\r\\n'; head -c{} >/dev/null; \
              for _ in 1 2 3 4 5; do printf .; sleep 0.05; done; \
              printf 'SETTLED\\r\\n'",
             payload.len()
@@ -1569,6 +1656,7 @@ mod tests {
             )
         })
         .expect("spawning the fake pty target");
+        wait_for_ready_marker(&mut session, "READY");
 
         session
             .drive_step(&Step::Send(keys.to_string()))
@@ -1579,6 +1667,58 @@ mod tests {
             "drive_step returned before the target's delayed output reached \
              the screen -- the same race a probe step reads through when it \
              runs immediately after a send step; screen:\n{}",
+            session.pty().screen()
+        );
+
+        session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+    }
+
+    // A settle check that treats an unmoved screen as confirmation needs
+    // only a stall, not an ongoing animation, to read early: this target
+    // reads the sent bytes, holds the screen completely unchanged for
+    // longer than SEND_SETTLE_SILENCE, then makes its one distinguishing
+    // write. A baseline captured after the write (rather than before it) or
+    // a settle rule satisfied by "no change since polling started" (rather
+    // than requiring an observed change first) both return once the stall
+    // alone has outlasted the silence window, before this write ever lands.
+    #[cfg(unix)]
+    #[test]
+    fn send_step_blocks_through_a_stall_with_no_screen_movement_at_all() {
+        let keys = "ix<Esc>";
+        let payload = resolve_send_keys(keys).expect("resolving test keys");
+        let script = format!(
+            "stty raw -echo; printf 'READY\\r\\n'; head -c{} >/dev/null; \
+             sleep 0.4; printf 'SETTLED\\r\\n'",
+            payload.len()
+        );
+
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(&script);
+            CompatSession::spawn_configured(
+                cmd,
+                80,
+                24,
+                PathBuf::from("nvim"),
+                PathBuf::from("/dev/null"),
+            )
+        })
+        .expect("spawning the fake pty target");
+        wait_for_ready_marker(&mut session, "READY");
+
+        session
+            .drive_step(&Step::Send(keys.to_string()))
+            .expect("the send step itself must report success");
+
+        assert!(
+            session.pty().screen().contains("SETTLED"),
+            "drive_step returned during a stall in which the screen never \
+             moved at all -- a settle check satisfied by an unchanged \
+             screen, rather than one requiring an observed change first, \
+             cannot tell an unstarted delivery from a settled one; \
+             screen:\n{}",
             session.pty().screen()
         );
 
