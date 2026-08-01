@@ -181,8 +181,9 @@ impl EngineConfig {
     ///    planned: the sweep drops what the host merely happens to export,
     ///    and a variable a caller asked for is not that.
     /// 2. [`crate::env::HOST_REDIRECT_VARS`],
-    ///    [`crate::env::HOST_SEARCH_PATH_VARS`] and
-    ///    [`crate::env::HOST_SUBPROCESS_CONFIG_VARS`], unconditionally. The
+    ///    [`crate::env::HOST_SEARCH_PATH_VARS`],
+    ///    [`crate::env::HOST_SUBPROCESS_CONFIG_VARS`] and
+    ///    [`crate::env::HERMETIC_HOME_VAR`], unconditionally. The
     ///    sweep already covers a host that exports them; this layer also
     ///    covers the caller who set one deliberately, which is what an
     ///    isolated config must refuse whoever asks.
@@ -210,6 +211,11 @@ impl EngineConfig {
             for name in crate::env::HOST_SUBPROCESS_CONFIG_VARS {
                 plan_set(&mut plan, OsStr::new(name), Some(absent.clone()));
             }
+            plan_set(
+                &mut plan,
+                OsStr::new(crate::env::HERMETIC_HOME_VAR),
+                Some(crate::env::hermetic_home().into_os_string()),
+            );
         }
         plan
     }
@@ -367,12 +373,15 @@ impl Engine {
     ///
     /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
     /// search path cannot be established empty (see
-    /// [`crate::env::prepare_empty_search_path`]), before any process is
-    /// started: a child pointed at a directory somebody planted a plugin in
-    /// is not isolated, and refusing the spawn is the only way that says so.
+    /// [`crate::env::prepare_empty_search_path`]) or the hermetic home holds
+    /// a planted entry (see [`crate::env::prepare_hermetic_home`]), before
+    /// any process is started: a child pointed at a directory somebody
+    /// planted a plugin or credential file in is not isolated, and refusing
+    /// the spawn is the only way that says so.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
         if cfg.hermetic {
             crate::env::prepare_empty_search_path()?;
+            crate::env::prepare_hermetic_home()?;
         }
         let mut guard = ChildGuard(Some(build_command(&cfg).spawn()?));
         // unreachable ok_or: nothing clears guard.0 before this point
@@ -754,12 +763,15 @@ mod config_tests {
              is actually asserted"
         );
         let overridden = crate::env::empty_search_path().into_os_string();
+        let home = crate::env::hermetic_home().into_os_string();
         for (name, _) in swept {
             let expected = if crate::env::HOST_SEARCH_PATH_VARS
                 .iter()
                 .any(|search| crate::env::env_names_eq(&name, OsStr::new(search)))
             {
                 Some(overridden.clone())
+            } else if crate::env::env_names_eq(&name, OsStr::new(crate::env::HERMETIC_HOME_VAR)) {
+                Some(home.clone())
             } else {
                 None
             };
@@ -789,27 +801,36 @@ mod config_tests {
         }
     }
 
-    /// `HOME` reaches a hermetic child, so the programs that child spawns
-    /// resolve their own configuration through it. An isolated plan has to
-    /// close that separately: the editor's `XDG_*_HOME` overrides divert the
-    /// editor's lookups and nothing else's.
+    /// The programs an isolated child spawns resolve their own configuration
+    /// and credentials through `HOME`, which the editor's `XDG_*_HOME`
+    /// overrides do nothing about. An isolated plan closes that on two
+    /// levels: the git configuration files are pointed at a missing path,
+    /// and `HOME` itself at the hardened empty directory for everything no
+    /// variable of git's diverts (`.netrc`, `.ssh/`, the ignore-file
+    /// default).
+    ///
+    /// The two file layers are asserted by literal name rather than by
+    /// iterating the const the code under test iterates: an entry dropped
+    /// from that const would otherwise shrink this assertion along with the
+    /// plan, and nothing can plant `/etc/gitconfig` to catch the system
+    /// half's loss downstream.
     #[test]
     fn an_isolated_plan_closes_the_config_layers_a_child_subprocess_reads_from_home() {
         let plan = spawned_env(&EngineConfig::isolated());
         let absent = crate::env::absent_config_file().into_os_string();
-        for name in crate::env::HOST_SUBPROCESS_CONFIG_VARS {
+        for name in ["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"] {
             assert!(
-                plan.contains(&(OsString::from(*name), Some(absent.clone()))),
+                plan.contains(&(OsString::from(name), Some(absent.clone()))),
                 "{name} does not select a missing configuration file, so a \
                  subprocess of an isolated child reads the operator's own; \
                  plan {plan:?}"
             );
         }
+        let home = crate::env::hermetic_home().into_os_string();
         assert!(
-            plan.iter()
-                .all(|(name, _)| !crate::env::env_names_eq(name, OsStr::new("HOME"))),
-            "HOME is planned after all, which would defeat the child itself \
-             rather than its subprocesses; plan {plan:?}"
+            plan.contains(&(OsString::from("HOME"), Some(home))),
+            "HOME still names the operator's own home, so a subprocess of an \
+             isolated child resolves its credentials out of it; plan {plan:?}"
         );
     }
 
@@ -852,6 +873,7 @@ mod config_tests {
                     .iter()
                     .chain(crate::env::HOST_SEARCH_PATH_VARS)
                     .chain(crate::env::HOST_SUBPROCESS_CONFIG_VARS)
+                    .chain(std::iter::once(&crate::env::HERMETIC_HOME_VAR))
                     .any(|fixed| crate::env::env_names_eq(name, OsStr::new(fixed)))
             })
             .expect("this host exports nothing the sweep would drop");
@@ -880,6 +902,7 @@ mod config_tests {
                 !crate::env::HOST_REDIRECT_VARS
                     .iter()
                     .chain(crate::env::HOST_SEARCH_PATH_VARS)
+                    .chain(std::iter::once(&crate::env::HERMETIC_HOME_VAR))
                     .any(|fixed| crate::env::env_names_eq(name, OsStr::new(fixed)))
             })
             .expect("this host exports nothing the sweep would drop");

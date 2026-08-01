@@ -22,8 +22,13 @@ those names deliberately. `SpawnEnv` gained `value_of` rather than an `is_set`
 query: a swept name is dropped only while the builder still holds the host's
 own value for it. `d32daf0` closed the review findings: a third host layer,
 `HOST_SUBPROCESS_CONFIG_VARS`, points `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM`
-at a path that does not exist, so a hermetic child's own subprocesses no
-longer read the operator's configuration through the allowlisted `HOME`.
+at a path that does not exist, closing git's configuration-*file* layers.
+The re-review proved `.netrc` credentials still rode the then-allowlisted
+`HOME` (libcurl's lookup sits below the config layer); the fix-round on top
+re-points a hermetic child's `HOME` at a guarded harness-owned dir
+(`HERMETIC_HOME_VAR` -> `env::hermetic_home`), closing `.netrc`, `~/.ssh/*`
+and the ignore-file default in one move. Windows OpenSSH resolves the profile rather than
+`HOME`; that residual is recorded in `env.rs`, not closed.
 
 What the next session needs from it:
 

@@ -356,6 +356,11 @@ pub fn make_hermetic<E: SpawnEnv>(cmd: &mut E) -> Result<(), OracleError> {
     for name in view_engine::env::HOST_SUBPROCESS_CONFIG_VARS {
         cmd.set(OsStr::new(name), absent.as_os_str());
     }
+    let home = view_engine::env::prepare_hermetic_home()?;
+    cmd.set(
+        OsStr::new(view_engine::env::HERMETIC_HOME_VAR),
+        home.as_os_str(),
+    );
     Ok(())
 }
 
@@ -1210,14 +1215,19 @@ mod tests {
         /// The rewritten-to host, which no name server resolves.
         const REWRITTEN_TO: &'static str = "https://view-test.invalid/";
 
-        fn plant() -> Self {
+        /// `label` keeps each test's home its own: planting begins with a
+        /// `remove_dir_all`, which under a shared path would delete another
+        /// test's planted home mid-assertion.
+        fn plant(label: &str) -> Self {
             let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
             root.pop(); // crates/
             root.pop(); // workspace root
                         // under the build tree, never the system temp dir: this is the
                         // host configuration a leak would read, so it must not be
                         // somewhere an unrelated process can reach into
-            let dir = root.join("target").join("view-hostile-home");
+            let dir = root
+                .join("target")
+                .join(format!("view-hostile-home-{label}"));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
@@ -1238,24 +1248,34 @@ mod tests {
             cmd.arg("config")
                 .arg("--get")
                 .arg(format!("url.{}.insteadOf", Self::REWRITTEN_TO));
+            // run from inside the planted home with repository discovery
+            // ceilinged at its parent: this test binary's cwd is a checkout
+            // of a real repository, whose own .git/config is a layer no
+            // funnel variable diverts, and a stray rewrite there would fail
+            // the guarded assertion for a reason unrelated to hermeticity
+            cmd.current_dir(&self.dir);
+            cmd.env("GIT_CEILING_DIRECTORIES", self.dir.parent().unwrap());
             build(&mut cmd);
             let out = cmd.output().expect("failed to run git");
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
     }
 
-    /// `HOME` reaches a hermetic child by design -- the editor cannot resolve
-    /// its own home without it -- and the programs that child then spawns
-    /// resolve *their* configuration through it too, which the editor's
-    /// `XDG_*_HOME` overrides do nothing about. An operator's `insteadOf`
-    /// rewrite, proxy, disabled certificate check or credential helper would
-    /// otherwise decide what a measured plugin bootstrap fetches and from
-    /// where, and report nothing: the clone succeeds and the run is green.
+    /// The programs a hermetic child spawns resolve their configuration
+    /// through a home the editor's `XDG_*_HOME` overrides do nothing about.
+    /// An operator's `insteadOf` rewrite, proxy, disabled certificate check
+    /// or credential helper would otherwise decide what a measured plugin
+    /// bootstrap fetches and from where, and report nothing: the clone
+    /// succeeds and the run is green. The funnel closes the channel twice
+    /// over -- the configuration files are diverted by name and `HOME`
+    /// itself is re-pointed -- and this oracle checks the channel rather
+    /// than either layer, staying green while at least one closure holds;
+    /// the plan tests pin each layer individually.
     ///
     /// Gated off Windows with this module's other real-subprocess fixtures.
     #[test]
     fn a_hermetic_childs_own_subprocesses_read_none_of_the_hosts_configuration() {
-        let home = HostileHome::plant();
+        let home = HostileHome::plant("rewrite");
         let planted = testenv::plant(&[("HOME", &*home.dir.to_string_lossy())]);
 
         // the control: the same plant reaching a spawn no funnel touched.
@@ -1282,6 +1302,59 @@ mod tests {
              configuration ({guarded}), so which repository a measured \
              bootstrap clones, over what transport and with whose \
              credentials, are all properties of the machine it ran on"
+        );
+    }
+
+    /// The credential files a child's subprocesses resolve through `HOME`
+    /// sit below the configuration layer the two `GIT_CONFIG_*` overrides
+    /// divert: no variable of git's or curl's turns off the `$HOME/.netrc`
+    /// lookup git's http transport hands to libcurl, so an operator's
+    /// credentials ride any allowlisted host `HOME` into every fetch a
+    /// measured bootstrap makes -- and an authenticated fetch succeeding
+    /// where an anonymous one would fail is a fixture green on one machine
+    /// only, silently.
+    ///
+    /// The oracle reads the credential file exactly the way such a
+    /// subprocess would, through the `HOME` the child actually received, so
+    /// it goes red if the funnel stops re-pointing `HOME` and is
+    /// indifferent to how the funnel does it.
+    #[test]
+    fn a_hermetic_childs_home_holds_none_of_the_operators_credentials() {
+        let home = HostileHome::plant("netrc");
+        let creds = "machine github.com login operator password host-secret";
+        std::fs::write(home.dir.join(".netrc"), creds).unwrap();
+        let planted = testenv::plant(&[("HOME", &*home.dir.to_string_lossy())]);
+
+        let netrc_read = |build: fn(&mut std::process::Command)| {
+            let mut cmd = std::process::Command::new("/bin/sh");
+            cmd.arg("-c").arg("cat -- \"$HOME/.netrc\" 2>/dev/null");
+            build(&mut cmd);
+            let out = cmd.output().expect("failed to run sh");
+            String::from_utf8_lossy(&out.stdout).into_owned()
+        };
+
+        // the control: the plant reaching a spawn no funnel touched. An
+        // empty guarded read below otherwise equally describes a file that
+        // was never readable at all
+        let uncontrolled = planted.spawning(|| netrc_read(|_| {}));
+        assert_eq!(
+            uncontrolled.trim(),
+            creds,
+            "the planted credential file reached no subprocess even \
+             unguarded, so this test proves nothing about a guarded one"
+        );
+
+        let guarded = planted.spawning(|| {
+            netrc_read(|cmd| {
+                make_hermetic(cmd).unwrap();
+            })
+        });
+        drop(planted);
+        assert!(
+            guarded.is_empty(),
+            "a hermetic child's HOME still reaches the operator's credential \
+             file ({guarded:?}), so every fetch a measured bootstrap makes \
+             carries the operator's credentials"
         );
     }
 

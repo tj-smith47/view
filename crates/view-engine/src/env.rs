@@ -17,9 +17,16 @@
 //! every entry was confirmed against the pinned binary. Deliberately
 //! absent:
 //!
-//! - `HOME`: once the `XDG_*_HOME` variables are set, Neovim derives none of
-//!   its own directories from it, and overriding it would break the
-//!   unrelated host tooling (Cargo, git) a harness runs alongside the child.
+//! - `HOME` -- absent from the *removal* list only: unset, libc and LuaJIT
+//!   cannot resolve a home at all and the child's own `expand('~')` fails,
+//!   so removal is the wrong neutralizer. An earlier revision passed the
+//!   host's value through so the tooling a hermetic child spawns (git above
+//!   all) would keep resolving its own configuration; that reasoning
+//!   survives only where these variables are never set -- the shipped
+//!   editor's default spawn -- because for a hermetic child, a subprocess
+//!   resolving credentials and configuration out of the operator's home is
+//!   exactly the channel being closed. [`HERMETIC_HOME_VAR`] records where
+//!   a hermetic child's `HOME` points instead.
 //! - `XDG_RUNTIME_DIR`: names where the child writes its server socket, not
 //!   where it reads configuration or code from, and a private replacement
 //!   deep inside a scratch tree risks overflowing the 104-byte limit on a
@@ -118,8 +125,7 @@ pub const HOST_REDIRECT_VARS: &[&str] = &[
 pub const HOST_SEARCH_PATH_VARS: &[&str] = &["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"];
 
 /// Environment variables overridden so that the programs a hermetic child
-/// *itself* spawns read no configuration out of the host's `HOME`, which
-/// [`HERMETIC_PASSTHROUGH_VARS`] keeps because the editor needs it.
+/// *itself* spawns read none of git's configuration *files* from the host.
 ///
 /// The editor's own lookups are diverted by the `XDG_*_HOME` overrides a
 /// caller sets, but a subprocess does not consult those and resolves its own
@@ -135,7 +141,43 @@ pub const HOST_SEARCH_PATH_VARS: &[&str] = &["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"]
 /// Both layers are named because either alone leaves the other live, and
 /// both are pointed at [`absent_config_file`] rather than emptied, since
 /// Git skips a configuration file it cannot read and reads an empty one.
+/// These two close the configuration-file layers and nothing below them:
+/// what a subprocess resolves through `HOME` without consulting any
+/// configuration file at all -- `$HOME/.netrc`, `$HOME/.ssh/`, the
+/// `core.excludesFile` default -- is closed by [`HERMETIC_HOME_VAR`]
+/// instead, because no variable of git's or curl's diverts those.
 pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"];
+
+/// The variable every remaining `HOME`-resolved lookup rides, re-pointed at
+/// a guarded directory of the harness's own for a hermetic child rather
+/// than passed through from the host or removed.
+///
+/// [`HOST_SUBPROCESS_CONFIG_VARS`] diverts git's configuration files and
+/// nothing else. Below that layer, git's http transport asks libcurl for
+/// `$HOME/.netrc` unconditionally, a default `ssh` reads `$HOME/.ssh/`
+/// (config, known hosts, identities), and the `core.excludesFile` default
+/// falls back to `$HOME/.config/git/ignore` -- none selectable by an
+/// environment variable of its own, so overriding `HOME` itself is the only
+/// move that closes the family rather than its enumerated members. The
+/// credential half is the one that matters: an authenticated fetch succeeds
+/// where an anonymous one would 404 or rate-limit, so a fixture can be
+/// green on the operator's machine and red everywhere else, silently.
+///
+/// The value is [`hermetic_home`], a directory of the harness's own whose
+/// preparation ([`prepare_hermetic_home`]) refuses every entry outside the
+/// state names a child legitimately creates: the configuration and
+/// credential paths a subprocess derives from this `HOME` are therefore
+/// absent at every spawn, and a plant is a refused spawn rather than a
+/// silent read. Removal instead of override would leave libc, LuaJIT and
+/// the child's own `expand('~')` with no home at all.
+///
+/// On Windows this diverts the tooling that resolves its home through
+/// `HOME` first (git and the curl it bundles do); tooling that resolves the
+/// *profile* instead -- Windows OpenSSH reads `~/.ssh` from the account
+/// profile, not `HOME` -- still reaches the operator's, because the profile
+/// variables stay passthrough: process creation and the child's own
+/// profile-shaped lookups need them. That residual is accepted, not closed.
+pub const HERMETIC_HOME_VAR: &str = "HOME";
 
 /// The host environment variables a hermetic child keeps. Every other
 /// variable the host exports is dropped before the child sees it.
@@ -155,13 +197,12 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 /// - `PATH`, and on Windows `COMSPEC`/`PATHEXT`: how the child resolves the
 ///   shell that `:terminal` and `system()` run, which the flood row drives
 ///   directly.
-/// - `HOME`, `USER`, `LOGNAME`, `SHELL` and the Windows profile variables:
-///   identity and home resolution that libc, LuaJIT and the child's own
-///   `expand('~')` read. Keeping `HOME` does open a channel the editor's
-///   own `XDG_*_HOME` overrides do not close, because the child's
-///   *subprocesses* resolve their configuration through it independently;
-///   [`HOST_SUBPROCESS_CONFIG_VARS`] closes that channel rather than
-///   leaving it to the entry above to disclaim.
+/// - `USER`, `LOGNAME`, `SHELL` and the Windows profile variables: identity
+///   resolution that libc and the child's tooling read. `HOME` is
+///   deliberately not among them: a child needs one, but everything a
+///   subprocess resolves through the host's -- credentials first -- is host
+///   state, so the hermetic layer supplies its own value
+///   ([`HERMETIC_HOME_VAR`]) instead of passing the host's through.
 /// - `TERM`, `COLORTERM`: what the child derives its capability tier from,
 ///   which a measurement pins deliberately.
 /// - `TMPDIR`, `XDG_RUNTIME_DIR` and the Windows temp variables: where the
@@ -176,7 +217,6 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 ///   stop there being one.
 pub const HERMETIC_PASSTHROUGH_VARS: &[&str] = &[
     "PATH",
-    "HOME",
     "USER",
     "LOGNAME",
     "SHELL",
@@ -269,7 +309,11 @@ pub fn env_names_eq(left: &OsStr, right: &OsStr) -> bool {
 /// with the child, which is the whole failure this comparison exists to
 /// prevent. What remains divergent is the Unicode table itself: this reads
 /// Rust's, the child is collapsed against the operating system's, and the
-/// two can differ for characters added between their versions.
+/// two can differ for characters added between their versions. The spawn
+/// builders fold differently again -- `portable_pty` keys its map with a
+/// full `str::to_lowercase`, `std`'s `Command` defers to the OS upcase --
+/// so an exotic pair that one-to-many lowercasing merges but simple
+/// uppercasing keeps apart can be one variable to a builder and two here.
 ///
 /// A name that is not valid UTF-8 compares byte for byte, having no case to
 /// fold that this can see.
@@ -343,9 +387,7 @@ pub fn hermetic_sweep() -> Vec<(OsString, OsString)> {
 /// harness puts every other scratch tree: the temp dir is world-writable
 /// with a guessable name, so a directory merely *expected* to stay empty is
 /// a directory anyone can plant a `nvim/plugin/` script in, and every
-/// "hermetic" child would then source it. Its path is resolved from this
-/// crate's own manifest dir because the crate that owns the same derivation
-/// for the harness bins sits above this one in the dependency order.
+/// "hermetic" child would then source it.
 ///
 /// A build-machine path baked into a released binary never resolves at run
 /// time, and never has to: only [`crate::process::EngineConfig::isolated`]
@@ -353,10 +395,87 @@ pub fn hermetic_sweep() -> Vec<(OsString, OsString)> {
 /// `EngineConfig::default` (pinned by test in the `view` binary itself).
 #[must_use]
 pub fn empty_search_path() -> PathBuf {
+    build_target_dir().join("view-hermetic-empty")
+}
+
+/// The workspace `target/` directory, where every hermetic directory this
+/// module hands a child lives: resolved from this crate's own manifest dir
+/// because the crate that owns the same derivation for the harness bins
+/// sits above this one in the dependency order.
+fn build_target_dir() -> PathBuf {
     let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     root.pop(); // crates/
     root.pop(); // workspace root
-    root.join("target").join("view-hermetic-empty")
+    root.join("target")
+}
+
+/// The directory a hermetic child receives as its `HOME`
+/// ([`HERMETIC_HOME_VAR`]), prepared by [`prepare_hermetic_home`] at the
+/// same funnels that prepare [`empty_search_path`].
+///
+/// A directory of its own rather than [`empty_search_path`], because a home
+/// is *written* by its legitimate holders: an embedded Neovim creates
+/// `$HOME/.local/state/nvim` for its log the moment it starts when no
+/// `XDG_STATE_HOME` redirects it, so pointing `HOME` at the directory whose
+/// emptiness every spawn re-checks would let the first child's state veto
+/// every spawn after it. Under the build tree for the same reason as the
+/// search path: the system temp dir is world-writable with a guessable
+/// name, and a home is the last directory to leave plantable.
+#[must_use]
+pub fn hermetic_home() -> PathBuf {
+    build_target_dir().join("view-hermetic-home")
+}
+
+/// The entries a hermetic child may leave under [`hermetic_home`]: the XDG
+/// state and cache fallbacks, which a child derives from `HOME` exactly
+/// when a caller redirects neither.
+const HERMETIC_HOME_STATE_DIRS: &[&str] = &[".local", ".cache"];
+
+/// Creates [`hermetic_home`] if absent and verifies it holds nothing a
+/// child's subprocess would read configuration or credentials out of,
+/// returning the path a hermetic spawn points [`HERMETIC_HOME_VAR`] at.
+///
+/// Emptiness is the wrong invariant for a home -- its holders write state
+/// under it, see [`hermetic_home`] -- so the check is a refusal of every
+/// entry outside the two state names instead. The entries that must never
+/// appear are the ones a subprocess resolves *inputs* through (`.netrc`,
+/// `.gitconfig`, `.ssh/`, `.config/`), and rather than enumerate those and
+/// miss one, an unexpected name is treated as a plant: the spawn fails
+/// naming it, never runs against it.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the directory cannot be
+/// created or read, and an [`io::Error::other`] naming the offending entry
+/// if it holds anything outside the state names.
+pub fn prepare_hermetic_home() -> io::Result<PathBuf> {
+    let path = hermetic_home();
+    prepare_home_dir(&path)?;
+    Ok(path)
+}
+
+/// The body of [`prepare_hermetic_home`], taking its path as an argument so
+/// a test can exercise the refusal against a directory of its own instead
+/// of planting an entry in the one every concurrent spawn in the same test
+/// binary is reading.
+fn prepare_home_dir(path: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(path)?;
+    for entry in std::fs::read_dir(path)? {
+        let name = entry?.file_name();
+        if !HERMETIC_HOME_STATE_DIRS
+            .iter()
+            .any(|allowed| name == *allowed)
+        {
+            return Err(io::Error::other(format!(
+                "the hermetic home {} holds {:?}: a child's own subprocesses \
+                 would read configuration or credentials planted there, so \
+                 the spawn is refused rather than silently measured against it",
+                path.display(),
+                name
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Creates [`empty_search_path`] if absent, verifies it holds nothing, and
@@ -586,11 +705,19 @@ mod tests {
     }
 
     /// The path the subprocess-configuration layers select must be missing,
-    /// and must sit where nobody can create it: a readable file there is a
-    /// host configuration reaching the child's own subprocesses, which is
+    /// and must sit inside the hardened directory: a readable file there is
+    /// a host configuration reaching the child's own subprocesses, which is
     /// the channel those layers exist to close.
+    ///
+    /// Parentage is what this pins on every platform; what parentage buys
+    /// differs. On Unix the prepared directory is unwritable
+    /// (`a_prepared_search_path_is_not_writable`), so planting fails
+    /// outright. Windows has no cheap equivalent -- the readonly attribute
+    /// does not stop file creation inside a directory -- so there the
+    /// enforcement is the emptiness refusal at every later spawn, pinned by
+    /// `a_file_planted_at_the_absent_config_path_refuses_the_next_spawn`.
     #[test]
-    fn the_absent_config_file_is_absent_and_cannot_be_planted() {
+    fn the_absent_config_file_is_absent_and_sits_in_the_hardened_directory() {
         let prepared = prepare_empty_search_path().unwrap();
         let absent = absent_config_file();
         assert!(
@@ -601,8 +728,51 @@ mod tests {
         assert_eq!(
             absent.parent(),
             Some(prepared.as_path()),
-            "the absent config path sits outside the directory that is made \
-             unwritable, so anybody can plant a config file at it"
+            "the absent config path sits outside the directory whose \
+             emptiness every spawn re-checks, so a planted config file \
+             there would never be noticed"
+        );
+    }
+
+    /// The state a child derives from its `HOME` when nothing redirects it
+    /// -- an embedded Neovim's log directory is the live case -- must not
+    /// veto the spawns that come after it.
+    #[test]
+    fn a_hermetic_home_tolerates_the_state_a_child_writes_under_it() {
+        let dir = scratch("home-state");
+        std::fs::create_dir_all(dir.join(".local/state/nvim")).unwrap();
+        std::fs::create_dir_all(dir.join(".cache/nvim")).unwrap();
+        prepare_home_dir(&dir).unwrap();
+    }
+
+    /// Anything else under a hermetic home is input a child's subprocess
+    /// would read -- a credential file first of all -- and the spawn must
+    /// refuse it by name rather than run against it.
+    #[test]
+    fn a_credential_planted_in_the_hermetic_home_refuses_the_next_spawn() {
+        let dir = scratch("home-planted");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(".netrc"), "machine github.com").unwrap();
+        let refused = prepare_home_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains(".netrc"),
+            "the refusal does not name the planted credential file: {refused}"
+        );
+    }
+
+    /// The half of the plant defense that holds on every platform: a file
+    /// created at the absent-config path makes the hardened directory
+    /// non-empty, and the next spawn is refused naming it rather than run
+    /// against a plant.
+    #[test]
+    fn a_file_planted_at_the_absent_config_path_refuses_the_next_spawn() {
+        let dir = scratch("planted-absent");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("absent"), "[url]").unwrap();
+        let refused = prepare_empty_dir(&dir).unwrap_err();
+        assert!(
+            refused.to_string().contains("absent"),
+            "the refusal does not name the planted config file: {refused}"
         );
     }
 
