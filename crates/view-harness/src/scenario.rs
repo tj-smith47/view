@@ -20,7 +20,9 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
-use view_oracle::compat::{resolve_send_keys, CompatError, PluginClass, ScenarioState, Step};
+use view_oracle::compat::{
+    resolve_send_keys, CompatError, PluginClass, ScenarioState, SendConfirm, Step,
+};
 
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -55,6 +57,9 @@ struct RawScenario {
 /// enforces that, since `serde`'s own `deny_unknown_fields` only catches a
 /// field name it has never heard of, not a legal field used on the wrong
 /// variant (e.g. `expect` with no `probe`, or two action fields at once).
+/// `confirm_probe`/`confirm_expect` are `send`'s own pair, named apart from
+/// `probe`/`expect` so a step can never be ambiguous between "this step is
+/// a probe" and "this send step also carries a confirmation probe".
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawStep {
@@ -66,6 +71,8 @@ struct RawStep {
     wait_for_probe: Option<String>,
     expect: Option<String>,
     timeout_ms: Option<u64>,
+    confirm_probe: Option<String>,
+    confirm_expect: Option<String>,
 }
 
 /// `wait_for_cell`'s inline-table shape: `{ row = 23, col = 0, expected = ":" }`.
@@ -158,6 +165,28 @@ pub enum ScenarioError {
         #[source]
         source: CompatError,
     },
+    /// `confirm_probe`/`confirm_expect` was set on a step whose action is
+    /// not `send` -- they exist only to pair with a `send` step's own
+    /// delivery confirmation.
+    #[error("step {index} sets confirm_probe/confirm_expect but is not a send step")]
+    ConfirmWithoutSend { index: usize },
+    /// A `send` step set `confirm_probe` without its required
+    /// `confirm_expect` partner, or vice versa -- both name one
+    /// confirmation together and neither means anything alone.
+    #[error("step {index} sets confirm_probe/confirm_expect but not both")]
+    ConfirmMissingPartner { index: usize },
+    /// A `send` step's key text opens with `:silent `, the codebase's own
+    /// idiom for a send that produces no screen delta, but sets no
+    /// `confirm_probe`: unconfirmed, `Step::Send`'s screen-based wait can
+    /// never observe this step's effect, so it would burn its own full
+    /// deadline on every run with nothing in the scenario file explaining
+    /// why. Add `confirm_probe`/`confirm_expect`, or drop `:silent` so the
+    /// command produces a visible delta the default path can confirm.
+    #[error(
+        "step {index} sends a :silent command with no confirm_probe; \
+         add confirm_probe/confirm_expect or drop :silent"
+    )]
+    SilentSendWithoutConfirm { index: usize },
 }
 
 /// Validates and converts one [`RawStep`] into a [`Step`], applying
@@ -191,13 +220,26 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
     if raw.probe.is_none() && raw.wait_for_probe.is_none() && raw.expect.is_some() {
         return Err(ScenarioError::ExpectWithoutProbe { index });
     }
+    if raw.send.is_none() && (raw.confirm_probe.is_some() || raw.confirm_expect.is_some()) {
+        return Err(ScenarioError::ConfirmWithoutSend { index });
+    }
+    if raw.confirm_probe.is_some() != raw.confirm_expect.is_some() {
+        return Err(ScenarioError::ConfirmMissingPartner { index });
+    }
 
     let timeout = Duration::from_millis(raw.timeout_ms.unwrap_or(DEFAULT_STEP_TIMEOUT_MS));
 
     if let Some(keys) = raw.send {
         resolve_send_keys(&keys)
             .map_err(|source| ScenarioError::UnsupportedKeyNotation { index, source })?;
-        return Ok(Step::Send(keys));
+        let confirm = match (raw.confirm_probe, raw.confirm_expect) {
+            (Some(expr), Some(expect)) => Some(SendConfirm { expr, expect }),
+            _ => None,
+        };
+        if confirm.is_none() && keys.starts_with(":silent ") {
+            return Err(ScenarioError::SilentSendWithoutConfirm { index });
+        }
+        return Ok(Step::Send { keys, confirm });
     }
     if let Some(needle) = raw.wait_for {
         return Ok(Step::WaitFor { needle, timeout });
@@ -328,7 +370,13 @@ steps = [
         assert_eq!(scenario.state, ScenarioState::Present);
         assert!(!scenario.cold_bootstrap);
         assert_eq!(scenario.steps.len(), 4);
-        assert_eq!(scenario.steps[0], Step::Send("ihello<Esc>".to_string()));
+        assert_eq!(
+            scenario.steps[0],
+            Step::Send {
+                keys: "ihello<Esc>".to_string(),
+                confirm: None,
+            }
+        );
         assert_eq!(
             scenario.steps[1],
             Step::WaitFor {
@@ -497,7 +545,10 @@ steps = [
         let scenario = parse(&toml).expect("a send step using only supported notation must parse");
         assert_eq!(
             scenario.steps[0],
-            Step::Send("ihello<Esc><C-w>".to_string())
+            Step::Send {
+                keys: "ihello<Esc><C-w>".to_string(),
+                confirm: None,
+            }
         );
     }
 
@@ -527,6 +578,101 @@ steps = []
         assert!(
             matches!(err, ScenarioError::Toml(_)),
             "expected a Toml error for a missing required field, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_send_step_with_a_paired_confirm_probe_parses() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \"ihello<Esc>\", confirm_probe = \"mode()\", confirm_expect = \"n\" },",
+        );
+        let scenario = parse(&toml).expect("a send step with a paired confirm probe must parse");
+        assert_eq!(
+            scenario.steps[0],
+            Step::Send {
+                keys: "ihello<Esc>".to_string(),
+                confirm: Some(SendConfirm {
+                    expr: "mode()".to_string(),
+                    expect: "n".to_string(),
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn confirm_probe_without_confirm_expect_is_rejected() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \"ihello<Esc>\", confirm_probe = \"mode()\" },",
+        );
+        let err = parse(&toml)
+            .expect_err("confirm_probe with no confirm_expect partner must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::ConfirmMissingPartner { index: 0 }),
+            "expected ConfirmMissingPartner{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirm_expect_without_confirm_probe_is_rejected() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \"ihello<Esc>\", confirm_expect = \"n\" },",
+        );
+        let err = parse(&toml)
+            .expect_err("confirm_expect with no confirm_probe partner must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::ConfirmMissingPartner { index: 0 }),
+            "expected ConfirmMissingPartner{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn confirm_probe_on_a_non_send_step_is_rejected() {
+        let toml = VALID.replace(
+            "{ assert_absent = \"E5108\" },",
+            "{ assert_absent = \"E5108\", confirm_probe = \"mode()\", confirm_expect = \"n\" },",
+        );
+        let err = parse(&toml).expect_err("confirm_probe on a non-send step must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::ConfirmWithoutSend { index: 2 }),
+            "expected ConfirmWithoutSend{{index: 2}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_silent_send_with_no_confirm_probe_is_rejected() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \":silent cd /tmp<CR>\" },",
+        );
+        let err = parse(&toml).expect_err(
+            "a :silent send step with no confirm_probe must be a hard error, since its \
+             screen-based delivery wait can never observe a :silent command's effect",
+        );
+        assert!(
+            matches!(err, ScenarioError::SilentSendWithoutConfirm { index: 0 }),
+            "expected SilentSendWithoutConfirm{{index: 0}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_silent_send_with_a_confirm_probe_parses() {
+        let toml = VALID.replace(
+            "{ send = \"ihello<Esc>\" },",
+            "{ send = \":silent cd /tmp<CR>\", confirm_probe = \"getcwd()\", confirm_expect = \"/tmp\" },",
+        );
+        let scenario = parse(&toml).expect("a :silent send step with a confirm_probe must parse");
+        assert_eq!(
+            scenario.steps[0],
+            Step::Send {
+                keys: ":silent cd /tmp<CR>".to_string(),
+                confirm: Some(SendConfirm {
+                    expr: "getcwd()".to_string(),
+                    expect: "/tmp".to_string(),
+                }),
+            }
         );
     }
 }

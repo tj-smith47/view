@@ -25,7 +25,12 @@ steps = [
   # asserts on. Nothing in this scenario ever clears the message (view's
   # toast persists until a message-clearing event arrives), so the only
   # deterministic screen is the one where the echo never happens.
-  { send = ":silent cd $XDG_CONFIG_HOME/nvim<CR>" },
+  # :silent means this step produces no screen delta for drive_step's
+  # default delivery check to observe, so it carries its own confirm_probe
+  # instead: lazy-lock.json lives only in the fixture directory this cd
+  # targets, so a relative filereadable() only reports true once the cd has
+  # actually landed there.
+  { send = ":silent cd $XDG_CONFIG_HOME/nvim<CR>", confirm_probe = "luaeval('vim.fn.filereadable(\"lazy-lock.json\") == 1')", confirm_expect = "true" },
   { send = ":NvimTreeOpen<CR>" },
   # lazy-lock.json appears nowhere on screen except as a sidebar entry, so
   # this pins nvim-tree actually rendering the directory listing, not just

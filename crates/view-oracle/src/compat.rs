@@ -72,19 +72,21 @@ use crate::OracleError;
 /// promptly instead of hanging the whole compat run.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Silence window [`Step::Send`] requires the pty's rendered screen to hold,
-/// *after* it has first been observed to differ from its pre-send baseline,
-/// before treating the keys as delivered. Matches the differential oracle's
-/// own quiesce convention (`corpus::DEFAULT_QUIESCE_SILENCE_MS`): long
-/// enough that ordinary key-processing latency never trips it, short enough
-/// that a step's own deadline (below) is reached in a handful of polls once
-/// the screen has genuinely gone quiet.
+/// Silence window a [`Step::Send`] with no [`SendConfirm`] requires the
+/// pty's rendered screen to hold, *after* it has first been observed to
+/// differ from its pre-send baseline, before treating the keys as
+/// delivered. Matches the differential oracle's own quiesce convention
+/// (`corpus::DEFAULT_QUIESCE_SILENCE_MS`): long enough that ordinary
+/// key-processing latency never trips it, short enough that a step's own
+/// deadline (below) is reached in a handful of polls once the screen has
+/// genuinely gone quiet.
 const SEND_SETTLE_SILENCE: Duration = Duration::from_millis(200);
 
-/// Bound on how long [`Step::Send`] waits for a delivered-and-settled screen
-/// before giving up on confirming delivery and letting the step return
-/// anyway (see its own doc comment for why giving up is safe). A plugin that
-/// keeps a floating notification animating indefinitely (fidget's progress
+/// Bound on how long an unconfirmed [`Step::Send`] waits for a
+/// delivered-and-settled screen before giving up on confirming delivery and
+/// letting the step return anyway (see its own doc comment for why giving
+/// up is safe). A plugin that keeps a floating notification animating
+/// indefinitely (fidget's progress
 /// spinner, live-confirmed) never holds the whole screen still for
 /// [`SEND_SETTLE_SILENCE`] once it has changed, so this bounds the wasted
 /// wait at a small multiple of the forwarding latency this step actually
@@ -92,6 +94,23 @@ const SEND_SETTLE_SILENCE: Duration = Duration::from_millis(200);
 /// repetitions of the scenario that first exposed the race, both idle and
 /// under host load.
 const SEND_SETTLE_DEADLINE: Duration = Duration::from_millis(1_000);
+
+/// Bound on how long a [`Step::Send`] with a [`SendConfirm`] retries its
+/// probe before failing with [`CompatError::SendConfirmTimedOut`]. A real
+/// confirmation typically lands within one or two probe round-trips (the
+/// effect a `:silent` ex command produces is applied synchronously, well
+/// before the command line that triggered it returns control to nvim's
+/// main loop), so this bounds the pathological case -- a genuinely stalled
+/// or wrong expression -- without padding the ordinary one; matches
+/// [`SEND_SETTLE_DEADLINE`] so a confirmed send never waits longer than an
+/// unconfirmed one would have.
+const SEND_CONFIRM_DEADLINE: Duration = Duration::from_millis(1_000);
+
+/// Interval between retries of a [`SendConfirm`] probe. Matches
+/// [`Step::WaitForProbe`]'s own retry cadence: each attempt is a real probe
+/// subprocess (fork/exec/connect/eval), so spacing retries avoids hammering
+/// the target with spawns for a value that has not had time to change yet.
+const SEND_CONFIRM_POLL: Duration = Duration::from_millis(200);
 
 /// Which of the design spec's three config-reconciliation classes a
 /// scenario's plugin belongs to. Purely descriptive at this schema layer --
@@ -134,12 +153,21 @@ pub enum ScenarioState {
 /// exactly that reason.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Step {
-    /// Types `keys` into the pty verbatim, as a user would, then waits
+    /// Types `keys` into the pty verbatim, as a user would, then confirms
+    /// delivery before returning. With `confirm: None`, that means waiting
     /// (bounded) for the screen to actually show the keys' effect and
-    /// settle before returning, closing the ordinary-case gap between
-    /// typing and forwarding without demanding a guarantee an animating
-    /// target could never give.
-    Send(String),
+    /// settle, closing the ordinary-case gap between typing and forwarding
+    /// without demanding a guarantee an animating target could never give.
+    /// With `confirm: Some(_)`, the keys are known ahead of time to produce
+    /// no screen delta (a `:silent` ex command is the idiom this exists
+    /// for), so screen movement can never confirm them; [`SendConfirm`]'s
+    /// expression is retried over the probe channel instead, the same
+    /// positively-confirmed (never a fixed sleep) standard applied to a
+    /// signal that can actually observe a silent effect.
+    Send {
+        keys: String,
+        confirm: Option<SendConfirm>,
+    },
     /// Blocks until the pty's rendered screen contains `needle`, or `timeout`
     /// elapses.
     WaitFor { needle: String, timeout: Duration },
@@ -173,6 +201,21 @@ pub enum Step {
         expect: String,
         timeout: Duration,
     },
+}
+
+/// A [`Step::Send`]'s opt-in delivery confirmation for keys known to produce
+/// no screen delta. `expr` is retried over the probe channel (the same
+/// content-aware, positively-confirmed pattern [`Step::WaitForProbe`] uses)
+/// until its trimmed result equals `expect` or [`SEND_CONFIRM_DEADLINE`]
+/// elapses; unlike the screen-based path, reaching the deadline here is a
+/// hard [`CompatError::SendConfirmTimedOut`], not a best-effort return --
+/// the author asserted this expression proves delivery, so a probe that
+/// never confirms it is an actual scenario failure, not merely an
+/// unconfirmed animation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendConfirm {
+    pub expr: String,
+    pub expect: String,
 }
 
 /// Errors driving a compat scenario. Never carries a scenario name or step
@@ -216,6 +259,17 @@ pub enum CompatError {
     /// its own timeout.
     #[error("wait_for_probe {expr:?} never returned {expect:?} within {timeout:?}")]
     WaitForProbeTimedOut {
+        expr: String,
+        expect: String,
+        timeout: Duration,
+    },
+    /// A `send` step's `confirm` probe never returned its expected value
+    /// before `timeout`: the keys were written, but the effect they were
+    /// asserted to produce was never observed, so (unlike a plain `send`'s
+    /// best-effort screen wait) this is a hard failure rather than a
+    /// silent give-up.
+    #[error("send confirm {expr:?} never returned {expect:?} within {timeout:?}")]
+    SendConfirmTimedOut {
         expr: String,
         expect: String,
         timeout: Duration,
@@ -556,16 +610,47 @@ impl CompatSession {
     /// Returns the [`CompatError`] variant matching whichever check failed.
     pub fn drive_step(&mut self, step: &Step) -> Result<(), CompatError> {
         match step {
-            Step::Send(keys) => {
+            Step::Send { keys, confirm } => {
                 // Captured before the write, not after: the pipeline from
                 // "bytes on the pty" to "nvim has forwarded and applied
                 // them" can take long enough that an effect landing between
                 // the write and a post-write capture would already be
                 // baked into the baseline, and wait_for_send_delivery would
                 // then read a screen that never again differs from it as
-                // "nothing happened" for the rest of the poll.
+                // "nothing happened" for the rest of the poll. Only the
+                // screen-based path below reads this; a confirm probe
+                // queries live nvim state instead, so it needs no baseline.
                 let baseline = self.pty.screen();
                 self.pty.send(&resolve_send_keys(keys)?)?;
+
+                if let Some(SendConfirm { expr, expect }) = confirm {
+                    // These keys are known ahead of time to produce no
+                    // screen delta (why the author reached for `confirm`
+                    // instead of the default path at all), so
+                    // wait_for_send_delivery's "must observe a change"
+                    // requirement can never be satisfied here -- it would
+                    // just burn its full deadline every time. Retrying a
+                    // live probe until it actually reports the effect
+                    // (never a fixed sleep, never trusting a single
+                    // best-effort read) gives the same positive-confirmation
+                    // guarantee task 22 required, on a channel that can see
+                    // a silent effect.
+                    let deadline = Instant::now() + SEND_CONFIRM_DEADLINE;
+                    loop {
+                        if self.probe(expr).is_ok_and(|actual| &actual == expect) {
+                            return Ok(());
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(CompatError::SendConfirmTimedOut {
+                                expr: expr.clone(),
+                                expect: expect.clone(),
+                                timeout: SEND_CONFIRM_DEADLINE,
+                            });
+                        }
+                        std::thread::sleep(SEND_CONFIRM_POLL);
+                    }
+                }
+
                 // Best-effort past this point: a plugin that keeps
                 // something animating (a progress spinner) never lets the
                 // screen re-settle once it has changed, and this step has
@@ -1663,7 +1748,10 @@ mod tests {
         wait_for_ready_marker(&mut session, "READY");
 
         session
-            .drive_step(&Step::Send(keys.to_string()))
+            .drive_step(&Step::Send {
+                keys: keys.to_string(),
+                confirm: None,
+            })
             .expect("the send step itself must report success");
 
         assert!(
@@ -1713,7 +1801,10 @@ mod tests {
         wait_for_ready_marker(&mut session, "READY");
 
         session
-            .drive_step(&Step::Send(keys.to_string()))
+            .drive_step(&Step::Send {
+                keys: keys.to_string(),
+                confirm: None,
+            })
             .expect("the send step itself must report success");
 
         assert!(
