@@ -25,17 +25,31 @@
 //! -- which is only possible at all because "anonymous pipes are implemented
 //! using a named pipe with a unique name", so a named-pipe query accepts one.
 //!
-//! The query is not free of the pipe's own synchronisation: a handle from
-//! `CreatePipe` is synchronous, and every operation on a synchronous file
-//! object queues behind the one in flight. A query issued while another
-//! thread sits inside a write to a full pipe therefore blocks until that
-//! write completes -- also measured. What makes the query safe to call from
-//! the runtime loop is not the query but the caller: [`crate::outbox`] asks
-//! only while holding the same lock every write to this pipe is made under,
-//! so there is never an operation in flight to queue behind.
+//! [`SyncPipe`] is what keeps the rest from being facts a reader has to
+//! remember. Two properties of that handle are load-bearing, neither is
+//! visible in a bare `OwnedHandle`, and both hold for a `CreatePipe` handle
+//! and not for the one `Stdio::piped()` returns -- so the type is
+//! constructible from this module's own creation path and nowhere else.
+//!
+//! **The handle is opened for synchronous I/O.** A query on an asynchronous
+//! file object may return `STATUS_PENDING` and complete afterwards, writing
+//! into the `IO_STATUS_BLOCK` and the information buffer once the call has
+//! returned. Both are stack locals here, so on an overlapped handle the call
+//! would be writing into a dead frame while the success check discarded the
+//! result. That is the memory-safety precondition of every query below, and
+//! no handle that could violate it can become a [`SyncPipe`].
+//!
+//! **Synchronous also means serialized.** Every operation on a synchronous
+//! file object queues behind the one in flight, so a query raised while
+//! another thread sat inside a write to a full pipe would block until that
+//! write completed -- measured. What makes the query safe to raise from the
+//! runtime loop is therefore not the query but where it is raised:
+//! [`crate::outbox`] asks only while holding the same lock every write to
+//! this pipe is made under, so there is never an operation in flight to
+//! queue behind.
 
 use std::io;
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle};
+use std::os::windows::io::{AsRawHandle, HandleOrInvalid, OwnedHandle, RawHandle};
 
 use windows_sys::Wdk::Storage::FileSystem::{
     FilePipeLocalInformation, NtQueryInformationFile, FILE_PIPE_LOCAL_INFORMATION,
@@ -53,72 +67,110 @@ use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 /// reads is whatever the system actually granted, never this number.
 const STDIN_CAPACITY: u32 = 64 * 1024;
 
+/// One end of a pipe this module created, and so one known to be open for
+/// synchronous I/O.
+///
+/// That property is a memory-safety precondition of the queries below rather
+/// than a preference (see the module docs), so it is carried by a type no
+/// foreign handle can be turned into instead of by a comment asking callers
+/// to check.
+pub(crate) struct SyncPipe(OwnedHandle);
+
+impl SyncPipe {
+    /// A second handle on the same pipe, for a caller that must ask about the
+    /// pipe without borrowing the writer it would then write through.
+    ///
+    /// # Errors
+    ///
+    /// Returns the OS error `DuplicateHandle` failed with.
+    pub(crate) fn try_clone(&self) -> io::Result<Self> {
+        self.0.try_clone().map(Self)
+    }
+
+    /// Bytes the pipe can still accept without waiting, or `None` if the
+    /// handle did not answer.
+    ///
+    /// A `None` is not a zero: it says the question went unanswered, and a
+    /// caller owes the message to the writer thread either way.
+    pub(crate) fn write_quota(&self) -> Option<u32> {
+        self.local_info().map(|info| info.WriteQuotaAvailable)
+    }
+
+    /// Bytes the pipe's buffer holds in total, for tests that need the bound
+    /// the quota can never exceed.
+    #[cfg(test)]
+    pub(crate) fn capacity(&self) -> Option<u32> {
+        self.local_info().map(|info| info.OutboundQuota)
+    }
+
+    /// Reads the pipe's local end information, or `None` on any failure
+    /// status.
+    fn local_info(&self) -> Option<FILE_PIPE_LOCAL_INFORMATION> {
+        let len = u32::try_from(size_of::<FILE_PIPE_LOCAL_INFORMATION>()).ok()?;
+        let mut status_block = IO_STATUS_BLOCK::default();
+        let mut info = FILE_PIPE_LOCAL_INFORMATION::default();
+        // SAFETY: a `SyncPipe` exists only for a handle this module opened for
+        // synchronous I/O, so the call completes before it returns and cannot
+        // write into `status_block` or `info` afterwards -- which is what makes
+        // stack locals sound out-params here. The handle is borrowed for the
+        // call, and `len` is the size of the very buffer being passed, which is
+        // the one the `FilePipeLocalInformation` class writes.
+        #[allow(unsafe_code)]
+        let status = unsafe {
+            NtQueryInformationFile(
+                self.0.as_raw_handle() as HANDLE,
+                &mut status_block,
+                std::ptr::addr_of_mut!(info).cast(),
+                len,
+                FilePipeLocalInformation,
+            )
+        };
+        (status == 0).then_some(info)
+    }
+}
+
+impl From<SyncPipe> for std::fs::File {
+    fn from(pipe: SyncPipe) -> Self {
+        Self::from(pipe.0)
+    }
+}
+
 /// Creates the engine's stdin channel, returning the read end the child is
 /// given and the write end the spawning process keeps.
 ///
 /// # Errors
 ///
-/// Returns the OS error `CreatePipe` failed with.
-// FFI is the whole of this module: the readiness answer the inline path
-// needs exists only behind ntdll and kernel32 entry points.
-#[allow(unsafe_code)]
-pub(crate) fn child_stdin_pipe() -> io::Result<(OwnedHandle, OwnedHandle)> {
+/// Returns the OS error `CreatePipe` failed with, or an
+/// [`io::Error::other`] if it reports success while handing back something
+/// that is not a handle.
+pub(crate) fn child_stdin_pipe() -> io::Result<(OwnedHandle, SyncPipe)> {
     let mut read: HANDLE = std::ptr::null_mut();
     let mut write: HANDLE = std::ptr::null_mut();
     // SAFETY: both out-params are live locals for the length of the call, and
     // a null `lpPipeAttributes` is the documented way to ask for a default
     // security descriptor and non-inheritable handles -- inheritance is the
     // spawn's business, which duplicates the read end inheritably itself.
+    #[allow(unsafe_code)]
     let created = unsafe { CreatePipe(&mut read, &mut write, std::ptr::null(), STDIN_CAPACITY) };
     if created == 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: `CreatePipe` reported success, so both variables hold handles
+    // claimed through the type that rejects the sentinel rather than on the
+    // strength of the success code alone: `CreatePipe` documents its
+    // out-params as indeterminate whenever it does not succeed, so the
+    // difference between "success" and "a handle" is worth being checked
+    // rather than assumed.
+    // SAFETY: `CreatePipe` reported success, so each variable holds a handle
     // this process is now the sole owner of, and each is wrapped exactly once.
-    let ends = unsafe {
+    #[allow(unsafe_code)]
+    let claimed = unsafe {
         (
-            OwnedHandle::from_raw_handle(read as RawHandle),
-            OwnedHandle::from_raw_handle(write as RawHandle),
+            HandleOrInvalid::from_raw_handle(read as RawHandle),
+            HandleOrInvalid::from_raw_handle(write as RawHandle),
         )
     };
-    Ok(ends)
-}
-
-/// Bytes the pipe behind `handle` can still accept without waiting, or
-/// `None` if the handle cannot answer.
-///
-/// A `None` is not a zero: it says the question was not answered, and the
-/// caller owes the message to the writer thread either way.
-pub(crate) fn write_quota(handle: &OwnedHandle) -> Option<u32> {
-    local_info(handle).map(|info| info.WriteQuotaAvailable)
-}
-
-/// Bytes the pipe behind `handle` can hold in total, for tests that need
-/// the bound the quota can never exceed.
-#[cfg(test)]
-pub(crate) fn capacity(handle: &OwnedHandle) -> Option<u32> {
-    local_info(handle).map(|info| info.OutboundQuota)
-}
-
-/// Reads the pipe's local end information, or `None` on any failure status.
-// see the module docs: this is the readiness answer, and there is no safe
-// binding for it.
-#[allow(unsafe_code)]
-fn local_info(handle: &OwnedHandle) -> Option<FILE_PIPE_LOCAL_INFORMATION> {
-    let len = u32::try_from(size_of::<FILE_PIPE_LOCAL_INFORMATION>()).ok()?;
-    let mut status_block = IO_STATUS_BLOCK::default();
-    let mut info = FILE_PIPE_LOCAL_INFORMATION::default();
-    // SAFETY: the handle is borrowed for the call, both out-params are live
-    // locals, and `len` is the size of the very buffer being passed, which is
-    // the one the `FilePipeLocalInformation` class writes.
-    let status = unsafe {
-        NtQueryInformationFile(
-            handle.as_raw_handle() as HANDLE,
-            &mut status_block,
-            std::ptr::addr_of_mut!(info).cast(),
-            len,
-            FilePipeLocalInformation,
-        )
-    };
-    (status == 0).then_some(info)
+    let invalid = || io::Error::other("CreatePipe reported success with an invalid handle");
+    let read = OwnedHandle::try_from(claimed.0).map_err(|_| invalid())?;
+    let write = OwnedHandle::try_from(claimed.1).map_err(|_| invalid())?;
+    Ok((read, SyncPipe(write)))
 }

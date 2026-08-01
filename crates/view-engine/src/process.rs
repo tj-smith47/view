@@ -396,6 +396,15 @@ impl Engine {
             ours
         };
         let mut guard = ChildGuard(Some(command.spawn()?));
+        // the child's own ends are the child's from here on. A `Command`
+        // holds any handle it was configured with until it is dropped, so on
+        // Windows this is what closes the parent's copy of the child's stdin
+        // read end -- without it a child that died during the handshake could
+        // not break its own stdin pipe, and detection would rest on the
+        // stdout EOF and the handshake timeout alone. Unix closes the
+        // child-side ends in the parent as part of the spawn, so there it
+        // costs nothing and reads the same.
+        drop(command);
         // unreachable ok_or: nothing clears guard.0 before this point
         let child = guard
             .0
