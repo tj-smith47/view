@@ -12,8 +12,8 @@ schema = 1
 # between classes is visible in the file instead of hidden inside a value.
 #
 # A metric with no entry here has no spec budget. That is a real state, not
-# an oversight: first_paint's content boundary and dev-macos's input path
-# both sit there deliberately, and the spec rows say so.
+# an oversight: dev-macos's input path sits there deliberately, and the spec
+# row says so.
 
 # 100, not the 232 this row carried until 2026-07-27. That 232 was the
 # then-recorded 154.749 times ABSOLUTE_HEADROOM 1.5: a bound computed from
@@ -57,6 +57,29 @@ spec_row = "First paint: view's own UI shell visible, engine still loading"
 scenario = "first_paint"
 metric = "shell_visible_ms"
 max = 50.0
+
+# 30 ms, not a rounder number, because the ratchet already bounds this
+# metric at the recorded 26.507 times ABSOLUTE_HEADROOM 1.5 = 39.8 ms. Any
+# budget above that is one the ratchet always reaches first, so the budget
+# could never be the thing that fires -- the same defect the withdrawn
+# cold_ms bar had. 30 sits under the ratchet and over the measurement, so it
+# can break. 0.30 bounds the paired quantity the absolute cannot: a class
+# whose cold start is slow for reasons outside view still has to show view
+# reaching the file in under a third of bare nvim's time. marker_cold_ms is
+# a p99 gated on the shared dev-linux class only because its name carries no
+# percentile component; a load excursion past 30 fails as a new shortfall,
+# and the 39.8 ms ratchet premise holds only under that classification.
+[[budget]]
+spec_row = "First paint: the opened file's content on screen"
+scenario = "first_paint"
+metric = "marker_cold_ms"
+max = 30.0
+
+[[budget]]
+spec_row = "First paint: the opened file's content on screen"
+scenario = "first_paint"
+metric = "marker_ratio_p50"
+max = 0.30
 
 # The flood row states its bound by reference: "coalesced paint stays inside
 # the staleness budget". So the row that carries the number is the scroll
@@ -131,6 +154,22 @@ metric = "cadence_p99_ms"
 class = "dev-linux"
 accepted = 20.880463
 why = "a jitter tail, not a hard throttle. On this class the cadence gap p50 measures 12.24 ms against a p99 of 15.39 ms, so the p99 is the upper edge of a regular redraw cadence rather than a tail detached from the bulk; the criterion for that reading was pre-registered before the number existed (p50 near 12-13 ms means jitter, p50 near 16.4 ms means a throttle, anything between licenses neither). The metric also tracks ambient host load: the same row reads 15.385 ms at load average 1.04 and 16.429 ms at load 3.9, so a single value carries the host's weather with it, and neither reading located a view defect. The accepted figure is deliberately not the best observation for that reason, since a never-widen ratchet pinned to one sample of a noisy statistic fails on the next jitter excursion. The absolute bar stays gated regardless: a stall that hits view and nvim together leaves the paired cadence ratio near 1, so this is the metric that has to express it. Evidence: .claude/measurements/2026-07-27-the-flood-stimulus-cannot-be-pinned.md"
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_cold_ms"
+class = "dev-linux"
+accepted = 120.464107
+why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 24.9 ms. Bare nvim opening the same fixture reaches the same marker at 199.8 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first by 79 ms. It is not a reason to widen the bar: the 30 ms promise is about the cold start of a config that is not paying for 14 plugins."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_ratio_p50"
+class = "dev-linux"
+accepted = 0.4601985941432818
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.135. Under the heavy fixture the p99 cold start grows 26.5 -> 120.5 ms for view against 131.4 -> 199.8 ms for bare nvim, so view's own cold start grows more in absolute ms with plugin count than nvim's does and the ratio degrades to 0.460 while view still reaches the file first. Why it scales that way is measured but not attributed."
 
 [[shortfall]]
 scenario = "echo"
