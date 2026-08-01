@@ -27,6 +27,7 @@ tasks:
       - bash scripts/audit-deps.sh
       - bash scripts/check-engine-pin.sh
       - bash scripts/check-budget-drift.sh
+      - bash .claude/hooks/tests/validate-commands-cases.sh
 
   style:
     desc: Enforce comment and doc style rules
