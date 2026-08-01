@@ -9,7 +9,7 @@
 
 use std::time::{Duration, Instant};
 
-use crate::pairing::{paired_summary, PairedSummary};
+use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Side};
 use crate::scenarios::Protocol;
 use crate::session::{BenchSession, SettleBound, SpawnSpec};
@@ -247,8 +247,8 @@ pub fn run(
             }
         }
         trials.push(paired_summary(
-            &view_state.raw_ms,
-            &nvim_state.raw_ms,
+            ViewSamples(&view_state.raw_ms),
+            NvimSamples(&nvim_state.raw_ms),
             protocol.warmup,
         )?);
     }

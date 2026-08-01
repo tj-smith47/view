@@ -30,7 +30,7 @@
 use std::time::{Duration, Instant};
 
 use crate::boundaries::screen_holds;
-use crate::pairing::{paired_summary, PairedSummary};
+use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{Distribution, Side};
 use crate::scenarios::Protocol;
 use crate::session::{BenchSession, SpawnSpec};
@@ -185,7 +185,11 @@ pub fn run(
         std::thread::sleep(protocol.inter_sample);
     }
 
-    let summary = paired_summary(&view_ms, &nvim_ms, protocol.warmup)?;
+    let summary = paired_summary(
+        ViewSamples(&view_ms),
+        NvimSamples(&nvim_ms),
+        protocol.warmup,
+    )?;
     let shell = Distribution::from_samples(&shell_ms, protocol.warmup)?;
     let gated_marker_cold_ms = summary.view.p99();
     let gated_marker_ratio_p50 = summary.ratio_p50;

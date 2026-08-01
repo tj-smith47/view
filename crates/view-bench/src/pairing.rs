@@ -21,6 +21,21 @@ pub struct PairedSummary {
     pub paired_delta_p99_ms: f64,
 }
 
+/// The measured side's raw per-sample milliseconds, warmup included.
+///
+/// The two sides carry distinct types so that a call transposing them
+/// cannot compile. A transposed pair inverts every ratio and paired delta
+/// the perf gate reads, scoring a view regression as an improvement, and
+/// the resulting statistics stay plausible enough that nothing downstream
+/// can detect the swap.
+#[derive(Debug, Clone, Copy)]
+pub struct ViewSamples<'a>(pub &'a [f64]);
+
+/// The bare-editor baseline's raw per-sample milliseconds, warmup
+/// included. See [`ViewSamples`] for why the sides are separate types.
+#[derive(Debug, Clone, Copy)]
+pub struct NvimSamples<'a>(pub &'a [f64]);
+
 /// Builds the paired summary from both sides' raw per-sample milliseconds
 /// (warmup still included; `warmup` is excluded here so no caller can pair
 /// a warmed distribution with an unwarmed one).
@@ -34,10 +49,12 @@ pub struct PairedSummary {
 /// not a positive finite number (the ratio would be Inf/NaN and could slip
 /// through a numeric gate comparison).
 pub fn paired_summary(
-    view_raw: &[f64],
-    nvim_raw: &[f64],
+    view_samples: ViewSamples<'_>,
+    nvim_samples: NvimSamples<'_>,
     warmup: usize,
 ) -> Result<PairedSummary, BenchError> {
+    let ViewSamples(view_raw) = view_samples;
+    let NvimSamples(nvim_raw) = nvim_samples;
     if view_raw.len() != nvim_raw.len() {
         return Err(BenchError::SampleCountMismatch {
             view: view_raw.len(),
@@ -96,7 +113,7 @@ mod tests {
     fn ratio_and_delta_match_hand_computed_values() {
         let view = constant(200, 2.0);
         let nvim = constant(200, 1.0);
-        let summary = paired_summary(&view, &nvim, 100).unwrap();
+        let summary = paired_summary(ViewSamples(&view), NvimSamples(&nvim), 100).unwrap();
         assert_eq!(summary.view.len(), 100);
         assert_eq!(summary.nvim.len(), 100);
         assert_eq!(summary.ratio_p50, 2.0);
@@ -112,7 +129,7 @@ mod tests {
         view.extend([50.0, 50.0]);
         let mut nvim = constant(98, 1.0);
         nvim.extend([80.0, 80.0]);
-        let summary = paired_summary(&view, &nvim, 0).unwrap();
+        let summary = paired_summary(ViewSamples(&view), NvimSamples(&nvim), 0).unwrap();
         assert_eq!(summary.ratio_p50, 2.0);
         assert_eq!(
             summary.ratio_p99,
@@ -129,14 +146,19 @@ mod tests {
         view.extend(constant(50, 2.0));
         let mut nvim = vec![0.5];
         nvim.extend(constant(50, 1.0));
-        let summary = paired_summary(&view, &nvim, 1).unwrap();
+        let summary = paired_summary(ViewSamples(&view), NvimSamples(&nvim), 1).unwrap();
         assert_eq!(summary.ratio_p99, 2.0);
         assert_eq!(summary.paired_delta_p99_ms, 1.0);
     }
 
     #[test]
     fn mismatched_sample_counts_are_an_error() {
-        let err = paired_summary(&constant(10, 1.0), &constant(9, 1.0), 0).unwrap_err();
+        let err = paired_summary(
+            ViewSamples(&constant(10, 1.0)),
+            NvimSamples(&constant(9, 1.0)),
+            0,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             BenchError::SampleCountMismatch { view: 10, nvim: 9 }
@@ -145,7 +167,12 @@ mod tests {
 
     #[test]
     fn a_zero_nvim_p99_cannot_produce_an_infinite_ratio() {
-        let err = paired_summary(&constant(10, 1.0), &constant(10, 0.0), 0).unwrap_err();
+        let err = paired_summary(
+            ViewSamples(&constant(10, 1.0)),
+            NvimSamples(&constant(10, 0.0)),
+            0,
+        )
+        .unwrap_err();
         assert!(matches!(err, BenchError::DegenerateBaselineSide { .. }));
     }
 
@@ -153,7 +180,7 @@ mod tests {
     fn per_sample_deltas_can_be_negative_when_view_wins() {
         let view = constant(20, 0.5);
         let nvim = constant(20, 1.0);
-        let summary = paired_summary(&view, &nvim, 0).unwrap();
+        let summary = paired_summary(ViewSamples(&view), NvimSamples(&nvim), 0).unwrap();
         assert_eq!(summary.paired_delta_p99_ms, -0.5);
         assert_eq!(summary.ratio_p99, 0.5);
     }

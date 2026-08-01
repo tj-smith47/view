@@ -123,14 +123,14 @@ pub fn aggregate_line(statistic: &str, value: f64, trials: usize) -> String {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::pairing::paired_summary;
+    use crate::pairing::{paired_summary, NvimSamples, ViewSamples};
     use crate::scenarios::flood::{FloodSide, SideCadence};
 
     #[test]
     fn paired_cell_renders_the_documented_two_line_shape() {
         let view: Vec<f64> = vec![2.0; 150];
         let nvim: Vec<f64> = vec![1.0; 150];
-        let summary = paired_summary(&view, &nvim, 100).unwrap();
+        let summary = paired_summary(ViewSamples(&view), NvimSamples(&nvim), 100).unwrap();
         let rendered = paired_cell("echo", "minimal", "view", &summary, 100);
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
