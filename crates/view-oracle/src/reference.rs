@@ -369,17 +369,23 @@ impl ReferenceSession {
         self.engine.handle.input(notation).map_err(Into::into)
     }
 
-    /// Types the next quiesce marker's arm command and `notation` as one
-    /// `nvim_input` payload, in that order, and records the marker for the
-    /// next [`quiesce`](Self::quiesce) call to wait on. The way a script
-    /// under test must be driven; see [`crate::settle::arm_and_input`] for
-    /// why the fusion into a single payload is the whole settle argument,
-    /// and for the already-settled contract a caller owes it.
+    /// Queues the next quiesce marker's arm command and `notation` into
+    /// nvim's typeahead as one `feedkeys()` payload, in that order, and
+    /// records the marker for the next [`quiesce`](Self::quiesce) call to
+    /// wait on. The way a script under test must be driven; see
+    /// [`crate::settle::arm_and_input`] for why the fusion into a single
+    /// payload is the whole settle argument, and for the already-settled
+    /// contract a caller owes it.
+    ///
+    /// Blocking, unlike [`input`](Self::input): the payload rides a request
+    /// whose reply says nvim accepted it (the keys themselves are left for
+    /// the main loop to consume).
     ///
     /// # Errors
     ///
-    /// Returns [`OracleError::Engine`] if the connection's writer thread has
-    /// already exited.
+    /// Returns [`OracleError::Engine`] if the connection has closed, nvim
+    /// rejects the payload, or no reply arrives within the engine's eval
+    /// timeout.
     pub fn arm_and_input(&mut self, notation: &str) -> Result<(), OracleError> {
         settle::arm_and_input(self, notation)
     }
@@ -391,10 +397,10 @@ impl ReferenceSession {
     ///
     /// # Errors
     ///
-    /// - [`OracleError::Engine`] if the fast state probe or the marker's
-    ///   arm `nvim_input` call fails at the RPC layer.
+    /// - [`OracleError::Engine`] if the fast state probe, the parked-state
+    ///   probe, or the marker's arm call fails at the RPC layer.
     /// - [`OracleError::QuiescePerturbed`] if the marker round-trip failed
-    ///   one of the protocol's integrity checks.
+    ///   the protocol's integrity check.
     pub fn quiesce(&mut self, silence: Duration, deadline: Duration) -> Result<bool, OracleError> {
         settle::settle(self, silence, deadline)
     }
@@ -1073,6 +1079,23 @@ mod tests {
             flags.contains('o'),
             "quiesce's own probing consumed the pending register prefix: state {flags:?}"
         );
+
+        // a second call with nothing typed since: the arm command is keys,
+        // so a settle that armed before recognising the wait would hand the
+        // register prefix its register name and cancel it
+        assert!(
+            reference_side
+                .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+                .expect("second quiesce ReferenceSession"),
+            "a repeat settle on a parked session must settle again"
+        );
+        let flags = reference_side
+            .eval_str("state()")
+            .expect("eval_str against ReferenceSession");
+        assert!(
+            flags.contains('o'),
+            "a repeat settle armed into the pending key-wait: state {flags:?}"
+        );
     }
 
     /// The integrity backstop, still live: a session that moves *after*
@@ -1135,6 +1158,11 @@ mod tests {
         assert!(
             !settled,
             "quiesce reported settled while nvim was still inside a blocking :sleep 10"
+        );
+        assert!(
+            reference_side.markers.is_armed(),
+            "a marker that never fired must be handed back, or a retry queues a \
+             second arm behind whatever is still draining"
         );
     }
 

@@ -27,10 +27,11 @@ use crate::OracleError;
 const QUIESCE_AUGROUP: &str = "ViewOracleQuiesce";
 
 /// Wraps `cmd` as a single `<Cmd>...<CR>` key-notation segment: an Ex
-/// command executed via `nvim_input` without leaving the current mode or
-/// waiting for a reply, the mechanism every command in this protocol rides
-/// on (see [`settle`] for why this, and not `nvim_command`/`nvim_eval`, is
-/// what proves ordering).
+/// command that runs where it lands in the key stream, without leaving the
+/// current mode. Every command in this protocol rides one, because a command
+/// sent as a *key* takes its turn in the same queue as the script's keys,
+/// which is the ordering the whole settle argument rests on (see
+/// [`install_hooks`] and [`settle`]).
 fn cmd_key(cmd: &str) -> String {
     format!("<Cmd>{cmd}<CR>")
 }
@@ -98,27 +99,42 @@ fn decode_mode_payload(payload: &str) -> String {
 /// against a trailing `:sleep`, where mode and blocked flag are likewise
 /// indistinguishable from an idle session), so settling on it would settle
 /// mid-command -- the exact reading this protocol exists to make impossible.
-const PENDING_INPUT_FLAGS: &str = "oa";
+///
+/// The set is not exhaustive over nvim's SafeState suppressors, and does not
+/// need to be, because the direction it fails in is the safe one: a
+/// suppressor outside it (Command-line completion is the documented one --
+/// it reads as a bare `S`) is simply not recognised, so [`settle`] keeps
+/// waiting and the round ends as a reported timeout. An unrecognised state
+/// costs a deadline; it can never buy a false settle.
+pub(crate) const PENDING_INPUT_FLAGS: &str = "oa";
 
 /// `state()` flags that mean nvim is still working, and so veto the above no
 /// matter what else is set: mid-mapping/`feedkeys()`/`:normal` (`m`) means
-/// keys are still queued to run, and mid-autocommand (`x`) means a cascade
-/// the script started has not finished. Either can coexist with a pending
-/// operator -- a script that stalls while one is half-typed shows both -- and
-/// there the operator is a state being passed through, not the one the script
-/// ended in.
-const BUSY_FLAGS: &str = "mx";
+/// keys are still queued to run, mid-autocommand (`x`) means a cascade the
+/// script started has not finished, and mid-callback (`c`, including a timer)
+/// means work is running that can still move the session. Each can coexist
+/// with a pending operator -- a script that stalls while one is half-typed
+/// shows both -- and there the operator is a state being passed through, not
+/// the one the script ended in.
+///
+/// `c` is vetoed rather than ignored on the evidence that this module's own
+/// probe never sets it: the pinned engine answers `state()` as `oS`/`aS` in
+/// exactly the parked sessions this classifies, and reports `c` only when
+/// something else is genuinely mid-callback (live-checked from inside a timer
+/// callback, which reads `oSc`). Accepting it would buy nothing and would
+/// settle mid-callback, the same reading that disqualifies a bare `S`.
+const BUSY_FLAGS: &str = "mxc";
 
 /// Renders a fast-probe `(mode, blocking)` pair for
 /// [`OracleError::QuiescePerturbed`]'s `observed` field, folding the
 /// blocked flag into the one string the variant carries (a blocked
 /// key-wait and plain normal mode both report mode `"n"`, so the flag is
 /// the only thing distinguishing them in a report line).
-fn describe_state(state: Option<&(String, bool)>) -> String {
-    match state {
-        Some((mode, true)) => format!("{mode} (blocked key-wait)"),
-        Some((mode, false)) => mode.clone(),
-        None => "<never probed>".to_string(),
+fn describe_state((mode, blocking): &(String, bool)) -> String {
+    if *blocking {
+        format!("{mode} (blocked key-wait)")
+    } else {
+        mode.clone()
     }
 }
 
@@ -138,6 +154,14 @@ pub(crate) struct QuiesceMarkers {
 }
 
 impl QuiesceMarkers {
+    /// Whether this driver is still holding a marker no [`settle`] call has
+    /// consumed. Test-only, and a read rather than a widened field, so the
+    /// one thing that may write it stays [`settle`] itself.
+    #[cfg(test)]
+    pub(crate) fn is_armed(&self) -> bool {
+        self.pending.is_some()
+    }
+
     /// Allocates the next sequence-tagged marker prefix. A stale echo from
     /// an earlier call can never satisfy a later one: the sequence number
     /// is part of the text [`settle`] searches the message stream for.
@@ -180,17 +204,21 @@ pub(crate) trait Settling {
 /// mapping timeout or a `CursorHold` firing mid-script would inject
 /// nondeterministic redraw noise into the quiesce silence window) and
 /// creates the empty [`QUIESCE_AUGROUP`] every [`arm`] call replaces the
-/// contents of. Sent via `nvim_input` (fire-and-forget, no reply awaited)
-/// rather than a synchronous `nvim_command` request: everything this
-/// protocol depends on is typed through the same typeahead queue real test
-/// input rides, and mixing in a request/reply round-trip here would be
-/// exactly the ordering hazard [`settle`]'s doc comment explains why to
-/// avoid.
+/// contents of.
+///
+/// Queued with `feed_keys`, as every other command this protocol issues is,
+/// so that ordering between any two of them is nvim's typeahead FIFO and
+/// nothing else. The two delivery paths must not be mixed: `nvim_input`
+/// keys land in nvim's low-level input buffer while a `feedkeys()` payload
+/// is inserted straight into the typeahead, and nvim defines no order
+/// between a key still in the input buffer and one already in the typeahead.
+/// One queue for the whole protocol makes that question unrepresentable
+/// instead of leaving it to be re-derived (wrongly) at each call site.
 ///
 /// # Errors
 ///
-/// Returns [`OracleError::Engine`] if the setup commands cannot be written
-/// to the connection.
+/// Returns [`OracleError::Engine`] if the connection has closed, nvim
+/// rejects the setup, or no reply arrives within the engine's eval timeout.
 pub(crate) fn install_hooks(handle: &EngineHandle) -> Result<(), OracleError> {
     let setup = format!(
         "{}{}{}",
@@ -198,24 +226,31 @@ pub(crate) fn install_hooks(handle: &EngineHandle) -> Result<(), OracleError> {
         cmd_key(&format!("augroup {QUIESCE_AUGROUP}")),
         cmd_key("autocmd!"),
     ) + &cmd_key("augroup END");
-    handle.input(&setup)?;
+    handle.feed_keys(&setup)?;
     Ok(())
 }
 
-/// Types the next marker's arm command and `notation` as one `nvim_input`
-/// payload, in that order, and records the marker for the next [`settle`]
-/// call to wait on.
+/// Queues the next marker's arm command and `notation` into nvim's
+/// typeahead as one `feedkeys()` payload, in that order, and records the
+/// marker for the next [`settle`] call to wait on.
 ///
-/// One call, not an arm call followed by an input call: `nvim_input`
-/// appends to nvim's input buffer, so two calls leave a window in which
-/// nvim can consume the arm command, find nothing else pending, and fire
-/// the `SafeState` hook before the script's first key has even arrived -- a
-/// marker that proves nothing. Fused into one payload, the arm command is
-/// unambiguously ahead of every script key in the same typeahead FIFO: it
-/// executes first, registering the hook while the script's keys are still
-/// queued behind it (so `SafeState` is suppressed by nvim's own "there is
-/// typeahead" rule -- see [`arm_command`]), and the hook can therefore only
-/// fire once the last script key has been consumed.
+/// One call, not an arm call followed by an input call: two calls leave a
+/// window in which nvim can consume the arm command, find nothing else
+/// pending, and fire the `SafeState` hook before the script's first key has
+/// even arrived -- a marker that proves nothing. Fused into one payload, the
+/// arm command is unambiguously ahead of every script key in the same
+/// typeahead FIFO: it executes first, registering the hook while the
+/// script's keys are still queued behind it (so `SafeState` is suppressed by
+/// nvim's own "there is typeahead" rule -- see [`arm_command`]), and the
+/// hook can therefore only fire once the last script key has been consumed.
+///
+/// `feedkeys()` and not `nvim_input` for the delivery, because the fusion
+/// has to survive the trip: `nvim_input` writes to nvim's low-level input
+/// buffer, whose contents move into the typeahead in pieces, so nvim can
+/// find the typeahead momentarily empty with the tail of one payload still
+/// queued a layer further out -- live-observed as a `SafeState` firing in
+/// the middle of a script. `feedkeys()` inserts the whole payload in one
+/// step.
 ///
 /// That ordering is what makes this the alternative to arming *after* a
 /// script: a marker typed behind a script that is still draining lands
@@ -236,8 +271,10 @@ pub(crate) fn install_hooks(handle: &EngineHandle) -> Result<(), OracleError> {
 ///
 /// # Errors
 ///
-/// Returns [`OracleError::Engine`] if the connection's writer thread has
-/// already exited.
+/// Returns [`OracleError::Engine`] if the connection has closed, nvim
+/// rejects the payload, or no reply arrives within the engine's eval
+/// timeout. The call blocks for that round trip; the keys it queues are
+/// still consumed asynchronously by nvim's main loop afterwards.
 pub(crate) fn arm_and_input<S: Settling>(
     session: &mut S,
     notation: &str,
@@ -249,14 +286,22 @@ pub(crate) fn arm_and_input<S: Settling>(
     Ok(())
 }
 
-/// Types a fresh marker's arm command on its own, for the
+/// Queues a fresh marker's arm command on its own, for the
 /// nothing-was-typed case [`settle`] documents. Fresh rather than re-armed:
 /// [`arm_command`] replaces the augroup's contents, so an earlier call's
 /// `++once` hook cannot fire late and satisfy this one under the wrong
-/// sequence number.
+/// sequence number. Same `feed_keys` delivery as every other command here,
+/// for the one-queue reason [`install_hooks`] gives.
+///
+/// # Contract
+///
+/// These are keys, so calling this on a session waiting for one hands it
+/// the arm command as that key. [`settle`] therefore rules out every wait it
+/// can see -- the fast probe's blocked flag and
+/// [`parked_awaiting_input`] -- before it calls this.
 fn arm<S: Settling>(session: &mut S) -> Result<String, OracleError> {
     let marker = session.markers().next();
-    session.handle().input(&arm_command(&marker))?;
+    session.handle().feed_keys(&arm_command(&marker))?;
     Ok(marker)
 }
 
@@ -297,13 +342,12 @@ fn reads_as_parked(flags: &str) -> bool {
 }
 
 /// Waits until everything typed into `session` has been fully processed,
-/// using nvim's own idle signal rather than any RPC-reply ordering. An
-/// `nvim_eval`/`nvim_command` round-trip cannot stand in for it twice over:
-/// it only proves the channel consumed prior messages, not that the
-/// *processing* those messages queued (redraw bursts, autocmd cascades) has
-/// finished, and a deferred request is free to be serviced *ahead* of typed
-/// keys still sitting in the input buffer, since `nvim_input` queues into
-/// nvim's typeahead and returns before any of it is processed.
+/// using nvim's own idle signal rather than any RPC-reply ordering. A
+/// request/reply round-trip cannot stand in for it: a reply only proves the
+/// channel consumed prior messages, not that the *processing* those messages
+/// queued (redraw bursts, autocmd cascades) has finished, and every key this
+/// protocol sends is queued for nvim's main loop and returns long before any
+/// of it runs.
 ///
 /// Three settle paths, because a script is free to end with nvim waiting for
 /// more input, and that wait is a real final state the session must preserve
@@ -341,11 +385,14 @@ fn reads_as_parked(flags: &str) -> bool {
 ///   prefixes the real one.
 ///   When nothing has been typed since the last settle -- a startup drain,
 ///   or a repeat call -- there is no marker riding in front of anything, so
-///   one is armed here instead, after a full quiet window. That is safe for
-///   exactly the reason arming behind a script was not: there are no queued
-///   script keys for the arm keys to land behind, and typing the arm is
-///   itself what makes nvim leave and re-enter the safe state the hook
-///   waits on.
+///   one is armed here instead, after a full quiet window and only once the
+///   two paths above have both said no. Order matters and is load-bearing:
+///   the arm command is keys, so arming into a session that is waiting for
+///   one hands it the arm command as that key -- the same key-eating this
+///   protocol exists to eliminate. With both waits ruled out first, there
+///   are no queued script keys for the arm keys to land behind, and queueing
+///   the arm is itself what makes nvim leave and re-enter the safe state the
+///   hook waits on.
 ///
 /// A settled marker-path result requires all of: the echo arrived, the fast
 /// probe reports exactly the state the echo published (mode *and* blocked
@@ -360,15 +407,25 @@ fn reads_as_parked(flags: &str) -> bool {
 /// any drained event -- and any observed mode/blocked transition, which can
 /// occur without a redraw of its own -- resets the window, so quiescence is
 /// never declared while a burst is still in flight. The whole wait is
-/// bounded by `deadline`; returns `Ok(false)` if it elapses first, whether
-/// or not the marker was ever seen.
+/// bounded by `deadline`; returns `Ok(false)` if it elapses first, and hands
+/// an unfired marker back to the driver so a retry waits on the hook that is
+/// still armed instead of queueing a second one.
+///
+/// The two waiting paths do settle with their marker still armed inside
+/// nvim, which is deliberate and bounded: it cannot be disarmed by typing
+/// (that key would be eaten by the very wait being preserved), the next
+/// [`arm_command`] replaces the augroup's whole contents so at most one
+/// stale hook exists per session, and its echo is sequence-tagged, so should
+/// it fire later it can neither satisfy a later call nor be mistaken for its
+/// marker -- it reaches the applier as an ordinary foreign message, symmetric
+/// across both sides of a run.
 ///
 /// # Errors
 ///
 /// - [`OracleError::Engine`] if the fast state probe, the parked-state
-///   probe, or the marker's arm `nvim_input` call fails at the RPC layer --
-///   surfaced as the RPC error it is, not folded into the deadline's
-///   `Ok(false)`, so a broken connection is never misreported as a timeout.
+///   probe, or the marker's arm call fails at the RPC layer -- surfaced as
+///   the RPC error it is, not folded into the deadline's `Ok(false)`, so a
+///   broken connection is never misreported as a timeout.
 /// - [`OracleError::QuiescePerturbed`] if the marker round-trip failed an
 ///   integrity check above.
 pub(crate) fn settle<S: Settling>(
@@ -398,11 +455,10 @@ pub(crate) fn settle<S: Settling>(
         let state = session.handle().get_mode()?;
         if last_state.as_ref() != Some(&state) {
             quiet_since = Instant::now();
-            last_state = Some(state);
+            last_state = Some(state.clone());
         }
-        let awaiting_more_input = last_state
-            .as_ref()
-            .is_some_and(|(mode, blocking)| *blocking || mode.starts_with("no"));
+        let (mode, blocking) = &state;
+        let awaiting_more_input = *blocking || mode.starts_with("no");
         let window_elapsed = quiet_since.elapsed() >= silence;
 
         if let Some(published) = &fired_mode {
@@ -411,10 +467,10 @@ pub(crate) fn settle<S: Settling>(
             // protocol cannot account for -- a comparison against the
             // resulting state would be measuring that input, not the
             // script's
-            if last_state.as_ref() != Some(&(published.clone(), false)) {
+            if state != (published.clone(), false) {
                 return Err(OracleError::QuiescePerturbed {
                     armed: published.clone(),
-                    observed: describe_state(last_state.as_ref()),
+                    observed: describe_state(&state),
                 });
             }
             if window_elapsed {
@@ -424,21 +480,29 @@ pub(crate) fn settle<S: Settling>(
             if window_elapsed {
                 return Ok(true);
             }
-        } else if window_elapsed {
+        } else if window_elapsed && last_park_probe.is_none_or(|at| at.elapsed() >= silence) {
+            // rate-limited to the silence window: each probe is an RPC
+            // round-trip that wakes nvim, and its answer cannot change
+            // without a state change that resets that window anyway
+            last_park_probe = Some(Instant::now());
+            // strictly before any arming: the arm command is keys, and a
+            // parked session would take them as the key it is waiting for
+            if parked_awaiting_input(session)? {
+                return Ok(true);
+            }
             if marker.is_none() {
                 marker = Some(arm(session)?);
-            } else if last_park_probe.is_none_or(|at| at.elapsed() >= silence) {
-                // rate-limited to the silence window: each probe is an RPC
-                // round-trip that wakes nvim, and its answer cannot change
-                // without a state change that resets that window anyway
-                last_park_probe = Some(Instant::now());
-                if parked_awaiting_input(session)? {
-                    return Ok(true);
-                }
             }
         }
 
         if start.elapsed() >= deadline {
+            // handing the marker back rather than dropping it: the hook is
+            // still armed inside nvim, and a caller that retries must wait
+            // for that one instead of queueing a second arm behind whatever
+            // is still draining
+            if fired_mode.is_none() {
+                session.markers().pending = marker;
+            }
             return Ok(false);
         }
         std::thread::sleep(Duration::from_millis(1));
@@ -547,7 +611,6 @@ mod tests {
         // fast probe calls every one of them unblocked
         assert!(reads_as_parked("oS"));
         assert!(reads_as_parked("aS"));
-        assert!(reads_as_parked("oSc"), "a live callback flag is not a veto");
     }
 
     #[test]
@@ -556,6 +619,10 @@ mod tests {
         assert!(
             !reads_as_parked("S"),
             "a bare S is what a running :sleep reports"
+        );
+        assert!(
+            !reads_as_parked("oSc"),
+            "a callback is running and can still move the session"
         );
         assert!(!reads_as_parked("c"), "a callback alone is not a key-wait");
         assert!(

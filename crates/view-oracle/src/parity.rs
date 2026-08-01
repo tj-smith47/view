@@ -9,9 +9,9 @@
 //! Three comparison axes, kept separate because they diverge for different
 //! reasons and a caller needs to tell them apart:
 //! - [`Divergence::State`]: the two sides' `nvim_eval` state probes
-//!   ([`StateSnapshot`]) disagree -- buffer text, cursor, mode, registers,
-//!   or marks. A bug in `view`'s own input handling or engine wiring, not a
-//!   rendering bug.
+//!   ([`StateSnapshot`]) disagree -- buffer text, cursor, mode, a pending
+//!   key-wait, registers, or marks. A bug in `view`'s own input handling or
+//!   engine wiring, not a rendering bug.
 //! - [`Divergence::Grid`]: the two sides' rendered screen *text* disagrees at
 //!   a specific row not excluded by [`masked_rows`]. A rendering/apply bug
 //!   in `view`'s `Model`/`Grid`/`Surface` pipeline (the exact class
@@ -172,16 +172,36 @@ pub struct StateSnapshot {
     /// state rather than being silently probed away.
     ///
     /// Granularity boundary: this is one flag, not an identification of
-    /// *which* wait. Two different waits that report the same mode name --
-    /// a pending `t` target character vs a register name after `"`, both
-    /// `("n", blocking)` from the fast probe -- compare equal here even
-    /// though the two sessions would consume their next key differently.
-    /// That is the fast-API surface's own limit: `nvim_get_mode` (the only
-    /// probe a blocked main loop answers) exposes exactly the mode name
-    /// and this flag, and telling the waits apart would need a non-fast
-    /// probe that a blocked session defers -- the wedge this field exists
-    /// to avoid.
+    /// *which* wait. Two different blocked waits that report the same mode
+    /// name -- a pending `t` target character vs a pending `r` replacement
+    /// character, both `("n", blocking)` from the fast probe -- compare
+    /// equal here even though the two sessions would consume their next key
+    /// differently. That is the fast-API surface's own limit: `nvim_get_mode`
+    /// (the only probe a blocked main loop answers) exposes exactly the mode
+    /// name and this flag, and telling *blocked* waits apart would need a
+    /// non-fast probe that a blocked session defers -- the wedge this field
+    /// exists to avoid. The limit is specific to blocked waits;
+    /// [`pending_input`](Self::pending_input) covers the unblocked ones,
+    /// where an eval does answer.
     pub blocked: bool,
+    /// Which half-typed command the session is holding open, if any: `o` for
+    /// a pending operator or a register prefix left dangling by `"`, `a` for
+    /// an open Insert-mode completion, empty for neither, in that fixed
+    /// order.
+    ///
+    /// Compared, because these sessions are `("n", unblocked)` to every
+    /// other field here while differing in how they would consume their next
+    /// key -- so without this a side whose pending prefix was consumed by
+    /// harness keys compares equal to a side that still holds it, and the
+    /// comparison scores parity over two materially different sessions.
+    ///
+    /// Projected down from nvim's `state()` to those two flags rather than
+    /// compared raw: the rest of that string reports transient conditions of
+    /// the moment the probe happened to land in (a callback running, the
+    /// screen having scrolled for a message), which are not properties of
+    /// the state the script produced and would flake a comparison between
+    /// two independently timed sessions.
+    pub pending_input: String,
     pub registers: Vec<(char, String)>,
     pub marks: Vec<(String, u64, u64)>,
 }
@@ -189,8 +209,15 @@ pub struct StateSnapshot {
 /// Probes `probe` for a full [`StateSnapshot`]: the fast `nvim_get_mode`
 /// probe for the mode name and blocked flag, then one `nvim_eval` round
 /// trip for the buffer, one for the cursor, one per [`REGISTER_NAMES`]
-/// entry, and two for marks (buffer-local, then global -- see
-/// [`marks_expr`]).
+/// entry, two for marks (buffer-local, then global -- see [`marks_expr`]),
+/// and one for `state()`, projected by [`pending_input_of`] down to the
+/// half-typed command the session is holding open.
+///
+/// That last probe is what keeps an *unblocked* key-wait a compared state:
+/// a session parked in one reports plain unblocked normal mode, so every
+/// other field here is blind to it (see
+/// [`StateSnapshot::pending_input`]). It is an eval, which is exactly why it
+/// is sound to ask -- these sessions are not blocked, so nvim answers.
 ///
 /// The mode comes from `nvim_get_mode` (which reports it in `mode(1)`'s own
 /// format) rather than an eval probe, and it is read first, because the two
@@ -270,14 +297,33 @@ fn snapshot_with_deadline(
     let global_marks_raw = probe.eval_str(&marks_expr(""))?;
     marks.extend(parse_marks(&global_marks_raw)?);
 
+    let pending_input = pending_input_of(&probe.eval_str("state()")?);
+
     Ok(StateSnapshot {
         buffer_lines,
         cursor,
         mode,
         blocked,
+        pending_input,
         registers,
         marks,
     })
+}
+
+/// Projects one nvim `state()` result down to
+/// [`StateSnapshot::pending_input`]: the half-typed-command flags, in a
+/// fixed order so two sides cannot disagree over nvim's own ordering, and
+/// nothing else.
+///
+/// Shares [`crate::settle::PENDING_INPUT_FLAGS`] with the settle protocol on
+/// purpose: the states a run refuses to disturb and the states it compares
+/// have to be the same set, or a script could end in a wait one layer holds
+/// open and the other never looks at.
+fn pending_input_of(state_flags: &str) -> String {
+    crate::settle::PENDING_INPUT_FLAGS
+        .chars()
+        .filter(|flag| state_flags.contains(*flag))
+        .collect()
 }
 
 /// Types a single `<Esc>` to abort the blocked key-wait `probe`'s fast
@@ -568,6 +614,13 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
             reference: ref_state.blocked.to_string(),
         });
     }
+    if view_state.pending_input != ref_state.pending_input {
+        divergences.push(Divergence::State {
+            field: "pending_input".to_string(),
+            view: view_state.pending_input.clone(),
+            reference: ref_state.pending_input.clone(),
+        });
+    }
     if view_state.registers != ref_state.registers {
         divergences.push(Divergence::State {
             field: "registers".to_string(),
@@ -694,6 +747,7 @@ mod tests {
             cursor: (1, 0),
             mode: "n".to_string(),
             blocked: false,
+            pending_input: String::new(),
             registers: vec![('"', "hello\n".to_string()), ('0', "hello\n".to_string())],
             marks: vec![("'.".to_string(), 1, 0)],
         }
@@ -720,6 +774,55 @@ mod tests {
     /// register (everything else identical) must produce exactly one
     /// `Divergence::State` naming the `"registers"` field, and nothing else
     /// -- not a `Grid` divergence, not more than one entry.
+    #[test]
+    fn pending_input_keeps_only_the_half_typed_command_flags_in_a_fixed_order() {
+        // the pinned engine's own answers, plus the flags it mixes in
+        assert_eq!(pending_input_of("oS"), "o", "a dangling register prefix");
+        assert_eq!(pending_input_of("aS"), "a", "an open Insert completion");
+        assert_eq!(pending_input_of(""), "", "an idle session");
+        assert_eq!(pending_input_of("S"), "", "a command still running");
+        assert_eq!(
+            pending_input_of("cs"),
+            "",
+            "a callback and a scrolled message are moments, not states"
+        );
+        assert_eq!(
+            pending_input_of("ao"),
+            pending_input_of("oa"),
+            "nvim's own flag order must not reach the comparison"
+        );
+    }
+
+    /// The same falsifiable check the register arm makes, for the dimension
+    /// that a pre-`state()` snapshot could not see at all: two sessions that
+    /// agree on buffer, cursor, mode, blocked flag, registers, and marks
+    /// while one holds a half-typed command open must not compare equal.
+    #[test]
+    fn a_half_typed_command_on_one_side_produces_exactly_one_state_divergence() {
+        let view_state = snapshot_fixture();
+        let mut ref_state = snapshot_fixture();
+        ref_state.pending_input = "o".to_string();
+        let rows = rows_fixture();
+
+        let divergences = compare(
+            ViewSide {
+                state: &view_state,
+                screen: &screen(rows.clone()),
+            },
+            ReferenceSide {
+                state: &ref_state,
+                screen: &screen(rows),
+            },
+            &[],
+        );
+
+        assert_eq!(divergences.len(), 1, "divergences: {divergences:?}");
+        match &divergences[0] {
+            Divergence::State { field, .. } => assert_eq!(field, "pending_input"),
+            other => unreachable!("expected Divergence::State, got {other:?}"),
+        }
+    }
+
     #[test]
     fn doctored_register_produces_exactly_one_state_divergence() {
         let view_state = snapshot_fixture();
@@ -1361,6 +1464,34 @@ mod tests {
     /// timed out on its first probe and the whole run failed as an ERROR.
     /// `snapshot` must instead capture the blocked state itself and still
     /// read the rest of the session's state through the `<Esc>` dismissal.
+    #[test]
+    fn snapshot_captures_an_unblocked_half_typed_command_live() {
+        let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))
+            .expect("EngineSession::spawn against real nvim");
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
+
+        session
+            .arm_and_input("ihello<Esc>\"0")
+            .expect("input against EngineSession");
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
+
+        let state = snapshot(&mut session).expect("snapshot against a parked session");
+
+        assert!(
+            !state.blocked && state.mode == "n",
+            "a dangling register prefix is unblocked normal mode to the fast probe: {state:?}"
+        );
+        assert_eq!(
+            state.pending_input, "o",
+            "the half-typed command is the only field that can carry this session's \
+             difference from an idle one: {state:?}"
+        );
+    }
+
     #[test]
     fn snapshot_answers_in_a_blocked_char_wait_instead_of_wedging() {
         let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))

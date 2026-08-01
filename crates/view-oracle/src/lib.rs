@@ -7,9 +7,13 @@
 //!   deterministic [`view_surface::Surface`]/screen text. The fast oracle
 //!   path for cases that do not need a real nvim to prove.
 //! - [`EngineSession`]: a real embedded engine, no terminal. The truth
-//!   path: drives actual `nvim_input`, actual redraw traffic, actual
-//!   `nvim_eval` state probes, but never touches a pty or the real
-//!   terminal.
+//!   path: real keys into nvim's own typeahead, actual redraw traffic,
+//!   actual `nvim_eval` state probes, but never touches a pty or the real
+//!   terminal. Corpus and fuzz runs script it through
+//!   [`EngineSession::arm_and_input`], whose `feedkeys()` delivery is what
+//!   makes a settle point provable (see [`settle`]); the raw
+//!   [`EngineSession::input`] leg stays for single interactive keystrokes
+//!   and for the driver tests that exercise `nvim_input` itself.
 //! - [`PtySession`] (in [`pty`]): the full stack through a real pty. The
 //!   integration path, the only leg that proves terminal input decode and
 //!   real-process behavior end to end.
@@ -88,30 +92,30 @@ pub enum OracleError {
         /// session stayed blocked.
         mode: String,
     },
-    /// [`ReferenceSession::quiesce`]'s marker round-trip failed one of its
-    /// integrity checks: the marker keys executed in a different state
-    /// than the one they were armed in, or the state was seen moving
-    /// while they were still in flight. Either way the
-    /// script's own pending input can have consumed the marker keys (a
-    /// main-loop stall such as `:sleep` leaves trailing script keys in
-    /// typeahead where the quiet-window heuristic cannot see them), so
-    /// the session may no longer hold the script's final state and no
-    /// comparison against it can be trusted. Surfaced as an error rather
-    /// than a settled-or-timeout bool so a report line names the true
-    /// cause instead of fabricating a divergence from harness-corrupted
-    /// state.
+    /// A driver's quiesce marker failed its integrity check: nvim's
+    /// `SafeState` hook published the mode it reached idle in, and the fast
+    /// probe then reported a different state. Raised by either side of a
+    /// differential run ([`EngineSession::quiesce`],
+    /// [`ReferenceSession::quiesce`]).
+    ///
+    /// The published mode is nvim's own proof that its typeahead was empty
+    /// at that instant, so a session that no longer holds that state moved
+    /// on input this protocol cannot account for -- and a comparison against
+    /// where it moved to would be measuring that input rather than the
+    /// script's. Surfaced as an error rather than a settled-or-timeout bool
+    /// so a report line names the true cause instead of fabricating a
+    /// divergence out of harness-perturbed state.
     #[error(
-        "quiesce marker keys were armed in state {armed:?} but their round-trip passed through \
-         state {observed:?}; the script's own pending input can have consumed them, so the \
-         session may no longer hold the script's final state"
+        "quiesce marker fired with the session idle in state {armed:?}, but it then moved to \
+         state {observed:?}; input this protocol cannot account for reached the session, so it \
+         may no longer hold the script's final state"
     )]
     QuiescePerturbed {
-        /// The mode name the fast probe reported stably before the marker
-        /// keys were typed.
+        /// The `mode(1)` the `SafeState` hook itself captured, at fire time,
+        /// in the same instant nvim proved its typeahead empty.
         armed: String,
-        /// The state that broke the round-trip: the mode the arm command
-        /// itself recorded at execution time, or the diverging state the
-        /// fast probe observed while the marker was still in flight.
+        /// The state the fast probe reported afterwards, rendered with its
+        /// blocked flag folded in.
         observed: String,
     },
     /// A state-probe reply did not match the shape its parser requires
@@ -237,17 +241,23 @@ impl EngineSession {
         })
     }
 
-    /// Types the next quiesce marker's arm command and `notation` as one
-    /// `nvim_input` payload, in that order, and records the marker for the
-    /// next [`quiesce`](Self::quiesce) call to wait on. The way a script
-    /// under test must be driven; see [`crate::settle::arm_and_input`] for
-    /// why the fusion into a single payload is the whole settle argument,
-    /// and for the already-settled contract a caller owes it.
+    /// Queues the next quiesce marker's arm command and `notation` into
+    /// nvim's typeahead as one `feedkeys()` payload, in that order, and
+    /// records the marker for the next [`quiesce`](Self::quiesce) call to
+    /// wait on. The way a script under test must be driven; see
+    /// [`crate::settle::arm_and_input`] for why the fusion into a single
+    /// payload is the whole settle argument, and for the already-settled
+    /// contract a caller owes it.
+    ///
+    /// Blocking, unlike [`input`](Self::input): the payload rides a
+    /// request whose reply says nvim accepted it (the keys themselves are
+    /// left for the main loop to consume).
     ///
     /// # Errors
     ///
-    /// Returns [`OracleError::Engine`] if the connection's writer thread
-    /// has already exited.
+    /// Returns [`OracleError::Engine`] if the connection has closed, nvim
+    /// rejects the payload, or no reply arrives within the engine's eval
+    /// timeout.
     pub fn arm_and_input(&mut self, notation: &str) -> Result<(), OracleError> {
         settle::arm_and_input(self, notation)
     }
@@ -270,10 +280,10 @@ impl EngineSession {
     ///
     /// # Errors
     ///
-    /// - [`OracleError::Engine`] if the fast state probe or the marker's
-    ///   arm `nvim_input` call fails at the RPC layer.
+    /// - [`OracleError::Engine`] if the fast state probe, the parked-state
+    ///   probe, or the marker's arm call fails at the RPC layer.
     /// - [`OracleError::QuiescePerturbed`] if the marker round-trip failed
-    ///   one of the protocol's integrity checks.
+    ///   the protocol's integrity check.
     pub fn quiesce(&mut self, silence: Duration, deadline: Duration) -> Result<bool, OracleError> {
         settle::settle(self, silence, deadline)
     }

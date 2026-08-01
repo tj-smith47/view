@@ -38,6 +38,13 @@ const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
 /// connection.
 const GET_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The lua chunk [`EngineHandle::feed_keys`] runs inside nvim, taking the
+/// key notation as its single vararg. Constant by construction: no caller
+/// data is ever interpolated into it, so no quote, backslash, or newline in
+/// a notation can change what runs.
+const FEED_KEYS_CHUNK: &str =
+    "vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -179,23 +186,33 @@ impl EngineHandle {
     /// type on this side. Only the notation itself -- plain text -- crosses
     /// the connection.
     ///
-    /// A request, not a notify: a rejected expression (a vimscript error)
-    /// must surface as an error rather than as a script that silently never
-    /// ran.
+    /// `nvim_exec_lua(String code, Array args) -> Object` (verified against
+    /// the pinned engine's own `api_info`) with `notation` passed as an
+    /// *argument*, not interpolated into the chunk: a constant chunk cannot
+    /// be escaped by anything a caller sends. Quoting the notation into a
+    /// command string instead would make every quote, backslash, and
+    /// newline in a script a correctness question -- and a literal newline
+    /// would end the command outright, a way to lose a script that
+    /// `nvim_input` never had.
+    ///
+    /// A request, not a notify: a rejected chunk (a runtime error inside
+    /// nvim) must surface as an error rather than as a script that silently
+    /// never ran.
     ///
     /// # Errors
     ///
     /// Returns the `EngineError` from the underlying request if it fails,
-    /// nvim rejects the command, or the reply does not arrive within
+    /// nvim rejects the call, or the reply does not arrive within
     /// [`EVAL_TIMEOUT`].
     pub fn feed_keys(&self, notation: &str) -> Result<(), EngineError> {
-        // single-quoted vimscript literal: the doubled quote is its only
-        // escape, and it keeps every backslash in the notation literal
-        let quoted = notation.replace('\'', "''");
-        let cmd = format!(
-            "call feedkeys(nvim_replace_termcodes('{quoted}', v:true, v:true, v:true), 't')"
-        );
-        self.request_timeout("nvim_command", vec![Value::from(cmd)], EVAL_TIMEOUT)?;
+        self.request_timeout(
+            "nvim_exec_lua",
+            vec![
+                Value::from(FEED_KEYS_CHUNK),
+                Value::Array(vec![Value::from(notation)]),
+            ],
+            EVAL_TIMEOUT,
+        )?;
         Ok(())
     }
 
@@ -510,6 +527,23 @@ mod tests {
         let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(method, "nvim_eval");
         assert_eq!(params, vec![Value::from("getline(1)")]);
+    }
+
+    #[test]
+    fn feed_keys_passes_the_notation_as_an_argument_not_as_code() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        // every character a quoted-into-a-command implementation would
+        // have had to escape, in one notation
+        let hostile = "<Cmd>call setline(1, 'a\\b')<CR>\nix\"y'z";
+        let _ = h.feed_keys(hostile);
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(FEED_KEYS_CHUNK));
+        assert_eq!(params[1], Value::Array(vec![Value::from(hostile)]));
+        assert!(
+            !FEED_KEYS_CHUNK.contains("setline"),
+            "the chunk must stay constant, whatever the notation carries"
+        );
     }
 
     #[test]
