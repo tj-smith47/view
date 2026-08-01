@@ -19,6 +19,15 @@ COMMAND=$(printf %s "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null)
 #     genuinely is the subcommand and `stash` is a directory, keeps being read
 #     as a push.
 #
+# A message span is only recognised where a flag can actually begin: the start
+# of the flattened line, or a space. A looser leading boundary that merely
+# excluded word characters also matched `=`, so the tail of an attached value
+# read as a flag and the word behind it was deleted as its argument -- in
+# `git -c a.b=-m push` that word is the subcommand, and git accepts that line,
+# so a real push reached the allow path. For the same reason an unquoted value
+# stops at `;`, `&` and `|`: those end the command rather than the word, and
+# consuming past one would swallow the command that follows it.
+#
 # Line continuations are joined with awk rather than `sed -z`, which is a GNU
 # extension: BSD sed rejects the option outright, and under `set -o pipefail`
 # that aborts the guard before either check runs, so the hook would fail OPEN
@@ -32,9 +41,9 @@ FLAT=$(printf %s "$COMMAND" |
   tr '\n' ' ' |
   tr -d '\\' |
   sed -E \
-    -e "s/(^|[^[:alnum:]_-])(-m|--message)[[:space:]=]*\"[^\"]*\"/\1/g" \
-    -e "s/(^|[^[:alnum:]_-])(-m|--message)[[:space:]=]*$SQ[^$SQ]*$SQ/\1/g" \
-    -e "s/(^|[^[:alnum:]_-])(-m|--message)[[:space:]=]+[^-[:space:]][^[:space:]]*/\1/g" \
+    -e "s/(^|[[:space:]])(-m|--message)[[:space:]=]*\"[^\"]*\"/\1/g" \
+    -e "s/(^|[[:space:]])(-m|--message)[[:space:]=]*${SQ}[^${SQ}]*${SQ}/\1/g" \
+    -e "s/(^|[[:space:]])(-m|--message)[[:space:]=]+[^-[:space:];&|][^[:space:];&|]*/\1/g" \
     -e "s/([^[:alnum:]_]|^)git[[:space:]]+stash[[:space:]]+push([^[:alnum:]_]|\$)/\1git stash\2/g" |
   tr -d "'\"")
 if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
