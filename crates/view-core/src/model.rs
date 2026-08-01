@@ -405,6 +405,13 @@ impl Messages {
     /// instead of appending, matching nvim's progress-indicator convention
     /// (e.g. successive search-match counts share one line); with no prior
     /// entry to replace, it appends instead.
+    ///
+    /// "Most recent" means the most recent entry nvim itself produced. A
+    /// raised condition notice (see `set_native_condition`) sits at the
+    /// tail whenever it is up, and nvim's replace targets its own previous
+    /// line: overwriting the notice would both drop a condition that is
+    /// still true and leave the line nvim meant to replace standing as a
+    /// duplicate.
     pub fn push(&mut self, kind: String, content: Vec<(u64, String)>, replace_last: bool) {
         let entry = MessageEntry {
             kind,
@@ -413,7 +420,7 @@ impl Messages {
             condition: false,
         };
         if replace_last {
-            if let Some(last) = self.entries.last_mut() {
+            if let Some(last) = self.entries.iter_mut().rev().find(|e| !e.condition) {
                 *last = entry;
                 return;
             }
@@ -465,20 +472,22 @@ impl Messages {
             self.entries.retain(|e| !e.condition);
             return self.entries.len() != before;
         };
-        let content = vec![(0, text.to_string())];
         if let Some(raised) = self.entries.iter_mut().find(|e| e.condition) {
+            let content = vec![(0, text.to_string())];
             if raised.content == content {
                 return false;
             }
             raised.content = content;
             return true;
         }
-        self.entries.push(MessageEntry {
-            kind: "native".to_string(),
-            content,
-            shown_at_flush: self.flush_generation,
-            condition: true,
-        });
+        // raised through `push_native` and marked afterwards, rather than
+        // built here: the flush stamp every entry carries keeps exactly one
+        // source, and a condition is a native notice in every respect but
+        // its lifetime
+        self.push_native(text.to_string(), false);
+        if let Some(raised) = self.entries.last_mut() {
+            raised.condition = true;
+        }
         true
     }
 
@@ -710,7 +719,7 @@ mod tests {
     }
 
     #[test]
-    fn is_persistent_matches_every_error_and_warning_kind_and_only_those() {
+    fn is_persistent_matches_every_error_and_warning_kind_plus_a_raised_condition() {
         for kind in [
             "emsg",
             "echoerr",
@@ -741,6 +750,14 @@ mod tests {
                 "{kind} must not be persistent"
             );
         }
+        // the arm no kind can reach: a raised condition carries the same
+        // "native" kind the loop above requires to be transient, and is
+        // persistent on the strength of being a condition alone
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("still true")));
+        let raised = messages.entries.first().unwrap();
+        assert_eq!(raised.kind, "native");
+        assert!(raised.is_persistent());
     }
 
     #[test]
@@ -856,6 +873,27 @@ mod tests {
         messages.note_flush();
         assert!(messages.dismiss_transient_on_keypress(false));
         assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+    }
+
+    #[test]
+    fn a_progress_message_replaces_its_own_previous_line_not_the_raised_condition() {
+        // the canonical wedge is an nvim too busy to read its stdin while
+        // still flushing progress lines, so a raised condition and a
+        // replacing msg_show overlap exactly
+        let mut messages = Messages::default();
+        messages.push("progress".to_string(), vec![(0, "[1/57]".into())], false);
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("progress".to_string(), vec![(0, "[2/57]".into())], true);
+        assert_eq!(messages.visible_lines(4), vec!["[2/57]", "engine stalled"]);
+        assert_eq!(messages.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_replacing_message_with_only_the_condition_present_appends_instead() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("progress".to_string(), vec![(0, "[1/57]".into())], true);
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled", "[1/57]"]);
     }
 
     #[test]

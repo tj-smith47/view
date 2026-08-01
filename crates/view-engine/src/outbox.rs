@@ -295,32 +295,6 @@ mod tests {
         }
     }
 
-    /// A sink that reports entering a write and then stays inside it until
-    /// it is released, standing in for a pipe whose peer stopped reading.
-    struct StuckSink {
-        entered: mpsc::Sender<()>,
-        release: mpsc::Receiver<()>,
-    }
-
-    impl Write for StuckSink {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let _ = self.entered.send(());
-            // dropping the release end frees this and every later write, so
-            // a run that has taken its reading can let the thread finish
-            let _ = self.release.recv();
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    /// Seconds the writer thread is given to reach the sink.
-    ///
-    /// Arming rather than measurement: until the thread is provably inside a
-    /// write it cannot finish, a caller's timing says nothing.
-    const STUCK_WRITE_ARM_SECS: u64 = 30;
-
     /// Seconds a `send` is given to return while the writer thread is stuck.
     ///
     /// Wide because it separates two outcomes rather than grading one: a
@@ -340,14 +314,10 @@ mod tests {
     /// fails the test instead of hanging the suite.
     #[test]
     fn a_caller_does_not_wait_for_a_writer_thread_stuck_inside_a_write() {
-        let (entered_tx, entered_rx) = mpsc::channel::<()>();
-        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let (sink, entered_rx, release_tx) = crate::test_peer::ParkedSink::new();
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let outbox = Arc::new(Outbox::new(
-            Box::new(StuckSink {
-                entered: entered_tx,
-                release: release_rx,
-            }),
+            Box::new(sink),
             tx,
             #[cfg(unix)]
             None,
@@ -364,7 +334,9 @@ mod tests {
         // with no pipe the fast path is off, so this message is the thread's
         assert!(outbox.send(vec![1]));
         entered_rx
-            .recv_timeout(std::time::Duration::from_secs(STUCK_WRITE_ARM_SECS))
+            .recv_timeout(std::time::Duration::from_secs(
+                crate::test_peer::PARKED_WRITE_ARM_SECS,
+            ))
             .expect("the writer thread reached the sink");
 
         let caller = Arc::clone(&outbox);

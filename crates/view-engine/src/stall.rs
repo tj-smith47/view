@@ -89,6 +89,37 @@ impl OutboxStallWatch {
         self.fold(queued, delivered, Instant::now())
     }
 
+    /// How long a caller may wait for its own next wakeup before this watch
+    /// would have something new to say, or `None` when it would not.
+    ///
+    /// `None` is the whole idle steady state, and it means "wait as long as
+    /// you like": with nothing queued there is no backlog to be stalled, so
+    /// no wakeup this watch asks for could tell the caller anything. A
+    /// duration is returned only while output is pending, which is the one
+    /// window in which a caller that never woke again would sit on an
+    /// unreported wedge -- a wedged engine sends no redraws, so the wakeup
+    /// it would otherwise be told by is exactly the one it does not get.
+    ///
+    /// Never zero, since a zero wait is a spin. Past the threshold the
+    /// window has already said what it had to say, and its remaining job --
+    /// noticing that delivery resumed -- is served by looking again one
+    /// threshold later.
+    #[must_use]
+    pub fn poll_deadline(&self) -> Option<Duration> {
+        self.deadline_at(Instant::now())
+    }
+
+    /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
+    fn deadline_at(&self, now: Instant) -> Option<Duration> {
+        let since = self.since?;
+        let remaining = self.threshold.saturating_sub(now.duration_since(since));
+        Some(if remaining.is_zero() {
+            self.threshold
+        } else {
+            remaining
+        })
+    }
+
     /// [`observe`](Self::observe) with both readings supplied, so the
     /// predicate is provable against an exact queue depth, an exact
     /// delivered count and an exact clock instead of a scheduler's.
@@ -197,6 +228,46 @@ mod tests {
         assert!(!w.fold(2, 1, recovered + THRESHOLD / 2));
         assert!(!w.fold(2, 1, recovered + THRESHOLD - Duration::from_millis(1)));
         assert!(w.fold(2, 1, recovered + THRESHOLD));
+    }
+
+    #[test]
+    fn nothing_queued_asks_for_no_wakeup_at_all() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        assert_eq!(w.deadline_at(t0), None);
+        assert!(!w.fold(0, 4, t0));
+        assert_eq!(w.deadline_at(t0), None);
+        assert_eq!(w.deadline_at(t0 + THRESHOLD * 100), None);
+    }
+
+    #[test]
+    fn a_pending_backlog_asks_for_the_wakeup_that_would_confirm_the_stall() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        assert!(!w.fold(1, 0, t0));
+        assert_eq!(w.deadline_at(t0), Some(THRESHOLD));
+        assert_eq!(w.deadline_at(t0 + THRESHOLD / 4), Some(THRESHOLD / 4 * 3));
+    }
+
+    #[test]
+    fn a_confirmed_stall_keeps_asking_so_the_recovery_is_seen_without_a_keystroke() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        assert!(!w.fold(1, 0, t0));
+        assert!(w.fold(1, 0, t0 + THRESHOLD));
+        // never zero: a spin would burn the loop it is meant to let sleep
+        assert_eq!(w.deadline_at(t0 + THRESHOLD), Some(THRESHOLD));
+        assert_eq!(w.deadline_at(t0 + THRESHOLD * 10), Some(THRESHOLD));
+    }
+
+    #[test]
+    fn a_drained_queue_stops_asking_for_wakeups_again() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        assert!(!w.fold(1, 0, t0));
+        assert!(w.deadline_at(t0).is_some());
+        assert!(!w.fold(0, 1, t0 + THRESHOLD / 2));
+        assert_eq!(w.deadline_at(t0 + THRESHOLD / 2), None);
     }
 
     #[test]

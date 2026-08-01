@@ -10,6 +10,10 @@ pub mod rpc;
 pub mod stall;
 #[cfg(feature = "bench-taps")]
 mod tap;
+// test-only: a peer that parks inside a write, which no real engine can be
+// asked to become, shared by every crate whose tests need one wedged
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_peer;
 pub mod ui_events;
 mod wire;
 
