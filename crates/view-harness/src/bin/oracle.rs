@@ -247,12 +247,34 @@ impl EntryOutcome {
     }
 }
 
+/// Whether the engine side -- view's own decode/apply pipeline -- reached
+/// quiescence.
+///
+/// The two sides carry distinct types so that a call transposing them
+/// cannot compile. Both are bare bools, and a transposed pair still
+/// produces a status word for every combination: a wedged engine side is
+/// reported as `TIMEOUT (reference)`, pointing whoever debugs it at the
+/// side that exists to be trusted while view's own hang goes unnamed.
+#[derive(Debug, Clone, Copy)]
+struct EngineSettled(bool);
+
+/// Whether the reference applier's side reached quiescence. See
+/// [`EngineSettled`] for why the sides are separate types.
+#[derive(Debug, Clone, Copy)]
+struct ReferenceSettled(bool);
+
 /// Derives the report-line status word from both sides' settle results and
 /// whether any divergence was found. A free function rather than inlined in
 /// [`print_outcome`] so the merge decision -- an unsettled side always wins
 /// over an empty divergence list, on either side, never falling through to
 /// PARITY or DIVERGENCE -- is checkable without spawning a real engine.
-fn settle_status(engine_settled: bool, reference_settled: bool, divergences_empty: bool) -> String {
+fn settle_status(
+    engine: EngineSettled,
+    reference: ReferenceSettled,
+    divergences_empty: bool,
+) -> String {
+    let EngineSettled(engine_settled) = engine;
+    let ReferenceSettled(reference_settled) = reference;
     match (engine_settled, reference_settled) {
         (true, true) if divergences_empty => "PARITY".to_string(),
         (true, true) => "DIVERGENCE".to_string(),
@@ -361,8 +383,8 @@ fn run_entry(entry: &CorpusEntry) -> Result<EntryOutcome, view_oracle::OracleErr
 /// runner's own interface (see this crate's module docs) commits to.
 fn print_outcome(name: &str, outcome: &EntryOutcome) {
     let status = settle_status(
-        outcome.engine_settled,
-        outcome.reference_settled,
+        EngineSettled(outcome.engine_settled),
+        ReferenceSettled(outcome.reference_settled),
         outcome.divergences.is_empty(),
     );
     let settle_word = if outcome.engine_settled && outcome.reference_settled {
@@ -1476,12 +1498,12 @@ mod tests {
     #[test]
     fn engine_side_timeout_is_not_masked_by_a_settled_reference() {
         assert_eq!(
-            settle_status(false, true, true),
+            settle_status(EngineSettled(false), ReferenceSettled(true), true),
             "TIMEOUT (engine)",
             "an unsettled engine side with no divergences must not read as PARITY"
         );
         assert_eq!(
-            settle_status(false, true, false),
+            settle_status(EngineSettled(false), ReferenceSettled(true), false),
             "TIMEOUT (engine)",
             "an unsettled engine side must not read as DIVERGENCE"
         );
@@ -1489,22 +1511,34 @@ mod tests {
 
     #[test]
     fn reference_side_timeout_is_reported_distinctly() {
-        assert_eq!(settle_status(true, false, true), "TIMEOUT (reference)");
-        assert_eq!(settle_status(true, false, false), "TIMEOUT (reference)");
+        assert_eq!(
+            settle_status(EngineSettled(true), ReferenceSettled(false), true),
+            "TIMEOUT (reference)"
+        );
+        assert_eq!(
+            settle_status(EngineSettled(true), ReferenceSettled(false), false),
+            "TIMEOUT (reference)"
+        );
     }
 
     #[test]
     fn both_sides_unsettled_names_both() {
         assert_eq!(
-            settle_status(false, false, true),
+            settle_status(EngineSettled(false), ReferenceSettled(false), true),
             "TIMEOUT (engine, reference)"
         );
     }
 
     #[test]
     fn both_settled_falls_through_to_parity_or_divergence() {
-        assert_eq!(settle_status(true, true, true), "PARITY");
-        assert_eq!(settle_status(true, true, false), "DIVERGENCE");
+        assert_eq!(
+            settle_status(EngineSettled(true), ReferenceSettled(true), true),
+            "PARITY"
+        );
+        assert_eq!(
+            settle_status(EngineSettled(true), ReferenceSettled(true), false),
+            "DIVERGENCE"
+        );
     }
 
     #[test]

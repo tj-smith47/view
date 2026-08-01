@@ -481,7 +481,10 @@ pub struct Screen {
 /// read backwards, attributing view's own rendering bug to the side that
 /// exists to be trusted. Each side's state and screen travel together so a
 /// half-swap, pairing one side's probe with the other side's frame, is
-/// equally unrepresentable.
+/// equally untransposable. Neither guard reaches a side built wrong in the
+/// first place: naming the reference applier's state as the view side's at
+/// the one construction site still compiles, which is why that site is a
+/// single explicit place rather than an argument order.
 #[derive(Debug, Clone, Copy)]
 pub struct ViewSide<'a> {
     pub state: &'a StateSnapshot,
@@ -505,9 +508,9 @@ struct ViewRows<'a>(&'a [String]);
 
 /// The reference applier's rows under diff. See [`ViewRows`].
 #[derive(Debug, Clone, Copy)]
-struct RefRows<'a>(&'a [String]);
+struct ReferenceRows<'a>(&'a [String]);
 
-/// Diffs `view`'s state against `reference`'s field by field, then the two
+/// Diffs `view`'s state against `reference`'s, field by field, then the two
 /// screens' glyph rows, then their attribute rows, skipping any row index
 /// present in `mask` (see [`masked_rows`]) -- the ordering is arbitrary and
 /// not load-bearing; every field/row that disagrees produces its own
@@ -582,7 +585,7 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
 
     diff_rows(
         ViewRows(&view_screen.rows),
-        RefRows(&ref_screen.rows),
+        ReferenceRows(&ref_screen.rows),
         mask,
         &mut divergences,
         |row, v, r| Divergence::Grid {
@@ -593,7 +596,7 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
     );
     diff_rows(
         ViewRows(&view_screen.attr_rows),
-        RefRows(&ref_screen.attr_rows),
+        ReferenceRows(&ref_screen.attr_rows),
         mask,
         &mut divergences,
         |row, v, r| Divergence::Attr {
@@ -614,13 +617,13 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
 /// which [`Divergence`] variant a disagreement becomes.
 fn diff_rows(
     view: ViewRows<'_>,
-    reference: RefRows<'_>,
+    reference: ReferenceRows<'_>,
     mask: &[u16],
     out: &mut Vec<Divergence>,
     make: impl Fn(u16, &str, &str) -> Divergence,
 ) {
     let ViewRows(view_rows) = view;
-    let RefRows(ref_rows) = reference;
+    let ReferenceRows(ref_rows) = reference;
     let row_count = view_rows.len().max(ref_rows.len());
     for index in 0..row_count {
         // Unreachable in practice: both sides' canvases are u16-bounded
@@ -633,10 +636,10 @@ fn diff_rows(
         if mask.contains(&row) {
             continue;
         }
-        let view = view_rows.get(index).map_or("", String::as_str);
-        let reference = ref_rows.get(index).map_or("", String::as_str);
-        if view != reference {
-            out.push(make(row, view, reference));
+        let view_row = view_rows.get(index).map_or("", String::as_str);
+        let ref_row = ref_rows.get(index).map_or("", String::as_str);
+        if view_row != ref_row {
+            out.push(make(row, view_row, ref_row));
         }
     }
 }

@@ -259,7 +259,7 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                     .with_context(|| format!("writing workload buffer {name}"))?;
             }
             let view_spec = view_spec_from(side, bins.view_bins());
-            let outcome = memory::run(&view_spec, protocol)
+            let outcome = memory::run(ViewSpec(&view_spec), protocol)
                 .with_context(|| format!("memory/{fixture} run failed"))?;
             println!(
                 "{}",

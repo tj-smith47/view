@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::sampling::Distribution;
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SettleBound, SpawnSpec};
+use crate::session::{BenchSession, SettleBound, ViewSpec};
 use crate::BenchError;
 
 /// Buffers the standard workload opens.
@@ -175,7 +175,8 @@ pub struct MemoryOutcome {
 /// Returns [`BenchError::Desync`] if the platform defines no memory
 /// metric, the session never settles, the pid is unavailable, or the
 /// per-process reading cannot be taken.
-pub fn run(view: &SpawnSpec, protocol: &Protocol) -> Result<MemoryOutcome, BenchError> {
+pub fn run(view_spec: ViewSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
     let Some(metric) = METRIC else {
         return Err(BenchError::Desync {
             context: "no memory metric is defined for this platform".to_string(),

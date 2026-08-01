@@ -341,7 +341,7 @@ fn settle_deadline(fixture: &str) -> Duration {
 /// config swapped in below `view`, would measure a plugin-free editor
 /// against baselines recorded with the fixture's full plugin set, report it
 /// as a large improvement, and gate green.
-fn view_spec_from(side: SideSetup, bins: ViewBins<'_>) -> SpawnSpec {
+fn view_spec_from(side: SideSetup, bins: EditorBins<'_>) -> SpawnSpec {
     SpawnSpec {
         program: bins.view.to_path_buf(),
         args: vec![
@@ -535,7 +535,11 @@ struct Bins {
 }
 
 /// The two binaries one view-side spawn names: the editor under
-/// measurement, and the engine it is told to spawn.
+/// measurement, and the engine it is told to spawn. Named for the pair it
+/// holds rather than for the view side of it: the per-side wrapper types
+/// guarding view-against-nvim arguments elsewhere in this workspace are
+/// singular, and a view-prefixed plural beside them reads as a collection
+/// of those when it is a different concept entirely.
 ///
 /// Both are paths, so passing them as adjacent positional arguments lets a
 /// caller transpose them into a spec that spawns bare nvim as the editor
@@ -544,15 +548,15 @@ struct Bins {
 /// against nvim as a view result near 1.0. Naming them at the point they
 /// are chosen removes the order from the problem.
 #[derive(Clone, Copy)]
-struct ViewBins<'a> {
+struct EditorBins<'a> {
     view: &'a Path,
     nvim: &'a Path,
 }
 
 impl Bins {
     /// The measured editor and its engine.
-    fn view_bins(&self) -> ViewBins<'_> {
-        ViewBins {
+    fn view_bins(&self) -> EditorBins<'_> {
+        EditorBins {
             view: &self.view,
             nvim: &self.nvim,
         }
@@ -561,8 +565,8 @@ impl Bins {
     /// The bench-taps build of the editor and its engine, for the rows
     /// that measure an internal boundary rather than the terminal.
     #[cfg(unix)]
-    fn taps_bins(&self) -> ViewBins<'_> {
-        ViewBins {
+    fn taps_bins(&self) -> EditorBins<'_> {
+        EditorBins {
             view: &self.taps_view,
             nvim: &self.nvim,
         }
