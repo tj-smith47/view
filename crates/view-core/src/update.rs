@@ -15,8 +15,8 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Key(Key { notation }) => {
             // any keypress is "the user is reading again": gives a
             // transient (info-kind) toast a readable duration bounded by
-            // real activity instead of a wall-clock timer the zero-clock
-            // runtime has no mechanism for; runs regardless of focus, since
+            // real activity instead of a wall-clock timer the runtime
+            // never delivers to `update`; runs regardless of focus, since
             // the semantic is user activity, not specifically engine input
             let cmdline_open = model.engine.cmdline.is_some();
             if model

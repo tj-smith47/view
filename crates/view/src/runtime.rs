@@ -4,9 +4,10 @@
 //! the model dirty, and a keystroke wakes the loop directly instead of
 //! waiting for the next poll.
 //!
-//! The wait carries a deadline in exactly one state, and it is a state in
-//! which no wakeup would otherwise come: output queued for the engine and
-//! not moving (see [`wait_for_msg`]). An idle editor still sleeps until
+//! The wait carries a deadline in exactly one state: output queued for the
+//! engine and not yet delivered (see [`wait_for_msg`]) -- the one state in
+//! which, were that output wedged, no wakeup would otherwise come. An idle
+//! editor still sleeps until
 //! something happens, and the cost of the exception is bounded by the stall
 //! threshold rather than by a frame rate.
 //!
@@ -262,9 +263,10 @@ fn note_write_stall(
 /// steady state: an editor with nothing queued sleeps until a keystroke, a
 /// redraw or an engine request wakes it, exactly as it always has, and pays
 /// no periodic wakeup for a condition that cannot be true. A deadline
-/// exists only while output is pending and unmoving, and there the wakeup
-/// is the point: a wedged engine emits no redraws, so an operator who types
-/// once and then waits would otherwise be told nothing at all.
+/// exists only while output is pending -- delivering or wedged, the watch
+/// cannot know yet, and for the wedged case the wakeup is the point: a
+/// wedged engine emits no redraws, so an operator who types once and then
+/// waits would otherwise be told nothing at all.
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
     watch: &OutboxStallWatch,
@@ -294,10 +296,12 @@ fn wait_for_msg(
 /// typed while the engine is still attaching is never lost to a
 /// not-yet-existing channel -- see `startup::drain_pre_attach` for the
 /// buffering that covers exactly that window. The executor drives
-/// `engine.handle` through [`EngineOps`]. There is no timer anywhere in the
+/// `engine.handle` through [`EngineOps`]. There is no periodic timer in the
 /// loop body: painting fires immediately when `update()` marks
-/// `model.dirty`, and the loop's only blocking call is `msg_rx.recv()`,
-/// which a redraw, a keystroke, or an engine request wakes directly.
+/// `model.dirty`, and the loop blocks in [`wait_for_msg`], which a redraw,
+/// a keystroke, or an engine request wakes directly -- unbounded except
+/// while engine-bound output is pending, where the stall deadline bounds
+/// the sleep.
 ///
 /// # Errors
 ///

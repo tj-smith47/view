@@ -250,8 +250,8 @@ impl EngineSession {
     /// polling loop the caller's own `deadline` parameter controls, not a
     /// blocking wait inside `view-engine` or `view-core` -- neither of
     /// which has a clock of its own (see `crates/view/src/runtime.rs`'s
-    /// module docs: the production runtime loop's only wait is one
-    /// blocking `recv`, with no timer anywhere in its body).
+    /// module docs: the production runtime loop blocks on one `recv`,
+    /// deadline-bounded only while engine-bound output is pending).
     ///
     /// Every `Effect::Rpc` `update` returns is forwarded back to the real
     /// engine via [`apply_effects`](Self::apply_effects), the same way the

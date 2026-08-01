@@ -504,8 +504,8 @@ impl Messages {
     /// and -- while `cmdline_open` -- `is_prompt` ones in place. Called
     /// from `update` on the user's next keypress: gives an info-level toast
     /// a readable duration bounded by real user activity -- an event the
-    /// zero-clock runtime already receives -- rather than a wall-clock
-    /// timer the runtime has no mechanism for. An entry pushed in the same
+    /// clockless model already receives -- rather than a wall-clock
+    /// timer the runtime never delivers to `update`. An entry pushed in the same
     /// flush generation as the pending keypress has not necessarily been
     /// painted even once yet, so it survives this pass and is only
     /// dismissed on the *next* keypress instead, guaranteeing every
