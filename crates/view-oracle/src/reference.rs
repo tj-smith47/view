@@ -12,14 +12,16 @@
 //! RefGrid intentionally re-implements grid semantics; folding it into
 //! view-core's Grid would blind the oracle to grid-apply bugs.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use std::collections::HashMap;
 
 use view_core::events::{clamp_dim, saturate_u16, GridCell, UiEvent};
+use view_engine::handle::EngineHandle;
 use view_engine::{DamagePump, Engine, EngineConfig};
 
 use crate::attr::{row_fingerprint, ResolvedAttr};
+use crate::settle::{self, QuiesceMarkers, Settling};
 use crate::OracleError;
 
 /// One [`RefGrid`] cell: display text and the highlight group id it was
@@ -246,52 +248,6 @@ impl RefGrid {
     }
 }
 
-/// Vimscript augroup name [`ReferenceSession::install_quiesce_hooks`]
-/// registers once at spawn time and every [`ReferenceSession::quiesce`] call
-/// re-arms; kept as a named constant so the setup command and the per-call
-/// marker command cannot drift apart into two different group names.
-const QUIESCE_AUGROUP: &str = "ViewOracleQuiesce";
-
-/// Wraps `cmd` as a single `<Cmd>...<CR>` key-notation segment: an Ex
-/// command executed via `nvim_input` without leaving the current mode or
-/// waiting for a reply, the mechanism every quiesce-protocol command in this
-/// module rides on (see [`ReferenceSession::quiesce`]'s doc comment for why
-/// this, and not `nvim_command`/`nvim_eval`, is what proves ordering).
-fn cmd_key(cmd: &str) -> String {
-    format!("<Cmd>{cmd}<CR>")
-}
-
-/// Decodes the `-`-joined `str2list` character codes the quiesce marker's
-/// `echom` publishes back into the `mode(1)` string the arm command
-/// captured. Char-code encoding rather than the raw mode string because
-/// message rendering is not transparent for every mode name: visual-block
-/// is the control character `CTRL-V`, which an `echom` would render as a
-/// caret sequence and so never compare equal to the fast probe's raw
-/// string. A payload that does not decode is returned as a labeled
-/// literal rather than dropped: it can then never equal a real mode name,
-/// so a garbled marker fails the round-trip check loudly instead of
-/// settling.
-fn decode_mode_payload(payload: &str) -> String {
-    let decoded: Option<String> = payload
-        .split('-')
-        .map(|tok| tok.parse::<u32>().ok().and_then(char::from_u32))
-        .collect();
-    decoded.unwrap_or_else(|| format!("<undecodable marker payload {payload:?}>"))
-}
-
-/// Renders a fast-probe `(mode, blocking)` pair for
-/// [`OracleError::QuiescePerturbed`]'s `observed` field, folding the
-/// blocked flag into the one string the variant carries (a blocked
-/// key-wait and plain normal mode both report mode `"n"`, so the flag is
-/// the only thing distinguishing them in a report line).
-fn describe_state(state: Option<&(String, bool)>) -> String {
-    match state {
-        Some((mode, true)) => format!("{mode} (blocked key-wait)"),
-        Some((mode, false)) => mode.clone(),
-        None => "<never probed>".to_string(),
-    }
-}
-
 /// `UiEvent::Unknown` names a real `--clean` nvim session emits on every
 /// healthy run, pinned from an empirical capture of the pinned nvim build
 /// attached with the full `ext_*` set (`--clean` startup through a plain
@@ -327,7 +283,9 @@ pub struct ReferenceSession {
     /// detail). See [`unknown_events`](Self::unknown_events) for the
     /// filtered view novelty-checking code should read instead.
     unknown_events_raw: Vec<String>,
-    next_marker_seq: u64,
+    /// This session's half of the shared quiesce protocol's state (see
+    /// [`crate::settle`]).
+    markers: QuiesceMarkers,
     /// The terminal size this session attached at, held separately from
     /// `grid`'s own (possibly chrome-reduced) dimensions: [`chrome_rows`](Self::chrome_rows)
     /// needs the constant full-terminal size to recompute a resize target
@@ -381,45 +339,27 @@ impl ReferenceSession {
         engine.handle.ui_attach(cols, rows)?;
         let (sink, _unused_rx) = std::sync::mpsc::sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
-        let mut session = Self {
+        let session = Self {
             engine,
             pump,
             grid: RefGrid::new(),
             mode: String::new(),
             unknown_events_raw: Vec::new(),
-            next_marker_seq: 0,
+            markers: QuiesceMarkers::default(),
             term_width: cols,
             term_height: rows,
             tab_count: 0,
         };
-        session.install_quiesce_hooks()?;
+        settle::install_hooks(&session.engine.handle)?;
         Ok(session)
     }
 
-    /// Pins `timeoutlen`/`updatetime` far outside any run's real duration (a
-    /// mapping timeout or a `CursorHold` firing mid-script would inject
-    /// nondeterministic redraw noise into the quiesce silence window) and
-    /// creates the empty [`QUIESCE_AUGROUP`] each [`quiesce`](Self::quiesce)
-    /// call re-arms with a fresh `SafeState` hook. Sent via `nvim_input`
-    /// (fire-and-forget, no reply awaited) rather than a synchronous
-    /// `nvim_command` request: everything this protocol depends on is typed
-    /// through the same typeahead queue real test input rides, and mixing
-    /// in a request/reply round-trip here would be exactly the ordering
-    /// hazard [`quiesce`](Self::quiesce)'s doc comment explains why to
-    /// avoid.
-    fn install_quiesce_hooks(&mut self) -> Result<(), OracleError> {
-        let setup = format!(
-            "{}{}{}",
-            cmd_key("set timeoutlen=86400000 updatetime=86400000"),
-            cmd_key(&format!("augroup {QUIESCE_AUGROUP}")),
-            cmd_key("autocmd!"),
-        ) + &cmd_key("augroup END");
-        self.engine.handle.input(&setup)?;
-        Ok(())
-    }
-
     /// Forwards one encoded key `notation` via `nvim_input`, identical to
-    /// [`EngineSession::input`](crate::EngineSession::input).
+    /// [`EngineSession::input`](crate::EngineSession::input). Arms no
+    /// quiesce marker: this is the poke a caller uses on a session whose
+    /// state it is not trying to settle afterwards (the `<Esc>` dismissal
+    /// [`crate::snapshot`] types into a blocked key-wait). Drive a script
+    /// through [`arm_and_input`](Self::arm_and_input) instead.
     ///
     /// # Errors
     ///
@@ -429,198 +369,34 @@ impl ReferenceSession {
         self.engine.handle.input(notation).map_err(Into::into)
     }
 
-    /// Waits for input driven via [`input`](Self::input) to be fully
-    /// processed, using nvim's own idle signal rather than any RPC-reply
-    /// ordering: an `nvim_eval`/`nvim_command` round-trip only proves the
-    /// channel consumed prior messages, not that the *processing* those
-    /// messages queued (redraw bursts, autocmd cascades) has finished,
-    /// since `nvim_input` queues keys into nvim's typeahead buffer and
-    /// returns before they are processed.
+    /// Types the next quiesce marker's arm command and `notation` as one
+    /// `nvim_input` payload, in that order, and records the marker for the
+    /// next [`quiesce`](Self::quiesce) call to wait on. The way a script
+    /// under test must be driven; see [`crate::settle::arm_and_input`] for
+    /// why the fusion into a single payload is the whole settle argument,
+    /// and for the already-settled contract a caller owes it.
     ///
-    /// Two settle paths, chosen per iteration from the fast
-    /// `nvim_get_mode` probe (answered even while nvim is blocked -- see
-    /// `EngineHandle::get_mode`), because a script is free to end with
-    /// nvim waiting for more input, and that wait is a real final state
-    /// this session must preserve for the parity snapshot rather than
-    /// disturb:
+    /// # Errors
     ///
-    /// - **Awaiting-more-input states** (`blocking = true` -- a hit-enter
-    ///   prompt, a pending `t`/`f`/`r` character argument, a register name
-    ///   after `"` -- or an operator pending, mode `no*`): `SafeState`
-    ///   cannot fire here (`:help SafeState` excludes pending operators,
-    ///   and a blocked wait defers everything non-fast), and any marker
-    ///   key typed now would be consumed as the script's own continuation
-    ///   -- aborting the pending operator, or feeding `t` its target
-    ///   character -- which is exactly the state corruption that once
-    ///   turned an operator-pending script into a false mode/marks
-    ///   divergence. Nothing is typed; the settle signal is the silence
-    ///   window alone. That is sound because these states cannot coexist
-    ///   with queued input: nvim only waits for a character once every
-    ///   already-queued key has been consumed, so reaching one (and
-    ///   holding it stable through the window below) means the typed
-    ///   script has been fully processed.
-    /// - **Every other state**: the `SafeState` marker protocol. A
-    ///   `++once` hook in [`QUIESCE_AUGROUP`] `echom`s a sequence-tagged
-    ///   marker when nvim's main loop is idle with no pending input. The
-    ///   marker command is a single `nvim_input` call, landing in the same
-    ///   typeahead FIFO as every key driven by prior
-    ///   [`input`](Self::input) calls on this connection -- so by the time
-    ///   nvim processes *this* keystroke, every earlier one is guaranteed
-    ///   already processed, without relying on RPC scheduling order. A
-    ///   stale marker from an earlier call cannot satisfy this: its
-    ///   sequence number will not match. The marker is armed only after a
-    ///   full `silence` window has already passed with the state stable
-    ///   and no events arriving -- but that heuristic alone cannot close
-    ///   the race where nvim's main loop is stalled inside a long-running
-    ///   command (`:sleep`) while the script's own trailing keys sit
-    ///   unprocessed in typeahead: the fast probe cannot see typeahead
-    ///   (it keeps reporting the pre-stall state), so the arm keys can
-    ///   land behind those keys and be consumed as the script's own
-    ///   continuation -- aborting a pending operator, feeding a pending
-    ///   key-wait -- without any observable mode transition, because nvim
-    ///   drains typeahead without servicing RPC between keys. The marker
-    ///   therefore carries proof of where it executed: the arm command
-    ///   records `mode(1)` at its own execution time and the `echom`
-    ///   publishes it (char-code encoded, so control-char modes like
-    ///   visual-block survive message rendering, and terminator-delimited
-    ///   so a payload cut short at a message-chunk boundary can never
-    ///   decode as a shorter mode that prefixes the real one) inside the
-    ///   marker text.
-    ///   A settled result requires all of: the published mode equals the
-    ///   mode the marker was armed in, the fast probe never saw the state
-    ///   move while the marker was in flight, and the settle-time probe
-    ///   still reports the armed state. Any violation fails loudly
-    ///   as [`OracleError::QuiescePerturbed`]: a marker that consumed (or
-    ///   even raced with) script keys can never produce a settled result.
-    ///
-    /// In both paths the silence window is the backstop against late async
-    /// bursts (a deferred `timer_start` mapping firing after nvim went
-    /// idle): any drained event -- and any observed mode/blocked
-    /// transition, which can occur without a redraw of its own -- resets
-    /// the window, so quiescence is never declared while a burst is still
-    /// in flight. The whole wait is bounded by `deadline`; returns
-    /// `Ok(false)` if it elapses first, whether or not the marker was
-    /// ever seen.
-    ///
-    /// Every drained event is applied to this session's `RefGrid`
-    /// regardless of whether it precedes or follows the marker, and every
-    /// `UiEvent::Unknown` observed is recorded (see
-    /// [`unknown_events`](Self::unknown_events)) rather than silently
-    /// dropped.
+    /// Returns [`OracleError::Engine`] if the connection's writer thread has
+    /// already exited.
+    pub fn arm_and_input(&mut self, notation: &str) -> Result<(), OracleError> {
+        settle::arm_and_input(self, notation)
+    }
+
+    /// Waits until everything typed into this session has been fully
+    /// processed, per the shared marker protocol [`crate::settle::settle`]
+    /// documents in full. Returns whether the session settled before
+    /// `deadline`.
     ///
     /// # Errors
     ///
     /// - [`OracleError::Engine`] if the fast state probe or the marker's
-    ///   arm `nvim_input` call fails at the RPC layer -- surfaced as the
-    ///   RPC error it is, not folded into the deadline's `Ok(false)`,
-    ///   so a broken connection is never misreported as a timeout.
-    /// - [`OracleError::QuiescePerturbed`] if the marker round-trip
-    ///   failed an integrity check above.
+    ///   arm `nvim_input` call fails at the RPC layer.
+    /// - [`OracleError::QuiescePerturbed`] if the marker round-trip failed
+    ///   one of the protocol's integrity checks.
     pub fn quiesce(&mut self, silence: Duration, deadline: Duration) -> Result<bool, OracleError> {
-        let start = Instant::now();
-        // (marker prefix, the stable state it was armed in)
-        let mut armed: Option<(String, (String, bool))> = None;
-        // the arm command's own mode(1) capture, decoded from the marker
-        let mut executed_mode: Option<String> = None;
-        let mut quiet_since = Instant::now();
-        let mut last_state: Option<(String, bool)> = None;
-        loop {
-            let events = self.pump.take_damage();
-            if !events.is_empty() {
-                for ev in events {
-                    if executed_mode.is_none() {
-                        if let (Some((prefix, _)), UiEvent::MsgShow { content, .. }) = (&armed, &ev)
-                        {
-                            // chunks are reassembled before searching and the
-                            // payload must reach its terminator: a payload cut
-                            // at a chunk or truncation boundary could otherwise
-                            // decode as a shorter mode that is a prefix of the
-                            // real one ("n" out of "no") and falsely pass the
-                            // round-trip check
-                            let full: String =
-                                content.iter().map(|(_, text)| text.as_str()).collect();
-                            executed_mode = full.split_once(prefix.as_str()).map(|(_, rest)| {
-                                match rest.split_once(':') {
-                                    Some((payload, _)) => decode_mode_payload(payload),
-                                    None => format!("<unterminated marker payload {rest:?}>"),
-                                }
-                            });
-                        }
-                    }
-                    self.apply(ev);
-                }
-                quiet_since = Instant::now();
-            }
-
-            let state = self.engine.handle.get_mode()?;
-            if last_state.as_ref() != Some(&state) {
-                quiet_since = Instant::now();
-                last_state = Some(state);
-            }
-            let awaiting_more_input = last_state
-                .as_ref()
-                .is_some_and(|(mode, blocking)| *blocking || mode.starts_with("no"));
-
-            if let Some((_, armed_state)) = &armed {
-                if let Some(executed) = &executed_mode {
-                    // the deterministic detector for the stalled-typeahead
-                    // race: a marker consumed as a pending operator's input
-                    // still executes its command, and mode(1) there reports
-                    // the pending state the fast probe never saw
-                    if *executed != armed_state.0 {
-                        return Err(OracleError::QuiescePerturbed {
-                            armed: armed_state.0.clone(),
-                            observed: executed.clone(),
-                        });
-                    }
-                } else if last_state.as_ref() != Some(armed_state) {
-                    // the state moved while the marker was still in flight:
-                    // the arm keys raced with (or were already consumed by)
-                    // input the script still owns -- a blocked key-wait
-                    // eating them lands in whatever state their remaining
-                    // characters produce -- so a marker echo can no longer
-                    // prove anything about the script's final state
-                    return Err(OracleError::QuiescePerturbed {
-                        armed: armed_state.0.clone(),
-                        observed: describe_state(last_state.as_ref()),
-                    });
-                }
-            }
-
-            let window_elapsed = quiet_since.elapsed() >= silence;
-            if awaiting_more_input {
-                if window_elapsed {
-                    return Ok(true);
-                }
-            } else if let Some((_, armed_state)) = &armed {
-                if executed_mode.is_some() && window_elapsed {
-                    if last_state.as_ref() != Some(armed_state) {
-                        return Err(OracleError::QuiescePerturbed {
-                            armed: armed_state.0.clone(),
-                            observed: describe_state(last_state.as_ref()),
-                        });
-                    }
-                    return Ok(true);
-                }
-            } else if window_elapsed {
-                if let Some(pre_arm) = last_state.clone() {
-                    self.next_marker_seq += 1;
-                    let marker = format!("VIEW_ORACLE_QUIESCE:{}:", self.next_marker_seq);
-                    let arm = cmd_key(&format!(
-                        "let g:view_oracle_quiesce_mode = mode(1) | \
-                         autocmd! {QUIESCE_AUGROUP} SafeState * ++once \
-                         echom '{marker}' . join(str2list(g:view_oracle_quiesce_mode), '-') . ':'"
-                    ));
-                    self.engine.handle.input(&arm)?;
-                    armed = Some((marker, pre_arm));
-                }
-            }
-
-            if start.elapsed() >= deadline {
-                return Ok(false);
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        settle::settle(self, silence, deadline)
     }
 
     /// Renders `RefGrid`'s current content as a plain-text screen dump: one
@@ -904,9 +680,31 @@ impl ReferenceSession {
     }
 }
 
+impl Settling for ReferenceSession {
+    fn handle(&self) -> &EngineHandle {
+        &self.engine.handle
+    }
+
+    fn take_damage(&self) -> Vec<UiEvent> {
+        self.pump.take_damage()
+    }
+
+    fn apply_batch(&mut self, events: Vec<UiEvent>) {
+        for ev in events {
+            self.apply(ev);
+        }
+    }
+
+    fn markers(&mut self) -> &mut QuiesceMarkers {
+        &mut self.markers
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::time::Instant;
+
     use super::*;
     use crate::testenv;
     use crate::EngineSession;
@@ -935,41 +733,27 @@ mod tests {
         let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
             .expect("ReferenceSession::spawn against real nvim");
 
-        // EngineSession's pump_until_flush returns on the first Flush it
-        // sees, which is otherwise indistinguishable from a still-pending
-        // startup batch: draining startup traffic first (the same guard
-        // pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives
-        // uses in driver_legs.rs) is what ReferenceSession's quiesce needs
-        // no equivalent for, since any marker a call arms carries a fresh
-        // sequence number: the marker the later, post-input quiesce call
-        // below arms is issued after the real input is queued, so a stale
-        // pre-input idle period can never satisfy it.
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
 
         engine_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against EngineSession");
         reference_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against ReferenceSession");
 
-        // pump_until_flush is a "wait for at least one Flush" primitive,
-        // not a "wait until settled" one: a multi-key notation like this
-        // one can land across more than one Flush, so the first call alone
-        // can observe a still-mid-edit screen. Looping it until a full
-        // window passes with nothing new is the same drain-to-quiet pattern
-        // used above for startup traffic; ReferenceSession's quiesce needs
-        // no such caller-side loop because its own silence backstop already
-        // does this internally.
         assert!(
-            engine_side.pump_until_flush(QUIESCE_DEADLINE),
-            "EngineSession never observed a Flush; screen:\n{}",
+            engine_side
+                .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+                .expect("quiesce EngineSession"),
+            "EngineSession never quiesced; screen:\n{}",
             engine_side.screen_text()
         );
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
         let settled = reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession");
@@ -1014,15 +798,19 @@ mod tests {
         let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
             .expect("ReferenceSession::spawn against real nvim");
 
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
 
         engine_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against EngineSession");
         reference_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against ReferenceSession");
-        assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1055,7 +843,7 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against ReferenceSession");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
@@ -1087,7 +875,7 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input("ihello world<Esc>")
+            .arm_and_input("ihello world<Esc>")
             .expect("input against ReferenceSession");
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
@@ -1128,7 +916,7 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input("y")
+            .arm_and_input("y")
             .expect("input against ReferenceSession");
         assert!(
             reference_side
@@ -1176,7 +964,7 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input("ihello<Esc>0t")
+            .arm_and_input("ihello<Esc>0t")
             .expect("input against ReferenceSession");
         assert!(
             reference_side
@@ -1201,20 +989,19 @@ mod tests {
     }
 
     /// Regression pin for the stalled-typeahead marker race: `:sleep`
-    /// stalls nvim's main loop past the quiet window while the trailing
-    /// `y` sits unprocessed in typeahead, and the fast probe keeps
-    /// reporting the pre-stall `("n", false)` throughout -- so `quiesce`
-    /// arms its marker into that typeahead, the sleep ends, and the
-    /// marker keys abort the freshly-started operator (`no` -> `n`,
-    /// spurious `'['`/`']` marks) with no mode transition the probe ever
-    /// sees. The arm command's own `mode(1)` capture is the only witness:
-    /// it reports the operator-pending state the marker executed in, and
-    /// `quiesce` must surface that as a loud
-    /// [`OracleError::QuiescePerturbed`] -- never a settled result over
-    /// state the harness itself corrupted, which would fabricate a
-    /// mode/marks divergence the engine side never had.
+    /// stalls nvim's main loop past the quiet window while the trailing `y`
+    /// sits unprocessed in typeahead, and the fast probe keeps reporting
+    /// the pre-stall `("n", false)` throughout. A marker armed *behind*
+    /// that script would land in the stalled typeahead and execute as the
+    /// freshly-started operator's input; armed ahead of it by
+    /// [`ReferenceSession::arm_and_input`], nvim's own "there is typeahead"
+    /// rule holds the hook until the sleep ends and the `y` is consumed, so
+    /// the session settles in the operator-pending state the script
+    /// actually produced -- no aborted operator, no spurious `'[`/`']`
+    /// marks, and no fabricated mode/marks divergence against an engine
+    /// side that never had either.
     #[test]
-    fn quiesce_fails_loudly_when_the_marker_arms_into_stalled_typeahead() {
+    fn quiesce_survives_a_script_that_stalls_the_main_loop_mid_typeahead() {
         let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
             .expect("ReferenceSession::spawn against real nvim");
         assert!(reference_side
@@ -1222,23 +1009,102 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input(":sleep 1500m<CR>y")
+            .arm_and_input(":sleep 1500m<CR>y")
             .expect("input against ReferenceSession");
 
-        match reference_side.quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE) {
+        assert!(
+            reference_side
+                .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+                .expect("quiesce ReferenceSession"),
+            "quiesce must settle a stalled script's real final state"
+        );
+        let (mode, _) = reference_side
+            .get_mode()
+            .expect("get_mode against ReferenceSession");
+        assert_eq!(
+            mode, "no",
+            "the operator the stalled typeahead's trailing y started must survive quiesce"
+        );
+        let marks = reference_side
+            .eval_str("join(map(getmarklist(bufnr('%')), 'v:val.mark'), ',')")
+            .expect("eval_str against ReferenceSession");
+        assert!(
+            !marks.contains("'["),
+            "quiesce's own keys completed/aborted the pending operator: marks {marks:?}"
+        );
+    }
+
+    /// Regression pin for a script that ends parked in a half-typed command
+    /// nothing else can see: `"0` leaves a register prefix waiting for the
+    /// operator that never comes, which suppresses `SafeState` (so the marker
+    /// can never arrive) while `nvim_get_mode` still reports plain unblocked
+    /// normal mode (so there is nothing for the fast probe to wait on
+    /// either). Settling it requires nvim's own `state()`, and the state must
+    /// survive: the register prefix is the script's real final state, so a
+    /// settle that completed or aborted it would be reading a state the
+    /// script never produced.
+    #[test]
+    fn quiesce_settles_a_script_parked_in_a_dangling_register_prefix() {
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
+            .expect("ReferenceSession::spawn against real nvim");
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
+
+        reference_side
+            .arm_and_input("ihello<Esc>\"0")
+            .expect("input against ReferenceSession");
+
+        let started = Instant::now();
+        assert!(
+            reference_side
+                .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+                .expect("quiesce ReferenceSession"),
+            "a dangling register prefix must settle, not run out the deadline"
+        );
+        assert!(
+            started.elapsed() < QUIESCE_DEADLINE,
+            "settled only by exhausting the deadline"
+        );
+        let flags = reference_side
+            .eval_str("state()")
+            .expect("eval_str against ReferenceSession");
+        assert!(
+            flags.contains('o'),
+            "quiesce's own probing consumed the pending register prefix: state {flags:?}"
+        );
+    }
+
+    /// The integrity backstop, still live: a session that moves *after*
+    /// nvim's `SafeState` hook has already proved its typeahead empty had
+    /// input this protocol cannot account for, so no comparison against the
+    /// resulting state can be trusted. Constructed deterministically -- a
+    /// one-shot timer feeds a mode-changing key strictly inside the silence
+    /// window, so the marker fires in normal mode and the fast probe then
+    /// observes insert mode -- because the perturbation this catches must
+    /// never be reachable only by racing.
+    #[test]
+    fn quiesce_fails_loudly_when_the_session_moves_after_proving_itself_idle() {
+        let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(20, 6))
+            .expect("ReferenceSession::spawn against real nvim");
+        assert!(reference_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce ReferenceSession"));
+
+        reference_side
+            .arm_and_input("<Cmd>call timer_start(150, {-> feedkeys('i')})<CR>")
+            .expect("input against ReferenceSession");
+
+        match reference_side.quiesce(Duration::from_millis(600), QUIESCE_DEADLINE) {
             Err(OracleError::QuiescePerturbed { armed, observed }) => {
+                assert_eq!(armed, "n", "the marker fired in normal mode");
                 assert_eq!(
-                    armed, "n",
-                    "the marker was armed during the sleep's stable state"
-                );
-                assert!(
-                    observed.starts_with("no"),
-                    "the marker keys executed while the y operator was pending, \
-                     and the arm-time capture must say so: observed {observed:?}"
+                    observed, "i",
+                    "the timer's feedkeys moved the session after the marker proved it idle"
                 );
             }
             other => unreachable!(
-                "a marker armed into stalled typeahead must fail loudly as \
+                "a session moving after its marker fired must fail loudly as \
                  QuiescePerturbed, got {other:?}"
             ),
         }
@@ -1260,7 +1126,7 @@ mod tests {
         );
 
         reference_side
-            .input("<Cmd>sleep 10<CR>")
+            .arm_and_input("<Cmd>sleep 10<CR>")
             .expect("input against ReferenceSession");
 
         let settled = reference_side
@@ -1293,7 +1159,7 @@ mod tests {
             .expect("quiesce ReferenceSession"));
 
         reference_side
-            .input(&format!(
+            .arm_and_input(&format!(
                 "<Cmd>call timer_start({TIMER_DELAY_MS}, {{-> setline(1, 'DELAYED')}})<CR>"
             ))
             .expect("input against ReferenceSession");

@@ -38,6 +38,7 @@ mod parity;
 pub mod pty;
 mod raster;
 mod reference;
+mod settle;
 #[cfg(test)]
 mod testenv;
 
@@ -173,6 +174,9 @@ pub struct EngineSession {
     model: Model,
     engine: Engine,
     pump: DamagePump,
+    /// This session's half of the shared quiesce protocol's state (see
+    /// [`crate::settle`]).
+    markers: settle::QuiesceMarkers,
 }
 
 impl EngineSession {
@@ -211,8 +215,9 @@ impl EngineSession {
     ///
     /// # Errors
     ///
-    /// Returns [`OracleError::Engine`] if the process fails to spawn or the
-    /// `ui_attach` handshake fails or times out.
+    /// Returns [`OracleError::Engine`] if the process fails to spawn, the
+    /// `ui_attach` handshake fails or times out, or the quiesce-protocol
+    /// setup commands cannot be written to the connection.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
         let mut engine = Engine::spawn(EngineConfig::isolated())?;
         engine.handle.ui_attach(cols, rows)?;
@@ -223,11 +228,54 @@ impl EngineSession {
         // module docs) when nothing ever removes them
         let (sink, _unused_rx) = sync_channel(64);
         let (pump, _cutover) = engine.start_pump(sink);
+        settle::install_hooks(&engine.handle)?;
         Ok(Self {
             model: Model::with_term_size(cols, rows),
             engine,
             pump,
+            markers: settle::QuiesceMarkers::default(),
         })
+    }
+
+    /// Types the next quiesce marker's arm command and `notation` as one
+    /// `nvim_input` payload, in that order, and records the marker for the
+    /// next [`quiesce`](Self::quiesce) call to wait on. The way a script
+    /// under test must be driven; see [`crate::settle::arm_and_input`] for
+    /// why the fusion into a single payload is the whole settle argument,
+    /// and for the already-settled contract a caller owes it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::Engine`] if the connection's writer thread
+    /// has already exited.
+    pub fn arm_and_input(&mut self, notation: &str) -> Result<(), OracleError> {
+        settle::arm_and_input(self, notation)
+    }
+
+    /// Waits until everything typed into this session has been fully
+    /// processed, per the shared marker protocol [`crate::settle::settle`]
+    /// documents in full. Returns whether the session settled before
+    /// `deadline`.
+    ///
+    /// The settle criterion is nvim's own `SafeState` signal, identical to
+    /// [`ReferenceSession::quiesce`]'s, rather than this driver's
+    /// [`pump_until_flush`](Self::pump_until_flush) redraw-boundary drain:
+    /// nvim suppresses redraws for as long as it has typeahead to chew
+    /// through, so a script that stalls the main loop mid-run leaves a
+    /// flush-boundary drain no traffic to wait on and it declares the
+    /// script finished while its tail is still queued. Both sides of a
+    /// differential run must decide they are done by the same rule, or one
+    /// reads its state at a different point in the same script and the
+    /// mismatch is reported as a divergence in view's own pipeline.
+    ///
+    /// # Errors
+    ///
+    /// - [`OracleError::Engine`] if the fast state probe or the marker's
+    ///   arm `nvim_input` call fails at the RPC layer.
+    /// - [`OracleError::QuiescePerturbed`] if the marker round-trip failed
+    ///   one of the protocol's integrity checks.
+    pub fn quiesce(&mut self, silence: Duration, deadline: Duration) -> Result<bool, OracleError> {
+        settle::settle(self, silence, deadline)
     }
 
     /// Forwards one encoded key `notation` via `nvim_input` (leg (a):
@@ -390,6 +438,25 @@ impl EngineSession {
     /// times out, or the reply shape is malformed.
     pub fn get_mode(&mut self) -> Result<(String, bool), OracleError> {
         self.engine.handle.get_mode().map_err(Into::into)
+    }
+}
+
+impl settle::Settling for EngineSession {
+    fn handle(&self) -> &view_engine::handle::EngineHandle {
+        &self.engine.handle
+    }
+
+    fn take_damage(&self) -> Vec<UiEvent> {
+        self.pump.take_damage()
+    }
+
+    fn apply_batch(&mut self, events: Vec<UiEvent>) {
+        let effects = update(&mut self.model, Msg::Redraw(events));
+        self.apply_effects(effects);
+    }
+
+    fn markers(&mut self) -> &mut settle::QuiesceMarkers {
+        &mut self.markers
     }
 }
 

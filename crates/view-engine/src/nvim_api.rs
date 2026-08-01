@@ -154,6 +154,51 @@ impl EngineHandle {
         self.notify("nvim_input", vec![Value::from(notation)])
     }
 
+    /// Queues one encoded key `notation` into nvim's typeahead via
+    /// `feedkeys()` in `"t"` mode: remapped and accounted for exactly as if
+    /// the user had typed it, appended after anything already queued, and
+    /// left for the main loop to consume rather than executed inline (no
+    /// `"x"` flag).
+    ///
+    /// Distinct from [`input`](Self::input), not a replacement for it. Keys
+    /// sent through `nvim_input` land in nvim's low-level input buffer and
+    /// move into the typeahead buffer in pieces, so a driver watching for
+    /// nvim's own idle signal can observe an empty typeahead while the tail
+    /// of what it sent is still queued a layer further out -- live-observed
+    /// as a `SafeState` firing in the middle of a script. `feedkeys()`
+    /// inserts the whole string into the typeahead in one step instead,
+    /// which is what a caller sending a *script* it intends to wait for
+    /// needs. `input` remains the right call for a single interactive
+    /// keystroke and the only one that reaches a session already blocked in
+    /// a key-wait, which never services the deferred request this one is.
+    ///
+    /// The `<...>` notation is translated by `nvim_replace_termcodes`
+    /// inside nvim rather than translated here and passed as key bytes:
+    /// those bytes carry `K_SPECIAL` (`0x80`) prefixes and are not valid
+    /// UTF-8, so they cannot survive a round trip through the wire's string
+    /// type on this side. Only the notation itself -- plain text -- crosses
+    /// the connection.
+    ///
+    /// A request, not a notify: a rejected expression (a vimscript error)
+    /// must surface as an error rather than as a script that silently never
+    /// ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the command, or the reply does not arrive within
+    /// [`EVAL_TIMEOUT`].
+    pub fn feed_keys(&self, notation: &str) -> Result<(), EngineError> {
+        // single-quoted vimscript literal: the doubled quote is its only
+        // escape, and it keeps every backslash in the notation literal
+        let quoted = notation.replace('\'', "''");
+        let cmd = format!(
+            "call feedkeys(nvim_replace_termcodes('{quoted}', v:true, v:true, v:true), 't')"
+        );
+        self.request_timeout("nvim_command", vec![Value::from(cmd)], EVAL_TIMEOUT)?;
+        Ok(())
+    }
+
     /// Notifies nvim of a terminal resize to `width` x `height` cells via
     /// `nvim_ui_try_resize`.
     ///

@@ -1175,20 +1175,23 @@ mod tests {
         let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(40, 10))
             .expect("ReferenceSession::spawn against real nvim");
 
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
 
         engine_side
-            .input("ihello<Esc>yyp")
+            .arm_and_input("ihello<Esc>yyp")
             .expect("input against EngineSession");
         reference_side
-            .input("ihello<Esc>yyp")
+            .arm_and_input("ihello<Esc>yyp")
             .expect("input against ReferenceSession");
 
-        assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1278,7 +1281,7 @@ mod tests {
     /// production resolves with an `nvim_ui_try_resize` down by one row to
     /// make room for the tabline (see `TablineUpdate`'s handling in
     /// `view_core::update::update`). Both `EngineSession` (via
-    /// `pump_until_flush`'s effect forwarding) and `ReferenceSession` (via
+    /// its settle loop's effect forwarding) and `ReferenceSession` (via
     /// its own `chrome_rows`/`TablineUpdate` handling) must carry out that
     /// same resize against their own nvim process, and `ReferenceSession`
     /// must reserve a matching placeholder row in `screen_rows`, or the two
@@ -1292,20 +1295,23 @@ mod tests {
         let mut reference_side = testenv::spawning(|| ReferenceSession::spawn(60, 12))
             .expect("ReferenceSession::spawn against real nvim");
 
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
 
         engine_side
-            .input(":tabnew<CR>gt")
+            .arm_and_input(":tabnew<CR>gt")
             .expect("input against EngineSession");
         reference_side
-            .input(":tabnew<CR>gt")
+            .arm_and_input(":tabnew<CR>gt")
             .expect("input against ReferenceSession");
 
-        assert!(engine_side.pump_until_flush(QUIESCE_DEADLINE));
-        while engine_side.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(engine_side
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
         assert!(reference_side
             .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
             .expect("quiesce ReferenceSession"));
@@ -1359,13 +1365,16 @@ mod tests {
     fn snapshot_answers_in_a_blocked_char_wait_instead_of_wedging() {
         let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))
             .expect("EngineSession::spawn against real nvim");
-        while session.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
 
         session
-            .input("ihello<Esc>0t")
+            .arm_and_input("ihello<Esc>0t")
             .expect("input against EngineSession");
-        assert!(session.pump_until_flush(QUIESCE_DEADLINE));
-        while session.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
 
         let state = snapshot(&mut session).expect("snapshot against a blocked session");
 
@@ -1410,13 +1419,16 @@ mod tests {
     fn parse_cursor_and_parse_marks_match_a_live_getpos_and_getmarklist_reply() {
         let mut session = testenv::spawning(|| EngineSession::spawn(40, 10))
             .expect("EngineSession::spawn against real nvim");
-        while session.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
 
         session
-            .input("ihello<Esc>mamA")
+            .arm_and_input("ihello<Esc>mamA")
             .expect("input against EngineSession");
-        assert!(session.pump_until_flush(QUIESCE_DEADLINE));
-        while session.pump_until_flush(Duration::from_millis(500)) {}
+        assert!(session
+            .quiesce(QUIESCE_SILENCE, QUIESCE_DEADLINE)
+            .expect("quiesce EngineSession"));
 
         let state = snapshot(&mut session).expect("snapshot EngineSession");
 

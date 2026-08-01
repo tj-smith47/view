@@ -52,14 +52,6 @@ use view_oracle::{
 const COLS: u16 = 60;
 const ROWS: u16 = 12;
 
-/// Bound on each startup/post-input drain loop
-/// (`while engine.pump_until_flush(STARTUP_DRAIN) {}`): short enough that
-/// a healthy already-quiet engine falls through in one iteration, long
-/// enough that a genuine startup/redraw burst is never mistaken for
-/// silence mid-burst. Matches the window `view-oracle`'s own end-to-end
-/// parity test drains startup traffic with.
-const STARTUP_DRAIN: Duration = Duration::from_millis(500);
-
 /// Test-support sentinel `Command::Minimize`'s hidden `--inject-divergence-at`
 /// flag splices into a token stream at a caller-chosen index: a value no
 /// real key-notation escape or literal character in any generated or
@@ -294,12 +286,12 @@ fn settle_status(
 /// [`INJECT_DIVERGENCE_TOKEN`] is handled specially when present: the
 /// tokens before and after it are fed to both sides as usual, but
 /// [`INJECT_DIVERGENCE_KEYS`] is spliced in between, sent to the reference
-/// session alone. Every other token is fed identically to both sides via
-/// one joined `nvim_input` call each (matching the single-call shape the
-/// corpus runner has always used), not one call per token: splitting into
-/// per-token calls only when the sentinel demands it keeps the normal,
-/// no-injection path's RPC-call count unchanged from before this function
-/// existed.
+/// session alone. Each side still receives its whole script as exactly one
+/// `nvim_input` payload either way, sentinel or not: the reference side's
+/// settle protocol arms its quiesce marker in front of that payload and
+/// depends on the fusion (see `ReferenceSession::arm_and_input`), so a
+/// script split across several calls would leave a window for the marker to
+/// fire between them and prove nothing.
 fn run_tokens(
     tokens: &[String],
     cols: u16,
@@ -311,30 +303,33 @@ fn run_tokens(
     let mut engine = EngineSession::spawn(cols, rows)?;
     let mut reference = ReferenceSession::spawn(cols, rows)?;
 
-    while engine.pump_until_flush(STARTUP_DRAIN) {}
     // startup quiescence is drained, not gated on: a slow-starting nvim's
     // own splash/plugin traffic settling late here is not itself a
     // divergence, only the post-input settle below decides pass/fail. A
     // probe error, unlike a slow settle, still propagates: it means the
     // session is broken, not merely late
+    let _ = engine.quiesce(silence, deadline)?;
     let _ = reference.quiesce(silence, deadline)?;
 
-    if let Some(pos) = tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
-        let prefix = join_tokens(&tokens[..pos]);
-        let suffix = join_tokens(&tokens[pos + 1..]);
-        engine.input(&prefix)?;
-        reference.input(&prefix)?;
-        reference.input(INJECT_DIVERGENCE_KEYS)?;
-        engine.input(&suffix)?;
-        reference.input(&suffix)?;
-    } else {
-        let joined = join_tokens(tokens);
-        engine.input(&joined)?;
-        reference.input(&joined)?;
-    }
+    let (engine_keys, reference_keys) =
+        match tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
+            Some(pos) => {
+                let prefix = join_tokens(&tokens[..pos]);
+                let suffix = join_tokens(&tokens[pos + 1..]);
+                (
+                    format!("{prefix}{suffix}"),
+                    format!("{prefix}{INJECT_DIVERGENCE_KEYS}{suffix}"),
+                )
+            }
+            None => {
+                let joined = join_tokens(tokens);
+                (joined.clone(), joined)
+            }
+        };
+    engine.arm_and_input(&engine_keys)?;
+    reference.arm_and_input(&reference_keys)?;
 
-    let engine_settled = engine.pump_until_flush(deadline);
-    while engine.pump_until_flush(STARTUP_DRAIN) {}
+    let engine_settled = engine.quiesce(silence, deadline)?;
     let reference_settled = reference.quiesce(silence, deadline)?;
 
     let surface = engine.surface();
