@@ -24,6 +24,12 @@ use view_engine::process::{Engine, EngineConfig};
 /// Poisoning is ignored on both sides: the lock orders operations and
 /// guards no data, so a test that panicked while holding it left nothing
 /// behind for the next one to find broken.
+///
+/// The lock is per-test-binary, which suffices because `cargo test` -- the
+/// gate's runner -- runs test binaries serially. A runner that interleaves
+/// binaries (nextest) could land another binary's isolated spawn inside a
+/// mutation here; that surfaces as the refusal naming the planted entry,
+/// never as silent acceptance.
 static HERMETIC_DIRS: RwLock<()> = RwLock::new(());
 
 /// Runs `f` -- an isolated spawn plus everything driving its child -- with
@@ -388,11 +394,17 @@ fn an_isolated_spawn_refuses_a_home_holding_a_planted_credential() {
         .unwrap_or_else(PoisonError::into_inner);
     let home = view_engine::env::hermetic_home();
     std::fs::create_dir_all(&home).unwrap();
+    // unplanted on every exit path, panics included: a `.netrc` left behind
+    // refuses every isolated spawn in every later test
+    struct Unplant(PathBuf);
+    impl Drop for Unplant {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+    let _plant = Unplant(home.join(".netrc"));
     std::fs::write(home.join(".netrc"), "machine github.com").unwrap();
     let spawned = Engine::spawn(EngineConfig::isolated());
-    // unplanted before any assertion can panic: a `.netrc` left behind
-    // refuses every isolated spawn in every later test
-    let _ = std::fs::remove_file(home.join(".netrc"));
     // the map drops a wrongly-spawned engine, which shuts its child down
     // before the failure is reported
     let refused = spawned.map(drop).expect_err(

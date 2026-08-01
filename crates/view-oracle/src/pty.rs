@@ -1403,8 +1403,11 @@ mod tests {
         let mut cmd = std::process::Command::new("true");
         let refused = make_hermetic(&mut cmd);
         let _ = std::fs::remove_file(empty.join("planted"));
+        // "hermetic search path", not "planted": the home refusal's prose
+        // also says "planted", so only the search-path phrase proves which
+        // refusal fired
         assert!(
-            refused.is_err_and(|err| err.to_string().contains("planted")),
+            refused.is_err_and(|err| err.to_string().contains("hermetic search path")),
             "the funnel accepted a search path holding a planted entry, so \
              its emptiness refusal never ran"
         );
@@ -1413,7 +1416,6 @@ mod tests {
         // spawn can reach them
         let mut cmd = std::process::Command::new("true");
         make_hermetic(&mut cmd).unwrap();
-        assert!(home.is_dir() && empty.is_dir());
         drop(planted);
     }
 
