@@ -42,8 +42,10 @@ ratio_p50 = 1.06
 # recorded value 2.34x (8.881 against heavy's recorded 3.788); the 2x
 # half-width rule asks 2.41x. 2.5 clears both, and replaces a default of 1.5
 # that this host's own weather breaches -- the quiet-recorded bar was broken
-# by an ambient excursion, not by a change to view.
-shell_visible_ms = 2.5
+# by an ambient excursion, not by a change to view. Scoped to first_paint,
+# the scenario the replicates ran: a future scenario reusing this metric
+# name must earn its own characterization rather than inherit this one.
+"first_paint.shell_visible_ms" = 2.5
 
 # Same 8 replicates as shell_visible_ms, same statistic shape (a p99 of
 # 1000 cold spawns whose name carries no percentile component). Relative
@@ -52,5 +54,6 @@ shell_visible_ms = 2.5
 # recorded value 1.91x (151.206 against heavy's recorded 79.267); the 2x
 # half-width rule asks 1.85x. 2.0 clears both. The minimal fixture's spec
 # budget of 30 ms sits far under this ratchet ceiling and stays the bar
-# that actually fires there.
-marker_cold_ms = 2.0
+# that actually fires there. Scoped to first_paint for the same reason as
+# shell_visible_ms.
+"first_paint.marker_cold_ms" = 2.0

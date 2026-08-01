@@ -512,10 +512,7 @@ pub enum BaselineError {
 /// (`baselines/<class>.headroom.toml`, see [`headroom_path`]) via
 /// [`load_headroom`], never from the recorded baseline itself: a
 /// characterization has a different lifecycle than a recorded measurement,
-/// and [`load`] refuses a baseline that carries one.
-pub type HeadroomTable = BTreeMap<String, f64>;
-
-/// The measured-headroom sidecar shape (`baselines/<class>.headroom.toml`):
+/// and [`load`] refuses a baseline that carries one. The sidecar's shape:
 ///
 /// ```toml
 /// machine_class = "dev-linux"
@@ -529,9 +526,11 @@ pub type HeadroomTable = BTreeMap<String, f64>;
 /// `"scenario.metric"` key scopes it to one scenario and wins there (see
 /// [`headroom_for`]). The quotes are TOML syntax, not decoration: unquoted,
 /// the dot would open a nested table and the file would fail to load.
-///
-/// Unknown fields are refused so a recorded cell pasted in here is a load
-/// error rather than a table that silently binds nothing.
+pub type HeadroomTable = BTreeMap<String, f64>;
+
+/// The deserialization shape of the sidecar documented on
+/// [`HeadroomTable`]. Unknown fields are refused so a recorded cell pasted
+/// in here is a load error rather than a table that silently binds nothing.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HeadroomFile {
@@ -960,14 +959,20 @@ pub enum RatchetOutcome {
 /// metric the run did not remeasure is not carried forward, matching the
 /// full-matrix record's from-scratch hygiene.
 ///
-/// Ratcheting to `min` pins an absolute metric's bar to its best-ever quiet
-/// run, so the gated ceiling becomes `min * ABSOLUTE_HEADROOM`. On a shared
-/// class whose quiet absolute variance is itself ~1.5x (see
-/// [`ABSOLUTE_HEADROOM`]) that ceiling sits near the top of the honest band,
-/// so a normal quiet run can breach; the load-controlled classes it matters
-/// for do not carry that variance. Sizing a noise-aware floor into the
-/// downward move (only ratchet down past the host's measured resolution) is
-/// the refinement that closes this, and it needs the per-host floor that is
+/// Ratcheting to `min` pins a metric's bar to its best-ever quiet run, so
+/// the gated ceiling becomes `min` times the class's allowance for the
+/// metric -- a measured sidecar factor where one exists, the compiled
+/// default otherwise. A fixed factor over a floor that only falls tightens
+/// the bar on every lucky run while the honest band stays put, so a normal
+/// run can breach on unchanged code; a measured factor moves the exposure
+/// without removing it, and it reaches ratios as well as absolutes. The
+/// scroll characterization is the live example: its ratio_p50 factor
+/// clears the replicate band's own rule by under half a percent, so a
+/// record lowering scroll.minimal's floor about 4% (1.7778 to 1.70) puts
+/// the bar at 2.006 against a 2.013 already observed on unchanged
+/// binaries. Sizing a noise-aware floor into the downward move (only
+/// ratchet down past the host's measured resolution) is the refinement
+/// that closes this, and it needs the per-host resolution floor that is
 /// not yet measured; until then the min-ratchet is the faithful "only
 /// improves" rule and the shared-class breach is the documented
 /// loud-breach-then-rerun regime.
@@ -1378,6 +1383,16 @@ mod tests {
         );
         require_headroom_bound(&headroom, &plan.file, &sidecar).unwrap();
         save(&path, &plan.file).unwrap();
+
+        // the by-construction claim rests on a serde attribute a future
+        // edit could delete; an emitted empty table would still pass the
+        // load-time refusal, so the written text is checked directly
+        assert!(
+            !std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("[headroom]"),
+            "the record writer emitted a headroom table into the baseline"
+        );
 
         let text = std::fs::read_to_string(&sidecar).unwrap();
         assert_eq!(

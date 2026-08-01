@@ -56,10 +56,14 @@ pre-registered jitter-tail reading, recorded with its host load in
 
 What the review left open, none of it blocking the commit:
 
-- Finding 1's ratchet warning: the flood `[[shortfall]]` `why` still cites the
-  refuted cross-class rationale (task 31), and `accepted = 20.880463` must not
-  be ratcheted down off a single run. That entry is also what covers the
-  both-sides-stall hole, so it must not be deleted while the budget is unmet.
+- Finding 1's ratchet warning: resolved 2026-08-01. The budget is now met —
+  the row gated at 14.827 and then 15.648 ms inside the 16 ms bar — so the
+  flood `[[shortfall]]` (with its refuted task-31 rationale and the
+  `accepted = 20.880463` that must not be ratcheted) was deleted under the
+  condition stated here. The both-sides-stall hole stays covered by the
+  retained `[[budget]]` entry, whose comment now records the residual: the
+  bar's margin is a load regime (16.429 ms observed at load 3.9 on
+  unchanged code), so a loaded-host breach is weather, not a regression.
 - Finding 2's load-regime characterization for `cadence_p99_ratio`, which is
   the only thing that would earn it a shared-class gate.
 - The mbp cross-host flood pair.

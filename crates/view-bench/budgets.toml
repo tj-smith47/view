@@ -63,12 +63,13 @@ max = 50.0
 # 50.3 ms on dev-linux under the 2.0 in its headroom sidecar). Any budget
 # above that is one the ratchet always reaches first, so the budget could
 # never be the thing that fires -- the same defect the withdrawn cold_ms bar
-# had. 30 sits under the ratchet and over the measurement, so it can break. 0.30 bounds the paired quantity the absolute cannot: a class
-# whose cold start is slow for reasons outside view still has to show view
-# reaching the file in under a third of bare nvim's time. marker_cold_ms is
-# a p99 gated on the shared dev-linux class only because its name carries no
+# had. 30 sits under the ratchet and over the measurement, so it can break.
+# 0.30 bounds the paired quantity the absolute cannot: a class whose cold
+# start is slow for reasons outside view still has to show view reaching
+# the file in under a third of bare nvim's time. marker_cold_ms is a p99
+# gated on the shared dev-linux class only because its name carries no
 # percentile component; a load excursion past 30 fails as a new shortfall,
-# and the 39.8 ms ratchet premise holds only under that classification.
+# and the 50.3 ms ratchet premise holds only under that classification.
 [[budget]]
 spec_row = "First paint: the opened file's content on screen"
 scenario = "first_paint"
@@ -86,6 +87,15 @@ max = 0.30
 # row, and that is the one named here. Restating 16.0 against the flood row
 # instead would put the same number in two spec rows, which is the drift this
 # file exists to prevent.
+#
+# A budget max gets no headroom relief: above it with no shortfall entry
+# fails as a new finding. On dev-linux this bar's margin is a load regime,
+# not a constant -- unchanged code has measured 14.827 and 15.648 ms gated
+# on quieter runs (2026-08-01, the readings that spent the shortfall that
+# used to sit here) but 16.429 ms at load 3.9 and a single trial at 16.29
+# under a loaded bracket. A breach here on a busy host is expected weather
+# for this p99, not a regression signal on its own: rerun quiet before
+# reading it as one. Median-of-3 absorbs a lone excursion, not a loaded run.
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"
