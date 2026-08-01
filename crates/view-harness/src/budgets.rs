@@ -47,7 +47,7 @@
 //! whose *recorded* value on this class is inside the bound, measuring
 //! above the bound this run, on a class that has published a measured
 //! spread for that statistic. A single reading inside the spread the class
-//! has characterised around a compliant recorded value is not evidence the
+//! has characterized around a compliant recorded value is not evidence the
 //! bound stopped being met, so demanding a `[[shortfall]]` entry for it
 //! would write ambient load into the ledger as an accepted gap. It passes,
 //! bounded by the same ceiling the recorded value earns, and it reports
@@ -128,13 +128,21 @@ pub enum Verdict {
     /// stopped meeting without recording that it had.
     New,
     /// Outside the bound and past the ceiling the accepted value earns.
-    Widened { accepted: f64, ceiling: f64 },
+    Widened {
+        accepted: f64,
+        ceiling: f64,
+        headroom: crate::baselines::Headroom,
+    },
     /// Outside the bound, with no shortfall entry, on a class that has
     /// published a measured spread for this statistic and whose recorded
     /// value for it is itself inside the bound: a reading the class's own
-    /// characterised noise accounts for, held to the ceiling that recorded
+    /// characterized noise accounts for, held to the ceiling that recorded
     /// value earns.
-    Excursion { recorded: f64, ceiling: f64 },
+    Excursion {
+        recorded: f64,
+        ceiling: f64,
+        headroom: crate::baselines::Headroom,
+    },
 }
 
 impl Verdict {
@@ -192,21 +200,29 @@ impl std::fmt::Display for Finding {
                  {budget:.3}, and no shortfall records it. Either fix it, or add a [[shortfall]] \
                  entry to budgets.toml saying why it stands [{spec_row}]"
             ),
-            Verdict::Widened { accepted, ceiling } => write!(
+            Verdict::Widened {
+                accepted,
+                ceiling,
+                headroom,
+            } => write!(
                 f,
                 "BUDGET FAIL [{scenario}.{fixture}] {metric}: {measured:.3} against spec \
-                 {budget:.3} is past {ceiling:.3}, the ceiling the accepted shortfall \
-                 {accepted:.3} earns under this class's gate headroom; a shortfall may hold or \
-                 improve, never widen [{spec_row}]"
+                 {budget:.3} is past {ceiling:.3}, which is the accepted shortfall \
+                 {accepted:.3} {headroom} on this class; a shortfall may hold or improve, never \
+                 widen [{spec_row}]"
             ),
-            Verdict::Excursion { recorded, ceiling } => write!(
+            Verdict::Excursion {
+                recorded,
+                ceiling,
+                headroom,
+            } => write!(
                 f,
                 "BUDGET EXCURSION [{scenario}.{fixture}] {metric}: {measured:.3} is past spec \
-                 {budget:.3}, but inside {ceiling:.3}, the ceiling this class's measured \
-                 headroom grants its recorded {recorded:.3} -- a quiet value that is itself \
-                 inside the bound. This class has measured the statistic moving that far on \
-                 unchanged code, so one reading here is its noise and not a budget miss; \
-                 anything past that ceiling fails [{spec_row}]"
+                 {budget:.3}, but inside {ceiling:.3}, which is its recorded {recorded:.3} \
+                 {headroom} -- the spread this class has measured for the statistic, applied to \
+                 a quiet value that is itself inside the bound. One reading this far out is that \
+                 measured spread and not a budget miss; anything past the ceiling fails \
+                 [{spec_row}]"
             ),
         }
     }
@@ -371,27 +387,28 @@ fn find_shortfall<'a>(
 /// of one of them firing on measurement noise the other was built to
 /// absorb. A metric the class does not gate at all (shared-class tail
 /// statistics) gets no ceiling here either, for the same reason it gets
-/// none there: on a shared host that number is not a property of the code.
+/// none there: on a shared host that number is not a property of the code,
+/// and `None` here is that absence rather than a sentinel standing in for it.
 fn shortfall_ceiling(
     scenario: &str,
     metric: &str,
     class: &str,
     accepted: f64,
     headroom_table: &crate::baselines::HeadroomTable,
-) -> f64 {
+) -> Option<(crate::baselines::Headroom, f64)> {
     let controlled = crate::baselines::is_controlled_class(class);
-    crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)
-        .map_or(f64::INFINITY, |headroom| headroom.bar(accepted))
+    let headroom = crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)?;
+    Some((headroom, headroom.bar(accepted)))
 }
 
 /// The recorded value and the worst reading it accounts for, when a metric
 /// above its bound this run is inside what this class has measured the
 /// statistic to move; `None` when nothing earns that.
 ///
-/// Three conditions, each load-bearing:
+/// Four conditions, each load-bearing:
 ///
 /// - The class published a spread for this statistic. A compiled-in default
-///   is a guess about a host nobody characterised, and widening every spec
+///   is a guess about a host nobody characterized, and widening every spec
 ///   bound on every class by a guess is how a budget stops meaning anything.
 ///   Absence keeps the strict rule.
 /// - A recorded value exists for this metric in this cell. It is the
@@ -401,6 +418,15 @@ fn shortfall_ceiling(
 ///   already outside its budget has a real, standing gap, and the mechanism
 ///   for that is a `[[shortfall]]` entry with the reason written down --
 ///   never a noise allowance that would hide it.
+/// - The spread is proportional. A signed metric's allowance carries
+///   [`crate::baselines::SIGNED_DELTA_FLOOR_MS`], an absolute floor sized
+///   for a paired delta's own jitter around a *recorded* value; against a
+///   spec bound it would grant a fixed 0.25 ms band no published factor can
+///   shrink, so a bound at 0.1 ms would tolerate 0.35. That floor is a
+///   ratchet instrument and does not transfer here. No signed metric carries
+///   a budget today, and refusing the shape keeps it that way by
+///   construction rather than by a comment nobody reads when the first one
+///   lands.
 ///
 /// The ceiling is then the recorded value under the published spread, which
 /// is the same bar [`crate::baselines`] holds that recorded value to. The
@@ -412,10 +438,36 @@ fn excursion_ceiling(
     budget: f64,
     recorded: Option<&crate::baselines::CellMetrics>,
     headroom_table: &crate::baselines::HeadroomTable,
-) -> Option<(f64, f64)> {
+) -> Option<(crate::baselines::Headroom, f64, f64)> {
     let headroom = crate::baselines::declared_headroom(headroom_table, scenario, metric)?;
+    if headroom.admits_non_positive() {
+        return None;
+    }
     let recorded = *recorded?.get(metric)?;
-    (recorded <= budget).then(|| (recorded, headroom.bar(recorded)))
+    (recorded <= budget).then(|| (headroom, recorded, headroom.bar(recorded)))
+}
+
+/// Checks every measured cell of one run against the budgets that cover
+/// `class`, in the order the cells were measured.
+///
+/// The run-level entry point, because the budget verdict for a cell is not a
+/// function of that cell alone: it also reads the cell the *baseline* holds
+/// for the same id. Pairing the two is therefore done here, from one
+/// `baseline`, rather than at each call site where a `None` or the wrong
+/// cell's metrics would silently return the gate to its strict behavior with
+/// every test still green.
+#[must_use]
+pub fn check_run(
+    file: &BudgetFile,
+    baseline: &crate::baselines::BaselineFile,
+    measured: &[crate::baselines::MeasuredCell],
+    class: &str,
+    headroom_table: &crate::baselines::HeadroomTable,
+) -> Vec<Finding> {
+    measured
+        .iter()
+        .flat_map(|cell| check_cell(file, cell, baseline, class, headroom_table))
+        .collect()
 }
 
 /// Checks one cell's measured metrics against the budgets that cover
@@ -431,19 +483,25 @@ fn excursion_ceiling(
 /// does. `unreached_budgets` cannot see it either -- that walk reads the
 /// measured ids, which are still correct.
 ///
-/// `recorded` is the baseline's own cell for the same id, or `None` where
-/// the baseline holds none. It is what tells a reading past the bound on a
-/// noisy class apart from a bound the project stopped meeting (see
-/// [`excursion_ceiling`]); without it every such reading is the latter.
+/// `baseline` arrives whole for the same reason, one level up: the recorded
+/// value is what tells a reading past the bound on a noisy class apart from
+/// a bound the project stopped meeting (see [`excursion_ceiling`]), and it
+/// is looked up here under the measured cell's own id. Handing this function
+/// the recorded metrics directly would make "the wrong cell's numbers" and
+/// "no numbers at all" both spellable, and both are silent: the first
+/// re-sizes the ceiling from an unrelated cell, the second reverts the gate
+/// to its strict behavior, and neither fails a test that does not already
+/// know to look.
 #[must_use]
 pub fn check_cell(
     file: &BudgetFile,
     cell: &crate::baselines::MeasuredCell,
-    recorded: Option<&crate::baselines::CellMetrics>,
+    baseline: &crate::baselines::BaselineFile,
     class: &str,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> Vec<Finding> {
     let (scenario, fixture) = (cell.id.scenario.as_str(), cell.id.fixture.as_str());
+    let recorded = baseline.cell(&cell.id);
     let mut findings = Vec::new();
     for (metric, &measured) in &cell.metrics {
         let Some(budget) = find_budget(file, scenario, metric, class) else {
@@ -456,30 +514,33 @@ pub fn check_cell(
                 None => {
                     match excursion_ceiling(scenario, metric, budget.max, recorded, headroom_table)
                     {
-                        Some((recorded, ceiling)) if measured <= ceiling => {
-                            Verdict::Excursion { recorded, ceiling }
+                        Some((headroom, recorded, ceiling)) if measured <= ceiling => {
+                            Verdict::Excursion {
+                                recorded,
+                                ceiling,
+                                headroom,
+                            }
                         }
                         _ => Verdict::New,
                     }
                 }
                 Some(shortfall) => {
-                    let ceiling = shortfall_ceiling(
+                    match shortfall_ceiling(
                         scenario,
                         metric,
                         class,
                         shortfall.accepted,
                         headroom_table,
-                    );
-                    if measured > ceiling {
-                        Verdict::Widened {
+                    ) {
+                        Some((headroom, ceiling)) if measured > ceiling => Verdict::Widened {
                             accepted: shortfall.accepted,
                             ceiling,
-                        }
-                    } else {
-                        Verdict::Held {
+                            headroom,
+                        },
+                        _ => Verdict::Held {
                             accepted: shortfall.accepted,
                             why: shortfall.why.clone(),
-                        }
+                        },
                     }
                 }
             }
@@ -578,8 +639,27 @@ mod tests {
         parse(text, "test").unwrap()
     }
 
-    /// [`super::check_cell`] with no measured per-class headroom and no
-    /// recorded cell, so every case below reads against the policy defaults
+    /// A baseline holding one cell, or an empty one when `recorded` is
+    /// `None`.
+    fn baseline_with(
+        scenario: &str,
+        fixture: &str,
+        recorded: Option<&CellMetrics>,
+    ) -> crate::baselines::BaselineFile {
+        let mut file = crate::baselines::BaselineFile::new("test-class", "v0");
+        if let Some(recorded) = recorded {
+            file.cells.insert(
+                scenario.to_string(),
+                [(fixture.to_string(), recorded.clone())]
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        file
+    }
+
+    /// [`super::check_cell`] with no measured per-class headroom and an
+    /// empty baseline, so every case below reads against the policy defaults
     /// and the strict outside-budget rule. The override paths have their own
     /// tests rather than being threaded through all of them.
     fn check_cell(
@@ -595,7 +675,7 @@ mod tests {
                 id: crate::baselines::CellId::new(scenario, fixture),
                 metrics: metrics.clone(),
             },
-            None,
+            &baseline_with(scenario, fixture, None),
             class,
             &crate::baselines::HeadroomTable::new(),
         )
@@ -618,12 +698,13 @@ why = \"because\"
 "
         ));
         let measured = measured_cell("echo", "minimal", &[("view_p99_ms", 10.0)]);
+        let baseline = baseline_with("echo", "minimal", None);
         // default ABSOLUTE_HEADROOM 1.5 admits 13.5
         assert!(matches!(
             super::check_cell(
                 &file,
                 &measured,
-                None,
+                &baseline,
                 "controlled-linux",
                 &crate::baselines::HeadroomTable::new()
             )[0]
@@ -634,7 +715,7 @@ why = \"because\"
         let tight: crate::baselines::HeadroomTable =
             [("view_p99_ms".to_string(), 1.05)].into_iter().collect();
         assert!(matches!(
-            super::check_cell(&file, &measured, None, "controlled-linux", &tight)[0].verdict,
+            super::check_cell(&file, &measured, &baseline, "controlled-linux", &tight)[0].verdict,
             Verdict::Widened { .. }
         ));
     }
@@ -736,7 +817,7 @@ max = 30.0
         super::check_cell(
             &file,
             &measured_cell("first_paint", "minimal", &[("marker_cold_ms", measured)]),
-            recorded.as_ref(),
+            &baseline_with("first_paint", "minimal", recorded.as_ref()),
             "dev-linux",
             table,
         )[0]
@@ -744,7 +825,99 @@ max = 30.0
         .clone()
     }
 
-    /// A characterised class does not loosen the bound itself: a reading
+    /// The tolerance must survive the run-level walk the gate actually
+    /// calls, reading the recorded value out of the baseline under each
+    /// cell's own id. This is the wiring no per-cell test can see: hand the
+    /// walk a baseline and it must still reach `Excursion`, and it must
+    /// size the ceiling from the cell it is checking rather than from a
+    /// sibling that records a different value for the same metric.
+    ///
+    /// Disconfirm: a walk that stops consulting the baseline returns `New`
+    /// for the first cell; one that reads any fixed or wrong cell's metrics
+    /// gives `minimal` the heavy fixture's 40.0 recorded value, and the
+    /// asserted `recorded`/`ceiling` pair fails.
+    #[test]
+    fn the_run_walk_reaches_an_excursion_with_each_cell_own_recorded_value() {
+        let file = file_from(COLD_START_BUDGET);
+        let mut baseline = crate::baselines::BaselineFile::new("dev-linux", "v0");
+        baseline.cells.insert(
+            "first_paint".to_string(),
+            [
+                (
+                    "minimal".to_string(),
+                    metrics(&[("marker_cold_ms", COLD_START_RECORDED)]),
+                ),
+                ("heavy".to_string(), metrics(&[("marker_cold_ms", 20.0)])),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let measured = [
+            measured_cell("first_paint", "minimal", &[("marker_cold_ms", 34.0)]),
+            measured_cell("first_paint", "heavy", &[("marker_cold_ms", 34.0)]),
+        ];
+
+        let findings = check_run(&file, &baseline, &measured, "dev-linux", &characterized());
+        assert_eq!(findings.len(), 2);
+        assert_eq!(
+            findings[0].verdict,
+            Verdict::Excursion {
+                recorded: COLD_START_RECORDED,
+                ceiling: COLD_START_RECORDED * 2.0,
+                headroom: crate::baselines::Headroom::Proportional(2.0),
+            },
+            "the minimal cell must be sized by its own recorded 25.151"
+        );
+        assert_eq!(
+            findings[1].verdict,
+            Verdict::Excursion {
+                recorded: 20.0,
+                ceiling: 40.0,
+                headroom: crate::baselines::Headroom::Proportional(2.0),
+            },
+            "the heavy cell must be sized by its own recorded 20.0"
+        );
+    }
+
+    /// A signed metric's allowance carries an absolute floor sized for a
+    /// paired delta's jitter around a recorded value. Against a spec bound
+    /// that floor is a fixed band no published factor can shrink, so the
+    /// shape is refused outright and the strict rule stands.
+    ///
+    /// Disconfirm: without the refusal this returns `Excursion` with a
+    /// ceiling of 0.35 against a 0.10 bound -- a 3.5x tolerance bought by a
+    /// x1.01 measured spread.
+    #[test]
+    fn a_signed_metric_earns_no_excursion_however_tight_its_published_spread() {
+        let file = file_from(
+            r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "echo"
+metric = "paired_delta_p99_ms"
+max = 0.10
+"#,
+        );
+        let table: crate::baselines::HeadroomTable = [("paired_delta_p99_ms".to_string(), 1.01)]
+            .into_iter()
+            .collect();
+        let baseline = baseline_with(
+            "echo",
+            "minimal",
+            Some(&metrics(&[("paired_delta_p99_ms", 0.10)])),
+        );
+        let findings = super::check_cell(
+            &file,
+            &measured_cell("echo", "minimal", &[("paired_delta_p99_ms", 0.12)]),
+            &baseline,
+            "controlled-linux",
+            &table,
+        );
+        assert_eq!(findings[0].verdict, Verdict::New);
+    }
+
+    /// A characterized class does not loosen the bound itself: a reading
     /// inside it is inside it, with nothing tolerated and nothing reported.
     #[test]
     fn a_reading_inside_its_bound_is_inside_on_a_characterized_class() {
@@ -785,7 +958,8 @@ max = 30.0
             tolerated,
             Verdict::Excursion {
                 recorded: COLD_START_RECORDED,
-                ceiling
+                ceiling,
+                headroom: crate::baselines::Headroom::Proportional(2.0),
             }
         );
         assert!(!tolerated.is_failure());
@@ -796,7 +970,7 @@ max = 30.0
         assert!(past.is_failure());
     }
 
-    /// A default allowance is a guess about a host nobody characterised.
+    /// A default allowance is a guess about a host nobody characterized.
     /// Letting one earn the tolerance would widen every spec bound on every
     /// class by 50% at a stroke, so a class with no published spread for the
     /// statistic keeps the strict rule exactly.
@@ -845,11 +1019,16 @@ max = 30.0
             verdict: Verdict::Excursion {
                 recorded: COLD_START_RECORDED,
                 ceiling: COLD_START_RECORDED * 2.0,
+                headroom: crate::baselines::Headroom::Proportional(2.0),
             },
         }
         .to_string();
         assert!(line.starts_with("BUDGET EXCURSION"), "{line}");
         assert!(line.contains("past spec 30.000"), "{line}");
+        assert!(
+            line.contains("x headroom 2"),
+            "the line must name the factor that produced the ceiling: {line}"
+        );
         assert!(line.contains("50.302"), "{line}");
         assert!(line.contains("25.151"), "{line}");
         assert!(!line.contains("budget OK"), "{line}");
@@ -957,7 +1136,10 @@ why = \"because\"
             widened,
             Verdict::Widened {
                 accepted: 9.0,
-                ceiling: 13.5
+                ceiling: 13.5,
+                headroom: crate::baselines::Headroom::Proportional(
+                    crate::baselines::ABSOLUTE_HEADROOM
+                ),
             }
         );
         assert!(widened.is_failure());

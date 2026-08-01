@@ -52,8 +52,15 @@ ratio_p50 = 1.06
 # half-width agrees across fixtures: minimal median 23.6 ms, half-width
 # 42.3%; heavy median 84.4 ms, half-width 42.1%. Worst excursion above the
 # recorded value 1.91x (151.206 against heavy's recorded 79.267); the 2x
-# half-width rule asks 1.85x. 2.0 clears both. The minimal fixture's spec
-# budget of 30 ms sits far under this ratchet ceiling and stays the bar
-# that actually fires there. Scoped to first_paint for the same reason as
-# shell_visible_ms.
+# half-width rule asks 1.85x. 2.0 clears both. Scoped to first_paint for the
+# same reason as shell_visible_ms.
+#
+# This factor reaches further than the others: the minimal fixture's spec
+# budget of 30 ms sits under this ratchet ceiling (25.151 x 2.0 = 50.301),
+# and marker_cold_ms is not tail-exempt, so the budget gate reads this entry
+# too. A reading in (30.0, 50.301] on that cell is reported as an excursion
+# rather than failed, which makes 50.301 the value both gates fail at.
+# Changing this number therefore moves a spec bound's effective firing
+# point, not only the regression bar -- size it from the replicates, never
+# from what would be convenient for a run to pass.
 "first_paint.marker_cold_ms" = 2.0

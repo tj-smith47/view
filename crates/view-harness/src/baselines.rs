@@ -54,7 +54,7 @@ pub const SUPPORTED_SCHEMA: u32 = 1;
 /// regimes whose absolute tails swung x300.
 ///
 /// **1.25 is deliberately conservative and is not a target.** Where a
-/// class has characterised the spread it should say so in its headroom
+/// class has characterized the spread it should say so in its headroom
 /// sidecar (see [`HeadroomTable`]) rather than inherit this:
 /// dev-linux measured `ratio_p50` to a 1.70% half-width over eight
 /// replicates spanning host loads 0.44 to 8.53, so 1.25 admitted a 25%
@@ -238,11 +238,21 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// statistics gate there under the standard ratio headroom, and the spec
 /// p99 budget gets a real bar instead of a reference number.
 ///
-/// Lifting an exemption is a change to this function and nothing else. A
-/// measured `[headroom]` entry resizes an allowance that already exists and
-/// cannot restore one this returns `None` for (see [`headroom_for`]), so
-/// giving a shared class an entry for `cadence_p99_ratio` leaves it ungated
-/// there however well its spread has been characterized.
+/// Lifting an exemption *for the ratchet* is a change to this function and
+/// nothing else. A measured `[headroom]` entry resizes an allowance that
+/// already exists and cannot restore one this returns `None` for (see
+/// [`headroom_for`]), so giving a shared class an entry for
+/// `cadence_p99_ratio` leaves the recorded-value ratchet ungated there
+/// however well its spread has been characterized.
+///
+/// The exemption does not reach the budget gate, and a published factor is
+/// read there whatever this function returns (see [`declared_headroom`]).
+/// For a tail-derived metric that carries a spec budget, adding a sidecar
+/// entry alone therefore changes a verdict with no edit here: it opens a
+/// tolerated band between the bound and the recorded value under that
+/// factor. The band can only loosen an existing hard failure, never create
+/// one, which is why the two gates are allowed to disagree about the
+/// exemption at all.
 #[must_use]
 pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     let factor = if metric.contains("ratio") {
@@ -319,12 +329,25 @@ fn resized(policy: Headroom, factor: f64) -> Headroom {
 ///   measurement must use it.
 /// - This answers "how far is this number known to move on this host",
 ///   which only a measurement can say. A default is a guess, so absence is
-///   reported as absence rather than as a plausible number, and the
-///   shared-class exemption does not apply: that exemption is about a
-///   *recorded value* being too load-dependent to make a bar out of, while
-///   a published factor is exactly the load-dependence, measured. A caller
-///   holding a bound that does not come from a recorded value can act on
-///   the spread without the exemption applying to it.
+///   reported as absence rather than as a plausible number.
+///
+/// The shared-class tail exemption is deliberately not applied, and the
+/// warrant for that is narrow. It is *not* that the value returned here is
+/// somehow independent of a recorded measurement -- the one caller does
+/// build its ceiling as `bar(recorded)`, on exactly the load-dependent
+/// recorded value the exemption distrusts. It is that the caller uses that
+/// ceiling only to *withdraw* a failure it would otherwise report: entry is
+/// conditional on the measurement already being outside a bound that does
+/// not come from any measurement, and anything past the ceiling returns the
+/// same verdict it had before. A mis-sized ceiling can therefore only
+/// mis-size a tolerance, never manufacture a breach, and its worst case is
+/// bounded by the bound itself times the factor.
+///
+/// That is a property of the caller, not of this function, so any future
+/// caller must re-establish it. Building a hard bar -- anything that can
+/// turn a pass into a failure -- out of a shared-class tail on the strength
+/// of this value is what the exemption exists to forbid, and nothing here
+/// licenses it.
 ///
 /// The returned policy carries the metric's own shape, so a signed paired
 /// delta still gets its floor rather than a proportional allowance that
@@ -542,7 +565,7 @@ pub enum BaselineError {
 /// default from [`gate_headroom`].
 ///
 /// A default is a guess about how much a number moves between runs on a
-/// host nobody has characterised. An entry here is that number, measured.
+/// host nobody has characterized. An entry here is that number, measured.
 /// Absence is therefore meaningful and is not a gap to be filled with a
 /// plausible value: it says this metric's spread on this class has not been
 /// established, so it gates on the conservative default until it has.
@@ -589,7 +612,7 @@ pub fn headroom_path(baseline_path: &Path) -> std::path::PathBuf {
 
 /// Loads the measured-headroom sidecar at `path` for `class`.
 ///
-/// A missing file is the legitimate "nothing characterised yet" state and
+/// A missing file is the legitimate "nothing characterized yet" state and
 /// loads as an empty table; every metric then gates on its policy default.
 ///
 /// # Errors
@@ -639,7 +662,7 @@ pub fn load_headroom(path: &Path, class: &str) -> Result<HeadroomTable, Baseline
 /// in force when none is. That is the one way the table can lie, so it is
 /// checked against every baseline the table is about to be used with --
 /// including the one a record is about to write, so a record that drops the
-/// last cell measuring a characterised metric refuses instead of orphaning
+/// last cell measuring a characterized metric refuses instead of orphaning
 /// the entry.
 ///
 /// # Errors
@@ -1569,7 +1592,7 @@ mod tests {
         std::fs::remove_file(&sidecar).unwrap();
         assert!(
             load_headroom(&sidecar, "dev-linux").unwrap().is_empty(),
-            "no sidecar means nothing characterised, which loads as an empty table"
+            "no sidecar means nothing characterized, which loads as an empty table"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1952,7 +1975,7 @@ mod tests {
     /// own scenario exactly as it does for the ratchet's allowance.
     ///
     /// Disconfirm: falling back to the policy default here would report every
-    /// uncharacterised metric on every class as measured at 1.25 or 1.5, and
+    /// uncharacterized metric on every class as measured at 1.25 or 1.5, and
     /// the second assertion fails.
     #[test]
     fn a_declared_headroom_is_reported_only_where_the_class_published_one() {
@@ -1970,7 +1993,7 @@ mod tests {
         assert_eq!(
             declared_headroom(&table, "echo", "view_p99_ms"),
             None,
-            "an uncharacterised statistic reports absence, never a default"
+            "an uncharacterized statistic reports absence, never a default"
         );
         assert_eq!(
             declared_headroom(&table, "echo", "ratio_p50"),

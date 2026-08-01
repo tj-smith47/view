@@ -441,11 +441,16 @@ unifying the input thread with the runtime loop, incremental rendering, or
 both -- or does the project accept ~1.17x typing through P4 and revisit
 later? All are defensible; the evidence sizes them but does not decide it.
 
-**A caveat that outlives this pitch:** every criterion micro-bench in the
-repo measures the hot state. They are sound relative instruments and wrong
-as absolute costs, by roughly the factor above. Task 29 gives the rest of
-them cold variants; until it lands, do not quote a hot number as what a
-keystroke pays.
+**A caveat that outlives this pitch, now resolved (2026-08-01,
+`c215405`+`fc8186c`):** every criterion micro-bench carries a hot/cold
+pair — paint_frame, render_frame, damage_fold (2.48x residency factor),
+grid_apply, update_key — hot as the relative instrument, cold (10ms idle
+gap, only the work timed) as the absolute cost a keystroke pays.
+input_handoff is differently-shaped evidence: not a criterion bench, it
+sweeps idle gaps 50µs–10ms directly, and its published factor compares a
+50µs proxy row to the 10ms row, not a true 0-gap hot. Numbers:
+`.superpowers/sdd/task10-cold-bench-report.md`. Quote cold numbers as
+absolute costs, hot only for deltas.
 
 ---
 

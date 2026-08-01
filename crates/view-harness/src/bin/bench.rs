@@ -983,7 +983,7 @@ fn main() -> Result<()> {
         let plan = baselines::plan_record(existing, mode, &cli.class, &pin, &measured, &headroom);
         // checked against the file about to be written, not the one being
         // replaced: a record that drops the last cell measuring a
-        // characterised metric must refuse rather than orphan the sidecar
+        // characterized metric must refuse rather than orphan the sidecar
         // entry and fail the next load
         baselines::require_headroom_bound(&headroom, &plan.file, &headroom_file)?;
         baselines::save(&path, &plan.file)?;
@@ -1075,16 +1075,7 @@ fn main() -> Result<()> {
                 budget_path.display()
             )
         })?;
-        let mut findings = Vec::new();
-        for cell in &measured {
-            findings.extend(budgets::check_cell(
-                &budget_file,
-                cell,
-                file.cell(&cell.id),
-                &cli.class,
-                &headroom,
-            ));
-        }
+        let findings = budgets::check_run(&budget_file, &file, &measured, &cli.class, &headroom);
         let budget_failures = findings
             .iter()
             .filter(|finding| finding.verdict.is_failure())
@@ -1150,10 +1141,17 @@ fn main() -> Result<()> {
                 .iter()
                 .filter(|finding| matches!(finding.verdict, budgets::Verdict::Excursion { .. }))
                 .count();
+            // a class with an empty headroom table has published no spread
+            // for anything, so a count "inside this class's measured spread"
+            // would be a sentence about a quantity that does not exist there
+            let spread = if headroom.is_empty() {
+                String::new()
+            } else {
+                format!(", {excursions} reading(s) past spec inside this class's measured spread")
+            };
             println!(
                 "gate OK: {} cell(s) within recorded bars, {} metric(s) checked against spec 3.1 \
-                 budgets, {held} accepted shortfall(s) still held, {excursions} reading(s) past \
-                 spec inside this class's measured spread",
+                 budgets, {held} accepted shortfall(s) still held{spread}",
                 measured.len(),
                 findings.len()
             );
