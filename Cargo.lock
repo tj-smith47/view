@@ -2041,6 +2041,7 @@ dependencies = [
  "thiserror 2.0.18",
  "view-core",
  "view-engine",
+ "windows-sys",
 ]
 
 [[package]]

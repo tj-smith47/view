@@ -15,6 +15,10 @@ mod tap;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_peer;
 pub mod ui_events;
+// the engine's stdin channel has to be built a particular way on Windows for
+// the outbox's inline path to be able to ask about it at all
+#[cfg(windows)]
+mod winpipe;
 mod wire;
 
 pub use damage::{DamagePump, SinkCutover};

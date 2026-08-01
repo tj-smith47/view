@@ -1608,6 +1608,10 @@ mod tests {
     // "observe positive evidence before proceeding" standard the fix under
     // test applies to the real pty channel applies here to the test's own
     // synchronization with its fake target.
+    // Gated with the tests that block on it: both fake targets are shell
+    // scripts driven over a pty, which exists on unix alone, so off unix
+    // this helper would have no caller and would fail the dead-code gate.
+    #[cfg(unix)]
     fn wait_for_ready_marker(session: &mut CompatSession, marker: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !session.pty().screen().contains(marker) {

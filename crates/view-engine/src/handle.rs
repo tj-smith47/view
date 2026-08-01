@@ -201,7 +201,7 @@ impl EngineHandle {
             writer,
             None,
             Some(notif_tx),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             None,
         );
         (handle, notif_rx)
@@ -231,14 +231,14 @@ impl EngineHandle {
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         pump: Arc<PumpShared>,
-        #[cfg(unix)] pipe: Option<std::os::fd::OwnedFd>,
+        #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
         Self::start_with_pipe(
             reader,
             writer,
             Some(pump),
             None,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             pipe,
         )
     }
@@ -248,14 +248,14 @@ impl EngineHandle {
         writer: impl Write + Send + 'static,
         pump: Option<Arc<PumpShared>>,
         notif_tx: Option<mpsc::Sender<EngineNotification>>,
-        #[cfg(unix)] pipe: Option<std::os::fd::OwnedFd>,
+        #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
         let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
         let outbox = Arc::new(crate::outbox::Outbox::new(
             Box::new(writer),
             write_tx,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             pipe,
         ));
 
@@ -768,7 +768,7 @@ mod tests {
             our_read,
             our_write,
             Arc::clone(&pump),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             None,
         );
         (h, pump, peer_read, peer_write)

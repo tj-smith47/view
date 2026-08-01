@@ -383,7 +383,19 @@ impl Engine {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
         }
-        let mut guard = ChildGuard(Some(build_command(&cfg).spawn()?));
+        let mut command = build_command(&cfg);
+        // the stdin `Stdio::piped()` would build on Windows is opened without
+        // the right to read its own attributes, which is the right the
+        // outbox's readiness query needs, and no later call can widen it. A
+        // pipe built here answers that query; the child is handed its read
+        // end and cannot tell the difference.
+        #[cfg(windows)]
+        let our_stdin = {
+            let (theirs, ours) = crate::winpipe::child_stdin_pipe()?;
+            command.stdin(Stdio::from(theirs));
+            ours
+        };
+        let mut guard = ChildGuard(Some(command.spawn()?));
         // unreachable ok_or: nothing clears guard.0 before this point
         let child = guard
             .0
@@ -393,6 +405,7 @@ impl Engine {
             .stdout
             .take()
             .ok_or_else(|| EngineError::Io(std::io::Error::other("stdout pipe not captured")))?;
+        #[cfg(not(windows))]
         let stdin = child
             .stdin
             .take()
@@ -410,7 +423,17 @@ impl Engine {
             let pipe = stdin.as_fd().try_clone_to_owned().ok();
             EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump), pipe)
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let handle = {
+            let pipe = our_stdin.try_clone().ok();
+            EngineHandle::start_pumped(
+                stdout,
+                std::fs::File::from(our_stdin),
+                Arc::clone(&pump),
+                pipe,
+            )
+        };
+        #[cfg(not(any(unix, windows)))]
         let handle = EngineHandle::start_pumped(stdout, stdin, Arc::clone(&pump));
         let api_info = decode_api_info(handle.request_timeout(
             "nvim_get_api_info",

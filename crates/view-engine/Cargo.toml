@@ -73,7 +73,22 @@ rustix = { version = "1", default-features = false, features = [
     "time",
     "event",
     "fs",
-    # a real pipe is the only configuration in which the outbox's inline
-    # path is live, so the ordering proof cannot be written without one
+    # PIPE_BUF is the size half of what makes an inline write safe on unix
     "pipe",
+] }
+
+# Windows-only, and not optional for the same reason rustix is not: the
+# inline path's readiness answer is `WriteQuotaAvailable` from
+# NtQueryInformationFile, and the pipe that can answer it has to be built by
+# CreatePipe rather than left to Stdio::piped() (see engine::winpipe).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    # CreatePipe takes a SECURITY_ATTRIBUTES pointer, so windows-sys gates the
+    # binding on this feature as well as on Win32_System_Pipes; without it the
+    # crate builds only while some other dependency happens to ask for it.
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
 ] }

@@ -57,6 +57,17 @@ use std::sync::{mpsc, Mutex, PoisonError, TryLockError};
 #[cfg(unix)]
 const MAX_INLINE_WRITE: usize = rustix::pipe::PIPE_BUF;
 
+/// The second handle on the engine pipe, held so the inline path can ask
+/// about writability without borrowing the writer it would then write
+/// through.
+#[cfg(unix)]
+pub(crate) type PipeHandle = std::os::fd::OwnedFd;
+
+/// Windows: the same second handle, on the write end this process created
+/// for the child's stdin (see [`crate::winpipe`]).
+#[cfg(windows)]
+pub(crate) type PipeHandle = std::os::windows::io::OwnedHandle;
+
 /// The write side of an engine connection.
 pub(crate) struct Outbox {
     /// Serializes writers against each other. Held across a write by
@@ -95,15 +106,15 @@ pub(crate) struct Outbox {
     /// writability. `None` disables the fast path entirely, which is the
     /// correct behaviour for a writer that is not a pollable pipe (every
     /// in-process test sink) and for platforms without the guarantee.
-    #[cfg(unix)]
-    pipe: Option<std::os::fd::OwnedFd>,
+    #[cfg(any(unix, windows))]
+    pipe: Option<PipeHandle>,
 }
 
 impl Outbox {
     pub(crate) fn new(
         writer: Box<dyn Write + Send>,
         tx: mpsc::Sender<Vec<u8>>,
-        #[cfg(unix)] pipe: Option<std::os::fd::OwnedFd>,
+        #[cfg(any(unix, windows))] pipe: Option<PipeHandle>,
     ) -> Self {
         Self {
             writer: Mutex::new(writer),
@@ -112,7 +123,7 @@ impl Outbox {
             took_thread: AtomicUsize::new(0),
             wrote: AtomicU64::new(0),
             tx,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             pipe,
         }
     }
@@ -225,10 +236,10 @@ impl Outbox {
     /// How many messages went inline and how many went to the writer
     /// thread, in that order.
     ///
-    /// Unix as well as test: the inline path exists only there, so every
-    /// reader of this is unix-gated and on Windows the method would have
-    /// none at all.
-    #[cfg(all(test, unix))]
+    /// Gated on a platform that has an inline path as well as on `test`:
+    /// where there is none, every reader of this would be gated away too
+    /// and the method would be dead.
+    #[cfg(all(test, any(unix, windows)))]
     pub(crate) fn path_counts(&self) -> (usize, usize) {
         (
             self.took_inline.load(Ordering::Relaxed),
@@ -263,9 +274,41 @@ impl Outbox {
         }
     }
 
-    /// Off unix there is no portable "can this write complete now" answer,
-    /// so every message goes to the writer thread exactly as before.
-    #[cfg(not(unix))]
+    /// Whether the pipe has already said it can take `len` bytes now.
+    ///
+    /// Windows reports free buffer space as a byte count rather than as a
+    /// readiness bit, so the answer is about this message rather than about
+    /// a platform-fixed bound, and no `PIPE_BUF`-style size cap belongs
+    /// beside it: a blocking-mode write waits only when the buffer cannot
+    /// take the bytes still to go, so a quota of at least `len` promises
+    /// the whole message fits. What an accepted answer can commit the
+    /// caller to is bounded anyway, since a quota can never exceed the
+    /// pipe's own 64 KiB buffer.
+    ///
+    /// Asking does not wait, but only because of where it is asked from. A
+    /// synchronous pipe file object queues every operation behind the one
+    /// in flight, so a query raised while another thread sat inside a write
+    /// to a full pipe would block until that write finished.
+    /// [`Self::send`] asks while holding [`Self::writer`] -- the lock every
+    /// write to this pipe is made under -- so there is never an operation
+    /// in flight for the query to queue behind.
+    #[cfg(windows)]
+    fn can_write_inline(&self, len: usize) -> bool {
+        let Some(pipe) = &self.pipe else {
+            return false;
+        };
+        crate::winpipe::write_quota(pipe)
+            .and_then(|free| usize::try_from(free).ok())
+            .is_some_and(|free| free >= len)
+    }
+
+    /// Whether the pipe has already said it can take `len` bytes now.
+    ///
+    /// Neither unix's readiness poll nor the Windows write quota exists
+    /// here, and a write started without one of those answers could park
+    /// the caller on a full pipe, so every message goes to the writer
+    /// thread exactly as it did before the fast path existed.
+    #[cfg(not(any(unix, windows)))]
     #[allow(clippy::unused_self)]
     fn can_write_inline(&self, _len: usize) -> bool {
         false
@@ -319,7 +362,7 @@ mod tests {
         let outbox = Arc::new(Outbox::new(
             Box::new(sink),
             tx,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             None,
         ));
         let writer = Arc::clone(&outbox);
@@ -371,7 +414,7 @@ mod tests {
         let outbox = Arc::new(Outbox::new(
             Box::new(sink),
             tx,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             None,
         ));
         let writer = Arc::clone(&outbox);
@@ -423,7 +466,7 @@ mod tests {
         let outbox = Outbox::new(
             Box::new(sink.clone()),
             tx,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             None,
         );
         assert!(outbox.send(vec![1]));
@@ -450,23 +493,22 @@ mod tests {
     /// Under `PIPE_BUF` on every unix, which is 512 on some and not the
     /// 4096 Linux uses: a pipe that answers "writable" is only promised to
     /// hold `PIPE_BUF` more bytes, and a message above that could block the
-    /// test's own inline write instead of measuring the outbox.
-    #[cfg(unix)]
+    /// test's own inline write instead of measuring the outbox. Windows
+    /// answers in bytes rather than in blocks, so the same frame needs no
+    /// bound of its own there.
     const MESSAGE_LEN: usize = 64;
 
     /// Bytes a fill loop will push before declaring the pipe unfillable.
     ///
-    /// Well past the largest pipe capacity in play (64 KiB by default on
-    /// Linux and macOS alike). Reaching it means `poll` never withheld
-    /// writability, so no message was ever handed to the writer thread and
-    /// the run cannot say anything about ordering between the two paths --
-    /// a result to report loudly, not to keep sending through.
-    #[cfg(unix)]
+    /// Well past the largest pipe capacity in play (64 KiB on every
+    /// platform here). Reaching it means the pipe never once refused a
+    /// message, so nothing was handed to the writer thread and the run
+    /// cannot say anything about ordering between the two paths -- a result
+    /// to report loudly, not to keep sending through.
     const FILL_CEILING: usize = 4 << 20;
 
     /// Seconds a test will wait on the pipe for bytes that were sent.
-    #[cfg(unix)]
-    const READ_WAIT_SECS: i64 = 30;
+    const READ_WAIT_SECS: u64 = 30;
 
     /// Sends messages until one is handed to the writer thread, returning
     /// every byte sent.
@@ -476,7 +518,6 @@ mod tests {
     /// `poll` stops reporting writability, and that first refusal is a
     /// hand-off that has provably happened -- no scheduling decision, and
     /// no reader that happens to keep up, can take it away afterwards.
-    #[cfg(unix)]
     fn fill_until_handed_off(outbox: &Outbox) -> Vec<u8> {
         fill_until_handed_off_with(outbox, |n| {
             vec![u8::try_from(n % 251).unwrap_or(0); MESSAGE_LEN]
@@ -485,7 +526,6 @@ mod tests {
 
     /// The same fill over messages a caller builds, for tests that need to
     /// tell one sender's bytes from another's afterwards.
-    #[cfg(unix)]
     fn fill_until_handed_off_with(
         outbox: &Outbox,
         mut message: impl FnMut(usize) -> Vec<u8>,
@@ -514,44 +554,44 @@ mod tests {
     ///
     /// A pipe read has no timeout of its own, so a defect that leaves bytes
     /// unwritten would stall the whole suite on a blocked `read` rather than
-    /// naming itself. Running out of patience is a failure, not a retry.
-    #[cfg(unix)]
+    /// naming itself. The read therefore runs on a thread of its own, over
+    /// a second handle on the read end, and running out of patience is a
+    /// failure rather than a retry. The count of bytes that did arrive is
+    /// published as they land, so a run that goes quiet halfway reports
+    /// where it stopped rather than only that it stopped.
     fn read_exactly(pipe: &std::fs::File, len: usize) -> Vec<u8> {
-        use rustix::event::{poll, PollFd, PollFlags};
         use std::io::Read;
 
-        let mut got: Vec<u8> = Vec::with_capacity(len);
-        let mut buf = vec![0_u8; len];
-        while got.len() < len {
-            let mut fds = [PollFd::new(pipe, PollFlags::IN)];
-            let ready = poll(
-                &mut fds,
-                Some(&rustix::event::Timespec {
-                    tv_sec: READ_WAIT_SECS,
-                    tv_nsec: 0,
-                }),
-            )
-            .expect("poll the read end");
-            assert!(
-                ready > 0,
-                "the pipe delivered {} of {len} bytes and then went quiet",
-                got.len()
-            );
-            let remaining = len - got.len();
-            let mut source = pipe;
-            let n = source.read(&mut buf[..remaining]).expect("read the pipe");
-            assert!(
-                n > 0,
-                "the write end closed after {} of {len} bytes",
-                got.len()
-            );
-            got.extend_from_slice(&buf[..n]);
-        }
+        let mut source = pipe.try_clone().expect("a second handle on the read end");
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let reader_delivered = Arc::clone(&delivered);
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut got: Vec<u8> = Vec::with_capacity(len);
+            let mut buf = vec![0_u8; len];
+            while got.len() < len {
+                let remaining = len - got.len();
+                match source.read(&mut buf[..remaining]) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => got.extend_from_slice(&buf[..n]),
+                }
+                reader_delivered.store(got.len(), Ordering::Relaxed);
+            }
+            let _ = tx.send(got);
+        });
+        let got = rx
+            .recv_timeout(std::time::Duration::from_secs(READ_WAIT_SECS))
+            .unwrap_or_default();
+        assert_eq!(
+            got.len(),
+            len,
+            "the pipe delivered {} of {len} bytes and then went quiet",
+            delivered.load(Ordering::Relaxed)
+        );
         got
     }
 
     /// Bytes of context shown either side of a byte-stream divergence.
-    #[cfg(unix)]
     const DIVERGENCE_WINDOW: usize = 3 * MESSAGE_LEN;
 
     /// Asserts two byte streams match, reporting the first byte they differ
@@ -561,7 +601,6 @@ mod tests {
     /// prints both operands in full: the single index that identifies the
     /// reordering ends up buried in megabytes of test output that has to be
     /// searched before the failure can be read at all.
-    #[cfg(unix)]
     fn assert_same_bytes(seen: &[u8], expected: &[u8], what: &str) {
         assert_eq!(
             seen.len(),
@@ -587,17 +626,37 @@ mod tests {
         );
     }
 
+    /// A pipe pair to build an outbox over: the read end first, the write
+    /// end second.
+    ///
+    /// Windows builds it the way a spawn does, because how the pipe was
+    /// built is exactly what decides whether the readiness query can answer
+    /// on it; on unix any kernel pipe behaves as the engine's does.
+    #[cfg(unix)]
+    fn engine_pipe() -> (PipeHandle, PipeHandle) {
+        let (read_end, write_end) = std::io::pipe().expect("pipe");
+        (PipeHandle::from(read_end), PipeHandle::from(write_end))
+    }
+
+    /// A pipe pair to build an outbox over: the read end first, the write
+    /// end second.
+    #[cfg(windows)]
+    fn engine_pipe() -> (PipeHandle, PipeHandle) {
+        crate::winpipe::child_stdin_pipe().expect("pipe")
+    }
+
     /// Builds an outbox over a real pipe, returning it with the read end and
     /// the queue the writer thread would drain.
-    #[cfg(unix)]
     fn outbox_on_a_pipe() -> (Arc<Outbox>, std::fs::File, mpsc::Receiver<Vec<u8>>) {
-        let (read_end, write_end) = rustix::pipe::pipe().expect("pipe");
-        let dup: std::os::fd::OwnedFd = write_end.try_clone().expect("dup the write end");
+        let (read_end, write_end) = engine_pipe();
+        let second = write_end
+            .try_clone()
+            .expect("a second handle on the write end");
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
         let outbox = Arc::new(Outbox::new(
             Box::new(std::fs::File::from(write_end)),
             tx,
-            Some(dup),
+            Some(second),
         ));
         (outbox, std::fs::File::from(read_end), rx)
     }
@@ -614,7 +673,6 @@ mod tests {
     /// it, and only [`Outbox`]'s own hand-off gate can hold it back. Remove
     /// that gate and the two assertions below fire on every run rather than
     /// on a lucky one.
-    #[cfg(unix)]
     #[test]
     fn a_backlogged_pipe_keeps_order_while_both_paths_are_live() {
         let (outbox, reader, rx) = outbox_on_a_pipe();
@@ -682,7 +740,6 @@ mod tests {
     /// reading it, so a hand-off is a fact before the reader thread exists;
     /// what the contention that follows decides is only which path each
     /// later message takes, never whether both paths ran at all.
-    #[cfg(unix)]
     #[test]
     fn both_paths_keep_order_while_a_reader_drains_concurrently() {
         use std::io::Read;
@@ -739,15 +796,12 @@ mod tests {
 
     /// Sends made once the pipe is live and a reader is draining it, enough
     /// for the two paths to interleave many times over.
-    #[cfg(unix)]
     const CONTENDED_MESSAGES: usize = 20_000;
 
     /// Caller threads sending into one outbox at once.
-    #[cfg(unix)]
     const CONTENDING_CALLERS: u8 = 2;
 
     /// Messages each contending caller sends per round.
-    #[cfg(unix)]
     const MESSAGES_PER_CALLER: u64 = 20_000;
 
     /// Nanoseconds a contending caller leaves between its sends, one round
@@ -764,16 +818,15 @@ mod tests {
     /// so the rate is swept rather than chosen. A host too slow to keep a
     /// pace falls back to sending flat out, which is a covered round rather
     /// than a failure.
-    #[cfg(unix)]
     const CALLER_GAPS_NANOS: [u64; 3] = [0, 2_000, 5_000];
 
     /// Stamps a message with its sender and that sender's position in its own
     /// stream, in a fixed-width frame a reader can split without a parser.
     ///
-    /// Every frame is under `PIPE_BUF`, and a pipe write of at most that many
-    /// bytes is atomic on both paths, so a frame reaches the reader whole and
-    /// the split is a division rather than a guess.
-    #[cfg(unix)]
+    /// Every write to the pipe is made under one lock and completed before
+    /// that lock is released, on the inline path as on the writer thread's,
+    /// so the stream a reader sees is whole frames in order and the split is
+    /// a division rather than a guess.
     fn stamped(caller: u8, seq: u64) -> Vec<u8> {
         let mut bytes = vec![caller; MESSAGE_LEN];
         bytes[1..9].copy_from_slice(&seq.to_le_bytes());
@@ -789,7 +842,6 @@ mod tests {
     /// caller's *next* send would find the gate open and go inline past the
     /// message it just queued. Nothing about cross-caller order is asserted,
     /// because concurrent senders establish none.
-    #[cfg(unix)]
     #[test]
     fn each_callers_own_messages_keep_their_order_while_two_callers_contend() {
         for gap in CALLER_GAPS_NANOS {
@@ -798,7 +850,6 @@ mod tests {
     }
 
     /// One round of the two-caller ordering check, at one send rate.
-    #[cfg(unix)]
     fn two_callers_keep_their_own_order(gap_nanos: u64) {
         use std::io::Read;
 
@@ -913,6 +964,41 @@ mod tests {
             (1, 1),
             "one byte past the atomic-write size the pipe's answer stops \
              being binding, and an inline write could block the caller"
+        );
+    }
+
+    /// The same bound where Windows draws it. The quota answers in bytes,
+    /// so the cutoff is the pipe's own buffer rather than a fixed constant:
+    /// a message that size can be promised room when the pipe is empty, and
+    /// one byte more can never be promised room at all, however empty the
+    /// pipe is or how long the caller waits.
+    #[cfg(windows)]
+    #[test]
+    fn a_message_larger_than_the_pipe_can_hold_never_goes_inline() {
+        let (outbox, reader, _rx) = outbox_on_a_pipe();
+        let capacity = outbox
+            .pipe
+            .as_ref()
+            .and_then(crate::winpipe::capacity)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .expect("the pipe reports its buffer size");
+
+        assert!(outbox.send(vec![7_u8; capacity]), "send failed");
+        assert_eq!(
+            outbox.path_counts(),
+            (1, 0),
+            "a message of exactly the buffer size fits the room an empty \
+             pipe just reported, so it belongs on the inline path"
+        );
+        let written = read_exactly(&reader, capacity);
+        assert_eq!(written, vec![7_u8; capacity]);
+
+        assert!(outbox.send(vec![9_u8; capacity + 1]), "send failed");
+        assert_eq!(
+            outbox.path_counts(),
+            (1, 1),
+            "no quota can ever reach one byte past the buffer, so a message \
+             that size has no answer that would let it go inline"
         );
     }
 }
