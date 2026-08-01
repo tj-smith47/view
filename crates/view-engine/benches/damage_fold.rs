@@ -50,9 +50,8 @@ fn bench_damage_fold_cold(c: &mut Criterion) {
             let mut elapsed = Duration::ZERO;
             for _ in 0..iters {
                 std::thread::sleep(KEYSTROKE_GAP);
-                let batch = storm.clone();
                 let started = Instant::now();
-                let compacted = fold_and_take(black_box(batch));
+                let compacted = fold_and_take(black_box(storm.clone()));
                 black_box(compacted);
                 elapsed += started.elapsed();
             }
