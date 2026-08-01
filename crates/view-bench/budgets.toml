@@ -68,8 +68,17 @@ max = 50.0
 # start is slow for reasons outside view still has to show view reaching
 # the file in under a third of bare nvim's time. marker_cold_ms is a p99
 # gated on the shared dev-linux class only because its name carries no
-# percentile component; a load excursion past 30 fails as a new shortfall,
-# and the 50.3 ms ratchet premise holds only under that classification.
+# percentile component, and the 50.3 ms ratchet premise holds only under
+# that classification.
+#
+# 30 is also the bound the noise tolerance was built around. This row is
+# one-shot -- no median-of-trials stands between an ambient spike and the
+# verdict -- the class publishes a x2.0 spread for the statistic, and the
+# recorded 25.151 sits 19% under the bar. So a load excursion past 30 is
+# reported against the ceiling that recorded value earns, which is that
+# same 50.3 ms, and fails past it. The bar keeps its teeth two ways: the
+# tolerance applies only while the recorded quiet value stays under 30, and
+# every run above 30 prints a line saying so.
 [[budget]]
 spec_row = "First paint: the opened file's content on screen"
 scenario = "first_paint"
@@ -88,14 +97,21 @@ max = 0.30
 # instead would put the same number in two spec rows, which is the drift this
 # file exists to prevent.
 #
-# A budget max gets no headroom relief: above it with no shortfall entry
-# fails as a new finding. On dev-linux this bar's margin is a load regime,
-# not a constant -- unchanged code has measured 14.827 and 15.648 ms gated
-# on quieter runs (2026-08-01, the readings that spent the shortfall that
-# used to sit here) but 16.429 ms at load 3.9 and a single trial at 16.29
-# under a loaded bracket. A breach here on a busy host is expected weather
-# for this p99, not a regression signal on its own: rerun quiet before
-# reading it as one. Median-of-3 absorbs a lone excursion, not a loaded run.
+# This metric has no entry in any class's headroom sidecar, so above the bar
+# with no shortfall entry fails as a new finding: the noise tolerance a
+# budget can earn comes only from a published, measured spread, and
+# cadence_p99_ms has not had one established on any class.
+#
+# On dev-linux this bar's margin is a load regime, not a constant --
+# unchanged code has measured 14.827 and 15.648 ms gated on quieter runs
+# (2026-08-01, the readings that spent the shortfall that used to sit here)
+# but 16.429 ms at load 3.9 and a single trial at 16.29 under a loaded
+# bracket. A breach here on a busy host is expected weather for this p99,
+# not a regression signal on its own: rerun quiet before reading it as one.
+# Median-of-3 absorbs a lone excursion, not a loaded run. Those four
+# readings against a recorded 14.566 put the worst observed excursion at
+# 1.13x, which is the number a characterization run would have to confirm
+# across load regimes before this row could tolerate anything.
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"
@@ -129,6 +145,13 @@ classes = ["dev-macos"]
 # existing shortfall, quietly widening). It passes a listed one that held or
 # improved, so a budget the project has not met yet does not block work on
 # everything else, and cannot be forgotten either.
+#
+# One reading does not earn an entry here: a metric whose recorded baseline
+# on this class is inside its budget, measuring outside it on a class that
+# has published a measured spread for that statistic, is reported as an
+# excursion against the ceiling the recorded value earns and does not fail.
+# Writing such a reading down as an accepted shortfall would put ambient
+# load in this file as though it were a property of view.
 #
 # Improving past the budget does not need an edit here to pass; deleting the
 # entry is the housekeeping that follows.

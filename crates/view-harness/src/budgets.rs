@@ -35,14 +35,27 @@
 //! being ignorable. Outside budget with no entry is a new shortfall and
 //! fails; outside budget and past the ceiling its accepted value earns is a
 //! widening shortfall and fails; outside budget but inside that ceiling
-//! passes and is reported every run. There is no fourth state, and in
-//! particular no way to be quietly outside budget.
+//! passes and is reported every run.
 //!
 //! The ceiling is the one [`crate::baselines`] already grants the recorded
 //! bar for that metric on that class, not the accepted value itself. An
 //! accepted value is one sample of a noisy statistic; comparing the next
 //! sample to it exactly makes every listed shortfall a coin flip rather
 //! than a gate.
+//!
+//! There is one further state, and it exists for the same reason: a metric
+//! whose *recorded* value on this class is inside the bound, measuring
+//! above the bound this run, on a class that has published a measured
+//! spread for that statistic. A single reading inside the spread the class
+//! has characterised around a compliant recorded value is not evidence the
+//! bound stopped being met, so demanding a `[[shortfall]]` entry for it
+//! would write ambient load into the ledger as an accepted gap. It passes,
+//! bounded by the same ceiling the recorded value earns, and it reports
+//! every run. Absent a published spread for the statistic the strict rule
+//! stands unchanged, because a default allowance is a guess about the host
+//! rather than a measurement of it.
+//!
+//! No state is quiet: everything except a value inside its bound prints.
 
 use std::path::Path;
 
@@ -116,10 +129,23 @@ pub enum Verdict {
     New,
     /// Outside the bound and past the ceiling the accepted value earns.
     Widened { accepted: f64, ceiling: f64 },
+    /// Outside the bound, with no shortfall entry, on a class that has
+    /// published a measured spread for this statistic and whose recorded
+    /// value for it is itself inside the bound: a reading the class's own
+    /// characterised noise accounts for, held to the ceiling that recorded
+    /// value earns.
+    Excursion { recorded: f64, ceiling: f64 },
 }
 
 impl Verdict {
     /// Whether this verdict must fail the gate.
+    ///
+    /// [`Self::Excursion`] does not, and that is the one place the answer is
+    /// not obvious: it is a value past the spec bound. It passes because the
+    /// class has measured that this statistic moves that far between runs on
+    /// unchanged code, so failing on it would gate on ambient load. It is
+    /// still printed every run, and anything past the ceiling is
+    /// [`Self::New`] again.
     #[must_use]
     pub fn is_failure(&self) -> bool {
         matches!(self, Self::New | Self::Widened { .. })
@@ -172,6 +198,15 @@ impl std::fmt::Display for Finding {
                  {budget:.3} is past {ceiling:.3}, the ceiling the accepted shortfall \
                  {accepted:.3} earns under this class's gate headroom; a shortfall may hold or \
                  improve, never widen [{spec_row}]"
+            ),
+            Verdict::Excursion { recorded, ceiling } => write!(
+                f,
+                "BUDGET EXCURSION [{scenario}.{fixture}] {metric}: {measured:.3} is past spec \
+                 {budget:.3}, but inside {ceiling:.3}, the ceiling this class's measured \
+                 headroom grants its recorded {recorded:.3} -- a quiet value that is itself \
+                 inside the bound. This class has measured the statistic moving that far on \
+                 unchanged code, so one reading here is its noise and not a budget miss; \
+                 anything past that ceiling fails [{spec_row}]"
             ),
         }
     }
@@ -349,6 +384,40 @@ fn shortfall_ceiling(
         .map_or(f64::INFINITY, |headroom| headroom.bar(accepted))
 }
 
+/// The recorded value and the worst reading it accounts for, when a metric
+/// above its bound this run is inside what this class has measured the
+/// statistic to move; `None` when nothing earns that.
+///
+/// Three conditions, each load-bearing:
+///
+/// - The class published a spread for this statistic. A compiled-in default
+///   is a guess about a host nobody characterised, and widening every spec
+///   bound on every class by a guess is how a budget stops meaning anything.
+///   Absence keeps the strict rule.
+/// - A recorded value exists for this metric in this cell. It is the
+///   quiet-run reading the excursion is measured against; with no baseline
+///   there is nothing to say this run is an excursion *from* anything.
+/// - That recorded value is inside the bound. A cell whose quiet value is
+///   already outside its budget has a real, standing gap, and the mechanism
+///   for that is a `[[shortfall]]` entry with the reason written down --
+///   never a noise allowance that would hide it.
+///
+/// The ceiling is then the recorded value under the published spread, which
+/// is the same bar [`crate::baselines`] holds that recorded value to. The
+/// two gates therefore fail at the same number instead of one of them
+/// firing on noise the other was built to absorb.
+fn excursion_ceiling(
+    scenario: &str,
+    metric: &str,
+    budget: f64,
+    recorded: Option<&crate::baselines::CellMetrics>,
+    headroom_table: &crate::baselines::HeadroomTable,
+) -> Option<(f64, f64)> {
+    let headroom = crate::baselines::declared_headroom(headroom_table, scenario, metric)?;
+    let recorded = *recorded?.get(metric)?;
+    (recorded <= budget).then(|| (recorded, headroom.bar(recorded)))
+}
+
 /// Checks one cell's measured metrics against the budgets that cover
 /// `class`, in deterministic (metric-name) order.
 ///
@@ -361,10 +430,16 @@ fn shortfall_ceiling(
 /// and the gate reports the same zero failures a fully compliant matrix
 /// does. `unreached_budgets` cannot see it either -- that walk reads the
 /// measured ids, which are still correct.
+///
+/// `recorded` is the baseline's own cell for the same id, or `None` where
+/// the baseline holds none. It is what tells a reading past the bound on a
+/// noisy class apart from a bound the project stopped meeting (see
+/// [`excursion_ceiling`]); without it every such reading is the latter.
 #[must_use]
 pub fn check_cell(
     file: &BudgetFile,
     cell: &crate::baselines::MeasuredCell,
+    recorded: Option<&crate::baselines::CellMetrics>,
     class: &str,
     headroom_table: &crate::baselines::HeadroomTable,
 ) -> Vec<Finding> {
@@ -378,7 +453,15 @@ pub fn check_cell(
             Verdict::Inside
         } else {
             match find_shortfall(file, scenario, fixture, metric, class) {
-                None => Verdict::New,
+                None => {
+                    match excursion_ceiling(scenario, metric, budget.max, recorded, headroom_table)
+                    {
+                        Some((recorded, ceiling)) if measured <= ceiling => {
+                            Verdict::Excursion { recorded, ceiling }
+                        }
+                        _ => Verdict::New,
+                    }
+                }
                 Some(shortfall) => {
                     let ceiling = shortfall_ceiling(
                         scenario,
@@ -495,9 +578,10 @@ mod tests {
         parse(text, "test").unwrap()
     }
 
-    /// [`super::check_cell`] with no measured per-class headroom, so every
-    /// case below reads against the policy defaults. The override path has
-    /// its own test rather than being threaded through all of them.
+    /// [`super::check_cell`] with no measured per-class headroom and no
+    /// recorded cell, so every case below reads against the policy defaults
+    /// and the strict outside-budget rule. The override paths have their own
+    /// tests rather than being threaded through all of them.
     fn check_cell(
         file: &BudgetFile,
         scenario: &str,
@@ -511,6 +595,7 @@ mod tests {
                 id: crate::baselines::CellId::new(scenario, fixture),
                 metrics: metrics.clone(),
             },
+            None,
             class,
             &crate::baselines::HeadroomTable::new(),
         )
@@ -538,6 +623,7 @@ why = \"because\"
             super::check_cell(
                 &file,
                 &measured,
+                None,
                 "controlled-linux",
                 &crate::baselines::HeadroomTable::new()
             )[0]
@@ -548,7 +634,7 @@ why = \"because\"
         let tight: crate::baselines::HeadroomTable =
             [("view_p99_ms".to_string(), 1.05)].into_iter().collect();
         assert!(matches!(
-            super::check_cell(&file, &measured, "controlled-linux", &tight)[0].verdict,
+            super::check_cell(&file, &measured, None, "controlled-linux", &tight)[0].verdict,
             Verdict::Widened { .. }
         ));
     }
@@ -613,6 +699,189 @@ max = 8.0
         );
         assert_eq!(found[0].verdict, Verdict::New);
         assert!(found[0].verdict.is_failure());
+    }
+
+    /// The row this mechanism exists for, in its real proportions:
+    /// `first_paint.minimal` `marker_cold_ms` on dev-linux records 25.151 ms
+    /// against a 30 ms bound while the class's sidecar puts that statistic's
+    /// spread at x2.0. A quiet run sits 19% under a bound the host's own
+    /// noise clears several times over, and the row is one-shot -- no
+    /// median-of-trials stands between an ambient spike and the verdict.
+    const COLD_START_BUDGET: &str = r#"
+schema = 1
+[[budget]]
+spec_row = "row"
+scenario = "first_paint"
+metric = "marker_cold_ms"
+max = 30.0
+"#;
+
+    const COLD_START_RECORDED: f64 = 25.151;
+
+    /// The dev-linux sidecar's own entry for the row above.
+    fn characterized() -> crate::baselines::HeadroomTable {
+        [("first_paint.marker_cold_ms".to_string(), 2.0)]
+            .into_iter()
+            .collect()
+    }
+
+    fn cold_start(
+        budgets: &str,
+        measured: f64,
+        recorded: Option<f64>,
+        table: &crate::baselines::HeadroomTable,
+    ) -> Verdict {
+        let file = file_from(budgets);
+        let recorded = recorded.map(|value| metrics(&[("marker_cold_ms", value)]));
+        super::check_cell(
+            &file,
+            &measured_cell("first_paint", "minimal", &[("marker_cold_ms", measured)]),
+            recorded.as_ref(),
+            "dev-linux",
+            table,
+        )[0]
+        .verdict
+        .clone()
+    }
+
+    /// A characterised class does not loosen the bound itself: a reading
+    /// inside it is inside it, with nothing tolerated and nothing reported.
+    #[test]
+    fn a_reading_inside_its_bound_is_inside_on_a_characterized_class() {
+        assert_eq!(
+            cold_start(
+                COLD_START_BUDGET,
+                29.9,
+                Some(COLD_START_RECORDED),
+                &characterized()
+            ),
+            Verdict::Inside
+        );
+    }
+
+    /// Host noise cannot turn a quiet-run-compliant metric into a hard
+    /// failure on a class that has measured how far the statistic moves --
+    /// and cannot buy silence either: the reading is reported every run.
+    ///
+    /// Disconfirm: without the ceiling this is an unbounded amnesty, so the
+    /// far side is asserted too. The ceiling is the recorded value under the
+    /// class's published spread, which is the same bar the regression
+    /// ratchet holds that recorded value to, so the two gates fail at one
+    /// number instead of one firing on noise the other absorbs.
+    #[test]
+    fn host_noise_past_a_bound_a_quiet_run_meets_is_tolerated_and_reported() {
+        let ceiling = COLD_START_RECORDED * 2.0;
+        let verdict = |measured| {
+            cold_start(
+                COLD_START_BUDGET,
+                measured,
+                Some(COLD_START_RECORDED),
+                &characterized(),
+            )
+        };
+
+        let tolerated = verdict(34.0);
+        assert_eq!(
+            tolerated,
+            Verdict::Excursion {
+                recorded: COLD_START_RECORDED,
+                ceiling
+            }
+        );
+        assert!(!tolerated.is_failure());
+        assert!(matches!(verdict(ceiling), Verdict::Excursion { .. }));
+
+        let past = verdict(ceiling * 1.001);
+        assert_eq!(past, Verdict::New);
+        assert!(past.is_failure());
+    }
+
+    /// A default allowance is a guess about a host nobody characterised.
+    /// Letting one earn the tolerance would widen every spec bound on every
+    /// class by 50% at a stroke, so a class with no published spread for the
+    /// statistic keeps the strict rule exactly.
+    #[test]
+    fn an_uncharacterized_class_keeps_the_strict_rule() {
+        assert_eq!(
+            cold_start(
+                COLD_START_BUDGET,
+                34.0,
+                Some(COLD_START_RECORDED),
+                &crate::baselines::HeadroomTable::new()
+            ),
+            Verdict::New
+        );
+    }
+
+    /// The tolerance is measured against the quiet run, so it needs one. A
+    /// cell the baseline holds no value for has nothing saying the bound was
+    /// ever met, and a recorded value already outside the bound is a
+    /// standing gap whose mechanism is a written `[[shortfall]]` -- never a
+    /// noise allowance that would absorb it unstated.
+    #[test]
+    fn an_excursion_needs_a_recorded_value_that_is_itself_inside_the_bound() {
+        assert_eq!(
+            cold_start(COLD_START_BUDGET, 34.0, None, &characterized()),
+            Verdict::New
+        );
+        assert_eq!(
+            cold_start(COLD_START_BUDGET, 34.0, Some(30.1), &characterized()),
+            Verdict::New
+        );
+    }
+
+    /// A tolerated reading must never read as a clean pass: the report line
+    /// says the value is past spec, names the ceiling that admitted it, and
+    /// names the recorded value that ceiling comes from.
+    #[test]
+    fn an_excursion_reports_as_past_spec_not_as_a_pass() {
+        let line = Finding {
+            scenario: "first_paint".to_string(),
+            fixture: "minimal".to_string(),
+            metric: "marker_cold_ms".to_string(),
+            measured: 34.0,
+            budget: 30.0,
+            spec_row: "row".to_string(),
+            verdict: Verdict::Excursion {
+                recorded: COLD_START_RECORDED,
+                ceiling: COLD_START_RECORDED * 2.0,
+            },
+        }
+        .to_string();
+        assert!(line.starts_with("BUDGET EXCURSION"), "{line}");
+        assert!(line.contains("past spec 30.000"), "{line}");
+        assert!(line.contains("50.302"), "{line}");
+        assert!(line.contains("25.151"), "{line}");
+        assert!(!line.contains("budget OK"), "{line}");
+    }
+
+    /// Where a shortfall exists the shortfall decides, even when the cell
+    /// would otherwise qualify for the noise tolerance. Otherwise a written
+    /// gap could be reported as weather, and the stale-shortfall sweep --
+    /// which reads the verdicts -- would stop seeing the entry it is meant
+    /// to retire.
+    #[test]
+    fn a_listed_shortfall_still_decides_where_an_excursion_would_apply() {
+        let with_shortfall = format!(
+            "{COLD_START_BUDGET}
+[[shortfall]]
+scenario = \"first_paint\"
+fixture = \"minimal\"
+metric = \"marker_cold_ms\"
+class = \"dev-linux\"
+accepted = 40.0
+why = \"because\"
+"
+        );
+        assert!(matches!(
+            cold_start(
+                &with_shortfall,
+                34.0,
+                Some(COLD_START_RECORDED),
+                &characterized()
+            ),
+            Verdict::Held { .. }
+        ));
     }
 
     #[test]

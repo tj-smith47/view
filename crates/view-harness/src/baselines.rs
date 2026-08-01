@@ -286,14 +286,53 @@ pub fn headroom_for(
     controlled: bool,
 ) -> Option<Headroom> {
     let policy = gate_headroom(metric, controlled)?;
-    let factor = table
+    Some(declared_factor(table, scenario, metric).map_or(policy, |factor| resized(policy, factor)))
+}
+
+/// The factor `table` states for `scenario`'s `metric`, with a
+/// `"scenario.metric"` entry winning over a bare `"metric"` one.
+fn declared_factor(table: &HeadroomTable, scenario: &str, metric: &str) -> Option<f64> {
+    table
         .get(&format!("{scenario}.{metric}"))
-        .or_else(|| table.get(metric));
-    match (factor, policy) {
-        (Some(&factor), Headroom::Signed { floor, .. }) => Some(Headroom::Signed { factor, floor }),
-        (Some(&factor), Headroom::Proportional(_)) => Some(Headroom::Proportional(factor)),
-        (None, policy) => Some(policy),
+        .or_else(|| table.get(metric))
+        .copied()
+}
+
+/// `policy` carrying `factor` instead of its own, keeping the shape the
+/// metric's kind demands.
+fn resized(policy: Headroom, factor: f64) -> Headroom {
+    match policy {
+        Headroom::Signed { floor, .. } => Headroom::Signed { factor, floor },
+        Headroom::Proportional(_) => Headroom::Proportional(factor),
     }
+}
+
+/// The run-to-run spread this class has published for `scenario`'s
+/// `metric`, or `None` where it has published none.
+///
+/// This answers a different question than [`headroom_for`], and the two are
+/// not interchangeable:
+///
+/// - [`headroom_for`] answers "what bar does a recorded value earn here",
+///   so it falls back to the conservative compiled-in default and honours
+///   the shared-class tail exemption. Every gate that ratchets a recorded
+///   measurement must use it.
+/// - This answers "how far is this number known to move on this host",
+///   which only a measurement can say. A default is a guess, so absence is
+///   reported as absence rather than as a plausible number, and the
+///   shared-class exemption does not apply: that exemption is about a
+///   *recorded value* being too load-dependent to make a bar out of, while
+///   a published factor is exactly the load-dependence, measured. A caller
+///   holding a bound that does not come from a recorded value can act on
+///   the spread without the exemption applying to it.
+///
+/// The returned policy carries the metric's own shape, so a signed paired
+/// delta still gets its floor rather than a proportional allowance that
+/// would invert below zero.
+#[must_use]
+pub fn declared_headroom(table: &HeadroomTable, scenario: &str, metric: &str) -> Option<Headroom> {
+    let factor = declared_factor(table, scenario, metric)?;
+    Some(resized(gate_headroom(metric, true)?, factor))
 }
 
 /// Whether `metric` names a statistic whose value is a function of a tail
@@ -1905,6 +1944,70 @@ mod tests {
             headroom_for(&table, "flood", "ratio_p50", false),
             Some(Headroom::Proportional(1.06)),
             "a qualified entry must not leak outside its scenario"
+        );
+    }
+
+    /// The published spread is reported only where it was published: no
+    /// default stands in for it, and the `"scenario.metric"` key wins in its
+    /// own scenario exactly as it does for the ratchet's allowance.
+    ///
+    /// Disconfirm: falling back to the policy default here would report every
+    /// uncharacterised metric on every class as measured at 1.25 or 1.5, and
+    /// the second assertion fails.
+    #[test]
+    fn a_declared_headroom_is_reported_only_where_the_class_published_one() {
+        let table: HeadroomTable = [
+            ("ratio_p50".to_string(), 1.06),
+            ("scroll.ratio_p50".to_string(), 1.18),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(
+            declared_headroom(&table, "scroll", "ratio_p50"),
+            Some(Headroom::Proportional(1.18))
+        );
+        assert_eq!(
+            declared_headroom(&table, "echo", "view_p99_ms"),
+            None,
+            "an uncharacterised statistic reports absence, never a default"
+        );
+        assert_eq!(
+            declared_headroom(&table, "echo", "ratio_p50"),
+            Some(Headroom::Proportional(1.06))
+        );
+    }
+
+    /// A published spread is the class's load-dependence, measured, so it is
+    /// reported for a statistic the ratchet exempts from gating too: the
+    /// exemption says a recorded value is too load-dependent to make a bar
+    /// out of, which is a statement about the recorded value and not about
+    /// how far the number moves. A caller holding a bound that came from
+    /// somewhere other than a recorded measurement can act on the spread.
+    ///
+    /// The shape still follows the metric: a signed paired delta keeps its
+    /// floor rather than taking a proportional allowance that would invert
+    /// below zero.
+    #[test]
+    fn a_declared_headroom_survives_the_shared_class_exemption_and_keeps_its_shape() {
+        let table: HeadroomTable = [
+            ("cadence_p99_ms".to_string(), 1.15),
+            ("paired_delta_p99_ms".to_string(), 1.30),
+        ]
+        .into_iter()
+        .collect();
+
+        assert_eq!(headroom_for(&table, "flood", "cadence_p99_ms", false), None);
+        assert_eq!(
+            declared_headroom(&table, "flood", "cadence_p99_ms"),
+            Some(Headroom::Proportional(1.15))
+        );
+        assert_eq!(
+            declared_headroom(&table, "echo", "paired_delta_p99_ms"),
+            Some(Headroom::Signed {
+                factor: 1.30,
+                floor: SIGNED_DELTA_FLOOR_MS
+            })
         );
     }
 

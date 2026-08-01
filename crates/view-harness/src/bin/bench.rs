@@ -1080,6 +1080,7 @@ fn main() -> Result<()> {
             findings.extend(budgets::check_cell(
                 &budget_file,
                 cell,
+                file.cell(&cell.id),
                 &cli.class,
                 &headroom,
             ));
@@ -1140,9 +1141,19 @@ fn main() -> Result<()> {
                 .iter()
                 .filter(|finding| matches!(finding.verdict, budgets::Verdict::Held { .. }))
                 .count();
+            // counted apart from the held shortfalls it sits beside in the
+            // report: a shortfall is a gap the project has written down and
+            // owes work on, while an excursion is this run's weather against
+            // a bound the recorded measurement meets. Summing them would
+            // report a clean class as carrying a gap it does not have
+            let excursions = findings
+                .iter()
+                .filter(|finding| matches!(finding.verdict, budgets::Verdict::Excursion { .. }))
+                .count();
             println!(
                 "gate OK: {} cell(s) within recorded bars, {} metric(s) checked against spec 3.1 \
-                 budgets, {held} accepted shortfall(s) still held",
+                 budgets, {held} accepted shortfall(s) still held, {excursions} reading(s) past \
+                 spec inside this class's measured spread",
                 measured.len(),
                 findings.len()
             );
