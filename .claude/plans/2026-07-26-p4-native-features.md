@@ -89,6 +89,7 @@ requirement absent from both lists has found a plan defect.
 | Native overlay layers in `Surface`, z-ordered above engine grid (§7) | T4 |
 | Tier degradation for every native surface, golden snapshots per tier (§7, §13) | T4 |
 | Theme: named groups for native chrome; border style, padding scale, accent palette shared (§7) | T5 |
+| Theme group storage enum-keyed before P4 adds groups (DRY/SSOT audit S2) | T5 — restructure precedes the bridge and every new group |
 | `ColorScheme` re-derive bridge (autocmd → rpcnotify) (§7) | T5 |
 | Cold-start theme cache keyed by config path, used for first paint (§7) | T5 — verify P2's `theme_cache.rs` against the spec's keying rule |
 | Clipboard provider: `g:clipboard` injection so `"+y` works; user's own `g:clipboard` wins (§5.1) | T6 |
@@ -629,6 +630,26 @@ was rejected because it would have to be rebuilt on every
 between rebuilds, which is precisely what §7's "live highlight state, not
 a one-shot query" rule forbids.
 
+**Group storage goes enum-keyed before any group is added (DRY/SSOT
+audit S2).** `Theme`'s named chrome groups are a 5-site shotgun today
+(Theme field, `from_hl` body, `CachedTheme` field, and both `From`
+impls), and the failure is silent: a group added to `Theme` but missed
+in the `CachedTheme` mirror compiles clean and never persists, so
+cold-start paints stale defaults for exactly that element —
+`deny_unknown_fields` catches renames on load, not omissions on store.
+The audit's ruling stands: not urgent before groups multiply, wrong to
+do after. So T5 restructures BEFORE registering the bridge or adding
+any P4 group: a `#[non_exhaustive] enum ChromeGroup` with
+`ALL`/`hl_name()`/fallback-kind, `Theme` holding
+`[ResolvedStyle; ChromeGroup::COUNT]`, `from_hl` looping
+`ChromeGroup::ALL`, and the cache serializing a map keyed by
+`hl_name()` — adding a group then touches exactly one enum arm plus its
+consumers. This is the *persisted* storage layer; `Theme::named` stays
+as the dynamic-lookup API above. The two reconcile by ownership: any
+group the cold-start cache must carry for first paint rides the enum;
+ad-hoc `named` lookups against live `hl` state stay dynamic and
+uncached. (Full finding: `.superpowers/sdd/dry-ssot-audit.md` §S2.)
+
 **The ColorScheme bridge.** `Effect::Rpc(RpcCall::RegisterBridge)`
 registers one autocmd group whose callbacks `rpcnotify` view on
 `ColorScheme`, `DiagnosticChanged`, and the git-branch triggers T10
@@ -650,17 +671,22 @@ cache files, verified by listing the cache dir.
 - [ ] **Step 1:** Read `theme_cache.rs`; write down what it actually keys
   on. If it is not the config path, that is a P2 defect and this task
   fixes it — record which was true.
-- [ ] **Step 2: Failing test** for two config paths yielding two cache
+- [ ] **Step 2:** The ChromeGroup restructure above, landing with the
+  existing seven groups only — no P4 groups yet. Regression pin: a test
+  that a group present in the enum round-trips Theme → cache → Theme
+  for every arm (`ChromeGroup::ALL`), so a future arm missing from the
+  cache map is a red test, not a silent stale default.
+- [ ] **Step 3: Failing test** for two config paths yielding two cache
   entries.
-- [ ] **Step 3:** Bridge registration, at the same point in startup as
+- [ ] **Step 4:** Bridge registration, at the same point in startup as
   `register_vim_enter_autocmd` (which as-built must be registered BEFORE
   `ui_attach` returns — read `nvim_api.rs`'s doc comment for why, and do
   not repeat the race it describes).
-- [ ] **Step 4:** `Msg::ColorSchemeChanged` re-derives `Theme::from_hl`
+- [ ] **Step 5:** `Msg::ColorSchemeChanged` re-derives `Theme::from_hl`
   and writes the cache.
-- [ ] **Step 5: Disconfirm.** Break the bridge registration; the oracle
+- [ ] **Step 6: Disconfirm.** Break the bridge registration; the oracle
   entry fails with the border unchanged; restore.
-- [ ] **Step 6:** `task ci`. Commit: `feat(theme): ColorScheme re-derive
+- [ ] **Step 7:** `task ci`. Commit: `feat(theme): ColorScheme re-derive
   bridge and native named groups`.
 
 ---
