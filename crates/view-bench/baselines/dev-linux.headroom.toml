@@ -89,26 +89,27 @@ ratio_p50 = 1.06
 # heavier host (loads 1.29 to 6.48) and hit a failure mode this statistic
 # has no defense against: input_path taps one process, so unlike the paired
 # echo/scroll scenarios it has no null-pair calibration to refuse a
-# contaminated run. Four of the eight show the contamination directly in
-# the three per-replicate trials the gated value is a median of: at least
-# two of three trials landed an order of magnitude over the recorded floor,
-# together with the pty->key-read segment's own p99 climbing to 1-2ms
-# against its usual ~70us p50, so the trial-median itself lands on a
-# contaminated trial. Those four (1219.935, 569.016, 1751.224, 1033.173)
-# characterize scheduler starvation, not view, and are excluded. The other
-# four (90.922, 114.409, 100.961, 85.529) have at most one of three trials
-# elevated, so the trial-median already did what null-pair calibration does
-# for the paired scenarios and landed on a clean trial; these are kept.
+# contaminated run. A single criterion, stated before it was applied and
+# applied uniformly to all 16 replicates from both campaigns: exclude a
+# replicate if its pty->key-read segment p99 -- the diagnostic for the
+# specific hop this metric measures -- exceeds 500us. The clean group sits
+# at 109.9-124.4us and the contaminated group at 1032.9-2965.3us, a full
+# order of magnitude apart with no reading anywhere near the threshold, so
+# this line has no ambiguous cases to adjudicate. Six replicates are
+# excluded: segment p99 2939.1, 2669.2, 2965.3, 2119.2, 1032.9, 1864.2us
+# (gated values 1219.935, 569.016, 1751.224, 1033.173, 114.409, 100.961) --
+# these characterize scheduler starvation, not view.
 #
-# Pooling the twelve kept replicates: 80.155, 80.554, 80.579, 80.727,
-# 81.643, 81.834, 82.721, 83.752, 85.529, 90.922, 100.961, 114.409. Median
-# 82.2775, half-width 17.127 (20.82% of median). Worst excursion above the
-# recorded value 1.418x (114.409 against 80.682); the 2x half-width rule
-# asks 1.444x (82.2775 + 2 x 17.127 against 80.682). 1.45 clears both, and
-# reaches far enough that this cell's budget max (100.0) now sits under the
-# ratchet ceiling (80.682 x 1.45 = 116.989): a reading in (100.0, 116.989]
-# reports as an excursion rather than failed. The four excluded readings
-# sit far above even that ceiling and still fail as new findings -- this
-# factor does not, and is not meant to, cover a host in that state; "rerun
-# quiet" stays the operative mitigation there.
-"input_path.key_to_rpc_p99_us" = 1.45
+# Pooling the ten kept replicates: 80.155, 80.554, 80.579, 80.727, 81.643,
+# 81.834, 82.721, 83.752, 85.529, 90.922. Median 81.7385, half-width 5.3835
+# (6.59% of median). Worst excursion above the recorded value 1.127x
+# (90.922 against 80.682); the 2x half-width rule asks 1.147x (81.7385 + 2
+# x 5.3835 against 80.682). 1.15 clears both -- and this is the honest
+# result: 80.682 x 1.15 = 92.784 stays under this cell's budget max
+# (100.0), so the entry is inert by construction. This host could not
+# produce a campaign quiet enough to separate view's real spread from
+# scheduler starvation at this metric's scale; a genuinely quieter host is
+# the only route to a functional factor here. The six excluded readings and
+# any repeat of their scale still fail as new findings; "rerun quiet" stays
+# the operative mitigation.
+"input_path.key_to_rpc_p99_us" = 1.15

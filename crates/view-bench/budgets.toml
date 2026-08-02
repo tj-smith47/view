@@ -22,15 +22,18 @@ schema = 1
 # promise rather than a restatement; the gap to it was carried as a
 # shortfall until the row measured inside the bar.
 #
-# dev-linux now publishes a measured spread for this statistic:
-# "input_path.key_to_rpc_p99_us" = 1.45 in dev-linux.headroom.toml, pooled
-# from twelve report-only replicates against the recorded 80.682 after
-# excluding four whose per-trial detail showed host-contention
-# contamination the scenario has no calibration to refuse. A breach in
-# (100.0, 80.682 x 1.45] reports as an excursion rather than failing; a
-# breach above that, including a repeat of the excluded readings' scale,
-# still fails as a new finding and should be rerun quiet before being read
-# as a regression.
+# dev-linux tried to publish a measured spread for this statistic and came
+# back with an honest inert one: "input_path.key_to_rpc_p99_us" = 1.15 in
+# dev-linux.headroom.toml, pooled from 10 of 16 report-only replicates
+# against the recorded 80.682 after excluding six whose pty->key-read
+# segment p99 (a single criterion, applied uniformly to all 16) showed
+# host-contention contamination the scenario has no calibration to refuse.
+# 80.682 x 1.15 = 92.784 stays under this row's 100.0 max, so this cell
+# still gates as a flat max with no excursion window -- the campaign could
+# not separate view's real spread from scheduler starvation on this host at
+# this statistic's scale. A breach here still fails as a new finding and
+# should be rerun quiet before being read as a regression; a genuinely
+# quieter campaign is the only route to a functional factor.
 [[budget]]
 spec_row = "view input path: key event read from the terminal -> RPC bytes written"
 scenario = "input_path"
