@@ -914,6 +914,12 @@ enum FixtureResolution {
 /// `view` with the checked-in fixture tree itself as its config home would
 /// leave the committed fixture modified on disk after every run.
 ///
+/// The fixture-less arm is the one exception to "every XDG home is
+/// hermetic": its `XDG_DATA_HOME` is the maintainer's ambient data home
+/// (see [`ambient_data_home`]), not a fresh scratch directory, because the
+/// scenario exists to exercise the maintainer's real lazy.nvim-managed
+/// config against its already-installed plugins.
+///
 /// # Errors
 ///
 /// Returns an error if a named fixture has no `nvim/init.lua`, its
@@ -992,7 +998,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
             symlink_daily_config(&daily_path, &xdg_config_home.join("nvim"))?;
             Ok(FixtureResolution::Ready(Box::new(ReadyFixture {
                 xdg_config_home,
-                xdg_data_home: hermetic_dir.join("xdg_data_home"),
+                xdg_data_home: ambient_data_home(),
                 xdg_state_home,
                 xdg_cache_home,
                 needs_priming: true,
@@ -1006,12 +1012,40 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
     }
 }
 
+/// The fixture-less arm's `XDG_DATA_HOME`: `$XDG_DATA_HOME` if set, else
+/// `$HOME/.local/share` -- the same default nvim itself falls back to when
+/// the variable is unset.
+///
+/// Unlike every other XDG home in [`resolve_fixture`]'s fixture-less arm,
+/// this one is deliberately the maintainer's *live* data home rather than a
+/// fresh hermetic directory. The scenario's whole point is to exercise the
+/// maintainer's actual daily-driver config, and that config is
+/// lazy.nvim-managed: `stdpath("data")/lazy/lazy.nvim` is where its plugins
+/// already live. A hermetic, empty data home makes lazy.nvim conclude
+/// nothing is installed, so it clones lazy.nvim and the full plugin set from
+/// the network at startup -- and that bootstrap holds the editor for far
+/// longer than the driver's 15s prime deadline, which is waiting to type
+/// `:call serverstart(...)`. The scenario would then be measuring a
+/// from-scratch plugin install instead of the maintainer's editor, and would
+/// time out doing it. Pointing this one home at the ambient data directory
+/// lets lazy.nvim find its already-installed plugins and boot the same way
+/// the maintainer's real `nvim` does.
+fn ambient_data_home() -> PathBuf {
+    if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
+        return PathBuf::from(dir);
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local").join("share")
+}
+
 /// Links `link` (inside a per-run hermetic `XDG_CONFIG_HOME`) to `target`
 /// (`$VIEW_DAILY_CONFIG`'s real path), so the maintainer's actual nvim
 /// config is what `view` sources while every *other* XDG home
-/// (state/data/cache) stays per-run hermetic. Unix-only (symlinks): the
-/// daily-config scenario is a maintainer-machine standing scenario, not a
-/// CI-gated one, so a non-Unix host simply cannot run it yet.
+/// (state/cache) stays per-run hermetic, and `XDG_DATA_HOME` is the
+/// maintainer's own live data home (see [`ambient_data_home`]) rather than
+/// hermetic like the rest. Unix-only (symlinks): the daily-config scenario
+/// is a maintainer-machine standing scenario, not a CI-gated one, so a
+/// non-Unix host simply cannot run it yet.
 ///
 /// # Errors
 ///
@@ -1439,7 +1473,9 @@ fn page_command() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // the env-mutation sites below are the ones ENV_MUTATION_LOCK exists to
+    // bound; each holds the guard across its own restore
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
     use super::*;
 
     /// Reference values independently computed via Python's
@@ -1481,6 +1517,121 @@ mod tests {
             Some("4213bd6"),
             "heavy fixture's lazy-lock.json pins nvim-tree.lua at 4213bd6..."
         );
+    }
+
+    /// Serializes every test in this module that calls `std::env::set_var`/
+    /// `remove_var` on `VIEW_DAILY_CONFIG`, `XDG_DATA_HOME`, or `HOME`.
+    /// `cargo test` runs a module's tests on multiple threads by default,
+    /// and these tests set and then restore the *same* process-global
+    /// names, so two of them overlapping would interleave one's restore
+    /// with another's plant and leave the loser reading a value it never
+    /// set. The lock is held for the whole body, restore included, because
+    /// releasing it between the mutation and the restore is what opens
+    /// that window.
+    static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`ENV_MUTATION_LOCK`], with poisoning ignored: it orders two
+    /// operations and guards no data, so a test that panicked while
+    /// holding it left nothing behind for the next one to find broken.
+    fn env_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// A scratch daily config directory with a bare `init.lua`, real enough
+    /// to pass [`resolve_fixture`]'s "has `init.lua`/`init.vim`" check
+    /// without needing an actual lazy.nvim-managed config on the test host.
+    fn scratch_daily_config(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "view-harness-oracle-daily-config-{label}-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("failed to create scratch daily config dir");
+        std::fs::write(dir.join("init.lua"), "").expect("failed to write scratch init.lua");
+        dir
+    }
+
+    /// Pins the requirement this scenario exists for: with `XDG_DATA_HOME`
+    /// set, the fixture-less arm must hand `view` that ambient data home
+    /// rather than a fresh hermetic one, or a lazy.nvim-managed daily
+    /// config finds no already-installed plugins and re-bootstraps from
+    /// the network, outrunning the driver's prime deadline.
+    #[test]
+    fn resolve_fixture_fixture_less_arm_uses_ambient_xdg_data_home() {
+        let _guard = env_mutation_guard();
+        let prev_daily = std::env::var("VIEW_DAILY_CONFIG").ok();
+        let prev_data_home = std::env::var("XDG_DATA_HOME").ok();
+
+        let daily_dir = scratch_daily_config("env-set");
+        let ambient_data = std::env::temp_dir().join(format!(
+            "view-harness-oracle-ambient-data-home-{}",
+            std::process::id()
+        ));
+        std::env::set_var("VIEW_DAILY_CONFIG", &daily_dir);
+        std::env::set_var("XDG_DATA_HOME", &ambient_data);
+
+        let scenario = ScenarioFile {
+            plugin: "daily".to_string(),
+            class: PluginClass::UiOwning,
+            fixture: None,
+            state: ScenarioState::Present,
+            cold_bootstrap: false,
+            steps: Vec::new(),
+        };
+        let sock_path = std::env::temp_dir().join(format!(
+            "view-harness-oracle-daily-sock-{}",
+            std::process::id()
+        ));
+        let resolution =
+            resolve_fixture(&scenario, &sock_path).expect("resolve_fixture must not error");
+        let ready = match resolution {
+            FixtureResolution::Ready(ready) => Some(ready),
+            FixtureResolution::Skipped { .. } => None,
+        }
+        .expect("expected a Ready resolution with VIEW_DAILY_CONFIG set, not Skipped");
+        assert_eq!(
+            ready.xdg_data_home, ambient_data,
+            "the fixture-less arm must pass through $XDG_DATA_HOME, not a hermetic directory"
+        );
+
+        match prev_daily {
+            Some(v) => std::env::set_var("VIEW_DAILY_CONFIG", v),
+            None => std::env::remove_var("VIEW_DAILY_CONFIG"),
+        }
+        match prev_data_home {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&daily_dir);
+    }
+
+    /// The fallback half of the same requirement: with `XDG_DATA_HOME`
+    /// unset, [`ambient_data_home`] must derive `$HOME/.local/share` --
+    /// nvim's own default -- rather than leaving the daily-config
+    /// scenario with no ambient home to point at.
+    #[test]
+    fn ambient_data_home_falls_back_to_home_dot_local_share_when_xdg_unset() {
+        let _guard = env_mutation_guard();
+        let prev_data_home = std::env::var("XDG_DATA_HOME").ok();
+        let prev_home = std::env::var("HOME").ok();
+
+        std::env::remove_var("XDG_DATA_HOME");
+        std::env::set_var("HOME", "/home/daily-config-test");
+
+        assert_eq!(
+            ambient_data_home(),
+            PathBuf::from("/home/daily-config-test/.local/share")
+        );
+
+        match prev_data_home {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     /// The scenario the merge logic exists for: an engine side that never
