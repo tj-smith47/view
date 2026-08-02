@@ -137,6 +137,13 @@ under `~/.claude/tmp/` all share one scp mtime and cannot be ordered by it):
 | gate-3 07:15 | 9.21 | EXIT:201 — `scroll.heavy ratio_p50` 2.2269 > bar 2.0040 |
 | gate-4 | 3.68 | killed mid-run, no verdict |
 
+A later attempt ran on past those, orphaned to `PPID=1`, and was killed at
+1:05 elapsed. mbp was then verified to have zero surviving `bench`,
+`nvim` or `bench-scratch` processes. Note that the bench binary is
+`target/release/bench`, **not** `view-bench` — a `pkill -f view-bench`
+matches only the scratch paths in its children and leaves the parent
+running while it respawns them.
+
 The sidecar was last edited at 10:00, after all three completed runs, so
 gate-1's pass does not cover the current configuration. The sidecar
 *tightens* against the compiled 1.25 default (host-wide `ratio_p50 = 1.02`,
@@ -234,6 +241,16 @@ sir RAM tight).
 - Subagents run gates in the FOREGROUND with 10-15 minute timeouts, output
   to a file on the first run, read selectively. Background-child
   notifications do not resume a subagent whose turn has ended.
+- **`SendMessage` to a finished agent RESUMES it.** There is no "stop" you
+  can send: a message telling an agent to stand down restarts it, and it
+  then spends a fresh turn deciding what to do about the instruction. A
+  long-running subagent cost most of a day this way, re-ignited twice by
+  messages whose entire content was an order to stop. To actually end one,
+  use the harness kill, and kill the work it is blocked on (see 3.3) —
+  never a message.
+- Gate logs copied off a remote host all share one scp mtime. They cannot
+  be ordered by it, and reading them as run times inverts the true order.
+  Get run times from the remote host, or from a timestamp inside the log.
 - No polling loops anywhere; they are hook-denied. A denial means switch
   mechanism, never reword.
 - Name the model explicitly on every subagent dispatch. No Fable
