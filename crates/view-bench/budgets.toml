@@ -21,6 +21,16 @@ schema = 1
 # 100 is the bar the spec stated before anyone measured anything, so it is a
 # promise rather than a restatement; the gap to it was carried as a
 # shortfall until the row measured inside the bar.
+#
+# dev-linux now publishes a measured spread for this statistic:
+# "input_path.key_to_rpc_p99_us" = 1.45 in dev-linux.headroom.toml, pooled
+# from twelve report-only replicates against the recorded 80.682 after
+# excluding four whose per-trial detail showed host-contention
+# contamination the scenario has no calibration to refuse. A breach in
+# (100.0, 80.682 x 1.45] reports as an excursion rather than failing; a
+# breach above that, including a repeat of the excluded readings' scale,
+# still fails as a new finding and should be rerun quiet before being read
+# as a regression.
 [[budget]]
 spec_row = "view input path: key event read from the terminal -> RPC bytes written"
 scenario = "input_path"
@@ -97,21 +107,19 @@ max = 0.30
 # instead would put the same number in two spec rows, which is the drift this
 # file exists to prevent.
 #
-# This metric has no entry in any class's headroom sidecar, so above the bar
-# with no shortfall entry fails as a new finding: the noise tolerance a
-# budget can earn comes only from a published, measured spread, and
-# cadence_p99_ms has not had one established on any class.
-#
-# On dev-linux this bar's margin is a load regime, not a constant --
-# unchanged code has measured 14.827 and 15.648 ms gated on quieter runs
-# (2026-08-01, the readings that spent the shortfall that used to sit here)
-# but 16.429 ms at load 3.9 and a single trial at 16.29 under a loaded
-# bracket. A breach here on a busy host is expected weather for this p99,
-# not a regression signal on its own: rerun quiet before reading it as one.
-# Median-of-3 absorbs a lone excursion, not a loaded run. Those four
-# readings against a recorded 14.566 put the worst observed excursion at
-# 1.13x, which is the number a characterization run would have to confirm
-# across load regimes before this row could tolerate anything.
+# dev-linux now publishes a measured spread for this statistic:
+# "flood.cadence_p99_ms" = 1.02 in dev-linux.headroom.toml, from an 8
+# report-only-replicate campaign against the recorded 14.566. That
+# campaign's own worst reading was 1.006x the recorded value across host
+# loads up to 4.32, well short of the 1.02 ceiling it earns, and it did
+# not reproduce the two earlier, unreproduced loaded-host crossings this
+# comment used to carry as raw readings (16.429 ms at load 3.9, 16.29 ms
+# under a loaded bracket) -- those stay above this ceiling and outside
+# what the published spread covers. A breach in (16.0, 14.566 x 1.02]
+# reports as an excursion rather than failing; a breach above that,
+# including a repeat of either earlier crossing, still fails as a new
+# finding and should be rerun quiet before being read as a regression:
+# median-of-3 absorbs a lone excursion, not a sustained loaded run.
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"

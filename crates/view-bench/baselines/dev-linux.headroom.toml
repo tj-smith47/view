@@ -64,3 +64,51 @@ ratio_p50 = 1.06
 # point, not only the regression bar -- size it from the replicates, never
 # from what would be convenient for a run to pass.
 "first_paint.marker_cold_ms" = 2.0
+
+# 8 report-only replicates, 2026-08-01, host loads 1.58 to 4.32, one
+# unchanged binary pair, flood/minimal (gated statistic per replicate,
+# median cadence_p99_ms of 3 trials): 14.577, 14.529, 14.500, 14.491,
+# 14.655, 14.515, 14.525, 14.539. Median 14.527, half-width 0.56%. Worst
+# excursion above the recorded value 1.006x (14.655 against 14.566); the
+# 2x half-width rule asks 1.009x (14.527 + 2 x 0.082 against 14.566).
+# 1.02 clears both, and is what this campaign earns -- not a retroactive
+# explanation of the two loaded-host crossings the budget row's own
+# comment already records (16.429 ms at load 3.9, 16.29 ms under a
+# loaded bracket): this campaign's own load range reached 4.32 without
+# reproducing either, so that spread stays unaccounted for and the
+# budget row's "rerun quiet" guidance remains the operative mitigation
+# for a reading above this ceiling.
+"flood.cadence_p99_ms" = 1.02
+
+# First campaign: 8 report-only replicates, 2026-08-01, host loads 1.31 to
+# 1.98, one unchanged binary pair, input_path/minimal (gated statistic per
+# replicate, median key_to_rpc_p99_us of 3 trials): 80.554, 80.727, 81.643,
+# 80.155, 82.721, 80.579, 83.752, 81.834.
+#
+# A second campaign of 8 more replicates the same day drifted onto a
+# heavier host (loads 1.29 to 6.48) and hit a failure mode this statistic
+# has no defense against: input_path taps one process, so unlike the paired
+# echo/scroll scenarios it has no null-pair calibration to refuse a
+# contaminated run. Four of the eight show the contamination directly in
+# the three per-replicate trials the gated value is a median of: at least
+# two of three trials landed an order of magnitude over the recorded floor,
+# together with the pty->key-read segment's own p99 climbing to 1-2ms
+# against its usual ~70us p50, so the trial-median itself lands on a
+# contaminated trial. Those four (1219.935, 569.016, 1751.224, 1033.173)
+# characterize scheduler starvation, not view, and are excluded. The other
+# four (90.922, 114.409, 100.961, 85.529) have at most one of three trials
+# elevated, so the trial-median already did what null-pair calibration does
+# for the paired scenarios and landed on a clean trial; these are kept.
+#
+# Pooling the twelve kept replicates: 80.155, 80.554, 80.579, 80.727,
+# 81.643, 81.834, 82.721, 83.752, 85.529, 90.922, 100.961, 114.409. Median
+# 82.2775, half-width 17.127 (20.82% of median). Worst excursion above the
+# recorded value 1.418x (114.409 against 80.682); the 2x half-width rule
+# asks 1.444x (82.2775 + 2 x 17.127 against 80.682). 1.45 clears both, and
+# reaches far enough that this cell's budget max (100.0) now sits under the
+# ratchet ceiling (80.682 x 1.45 = 116.989): a reading in (100.0, 116.989]
+# reports as an excursion rather than failed. The four excluded readings
+# sit far above even that ceiling and still fail as new findings -- this
+# factor does not, and is not meant to, cover a host in that state; "rerun
+# quiet" stays the operative mitigation there.
+"input_path.key_to_rpc_p99_us" = 1.45
