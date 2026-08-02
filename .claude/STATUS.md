@@ -1,6 +1,6 @@
 # view — where we are
 
-One page. Updated 2026-07-26. If this disagrees with the task list, this
+One page. Updated 2026-08-02. If this disagrees with the task list, this
 file is stale and the task list wins — but fix this file in the same turn.
 
 ## The one-line answer
@@ -67,22 +67,24 @@ and still unattributed.
 
 ## Open tasks, in the order they should be done
 
-Ordered by information yield: each one's failure would invalidate work below it.
+Every P3 code task is closed. What is left is the exit battery: one
+measurement leg per row, all at the same frozen tip, then citations, then
+the user's adjudication. `.claude/HANDOFF.md` section 3 is the full version
+of this list — the two must be updated in the same turn or they drift.
 
-1. ~~**#22**~~ — done: first_paint split and re-recorded on dev-linux.
-2. ~~**#18**~~ — done: §3.1 budget table in the gate, with a shortfall
-   ledger for the seven metrics that do not meet it yet.
-3. ~~**#19**~~ — done: the `nvim --remote-ui` control ran and refuted the
-   protocol-inherent explanation; the README no longer hedges on it.
-4. **#23** — re-derive headrooms; fix the scroll row's tier mismatch and
-   the flood row's cross-class stimulus divergence.
-5. **#24** — allowlist the spawn environment. Do before CI runs with any
-   secret configured.
-6. **#21** — re-record dev-macos on a quiet mbp: input_path, and
-   first_paint's split metrics (its cell gates red until this lands).
-7. **#25** — noice's ext_* disable opts are not suppressing its errors.
-8. **#20** — P4 plan adversarial review (a fresh session; prompt is at
-   `.claude/plans/2026-07-26-p4-review-prompt.md`).
+1. **#6** — dev-macos re-record. The record is done and honest; what is
+   still owed is one `--all --gate --class dev-macos` at EXIT:0 against the
+   files as they now stand, on a genuinely quiet mbp. Its commit becomes the
+   frozen tip for everything below.
+2. **#15 / #16 / #19** — `task ci`, the oracle corpus plus fuzz seeds 1 and
+   2 at 200 rounds, and the zero-clock greps, all re-run at that tip.
+3. **#17** — compat: the Linux matrix, the daily-config row un-skipped, the
+   mbp matrix on real hardware, and a regenerated compat page.
+4. **#18** — `task perf-audit CLASS=dev-linux`, quiet host.
+5. **#26** — dogfood refresh.
+6. **#20** — write the exit-checklist citations at the final tip (the
+   existing draft cites a stale commit).
+7. **#21** — surface the adjudication list to the user. Last, by design.
 
 ## Deferred with user approval
 

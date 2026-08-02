@@ -30,17 +30,22 @@ startup; grep them when a question arises.
 
 ## 1. First actions in the new session
 
-0. **Read `.claude/IN-FLIGHT.md` first.** As of 2026-07-27 there is
-   uncommitted work in the tree, one half-landed change, and an adversarial
-   review whose findings are pre-commit blockers. That file supersedes
-   section 3's task table where the two disagree, and it is deleted once its
-   contents land as commits.
 1. Create tasks from section 3 below, verbatim, in the order listed. The
    harness task store does not persist across sessions and is not
    shell-accessible, so this file is the only carrier.
-2. `git log --oneline -3` and `git status --porcelain` to confirm where you are.
-3. `tail -c 4000 .superpowers/sdd/progress.md` for the last few entries.
-4. `task --list` to index the project's task targets before running anything.
+   `TaskCreate`/`TaskUpdate`/`TaskList`/`TaskGet` are deferred tools, reached
+   via `ToolSearch` (the one taking a `query`) with
+   `select:TaskCreate,TaskUpdate,...` — the regex-only tool-search variant
+   does not index deferred names and returns nothing for them; that is not
+   evidence the store is unreachable.
+2. `git log --oneline -5` and `git status --short` to confirm section 3.1's
+   tree truth still holds.
+3. Read `.superpowers/sdd/task6-devmacos-rerecord-report.md` if it exists —
+   the in-flight task's outcome (section 3.2). If it does not exist, that
+   task did not finish cleanly.
+4. Tail the SDD ledger for plan `2026-07-18-p3-oracle-bench-gates.md` under
+   `.superpowers/sdd/` for the last few entries.
+5. `task --list` to index the project's task targets before running anything.
 
 Then resume at the first unfinished task. Do not re-derive the state; the
 ledger and `git log` outrank your recollection.
@@ -72,16 +77,174 @@ Ordered by the sequencing decisions already made. The dependencies in the
 gates, the believed-vs-now ledger, and the ordering below). Update both in
 the same turn or they drift.
 
-| # | Task | Why it sits here |
+All P3 code tasks are closed. What remains is the exit battery: one
+measurement leg per row, every leg run at the same frozen tip, then
+citations, then the user's adjudication.
+
+| # | Task | State / what remains |
+|---|------|----------------------|
+| 6 | dev-macos re-record | in_progress — see 3.2. Its commit is the FINAL TIP |
+| 15 | `task ci` at final tip | re-run (green at `cdf5f26`: 796 passed, 32 suites) |
+| 16 | oracle corpus + fuzz seeds 1,2 x200 at final tip | re-run (at `cdf5f26`: 24/24 PARITY, both seeds 0 divergences) |
+| 19 | zero-clock greps at final tip | cheap re-observe |
+| 17 | compat at final tip | Linux matrix + `VIEW_DAILY_CONFIG=$HOME/.config/nvim task compat` (all 15 rows OK, none skipped) + mbp matrix via a fresh bundle (gitfix PATH) + `task oracle -- page` regen; commit the page |
+| 18 | `task perf-audit CLASS=dev-linux` at final tip | quiet host, no overlapping loads |
+| 26 | dogfood refresh at final tip | pending |
+| 20 | citations into the plan's exit checklist | a draft exists but cites `cdf5f26`, which is stale — re-cite everything at the final tip |
+| 21 | surface the adjudication list to the user | LAST — see 3.4 |
+
+Sequence: #6 commit -> #15/#16/#19 -> #17 -> #18 -> #26 -> #20 -> #21.
+Every measurement leg runs at the frozen final tip on a quiet host.
+
+### 3.1 Tree truth at handoff (verify, do not trust)
+
+Branch `dev/p3-oracle-bench`, tip `7a9f2e9`. The integration branch is
+**master**, not main.
+
+Uncommitted #6 results:
+
+- `crates/view-bench/baselines/dev-macos.toml` (M) — the record wrote 12
+  cells including this class's first `input_path` and `first_paint` rows.
+- `crates/view-bench/baselines/dev-macos.headroom.toml` (untracked) — the
+  hand-curated sidecar. `--record` never touches sidecars; an absent entry
+  is a statement, not a gap to fill with a plausible number.
+- `crates/view-bench/budgets.toml` (M) — `echo.minimal` `ratio_p50`
+  re-accepted at 1.1125 (was 1.3436; clears the 1.10 bar by 1.14%);
+  `echo.heavy` `ratio_p50` shortfall deleted as spent (1.0667, inside the
+  bar); three new `first_paint` shortfalls — minimal `marker_cold_ms`
+  42.542, heavy `marker_cold_ms` 219.997, heavy `marker_ratio_p50` 0.382.
+
+Another session owns `.claude/known-bugs.md` (M),
+`.claude/archive/known-bugs-2026-08.md` (staged) and
+`SECURITY-POSTURE-HANDOFF.md`. Never commit them and never tidy them.
+`task commit` runs `git add -A`, so every commit takes a trailing
+pathspec; verify with `git show --stat HEAD` afterward.
+
+### 3.2 Task #6 state — the validating gate is still owed
+
+The record is complete and honest: 12 cells on real mbp hardware, shortfall
+entries written with measured values, sidecar drafted. **What is missing is
+a single `task bench -- --all --gate --class dev-macos` at EXIT:0 against
+the files as they now stand.** Do not commit #6 before that run exists.
+
+Four gate attempts, in true chronological order (mbp local time; the copies
+under `~/.claude/tmp/` all share one scp mtime and cannot be ordered by it):
+
+| run | host load | outcome |
 |---|---|---|
-| 53 | P3 exit checklist execution, evidence-cited per plan protocol | Gates the phase, and carries this file's own retirement (section 9) |
-| 26 | Close the attributed echo typing gap in view's input and paint paths | **Half done.** The writer hop is gone (`outbox.rs`: the loop writes inline when the pipe says it can and nothing is queued). `echo.minimal` ratio_p50 1.354 -> 1.172, `input_path` p99 154.7 -> 117.7. view's own share is now 139 us p50 of a 644 us round trip: 71 input, 68 paint. What remains is one architectural lever, not tuning -- see the pitch in section 5.7 |
-| 28 | Give Windows an inline-write fast path, or record why it cannot have one | `can_write_inline` is `false` off unix, so the typing win is unix-only today. The two POSIX guarantees it rests on (PIPE_BUF atomicity, POLLOUT meaning PIPE_BUF of room) do not transfer; overlapped I/O on a named pipe would give an equivalent proof. winserver can measure it |
-| 23 | Re-derive the gate headroom constants; fix scroll's tier mismatch and flood's cross-class stimulus divergence | 18 landed, so a spec bar now exists to size the headrooms against; flood's shortfall entry names this task as its resolution |
-| 24 | Allowlist the environment at the bench/oracle spawn funnel | Landed in `efb594d`/`d32daf0`, re-review closures on top: the funnel sweeps every host variable the allowlist does not name on both spawn builders, points the git config-file layers at a missing path, and re-points `HOME` itself at a guarded harness-owned dir (`env::hermetic_home`) so `.netrc`, `~/.ssh/*` and the ignore-file default cannot ride it (Windows OpenSSH resolves the profile, not `HOME`; that residual is recorded in `env.rs`). Both funnels are pinned to run their preparation by an observed *refusal*, which no child can fake (an engine child creates its own `HOME` state, so mere directory existence proves nothing): a planted `.netrc` fails `Engine::spawn` naming it, and a plant in either directory fails `make_hermetic` naming it, so deleting any one preparation call turns a test red on its own. The oracle-side pin plants under the exclusive environment lock instead of removing the live shared directories (a mid-suite removal is what stranded stray `nvim.log` files); the engine-side pin's removal runs under an equivalent binary-local lock whose shared side now covers each isolated child's whole lifetime, so no child is alive to race it. Verified: `task ci` on dev-linux and natively on windows-msvc via the winserver mirror (664 tests at `9e389eb`), plus `task compat` (14 scenarios incl. cold-bootstrap) on dev-linux |
-| 21 | Record a quiet-host dev-macos baseline: input_path and first_paint's split metrics | The rows are runnable again; they need a quiet mbp, not more code. Until it lands, the dev-macos first_paint cell gates red on `unmeasured_metrics` |
-| 25 | noice's `ext_*` disable opts are not suppressing its startup error notifications | Cosmetic in the compat fixture, real as a compat finding |
-| 20 | P4 plan adversarial review | A fresh session; the prompt is written at `.claude/plans/2026-07-26-p4-review-prompt.md` |
+| gate-1 01:52 | 1.58 | EXIT:0 — but under the *pre-tightening* sidecar |
+| gate-2 02:52 | 4.37 | EXIT:201 — tap overhead p99 7.125/6.833 us over the 5 us pre-gate |
+| gate-3 07:15 | 9.21 | EXIT:201 — `scroll.heavy ratio_p50` 2.2269 > bar 2.0040 |
+| gate-4 | 3.68 | killed mid-run, no verdict |
+
+The sidecar was last edited at 10:00, after all three completed runs, so
+gate-1's pass does not cover the current configuration. The sidecar
+*tightens* against the compiled 1.25 default (host-wide `ratio_p50 = 1.02`,
+`"scroll.ratio_p50" = 1.2`), so a looser run passing proves nothing about
+the tighter one.
+
+Recomputing the current bars against both completed runs' own
+`gated ratio_p50` lines, every ratio cell clears — `echo.minimal` 1.115 vs
+1.1348, `echo.heavy` 1.069 vs 1.0879, `scroll.minimal` 2.274 vs 2.8119,
+`scroll.heavy` 2.227 vs 2.3577 — and gate-3's sole breach is closed. That is
+arithmetic on prior runs, **not** an observed gate pass, and it does not
+substitute for one. Note how thin the echo margins are (1.7% and 1.8%): the
+1.02 host-wide key clears its own 2x-half-width rule (1.37%) by little, so
+modest ambient drift flips echo red.
+
+The tap-overhead pre-gate is the other load-sensitive failure mode: it
+tripped at load 4.37 and was comfortably clear (1.1-1.4 us) at load 1.58.
+Run the validating gate on a genuinely quiet mbp — historically that means
+overnight local time — not on a mid-day host.
+
+Two open items the #6 campaign surfaced:
+
+- The bare `ratio_p50 = 1.02` key was characterized from **echo replicates
+  alone** yet applies host-wide, and that scope is what put `scroll.heavy`
+  over its bar in gate-3. `"scroll.ratio_p50" = 1.2` covers it, but
+  `scroll.minimal` inherits that factor without its own campaign
+  (`headroom_for` in `baselines.rs` looks up the bare scenario name).
+  Whether an echo-derived factor should govern uncharacterized scenarios is
+  adjudication material, not something to settle silently.
+- **Bench process leak:** orphaned `PPID=1` `nvim --embed` children survive
+  under load and required an explicit pkill-and-verify before every
+  replicate. This is a live harness defect, unfixed.
+
+### 3.3 mbp operational traps (each has cost hours)
+
+- Invoke as `ssh mbp 'zsh -lc "..."'` and backslash-escape remote variables
+  (`\$HOME`, `\$PATH`), or the outer shell expands them and bakes a minimal
+  PATH where `nvim` and `task` vanish.
+- Always `export PATH=\$HOME/bin-gitfix:\$PATH` first — homebrew git is
+  broken there.
+- Never leave an unquoted `===` inside `zsh -lc`: equals-expansion aborts
+  the whole line (`zsh:1: == not found`) and everything after it silently
+  never runs.
+- Never `tail -n0 -f` to wait on a log — it attaches at EOF and misses a
+  line already written. Race-free:
+  `grep -m1 '^EXIT:' LOG || timeout <N>s tail -c +1 -f LOG | grep -m1 '^EXIT:'`
+- A Parallels "Windows 11" VM can auto-start and contaminate a campaign;
+  check `prlctl list` before and after, and record `uptime` load ranges in
+  the provenance comments.
+- A full `--all --gate` run is 55-60 minutes (`first_paint` alone does 1000
+  cold nvim spawns; that self-induced load is normal, not contamination).
+- The repo is at `~/repos/view`, detached at `7a9f2e9` — advance it to the
+  final tip before any post-#6 mbp run.
+
+### 3.4 Adjudication list for #21
+
+No other file carries this list; it is the reason #21 runs last.
+
+1. **Echo escalation door.** dev-linux echo `ratio_p50` 1.172/1.181 against
+   the ≤1.10 contract, plus the new dev-macos `echo.minimal` shortfall at
+   1.1125. Attribution is settled (see section 5.7): `echo_control` shows
+   out-of-process costs ~1-2%, view's own path ~22%, so the
+   protocol-inherent hypothesis is refuted and there is no permanent
+   limitation to publish.
+2. Deferrals 1-4 re-confirmation (the plan's exit checklist).
+3. noice residual (folke/noice.nvim#1137).
+4. `first_paint.minimal` `marker_cold_ms` budget 30 -> 50.302 — a
+   strictness change, already settled and not to be relitigated by an
+   implementer, but the user has not ruled on it.
+5. flood contended-host residual.
+6. Tracked `.claude/settings.json` auto-executing hooks — the one unchecked
+   `known-bugs.md` item.
+7. Go-ahead for the classifier-blocked `known-bugs.md` repair script.
+8. daily-config E216 residual (cfgd-config `hijack_netrw`).
+9. mbp homebrew git is broken and works only via the `~/bin-gitfix` shim —
+   an infra fix that is the user's call.
+
+Carried from #6 (see 3.2): the host-wide `ratio_p50 = 1.02` headroom key is
+echo-derived but governs scenarios whose spread was never measured, and the
+bench process leak (orphaned `PPID=1` `nvim --embed` children).
+
+Separately, not a view matter: the sir/proxmox storage-incident follow-ups
+(retention does not fit the pool, backup-script defects, the next run does
+~1T of FULL sends, the health check alerted nobody, host `bud` still down,
+sir RAM tight).
+
+### 3.5 Constraints sessions lose first
+
+- `--record` rewrites `<class>.toml` from scratch but never the
+  `.headroom.toml` sidecar. Shortfall shape: `struct Shortfall` in
+  `crates/view-harness/src/budgets.rs`. Outside-budget with no entry is
+  `Verdict::New` and fails; widening an existing shortfall fails; honest
+  entries carry `accepted` and `why`. Never widen a shortfall — or a
+  headroom entry — to clear a loaded-host excursion.
+- Subagents run gates in the FOREGROUND with 10-15 minute timeouts, output
+  to a file on the first run, read selectively. Background-child
+  notifications do not resume a subagent whose turn has ended.
+- No polling loops anywhere; they are hook-denied. A denial means switch
+  mechanism, never reword.
+- Name the model explicitly on every subagent dispatch. No Fable
+  subagents; opus only at fix rounds 4-5.
+- Comments are WHY-only. Banned: session-narrative markers, assistant
+  references, finding tags. Fix on sight, before committing.
+- The bench/oracle spawn allowlist keeps neither `SSL_CERT_FILE` /
+  `SSL_CERT_DIR` nor any proxy variable. On a host behind a proxy or using
+  a non-default CA bundle, the cold-bootstrap clone therefore fails loudly
+  rather than measuring something wrong quietly — that is the intended
+  trade, so read such a failure as environment, not as a regression.
 
 **The publisher-set question moved to P6 and is no longer an open task.**
 The user decided 2026-07-26 that the pre-P4 push cuts no release: its only
@@ -125,8 +288,21 @@ forced them:
 several of the above, and the durable ones are in section 5.7 below rather
 than here.
 
-**`known-bugs.md` is fully drained** — zero unchecked items. It must stay that
-way, or carry only explicit user-approved deferrals, before declaring P3 done.
+**`known-bugs.md` has exactly one unchecked item** as of 2026-08-02: the
+tracked `.claude/settings.json` auto-executes machine-local hooks on any
+checkout, a supply-chain and portability exposure that needs a decision
+before the first public push. It is item 6 of the adjudication list in 3.4,
+which is its approval path.
+
+The file *reads* as roughly seven open entries, but the rest are orphaned
+body fragments whose `- [x]` headers were archived into
+`.claude/archive/known-bugs-2026-08.md` — the archive's "No god-file audit"
+entry visibly ends mid-sentence, which is where the split happened. A repair
+script exists in a session scratchpad but is classifier-blocked and needs
+explicit user go-ahead (item 7 of 3.4). Do not hand-edit that file while
+another session holds it uncommitted.
+
+It must carry only explicit user-approved deferrals before declaring P3 done.
 The gate is at the "I'm finished" moment, not at push. The message-toast
 direction that stood here as an open user decision was decided and shipped:
 see `known-bugs.md` and
