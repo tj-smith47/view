@@ -1539,9 +1539,44 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Plants (or clears) one environment variable and restores whatever it
+    /// held beforehand when dropped -- including when the drop happens
+    /// during an unwinding panic (a failed `assert_eq!` partway through a
+    /// test's body), so a failing assertion still leaves the next test to
+    /// acquire [`ENV_MUTATION_LOCK`] with a clean environment instead of
+    /// compounding one failure into an unrelated one downstream.
+    struct EnvRestore {
+        name: &'static str,
+        prior: Option<std::ffi::OsString>,
+    }
+
+    impl EnvRestore {
+        fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, prior }
+        }
+
+        fn unset(name: &'static str) -> Self {
+            let prior = std::env::var_os(name);
+            std::env::remove_var(name);
+            Self { name, prior }
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match self.prior.take() {
+                Some(v) => std::env::set_var(self.name, v),
+                None => std::env::remove_var(self.name),
+            }
+        }
+    }
+
     /// A scratch daily config directory with a bare `init.lua`, real enough
     /// to pass [`resolve_fixture`]'s "has `init.lua`/`init.vim`" check
     /// without needing an actual lazy.nvim-managed config on the test host.
+    #[cfg(unix)]
     fn scratch_daily_config(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "view-harness-oracle-daily-config-{label}-{}",
@@ -1557,19 +1592,24 @@ mod tests {
     /// rather than a fresh hermetic one, or a lazy.nvim-managed daily
     /// config finds no already-installed plugins and re-bootstraps from
     /// the network, outrunning the driver's prime deadline.
+    ///
+    /// Unix-only: the fixture-less arm's config symlink
+    /// ([`symlink_daily_config`]) is itself Unix-only and returns an error
+    /// on every other host, which is a real property of that arm today, not
+    /// something this test should paper over by skipping the symlinked-path
+    /// exercise on the hosts that can't take it.
+    #[cfg(unix)]
     #[test]
     fn resolve_fixture_fixture_less_arm_uses_ambient_xdg_data_home() {
         let _guard = env_mutation_guard();
-        let prev_daily = std::env::var("VIEW_DAILY_CONFIG").ok();
-        let prev_data_home = std::env::var("XDG_DATA_HOME").ok();
 
         let daily_dir = scratch_daily_config("env-set");
         let ambient_data = std::env::temp_dir().join(format!(
             "view-harness-oracle-ambient-data-home-{}",
             std::process::id()
         ));
-        std::env::set_var("VIEW_DAILY_CONFIG", &daily_dir);
-        std::env::set_var("XDG_DATA_HOME", &ambient_data);
+        let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", &daily_dir);
+        let _data_home_env = EnvRestore::set("XDG_DATA_HOME", &ambient_data);
 
         let scenario = ScenarioFile {
             plugin: "daily".to_string(),
@@ -1595,14 +1635,6 @@ mod tests {
             "the fixture-less arm must pass through $XDG_DATA_HOME, not a hermetic directory"
         );
 
-        match prev_daily {
-            Some(v) => std::env::set_var("VIEW_DAILY_CONFIG", v),
-            None => std::env::remove_var("VIEW_DAILY_CONFIG"),
-        }
-        match prev_data_home {
-            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&daily_dir);
     }
 
@@ -1613,25 +1645,13 @@ mod tests {
     #[test]
     fn ambient_data_home_falls_back_to_home_dot_local_share_when_xdg_unset() {
         let _guard = env_mutation_guard();
-        let prev_data_home = std::env::var("XDG_DATA_HOME").ok();
-        let prev_home = std::env::var("HOME").ok();
-
-        std::env::remove_var("XDG_DATA_HOME");
-        std::env::set_var("HOME", "/home/daily-config-test");
+        let _data_home_env = EnvRestore::unset("XDG_DATA_HOME");
+        let _home_env = EnvRestore::set("HOME", "/home/daily-config-test");
 
         assert_eq!(
             ambient_data_home(),
             PathBuf::from("/home/daily-config-test/.local/share")
         );
-
-        match prev_data_home {
-            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
-            None => std::env::remove_var("XDG_DATA_HOME"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
     }
 
     /// The scenario the merge logic exists for: an engine side that never
