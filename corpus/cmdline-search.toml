@@ -1,0 +1,5 @@
+schema = 1
+name = "cmdline-search"
+input = "/pattern<CR>n"
+engine_pin = "v0.12.4"
+ext_set = "default"

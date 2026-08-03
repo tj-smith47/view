@@ -1,0 +1,115 @@
+# Gate headroom measured on this host, overriding the compiled-in default
+# for the metric's kind. Hand-curated characterization: --record rewrites
+# dev-linux.toml and never this file, so entries and their provenance
+# comments survive every record pass. A metric absent here has not had its
+# run-to-run spread established on this class and gates on the conservative
+# default; absence is a statement, not a gap to fill with a plausible number.
+# A bare key characterizes the statistic host-wide; a quoted
+# "scenario.metric" key scopes it to one scenario and wins there, for a
+# statistic whose spread is a property of the scenario rather than of the
+# host.
+machine_class = "dev-linux"
+
+[headroom]
+# 8 report-only replicates, 2026-07-27, host loads 0.44 to 8.53, one
+# unchanged binary pair. Median 1.1735, half-width 1.70%, and the worst
+# excursion above the recorded value was 2.14%. The pre-registered rule for
+# distinguishing two conditions from single measurements is 2x half-width,
+# here 3.4%. 1.06 clears both, and replaces a default of 1.25 that admitted a
+# 25% regression on a statistic this host resolves to under 2%.
+ratio_p50 = 1.06
+
+# 8 report-only replicates, 2026-08-01, host loads 1.26 to 7.35, one
+# unchanged binary pair, both scroll fixtures, gated statistic per replicate
+# (median ratio_p50 of 3 trials). Scoped to scroll because its spread is not
+# the host's ratio resolution: minimal median 1.9530, half-width 3.53%;
+# heavy median 2.1060, half-width 4.89% -- two to three times echo's 1.70%
+# -- and the min-ratcheted floors sit 9-13% below the medians (minimal
+# recorded 1.7778, heavy 1.9907). Worst excursion above a recorded value
+# 1.14x (2.013 against minimal's 1.7778); the 2x half-width rule asks
+# 1.18x (1.9530 + 2 x 0.069 against 1.7778). 1.18 clears both; under the
+# host-wide 1.06 the same unchanged pair breached on two independent runs
+# (minimal 1.9008 > 1.8844, heavy 2.115 > 2.1102).
+"scroll.ratio_p50" = 1.18
+
+# 8 report-only replicates, 2026-08-01, host loads 0.79 to 5.74, one
+# unchanged binary pair, both first_paint fixtures (16 observations of a p99
+# over 1000 cold spawns; the name carries no percentile component, so this
+# escapes the shared-class tail exemption and gates here). Pooled median
+# 3.72 ms, half-width 2.63 ms (70.7% of median): the six quiet replicates
+# per fixture sit inside 3.62..3.78 ms, and the elevated-load ones measured
+# 6.08, 6.13 and 8.88 ms on unchanged code. Worst excursion above the
+# recorded value 2.34x (8.881 against heavy's recorded 3.788); the 2x
+# half-width rule asks 2.41x. 2.5 clears both, and replaces a default of 1.5
+# that this host's own weather breaches -- the quiet-recorded bar was broken
+# by an ambient excursion, not by a change to view. Scoped to first_paint,
+# the scenario the replicates ran: a future scenario reusing this metric
+# name must earn its own characterization rather than inherit this one.
+"first_paint.shell_visible_ms" = 2.5
+
+# Same 8 replicates as shell_visible_ms, same statistic shape (a p99 of
+# 1000 cold spawns whose name carries no percentile component). Relative
+# half-width agrees across fixtures: minimal median 23.6 ms, half-width
+# 42.3%; heavy median 84.4 ms, half-width 42.1%. Worst excursion above the
+# recorded value 1.91x (151.206 against heavy's recorded 79.267); the 2x
+# half-width rule asks 1.85x. 2.0 clears both. Scoped to first_paint for the
+# same reason as shell_visible_ms.
+#
+# This factor reaches further than the others: the minimal fixture's spec
+# budget of 30 ms sits under this ratchet ceiling (25.151 x 2.0 = 50.301),
+# and marker_cold_ms is not tail-exempt, so the budget gate reads this entry
+# too. A reading in (30.0, 50.301] on that cell is reported as an excursion
+# rather than failed, which makes 50.301 the value both gates fail at.
+# Changing this number therefore moves a spec bound's effective firing
+# point, not only the regression bar -- size it from the replicates, never
+# from what would be convenient for a run to pass.
+"first_paint.marker_cold_ms" = 2.0
+
+# 8 report-only replicates, 2026-08-01, host loads 1.58 to 4.32, one
+# unchanged binary pair, flood/minimal (gated statistic per replicate,
+# median cadence_p99_ms of 3 trials): 14.577, 14.529, 14.500, 14.491,
+# 14.655, 14.515, 14.525, 14.539. Median 14.527, half-width 0.56%. Worst
+# excursion above the recorded value 1.006x (14.655 against 14.566); the
+# 2x half-width rule asks 1.009x (14.527 + 2 x 0.082 against 14.566).
+# 1.02 clears both, and is what this campaign earns -- not a retroactive
+# explanation of the two loaded-host crossings the budget row's own
+# comment already records (16.429 ms at load 3.9, 16.29 ms under a
+# loaded bracket): this campaign's own load range reached 4.32 without
+# reproducing either, so that spread stays unaccounted for and the
+# budget row's "rerun quiet" guidance remains the operative mitigation
+# for a reading above this ceiling.
+"flood.cadence_p99_ms" = 1.02
+
+# First campaign: 8 report-only replicates, 2026-08-01, host loads 1.31 to
+# 1.98, one unchanged binary pair, input_path/minimal (gated statistic per
+# replicate, median key_to_rpc_p99_us of 3 trials): 80.554, 80.727, 81.643,
+# 80.155, 82.721, 80.579, 83.752, 81.834.
+#
+# A second campaign of 8 more replicates the same day drifted onto a
+# heavier host (loads 1.29 to 6.48) and hit a failure mode this statistic
+# has no defense against: input_path taps one process, so unlike the paired
+# echo/scroll scenarios it has no null-pair calibration to refuse a
+# contaminated run. A single criterion, stated before it was applied and
+# applied uniformly to all 16 replicates from both campaigns: exclude a
+# replicate if its pty->key-read segment p99 -- the diagnostic for the
+# specific hop this metric measures -- exceeds 500us. The clean group sits
+# at 109.9-124.4us and the contaminated group at 1032.9-2965.3us, a full
+# order of magnitude apart with no reading anywhere near the threshold, so
+# this line has no ambiguous cases to adjudicate. Six replicates are
+# excluded: segment p99 2939.1, 2669.2, 2965.3, 2119.2, 1032.9, 1864.2us
+# (gated values 1219.935, 569.016, 1751.224, 1033.173, 114.409, 100.961) --
+# these characterize scheduler starvation, not view.
+#
+# Pooling the ten kept replicates: 80.155, 80.554, 80.579, 80.727, 81.643,
+# 81.834, 82.721, 83.752, 85.529, 90.922. Median 81.7385, half-width 5.3835
+# (6.59% of median). Worst excursion above the recorded value 1.127x
+# (90.922 against 80.682); the 2x half-width rule asks 1.147x (81.7385 + 2
+# x 5.3835 against 80.682). 1.15 clears both -- and this is the honest
+# result: 80.682 x 1.15 = 92.784 stays under this cell's budget max
+# (100.0), so the entry is inert by construction. This host could not
+# produce a campaign quiet enough to separate view's real spread from
+# scheduler starvation at this metric's scale; a genuinely quieter host is
+# the only route to a functional factor here. The six excluded readings and
+# any repeat of their scale still fail as new findings; "rerun quiet" stays
+# the operative mitigation.
+"input_path.key_to_rpc_p99_us" = 1.15

@@ -7,8 +7,12 @@
 /// nvim batches many of these per `redraw` notification; unrecognized event
 /// names decode to [`UiEvent::Unknown`] rather than being dropped, since new
 /// event kinds arrive across nvim versions and callers may still want to see
-/// the name.
-#[non_exhaustive]
+/// the name. Deliberately not `#[non_exhaustive]`: a new *structured*
+/// variant (as opposed to an unrecognized wire name, already covered by
+/// `Unknown`) must fail every exhaustive match across the workspace at
+/// compile time rather than silently falling through a wildcard arm --
+/// `view-oracle`'s `RefGrid` applier depends on this to guarantee it never
+/// drops a redraw kind unnoticed.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UiEvent {
     /// A grid was resized to `width` x `height` cells.

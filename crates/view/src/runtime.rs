@@ -1,8 +1,15 @@
 //! The unified runtime loop: one blocking `recv()` wakes on damage, input,
-//! or engine-request tokens, with no timer anywhere in the loop body. There
-//! is no fixed post-redraw silence timeout and no input-drain budget:
-//! painting fires the instant `update()` marks the model dirty, and a
-//! keystroke wakes the loop directly instead of waiting for the next poll.
+//! or engine-request tokens. There is no fixed post-redraw silence timeout
+//! and no input-drain budget: painting fires the instant `update()` marks
+//! the model dirty, and a keystroke wakes the loop directly instead of
+//! waiting for the next poll.
+//!
+//! The wait carries a deadline in exactly one state: output queued for the
+//! engine and not yet delivered (see [`wait_for_msg`]) -- the one state in
+//! which, were that output wedged, no wakeup would otherwise come. An idle
+//! editor still sleeps until
+//! something happens, and the cost of the exception is bounded by the stall
+//! threshold rather than by a frame rate.
 //!
 //! # Ownership chain
 //!
@@ -20,7 +27,20 @@ use view_core::msg::{Effect, ExitInfo, Msg, ReplyToken, ReplyValue, RpcCall};
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::process::Engine;
+use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
+
+/// What the user is told while the engine has stopped accepting view's
+/// output.
+///
+/// The consequence leads and the diagnosis follows, because the toast
+/// overlay truncates at the tail to fit the grid: on a narrow terminal the
+/// operator keeps the half that says their typing is not lost. Fixed text,
+/// carrying neither a live duration nor a queue depth, since the notice is
+/// re-asserted on every loop pass for as long as the stall lasts and text
+/// that changed between passes would repaint the toast on each of them to
+/// say nothing more actionable.
+const ENGINE_STALLED_NOTICE: &str = "keystrokes queued: nvim has stopped reading view's output";
 
 /// The notify surface [`Executor`] drives, factored out from [`EngineHandle`]
 /// so its effect-to-call mapping is testable against a recording fake
@@ -210,6 +230,57 @@ pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, 
     flow
 }
 
+/// Reads the engine's write side once and raises or retracts the stalled-
+/// engine notice on `model` to match what it finds. Returns whether the
+/// visible message set changed, which is the caller's cue to repaint.
+///
+/// Costs two relaxed atomic loads plus one walk of the message log per
+/// call, and never takes the engine's writer lock --
+/// a wedge is precisely the state in which that lock is held by a thread
+/// parked inside a write, so a check that wanted it could not report the
+/// one condition it exists for.
+///
+/// Re-asserted rather than edge-triggered: `msg_clear` empties the log
+/// wholesale, and a notice raised once on the way in would be gone for good
+/// while the condition it describes is still true.
+fn note_write_stall(
+    model: &mut Model,
+    watch: &mut OutboxStallWatch,
+    handle: &EngineHandle,
+) -> bool {
+    let stalled = watch.observe(handle);
+    model
+        .engine
+        .messages
+        .set_native_condition(stalled.then_some(ENGINE_STALLED_NOTICE))
+}
+
+/// Waits for the loop's next message, bounded by the stall watch's deadline
+/// when it has one. `None` means the wait expired with nothing delivered
+/// and the caller should re-read the write side.
+///
+/// Unbounded whenever `watch` asks for no wakeup, which is the entire idle
+/// steady state: an editor with nothing queued sleeps until a keystroke, a
+/// redraw or an engine request wakes it, exactly as it always has, and pays
+/// no periodic wakeup for a condition that cannot be true. A deadline
+/// exists only while output is pending -- delivering or wedged, the watch
+/// cannot know yet, and for the wedged case the wakeup is the point: a
+/// wedged engine emits no redraws, so an operator who types once and then
+/// waits would otherwise be told nothing at all.
+fn wait_for_msg(
+    msg_rx: &mpsc::Receiver<Msg>,
+    watch: &OutboxStallWatch,
+) -> Option<Result<Msg, mpsc::RecvError>> {
+    let Some(deadline) = watch.poll_deadline() else {
+        return Some(msg_rx.recv());
+    };
+    match msg_rx.recv_timeout(deadline) {
+        Ok(msg) => Some(Ok(msg)),
+        Err(mpsc::RecvTimeoutError::Timeout) => None,
+        Err(mpsc::RecvTimeoutError::Disconnected) => Some(Err(mpsc::RecvError)),
+    }
+}
+
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
 /// terminal I/O error occurs, returning the final `Model` alongside the
 /// process exit code on the former (the caller persists the model's
@@ -225,10 +296,12 @@ pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, 
 /// typed while the engine is still attaching is never lost to a
 /// not-yet-existing channel -- see `startup::drain_pre_attach` for the
 /// buffering that covers exactly that window. The executor drives
-/// `engine.handle` through [`EngineOps`]. There is no timer anywhere in the
+/// `engine.handle` through [`EngineOps`]. There is no periodic timer in the
 /// loop body: painting fires immediately when `update()` marks
-/// `model.dirty`, and the loop's only blocking call is `msg_rx.recv()`,
-/// which a redraw, a keystroke, or an engine request wakes directly.
+/// `model.dirty`, and the loop blocks in [`wait_for_msg`], which a redraw,
+/// a keystroke, or an engine request wakes directly -- unbounded except
+/// while engine-bound output is pending, where the stall deadline bounds
+/// the sleep.
 ///
 /// # Errors
 ///
@@ -240,23 +313,60 @@ pub fn run(
     mut engine: Engine,
     pump: view_engine::DamagePump,
     msg_rx: mpsc::Receiver<Msg>,
+    term_size: view_tui::terminal::TermSizeCell,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
+    let mut write_stall = OutboxStallWatch::default();
 
     loop {
+        // a resize the input thread has already seen describes the terminal
+        // as it is now, whatever traffic is still queued ahead of its
+        // Msg::Resized: folding it in here means no frame is ever painted
+        // at a shape the terminal has left. Costs one relaxed load per pass
+        // when nothing resized, which is the whole steady state.
+        if let Some((width, height)) = term_size.take() {
+            match dispatch(&mut model, &executor, Msg::Resized { width, height }) {
+                Flow::Continue => {}
+                Flow::Quit(code) => return Ok((model, code)),
+                Flow::EngineLost => {
+                    let info = engine.wait_exit();
+                    if let Flow::Quit(code) = dispatch(&mut model, &executor, Msg::EngineDown(info))
+                    {
+                        return Ok((model, code));
+                    }
+                }
+            }
+        }
+        // checked here, immediately before the paint that would show it: an
+        // engine that has stopped reading view's output also sends no
+        // redraws, so nothing else in this loop can notice
+        if note_write_stall(&mut model, &mut write_stall, &engine.handle) {
+            model.dirty = true;
+        }
         // paint before blocking, not after processing: state mutated ahead
         // of the loop (the startup cutover replays staged messages straight
         // through dispatch) would otherwise sit unpainted until the next
         // message happens to arrive. Steady-state behavior is unchanged --
         // each processed wakeup paints here on the next pass, immediately,
-        // with no timer, no recv_timeout, no tick anywhere in this loop.
+        // with no post-redraw silence timeout and no input-drain budget.
         if model.dirty {
             let surface = view_surface::render(&model);
-            term.draw_surface(&model, &surface)?; // terminal I/O errors abort; engine errors never do
+            let damage = model.take_paint_damage();
+            term.draw_surface(&model, &surface, &damage)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
-        let msg = match msg_rx.recv() {
+        let Some(received) = wait_for_msg(&msg_rx, &write_stall) else {
+            // the wait expired against the stall watch's own deadline
+            // rather than delivering anything: go around and re-read the
+            // write side, which is the whole reason the deadline was armed
+            continue;
+        };
+        #[cfg(feature = "bench-taps")]
+        if received.is_ok() {
+            view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
+        }
+        let msg = match received {
             Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
             Ok(Msg::EngineStopped(reason)) => {
                 // stashed on the model rather than reported here: this loop
@@ -285,7 +395,13 @@ pub fn run(
                     // an engine write failed: the engine is gone, not the
                     // UI; resolve the real exit status and let update()
                     // decide
-                    Flow::EngineLost => queue.push(Msg::EngineDown(engine.wait_exit())),
+                    // the rest of this batch targets an engine that is
+                    // already gone: running it would fail identically and
+                    // queue a duplicate EngineDown per remaining effect
+                    Flow::EngineLost => {
+                        queue.push(Msg::EngineDown(engine.wait_exit()));
+                        break;
+                    }
                 }
             }
             // a RedrawReady is dropped when the shared channel is
@@ -526,6 +642,40 @@ mod tests {
         assert!(ops.calls.borrow()[0].starts_with("try_resize("));
     }
 
+    #[test]
+    fn a_resize_already_folded_in_costs_nothing_when_its_message_arrives() {
+        // the loop folds a published size in ahead of the paint gate, so
+        // the Msg::Resized for that same size reaches dispatch afterwards.
+        // Re-running the arm would dirty the model and send nvim a second
+        // TryResize for a change that already happened.
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let resize = Msg::Resized {
+            width: 100,
+            height: 50,
+        };
+        assert!(matches!(
+            dispatch(&mut model, &executor, resize.clone()),
+            Flow::Continue
+        ));
+        model.dirty = false;
+        assert!(matches!(
+            dispatch(&mut model, &executor, resize),
+            Flow::Continue
+        ));
+        assert_eq!(
+            ops.calls.borrow().len(),
+            1,
+            "the repeated resize must not reach the engine again: {:?}",
+            ops.calls.borrow()
+        );
+        assert!(
+            !model.dirty,
+            "a resize to the size already applied must not force a repaint"
+        );
+    }
+
     /// Recreates re-enqueueing buffered keys onto the same bounded
     /// `sync_channel` `main.rs`'s `msg_tx` is (capacity
     /// `startup::MSG_CHANNEL_CAPACITY`, tied by definition to
@@ -619,5 +769,259 @@ mod tests {
             start.elapsed()
         );
         assert_eq!(ops.calls.borrow().len(), 1000);
+    }
+
+    /// The stall threshold the tests below run against, in place of the
+    /// shipping ten seconds.
+    ///
+    /// The predicate is the same one either way -- it compares an elapsed
+    /// duration against whatever threshold the watch was built with -- so
+    /// the only thing a real-length run would add to these assertions is
+    /// ten seconds of suite time per test.
+    const TEST_STALL_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(50);
+
+    /// How long a watchdog waits before feeding a message to a wait that
+    /// should have expired on its own.
+    ///
+    /// Two orders of magnitude past the test threshold, so it separates
+    /// outcomes rather than grading one: a wait bounded by the stall
+    /// deadline returns in tens of milliseconds, and an unbounded one
+    /// returns never. The watchdog exists so "never" fails the test with a
+    /// verdict instead of hanging the suite.
+    const WAIT_WATCHDOG_SECS: u64 = 5;
+
+    /// Waits for `probe` to hold, failing the test rather than hanging if
+    /// it never does.
+    fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !probe() {
+            assert!(std::time::Instant::now() < deadline, "timed out: {what}");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
+    /// A live connection whose peer parks inside every write until
+    /// released, exactly as a wedged nvim parks the writer thread.
+    ///
+    /// Every end whose drop would free a parked thread is held here rather
+    /// than by the test body, so an assertion that fails mid-wedge still
+    /// unparks both threads: the body owns this, and unwinding drops it.
+    /// Neither the notification receiver nor the reader's block may be
+    /// dropped early, since either would retire the connection for a reason
+    /// that has nothing to do with the peer.
+    struct WedgedPeer {
+        handle: EngineHandle,
+        entered: mpsc::Receiver<()>,
+        release: Option<mpsc::Sender<()>>,
+        _reader: mpsc::Sender<()>,
+        _notifications: mpsc::Receiver<view_engine::EngineNotification>,
+    }
+
+    impl WedgedPeer {
+        fn new() -> Self {
+            let (sink, entered, release) = view_engine::test_peer::ParkedSink::new();
+            let (source, reader) = view_engine::test_peer::IdleSource::new();
+            let (handle, notifications) = EngineHandle::start(source, sink);
+            Self {
+                handle,
+                entered,
+                release: Some(release),
+                _reader: reader,
+                _notifications: notifications,
+            }
+        }
+
+        /// Blocks until the writer thread is provably inside a write that
+        /// cannot finish, so the stall is a fact before anything is timed.
+        fn await_parked_write(&self) {
+            self.entered
+                .recv_timeout(std::time::Duration::from_secs(
+                    view_engine::test_peer::PARKED_WRITE_ARM_SECS,
+                ))
+                .expect("the writer thread reached the sink");
+        }
+
+        /// Lets the peer accept writes again, from the one in progress on.
+        fn release(&mut self) {
+            self.release = None;
+        }
+    }
+
+    #[test]
+    fn a_wedged_engine_raises_the_notice_and_retracts_it_when_the_writer_moves_again() {
+        let mut peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+
+        peer.handle.input("a").unwrap();
+        peer.await_parked_write();
+        // queued behind a write that cannot finish, so the backlog outlives
+        // the message the writer is holding
+        peer.handle.input("b").unwrap();
+
+        // the stall is measured from an observation, never asserted by the
+        // first one: nothing has yet been seen to stop moving
+        assert!(
+            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            "the notice was raised by the observation that first saw the backlog, \
+             before any time had passed for the writer to be stalled through"
+        );
+        assert!(model.engine.messages.entries.is_empty());
+
+        std::thread::sleep(TEST_STALL_THRESHOLD * 3);
+        assert!(
+            note_write_stall(&mut model, &mut watch, &peer.handle),
+            "a writer parked inside a write, with a second message queued behind it \
+             and the threshold long past, raised no notice"
+        );
+        assert_eq!(
+            model.engine.messages.visible_lines(4),
+            vec![ENGINE_STALLED_NOTICE.to_string()]
+        );
+
+        assert!(
+            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            "re-asserting an unchanged notice reported a change, which repaints \
+             the toast on every loop pass for as long as the stall lasts"
+        );
+
+        // a keypress dismisses transient toasts; this one describes a
+        // condition that is still true, and the keypress that would drop it
+        // is the one it exists to explain
+        assert!(!model.engine.messages.dismiss_transient_on_keypress(false));
+        assert_eq!(
+            model.engine.messages.visible_lines(4),
+            vec![ENGINE_STALLED_NOTICE.to_string()]
+        );
+
+        peer.release();
+        wait_until("the writer drains its backlog", || {
+            peer.handle.write_progress().0 == 0
+        });
+        assert!(
+            note_write_stall(&mut model, &mut watch, &peer.handle),
+            "the backlog drained and the notice was not retracted"
+        );
+        assert!(model.engine.messages.entries.is_empty());
+    }
+
+    #[test]
+    fn a_wedge_surfaces_without_any_further_input() {
+        let mut peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        // nothing else will ever arrive: a wedged engine sends no redraws,
+        // and this operator typed once and then stopped. The watchdog is
+        // not a wakeup the loop may rely on -- it exists so a wait that
+        // never expires ends this test with a verdict
+        let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(WAIT_WATCHDOG_SECS));
+            let _ = msg_tx.send(Msg::RedrawReady);
+        });
+
+        peer.handle.input("a").unwrap();
+        peer.await_parked_write();
+        peer.handle.input("b").unwrap();
+
+        // the loop's own shape: read the write side, wait, repeat
+        let start = std::time::Instant::now();
+        while !note_write_stall(&mut model, &mut watch, &peer.handle) {
+            assert!(
+                wait_for_msg(&msg_rx, &watch).is_none(),
+                "the wait outlasted the stall deadline and returned the watchdog's \
+                 message: a wedge nobody types at would never be surfaced"
+            );
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(WAIT_WATCHDOG_SECS),
+                "the deadline kept expiring without the stall ever being reported"
+            );
+        }
+        assert_eq!(
+            model.engine.messages.visible_lines(4),
+            vec![ENGINE_STALLED_NOTICE.to_string()]
+        );
+        peer.release();
+    }
+
+    #[test]
+    fn an_idle_session_arms_no_deadline_and_is_never_woken_early() {
+        let mut peer = WedgedPeer::new();
+        // a peer that reads normally, expressed through the same sink as
+        // the wedged one: healthy and wedged differ by this one call
+        peer.release();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+
+        peer.handle.input("a").unwrap();
+        wait_until("the writer drains its backlog", || {
+            peer.handle.write_progress().0 == 0
+        });
+        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        assert_eq!(
+            watch.poll_deadline(),
+            None,
+            "an idle session armed a deadline, so the loop would wake on a \
+             schedule it has never paid for"
+        );
+
+        // and the wait itself delivers only what is sent, when it is sent
+        let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+        let quiet = TEST_STALL_THRESHOLD * 3;
+        std::thread::spawn(move || {
+            std::thread::sleep(quiet);
+            let _ = msg_tx.send(Msg::RedrawReady);
+        });
+        let start = std::time::Instant::now();
+        let received = wait_for_msg(&msg_rx, &watch);
+        assert!(
+            matches!(received, Some(Ok(Msg::RedrawReady))),
+            "an idle wait returned something other than the one message sent to it"
+        );
+        assert!(
+            start.elapsed() >= quiet,
+            "the idle wait returned before its only message was sent: the loop was \
+             woken by a deadline an idle session must not arm"
+        );
+    }
+
+    #[test]
+    fn an_engine_that_keeps_writing_never_raises_the_notice() {
+        let mut peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        peer.release();
+
+        for i in 0..20 {
+            peer.handle.input("a").unwrap();
+            peer.await_parked_write();
+            assert!(
+                !note_write_stall(&mut model, &mut watch, &peer.handle),
+                "a delivering writer read as stalled on write {i}"
+            );
+            std::thread::sleep(TEST_STALL_THRESHOLD / 2);
+        }
+        assert!(model.engine.messages.entries.is_empty());
+    }
+
+    #[test]
+    fn an_idle_engine_with_nothing_queued_never_raises_the_notice() {
+        let mut peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        peer.release();
+
+        peer.handle.input("a").unwrap();
+        wait_until("the writer drains its backlog", || {
+            peer.handle.write_progress().0 == 0
+        });
+        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        std::thread::sleep(TEST_STALL_THRESHOLD * 3);
+        assert!(
+            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            "an engine with an empty queue read as stalled after three thresholds \
+             of doing nothing, which is an idle editor rather than a wedged one"
+        );
+        assert!(model.engine.messages.entries.is_empty());
     }
 }

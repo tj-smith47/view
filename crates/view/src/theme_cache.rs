@@ -317,8 +317,9 @@ fn store_to_path(theme: Theme, path: &Path) {
 /// `u64::MAX`).
 const SEED_HL_ID_BASE: u64 = u64::MAX;
 
-/// Seeds `hl` from a previously cached `theme` so the very first paint --
-/// before nvim has sent a single `default_colors_set`/`hl_attr_define`/
+/// Builds a highlight table from a previously cached `theme` so the very
+/// first paint -- before nvim has sent a single `default_colors_set`/
+/// `hl_attr_define`/
 /// `hl_group_set` event -- already reflects last session's colors instead
 /// of `Theme::default()`'s all-unset fallback. Reuses the exact live
 /// derivation path ([`Theme::from_hl`]) rather than special-casing a
@@ -337,11 +338,18 @@ const SEED_HL_ID_BASE: u64 = u64::MAX;
 /// seeding closes. The cache only ever stores an already-honest `Theme`
 /// (never a wire-ambiguous raw value -- see `store`'s caller), so re-marking
 /// it "confirmed" here is not fabricating certainty that was never earned.
-pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
-    hl.default_fg = theme.fg;
-    hl.default_bg = theme.bg;
-    hl.confirmed = Some(ProbedDefaults {
-        generation: hl.probe_generation,
+///
+/// Returns a fresh table rather than seeding one in place: the model's own
+/// table is reachable only through `EngineModel`, whose accessors exist so
+/// that installing a replacement records the damage the swap causes.
+#[must_use]
+pub fn seeded_hl_table(theme: &Theme) -> HlTable {
+    let mut hl = HlTable::new();
+    // the generation the write itself opened, so the seeded confirmation
+    // answers these defaults rather than whatever generation preceded them
+    let generation = hl.set_default_colors(theme.fg, theme.bg);
+    hl.confirm_defaults(ProbedDefaults {
+        generation,
         fg: theme.fg,
         bg: theme.bg,
     });
@@ -357,16 +365,17 @@ pub fn seed_hl_table(hl: &mut HlTable, theme: &Theme) {
     // offsets come from enumeration, not hand-written literals, so two
     // groups can never collide on a synthetic hl_id
     for (offset, (name, style)) in entries.into_iter().enumerate() {
-        seed_named(hl, name, style, offset as u64);
+        seed_named(&mut hl, name, style, offset as u64);
     }
+    hl
 }
 
-/// One [`seed_hl_table`] entry: reserves `SEED_HL_ID_BASE - offset` as
+/// One [`seeded_hl_table`] entry: reserves `SEED_HL_ID_BASE - offset` as
 /// `name`'s synthetic `hl_id`, distinct per named group so seeding one
 /// group's colors can never bleed into another's.
 fn seed_named(hl: &mut HlTable, name: &str, style: ResolvedStyle, offset: u64) {
     let hl_id = SEED_HL_ID_BASE - offset;
-    hl.attrs.insert(
+    hl.define_attr(
         hl_id,
         HlAttr {
             fg: style.fg,
@@ -377,12 +386,14 @@ fn seed_named(hl: &mut HlTable, name: &str, style: ResolvedStyle, offset: u64) {
             reverse: style.reverse,
         },
     );
-    hl.groups.insert(name.to_string(), hl_id);
+    hl.set_group(name.to_string(), hl_id);
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // the env-mutation sites below are the ones ENV_MUTATION_LOCK exists to
+    // bound; each holds the guard across its own restore
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
     use super::*;
 
     fn tmp_dir(name: &str) -> PathBuf {
@@ -398,31 +409,35 @@ mod tests {
         dir
     }
 
-    fn empty_hl_table() -> HlTable {
-        HlTable {
-            default_fg: None,
-            default_bg: None,
-            attrs: std::collections::HashMap::new(),
-            groups: std::collections::HashMap::new(),
-            probe_generation: 0,
-            confirmed: None,
-        }
-    }
-
     /// Serializes every test in this module that calls `std::env::set_var`/
     /// `remove_var`. `cargo test` runs a module's tests on multiple threads
-    /// by default, and concurrent mutation of the process environment from
-    /// separate threads races at the libc `environ` level (any thread's
-    /// concurrent `var()` read can observe a table another thread is
-    /// mid-reallocation on), not just at the logical "which var did I read"
-    /// level -- disjoint var names do not make two such tests safe to run
-    /// concurrently. Each env-touching test acquires this for its whole
-    /// body, including its own restore of the prior value.
+    /// by default, and these tests set and then restore the *same* names, so
+    /// two of them overlapping would interleave one's restore with another's
+    /// plant and leave the loser reading a value it never set. The lock is
+    /// held for the whole body, restore included, because releasing it
+    /// between the mutation and the restore is what opens that window.
+    ///
+    /// The hazard is that overlap, not a torn read of libc's `environ`:
+    /// std's own `ENV_LOCK` already excludes `set_var` against `vars_os` and
+    /// against the environment copy inside `Command::spawn`, so a program
+    /// mutating the environment only through `std` cannot observe a table
+    /// mid-reallocation.
     static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// [`ENV_MUTATION_LOCK`], with poisoning ignored: it orders two
+    /// operations and guards no data, so a test that panicked while holding
+    /// it left nothing behind for the next one to find broken. Propagating
+    /// the poison would turn one real failure into a screenful of unrelated
+    /// ones, none of which names what actually broke.
+    fn env_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn resolved_config_path_prefers_xdg_config_home_then_home_then_appdata() {
-        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
+        let _guard = env_mutation_guard();
         let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
         let prev_home = std::env::var("HOME").ok();
         let prev_appdata = std::env::var("APPDATA").ok();
@@ -652,7 +667,7 @@ mod tests {
     /// the cached values, with zero special-casing in the derivation
     /// itself.
     #[test]
-    fn seed_hl_table_makes_named_groups_resolve_through_the_live_derivation_path() {
+    fn seeded_hl_table_makes_named_groups_resolve_through_the_live_derivation_path() {
         let cached_theme = Theme {
             fg: Some(0x111111),
             bg: Some(0x222222),
@@ -674,8 +689,7 @@ mod tests {
             },
             ..Theme::default()
         };
-        let mut hl = empty_hl_table();
-        seed_hl_table(&mut hl, &cached_theme);
+        let hl = seeded_hl_table(&cached_theme);
         let derived = Theme::from_hl(&hl);
         assert_eq!(derived.fg, Some(0x111111));
         assert_eq!(derived.bg, Some(0x222222));
@@ -690,16 +704,17 @@ mod tests {
     /// very next attach, reintroducing the black flash this seeding exists
     /// to prevent.
     #[test]
-    fn seed_hl_table_marks_the_cached_theme_confirmed_at_the_current_generation() {
+    fn seeded_hl_table_marks_the_cached_theme_confirmed_at_the_current_generation() {
         let cached_theme = Theme {
             fg: Some(0xF8F8F2),
             bg: None,
             ..Theme::default()
         };
-        let mut hl = empty_hl_table();
-        seed_hl_table(&mut hl, &cached_theme);
-        let confirmed = hl.confirmed.expect("seeding must record a confirmed value");
-        assert_eq!(confirmed.generation, hl.probe_generation);
+        let hl = seeded_hl_table(&cached_theme);
+        let confirmed = hl
+            .confirmed()
+            .expect("seeding must record a confirmed value");
+        assert_eq!(confirmed.generation, hl.probe_generation());
         assert_eq!(confirmed.fg, Some(0xF8F8F2));
         assert_eq!(confirmed.bg, None);
     }
@@ -719,8 +734,7 @@ mod tests {
             bg: None,
             ..Theme::default()
         };
-        let mut hl = empty_hl_table();
-        seed_hl_table(&mut hl, &cached_theme);
+        let hl = seeded_hl_table(&cached_theme);
         assert_eq!(
             Theme::from_hl(&hl).bg,
             None,
@@ -730,7 +744,7 @@ mod tests {
         // attach's own default_colors_set resends the same wire-ambiguous
         // zero the real bug report always reproduces with
         let mut model = view_core::model::Model::new();
-        model.engine.hl = hl;
+        model.engine.replace_hl(hl);
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::DefaultColorsSet {
@@ -740,7 +754,7 @@ mod tests {
             }]),
         );
         assert_eq!(
-            Theme::from_hl(&model.engine.hl).bg,
+            Theme::from_hl(model.engine.hl()).bg,
             None,
             "the seeded confirmed value must hold while attach's probe is in flight"
         );
@@ -761,8 +775,7 @@ mod tests {
             bg: Some(0),
             ..Theme::default()
         };
-        let mut hl = empty_hl_table();
-        seed_hl_table(&mut hl, &cached_theme);
+        let hl = seeded_hl_table(&cached_theme);
         assert_eq!(
             Theme::from_hl(&hl).bg,
             Some(0),
@@ -772,7 +785,7 @@ mod tests {
         // attach's own default_colors_set resends the same wire-ambiguous
         // zero every single startup, black theme or not
         let mut model = view_core::model::Model::new();
-        model.engine.hl = hl;
+        model.engine.replace_hl(hl);
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::Redraw(vec![view_core::events::UiEvent::DefaultColorsSet {
@@ -782,20 +795,31 @@ mod tests {
             }]),
         );
         assert_eq!(
-            Theme::from_hl(&model.engine.hl).bg,
+            Theme::from_hl(model.engine.hl()).bg,
             Some(0),
             "the seeded confirmed black value must hold while attach's probe is in flight"
         );
     }
 
     #[test]
-    fn seed_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
-        let mut hl = empty_hl_table();
-        seed_hl_table(&mut hl, &Theme::default());
-        let ids: std::collections::HashSet<u64> = hl.groups.values().copied().collect();
+    fn seeded_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
+        let hl = seeded_hl_table(&Theme::default());
+        let names = [
+            "StatusLine",
+            "TabLine",
+            "TabLineSel",
+            "TabLineFill",
+            "Pmenu",
+            "PmenuSel",
+            "MsgArea",
+        ];
+        let ids: std::collections::HashSet<u64> = names
+            .iter()
+            .map(|n| hl.group(n).expect("seeding must map every named group"))
+            .collect();
         assert_eq!(
             ids.len(),
-            hl.groups.len(),
+            names.len(),
             "each named group must get its own synthetic hl_id, not a shared one"
         );
     }
@@ -808,7 +832,7 @@ mod tests {
     /// owning disjoint var names.
     #[test]
     fn load_and_store_round_trip_through_xdg_state_home() {
-        let _guard = ENV_MUTATION_LOCK.lock().unwrap();
+        let _guard = env_mutation_guard();
         let dir = tmp_dir("xdg-e2e");
         let prev = std::env::var("XDG_STATE_HOME").ok();
         std::env::set_var("XDG_STATE_HOME", &dir);

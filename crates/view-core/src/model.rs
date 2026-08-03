@@ -1,8 +1,8 @@
 //! Application state `update()` reads and mutates. No I/O, no rendering.
 
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
-use crate::grid::Grid;
-use crate::hl::HlTable;
+use crate::grid::{Grid, GridOp};
+use crate::hl::{HlAttr, HlTable, ProbedDefaults};
 
 /// The complete application state.
 #[non_exhaustive]
@@ -49,14 +49,7 @@ impl Model {
         Self {
             engine: EngineModel {
                 grid: Grid::new(),
-                hl: HlTable {
-                    default_fg: None,
-                    default_bg: None,
-                    attrs: std::collections::HashMap::new(),
-                    groups: std::collections::HashMap::new(),
-                    probe_generation: 0,
-                    confirmed: None,
-                },
+                hl: HlTable::new(),
                 mode: ModeState::default(),
                 cmdline: None,
                 messages: Messages::default(),
@@ -102,6 +95,32 @@ impl Model {
         }
     }
 
+    /// Drains what changed since the last call, so a repaint can clip
+    /// compositing to the damaged region. The runtime calls this once per
+    /// frame, alongside clearing [`Model::dirty`]; see
+    /// [`crate::grid::GridDamage`].
+    ///
+    /// The one place damage is drained, because it is the one place that
+    /// sees every input a composite reads: the grid's own changed rows, and
+    /// the highlight table behind every cell's resolved style. A highlight
+    /// change has no rows of its own -- it can restyle the whole screen at
+    /// once -- so it collapses to whole-frame damage. Draining a paint input
+    /// anywhere else would clip a frame against a subset of what it paints
+    /// from, which is why [`crate::grid::Grid::take_dirty`] is crate-private.
+    #[must_use]
+    pub fn take_paint_damage(&mut self) -> crate::grid::GridDamage {
+        // both drained unconditionally: a change left in either tracker
+        // would resurface as damage on some later frame that no longer
+        // needs it
+        let hl_changed = self.engine.hl.take_dirty();
+        let grid = self.engine.grid.take_dirty();
+        if hl_changed {
+            crate::grid::GridDamage::full()
+        } else {
+            grid
+        }
+    }
+
     /// The `(width, height)` the engine grid should be resized to, given
     /// the current terminal size and reserved chrome rows. `update()` sends
     /// this as `Effect::Rpc(RpcCall::TryResize)` whenever the terminal size
@@ -130,8 +149,19 @@ impl Default for Model {
 /// wire.
 #[non_exhaustive]
 pub struct EngineModel {
-    pub grid: Grid,
-    pub hl: HlTable,
+    /// The engine grid. Private, and reachable only through
+    /// [`EngineModel::grid`] and [`EngineModel::apply_grid`], because it is
+    /// one of the two paint inputs that track their own damage: a `pub`
+    /// field makes `engine.grid = Grid::new()` compile, which installs a
+    /// tracker holding none of the damage the replacement caused and clips
+    /// the next frame to nothing.
+    grid: Grid,
+    /// The highlight table, private for the same reason `grid` is; see
+    /// [`EngineModel::hl`] and the mutators beside it. Whole-table
+    /// replacement stays available through [`EngineModel::replace_hl`],
+    /// which records the damage a replacement causes instead of discarding
+    /// it.
+    hl: HlTable,
     pub mode: ModeState,
     pub cmdline: Option<CmdlineState>,
     pub messages: Messages,
@@ -145,6 +175,75 @@ pub struct EngineModel {
     pub mouse_on: bool,
 }
 
+// the three accessors the compositor reaches for every frame carry
+// `#[inline]`: they are field reads, the workspace builds without LTO, and
+// without the hint nothing outside this crate can see through them
+impl EngineModel {
+    /// The engine grid, for reading: its cells, size, and cursor position.
+    #[must_use]
+    #[inline]
+    pub fn grid(&self) -> &Grid {
+        &self.grid
+    }
+
+    /// Applies one decoded `ext_linegrid` operation to the grid. The only
+    /// way to mutate it, so every mutation goes through the tracker that
+    /// records which rows it touched.
+    #[inline]
+    pub fn apply_grid(&mut self, op: GridOp) {
+        self.grid.apply(op);
+    }
+
+    /// The highlight table, for reading: default colors, per-id attributes,
+    /// builtin group mappings, and the probe generation.
+    #[must_use]
+    #[inline]
+    pub fn hl(&self) -> &HlTable {
+        &self.hl
+    }
+
+    /// Defines (or redefines) one highlight id's attributes, per
+    /// `hl_attr_define`.
+    pub fn define_hl_attr(&mut self, hl_id: u64, attr: HlAttr) {
+        self.hl.define_attr(hl_id, attr);
+    }
+
+    /// Associates a builtin UI element name with the `hl_id` it resolves
+    /// through, per `hl_group_set`.
+    pub fn set_hl_group(&mut self, name: String, hl_id: u64) {
+        self.hl.set_group(name, hl_id);
+    }
+
+    /// Records new default colors, returning the probe generation the
+    /// emitted `nvim_get_hl` call must carry; see
+    /// [`HlTable::set_default_colors`] for why dropping it is never correct.
+    #[must_use]
+    pub fn set_hl_default_colors(&mut self, fg: Option<u32>, bg: Option<u32>) -> u64 {
+        self.hl.set_default_colors(fg, bg)
+    }
+
+    /// Accepts one probe reply as the confirmed disambiguation of the
+    /// current defaults; see [`HlTable::confirm_defaults`] for the
+    /// generation check the caller owes first.
+    pub fn confirm_hl_defaults(&mut self, probe: ProbedDefaults) {
+        self.hl.confirm_defaults(probe);
+    }
+
+    /// Installs a whole highlight table, as startup does with one seeded
+    /// from a persisted theme, and records that every resolved style on
+    /// screen just moved.
+    ///
+    /// The damage mark is the reason this exists rather than a `pub` field
+    /// or a `&mut` accessor: a replacement changes the styles behind every
+    /// painted cell while touching no grid row, so a plain assignment would
+    /// leave the next frame clipped to whatever rows the grid happened to
+    /// damage, painting the new table's colors onto those rows alone.
+    pub fn replace_hl(&mut self, hl: HlTable) {
+        self.hl = hl;
+        self.hl.mark_dirty();
+    }
+}
+
 /// nvim mode state: the cursor/highlight property table from the last
 /// `mode_info_set`, plus the active mode from the last `mode_change`.
 #[non_exhaustive]
@@ -153,7 +252,6 @@ pub struct ModeState {
     /// nvim's own `mode_info_set` contract: when `false`, the UI must not
     /// restyle the cursor per mode at all and should render a plain
     /// (block) cursor regardless of what `modes`/`current_idx` describe.
-    /// Consumed by `view-surface`'s `shape_from_mode`.
     pub cursor_style_enabled: bool,
     pub modes: Vec<ModeInfo>,
     pub current: String,
@@ -200,6 +298,11 @@ pub struct MessageEntry {
     /// `MessageEntry` is built by `Messages::push`, which stamps this from
     /// its own counter.
     shown_at_flush: u64,
+    /// Whether this entry is the one locally-raised condition notice (see
+    /// `Messages::set_native_condition`) rather than a record of something
+    /// that happened. Marked rather than matched on text or kind, so
+    /// retracting the condition can never take a real message with it.
+    condition: bool,
 }
 
 impl MessageEntry {
@@ -225,19 +328,60 @@ impl MessageEntry {
 
     /// Whether nvim's own `msg_show` `kind` (per `api-ui-events.txt`'s kind
     /// table) names this an error or a warning: `"emsg"`, `"echoerr"`,
-    /// `"wmsg"`, `"lua_error"`, `"rpc_error"`. These must be read, not
-    /// silently lost, so they persist until explicitly cleared or replaced
-    /// -- never auto-dismissed by user activity and never evicted from the
-    /// visible toast stack merely because other messages arrived after
-    /// them (`Messages::visible_lines`) -- matching real nvim's own
+    /// `"wmsg"`, `"lua_error"`, `"rpc_error"`, `"shell_err"`. These must be
+    /// read, not silently lost, so they persist until explicitly cleared or
+    /// replaced -- never auto-dismissed by user activity and never evicted
+    /// from the visible toast stack merely because other messages arrived
+    /// after them (`Messages::visible_lines`) -- matching real nvim's own
     /// hit-enter-prompt convention that an error blocks until acknowledged.
     /// Every other kind is transient.
+    ///
+    /// `"shell_err"` is a `:!cmd`'s stderr: the one channel a failing
+    /// external command has to explain itself, and the only reason to look
+    /// at the output of a command that went wrong.
+    ///
+    /// A locally-raised condition notice (`Messages::set_native_condition`)
+    /// is persistent by the same argument arrived at from the other side:
+    /// it describes a state that is still true, and the user activity that
+    /// dismisses a transient entry is exactly the activity a stalled engine
+    /// is swallowing, so dismissing on a keypress would erase the notice
+    /// with the very keystroke it is there to explain. It is retracted by
+    /// whoever raised it, when the condition ends.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        matches!(
-            self.kind.as_str(),
-            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error"
-        )
+        self.condition
+            || matches!(
+                self.kind.as_str(),
+                "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
+            )
+    }
+
+    /// Whether this entry is the question text of a cmdline prompt that is
+    /// still waiting for an answer -- nvim's `"confirm"` kind, which its own
+    /// kind table defines as "message preceding a prompt".
+    ///
+    /// A third lifetime, neither persistent nor transient. nvim emits the
+    /// question once as `msg_show` and the answer line separately as
+    /// `cmdline_show`; a key that answers none of the offered choices
+    /// re-arms the prompt by re-emitting `cmdline_show` ALONE, so a question
+    /// dismissed on that keypress leaves an answer line with nothing to
+    /// answer. Persistence is equally wrong in the other direction: nvim
+    /// sends no `msg_clear` when the prompt resolves, so a question kept
+    /// until explicitly cleared would occlude the buffer forever. Its
+    /// lifetime is therefore the prompt's: dismissable by user activity,
+    /// but only once the cmdline has closed.
+    #[must_use]
+    pub fn is_prompt(&self) -> bool {
+        self.kind == "confirm"
+    }
+
+    /// Whether this entry keeps its rows when the toast box overflows.
+    /// An unanswered question ranks with the errors: a burst of info
+    /// messages must not push it off screen while the editor is blocked
+    /// waiting for it.
+    #[must_use]
+    fn outranks_transient(&self) -> bool {
+        self.is_persistent() || self.is_prompt()
     }
 }
 
@@ -261,14 +405,22 @@ impl Messages {
     /// instead of appending, matching nvim's progress-indicator convention
     /// (e.g. successive search-match counts share one line); with no prior
     /// entry to replace, it appends instead.
+    ///
+    /// "Most recent" means the most recent entry nvim itself produced. A
+    /// raised condition notice (see `set_native_condition`) sits at the
+    /// tail whenever it is up, and nvim's replace targets its own previous
+    /// line: overwriting the notice would both drop a condition that is
+    /// still true and leave the line nvim meant to replace standing as a
+    /// duplicate.
     pub fn push(&mut self, kind: String, content: Vec<(u64, String)>, replace_last: bool) {
         let entry = MessageEntry {
             kind,
             content,
             shown_at_flush: self.flush_generation,
+            condition: false,
         };
         if replace_last {
-            if let Some(last) = self.entries.last_mut() {
+            if let Some(last) = self.entries.iter_mut().rev().find(|e| !e.condition) {
                 *last = entry;
                 return;
             }
@@ -293,19 +445,67 @@ impl Messages {
         self.push("native".to_string(), vec![(0, text)], replace_last);
     }
 
-    /// Marks one full paint cycle as having happened, called from `update`
-    /// on every `Flush` UI event. Read by `dismiss_transient_on_keypress`
-    /// to tell whether an entry has survived at least one frame.
+    /// Raises (`Some`) or retracts (`None`) the one locally-raised
+    /// *condition* notice, through the same overlay as `push_native` and
+    /// for the same reason: a native condition reaches the user over the
+    /// message surface that already exists, never a second one built
+    /// alongside it.
+    ///
+    /// A condition differs from `push_native`'s notice in lifetime, not in
+    /// origin. `push_native` records that something happened, and the
+    /// record stays true forever; a condition asserts that something *is
+    /// true now* -- an engine that has stopped reading view's output, say --
+    /// and must disappear by itself the moment it stops being true. At most
+    /// one is ever shown, since a second simultaneous condition would need
+    /// its own retraction and there is nothing to key one off. It is
+    /// persistent while raised (see `MessageEntry::is_persistent`), so the
+    /// keypresses that dismiss ordinary transient text leave it alone.
+    ///
+    /// Idempotent, and cheap enough to call unconditionally on every loop
+    /// pass: re-asserting the text already showing changes nothing and
+    /// reports so. Returns whether the visible set changed, which is the
+    /// caller's cue to repaint.
+    #[must_use]
+    pub fn set_native_condition(&mut self, text: Option<&str>) -> bool {
+        let Some(text) = text else {
+            let before = self.entries.len();
+            self.entries.retain(|e| !e.condition);
+            return self.entries.len() != before;
+        };
+        if let Some(raised) = self.entries.iter_mut().find(|e| e.condition) {
+            let content = vec![(0, text.to_string())];
+            if raised.content == content {
+                return false;
+            }
+            raised.content = content;
+            return true;
+        }
+        // raised through `push_native` and marked afterwards, rather than
+        // built here: the flush stamp every entry carries keeps exactly one
+        // source, and a condition is a native notice in every respect but
+        // its lifetime
+        self.push_native(text.to_string(), false);
+        if let Some(raised) = self.entries.last_mut() {
+            raised.condition = true;
+        }
+        true
+    }
+
+    /// Marks one full paint cycle as having happened -- one call per
+    /// `Flush` UI event -- so that a transient entry's age in frames, and
+    /// therefore whether it has survived long enough to be dismissable, is
+    /// answerable at all.
     pub fn note_flush(&mut self) {
         self.flush_generation = self.flush_generation.wrapping_add(1);
     }
 
-    /// Drops every transient (non-`is_persistent`) entry that has already
-    /// survived at least one full paint cycle since it was shown. Called
+    /// Drops every transient entry that has already survived at least one
+    /// full paint cycle since it was shown, leaving `is_persistent` entries
+    /// and -- while `cmdline_open` -- `is_prompt` ones in place. Called
     /// from `update` on the user's next keypress: gives an info-level toast
     /// a readable duration bounded by real user activity -- an event the
-    /// zero-clock runtime already receives -- rather than a wall-clock
-    /// timer the runtime has no mechanism for. An entry pushed in the same
+    /// clockless model already receives -- rather than a wall-clock
+    /// timer the runtime never delivers to `update`. An entry pushed in the same
     /// flush generation as the pending keypress has not necessarily been
     /// painted even once yet, so it survives this pass and is only
     /// dismissed on the *next* keypress instead, guaranteeing every
@@ -313,35 +513,36 @@ impl Messages {
     /// anything was actually dropped, so the caller knows whether to mark
     /// the model dirty for a repaint.
     #[must_use]
-    pub fn dismiss_transient_on_keypress(&mut self) -> bool {
+    pub fn dismiss_transient_on_keypress(&mut self, cmdline_open: bool) -> bool {
         let before = self.entries.len();
         let current = self.flush_generation;
-        self.entries
-            .retain(|e| e.is_persistent() || e.shown_at_flush == current);
+        self.entries.retain(|e| {
+            e.is_persistent() || (cmdline_open && e.is_prompt()) || e.shown_at_flush == current
+        });
         self.entries.len() != before
     }
 
     /// The physical lines actually visible in a toast box `max_rows` tall:
-    /// every persistent (error/warn-kind) entry's lines are always kept, in
-    /// their original arrival order; the remaining row budget is filled
-    /// with the most recent transient lines, evicting the oldest transient
-    /// lines first when the log needs more rows than the box has. Only in
-    /// the extreme case where persistent lines alone exceed `max_rows` does
-    /// eviction reach into them too (oldest persistent first) -- the sole
-    /// remaining way an error/warn line can still be dropped, and never
-    /// merely because other messages arrived after it. Without this
-    /// priority, a burst of ordinary info messages could silently push an
-    /// unread error off the visible stack with neither an explicit
-    /// `msg_clear` nor a replace ever happening, which is exactly the
-    /// "persist until dismissed or replaced" contract broken by a plain
-    /// recency-only trim.
+    /// every entry that outranks transient text -- the error/warn kinds and
+    /// an unanswered prompt's question -- keeps its lines, in their original
+    /// arrival order; the remaining row budget is filled with the most
+    /// recent transient lines, evicting the oldest transient lines first
+    /// when the log needs more rows than the box has. Only in the extreme
+    /// case where those alone exceed `max_rows` does eviction reach into
+    /// them too (oldest first) -- the sole remaining way an error, warning
+    /// or question line can still be dropped, and never merely because
+    /// other messages arrived after it. Without this priority, a burst of
+    /// ordinary info messages could silently push an unread error off the
+    /// visible stack with neither an explicit `msg_clear` nor a replace
+    /// ever happening, which is exactly the "persist until dismissed or
+    /// replaced" contract broken by a plain recency-only trim.
     #[must_use]
     pub fn visible_lines(&self, max_rows: usize) -> Vec<String> {
         let all: Vec<(bool, String)> = self
             .entries
             .iter()
             .flat_map(|e| {
-                let persistent = e.is_persistent();
+                let persistent = e.outranks_transient();
                 e.lines().into_iter().map(move |l| (persistent, l))
             })
             .collect();
@@ -518,19 +719,101 @@ mod tests {
     }
 
     #[test]
-    fn is_persistent_matches_every_error_and_warning_kind_and_only_those() {
-        for kind in ["emsg", "echoerr", "wmsg", "lua_error", "rpc_error"] {
+    fn is_persistent_matches_every_error_and_warning_kind_plus_a_raised_condition() {
+        for kind in [
+            "emsg",
+            "echoerr",
+            "wmsg",
+            "lua_error",
+            "rpc_error",
+            "shell_err",
+        ] {
             assert!(
                 entry(kind, vec![]).is_persistent(),
                 "{kind} must be persistent"
             );
         }
-        for kind in ["echo", "echomsg", "native", "progress", "quickfix", ""] {
+        for kind in [
+            "echo",
+            "echomsg",
+            "native",
+            "progress",
+            "quickfix",
+            "confirm",
+            "shell_out",
+            "shell_cmd",
+            "shell_ret",
+            "",
+        ] {
             assert!(
                 !entry(kind, vec![]).is_persistent(),
                 "{kind} must not be persistent"
             );
         }
+        // the arm no kind can reach: a raised condition carries the same
+        // "native" kind the loop above requires to be transient, and is
+        // persistent on the strength of being a condition alone
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("still true")));
+        let raised = messages.entries.first().unwrap();
+        assert_eq!(raised.kind, "native");
+        assert!(raised.is_persistent());
+    }
+
+    #[test]
+    fn only_the_confirm_kind_is_bound_to_an_open_prompt() {
+        assert!(entry("confirm", vec![]).is_prompt());
+        for kind in ["emsg", "echomsg", "shell_err", "wmsg", ""] {
+            assert!(
+                !entry(kind, vec![]).is_prompt(),
+                "{kind} must not be a prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn a_confirm_question_survives_a_keypress_that_the_prompt_is_still_waiting_on() {
+        // nvim re-arms a confirm prompt on a key that answers none of its
+        // choices, and re-emits only `cmdline_show` -- never the `msg_show`
+        // carrying the question. Dismissing the question on that keypress
+        // leaves the user an answer line with nothing to answer.
+        let mut messages = Messages::default();
+        messages.push(
+            "confirm".to_string(),
+            vec![(0, "Save changes?".into())],
+            false,
+        );
+        messages.note_flush();
+        assert!(!messages.dismiss_transient_on_keypress(true));
+        assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_confirm_question_is_dismissed_once_its_prompt_has_closed() {
+        // the other side of the rule: with the prompt gone the question is
+        // ordinary transient text, so it must not outlive user activity the
+        // way an error does
+        let mut messages = Messages::default();
+        messages.push(
+            "confirm".to_string(),
+            vec![(0, "Save changes?".into())],
+            false,
+        );
+        messages.note_flush();
+        assert!(messages.dismiss_transient_on_keypress(false));
+        assert!(messages.entries.is_empty());
+    }
+
+    #[test]
+    fn an_open_prompts_question_outranks_transient_lines_for_the_visible_rows() {
+        let mut messages = Messages::default();
+        messages.push(
+            "confirm".to_string(),
+            vec![(0, "Save changes?".into())],
+            false,
+        );
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        assert_eq!(messages.visible_lines(1), vec!["Save changes?"]);
     }
 
     #[test]
@@ -539,11 +822,11 @@ mod tests {
         messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
         // not yet flushed: must survive this pass, guaranteeing at least
         // one painted frame before an info toast can be dismissed
-        assert!(!messages.dismiss_transient_on_keypress());
+        assert!(!messages.dismiss_transient_on_keypress(false));
         assert_eq!(messages.entries.len(), 1);
 
         messages.note_flush();
-        assert!(messages.dismiss_transient_on_keypress());
+        assert!(messages.dismiss_transient_on_keypress(false));
         assert!(messages.entries.is_empty());
     }
 
@@ -553,8 +836,88 @@ mod tests {
         messages.push("echoerr".to_string(), vec![(0, "boom".into())], false);
         messages.note_flush();
         messages.note_flush();
-        assert!(!messages.dismiss_transient_on_keypress());
+        assert!(!messages.dismiss_transient_on_keypress(false));
         assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_condition_notice_is_raised_once_and_retracted_once() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+        // re-asserting the same condition is not a change, so a caller that
+        // asks on every pass never repaints for it
+        assert!(!messages.set_native_condition(Some("engine stalled")));
+        assert_eq!(messages.entries.len(), 1);
+
+        assert!(messages.set_native_condition(None));
+        assert!(messages.entries.is_empty());
+        assert!(!messages.set_native_condition(None));
+    }
+
+    #[test]
+    fn re_raising_a_condition_with_new_text_replaces_it_rather_than_stacking() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("first")));
+        assert!(messages.set_native_condition(Some("second")));
+        assert_eq!(messages.visible_lines(4), vec!["second"]);
+        assert_eq!(messages.entries.len(), 1);
+    }
+
+    #[test]
+    fn a_condition_notice_survives_the_keypresses_that_dismiss_transient_text() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        messages.note_flush();
+        messages.note_flush();
+        assert!(messages.dismiss_transient_on_keypress(false));
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+    }
+
+    #[test]
+    fn a_progress_message_replaces_its_own_previous_line_not_the_raised_condition() {
+        // the canonical wedge is an nvim too busy to read its stdin while
+        // still flushing progress lines, so a raised condition and a
+        // replacing msg_show overlap exactly
+        let mut messages = Messages::default();
+        messages.push("progress".to_string(), vec![(0, "[1/57]".into())], false);
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("progress".to_string(), vec![(0, "[2/57]".into())], true);
+        assert_eq!(messages.visible_lines(4), vec!["[2/57]", "engine stalled"]);
+        assert_eq!(messages.entries.len(), 2);
+    }
+
+    #[test]
+    fn a_replacing_message_with_only_the_condition_present_appends_instead() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("progress".to_string(), vec![(0, "[1/57]".into())], true);
+        assert_eq!(messages.visible_lines(4), vec!["engine stalled", "[1/57]"]);
+    }
+
+    #[test]
+    fn retracting_a_condition_leaves_every_other_entry_alone() {
+        let mut messages = Messages::default();
+        messages.push("emsg".to_string(), vec![(0, "boom".into())], false);
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
+        assert!(messages.set_native_condition(None));
+        assert_eq!(messages.visible_lines(4), vec!["boom", "info"]);
+    }
+
+    #[test]
+    fn a_condition_notice_keeps_its_row_when_a_burst_of_transient_text_overflows_the_box() {
+        let mut messages = Messages::default();
+        assert!(messages.set_native_condition(Some("engine stalled")));
+        for i in 0..5 {
+            messages.push("echomsg".to_string(), vec![(0, format!("info {i}"))], false);
+        }
+        assert_eq!(
+            messages.visible_lines(2),
+            vec!["engine stalled", "info 4"],
+            "a stall notice must not be evicted by the messages that follow it"
+        );
     }
 
     #[test]

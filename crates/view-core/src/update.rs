@@ -15,10 +15,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::Key(Key { notation }) => {
             // any keypress is "the user is reading again": gives a
             // transient (info-kind) toast a readable duration bounded by
-            // real activity instead of a wall-clock timer the zero-clock
-            // runtime has no mechanism for; runs regardless of focus, since
+            // real activity instead of a wall-clock timer the runtime
+            // never delivers to `update`; runs regardless of focus, since
             // the semantic is user activity, not specifically engine input
-            if model.engine.messages.dismiss_transient_on_keypress() {
+            let cmdline_open = model.engine.cmdline.is_some();
+            if model
+                .engine
+                .messages
+                .dismiss_transient_on_keypress(cmdline_open)
+            {
                 model.dirty = true;
             }
             match model.focus {
@@ -71,8 +76,21 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             value: ReplyValue::Nil,
         }],
         Msg::Resized { width, height } => {
+            // an already-applied size is a no-op, not a repeat: the
+            // frontend may fold a resize in ahead of this message to keep
+            // the next frame's paint area current, and re-running the arm
+            // would then dirty the model and re-issue TryResize for a
+            // change that already happened
+            if (model.term_width, model.term_height) == (width, height) {
+                return Vec::new();
+            }
             model.term_width = width;
             model.term_height = height;
+            // the paint area is sourced from these fields, so the frame that
+            // renders them is this frontend's own concern: `grid_target`
+            // clamps, so a resize that leaves the grid unchanged draws no
+            // engine redraw at all and would otherwise never repaint
+            model.dirty = true;
             let (grid_width, grid_height) = model.grid_target();
             vec![Effect::Rpc(RpcCall::TryResize {
                 width: grid_width,
@@ -85,8 +103,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // after a newer one) would overwrite the newer reply's already-
             // correct confirmed state, permanently losing it since only one
             // slot is kept -- see HlTable::confirmed's doc comment
-            if generation == model.engine.hl.probe_generation {
-                model.engine.hl.confirmed = Some(crate::hl::ProbedDefaults { generation, fg, bg });
+            if generation == model.engine.hl().probe_generation() {
+                model
+                    .engine
+                    .confirm_hl_defaults(crate::hl::ProbedDefaults { generation, fg, bg });
                 // the paint loop's `if model.dirty` gate is the only thing
                 // that triggers a repaint; without this, a probe reply that
                 // arrives after the frame it corrects has already painted
@@ -131,7 +151,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // clamp untrusted wire dimensions: a desynced or malformed
             // grid_resize must not allocate unboundedly, and a plain `as
             // u16` cast would silently truncate 65536 to 0
-            model.engine.grid.apply(GridOp::Resize {
+            model.engine.apply_grid(GridOp::Resize {
                 width: clamp_dim(width),
                 height: clamp_dim(height),
             });
@@ -143,7 +163,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             cells,
             ..
         } => {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row: saturate_u16(row),
                 col_start: saturate_u16(col_start),
                 cells: cells
@@ -154,7 +174,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::GridCursorGoto { row, col, .. } => {
-            model.engine.grid.apply(GridOp::CursorGoto {
+            model.engine.apply_grid(GridOp::CursorGoto {
                 row: saturate_u16(row),
                 col: saturate_u16(col),
             });
@@ -168,7 +188,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             rows,
             ..
         } => {
-            model.engine.grid.apply(GridOp::Scroll {
+            model.engine.apply_grid(GridOp::Scroll {
                 top: saturate_u16(top),
                 bot: saturate_u16(bot),
                 left: saturate_u16(left),
@@ -178,7 +198,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::GridClear { .. } => {
-            model.engine.grid.apply(GridOp::Clear);
+            model.engine.apply_grid(GridOp::Clear);
             Vec::new()
         }
         UiEvent::HlAttrDefine {
@@ -190,7 +210,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             underline,
             reverse,
         } => {
-            model.engine.hl.attrs.insert(
+            model.engine.define_hl_attr(
                 id,
                 HlAttr {
                     fg,
@@ -204,21 +224,17 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             Vec::new()
         }
         UiEvent::DefaultColorsSet { fg, bg, .. } => {
-            model.engine.hl.default_fg = fg;
-            model.engine.hl.default_bg = bg;
-            // bumped before the effect is built so the emitted probe
-            // carries the exact generation this event owns; a stale reply
-            // for an older generation is dropped by the Msg::HlProbeReply
-            // arm below, and Theme::from_hl falls back to the (possibly
-            // still wire-ambiguous) raw values above until a matching reply
-            // lands
-            model.engine.hl.probe_generation = model.engine.hl.probe_generation.wrapping_add(1);
-            vec![Effect::Rpc(RpcCall::GetDefaultHl {
-                generation: model.engine.hl.probe_generation,
-            })]
+            // the generation comes back from the write that opened it, so
+            // the emitted probe carries the exact generation these colors
+            // own; a stale reply for an older generation is dropped by the
+            // Msg::HlProbeReply arm above, and Theme::from_hl falls back to
+            // the (possibly still wire-ambiguous) raw values until a
+            // matching reply lands
+            let generation = model.engine.set_hl_default_colors(fg, bg);
+            vec![Effect::Rpc(RpcCall::GetDefaultHl { generation })]
         }
         UiEvent::HlGroupSet { name, hl_id } => {
-            model.engine.hl.groups.insert(name, hl_id);
+            model.engine.set_hl_group(name, hl_id);
             Vec::new()
         }
         UiEvent::Flush => {
@@ -379,7 +395,7 @@ mod tests {
         let effects = update(&mut m, Msg::Redraw(vec![UiEvent::Flush]));
         assert!(effects.is_empty());
         assert!(m.dirty);
-        assert_eq!(m.engine.grid.row_text(0).trim_end(), "h");
+        assert_eq!(m.engine.grid().row_text(0).trim_end(), "h");
     }
 
     #[test]
@@ -393,7 +409,7 @@ mod tests {
             }]),
         );
         assert!(effects.is_empty());
-        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&41));
+        assert_eq!(m.engine.hl().group("StatusLine"), Some(41));
     }
 
     #[test]
@@ -413,7 +429,157 @@ mod tests {
                 hl_id: 168,
             }]),
         );
-        assert_eq!(m.engine.hl.groups.get("StatusLine"), Some(&168));
+        assert_eq!(m.engine.hl().group("StatusLine"), Some(168));
+    }
+
+    /// The `hl_attr_define` counterpart to the mapping test above: a
+    /// redefinition that changes exactly one attribute must land, for every
+    /// attribute a resolved style reads.
+    ///
+    /// `HlTable::define_attr` drops a redefinition it judges identical to
+    /// what it already holds, so any field missing from `HlAttr`'s equality
+    /// turns that field's redefinition into a silent no-op: the stored
+    /// attributes keep the old value, every cell holding the id keeps
+    /// painting the old style, and nothing anywhere reports it. A state
+    /// assertion rather than a clipped-versus-full paint comparison,
+    /// because those composite both sides from one model and so read the
+    /// same dropped mutation twice, agreeing with each other about the
+    /// wrong screen.
+    #[test]
+    fn an_hl_attr_redefinition_lands_for_every_field_a_resolved_style_reads() {
+        type AttrProbe = fn(&HlAttr) -> bool;
+        type StyleProbe = fn(&crate::theme::ResolvedStyle) -> bool;
+        const ID: u64 = 7;
+        let base = UiEvent::HlAttrDefine {
+            id: ID,
+            fg: Some(0x111111),
+            bg: Some(0x222222),
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        };
+        // each case redefines the baseline with exactly one field moved, so
+        // a field dropped from the equality can only be caught by its own
+        // case and never masked by another field changing alongside it
+        let cases: [(&str, UiEvent, AttrProbe, StyleProbe); 6] = [
+            (
+                "fg",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x999999),
+                    bg: Some(0x222222),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                |a| a.fg == Some(0x999999),
+                |s| s.fg == Some(0x999999),
+            ),
+            (
+                "bg",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x111111),
+                    bg: Some(0x888888),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                |a| a.bg == Some(0x888888),
+                |s| s.bg == Some(0x888888),
+            ),
+            (
+                "bold",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x111111),
+                    bg: Some(0x222222),
+                    bold: true,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+                |a| a.bold,
+                |s| s.bold,
+            ),
+            (
+                "italic",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x111111),
+                    bg: Some(0x222222),
+                    bold: false,
+                    italic: true,
+                    underline: false,
+                    reverse: false,
+                },
+                |a| a.italic,
+                |s| s.italic,
+            ),
+            (
+                "underline",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x111111),
+                    bg: Some(0x222222),
+                    bold: false,
+                    italic: false,
+                    underline: true,
+                    reverse: false,
+                },
+                |a| a.underline,
+                |s| s.underline,
+            ),
+            (
+                "reverse",
+                UiEvent::HlAttrDefine {
+                    id: ID,
+                    fg: Some(0x111111),
+                    bg: Some(0x222222),
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: true,
+                },
+                |a| a.reverse,
+                |s| s.reverse,
+            ),
+        ];
+
+        for (field, redefine, attr_probe, style_probe) in cases {
+            let mut m = model();
+            let _ = update(&mut m, Msg::Redraw(vec![base.clone()]));
+            let style_before =
+                crate::theme::Theme::from_hl(m.engine.hl()).style_for(ID, m.engine.hl());
+            // the baseline definition is itself a change, so its damage is
+            // drained before the redefinition under test runs
+            let _ = m.take_paint_damage();
+
+            let _ = update(&mut m, Msg::Redraw(vec![redefine]));
+
+            let stored = m.engine.hl().attr(ID).expect("the id stays defined");
+            assert!(
+                attr_probe(&stored),
+                "{field}: the redefinition never reached the stored attributes ({stored:?})"
+            );
+            let style_after =
+                crate::theme::Theme::from_hl(m.engine.hl()).style_for(ID, m.engine.hl());
+            assert!(
+                style_probe(&style_after),
+                "{field}: the redefinition never reached the resolved style ({style_after:?})"
+            );
+            assert_ne!(
+                style_before, style_after,
+                "{field}: every field here changes the style cells paint with"
+            );
+            assert!(
+                m.take_paint_damage().full,
+                "{field}: a landed redefinition restyles every cell holding the id"
+            );
+        }
     }
 
     #[test]
@@ -750,6 +916,24 @@ mod tests {
     }
 
     #[test]
+    fn resize_marks_the_model_dirty_so_the_new_area_is_actually_painted() {
+        let mut m = model();
+        m.dirty = false;
+        let _ = update(
+            &mut m,
+            Msg::Resized {
+                width: 120,
+                height: 40,
+            },
+        );
+        assert!(
+            m.dirty,
+            "a resize changes the paint area, so the frontend must repaint on its own \
+             rather than waiting for an engine redraw that a clamped grid_target may never produce"
+        );
+    }
+
+    #[test]
     fn resize_produces_try_resize_effect() {
         let mut m = model();
         let effects = update(
@@ -849,6 +1033,74 @@ mod tests {
 
         let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
         assert!(m.engine.cmdline.is_none());
+    }
+
+    #[test]
+    fn a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does() {
+        // the event order is nvim 0.12.4's own, observed over a real RPC
+        // session driving `confirm('Save changes?', "&Yes\n&No")`: the
+        // question arrives once as msg_show, the answer line separately as
+        // cmdline_show, and a key answering none of the choices re-arms the
+        // prompt with cmdline_hide + cmdline_show and NO second msg_show.
+        let mut m = model();
+        let prompt = || UiEvent::CmdlineShow {
+            content: vec![],
+            pos: 0,
+            firstc: String::new(),
+            prompt: "[Y]es, (N)o: ".into(),
+            indent: 0,
+            level: 1,
+        };
+        let question = || UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "Save changes?".into())],
+            replace_last: false,
+        };
+        let shown = |m: &Model| m.engine.messages.visible_lines(4);
+
+        let _ = update(&mut m, Msg::Redraw(vec![question(), UiEvent::Flush]));
+        let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
+        assert_eq!(shown(&m), vec!["Save changes?"]);
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "q".into(),
+            }),
+        );
+        assert_eq!(
+            shown(&m),
+            vec!["Save changes?"],
+            "a key the prompt refuses must not take the question away with it"
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "y".into(),
+            }),
+        );
+        assert_eq!(shown(&m), vec!["Save changes?"]);
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "j".into(),
+            }),
+        );
+        assert!(
+            shown(&m).is_empty(),
+            "with the prompt closed the question is ordinary transient text"
+        );
     }
 
     #[test]
@@ -1102,10 +1354,250 @@ mod tests {
         assert!(effects.is_empty());
     }
 
+    /// A style change has no rows of its own: the highlight table sits
+    /// behind every cell's resolved style, so any change to it can restyle
+    /// the whole screen while no grid cell's text moves. Damage clipped to
+    /// grid rows alone would repaint whatever row happened to change and
+    /// leave the rest of the screen in the previous colors.
+    #[test]
+    fn a_highlight_change_with_no_grid_change_damages_the_whole_frame() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 1,
+                width: 8,
+                height: 4,
+            }]),
+        );
+        let _ = m.take_paint_damage();
+
+        for ev in [
+            UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0x282A36),
+                sp: None,
+            },
+            UiEvent::HlAttrDefine {
+                id: 3,
+                fg: Some(0xFF0000),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+            UiEvent::HlGroupSet {
+                name: "StatusLine".to_string(),
+                hl_id: 3,
+            },
+        ] {
+            let _ = update(&mut m, Msg::Redraw(vec![ev.clone()]));
+            assert!(
+                m.take_paint_damage().full,
+                "{ev:?} must damage every cell, not none of them"
+            );
+        }
+
+        let generation = m.engine.hl().probe_generation();
+        let _ = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: Some(0x282A36),
+            },
+        );
+        assert!(
+            m.take_paint_damage().full,
+            "an accepted probe reply re-derives the theme and must damage every cell"
+        );
+    }
+
+    /// The one write in the highlight table that marks changed without
+    /// comparing values first, and the state that makes the difference
+    /// visible: nvim resends the same default colors, so neither colour
+    /// moves, but the probe generation those colours carry moves anyway and
+    /// strands a `confirmed` reply that was matching an instant earlier.
+    /// The derived theme changes with no value in the write itself
+    /// changing, so a value comparison here would leave the whole screen
+    /// painted in a theme the model no longer holds.
+    ///
+    /// Reaching this live needs `nvim_get_hl`'s answer to differ from the
+    /// `default_colors_set` that opened the same generation, so the state
+    /// is built from an explicit event sequence rather than left to a
+    /// live path to happen upon.
+    #[test]
+    fn resending_identical_default_colors_still_damages_the_frame() {
+        let mut m = model();
+        let resend = UiEvent::DefaultColorsSet {
+            fg: Some(0xFFFFFF),
+            bg: Some(0),
+            sp: None,
+        };
+        let _ = update(&mut m, Msg::Redraw(vec![resend.clone()]));
+        let generation = m.engine.hl().probe_generation();
+        // the reply disambiguates the wire-ambiguous zero and reports a fg
+        // the wire never carried, so the theme it derives is distinguishable
+        // from the one the raw wire values derive on their own
+        let _ = update(
+            &mut m,
+            Msg::HlProbeReply {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: Some(0x123456),
+            },
+        );
+        let before = crate::theme::Theme::from_hl(m.engine.hl());
+        let _ = m.take_paint_damage();
+
+        let _ = update(&mut m, Msg::Redraw(vec![resend]));
+
+        assert_eq!(
+            (m.engine.hl().default_fg(), m.engine.hl().default_bg()),
+            (Some(0xFFFFFF), Some(0)),
+            "the resent colours must be identical, or this proves nothing"
+        );
+        let after = crate::theme::Theme::from_hl(m.engine.hl());
+        assert_ne!(
+            before, after,
+            "the bumped generation strands the matching reply and re-derives the theme"
+        );
+        assert!(
+            m.take_paint_damage().full,
+            "a re-derived theme restyles every cell, however little the write itself changed"
+        );
+    }
+
+    /// Installing a whole highlight table is a style change like any other:
+    /// every painted cell resolves through the table, so the frame after
+    /// the swap must repaint all of them even though no grid row moved.
+    /// The installed table is drained clean first, so the only thing that
+    /// can supply the damage is the install itself.
+    #[test]
+    fn installing_a_whole_highlight_table_damages_the_frame() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 1,
+                width: 8,
+                height: 4,
+            }]),
+        );
+        let _ = m.take_paint_damage();
+
+        let mut replacement = crate::hl::HlTable::new();
+        replacement.define_attr(
+            3,
+            HlAttr {
+                fg: Some(0x00FF00),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        assert!(
+            replacement.take_dirty(),
+            "the replacement must arrive carrying no damage of its own"
+        );
+
+        m.engine.replace_hl(replacement);
+
+        assert_eq!(
+            m.engine.hl().attr(3).map(|a| a.fg),
+            Some(Some(0x00FF00)),
+            "the replacement must actually be installed"
+        );
+        assert!(
+            m.take_paint_damage().full,
+            "a swapped table restyles every cell on screen at once"
+        );
+    }
+
+    /// A first-ever definition of an `hl_id` damages the whole frame the
+    /// same way a redefinition does, and the pessimism is deliberate: the
+    /// highlight table holds no record of which ids the painted cells
+    /// reference, so it cannot tell a definition that restyles nothing from
+    /// one that restyles cells already on screen resolving that id through
+    /// the `Normal` fallback. Skipping the mark for an id the table has not
+    /// seen would trade one whole-frame composite for a silently stale
+    /// screen wherever nvim's own define-before-use ordering does not hold,
+    /// which the table cannot check, against a damage contract that
+    /// over-reports rather than under-reports.
+    #[test]
+    fn a_first_definition_of_a_previously_unknown_hl_id_still_damages_the_frame() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::GridResize {
+                grid: 1,
+                width: 8,
+                height: 4,
+            }]),
+        );
+        let _ = m.take_paint_damage();
+        assert!(
+            m.engine.hl().attr(12).is_none(),
+            "the id must be one the table has never held"
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::HlAttrDefine {
+                id: 12,
+                fg: Some(0x00FF00),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            }]),
+        );
+
+        assert!(
+            m.take_paint_damage().full,
+            "a first definition may still restyle cells already holding the id"
+        );
+    }
+
+    /// The other direction: a definition that changes nothing must not cost
+    /// a repaint. The value comparison this pins is defensive rather than
+    /// load-bearing -- the pinned engine was measured never to resend an
+    /// unchanged definition (see [`HlTable::define_attr`]) -- but an engine
+    /// that did would turn every resend into a whole-frame repaint, giving
+    /// back the frames damage clipping exists to save.
+    #[test]
+    fn a_highlight_definition_that_changes_nothing_produces_no_damage() {
+        let mut m = model();
+        let define = UiEvent::HlAttrDefine {
+            id: 3,
+            fg: Some(0xFF0000),
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+            reverse: false,
+        };
+        let group = UiEvent::HlGroupSet {
+            name: "StatusLine".to_string(),
+            hl_id: 3,
+        };
+        let _ = update(&mut m, Msg::Redraw(vec![define.clone(), group.clone()]));
+        let _ = m.take_paint_damage();
+
+        let _ = update(&mut m, Msg::Redraw(vec![define, group]));
+        let damage = m.take_paint_damage();
+        assert!(!damage.full, "an identical redefinition is not a repaint");
+        assert!(damage.rows.is_empty(), "and touches no grid row either");
+    }
+
     #[test]
     fn default_colors_set_bumps_generation_and_emits_a_matching_probe_effect() {
         let mut m = model();
-        assert_eq!(m.engine.hl.probe_generation, 0);
+        assert_eq!(m.engine.hl().probe_generation(), 0);
         let effects = update(
             &mut m,
             Msg::Redraw(vec![UiEvent::DefaultColorsSet {
@@ -1114,7 +1606,7 @@ mod tests {
                 sp: None,
             }]),
         );
-        assert_eq!(m.engine.hl.probe_generation, 1);
+        assert_eq!(m.engine.hl().probe_generation(), 1);
         assert!(matches!(
             effects.as_slice(),
             [Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 })]
@@ -1140,7 +1632,7 @@ mod tests {
                 sp: None,
             }]),
         );
-        assert_eq!(m.engine.hl.probe_generation, 2);
+        assert_eq!(m.engine.hl().probe_generation(), 2);
         assert!(matches!(
             effects.as_slice(),
             [Effect::Rpc(RpcCall::GetDefaultHl { generation: 2 })]
@@ -1169,7 +1661,7 @@ mod tests {
         );
         assert!(effects.is_empty());
         assert!(m.dirty, "an accepted probe reply must trigger a repaint");
-        let confirmed = m.engine.hl.confirmed.expect("reply must be recorded");
+        let confirmed = m.engine.hl().confirmed().expect("reply must be recorded");
         assert_eq!(confirmed.generation, 1);
         assert_eq!(confirmed.fg, Some(0x111111));
         assert_eq!(confirmed.bg, None);
@@ -1217,7 +1709,7 @@ mod tests {
             "a stale-generation reply must not trigger a repaint"
         );
         assert!(
-            m.engine.hl.confirmed.is_none(),
+            m.engine.hl().confirmed().is_none(),
             "a stale-generation reply must not be recorded"
         );
     }
@@ -1249,7 +1741,7 @@ mod tests {
                 bg: None,
             },
         );
-        assert_eq!(crate::theme::Theme::from_hl(&m.engine.hl).bg, None);
+        assert_eq!(crate::theme::Theme::from_hl(m.engine.hl()).bg, None);
 
         // the colorscheme switch: a second DefaultColorsSet, still an
         // ambiguous wire zero, bumps the generation and starts a fresh probe
@@ -1262,7 +1754,7 @@ mod tests {
             }]),
         );
         assert_eq!(
-            crate::theme::Theme::from_hl(&m.engine.hl).bg,
+            crate::theme::Theme::from_hl(m.engine.hl()).bg,
             None,
             "must keep the prior confirmed transparent value while the new probe is in flight"
         );
@@ -1276,7 +1768,7 @@ mod tests {
             },
         );
         assert_eq!(
-            crate::theme::Theme::from_hl(&m.engine.hl).bg,
+            crate::theme::Theme::from_hl(m.engine.hl()).bg,
             Some(0),
             "must converge on the new theme's genuinely-black bg once its probe replies"
         );

@@ -19,6 +19,12 @@ check_absent() { # usage: check_absent <crate> <forbidden-dep>
 for dep in view view-engine view-tui view-surface view-native view-ai view-oracle view-bench rmpv crossterm ratatui tokio async-std smol; do
   check_absent view-core "$dep"
 done
+# view-bench depends on view-oracle (the scenario drivers drive the same
+# PtySession the oracle's own tests use, instead of a second copy of the
+# spawn/read/write scaffolding) -- that edge is sanctioned and must stay
+# legal. This check only forbids the reverse: view-oracle must never depend
+# on view-bench, so a later audit sweep must not "fix" the bench->oracle edge.
+check_absent view-oracle view-bench
 for dep in view view-engine view-tui view-native view-ai view-oracle view-bench tokio async-std smol; do
   check_absent view-surface "$dep"
 done
@@ -29,20 +35,36 @@ for crate in view-native view-ai; do
 done
 check_absent view-native view-ai
 check_absent view-ai view-native
-for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view; do
+for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view view-harness; do
   for dep in crossterm ratatui; do
     check_absent "$crate" "$dep"
   done
 done
-for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view; do
+for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view view-harness; do
   check_absent "$crate" rmpv
 done
-# serde + toml exist for the theme cache file and are confined to the bin
-# crate; a lib crate gaining either would let wire/config concerns leak
-# into the pure layers
+# serde + toml exist for the theme cache file and the corpus loader,
+# confined to the two bin crates that need them (view, view-harness); a
+# lib crate gaining either would let wire/config concerns leak into the
+# pure layers. view-harness is deliberately absent from this loop: cargo
+# dependencies are per-package, not per-target, so a bin target inside
+# view-oracle (rather than a standalone package) would drag serde into
+# the oracle lib's own manifest and fail its own absence check below --
+# view-harness exists precisely to be the one non-view package allowed to
+# parse TOML, not to be checked for its absence.
 for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench; do
   check_absent "$crate" serde
   check_absent "$crate" toml
+done
+
+# view-harness is bin-only (the corpus loader + oracle/bench runner CLIs);
+# the dependency graph only ever points into it (view-harness ->
+# view-oracle, view-harness -> view-bench -- the bench bin drives
+# view-bench's scenario matrix while owning the TOML baseline I/O
+# view-bench itself must stay free of), never out. Nothing else may
+# depend on it.
+for crate in view view-core view-engine view-tui view-surface view-native view-ai view-oracle view-bench; do
+  check_absent "$crate" view-harness
 done
 
 # Resolved-graph check: cargo metadata --no-deps (used by check_absent above)
@@ -84,9 +106,16 @@ check_transitive_reach() { # usage: check_transitive_reach <forbidden-dep> [allo
 # own API stays rmpv-free (typed probes only, see src/lib.rs's module
 # docs), but its Cargo.toml now has a normal (not dev) dependency edge to
 # view-engine, so the resolved graph legitimately reaches rmpv through it.
-check_transitive_reach rmpv view-engine view view-oracle
-check_transitive_reach serde view
-check_transitive_reach toml view
+# view-bench and view-harness reach the same rmpv edge one hop further out,
+# through their own sanctioned dependency on view-oracle; neither one's own
+# API exposes rmpv the same way view-oracle's does not.
+check_transitive_reach rmpv view-engine view view-oracle view-bench view-harness
+# view-harness is the corpus loader's sanctioned TOML/serde home (see the
+# check_absent loop above): its dependency on view-oracle is what makes the
+# resolved graph legitimately reach these two through it, same shape as the
+# rmpv widening just above.
+check_transitive_reach serde view view-harness
+check_transitive_reach toml view view-harness
 check_transitive_reach crossterm view-tui view
 check_transitive_reach ratatui view-tui view
 check_transitive_reach tokio

@@ -126,7 +126,7 @@ type Pending = Arc<Mutex<PendingState>>;
 pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
-    write_tx: mpsc::Sender<Vec<u8>>,
+    outbox: Arc<crate::outbox::Outbox>,
 }
 
 impl Clone for EngineHandle {
@@ -134,7 +134,7 @@ impl Clone for EngineHandle {
         Self {
             next_msgid: Arc::clone(&self.next_msgid),
             pending: Arc::clone(&self.pending),
-            write_tx: self.write_tx.clone(),
+            outbox: Arc::clone(&self.outbox),
         }
     }
 }
@@ -196,7 +196,14 @@ impl EngineHandle {
         // behind a redraw flood; the bounded, compacted path is `pump`,
         // used instead of this channel by `start_pumped`
         let (notif_tx, notif_rx) = mpsc::channel();
-        let handle = Self::start_inner(reader, writer, None, Some(notif_tx));
+        let handle = Self::start_with_pipe(
+            reader,
+            writer,
+            None,
+            Some(notif_tx),
+            #[cfg(any(unix, windows))]
+            None,
+        );
         (handle, notif_rx)
     }
 
@@ -215,29 +222,48 @@ impl EngineHandle {
     /// [`start`](Self::start) and keeps the as-built auto-error-every-request
     /// behavior, since there is nowhere to route a dispatched request
     /// without a pump.
+    /// [`start_pumped`](Self::start_pumped) for a writer whose pipe this
+    /// platform can ask about writability, enabling the outbox's inline
+    /// fast path (see [`crate::outbox`]). `pipe` must be a handle on the
+    /// same pipe `writer` writes to, or the fast path would consult one
+    /// pipe's readiness before writing to another.
     pub(crate) fn start_pumped(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         pump: Arc<PumpShared>,
+        #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
-        Self::start_inner(reader, writer, Some(pump), None)
+        Self::start_with_pipe(
+            reader,
+            writer,
+            Some(pump),
+            None,
+            #[cfg(any(unix, windows))]
+            pipe,
+        )
     }
 
-    fn start_inner(
+    fn start_with_pipe(
         reader: impl Read + Send + 'static,
         writer: impl Write + Send + 'static,
         pump: Option<Arc<PumpShared>>,
         notif_tx: Option<mpsc::Sender<EngineNotification>>,
+        #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
         let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
+        let outbox = Arc::new(crate::outbox::Outbox::new(
+            Box::new(writer),
+            write_tx,
+            #[cfg(any(unix, windows))]
+            pipe,
+        ));
 
         let writer_pending = Arc::clone(&pending);
+        let writer_outbox = Arc::clone(&outbox);
         std::thread::spawn(move || {
-            let mut w = writer;
             while let Ok(bytes) = write_rx.recv() {
-                let sent = w.write_all(&bytes).and_then(|()| w.flush());
-                if sent.is_err() {
+                if !writer_outbox.write_from_thread(&bytes) {
                     // the pipe is broken (peer gone, or wedged past
                     // recovery): fail every pending waiter instead of
                     // leaving them to hang on a response that can never
@@ -249,7 +275,7 @@ impl EngineHandle {
         });
 
         let reader_pending = Arc::clone(&pending);
-        let reader_write_tx = write_tx.clone();
+        let reader_outbox = Arc::clone(&outbox);
         let reader_pump = pump;
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
@@ -290,8 +316,11 @@ impl EngineHandle {
                                     } else {
                                         (None, None)
                                     };
-                                    let _ =
-                                        pump.route_msg(Msg::HlProbeReply { generation, fg, bg });
+                                    pump.route_probe_reply(Msg::HlProbeReply {
+                                        generation,
+                                        fg,
+                                        bg,
+                                    });
                                 }
                             }
                             None => {}
@@ -305,7 +334,10 @@ impl EngineHandle {
                             // exist yet) is simply dropped rather than routed
                             // anywhere
                             if method == "redraw" {
-                                pump.fold_redraw(decode_redraw(&params));
+                                let events = decode_redraw(&params);
+                                #[cfg(feature = "bench-taps")]
+                                crate::tap::tap(crate::tap::TAG_REDRAW_PARSED);
+                                pump.fold_redraw(events);
                             }
                         } else if let Some(tx) = &notif_tx {
                             if tx.send(EngineNotification { method, params }).is_err() {
@@ -355,7 +387,7 @@ impl EngineHandle {
                             result: Value::Nil,
                         };
                         if let Ok(bytes) = encode_message(&resp) {
-                            let _ = reader_write_tx.send(bytes);
+                            let _ = reader_outbox.send(bytes);
                         }
                     }
                     Err(_) => {
@@ -378,7 +410,7 @@ impl EngineHandle {
         Self {
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
-            write_tx,
+            outbox,
         }
     }
 
@@ -470,6 +502,20 @@ impl EngineHandle {
         }
     }
 
+    /// How many messages the writer thread still owes the peer, paired with
+    /// how many it has delivered since the connection opened.
+    ///
+    /// A reading, not a verdict: a queue is only alarming if it stops
+    /// draining, which takes a second reading to establish (see
+    /// [`OutboxStallWatch`](crate::stall::OutboxStallWatch), which is what
+    /// callers should reach for). Lock-free and non-blocking on both loads,
+    /// so it answers while the writer is parked inside a write that cannot
+    /// finish.
+    #[must_use]
+    pub fn write_progress(&self) -> (usize, u64) {
+        self.outbox.write_progress()
+    }
+
     /// Sends a fire-and-forget notification: encodes and enqueues it on the
     /// writer thread's channel, same as a request, but returns as soon as
     /// it is queued rather than waiting for any reply (notifications have
@@ -489,7 +535,13 @@ impl EngineHandle {
             params,
         };
         let bytes = encode_message(&msg)?;
-        self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_RPC_HANDOFF);
+        if self.outbox.send(bytes) {
+            Ok(())
+        } else {
+            Err(EngineError::Closed)
+        }
     }
 
     /// Answers a request the engine is blocked on: encodes `[1, msgid, nil,
@@ -521,7 +573,11 @@ impl EngineHandle {
             result: reply_value_to_wire(&value),
         };
         let bytes = encode_message(&msg)?;
-        self.write_tx.send(bytes).map_err(|_| EngineError::Closed)
+        if self.outbox.send(bytes) {
+            Ok(())
+        } else {
+            Err(EngineError::Closed)
+        }
     }
 
     /// Allocates a msgid, registers the pending waiter, and enqueues the
@@ -551,9 +607,9 @@ impl EngineHandle {
             }
             p.waiters.insert(msgid, Waiter::Reply(tx));
         }
-        if self.write_tx.send(bytes).is_err() {
+        if !self.outbox.send(bytes) {
             // the writer thread is gone, so nothing will ever write this
-            // request or fail it on our behalf; undo the insert ourselves
+            // request or fail it on this call's behalf; undo the insert here
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
             p.waiters.remove(&msgid);
             return Err(EngineError::Closed);
@@ -599,7 +655,7 @@ impl EngineHandle {
             }
             p.waiters.insert(msgid, Waiter::HlProbe { generation });
         }
-        if self.write_tx.send(bytes).is_err() {
+        if !self.outbox.send(bytes) {
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
             p.waiters.remove(&msgid);
             return Err(EngineError::Closed);
@@ -708,7 +764,13 @@ mod tests {
         let (peer_read, our_write) = std::io::pipe().unwrap();
         let (our_read, peer_write) = std::io::pipe().unwrap();
         let pump = PumpShared::new();
-        let h = EngineHandle::start_pumped(our_read, our_write, Arc::clone(&pump));
+        let h = EngineHandle::start_pumped(
+            our_read,
+            our_write,
+            Arc::clone(&pump),
+            #[cfg(any(unix, windows))]
+            None,
+        );
         (h, pump, peer_read, peer_write)
     }
 
@@ -950,7 +1012,7 @@ mod tests {
     /// An incoming `Request` from the peer (e.g. a blocking
     /// `rpcrequest` from nvim's init.lua) must get an immediate reply, or
     /// the peer's main loop blocks forever waiting for one and every
-    /// subsequent call from our side deadlocks against it. Incoming
+    /// subsequent call from this side deadlocks against it. Incoming
     /// requests are not dispatched to real handlers; the reply is a typed
     /// "method not supported" error.
     #[test]

@@ -67,10 +67,54 @@ pub enum GridOp {
     },
 }
 
+/// The rows a batch of [`GridOp`]s changed, so a repaint can composite only
+/// the damaged region instead of the whole grid.
+///
+/// `full` supersedes `rows`: a resize or clear invalidates every cell, so the
+/// paint layer must repaint the whole grid and can ignore `rows` entirely.
+/// `rows` are grid-space row indices (0-based within the grid), which the
+/// paint layer offsets by any reserved chrome rows to reach terminal-space.
+/// Rows may repeat and are not sorted; a consumer only ever asks whether a
+/// given row is present, for which membership, not order, is what matters.
+#[non_exhaustive]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GridDamage {
+    /// Every cell changed (a resize or clear happened this batch): repaint
+    /// the whole grid regardless of `rows`.
+    pub full: bool,
+    /// Grid-space rows that changed, when `full` is `false`.
+    pub rows: Vec<u16>,
+}
+
+impl GridDamage {
+    /// Damage that covers the whole grid, for callers that always repaint
+    /// every cell (a first paint, a placeholder-shell frame, an error screen).
+    #[must_use]
+    pub fn full() -> Self {
+        Self {
+            full: true,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Whether this damage covers grid-space `row` (always true when `full`).
+    #[must_use]
+    pub fn covers(&self, row: u16) -> bool {
+        self.full || self.rows.contains(&row)
+    }
+}
+
 /// A rectangular buffer of [`Cell`]s addressed by nvim's `ext_linegrid` protocol.
 ///
 /// All mutation happens through [`Grid::apply`]; every [`GridOp`] is bounds-checked
 /// and ignored rather than panicking when it falls outside the current grid size.
+///
+/// Each mutation also records which rows it touched (see [`Grid::take_dirty`])
+/// so the compositor can clip a repaint to the changed region. Damage is
+/// biased toward over-reporting, never under: a mutation that writes nothing
+/// (a fully out-of-bounds run) may still mark its row, since repainting an
+/// unchanged row is merely wasted work while missing a changed one paints a
+/// stale cell.
 #[derive(Debug, Clone)]
 pub struct Grid {
     width: u16,
@@ -78,6 +122,12 @@ pub struct Grid {
     cells: Vec<Cell>,
     cursor_row: u16,
     cursor_col: u16,
+    /// Set when a resize or clear invalidated every cell since the last
+    /// [`Grid::take_dirty`]; supersedes `dirty_rows`.
+    dirty_full: bool,
+    /// Per-row changed flags accumulated since the last [`Grid::take_dirty`],
+    /// one entry per grid row (kept `height`-long by [`Grid::resize`]).
+    dirty_rows: Vec<bool>,
 }
 
 impl Grid {
@@ -91,6 +141,46 @@ impl Grid {
             cells: Vec::new(),
             cursor_row: 0,
             cursor_col: 0,
+            dirty_full: false,
+            dirty_rows: Vec::new(),
+        }
+    }
+
+    /// Drains the rows changed since the last call, resetting the tracker to
+    /// clean; see [`GridDamage`].
+    ///
+    /// Crate-private on purpose: the grid is one of two paint inputs, and a
+    /// repaint clipped to this alone strands the styles the other one owns.
+    /// [`crate::model::Model::take_paint_damage`] is the sanctioned drain,
+    /// and folds both.
+    #[must_use]
+    pub(crate) fn take_dirty(&mut self) -> GridDamage {
+        let damage = if self.dirty_full {
+            GridDamage {
+                full: true,
+                rows: Vec::new(),
+            }
+        } else {
+            let mut rows = Vec::new();
+            for (row, &dirty) in self.dirty_rows.iter().enumerate() {
+                if dirty {
+                    rows.push(u16::try_from(row).unwrap_or(u16::MAX));
+                }
+            }
+            GridDamage { full: false, rows }
+        };
+        self.dirty_full = false;
+        for row in &mut self.dirty_rows {
+            *row = false;
+        }
+        damage
+    }
+
+    /// Marks grid-space `row` changed, ignoring an out-of-range index the
+    /// same way the mutators themselves clamp rather than panic.
+    fn mark_row(&mut self, row: u16) {
+        if let Some(slot) = self.dirty_rows.get_mut(usize::from(row)) {
+            *slot = true;
         }
     }
 
@@ -180,12 +270,18 @@ impl Grid {
         self.cells = new_cells;
         self.cursor_row = self.cursor_row.min(self.height.saturating_sub(1));
         self.cursor_col = self.cursor_col.min(self.width.saturating_sub(1));
+        // a resize moves the whole grid: every cell must repaint, and the
+        // per-row mask is rebuilt to the new height so later marks land in
+        // range
+        self.dirty_full = true;
+        self.dirty_rows = vec![false; usize::from(height)];
     }
 
     fn clear(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::default();
         }
+        self.dirty_full = true;
     }
 
     fn cursor_goto(&mut self, row: u16, col: u16) {
@@ -197,6 +293,7 @@ impl Grid {
         if row >= self.height {
             return;
         }
+        self.mark_row(row);
         let mut col = col_start;
         for (text, hl_id, repeat) in cells {
             for _ in 0..*repeat {
@@ -223,6 +320,11 @@ impl Grid {
         let right = right.min(self.width);
         if top >= bot || left >= right || rows == 0 {
             return;
+        }
+        // the whole region repaints: scrolled-in rows carry moved content and
+        // the vacated tail is filled, so every row in `top..bot` changed
+        for row in top..bot {
+            self.mark_row(row);
         }
 
         if rows > 0 {

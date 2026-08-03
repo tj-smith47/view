@@ -105,7 +105,8 @@ pub fn paint_shell_frame(
     process_start: Instant,
 ) -> std::io::Result<()> {
     let surface = view_surface::render(model);
-    term.draw_surface(model, &surface)?;
+    // the placeholder shell is always a whole-frame paint
+    term.draw_surface(model, &surface, &view_core::grid::GridDamage::full())?;
     log_shell_paint_latency(process_start);
     Ok(())
 }
@@ -258,7 +259,7 @@ pub fn drain_pre_attach(
 ) -> DrainedInput {
     drain_pre_attach_with(msg_rx, model, |model| {
         let surface = view_surface::render(model);
-        let _ = term.draw_surface(model, &surface);
+        let _ = term.draw_surface(model, &surface, &view_core::grid::GridDamage::full());
     })
 }
 
@@ -288,7 +289,19 @@ fn drain_pre_attach_with(
                     repaint(model);
                 }
             }
-            Ok(Msg::Resized { width, height }) => resize = Some((width, height)),
+            Ok(Msg::Resized { width, height }) => {
+                // applied to the model here, not only carried to the
+                // cutover: the overflow repaint above paints from the
+                // model's terminal size, so a resize that arrives during
+                // the attach window would otherwise leave every repaint
+                // for the rest of that window addressing rows and columns
+                // the terminal no longer has. Still carried, because the
+                // cutover owes nvim its own `TryResize` and this loop has
+                // no engine to send one to.
+                model.term_width = width;
+                model.term_height = height;
+                resize = Some((width, height));
+            }
             Ok(Msg::EngineReady) => break,
             // structurally unreachable before EngineReady (see
             // attach_in_background's doc comment); kept for the same
@@ -516,6 +529,45 @@ mod tests {
                 .map(|k| k.notation.as_str())
                 .collect::<Vec<_>>(),
             vec!["a", "b"]
+        );
+        assert_eq!(
+            (model.term_width, model.term_height),
+            (120, 40),
+            "the model must follow the terminal during the attach window too: \
+             an overflow repaint here paints from these fields"
+        );
+    }
+
+    #[test]
+    fn an_overflow_repaint_during_the_attach_window_sees_the_resized_terminal() {
+        // the pre-attach hole this closes: a resize arriving before the
+        // key-ring overflow toast leaves every repaint for the rest of the
+        // attach window painting at the startup size -- on a shrink, at
+        // rows the terminal no longer has
+        let (tx, rx) = std::sync::mpsc::sync_channel(256);
+        tx.send(Msg::Resized {
+            width: 40,
+            height: 12,
+        })
+        .unwrap();
+        for _ in 0..=KEY_RING_CAPACITY {
+            tx.send(Msg::Key(key("a"))).unwrap();
+        }
+        tx.send(Msg::EngineReady).unwrap();
+
+        let mut model = Model::with_term_size(80, 24);
+        let mut painted_sizes = Vec::new();
+        let _ = drain_pre_attach_with(&rx, &mut model, |model| {
+            painted_sizes.push((model.term_width, model.term_height));
+        });
+
+        assert!(
+            !painted_sizes.is_empty(),
+            "the overflow repaint must have run for this test to say anything"
+        );
+        assert!(
+            painted_sizes.iter().all(|&size| size == (40, 12)),
+            "every repaint after the resize must paint at the new size, got {painted_sizes:?}"
         );
     }
 

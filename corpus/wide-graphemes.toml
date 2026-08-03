@@ -1,0 +1,20 @@
+schema = 1
+name = "wide-graphemes"
+# Every other entry is pure ASCII, so nothing else here reaches the one
+# axis where a cell's text is not exactly one column of one char: nvim
+# sends a double-width grapheme as one cell holding the glyph plus a cell
+# whose text is empty for the column it covers. The two deletions remove a
+# wide glyph mid-row and a wide glyph at the row's end, so the row reflows
+# by two columns and both sides must agree on where the survivors sit, not
+# merely on which glyphs remain. The explicit 0 pins the column because
+# nvim leaves 'startofline' off, so a bare gg would keep whatever column
+# the previous line's edit happened to end on.
+#
+# Covers the model and raster handling of wide graphemes only. It cannot
+# cover painted output: neither this harness nor the oracle links
+# view-tui, so blanking every multi-column glyph in the painter leaves
+# this entry at PARITY. The paint-side property tests are the only moat
+# for that.
+input = "i日本語 テスト 😀🎉<Esc>oascii 中文 mix<Esc>gg0x$x"
+engine_pin = "v0.12.4"
+ext_set = "default"

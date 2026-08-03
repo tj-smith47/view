@@ -8,6 +8,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Compiles a monotonic-timestamp tap at the terminal-write boundary
+# (src/tap.rs) for the measurement harness, widening the existing rustix
+# dependency with the clock and O_NONBLOCK-open features the tap needs.
+# Off by default: without it the tap module does not exist in the
+# compilation at all, so shipping builds carry zero tap code or cost.
+bench-taps = ["rustix/time", "rustix/fs"]
+
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
@@ -28,3 +36,10 @@ unicode-width = "0.2.2"
 # surface, just a direct edge to an already-vetted crate.
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1", default-features = false, features = ["std", "termios"] }
+
+[dev-dependencies]
+criterion = { version = "0.8.2", features = ["html_reports"] }
+
+[[bench]]
+name = "paint_frame"
+harness = false

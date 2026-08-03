@@ -53,10 +53,35 @@ pub fn view_bin_path() -> PathBuf {
     path
 }
 
+/// Returns the workspace `target/view-oracle-scratch` directory, creating
+/// it, as the one place this crate's tests write scratch state.
+///
+/// Never `std::env::temp_dir()`: the system temp dir is world-writable and
+/// every scratch name here is predictable (a label plus this process's pid),
+/// so an unrelated process can pre-create one of these paths as a symlink
+/// and have a test write through it -- which matters most for the one
+/// scratch file that gets marked executable and then run as the engine
+/// binary. A checkout's own build tree is the only directory the test
+/// already owns outright.
+pub fn scratch_root() -> PathBuf {
+    let mut root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop(); // crates/
+    root.pop(); // workspace root
+    let root = root.join("target").join("view-oracle-scratch");
+    std::fs::create_dir_all(&root).expect("failed to create the scratch root");
+    root
+}
+
 /// Points every `XDG_*_HOME` var `cmd` sees at a subdirectory of `home`,
 /// isolating the spawned process from the host's real nvim config: a
 /// dashboard plugin or custom keymap on a bare "i" would otherwise make a
 /// typed-text assertion nondeterministic.
+///
+/// Only the four directories: the environment variables that redirect an
+/// editor's configuration from outside them are dropped by
+/// `PtySession::spawn_configured` for every pty spawn in the tree, this
+/// one included, so that no caller has to remember a list to stay
+/// hermetic.
 pub fn isolate_xdg(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
     for var in [
         "XDG_CONFIG_HOME",
@@ -86,9 +111,9 @@ impl ScratchPaths {
     pub fn new(label: &str) -> Self {
         let pid = std::process::id();
         let id = NEXT_SCRATCH_ID.fetch_add(1, Ordering::Relaxed);
-        let scratch = std::env::temp_dir().join(format!("view-oracle-{label}-{pid}-{id}.txt"));
-        let isolated_home =
-            std::env::temp_dir().join(format!("view-oracle-{label}-home-{pid}-{id}"));
+        let root = scratch_root();
+        let scratch = root.join(format!("{label}-{pid}-{id}.txt"));
+        let isolated_home = root.join(format!("{label}-home-{pid}-{id}"));
         std::fs::create_dir_all(&isolated_home).unwrap();
         Self {
             scratch,

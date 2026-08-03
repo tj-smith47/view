@@ -118,7 +118,8 @@ fn truecolor_from_colorterm(value: Option<&str>) -> bool {
 /// every reply this probe cares about (DECRPM, kitty flags, DA1) is one of
 /// those. A byte that is not part of one is appended to `residue` instead
 /// of being discarded: nothing on this fd but the terminal itself can
-/// produce a private-mode CSI sequence in answer to our own query batch, so
+/// produce a private-mode CSI sequence in answer to the probe's own query
+/// batch, so
 /// anything else -- including a plain `ESC [` sequence like an arrow key --
 /// came from somewhere else, almost always keystrokes queued before or
 /// during the probe window, and must survive to be forwarded rather than
@@ -136,6 +137,14 @@ fn scan_csi_replies(buf: &[u8]) -> (bool, bool, bool, Vec<u8>) {
     let mut residue = Vec::new();
     let mut i = 0;
     while i < buf.len() {
+        // a CSI introducer ending the read is the terminal mid-reply, not
+        // typed input: forwarding it would replay an Escape plus a literal
+        // `[` into the engine, the same reason the >=3-byte truncation
+        // below is dropped. A lone trailing ESC stays residue -- that is
+        // what the Escape key produces, so dropping it would eat a key
+        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'[' && i + 2 >= buf.len() {
+            break;
+        }
         let is_private_csi_start =
             i + 2 < buf.len() && buf[i] == 0x1b && buf[i + 1] == b'[' && buf[i + 2] == b'?';
         if !is_private_csi_start {
@@ -614,11 +623,50 @@ mod tests {
         // an arrow key (`ESC [ A`, no `?`) typed during the probe window
         // does not match the private-mode reply grammar, so it must survive
         // into residue untouched rather than being swallowed as if it were
-        // one of our own DA1/DECRPM/kitty replies
+        // one of the probe's own DA1/DECRPM/kitty replies
         let mut source = ScriptedSource::new(vec![Some(b"\x1b[A\x1b[?62c".as_slice())]);
         let mut sink = Vec::new();
         let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
         assert_eq!(residue, b"\x1b[A");
+    }
+
+    #[test]
+    fn a_two_byte_csi_prefix_at_end_of_read_is_dropped_not_forwarded() {
+        // the same half-delivered reply cut one byte earlier. `ESC [` ending
+        // a read is the terminal mid-reply, and forwarding it replays an
+        // Escape plus a literal `[` into the engine as if typed
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[".as_slice()), None]);
+        let mut sink = Vec::new();
+        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        assert!(
+            residue.is_empty(),
+            "residue should be empty, got {residue:?}"
+        );
+    }
+
+    #[test]
+    fn a_lone_trailing_escape_is_still_forwarded_as_typed_input() {
+        // the boundary of the rule above: a bare `ESC` is what the Escape
+        // key produces, so dropping it would eat a keystroke. Only a
+        // confirmed CSI introducer is treated as an in-flight reply
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b".as_slice()), None]);
+        let mut sink = Vec::new();
+        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        assert_eq!(residue, b"\x1b", "a typed Escape must survive the probe");
+    }
+
+    #[test]
+    fn a_trailing_csi_introducer_is_dropped_rather_than_replayed_as_two_keys() {
+        // the other side of that boundary: `ESC [` ending the read is the
+        // terminal mid-reply, and `encode_residue_bytes` would turn it into
+        // an Escape followed by a literal `[` typed into the buffer
+        let mut source = ScriptedSource::new(vec![Some(b"\x1b[".as_slice()), None]);
+        let mut sink = Vec::new();
+        let (_caps, residue) = detect(&mut source, &mut sink, PROBE_DEADLINE, None).unwrap();
+        assert!(
+            residue.is_empty(),
+            "residue should be empty, got {residue:?}"
+        );
     }
 
     #[test]

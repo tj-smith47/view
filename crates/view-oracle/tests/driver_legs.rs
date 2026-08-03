@@ -10,11 +10,19 @@
 //! the decoded screen and nvim's own buffer state must agree).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// Only the pty-level integration leg (gated below) drives the `view` binary
+// through this scratch/XDG-isolation helper; the Session and EngineSession
+// legs do not, so on Windows, where that leg is gated off, it is unused.
+#[cfg(unix)]
 mod common;
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use view_core::msg::{Key, Msg};
-use view_oracle::{EngineSession, PtySession, Session};
+use view_oracle::{EngineSession, Session};
+// The pty-level leg drives the real `view` binary under a terminal, a tier-2
+// Windows surface validated on winserver rather than in CI; gated off Windows.
+#[cfg(unix)]
+use view_oracle::PtySession;
 
 /// leg (a) (Msg-level injection) + leg (b) (deterministic capture), driven
 /// through the pure `Session`: a scripted `Redraw` batch ending in `Flush`
@@ -58,7 +66,16 @@ fn engine_session_input_and_pump_until_flush_agree_with_eval_str_probe() {
         .input("ihello<Esc>")
         .expect("input() against a freshly attached engine");
 
-    let flushed = session.pump_until_flush(Duration::from_secs(5));
+    // pump_until_flush answers the next Flush of any origin -- an attach-time
+    // one, or one nvim emits partway through the typed keys -- so the leg is
+    // proven by pumping until the decoded screen carries the text, under this
+    // test's own deadline, rather than by trusting a single flush to be the
+    // one that finished the script
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut flushed = false;
+    while Instant::now() < deadline && !session.screen_text().contains("hello") {
+        flushed |= session.pump_until_flush(Duration::from_millis(250));
+    }
     assert!(
         flushed,
         "pump_until_flush never observed a Flush within the deadline; screen:\n{}",
@@ -104,6 +121,7 @@ fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
 /// process inside a real pty shows a typed character on screen. Full stack,
 /// full fidelity, the slowest and least isolated of the three legs by
 /// design.
+#[cfg(unix)]
 #[test]
 fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
     let paths = common::ScratchPaths::new("driver-legs");

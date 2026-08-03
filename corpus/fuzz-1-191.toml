@@ -1,0 +1,5 @@
+schema = 1
+name = "fuzz-1-191"
+input = 'c"0svlayyhypnccr$dtkawcOjw"1rfy<Esc>t1"awdwxro.eq1 y?iwG wVwlrtw?ag<CR>x"1ccexaigtgqbtm0O0fqnjgdda<CR>qjwohhrb zbokngh<Esc> xsdk<Esc>jeom.hjr0!0yyeydwxp.wdjccl<Esc><CR>rbmkyy"0l.jxo<Esc>llowatlh'
+engine_pin = "v0.12.4"
+ext_set = "default"

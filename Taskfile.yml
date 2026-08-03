@@ -22,16 +22,28 @@ tasks:
     cmd: cargo test --workspace
 
   audit:
-    desc: Enforce crate dependency direction from the spec
-    cmd: bash scripts/audit-deps.sh
+    desc: Enforce crate dependency direction and the pinned engine version
+    cmds:
+      - bash scripts/audit-deps.sh
+      - bash scripts/check-engine-pin.sh
+      - bash scripts/check-budget-drift.sh
+      - bash .claude/hooks/tests/validate-commands-cases.sh
 
   style:
     desc: Enforce comment and doc style rules
     cmd: bash scripts/check-style.sh
 
   loc:
-    desc: Enforce the production-LOC ceiling per file (split modules, separate tests)
-    cmd: bash scripts/check-loc.sh
+    desc: Enforce the god-file ceiling (production code lines per file; split modules, separate tests)
+    cmds:
+      - bash scripts/audit-god-files.sh
+      # the counter is only trustworthy while a second, independently written
+      # one still agrees with it over every file the gate measures. The
+      # interpreter is resolved rather than named: Windows runners ship
+      # `python` with no `python3` alias, and a cross-check that silently
+      # skipped there would leave the counter unverified on the one platform
+      # whose path handling differs most.
+      - bash -o pipefail -c 'scripts/crosscheck-god-files.sh'
 
   ci:
     desc: The full local gate; CI mirrors exactly this
@@ -43,20 +55,41 @@ tasks:
       - task: loc
       - task: test
 
-  bench-latency:
-    desc: Paired keypress-to-paint latency, view vs nvim
+  oracle:
+    desc: Run the differential oracle corpus against the pinned nvim (task oracle -- corpus/insert-basic.toml for one entry)
+    cmd: cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
+
+  compat:
+    desc: Run the plugin compat harness against the pinned nvim (task compat -- compat/scenarios/lualine.toml for one scenario)
+    cmd: cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
+
+  bench:
+    desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     cmds:
       - cargo build --release -p view
-      - cargo run --release -p view-bench --bin latency -- view target/release/view
-      - cargo run --release -p view-bench --bin latency -- nvim nvim
+      # separate target dir so the instrumented build can never overwrite
+      # the plain binary the e2e rows measure
+      - cargo build --release -p view --features bench-taps --target-dir target/taps
+      - cargo run --release -p view-harness --bin bench -- {{.CLI_ARGS}}
 
   bench-micro:
     desc: Hot-path micro-benches (grid apply, key dispatch, damage fold, render)
     cmds:
       - cargo bench -p view-core --bench grid_apply
       - cargo bench -p view-core --bench update_key
+      - cargo bench -p view-core --bench input_handoff
       - cargo bench -p view-engine --bench damage_fold --features bench-support
       - cargo bench -p view-surface --bench render_frame
+      - cargo bench -p view-tui --bench paint_frame
+
+  perf-audit:
+    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class, then every hot-path micro-bench (task perf-audit CLASS=dev-linux)
+    vars:
+      CLASS: '{{.CLASS | default "dev-linux"}}'
+    cmds:
+      - task: bench
+        vars: { CLI_ARGS: "--all --class {{.CLASS}} --gate" }
+      - task: bench-micro
 
   commit:
     desc: Gated commit — runs the ci chain first

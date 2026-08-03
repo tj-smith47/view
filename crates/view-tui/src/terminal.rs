@@ -6,11 +6,15 @@
 
 use crate::keys::encode_key;
 use crate::mouse::encode_mouse;
-use crate::paint::composite;
+use crate::paint::{overlay_rows, Damage, Shadow};
 use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
+use ratatui::backend::Backend;
+use std::cell::RefCell;
 use std::io::Write;
+use std::rc::Rc;
 use std::sync::mpsc::SyncSender;
+use view_core::grid::GridDamage;
 use view_core::model::{Model, TermCaps, Tier};
 use view_core::msg::{Key, Msg};
 use view_surface::{CursorShape, Surface};
@@ -141,22 +145,6 @@ fn restore() {
     let _ = out.flush();
 }
 
-/// Writes a synchronized-update bracket escape (`CSI ? 2026 h` to begin,
-/// `CSI ? 2026 l` to end) directly to stdout, bypassing `ratatui`'s own
-/// buffered writer: the bracket must wrap the entire frame write including
-/// the cursor move that follows it, not just the buffer diff `ratatui`
-/// flushes internally.
-fn write_sync_bracket(begin: bool) -> std::io::Result<()> {
-    let seq: &[u8] = if begin {
-        b"\x1b[?2026h"
-    } else {
-        b"\x1b[?2026l"
-    };
-    let mut out = std::io::stdout();
-    out.write_all(seq)?;
-    out.flush()
-}
-
 /// Maps a [`CursorShape`] to its DECSCUSR steady parameter: `2` (block),
 /// `4` (underline/horizontal), `6` (bar/vertical). Steady rather than
 /// blinking (`1`/`3`/`5`): a deterministic cursor is safer to test against
@@ -175,19 +163,65 @@ fn decscusr_param(shape: CursorShape) -> u8 {
 }
 
 /// Writes the DECSCUSR cursor-shape escape (`CSI n SP q`) for `shape` to
-/// `writer`. Generic over `Write` (rather than writing straight to stdout
-/// like [`write_sync_bracket`]) so the byte sequence itself is unit
+/// `writer`. Generic over `Write` so the byte sequence itself is unit
 /// testable against an injected `Vec<u8>` writer instead of only being
 /// provable via a live terminal.
 fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::Result<()> {
     write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
+/// The whole-terminal paint area for one frame, sized from the model's
+/// last-known terminal dimensions rather than an OS query on every frame.
+///
+/// `Model::term_width`/`term_height` are fed by `Msg::Resized` and startup
+/// wiring, so reading them here keeps [`Term::draw_surface`] off the
+/// per-frame `TIOCGWINSZ` syscall while still following every resize on the
+/// next frame: the shadow's own `resize` sees the new area and forces a full
+/// repaint, exactly as it did when the size came from the syscall.
+fn frame_area(model: &Model) -> ratatui::layout::Rect {
+    ratatui::layout::Rect::new(0, 0, model.term_width, model.term_height)
+}
+
+/// A frame-scoped byte accumulator standing in for stdout as ratatui's
+/// backend writer: `write` appends, `flush` is a no-op, so everything
+/// ratatui and the cursor/bracket escapes emit for one frame coalesces
+/// into a single buffer [`Term::draw_surface`] then writes to the real
+/// terminal in ONE `write`+`flush`. One syscall per frame instead of
+/// ~5 (bracket open, content flush, cursor position, cursor show,
+/// bracket close): each separate pty write costs a kernel copy plus a
+/// reader wakeup, which the output-path bench measured as the majority
+/// of the paint segment's non-CPU time.
+///
+/// `Rc<RefCell<..>>` rather than a plain field because ratatui owns its
+/// backend writer for the terminal's lifetime while `draw_surface` must
+/// also drain the same buffer after each draw; `Term` lives on one
+/// thread (nothing here is `Send`), so the shared handle is safe by
+/// construction and the borrows never overlap (ratatui borrows only
+/// inside `write` calls, the drain happens strictly after `draw`
+/// returns).
+struct FrameBuf(Rc<RefCell<Vec<u8>>>);
+
+impl Write for FrameBuf {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 /// The ratatui-backed terminal: draws grid frames and reports its size,
 /// without exposing `ratatui` types to callers outside this crate.
 pub struct Term {
     guard: TerminalGuard,
-    inner: ratatui::DefaultTerminal,
+    /// The backend directly, not a `ratatui::Terminal`: this type keeps its
+    /// own [`Shadow`] and emits the diff itself, so a `Terminal` would only
+    /// add two more full-size cell buffers that nothing ever reads.
+    inner: ratatui::backend::CrosstermBackend<FrameBuf>,
+    /// The frame accumulator shared with `inner`'s writer; see [`FrameBuf`].
+    frame_buf: Rc<RefCell<Vec<u8>>>,
     /// The last DECSCUSR shape written, so `draw_surface` only re-emits the
     /// escape when the `Surface` cursor's shape actually changed instead of
     /// writing it unconditionally on every frame.
@@ -198,6 +232,22 @@ pub struct Term {
     /// paint. `None` before the first frame, matching `last_cursor_shape`'s
     /// convention.
     last_mouse_capture: Option<bool>,
+    /// The persistent double-buffered shadow of the terminal's cells. Each
+    /// frame composites only its damaged rows into it, leaving every other
+    /// cell as earlier frames painted it. This is what clips per-frame
+    /// composite CPU to the damaged region instead of re-resolving all
+    /// ~4800 cells every keystroke. Starts zero-sized so the first paint
+    /// (and any later size change) rebuilds it and repaints in full.
+    shadow: Shadow,
+    /// The terminal-space rows every overlay layer covered last frame, so a
+    /// vanished, moved, or shrunk overlay's vacated cells are marked dirty
+    /// this frame and the grid (or the new overlay position) repaints under
+    /// them; see [`crate::paint::Damage::from_frame`].
+    last_overlay_rows: Vec<u16>,
+    /// The reserved chrome-row offset last frame. A change (a tabline
+    /// appearing or vanishing) shifts every grid row, so the next paint
+    /// must be full rather than damage-clipped.
+    last_offset: Option<u16>,
     /// The capabilities resolved during [`Term::init`], either probed or
     /// from a `--tier` override. Stored so [`Term::caps`] can hand a copy
     /// to the caller without re-running the (stdin-consuming, one-shot)
@@ -231,13 +281,17 @@ impl Term {
         let guard = TerminalGuard::enter_raw_mode()?;
         let (caps, residue) = tiers::resolve(tier_override)?;
         guard.finish_entering_alt_screen()?;
-        let inner =
-            ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))?;
+        let frame_buf = Rc::new(RefCell::new(Vec::new()));
+        let inner = ratatui::backend::CrosstermBackend::new(FrameBuf(Rc::clone(&frame_buf)));
         Ok(Self {
             guard,
             inner,
+            frame_buf,
             last_cursor_shape: None,
             last_mouse_capture: None,
+            shadow: Shadow::new(),
+            last_overlay_rows: Vec::new(),
+            last_offset: None,
             caps,
             residue,
         })
@@ -312,37 +366,102 @@ impl Term {
     /// # Errors
     ///
     /// Returns the underlying `std::io::Error` if the backend write fails.
-    pub fn draw_surface(&mut self, model: &Model, surface: &Surface) -> std::io::Result<()> {
+    pub fn draw_surface(
+        &mut self,
+        model: &Model,
+        surface: &Surface,
+        grid_damage: &GridDamage,
+    ) -> std::io::Result<()> {
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_DRAW_START);
+        let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_capture != Some(model.engine.mouse_on) {
-            let mut out = std::io::stdout();
             if model.engine.mouse_on {
-                crossterm::execute!(out, EnableMouseCapture)?;
+                crossterm::queue!(sink, EnableMouseCapture)?;
             } else {
-                crossterm::execute!(out, DisableMouseCapture)?;
+                crossterm::queue!(sink, DisableMouseCapture)?;
             }
-            out.flush()?;
             self.last_mouse_capture = Some(model.engine.mouse_on);
         }
         if model.caps.sync {
-            write_sync_bracket(true)?;
+            sink.write_all(b"\x1b[?2026h")?;
         }
-        self.inner.draw(|f| composite(model, surface, f))?;
+        // Translate this frame's grid damage into terminal-space rows, unioned
+        // with the overlay rows of this frame and the last so a vanished or
+        // moved overlay repaints the grid it uncovered. A chrome-offset change
+        // (a tabline appearing), a first paint, or a resize forces a
+        // whole-frame repaint instead.
+        let offset = model.chrome_rows();
+        let cur_overlay = overlay_rows(surface);
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);
+        // the terminal size comes from the model (fed by Msg::Resized and
+        // startup), not a per-frame TIOCGWINSZ query: the shadow's resize
+        // still forces a full repaint on any change, so a resize is followed
+        // on the next frame without the syscall.
+        let area = frame_area(model);
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_AREA_RESOLVED);
+        let resized = self.shadow.resize(area);
+        let force_full = resized || self.last_offset != Some(offset);
+        if resized {
+            // the terminal changed size: its on-screen contents are no longer
+            // trustworthy, so clear it and repaint every cell from a blank
+            // shadow -- the one place a full clear is warranted
+            crossterm::queue!(
+                sink,
+                crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
+            )?;
+        }
+        let damage = Damage::from_frame(
+            grid_damage,
+            offset,
+            &self.last_overlay_rows,
+            &cur_overlay,
+            force_full,
+        );
+        // paint only the damaged rows into the persistent shadow, then emit
+        // the cells that actually changed against what the terminal already
+        // shows; no full-buffer copy runs, because the shadow's buffers swap
+        self.shadow.compose(model, surface, &damage);
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_COMPOSED);
+        // disjoint field borrows: `shadow` supplies the cells while `inner`'s
+        // backend encodes them into the shared frame buffer
+        self.shadow.emit_updates(&mut self.inner)?;
+        self.shadow.commit();
+        self.last_overlay_rows = cur_overlay;
+        self.last_offset = Some(offset);
         match surface.cursor {
             Some(spec) => {
                 self.inner.set_cursor_position((spec.col, spec.row))?;
                 self.inner.show_cursor()?;
                 if self.last_cursor_shape != Some(spec.shape) {
-                    let mut out = std::io::stdout();
-                    write_cursor_shape(&mut out, spec.shape)?;
-                    out.flush()?;
+                    write_cursor_shape(&mut sink, spec.shape)?;
                     self.last_cursor_shape = Some(spec.shape);
                 }
             }
             None => self.inner.hide_cursor()?,
         }
         if model.caps.sync {
-            write_sync_bracket(false)?;
+            sink.write_all(b"\x1b[?2026l")?;
         }
+        // the frame's single real write: everything queued above -- mouse
+        // toggles, the sync bracket, the content diff, cursor escapes --
+        // reaches the terminal in one syscall, atomically from the pty
+        // reader's point of view. The tap here brackets exactly that write
+        // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_FLUSH_START);
+        let mut out = std::io::stdout().lock();
+        {
+            let mut frame = self.frame_buf.borrow_mut();
+            out.write_all(&frame)?;
+            frame.clear();
+        }
+        out.flush()?;
+        #[cfg(feature = "bench-taps")]
+        crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         Ok(())
     }
 
@@ -356,6 +475,50 @@ impl Term {
     /// independent teardown path alongside the guard's own.
     pub fn restore_now(&mut self) {
         self.guard.restore_now();
+    }
+}
+
+/// The terminal size as the input thread last observed it, readable by the
+/// paint loop.
+///
+/// Not a second source of truth for the size -- [`Model`] stays that -- but
+/// a second *transport* for it, the way `Msg::Resized` is. The message
+/// still flows and still drives the engine's own `TryResize` in message
+/// order; this only stops the frames painted between the resize happening
+/// and its message being dequeued from addressing a shape the terminal has
+/// already left. On a shrink those frames size the shadow larger than the
+/// real terminal and emit cells for rows and columns it no longer has.
+///
+/// A packed `u16` pair in one atomic, with `0` meaning "nothing published":
+/// a terminal is never 0x0, and one word keeps width and height inherently
+/// consistent with each other, which two atomics would not be.
+#[derive(Clone, Default, Debug)]
+pub struct TermSizeCell(std::sync::Arc<std::sync::atomic::AtomicU32>);
+
+impl TermSizeCell {
+    /// Publishes the size the terminal has just become.
+    pub fn publish(&self, width: u16, height: u16) {
+        let packed = (u32::from(width) << 16) | u32::from(height);
+        self.0.store(packed, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Takes a published size if one is waiting, leaving the cell empty.
+    ///
+    /// The empty case is a single relaxed load, which is what a frame pays
+    /// on every pass: the whole point of sourcing the paint area from the
+    /// model was to stop paying a `TIOCGWINSZ` per frame, and this must not
+    /// quietly put a cost back.
+    #[must_use]
+    pub fn take(&self) -> Option<(u16, u16)> {
+        use std::sync::atomic::Ordering;
+        if self.0.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        match self.0.swap(0, Ordering::Acquire) {
+            0 => None,
+            #[allow(clippy::cast_possible_truncation)]
+            packed => Some(((packed >> 16) as u16, (packed & 0xffff) as u16)),
+        }
     }
 }
 
@@ -374,12 +537,23 @@ impl Term {
 /// dropped keystroke is never an acceptable loss the way a coalescible
 /// redraw token is, so this thread blocks rather than discards when the
 /// channel is momentarily full.
-pub fn spawn_input_thread(tx: SyncSender<Msg>) {
+pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
             let msg = match event {
-                Event::Key(k) => encode_key(&k).map(|notation| Msg::Key(Key { notation })),
-                Event::Resize(width, height) => Some(Msg::Resized { width, height }),
+                Event::Key(k) => {
+                    #[cfg(feature = "bench-taps")]
+                    crate::tap::tap(crate::tap::TAG_KEY_READ);
+                    encode_key(&k).map(|notation| Msg::Key(Key { notation }))
+                }
+                Event::Resize(width, height) => {
+                    // published before the message is queued: the message
+                    // may sit behind a burst of keys or redraw tokens, and
+                    // every frame painted in the meantime would otherwise
+                    // address the terminal's previous shape
+                    size.publish(width, height);
+                    Some(Msg::Resized { width, height })
+                }
                 Event::Paste(text) => Some(Msg::Paste(text)),
                 Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),
                 _ => None,
@@ -399,6 +573,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_empty_size_cell_yields_nothing() {
+        let cell = TermSizeCell::default();
+        assert_eq!(cell.take(), None);
+    }
+
+    #[test]
+    fn a_published_size_is_taken_exactly_once() {
+        let cell = TermSizeCell::default();
+        cell.publish(120, 40);
+        assert_eq!(cell.take(), Some((120, 40)));
+        assert_eq!(
+            cell.take(),
+            None,
+            "a second take must not re-apply a resize that was already folded in"
+        );
+    }
+
+    #[test]
+    fn a_second_publish_supersedes_the_first() {
+        // only the terminal's current shape can be right; an intermediate
+        // size the terminal has already left must never reach a frame
+        let cell = TermSizeCell::default();
+        cell.publish(120, 40);
+        cell.publish(80, 24);
+        assert_eq!(cell.take(), Some((80, 24)));
+    }
+
+    #[test]
+    fn the_size_cell_round_trips_the_extremes_of_a_u16_pair() {
+        // the packing puts width in the high half and height in the low
+        // half; a swap or a sign error shows up here and nowhere else
+        let cell = TermSizeCell::default();
+        for size in [(1, 1), (u16::MAX, 1), (1, u16::MAX), (u16::MAX, u16::MAX)] {
+            cell.publish(size.0, size.1);
+            assert_eq!(cell.take(), Some(size));
+        }
+    }
+
+    #[test]
+    fn frame_area_is_sourced_from_the_model_terminal_size_and_follows_a_resize() {
+        // the paint area must be the model's last-known terminal size, so a
+        // per-frame OS size query is never needed and a stale size can never
+        // paint.
+        let mut model = Model::with_term_size(80, 24);
+        assert_eq!(
+            frame_area(&model),
+            ratatui::layout::Rect::new(0, 0, 80, 24),
+            "the initial paint area must match the startup terminal size"
+        );
+
+        // a resize lands as Msg::Resized, which sets term_width/height (see
+        // view_core::update). the very next frame must paint at the new size,
+        // never the size the previous frame used.
+        model.term_width = 120;
+        model.term_height = 40;
+        assert_eq!(
+            frame_area(&model),
+            ratatui::layout::Rect::new(0, 0, 120, 40),
+            "after a resize the paint area must follow the model, not a cached or queried size"
+        );
+    }
+
+    // restore_bytes drives crossterm's LeaveAlternateScreen/DisableMouseCapture
+    // through execute!; on Windows those touch the WinAPI console layer and
+    // fail ("Initial console modes not set") when no console was entered, so
+    // this ANSI-byte-ordering assertion can only be exercised where crossterm
+    // emits the raw sequences unconditionally. The production restore path is
+    // exercised after a real EnterAlternateScreen; this isolated unit check is
+    // a unix/VT-terminal concern.
+    #[cfg(unix)]
+    #[test]
     fn restore_bytes_closes_the_sync_bracket_before_leaving_the_alternate_screen() {
         let mut buf = Vec::new();
         restore_bytes(&mut buf).unwrap();
@@ -414,6 +659,8 @@ mod tests {
         );
     }
 
+    // Serves only the unix-gated restore_bytes test above.
+    #[cfg(unix)]
     fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         haystack
             .windows(needle.len())

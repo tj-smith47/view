@@ -15,3 +15,9 @@ view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 vt100 = "0.16.2"
+
+# Process groups are a Unix mechanism; killpg is what lets a session kill
+# everything its pty child spawned, not just the child. Windows keeps the
+# per-child kill portable-pty provides.
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", default-features = false, features = ["signal"] }

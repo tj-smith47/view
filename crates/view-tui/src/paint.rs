@@ -3,19 +3,427 @@
 //! *where*; this module is the only place that turns those decisions into
 //! `ratatui::Buffer` writes.
 
+use ratatui::backend::Backend;
+use ratatui::buffer::{Buffer, Cell, CellWidth};
 use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use view_core::grid::Grid;
+use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 use view_core::theme::{ResolvedStyle, Theme};
 use view_surface::{LayerKind, Rect, Surface};
 
-/// Paints every layer in `surface`, in order (z ascending), into `frame`.
-/// Later layers would overwrite the cells of earlier ones within their own
-/// rect, which is the z-order compositing contract: nothing here tracks
-/// damage or diffs between frames, since `ratatui`'s own buffer diff already
-/// limits what actually reaches the terminal.
+/// The terminal-space rows a frame's composite must repaint, so a redraw
+/// touches only the changed region instead of all ~4800 cells.
+///
+/// Rows are in terminal (post-chrome-offset) space, the same space
+/// [`ratatui::buffer::Buffer`] indexes, so [`composite_into`] can test a
+/// grid row's painted position directly. `full` supersedes `rows`: a
+/// first paint, resize, or chrome-offset change repaints everything. The
+/// grid layer is the only one clipped; transient overlays (cmdline,
+/// messages, popupmenu, tabline, shell) are small and always painted whole
+/// when present, and their rows are always included in a non-full
+/// `Damage` (see [`Damage::from_frame`]) so the grid underneath a vacated
+/// overlay repaints.
+#[derive(Debug, Clone)]
+pub struct Damage {
+    full: bool,
+    rows: Vec<u16>,
+}
+
+impl Default for Damage {
+    /// Repaints every row, not none of them. A damage nobody chose is a
+    /// damage nobody computed, and the two candidate meanings are not
+    /// symmetric: repainting a clean row wastes composite CPU for one
+    /// frame, while skipping a dirty one leaves the terminal showing
+    /// something the model no longer says.
+    fn default() -> Self {
+        Self::full()
+    }
+}
+
+impl Damage {
+    /// Damage that repaints every row.
+    #[must_use]
+    pub fn full() -> Self {
+        Self {
+            full: true,
+            rows: Vec::new(),
+        }
+    }
+
+    /// Builds a frame's damage from the grid's own changed rows plus the
+    /// overlay rows of this frame and the last, offsetting grid-space rows
+    /// by the reserved chrome rows to reach terminal space.
+    ///
+    /// The union with both frames' overlay rows is what makes an overlay
+    /// transition correct by construction: a toast that appears, moves,
+    /// shrinks, or vanishes has every cell it now covers *and* every cell it
+    /// covered last frame marked dirty, so the grid (or the new overlay
+    /// position) repaints underneath the vacated cells. `force_full` (a
+    /// chrome-offset change that shifts the whole grid) and a full
+    /// [`GridDamage`] (a resize or clear) both collapse to a whole-frame
+    /// repaint.
+    #[must_use]
+    pub fn from_frame(
+        grid: &GridDamage,
+        offset: u16,
+        prev_overlay_rows: &[u16],
+        cur_overlay_rows: &[u16],
+        force_full: bool,
+    ) -> Self {
+        if force_full || grid.full {
+            return Self::full();
+        }
+        let mut rows =
+            Vec::with_capacity(grid.rows.len() + prev_overlay_rows.len() + cur_overlay_rows.len());
+        rows.extend(grid.rows.iter().map(|&r| r.saturating_add(offset)));
+        rows.extend_from_slice(prev_overlay_rows);
+        rows.extend_from_slice(cur_overlay_rows);
+        Self { full: false, rows }
+    }
+
+    /// Whether terminal-space `row` must repaint (always true when `full`).
+    #[must_use]
+    pub fn covers(&self, row: u16) -> bool {
+        self.full || self.rows.contains(&row)
+    }
+
+    /// The damage covering every row either input covers.
+    #[must_use]
+    pub fn union(&self, other: &Self) -> Self {
+        if self.full || other.full {
+            return Self::full();
+        }
+        let mut rows = Vec::with_capacity(self.rows.len() + other.rows.len());
+        rows.extend_from_slice(&self.rows);
+        rows.extend(other.rows.iter().filter(|r| !self.rows.contains(r)));
+        Self { full: false, rows }
+    }
+
+    /// Replaces `out` with the contiguous runs of rows this damage covers
+    /// inside `area`, each a `(first row, row count)` pair in terminal space
+    /// and in ascending row order.
+    ///
+    /// Runs rather than individual rows because a run is what
+    /// [`ratatui::buffer::Buffer::diff_iter`] can be handed as one
+    /// sub-buffer: the rows of a run are adjacent in the buffer's flat cell
+    /// array, so one diff covers all of them. `out` is caller-owned so the
+    /// per-frame call reuses a single allocation.
+    fn row_runs(&self, area: ratatui::layout::Rect, out: &mut Vec<(u16, u16)>) {
+        out.clear();
+        let mut open: Option<(u16, u16)> = None;
+        for offset in 0..area.height {
+            let row = area.y.saturating_add(offset);
+            if self.covers(row) {
+                match &mut open {
+                    Some((_, height)) => *height = height.saturating_add(1),
+                    None => open = Some((row, 1)),
+                }
+            } else if let Some(run) = open.take() {
+                out.push(run);
+            }
+        }
+        if let Some(run) = open {
+            out.push(run);
+        }
+    }
+}
+
+/// Whether diffing only `runs` costs less than diffing all `height` rows.
+///
+/// Staging a run swaps its cells out of the shadow's buffers and back
+/// again, measured at 0.37 us per repainted row of a 120-column frame
+/// against the 0.71 us the unclipped scan spends on that same row, so
+/// clipping stops paying once roughly two thirds of the frame repaints.
+/// Half the frame sits on the conservative side of that crossover: a large
+/// repaint (a scroll, a resize) takes the unclipped path rather than paying
+/// the swap on top of a scan it cannot avoid. The two paths emit the same
+/// updates, so this only ever chooses which one is cheaper.
+fn clipping_pays(runs: &[(u16, u16)], height: u16) -> bool {
+    let rows: u32 = runs.iter().map(|&(_, h)| u32::from(h)).sum();
+    rows.saturating_mul(2) < u32::from(height)
+}
+
+/// The double-buffered shadow of the terminal's cells: one buffer holding
+/// what the terminal currently shows, one to composite the next frame into.
+///
+/// Exists to make a damage-clipped frame emit exactly the cells a full
+/// recomposite would, without either of the two costs a naive clip pays.
+///
+/// The buffers swap rather than copy. A frame composites into `back`, the
+/// diff against `front` is emitted, and the two then trade places, so no
+/// per-frame buffer copy runs at all -- the same trick `ratatui::Terminal`
+/// plays, which is why the pre-clipping paint path never paid for one.
+/// Swapping means `back` holds the frame *before* last on entry, not last,
+/// so a frame must repaint its own damaged rows plus the previous frame's:
+/// exactly the rows that can differ between the frame before last and this
+/// one. [`Shadow::compose`] carries that set forward internally so callers
+/// pass only the frame's own damage.
+///
+/// The emitted diff comes from [`ratatui::buffer::Buffer::diff_iter`], not
+/// a hand-rolled cell scan. A double-width symbol occupies its following
+/// cell, which must therefore *not* be emitted separately -- the crossterm
+/// backend skips the cursor move for a cell one column right of the last,
+/// so emitting it would print it one column past the wide glyph, over the
+/// cell after it. Delegating keeps that (and the VS16 trailing-cell and
+/// blank-visible-style rules beside it) correct by construction rather than
+/// by a re-derivation that would silently drift on a `ratatui` upgrade.
+///
+/// That delegation is also what bounds the diff's cost. A whole-frame diff
+/// compares every cell, and a `Cell` comparison is a symbol-string compare
+/// before it is anything else, measured at 6 ns per cell -- 29 us for a
+/// 120x40 frame in which one cell changed. So the diff is handed *fewer
+/// cells* rather than a cheaper comparison: the rows the frame actually
+/// repainted are lifted into sub-buffers carrying their own terminal-space
+/// rect, and `diff_iter` runs over those. Same iterator, same wide-glyph
+/// rules, same absolute coordinates out; only the input is clipped.
+///
+/// Diffing a subset of rows is exact because no cell ever overflows its
+/// row (see [`fitted_symbol`]), which leaves the diff carrying
+/// no state across a row boundary, and because a row the frame did not
+/// repaint cannot differ between the two buffers: `back` holds the frame
+/// before last there, which the previous frame's damage having missed it
+/// says is still what the model shows.
+#[derive(Debug, Default)]
+pub struct Shadow {
+    front: Buffer,
+    back: Buffer,
+    carried: Damage,
+    /// The rows the last [`Shadow::compose`] repainted, which are the only
+    /// rows in which `front` and `back` can differ.
+    painted: Damage,
+    /// Scratch for [`Shadow::emit_updates`]'s row runs, kept across frames
+    /// so a frame's clip costs no allocation.
+    runs: Vec<(u16, u16)>,
+    /// Scratch sub-buffers, one per run, likewise kept across frames.
+    staged: Vec<StagedRun>,
+}
+
+/// One repainted row run lifted out of the shadow's buffers, so the diff
+/// scans that run's cells instead of the whole frame's.
+///
+/// The run's cells are *swapped* in rather than cloned. A `Cell` clone
+/// copies a `CompactString` per cell and measured 8.5 ns against 0.8 ns for
+/// the swap, which would have spent more on the copy than the 6 ns per-cell
+/// scan the clip exists to avoid. Both buffers carry the run's real
+/// terminal-space rect, so `ratatui::buffer::Buffer::diff_iter` reports
+/// absolute coordinates and nothing translates them back.
+#[derive(Debug, Default)]
+struct StagedRun {
+    front: Buffer,
+    back: Buffer,
+}
+
+/// A [`Shadow`] with its repainted row runs lifted into scratch sub-buffers,
+/// which puts them back when it drops.
+///
+/// Staging is only reachable through this guard, so the lift can never be
+/// left half-done: the rows return on the error path, on an early return, and
+/// on an unwinding panic out of the backend alike. The shadow is the only
+/// record of what the terminal shows, so a lift that failed to reverse would
+/// make every later frame diff against scratch cells and emit the wrong
+/// updates for the rest of the session.
+struct StagedRuns<'a> {
+    shadow: &'a mut Shadow,
+    runs: &'a [(u16, u16)],
+}
+
+impl<'a> StagedRuns<'a> {
+    /// Sizes one scratch sub-buffer per run and lifts the runs' rows into
+    /// them.
+    fn stage(shadow: &'a mut Shadow, runs: &'a [(u16, u16)]) -> Self {
+        if shadow.staged.len() < runs.len() {
+            shadow.staged.resize_with(runs.len(), StagedRun::default);
+        }
+        let area = shadow.front.area;
+        for (slot, &(start, height)) in shadow.staged.iter_mut().zip(runs) {
+            let rect = ratatui::layout::Rect {
+                x: area.x,
+                y: start,
+                width: area.width,
+                height,
+            };
+            let len = usize::from(height) * usize::from(area.width);
+            slot.front.area = rect;
+            slot.back.area = rect;
+            slot.front.content.resize(len, Cell::EMPTY);
+            slot.back.content.resize(len, Cell::EMPTY);
+        }
+        shadow.swap_runs(runs);
+        Self { shadow, runs }
+    }
+
+    /// The staged runs' diffs, chained in ascending row order, which is the
+    /// order the whole-frame diff would have yielded them in.
+    fn diffs(&self) -> impl Iterator<Item = (u16, u16, &Cell)> + '_ {
+        self.shadow
+            .staged
+            .iter()
+            .take(self.runs.len())
+            .flat_map(|run| run.front.diff_iter(&run.back))
+    }
+}
+
+impl Drop for StagedRuns<'_> {
+    fn drop(&mut self) {
+        self.shadow.swap_runs(self.runs);
+    }
+}
+
+impl Shadow {
+    /// An empty shadow, zero-sized until the first [`Shadow::resize`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// What the terminal currently shows.
+    #[must_use]
+    pub fn front(&self) -> &Buffer {
+        &self.front
+    }
+
+    /// Points the shadow at `area`, rebuilding both buffers blank when it
+    /// differs from the current one. Returns whether that rebuild happened,
+    /// which is the caller's cue to clear the real terminal and force a
+    /// whole-frame repaint: after a size change neither the shadow nor the
+    /// terminal's contents mean anything.
+    pub fn resize(&mut self, area: ratatui::layout::Rect) -> bool {
+        if self.front.area == area {
+            return false;
+        }
+        self.front = Buffer::empty(area);
+        self.back = Buffer::empty(area);
+        self.carried = Damage::full();
+        self.painted = Damage::full();
+        self.staged.clear();
+        true
+    }
+
+    /// Composites one frame into the back buffer, repainting `damage`'s rows
+    /// plus the rows the previous frame repainted (see the type docs for why
+    /// the previous frame's rows are needed).
+    pub fn compose(&mut self, model: &Model, surface: &Surface, damage: &Damage) {
+        let repaint = damage.union(&self.carried);
+        composite_into(&mut self.back, model, surface, &repaint);
+        self.carried = damage.clone();
+        self.painted = repaint;
+    }
+
+    /// Writes the cells that differ between what the terminal shows and the
+    /// frame just composed to `backend`, in the order they should appear on
+    /// the wire.
+    ///
+    /// One `draw` call per frame either way, so the byte stream a run-clipped
+    /// frame produces is the stream the unclipped diff would have produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns the backend's own write error.
+    pub fn emit_updates<B: Backend>(&mut self, backend: &mut B) -> Result<(), B::Error> {
+        let mut runs = std::mem::take(&mut self.runs);
+        self.painted.row_runs(self.front.area, &mut runs);
+        let result = if clipping_pays(&runs, self.front.area.height) {
+            self.emit_clipped(backend, &runs)
+        } else {
+            backend.draw(self.updates())
+        };
+        self.runs = runs;
+        result
+    }
+
+    /// The whole-frame diff: every cell of what the terminal shows against
+    /// every cell of the frame just composed.
+    fn updates(&self) -> ratatui::buffer::BufferDiff<'_, '_> {
+        self.front.diff_iter(&self.back)
+    }
+
+    /// The same emission clipped to `runs`, one chained `draw` over the
+    /// staged sub-buffers.
+    ///
+    /// [`StagedRuns`] brackets exactly the backend call: while it lives the
+    /// shadow's own buffers hold the scratch's stale cells in those rows, and
+    /// nothing outside this function can observe that, because `backend`
+    /// cannot reach the shadow. Its `Drop` puts the rows back before the
+    /// backend's result reaches the caller, so neither a failed write nor an
+    /// unwinding panic can leave the shadow holding scratch cells.
+    fn emit_clipped<B: Backend>(
+        &mut self,
+        backend: &mut B,
+        runs: &[(u16, u16)],
+    ) -> Result<(), B::Error> {
+        let staged = StagedRuns::stage(self, runs);
+        backend.draw(staged.diffs())
+    }
+
+    /// Exchanges each run's rows between the shadow's buffers and its staged
+    /// sub-buffer. Its own inverse, which is why staging and unstaging are
+    /// the same call: a swap moves the cells without copying a `Cell`, so
+    /// neither direction allocates or clones a symbol.
+    fn swap_runs(&mut self, runs: &[(u16, u16)]) {
+        let area = self.front.area;
+        for (slot, &(start, _)) in self.staged.iter_mut().zip(runs) {
+            let offset = usize::from(start.saturating_sub(area.y)) * usize::from(area.width);
+            let len = slot.front.content.len();
+            let end = offset.saturating_add(len);
+            let (Some(front), Some(back)) = (
+                self.front.content.get_mut(offset..end),
+                self.back.content.get_mut(offset..end),
+            ) else {
+                // in range by construction (the runs come from `row_runs`
+                // over this same area). Skipping a run would silently drop
+                // that run's updates from the frame, so the invariant is
+                // loud under test; a release build degrades to the missed
+                // repaint rather than panicking in the paint loop
+                debug_assert!(
+                    false,
+                    "staged run at row {start} spans {offset}..{end}, past the \
+                     shadow's {} cells",
+                    self.front.content.len()
+                );
+                continue;
+            };
+            slot.front.content.swap_with_slice(front);
+            slot.back.content.swap_with_slice(back);
+        }
+    }
+
+    /// Promotes the composed frame to be what the terminal shows, once its
+    /// [`Shadow::emit_updates`] have been written.
+    pub fn commit(&mut self) {
+        std::mem::swap(&mut self.front, &mut self.back);
+    }
+}
+
+/// The terminal-space rows every non-[`LayerKind::EngineGrid`] layer covers.
+/// [`Term`](crate::terminal::Term) feeds this frame's set and remembers it as
+/// the next frame's "previous overlay rows" so [`Damage::from_frame`] can
+/// dirty the cells a vanished or moved overlay leaves behind.
+#[must_use]
+pub fn overlay_rows(surface: &Surface) -> Vec<u16> {
+    let mut rows = Vec::new();
+    for layer in &surface.layers {
+        if matches!(layer.kind, LayerKind::EngineGrid) {
+            continue;
+        }
+        let first = layer.rect.row;
+        let last = first.saturating_add(layer.rect.height);
+        rows.extend(first..last);
+    }
+    rows
+}
+
+/// Paints every layer in `surface`, in order (z ascending), into `buf`,
+/// clipping the engine grid to `damage`'s rows. Later layers overwrite the
+/// cells of earlier ones within their own rect, which is the z-order
+/// compositing contract.
+///
+/// `buf` is persistent across frames (it holds the last frame's content),
+/// so a non-full `damage` repaints only its rows and leaves every other
+/// cell as the previous frame painted it -- the compositor's half of the
+/// terminal's own cell diff. A full `damage` repaints every cell, which is
+/// what a fresh buffer needs.
 ///
 /// `model` supplies the engine grid and highlight table backing the
 /// [`LayerKind::EngineGrid`] layer: `Surface` describes where to paint and
@@ -32,12 +440,21 @@ use view_surface::{LayerKind, Rect, Surface};
 /// `LayerKind` variant is simply absent from `surface.layers` that frame,
 /// so the unconditional `EngineGrid` paint below is what restores the
 /// resting text underneath).
-pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_>) {
-    let frame_area = frame.area();
+pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage: &Damage) {
+    let frame_area = buf.area;
+    // Clear the rows this frame repaints before any layer paints, so each
+    // layer writes over blank cells exactly as a full recomposite writes
+    // over a fresh buffer. Without this, `buf` is persistent: a cell whose
+    // new style leaves a field unset (grid text under a vanished overlay,
+    // whose resolved style has no explicit fg) keeps the previous frame's
+    // value, because `ratatui::buffer::Cell::set_style` *merges* rather than
+    // replaces. Resetting the damaged rows makes the clipped path
+    // byte-identical to the full path -- the property the equality test pins.
+    reset_damaged_rows(buf, damage);
     // derived once per frame from the engine's live highlight state: a
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
-    let theme = Theme::from_hl(&model.engine.hl);
+    let theme = Theme::from_hl(model.engine.hl());
     for layer in &surface.layers {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
@@ -45,16 +462,90 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
         }
         match &layer.kind {
             LayerKind::EngineGrid => {
-                paint_grid(&model.engine.grid, &theme, &model.engine.hl, area, frame);
+                paint_grid(
+                    model.engine.grid(),
+                    &theme,
+                    model.engine.hl(),
+                    area,
+                    damage,
+                    buf,
+                );
             }
-            LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, frame),
-            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, frame),
-            LayerKind::Tabline(state) => paint_tabline(state, &theme, area, frame),
-            LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, frame),
-            LayerKind::Shell => paint_shell(&theme, area, frame),
+            LayerKind::Cmdline(state) => paint_cmdline(state, &theme, area, buf),
+            LayerKind::Messages(entries) => paint_messages(entries, &theme, area, buf),
+            LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
+            LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, buf),
+            LayerKind::Shell => paint_shell(&theme, area, buf),
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
             _ => {}
+        }
+    }
+}
+
+/// The display columns a cell at buffer column `col` has before `buf`'s row
+/// ends, which is the width a symbol written there must not exceed.
+fn columns_left(buf: &Buffer, col: u16) -> u16 {
+    buf.area
+        .x
+        .saturating_add(buf.area.width)
+        .saturating_sub(col)
+}
+
+/// `symbol` if it fits in `columns_left` display columns, a blank if it does
+/// not.
+///
+/// A terminal cannot show a grapheme in fewer columns than it occupies, and
+/// `ratatui::buffer::Buffer::set_stringn` drops one that does not fit rather
+/// than write it; the per-cell writers in this module place cells
+/// individually (they must, to honour a grid's own column assignment) and so
+/// have no equivalent stop of their own. nvim leaves a blank there for the
+/// same reason.
+///
+/// Fitting is also what makes a row-clipped diff exact.
+/// `ratatui::buffer::Buffer::diff_iter` walks a flat cell array and advances
+/// past a wide cell's covered columns by index, so a symbol overflowing the
+/// end of a row would swallow cells of the row below it -- leaving them stale
+/// on screen, and making a diff that starts at that lower row emit cells the
+/// whole-buffer diff does not. With no symbol overflowing its row, every row
+/// boundary is a point at which the diff carries no state, which is what lets
+/// [`Shadow`] diff a subset of rows and still emit exactly what a
+/// whole-buffer diff emits. The width that matters is `ratatui`'s own
+/// `cell_width`, not `unicode-width`'s raw one, because `diff_iter` skips by
+/// the former.
+///
+/// A symbol's byte length is an upper bound on its display width, so a symbol
+/// no longer than the columns left fits without computing anything: every
+/// char two columns wide is at least three UTF-8 bytes, and the halfwidth
+/// dakuten `ratatui` adds a column back for spends three bytes on that one
+/// column. That bound is what keeps this a length compare on nearly every
+/// cell of a text frame -- including the wide-glyph cells a width computation
+/// would otherwise charge for -- rather than a width computation per cell.
+fn fitted_symbol(symbol: &str, columns_left: u16) -> &str {
+    if symbol.len() > usize::from(columns_left) && symbol.cell_width() > columns_left {
+        " "
+    } else {
+        symbol
+    }
+}
+
+/// Resets every cell of `buf`'s damaged rows to its default, so the layers
+/// then paint over blank cells. See [`composite_into`] for why a persistent
+/// buffer needs this and a fresh one does not.
+fn reset_damaged_rows(buf: &mut Buffer, damage: &Damage) {
+    let area = buf.area;
+    let width = area.width as usize;
+    for row in 0..area.height {
+        if !damage.covers(area.y + row) {
+            continue;
+        }
+        // walks the row's cells as a slice rather than indexing each one:
+        // per-cell index arithmetic and its bounds check cost more than the
+        // reset itself, which is what made a whole-frame repaint here more
+        // expensive than the one `ratatui::buffer::Buffer::reset` runs
+        let start = buf.index_of(area.x, area.y + row);
+        for cell in &mut buf.content[start..start + width] {
+            cell.reset();
         }
     }
 }
@@ -71,18 +562,19 @@ pub fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_
 /// every character painted after it on the row. A wide character's second
 /// (shadow) cell is reset so no later character in this same call can draw
 /// into it, matching the convention `ratatui::buffer::Buffer::set_stringn`
-/// itself uses for multi-width graphemes.
+/// itself uses for multi-width graphemes. A character wider than the columns
+/// left before the buffer's own row ends is written as a blank instead (see
+/// [`fitted_symbol`]).
 fn paint_text_row(
     text: &str,
     style: Style,
     area: ratatui::layout::Rect,
     row_offset: u16,
-    frame: &mut ratatui::Frame<'_>,
+    buf: &mut Buffer,
 ) {
     if row_offset >= area.height {
         return;
     }
-    let buf = frame.buffer_mut();
     let mut col = 0_u16;
     for ch in text.chars() {
         if col >= area.width {
@@ -95,9 +587,12 @@ fn paint_text_row(
         // still advances the column for those rather than looping forever
         // painting into the same cell
         let width = ch.width().unwrap_or(1).max(1) as u16;
+        let room = columns_left(buf, area.x.saturating_add(col));
         let mut encode_buf = [0_u8; 4];
+        let symbol = fitted_symbol(ch.encode_utf8(&mut encode_buf), room);
+        let width = if symbol.len() == 1 { 1 } else { width };
         let cell = &mut buf[(area.x + col, area.y + row_offset)];
-        cell.set_symbol(ch.encode_utf8(&mut encode_buf));
+        cell.set_symbol(symbol);
         cell.set_style(style);
         if width == 2 && col + 1 < area.width {
             buf[(area.x + col + 1, area.y + row_offset)].reset();
@@ -142,7 +637,7 @@ fn paint_cmdline(
     state: &CmdlineState,
     theme: &Theme,
     area: ratatui::layout::Rect,
-    frame: &mut ratatui::Frame<'_>,
+    buf: &mut Buffer,
 ) {
     // a live `--clean` capture of nvim's `hl_group_set` batch (see
     // view-engine's ui_events tests) carries no builtin group naming the
@@ -151,14 +646,14 @@ fn paint_cmdline(
     // correct source
     let style = ratatui_style(theme.normal());
     let blank = " ".repeat(usize::from(area.width));
-    paint_text_row(&blank, style, area, 0, frame);
+    paint_text_row(&blank, style, area, 0, buf);
 
     let mut text = state.firstc.clone();
     text.push_str(&state.prompt);
     for (_, chunk) in &state.content {
         text.push_str(chunk);
     }
-    paint_text_row(&text, style, area, 0, frame);
+    paint_text_row(&text, style, area, 0, buf);
 }
 
 /// Renders the message log as a bordered toast box: `render()` already
@@ -182,12 +677,7 @@ fn paint_cmdline(
 /// when the frontend has no `ext_multigrid` support), which is what a live
 /// repro showed as foreign glyphs bleeding through at a toast row's right
 /// edge.
-fn paint_messages(
-    lines: &[String],
-    theme: &Theme,
-    area: ratatui::layout::Rect,
-    frame: &mut ratatui::Frame<'_>,
-) {
+fn paint_messages(lines: &[String], theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
     if lines.is_empty() {
         return;
     }
@@ -195,7 +685,7 @@ fn paint_messages(
     let style = ratatui_style(theme.msg_area);
     let blank = " ".repeat(usize::from(area.width));
     for row in 0..area.height {
-        paint_text_row(&blank, style, area, row, frame);
+        paint_text_row(&blank, style, area, row, buf);
     }
 
     let border_style = ratatui_style(ResolvedStyle {
@@ -203,14 +693,14 @@ fn paint_messages(
         bg: theme.msg_area.bg,
         ..ResolvedStyle::default()
     });
-    paint_message_border(area, border_style, frame);
+    paint_message_border(area, border_style, buf);
 
     let inner = inset_by_one(area);
     for (i, line) in lines.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };
-        paint_text_row(line, style, inner, row, frame);
+        paint_text_row(line, style, inner, row, buf);
     }
 }
 
@@ -234,13 +724,12 @@ fn inset_by_one(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
 /// 1x1 content rect, but a direct unit-test caller could still construct
 /// one) and paints nothing rather than writing corner glyphs on top of
 /// each other.
-fn paint_message_border(area: ratatui::layout::Rect, style: Style, frame: &mut ratatui::Frame<'_>) {
+fn paint_message_border(area: ratatui::layout::Rect, style: Style, buf: &mut Buffer) {
     if area.width < 2 || area.height < 2 {
         return;
     }
     let last_col = area.width - 1;
     let last_row = area.height - 1;
-    let buf = frame.buffer_mut();
     for col in 0..area.width {
         let top = match col {
             0 => '┌',
@@ -307,14 +796,14 @@ fn paint_tabline(
     state: &TablineState,
     theme: &Theme,
     area: ratatui::layout::Rect,
-    frame: &mut ratatui::Frame<'_>,
+    buf: &mut Buffer,
 ) {
     // painted before the tab labels themselves so `TabLineFill` shows
     // through any column the labels below do not reach (a short tab list
     // in a wide terminal), matching what that builtin group names: the
     // row's background beyond the tabs
     let fill = " ".repeat(usize::from(area.width));
-    paint_text_row(&fill, ratatui_style(theme.tab_line_fill), area, 0, frame);
+    paint_text_row(&fill, ratatui_style(theme.tab_line_fill), area, 0, buf);
 
     let mut text = String::new();
     let mut current_range: Option<(u16, u16)> = None;
@@ -330,9 +819,8 @@ fn paint_tabline(
             current_range = Some((start, end));
         }
     }
-    paint_text_row(&text, ratatui_style(theme.tab_line), area, 0, frame);
+    paint_text_row(&text, ratatui_style(theme.tab_line), area, 0, buf);
     if let Some((start, end)) = current_range {
-        let buf = frame.buffer_mut();
         for col in start..end.min(area.width) {
             buf[(area.x + col, area.y)].set_style(ratatui_style(theme.tab_line_sel));
         }
@@ -346,7 +834,7 @@ fn paint_popupmenu(
     state: &PopupmenuState,
     theme: &Theme,
     area: ratatui::layout::Rect,
-    frame: &mut ratatui::Frame<'_>,
+    buf: &mut Buffer,
 ) {
     for (i, item) in state.items.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
@@ -361,7 +849,7 @@ fn paint_popupmenu(
         } else {
             ratatui_style(theme.pmenu)
         };
-        paint_text_row(&item.display_text(), style, area, row, frame);
+        paint_text_row(&item.display_text(), style, area, row, buf);
     }
 }
 
@@ -377,7 +865,7 @@ fn paint_popupmenu(
 /// steady-state body), so this glyph is fixed rather than advancing frames
 /// on its own -- a real spinner would need a tick this architecture
 /// deliberately does not have.
-fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, frame: &mut ratatui::Frame<'_>) {
+fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
     if area.height == 0 || area.width == 0 {
         return;
     }
@@ -388,13 +876,15 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, frame: &mut ratatui::
         ratatui_style(theme.status_line),
         area,
         bottom_row,
-        frame,
+        buf,
     );
 
-    let label = "view: waiting for nvim...";
-    let text: String = label.chars().take(usize::from(area.width)).collect();
+    let text: String = view_surface::SHELL_PLACEHOLDER
+        .chars()
+        .take(usize::from(area.width))
+        .collect();
     let mid_row = area.height / 2;
-    paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, frame);
+    paint_text_row(&text, ratatui_style(theme.normal()), area, mid_row, buf);
 }
 
 /// Intersects a [`view_surface::Rect`] with the frame's own area: a layer
@@ -416,23 +906,86 @@ fn clip_to_frame(rect: Rect, frame_area: ratatui::layout::Rect) -> ratatui::layo
     }
 }
 
-/// Paints every visible `grid` cell within `area`, styled per `hl` through
-/// `theme`.
+/// Highest `hl_id` the per-frame dense style cache will hold. nvim
+/// allocates highlight ids as small dense integers, so real frames sit
+/// far below this; an id past the cap (or a pathological huge id) simply
+/// resolves uncached rather than growing an unbounded table.
+const STYLE_CACHE_CAP: usize = 4096;
+
+/// A per-frame memo of `hl_id -> ratatui::Style`, indexed directly by id.
+/// `Theme::style_for` costs a `HashMap` probe per call, and a full-grid
+/// composite makes one call per cell (4800 on a 120x40 frame) out of only
+/// a handful of distinct ids; resolving each id once per frame removes
+/// the probe from the per-cell path entirely. Frame-scoped rather than
+/// persistent so there is no invalidation to get wrong when the
+/// highlight table or theme changes between frames.
+struct StyleCache {
+    dense: Vec<Option<Style>>,
+}
+
+impl StyleCache {
+    fn new() -> Self {
+        Self { dense: Vec::new() }
+    }
+
+    fn get(&mut self, theme: &Theme, hl: &HlTable, hl_id: u64) -> Style {
+        let Ok(index) = usize::try_from(hl_id) else {
+            return style_for(theme, hl_id, hl);
+        };
+        if index >= STYLE_CACHE_CAP {
+            return style_for(theme, hl_id, hl);
+        }
+        if self.dense.len() <= index {
+            self.dense.resize(index + 1, None);
+        }
+        if let Some(style) = self.dense[index] {
+            return style;
+        }
+        let style = style_for(theme, hl_id, hl);
+        self.dense[index] = Some(style);
+        style
+    }
+}
+
+/// Paints the `grid` cells within `area` that `damage` covers, styled per
+/// `hl` through `theme`. Rows `damage` does not cover keep whatever the
+/// persistent `buf` already holds for them (last frame's content), which is
+/// what turns a full recomposite into a damage-clipped one; a full `damage`
+/// repaints every visible cell exactly as before.
 fn paint_grid(
     grid: &Grid,
     theme: &Theme,
     hl: &HlTable,
     area: ratatui::layout::Rect,
-    frame: &mut ratatui::Frame<'_>,
+    damage: &Damage,
+    buf: &mut Buffer,
 ) {
-    let buf = frame.buffer_mut();
     let (w, h) = grid.size();
+    let mut styles = StyleCache::new();
+    let cols = w.min(area.width) as usize;
     for row in 0..h.min(area.height) {
-        for col in 0..w.min(area.width) {
+        // `area.y + row` is the terminal-space row `damage` is expressed in;
+        // skipping an unchanged row leaves its cells as the previous frame
+        // painted them
+        if !damage.covers(area.y + row) {
+            continue;
+        }
+        // the row's destination cells as one slice: indexing each cell
+        // separately recomputes the same offset and re-checks the same
+        // bounds ~4800 times on a whole-frame repaint
+        let start = buf.index_of(area.x, area.y + row);
+        // the columns from this layer's left edge to the end of the buffer's
+        // own row, which is what a symbol's width is measured against rather
+        // than the layer's width: a glyph overflowing the layer still lands
+        // inside the row, while one overflowing the row lands in the next
+        let span = columns_left(buf, area.x);
+        let out_row = &mut buf.content[start..start + cols];
+        for (col, out) in out_row.iter_mut().enumerate() {
+            let col = col as u16;
             if let Some(cell) = grid.cell(row, col) {
-                let out = &mut buf[(area.x + col, area.y + row)];
-                out.set_symbol(&sanitized_symbol(&cell.text));
-                out.set_style(style_for(theme, cell.hl_id, hl));
+                let symbol = sanitized_symbol(&cell.text);
+                out.set_symbol(fitted_symbol(&symbol, span.saturating_sub(col)));
+                out.set_style(styles.get(theme, hl, cell.hl_id));
             }
         }
     }
@@ -491,23 +1044,27 @@ fn rgb(c: u32) -> Color {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
     use view_core::grid::GridOp;
 
+    /// A whole-frame composite into a fresh `ratatui::Frame`. Lives here
+    /// rather than beside [`composite_into`] because nothing in production
+    /// paints this way: the runtime drives [`Shadow`], which owns the
+    /// persistent buffers a damage clip needs, and a second entry point
+    /// bypassing it would be an entry point bypassing the damage discipline.
+    /// A `Frame` (through `Terminal::draw`) is still the least indirect way
+    /// for a test to observe a whole painted frame's cells.
+    fn composite(model: &Model, surface: &Surface, frame: &mut ratatui::Frame<'_>) {
+        composite_into(frame.buffer_mut(), model, surface, &Damage::full());
+    }
+
     fn table_with(attr: HlAttr) -> HlTable {
-        let mut attrs = std::collections::HashMap::new();
-        attrs.insert(1, attr);
-        HlTable {
-            default_fg: None,
-            default_bg: None,
-            attrs,
-            groups: std::collections::HashMap::new(),
-            probe_generation: 0,
-            confirmed: None,
-        }
+        let mut table = HlTable::new();
+        table.define_attr(1, attr);
+        table
     }
 
     #[test]
@@ -548,11 +1105,11 @@ mod tests {
     #[test]
     fn composite_paints_grid_layer_content() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("h".into(), 0, 1), ("i".into(), 0, 1)],
@@ -574,17 +1131,21 @@ mod tests {
     /// for the wire-verified shape this mirrors), a default grid cell must
     /// carry `Color::Reset` (ratatui's "no color set" default), never an
     /// explicit RGB, so the real terminal's own background shows through.
-    /// Disconfirm: reverting `Theme::from_hl`'s generation-matched branch
-    /// (see `theme.rs`) makes this assert `Color::Rgb(0,0,0)` instead -- an
-    /// all-black paint where transparency was expected.
+    /// Disconfirm: collapsing `Theme::from_hl`'s `bg` derivation to the raw
+    /// wire default (see `theme.rs`) makes this assert `Color::Rgb(0,0,0)`
+    /// instead -- an all-black paint where transparency was expected. Both
+    /// of that derivation's confirmed-reading branches produce the same
+    /// value for the state here, so it takes dropping the pair to move this
+    /// assertion; the branches are told apart from each other in `theme.rs`,
+    /// against state built for that purpose.
     #[test]
     fn transparent_confirmed_default_paints_grid_cells_with_no_bg_color() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -597,7 +1158,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation;
+        let generation = model.engine.hl().probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -637,11 +1198,11 @@ mod tests {
     #[test]
     fn warm_start_confirmed_transparent_bg_survives_attachs_ambiguous_default_colors_set() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -649,11 +1210,14 @@ mod tests {
         // mirrors the pre-attach state seeded from persisted state: a
         // confirmed value at the table's starting generation, from a prior
         // session's cached, already-disambiguated theme
-        model.engine.hl.confirmed = Some(view_core::hl::ProbedDefaults {
-            generation: model.engine.hl.probe_generation,
-            fg: Some(0xF8F8F2),
-            bg: None,
-        });
+        let generation = model.engine.hl().probe_generation();
+        model
+            .engine
+            .confirm_hl_defaults(view_core::hl::ProbedDefaults {
+                generation,
+                fg: Some(0xF8F8F2),
+                bg: None,
+            });
         apply(
             &mut model,
             view_core::events::UiEvent::DefaultColorsSet {
@@ -684,11 +1248,11 @@ mod tests {
     #[test]
     fn genuinely_black_confirmed_default_still_paints_black() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 4,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("x".into(), 0, 1)],
@@ -701,7 +1265,7 @@ mod tests {
                 sp: None,
             },
         );
-        let generation = model.engine.hl.probe_generation;
+        let generation = model.engine.hl().probe_generation();
         let _ = view_core::update::update(
             &mut model,
             view_core::msg::Msg::HlProbeReply {
@@ -737,11 +1301,11 @@ mod tests {
     #[test]
     fn cmdline_overlay_paints_while_shown_and_vanishes_with_cmdlinehide() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: vec![("x".into(), 0, 1), ("y".into(), 0, 1)],
@@ -790,11 +1354,11 @@ mod tests {
     #[test]
     fn cmdline_overlay_claims_the_full_bottom_row_no_grid_glyph_bleeds_through() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: "STATUSLIN".chars().map(|c| (c.to_string(), 0, 1)).collect(),
@@ -840,11 +1404,11 @@ mod tests {
     #[test]
     fn cmdline_prompt_mode_renders_prompt_label_and_places_cursor_after_it() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: "STATUSLINESTATUSLINE"
@@ -901,11 +1465,11 @@ mod tests {
     #[test]
     fn tabline_reserves_the_top_row_and_never_covers_resting_grid_text() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1), ("b".into(), 0, 1)],
@@ -930,11 +1494,11 @@ mod tests {
         // the grid itself only reflects that once nvim's GridResize round
         // trips, which this test drives directly to exercise the settled
         // (post-round-trip) frame.
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 2,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1), ("b".into(), 0, 1)],
@@ -972,16 +1536,16 @@ mod tests {
     #[test]
     fn tabline_update_without_matching_grid_resize_clips_the_transient_overflow_row() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("a".into(), 0, 1)],
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 2,
             col_start: 0,
             cells: vec![("z".into(), 0, 1)],
@@ -1039,11 +1603,11 @@ mod tests {
     #[test]
     fn single_tab_reserves_no_row_and_grid_fills_the_full_frame() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("z".into(), 0, 1)],
@@ -1060,7 +1624,7 @@ mod tests {
     #[test]
     fn messages_overlay_renders_stacked_toasts_top_right() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1105,7 +1669,7 @@ mod tests {
     #[test]
     fn messages_overlay_wide_char_advances_two_columns_not_one() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1146,7 +1710,7 @@ mod tests {
     #[test]
     fn messages_overlay_multiline_message_gets_one_row_per_physical_line_and_clears_its_box() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 26,
             height: 5,
         });
@@ -1155,7 +1719,7 @@ mod tests {
         // toast's own clear must overwrite, or it bleeds through exactly
         // like the reported foreign glyphs at a message row's right edge
         for row in 0..2u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("X".into(), 0, 26)],
@@ -1211,17 +1775,17 @@ mod tests {
     /// dropped the tail of that `Vec` -- the two newest lines, including
     /// the persistent `echoerr` -- without `visible_lines`'s own
     /// persistent-line-priority eviction ever getting a say. Disconfirm:
-    /// reverting `render()`'s two `.saturating_sub(2)` budget lines back
+    /// reverting `render()`'s three `.saturating_sub(2)` budget clamps back
     /// to the raw `grid_h`/`grid_w` reproduces exactly this -- `cargo test
     /// -p view-tui messages_toast_paints_the_newest_persistent_line`
-    /// fails with the interior's last row reading blank border-fill
-    /// instead of "critical error", confirmed by running it against the
-    /// reverted budget before restoring the fix.
+    /// fails with the interior's last row reading `"info2"`, a transient
+    /// line three older than the dropped `echoerr`, instead of
+    /// "critical error".
     #[test]
     fn messages_toast_paints_the_newest_persistent_line_at_the_clamp_boundary_instead_of_silently_dropping_it(
     ) {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 5,
         });
@@ -1304,7 +1868,7 @@ mod tests {
     #[test]
     fn messages_toast_shows_the_widest_lines_final_interior_cell_at_the_width_clamp_boundary() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
@@ -1346,7 +1910,7 @@ mod tests {
     #[test]
     fn framed_toast_renders_border_glyphs_on_all_four_edges() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
@@ -1431,18 +1995,18 @@ mod tests {
     #[test]
     fn empty_message_log_paints_nothing() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 8,
             height: 4,
         });
         for row in 0..4u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("Z".into(), 0, 8)],
             });
         }
-        let theme = Theme::from_hl(&model.engine.hl);
+        let theme = Theme::from_hl(model.engine.hl());
         // an area shaped like a real toast rect would occupy, handed
         // straight to paint_messages with an empty slice: render()'s own
         // contract never emits a Messages layer for an empty log, but this
@@ -1458,8 +2022,17 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                paint_grid(&model.engine.grid, &theme, &model.engine.hl, f.area(), f);
-                paint_messages(&[], &theme, area, f);
+                let fa = f.area();
+                let buf = f.buffer_mut();
+                paint_grid(
+                    model.engine.grid(),
+                    &theme,
+                    model.engine.hl(),
+                    fa,
+                    &Damage::full(),
+                    buf,
+                );
+                paint_messages(&[], &theme, area, buf);
             })
             .unwrap();
         let buf = terminal.backend().buffer().clone();
@@ -1478,12 +2051,12 @@ mod tests {
     fn clear_under_frame_overwrites_grid_content_across_the_whole_framed_rect_including_border_cells(
     ) {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 5,
         });
         for row in 0..5u16 {
-            model.engine.grid.apply(GridOp::PutLine {
+            model.engine.apply_grid(GridOp::PutLine {
                 row,
                 col_start: 0,
                 cells: vec![("Z".into(), 0, 10)],
@@ -1527,7 +2100,7 @@ mod tests {
     #[test]
     fn control_characters_in_message_text_do_not_panic_and_are_sanitized() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 3,
         });
@@ -1560,11 +2133,11 @@ mod tests {
     #[test]
     fn control_characters_in_grid_cell_text_do_not_panic_and_are_sanitized() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 10,
             height: 1,
         });
-        model.engine.grid.apply(GridOp::PutLine {
+        model.engine.apply_grid(GridOp::PutLine {
             row: 0,
             col_start: 0,
             cells: vec![("\u{7}".into(), 0, 1)],
@@ -1580,7 +2153,7 @@ mod tests {
     #[test]
     fn popupmenu_overlay_anchors_at_its_grid_coords_and_highlights_selected() {
         let mut model = Model::new();
-        model.engine.grid.apply(GridOp::Resize {
+        model.engine.apply_grid(GridOp::Resize {
             width: 20,
             height: 6,
         });
@@ -1671,6 +2244,1117 @@ mod tests {
             &buf[(0, 2)].symbol(),
             &" ",
             "no waiting indicator once content_painted is true"
+        );
+    }
+
+    // --- Damage-clip equality moat -------------------------------------
+    //
+    // The disconfirm-capable test for the whole change: a damage-clipped
+    // composite (paint only the damaged rows over the previous frame's
+    // persistent buffer) must be byte-identical to a full recomposite of
+    // the same state. The differential oracle compares model-level
+    // text/attr state and cannot see a wrong clip rect; the compat harness
+    // asserts text presence, not per-cell repaint. Only this test fails on
+    // an under-clip that strands a stale cell.
+
+    /// A full recomposite of `model` into a fresh `area`-sized buffer -- the
+    /// reference every clipped frame is measured against.
+    fn full_paint(model: &Model, area: ratatui::layout::Rect) -> ratatui::buffer::Buffer {
+        let surface = view_surface::render(model);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        composite_into(&mut buf, model, &surface, &Damage::full());
+        buf
+    }
+
+    /// Drives one state transition through the damage-clipped path exactly
+    /// as [`crate::terminal::Term`] does -- full-paint state A into a
+    /// persistent shadow, mutate to state B, then clip-composite only B's
+    /// damage over the shadow -- and asserts the shadow equals a full
+    /// recomposite of B. `mutate` returns nothing; B's grid damage is read
+    /// from the grid's own tracker, and its overlay rows from the rendered
+    /// surfaces, the same inputs the runtime feeds the real term.
+    fn assert_clip_matches_full(
+        w_a: u16,
+        h_a: u16,
+        setup_a: impl FnOnce(&mut Model),
+        w_b: u16,
+        h_b: u16,
+        mutate_b: impl FnOnce(&mut Model),
+    ) {
+        let area_a = ratatui::layout::Rect::new(0, 0, w_a, h_a);
+        let area_b = ratatui::layout::Rect::new(0, 0, w_b, h_b);
+
+        let mut model = Model::new();
+        setup_a(&mut model);
+        let surf_a = view_surface::render(&model);
+        let prev_overlay = overlay_rows(&surf_a);
+        let offset_a = model.chrome_rows();
+        // clear the damage state A's construction accumulated: the shadow is
+        // about to hold A in full, so only B's later damage matters
+        let _ = model.take_paint_damage();
+        let mut shadow = ratatui::buffer::Buffer::empty(area_a);
+        composite_into(&mut shadow, &model, &surf_a, &Damage::full());
+
+        mutate_b(&mut model);
+        let grid_damage = model.take_paint_damage();
+        let surf_b = view_surface::render(&model);
+        let cur_overlay = overlay_rows(&surf_b);
+        let offset_b = model.chrome_rows();
+        // a chrome-offset change or a paint-area change forces a full repaint,
+        // matching Term's own force_full; otherwise clip to B's damage
+        let force_full = offset_a != offset_b || area_a != area_b;
+        if shadow.area != area_b {
+            shadow = ratatui::buffer::Buffer::empty(area_b);
+        }
+        let damage = if force_full {
+            Damage::full()
+        } else {
+            Damage::from_frame(&grid_damage, offset_b, &prev_overlay, &cur_overlay, false)
+        };
+        composite_into(&mut shadow, &model, &surf_b, &damage);
+
+        let full = full_paint(&model, area_b);
+        assert_eq!(
+            shadow, full,
+            "damage-clipped composite diverged from a full recomposite"
+        );
+    }
+
+    /// The multi-frame counterpart to [`assert_clip_matches_full`], which
+    /// only ever drives one transition. [`Shadow`]'s buffers swap instead of
+    /// copying, so a frame composites into the buffer holding the frame
+    /// *before* last, and must therefore repaint the previous frame's rows
+    /// as well as its own. This drives a sequence whose damaged rows differ
+    /// from frame to frame and checks the promoted front buffer against a
+    /// full recomposite after every one: a missing carry-forward strands the
+    /// row an earlier frame changed, which no single-transition check sees.
+    #[test]
+    fn shadow_front_matches_full_recomposite_every_frame() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = Model::new();
+        seed_grid(&mut model, 40, 12);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+
+        // each step damages different rows from the one before it, so the
+        // buffer being composited into is always stale somewhere the current
+        // frame's own damage does not cover
+        type Step = (&'static str, Box<dyn Fn(&mut Model)>);
+        let steps: Vec<Step> = vec![
+            ("first paint", Box::new(|_: &mut Model| {})),
+            (
+                "edit row 3",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 3,
+                        col_start: 2,
+                        cells: vec![("Z".into(), 1, 1)],
+                    });
+                }),
+            ),
+            (
+                "edit row 7",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 7,
+                        col_start: 5,
+                        cells: vec![("Q".into(), 2, 1)],
+                    });
+                }),
+            ),
+            (
+                "overlay appears",
+                Box::new(|m: &mut Model| {
+                    apply(
+                        m,
+                        view_core::events::UiEvent::MsgShow {
+                            kind: "echomsg".into(),
+                            content: vec![(0, "a toast".into())],
+                            replace_last: false,
+                        },
+                    );
+                }),
+            ),
+            (
+                "overlay vanishes",
+                Box::new(|m: &mut Model| {
+                    apply(m, view_core::events::UiEvent::MsgClear);
+                }),
+            ),
+            (
+                "scroll",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::Scroll {
+                        top: 2,
+                        bot: 10,
+                        left: 0,
+                        right: 40,
+                        rows: 3,
+                    });
+                }),
+            ),
+            (
+                "edit row 0",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 0,
+                        col_start: 0,
+                        cells: vec![("W".into(), 3, 1)],
+                    });
+                }),
+            ),
+        ];
+
+        let mut prev_overlay: Vec<u16> = Vec::new();
+        let mut first = true;
+        for (label, mutate) in steps {
+            mutate(&mut model);
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let cur_overlay = overlay_rows(&surface);
+            let damage = Damage::from_frame(
+                &grid_damage,
+                model.chrome_rows(),
+                &prev_overlay,
+                &cur_overlay,
+                first,
+            );
+            first = false;
+            prev_overlay = cur_overlay;
+            shadow.compose(&model, &surface, &damage);
+            shadow.commit();
+            assert_eq!(
+                shadow.front(),
+                &full_paint(&model, area),
+                "shadow diverged from a full recomposite after: {label}"
+            );
+        }
+    }
+
+    /// A double-width symbol occupies the cell to its right, so that cell
+    /// must never be emitted as its own update: the crossterm backend omits
+    /// the cursor move for a cell one column right of the last one written,
+    /// which would print it one column past the wide glyph and over the cell
+    /// after it. Pins the delegation to `ratatui`'s own buffer diff -- a
+    /// hand-rolled per-cell scan passes every ASCII test and corrupts this.
+    #[test]
+    fn wide_symbol_trailing_cell_is_never_emitted_separately() {
+        let mut shadow = Shadow::new();
+        shadow.resize(ratatui::layout::Rect::new(0, 0, 4, 1));
+        // what the terminal shows: four narrow cells, so the wide symbol's
+        // trailing cell differs from what is on screen. A blank there would
+        // let a per-cell scan skip it for the wrong reason and pass.
+        for (col, symbol) in ["a", "b", "c", "d"].iter().enumerate() {
+            shadow.front[(col as u16, 0)].set_symbol(symbol);
+        }
+        // the frame just composed: a wide symbol covering columns 0 and 1
+        shadow.back[(0, 0)].set_symbol("界");
+        shadow.back[(1, 0)].reset();
+        shadow.back[(2, 0)].set_symbol("x");
+        shadow.back[(3, 0)].set_symbol("d");
+
+        let updates: Vec<(u16, u16)> = shadow.updates().map(|(x, y, _)| (x, y)).collect();
+
+        assert!(
+            updates.contains(&(0, 0)),
+            "the wide symbol itself must be emitted, got {updates:?}"
+        );
+        assert!(
+            !updates.contains(&(1, 0)),
+            "the wide symbol's trailing cell must not be emitted, got {updates:?}"
+        );
+        assert!(
+            updates.contains(&(2, 0)),
+            "the cell after the wide symbol must still be emitted, got {updates:?}"
+        );
+    }
+
+    // --- Clipped-diff equality moat ------------------------------------
+    //
+    // The clip that keeps the diff off the ~4800 cells a frame did not
+    // repaint is only sound if it emits what the whole-buffer diff emits.
+    // Nothing else in the tree can see that: `assert_clip_matches_full`
+    // compares composited *buffers*, not the update stream; the differential
+    // oracle compares model-level text and attributes; the compat harness
+    // asserts text presence in a vt100 capture. A clip that skipped or
+    // duplicated an update, or emitted a wide glyph's trailing column, would
+    // pass all three and corrupt a real terminal.
+
+    /// A `CrosstermBackend` writer whose bytes stay readable after the
+    /// backend has moved it, since `CrosstermBackend`'s own writer accessor
+    /// is behind an unstable feature gate.
+    #[derive(Clone, Default)]
+    struct ByteSink(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for ByteSink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The bytes `draw` puts on the wire through a real `CrosstermBackend`,
+    /// which is what a terminal ultimately receives: cursor moves included,
+    /// so an update stream that visits the same cells in a different order is
+    /// a mismatch here, not a pass.
+    fn drawn_bytes(
+        draw: impl FnOnce(&mut ratatui::backend::CrosstermBackend<ByteSink>) -> std::io::Result<()>,
+    ) -> Vec<u8> {
+        let sink = ByteSink::default();
+        let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
+        draw(&mut backend).unwrap();
+        let bytes = sink.0.borrow().clone();
+        bytes
+    }
+
+    /// Asserts the row-clipped emission is byte-identical to the whole-buffer
+    /// diff of the same two buffers, on both the forced-clip path and the
+    /// path [`Shadow::emit_updates`] picks for itself. Leaves `shadow`
+    /// untouched, so a caller can go on to `commit` and drive another frame.
+    fn assert_clipped_emission_matches_unclipped(shadow: &mut Shadow, label: &str) {
+        let expected = drawn_bytes(|backend| backend.draw(shadow.updates()));
+
+        let mut runs = Vec::new();
+        shadow.painted.row_runs(shadow.front.area, &mut runs);
+        let clipped = drawn_bytes(|backend| shadow.emit_clipped(backend, &runs));
+        assert_eq!(
+            clipped, expected,
+            "row-clipped emission diverged from the whole-buffer diff after: {label}"
+        );
+
+        let chosen = drawn_bytes(|backend| shadow.emit_updates(backend));
+        assert_eq!(
+            chosen, expected,
+            "emit_updates diverged from the whole-buffer diff after: {label}"
+        );
+    }
+
+    /// Writes `cells` into `row` starting at `col`, one grid cell each.
+    fn put(model: &mut Model, row: u16, col: u16, cells: &[&str]) {
+        model.engine.apply_grid(GridOp::PutLine {
+            row,
+            col_start: col,
+            cells: cells
+                .iter()
+                .map(|text| ((*text).to_string(), 4, 1))
+                .collect(),
+        });
+    }
+
+    /// Seeds a grid whose every row carries the shapes a per-cell diff gets
+    /// wrong: a CJK ideograph, an emoji with a VS16 presentation selector, a
+    /// ZWJ sequence, a three-column halfwidth-dakuten cluster, and a wide
+    /// glyph in the row's final column. Each wide glyph is followed by the
+    /// blank cells nvim itself sends for the columns the glyph covers.
+    fn seed_wide_grid(model: &mut Model, width: u16, height: u16) {
+        model.engine.apply_grid(GridOp::Resize { width, height });
+        let row_cells = [
+            "a",
+            "界",
+            " ",
+            "\u{2764}\u{FE0F}",
+            " ",
+            "\u{3042}\u{FF9E}",
+            " ",
+            " ",
+            "\u{1F468}\u{200D}\u{1F4BB}",
+            " ",
+            "b",
+            "界",
+        ];
+        for row in 0..height {
+            model.engine.apply_grid(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells: row_cells
+                    .iter()
+                    .map(|text| ((*text).to_string(), u64::from(row % 5), 1))
+                    .collect(),
+            });
+        }
+    }
+
+    #[test]
+    fn clipped_emission_matches_the_unclipped_diff_over_wide_glyph_content() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 8);
+        let mut model = Model::new();
+        seed_wide_grid(&mut model, 12, 8);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+
+        type Step = (&'static str, Box<dyn Fn(&mut Model)>);
+        let steps: Vec<Step> = vec![
+            ("first paint", Box::new(|_: &mut Model| {})),
+            (
+                "narrow edit on the row under one ending in a wide glyph",
+                Box::new(|m: &mut Model| put(m, 3, 0, &["Z"])),
+            ),
+            (
+                "a wide glyph replaced by narrow text",
+                Box::new(|m: &mut Model| put(m, 4, 2, &["q", "r"])),
+            ),
+            (
+                "narrow text replaced by a wide glyph",
+                Box::new(|m: &mut Model| put(m, 5, 6, &["界", " "])),
+            ),
+            (
+                "a VS16 emoji landing mid-row",
+                Box::new(|m: &mut Model| put(m, 6, 4, &["\u{2764}\u{FE0F}", " "])),
+            ),
+            (
+                "a wide glyph written into the final column",
+                Box::new(|m: &mut Model| put(m, 2, 11, &["界"])),
+            ),
+            (
+                "the first cell of the row under a wide row end",
+                Box::new(|m: &mut Model| put(m, 7, 0, &["W"])),
+            ),
+            (
+                "two non-adjacent rows in one frame",
+                Box::new(|m: &mut Model| {
+                    put(m, 1, 0, &["1"]);
+                    put(m, 6, 0, &["6"]);
+                }),
+            ),
+            (
+                "a three-column cluster overflowing a row's last two columns",
+                Box::new(|m: &mut Model| put(m, 4, 10, &["\u{3042}\u{FF9E}", " "])),
+            ),
+            // an unrelated frame in between, so the overflowing row is not
+            // carried into the next frame's repaint set and the run below it
+            // starts at a row boundary the overflow reaches across
+            (
+                "an unrelated row",
+                Box::new(|m: &mut Model| put(m, 0, 0, &["F"])),
+            ),
+            (
+                "the first cell of the row under that overflow",
+                Box::new(|m: &mut Model| put(m, 5, 0, &["V"])),
+            ),
+        ];
+
+        let mut prev_overlay: Vec<u16> = Vec::new();
+        let mut first = true;
+        for (label, mutate) in steps {
+            mutate(&mut model);
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let cur_overlay = overlay_rows(&surface);
+            let damage = Damage::from_frame(
+                &grid_damage,
+                model.chrome_rows(),
+                &prev_overlay,
+                &cur_overlay,
+                first,
+            );
+            first = false;
+            prev_overlay = cur_overlay;
+            shadow.compose(&model, &surface, &damage);
+            assert_clipped_emission_matches_unclipped(&mut shadow, label);
+            shadow.commit();
+            // the byte comparison above reads both paths out of the same two
+            // buffers, so a clip that lifted rows out of them and failed to
+            // put them back would agree with itself. Only this catches that:
+            // it measures the shadow against the model instead.
+            assert_eq!(
+                shadow.front(),
+                &full_paint(&model, area),
+                "emitting updates left the shadow holding something other than \
+                 the frame it composed, after: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_symbol_wider_than_the_columns_left_in_its_row_is_painted_blank() {
+        let area = ratatui::layout::Rect::new(0, 0, 6, 2);
+        // three display columns by `ratatui`'s own cell_width: `unicode-width`
+        // calls the halfwidth voiced sound mark zero-width, and `ratatui` adds
+        // a column back for it because terminals render it as its own cell.
+        // A check that only looked at the final column would miss this one.
+        let three_wide = "\u{3042}\u{FF9E}";
+        for (col, symbol, why) in [
+            (5, "界", "two columns wide with one column left"),
+            (5, three_wide, "three columns wide with one column left"),
+            (4, three_wide, "three columns wide with two columns left"),
+        ] {
+            let mut model = Model::new();
+            model.engine.apply_grid(GridOp::Resize {
+                width: 6,
+                height: 2,
+            });
+            put(&mut model, 0, col, &[symbol]);
+            let buf = full_paint(&model, area);
+            assert_eq!(
+                buf[(col, 0)].symbol(),
+                " ",
+                "a glyph that overflows its row has nowhere to go ({why}), and \
+                 leaving it there makes the diff skip cells of the row below"
+            );
+        }
+
+        // the same symbol one column earlier fills the row exactly, and must
+        // survive: this is a fit check, not a ban on wide glyphs near the edge
+        let mut model = Model::new();
+        model.engine.apply_grid(GridOp::Resize {
+            width: 6,
+            height: 2,
+        });
+        put(&mut model, 0, 3, &[three_wide]);
+        let buf = full_paint(&model, area);
+        assert_eq!(
+            buf[(3, 0)].symbol(),
+            three_wide,
+            "a glyph filling exactly the columns left must still be painted"
+        );
+    }
+
+    /// Every grapheme class the wire carries, at every column of a row,
+    /// against the rule the clip's exactness rests on: blank exactly when the
+    /// symbol's `cell_width` exceeds the columns left, and never otherwise.
+    ///
+    /// The reference is the rule itself rather than the implementation, so
+    /// this pins both directions -- a check that blanks too eagerly loses a
+    /// glyph the terminal could have shown, and one that blanks too late
+    /// lets the symbol overflow its row and strand the cells below it. Both
+    /// the helper and the painted frame are checked, because the painter is
+    /// what computes the columns left from the buffer's own rect.
+    ///
+    /// Disconfirm: dropping [`fitted_symbol`]'s width test and blanking on
+    /// the byte-length bound alone fails the over-blanking direction (a VS16
+    /// emoji spends six bytes on two columns); loosening that bound by two
+    /// bytes fails the under-blanking direction (a CJK ideograph spends three
+    /// bytes on two columns, so the width test stops running while the glyph
+    /// still overflows).
+    #[test]
+    fn the_fit_check_blanks_exactly_the_symbols_too_wide_for_the_columns_left() {
+        let symbols = [
+            ("ASCII", "a"),
+            ("CJK", "界"),
+            ("VS16 emoji", "\u{2764}\u{FE0F}"),
+            ("ZWJ family", "\u{1F468}\u{200D}\u{1F469}\u{200D}\u{1F467}"),
+            ("halfwidth dakuten cluster", "\u{3042}\u{FF9E}"),
+            ("regional indicator flag", "\u{1F1EF}\u{1F1F5}"),
+            ("combining mark", "e\u{0301}"),
+            ("blank", " "),
+        ];
+        const WIDTH: u16 = 6;
+        let area = ratatui::layout::Rect::new(0, 0, WIDTH, 2);
+
+        for (name, symbol) in symbols {
+            let width = symbol.cell_width();
+            for columns_left in 0..=WIDTH + 1 {
+                let fits = width <= columns_left;
+                let expected = if fits { symbol } else { " " };
+                assert_eq!(
+                    fitted_symbol(symbol, columns_left),
+                    expected,
+                    "{name} is {width} columns wide with {columns_left} left"
+                );
+            }
+
+            for col in 0..WIDTH {
+                let mut model = Model::new();
+                model.engine.apply_grid(GridOp::Resize {
+                    width: WIDTH,
+                    height: 2,
+                });
+                put(&mut model, 0, col, &[symbol]);
+                let buf = full_paint(&model, area);
+                let expected = if width <= WIDTH - col { symbol } else { " " };
+                assert_eq!(
+                    buf[(col, 0)].symbol(),
+                    expected,
+                    "{name} is {width} columns wide, painted at column {col} of {WIDTH}"
+                );
+            }
+        }
+    }
+
+    /// A shadow whose rows are staged is mid-surgery: its buffers hold the
+    /// scratch's cells, so a frame that abandoned the stage would leave every
+    /// later diff comparing against those. The rows must come back however
+    /// the staged scope ends, including by unwinding out of the backend.
+    ///
+    /// Disconfirm: emptying `StagedRuns`'s `Drop` body leaves the shadow
+    /// holding blank scratch rows and fails the comparison below.
+    #[test]
+    fn a_panic_while_the_shadow_is_staged_still_puts_its_rows_back() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 8);
+        let mut model = Model::new();
+        seed_wide_grid(&mut model, 12, 8);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+        let surface = view_surface::render(&model);
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+        let intact = shadow.front().clone();
+
+        let runs = vec![(2_u16, 2_u16)];
+        let hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _staged = StagedRuns::stage(&mut shadow, &runs);
+            // stands in for an unwinding panic anywhere inside the backend's
+            // write, which is the whole window in which the rows are lifted
+            panic!("backend write");
+        }));
+        std::panic::set_hook(hook);
+
+        assert!(unwound.is_err(), "the panic must have crossed the guard");
+        assert_eq!(
+            shadow.front(),
+            &intact,
+            "an unwind out of the staged scope must still restore the shadow, \
+             or every later frame diffs against scratch cells"
+        );
+    }
+
+    /// A run reaching past the shadow's cells cannot be swapped, and skipping
+    /// it would drop that run's updates from the frame with nothing said. The
+    /// guard is unreachable through [`Damage::row_runs`], so it is reached
+    /// here directly.
+    ///
+    /// Disconfirm: removing the `debug_assert!` beside the `continue` makes
+    /// the skip silent again, and this test fails for want of the panic it
+    /// expects.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "past the")]
+    fn a_staged_run_reaching_past_the_shadow_fails_loudly_rather_than_silently() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 8);
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+        // sizes one scratch slot, so the out-of-range run below has a slot to
+        // zip against
+        drop(StagedRuns::stage(&mut shadow, &[(2, 2)]));
+        shadow.swap_runs(&[(area.height, 2)]);
+    }
+
+    #[test]
+    fn row_runs_groups_adjacent_rows_and_splits_at_gaps() {
+        let area = ratatui::layout::Rect::new(0, 0, 4, 8);
+        let damage = Damage {
+            full: false,
+            rows: vec![6, 1, 2, 4, 99],
+        };
+        let mut runs = Vec::new();
+        damage.row_runs(area, &mut runs);
+        assert_eq!(
+            runs,
+            vec![(1, 2), (4, 1), (6, 1)],
+            "runs must be ascending, merged where adjacent, and clipped to the area"
+        );
+
+        Damage::full().row_runs(area, &mut runs);
+        assert_eq!(runs, vec![(0, 8)], "full damage is one run over every row");
+    }
+
+    /// Seeds every row of `model`'s grid with distinct full-width text, so a
+    /// stranded stale cell from an under-clip is a visible mismatch rather
+    /// than two default spaces comparing equal by accident.
+    fn seed_grid(model: &mut Model, width: u16, height: u16) {
+        model.engine.apply_grid(GridOp::Resize { width, height });
+        for row in 0..height {
+            let cells = (0..width)
+                .map(|col| {
+                    let ch = char::from(b'a' + ((row + col) % 26) as u8);
+                    (ch.to_string(), u64::from((row + col) % 5), 1)
+                })
+                .collect();
+            model.engine.apply_grid(GridOp::PutLine {
+                row,
+                col_start: 0,
+                cells,
+            });
+        }
+    }
+
+    #[test]
+    fn clip_matches_full_single_cell_change() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| {
+                m.engine.apply_grid(GridOp::PutLine {
+                    row: 5,
+                    col_start: 7,
+                    cells: vec![("Z".into(), 2, 1)],
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_multi_row_span_change() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| {
+                for row in 3..=6 {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row,
+                        col_start: 0,
+                        cells: vec![("Q".into(), 1, 40)],
+                    });
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_scroll_region() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| {
+                m.engine.apply_grid(GridOp::Scroll {
+                    top: 2,
+                    bot: 10,
+                    left: 0,
+                    right: 40,
+                    rows: 3,
+                });
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_overlay_appears() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| {
+                apply(
+                    m,
+                    view_core::events::UiEvent::MsgShow {
+                        kind: "echomsg".into(),
+                        content: vec![(0, "a toast".into())],
+                        replace_last: false,
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_overlay_disappears() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::MsgShow {
+                        kind: "echomsg".into(),
+                        content: vec![(0, "a toast".into())],
+                        replace_last: false,
+                    },
+                );
+            },
+            40,
+            12,
+            |m| apply(m, view_core::events::UiEvent::MsgClear),
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_overlay_moves() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::PopupmenuShow {
+                        items: vec![
+                            view_core::events::PmItem {
+                                word: "alpha".into(),
+                                ..Default::default()
+                            },
+                            view_core::events::PmItem {
+                                word: "beta".into(),
+                                ..Default::default()
+                            },
+                        ],
+                        selected: 0,
+                        row: 2,
+                        col: 4,
+                        grid: 0,
+                    },
+                );
+            },
+            40,
+            12,
+            |m| {
+                // hide-then-show at a new anchor: the popupmenu jumps from
+                // row 2 to row 7, vacating its old rows
+                apply(m, view_core::events::UiEvent::PopupmenuHide);
+                apply(
+                    m,
+                    view_core::events::UiEvent::PopupmenuShow {
+                        items: vec![
+                            view_core::events::PmItem {
+                                word: "alpha".into(),
+                                ..Default::default()
+                            },
+                            view_core::events::PmItem {
+                                word: "beta".into(),
+                                ..Default::default()
+                            },
+                        ],
+                        selected: 1,
+                        row: 7,
+                        col: 4,
+                        grid: 0,
+                    },
+                );
+            },
+        );
+    }
+
+    /// Sends one probe reply for the highlight table's current generation,
+    /// the shape `view-engine` produces when `nvim_get_hl` answers the probe
+    /// a `default_colors_set` triggered. A `Msg`, not a `UiEvent`, so it
+    /// cannot go through `apply`.
+    fn probe_reply(model: &mut Model, fg: Option<u32>, bg: Option<u32>) {
+        let generation = model.engine.hl().probe_generation();
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::HlProbeReply { generation, fg, bg },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_default_colors_change() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0xF8F8F2),
+                        bg: Some(0x101010),
+                        sp: None,
+                    },
+                );
+            },
+            40,
+            12,
+            |m| {
+                // every cell resolves its colors through the defaults, so a
+                // colorscheme swap restyles the whole screen without any grid
+                // cell's text changing
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0x202020),
+                        bg: Some(0x445566),
+                        sp: None,
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_hl_attr_redefinition() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                apply(
+                    m,
+                    view_core::events::UiEvent::HlAttrDefine {
+                        id: 2,
+                        fg: Some(0xFF0000),
+                        bg: None,
+                        bold: false,
+                        italic: false,
+                        underline: false,
+                        reverse: false,
+                    },
+                );
+            },
+            40,
+            12,
+            // redefining an id already on screen restyles every cell holding
+            // it, again with no grid cell changing its text
+            |m| {
+                apply(
+                    m,
+                    view_core::events::UiEvent::HlAttrDefine {
+                        id: 2,
+                        fg: Some(0x00FF00),
+                        bg: Some(0x000080),
+                        bold: true,
+                        italic: false,
+                        underline: false,
+                        reverse: false,
+                    },
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_hl_probe_reply_confirms_a_black_default() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| {
+                seed_grid(m, 40, 12);
+                // the wire-ambiguous zero: painted transparent until a probe
+                // reply says whether the colorscheme genuinely sets black
+                apply(
+                    m,
+                    view_core::events::UiEvent::DefaultColorsSet {
+                        fg: Some(0xF8F8F2),
+                        bg: Some(0),
+                        sp: None,
+                    },
+                );
+            },
+            40,
+            12,
+            // the reply lands after its own frame has painted, which the
+            // paint loop's never-await-RPC contract makes the common case
+            |m| probe_reply(m, Some(0xF8F8F2), Some(0)),
+        );
+    }
+
+    /// A highlight-only frame interposed after a partially damaged one: the
+    /// hole [`Shadow`]'s carry-forward can mask for exactly one frame.
+    ///
+    /// Frame two damages a single row, so frame three composites into a
+    /// buffer whose every other row is two frames old. If a highlight change
+    /// produced no damage, that third frame would repaint the carried row
+    /// alone and leave the rest of the screen in the previous theme's colors
+    /// -- one restyled stripe on an otherwise stale screen, which no
+    /// single-transition check and no first-frame check can see.
+    #[test]
+    fn shadow_front_matches_full_recomposite_across_a_highlight_only_frame() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = Model::new();
+        seed_grid(&mut model, 40, 12);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0xF8F8F2),
+                bg: Some(0),
+                sp: None,
+            },
+        );
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(area), "a fresh shadow must size itself");
+
+        type Step = (&'static str, Box<dyn Fn(&mut Model)>);
+        let steps: Vec<Step> = vec![
+            ("first paint", Box::new(|_: &mut Model| {})),
+            (
+                "edit row 4 only",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 4,
+                        col_start: 3,
+                        cells: vec![("K".into(), 1, 1)],
+                    });
+                }),
+            ),
+            (
+                "probe reply confirms black, no grid change",
+                Box::new(|m: &mut Model| probe_reply(m, Some(0xF8F8F2), Some(0))),
+            ),
+            (
+                "edit row 9 only",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 9,
+                        col_start: 1,
+                        cells: vec![("J".into(), 3, 1)],
+                    });
+                }),
+            ),
+            (
+                "colorscheme swap, no grid change",
+                Box::new(|m: &mut Model| {
+                    apply(
+                        m,
+                        view_core::events::UiEvent::DefaultColorsSet {
+                            fg: Some(0x1A1A1A),
+                            bg: Some(0xEEEEEE),
+                            sp: None,
+                        },
+                    );
+                }),
+            ),
+            (
+                "redefine an on-screen highlight id",
+                Box::new(|m: &mut Model| {
+                    apply(
+                        m,
+                        view_core::events::UiEvent::HlAttrDefine {
+                            id: 3,
+                            fg: Some(0x00FF00),
+                            bg: Some(0x000080),
+                            bold: true,
+                            italic: false,
+                            underline: false,
+                            reverse: false,
+                        },
+                    );
+                }),
+            ),
+        ];
+
+        let mut prev_overlay: Vec<u16> = Vec::new();
+        let mut first = true;
+        for (label, mutate) in steps {
+            mutate(&mut model);
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(&model);
+            let cur_overlay = overlay_rows(&surface);
+            let damage = Damage::from_frame(
+                &grid_damage,
+                model.chrome_rows(),
+                &prev_overlay,
+                &cur_overlay,
+                first,
+            );
+            first = false;
+            prev_overlay = cur_overlay;
+            shadow.compose(&model, &surface, &damage);
+            shadow.commit();
+            assert_eq!(
+                shadow.front(),
+                &full_paint(&model, area),
+                "shadow diverged from a full recomposite after: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn clip_matches_full_grid_clear_is_full_damage() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| m.engine.apply_grid(GridOp::Clear),
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_empty_damage_is_a_noop_frame() {
+        // no mutation at all: the shadow already holds the correct state, and
+        // an empty damage must leave it byte-identical to a full recomposite
+        assert_clip_matches_full(40, 12, |m| seed_grid(m, 40, 12), 40, 12, |_| {});
+    }
+
+    #[test]
+    fn clip_matches_full_resize_forces_full_repaint() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            48,
+            16,
+            |m| seed_grid(m, 48, 16),
+        );
+    }
+
+    #[test]
+    fn clip_matches_full_tabline_offset_shift_forces_full_repaint() {
+        assert_clip_matches_full(
+            40,
+            12,
+            |m| seed_grid(m, 40, 12),
+            40,
+            12,
+            |m| {
+                // a second tab reserves the chrome row, shifting every grid
+                // row down by one -- a chrome-offset change Term repaints in
+                // full rather than clipping
+                apply(
+                    m,
+                    view_core::events::UiEvent::TablineUpdate {
+                        current: view_core::events::TabHandle(1),
+                        tabs: vec![
+                            view_core::events::TabEntry {
+                                tab: view_core::events::TabHandle(1),
+                                name: "one".into(),
+                            },
+                            view_core::events::TabEntry {
+                                tab: view_core::events::TabHandle(2),
+                                name: "two".into(),
+                            },
+                        ],
+                    },
+                );
+            },
+        );
+    }
+
+    /// Disconfirm control: a deliberately under-clipped `Damage` (the changed
+    /// row omitted) must make the equality assertion fail. Proves the moat
+    /// can actually catch a wrong clip rect rather than passing vacuously;
+    /// run `#[ignore]`d so it does not fail the suite, and flipped to a real
+    /// failing run by hand to capture the mismatch evidence.
+    #[test]
+    #[ignore = "disconfirm control: passes only when the clip is broken"]
+    fn under_clip_that_omits_the_changed_row_is_caught() {
+        let area = ratatui::layout::Rect::new(0, 0, 40, 12);
+        let mut model = Model::new();
+        seed_grid(&mut model, 40, 12);
+        let _ = model.take_paint_damage();
+        let surf_a = view_surface::render(&model);
+        let mut shadow = ratatui::buffer::Buffer::empty(area);
+        composite_into(&mut shadow, &model, &surf_a, &Damage::full());
+
+        model.engine.apply_grid(GridOp::PutLine {
+            row: 5,
+            col_start: 7,
+            cells: vec![("Z".into(), 2, 1)],
+        });
+        let _grid_damage = model.take_paint_damage();
+        let surf_b = view_surface::render(&model);
+        // sabotage: an EMPTY damage, dropping the changed row 5 -- the clip
+        // paints nothing, so the shadow keeps row 5's stale cell. Built
+        // field-wise because no constructor produces it: `Damage::default`
+        // is whole-frame precisely so this value cannot be reached by
+        // accident.
+        let sabotaged = Damage {
+            full: false,
+            rows: Vec::new(),
+        };
+        composite_into(&mut shadow, &model, &surf_b, &sabotaged);
+
+        let full = full_paint(&model, area);
+        assert_eq!(
+            shadow, full,
+            "under-clip must be caught by the equality moat"
         );
     }
 }

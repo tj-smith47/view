@@ -15,12 +15,52 @@
 //! (`send`, `wait_for`, `wait_for_cell`, `wait_for_exit`, `screen`,
 //! `screen_raw`, `pid`, `wait`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Every test in this file drives the wired `view` binary inside a real pty;
+// view's Windows terminal runtime is a tier-2 surface validated on winserver
+// rather than in CI, so the whole suite is gated off the Windows build. There
+// are no pure-logic tests here to keep running on Windows.
+#![cfg(unix)]
 
 mod common;
 
 use std::path::PathBuf;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
-use view_oracle::PtySession;
+use view_oracle::{PtySession, QueryPolicy};
+use view_surface::SHELL_PLACEHOLDER;
+
+// The pty-isolation lock. A timing-bound test measures an absolute wall-clock
+// bound (startup+save) that is only meaningful with the host to itself: a
+// parallel run on few cores (e.g. `taskpolicy -b` confining the suite to 2
+// efficiency cores) inflates every session by the scheduling tax and
+// false-trips a bound that is really about the 50ms probe deadline, not
+// contention. Every spawn takes the read side, so ordinary sessions still run
+// in parallel with each other; a timing-bound test takes the write side for a
+// contention-free measurement window.
+static PTY_ISOLATION: RwLock<()> = RwLock::new(());
+
+// The read side of `PTY_ISOLATION`, held for a whole session lifetime.
+// `unwrap_or_else(into_inner)` recovers a poisoned lock: the guarded value is
+// `()` with no invariant to protect, so a panicking test must not cascade into
+// every later session failing to acquire the lock.
+fn shared_isolation() -> Option<RwLockReadGuard<'static, ()>> {
+    Some(
+        PTY_ISOLATION
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+    )
+}
+
+// The write side of `PTY_ISOLATION`: acquire it BEFORE starting a timing clock
+// (the acquisition can block waiting for in-flight sessions to drain, which is
+// not part of the startup latency under test), then spawn via
+// `spawn_view_pty_raw_isolated`. While the guard is held, no other spawn helper
+// can start a session, so the measurement runs on an uncontended host.
+fn pty_isolation_exclusive() -> RwLockWriteGuard<'static, ()> {
+    PTY_ISOLATION
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 /// Wraps the promoted `view_oracle::PtySession` with the `view`-binary
 /// concerns that promotion deliberately left behind: an isolated scratch
@@ -32,6 +72,11 @@ use view_oracle::PtySession;
 struct ViewPtySession {
     session: PtySession,
     paths: common::ScratchPaths,
+    // The isolation read lock, held for this session's whole lifetime so a
+    // timing-bound test's exclusive window (`pty_isolation_exclusive`) cannot
+    // begin mid-session. `None` when the spawning test already holds the
+    // exclusive write guard, since taking read on that same thread deadlocks.
+    _isolation: Option<RwLockReadGuard<'static, ()>>,
 }
 
 impl std::ops::Deref for ViewPtySession {
@@ -49,7 +94,10 @@ impl std::ops::DerefMut for ViewPtySession {
 
 impl ViewPtySession {
     /// The OS pid of the `view` process itself (not its embedded nvim
-    /// child).
+    /// child). Only the signal-death test needs it, and that test reads
+    /// the process tree through `/proc`, so this follows it in being
+    /// Linux-only rather than reading as dead code everywhere else.
+    #[cfg(target_os = "linux")]
     fn view_pid(&self) -> u32 {
         self.session
             .pid()
@@ -103,6 +151,23 @@ fn spawn_view_pty_raw() -> ViewPtySession {
 /// scratch-file positional argument (e.g. `--nvim-bin <wrapper>`, for tests
 /// that need to control how slowly the embedded engine starts).
 fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySession {
+    build_view_pty(extra_args, shared_isolation(), QueryPolicy::AnswerDa1)
+}
+
+/// Builds the raw `view` pty session with a given isolation guard and query
+/// policy.
+///
+/// The guard is the read side of `PTY_ISOLATION` for the common case, or
+/// `None` when the spawning test already holds the exclusive write guard
+/// (taking read on that same thread deadlocks). The policy decides whether
+/// this pty answers the child's DA1 fence like a real terminal or stays
+/// mute, which is the difference between measuring startup on a normal
+/// terminal and driving the probe's unanswered-deadline path.
+fn build_view_pty(
+    extra_args: &[&std::ffi::OsStr],
+    isolation: Option<RwLockReadGuard<'static, ()>>,
+    policy: QueryPolicy,
+) -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
@@ -112,9 +177,20 @@ fn spawn_view_pty_raw_with_args(extra_args: &[&std::ffi::OsStr]) -> ViewPtySessi
     cmd.arg(&paths.scratch);
     common::isolate_xdg(&mut cmd, &paths.isolated_home);
 
-    let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
+    let session = PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap();
 
-    ViewPtySession { session, paths }
+    ViewPtySession {
+        session,
+        paths,
+        _isolation: isolation,
+    }
+}
+
+/// Like [`spawn_view_pty_raw`] but takes NO isolation read lock, for a timing
+/// test that already holds the exclusive write guard from
+/// `pty_isolation_exclusive`; taking read on that same thread deadlocks.
+fn spawn_view_pty_raw_isolated(policy: QueryPolicy) -> ViewPtySession {
+    build_view_pty(&[], None, policy)
 }
 
 /// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of
@@ -173,14 +249,15 @@ fn view_paints_typed_text_in_a_pty() {
 
 #[test]
 fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries() {
-    // portable-pty's slave side never emulates a real terminal's DECRQM/
-    // kitty/DA1 replies, so every test in this file already exercises the
-    // detection deadline path; this test names that scenario explicitly and
-    // pins the property the deadline path exists to protect: the startup
-    // probe (raw-mode-only, pre-alt-screen) must never leave the terminal
-    // unresponsive or swallow the first real keystroke once the alternate
-    // screen and nvim take over, even though every one of its queries goes
-    // unanswered and it has to run its full deadline out before giving up.
+    // `QueryPolicy::Silent` is what makes this test's name true: every other
+    // test in this file gets a pty that answers the DA1 fence like a real
+    // terminal, which lets the probe finish early and never reaches the
+    // deadline path at all. Opting out of that reply here pins the property
+    // the deadline path exists to protect: the startup probe (raw-mode-only,
+    // pre-alt-screen) must never leave the terminal unresponsive or swallow
+    // the first real keystroke once the alternate screen and nvim take over,
+    // even though every one of its queries goes unanswered and it has to run
+    // its full deadline out before giving up.
     //
     // Typing is sent with zero delay, straight after the pty is opened
     // (`spawn_view_pty_raw`, skipping `spawn_view_pty`'s own "wait for the
@@ -193,8 +270,14 @@ fn view_starts_and_takes_input_under_a_pty_that_never_answers_capability_queries
     // The oracle is the saved file's real contents, not the pty's screen:
     // see `view_paints_typed_text_in_a_pty`'s comment for why a
     // screen-content assertion here would be vacuous.
+    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
+    // the isolation window BEFORE the clock (its acquisition can block waiting
+    // for in-flight sessions to drain, which is not the startup latency under
+    // test) so a parallel run on few cores cannot inflate this measurement past
+    // a bound that is really about the 50ms probe deadline, not host contention.
+    let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw();
+    let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
 
     session.send(b"ibasic tier still works").unwrap();
     // A fixed sleep, not a screen-content wait, bridges to the save: the
@@ -239,8 +322,20 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
     // burst below (276 bytes: a 6-byte DA1 reply, `i`, 260 `A`s, then a
     // distinct end marker) exceeds the 256-byte chunk size, so surviving it
     // intact proves the tail isn't getting orphaned in a buffered handle.
+    //
+    // `QueryPolicy::Silent`: this test writes the DA1 reply itself, glued to
+    // the burst so both land in one read. A pty that also answered would get
+    // its reply in first, on its own, letting the probe break out before the
+    // burst ever arrived -- the co-arrival this test is built to exercise
+    // would simply stop happening, and it would still pass.
+    // An absolute wall-clock bound is only meaningful with exclusive CPU: take
+    // the isolation window BEFORE the clock (its acquisition can block waiting
+    // for in-flight sessions to drain, which is not the startup latency under
+    // test) so a parallel run on few cores cannot inflate this measurement past
+    // a bound that is really about the 50ms probe deadline, not host contention.
+    let _exclusive = pty_isolation_exclusive();
     let start = Instant::now();
-    let mut session = spawn_view_pty_raw();
+    let mut session = spawn_view_pty_raw_isolated(QueryPolicy::Silent);
 
     let da1_reply = b"\x1b[?62c";
     let payload = "A".repeat(260);
@@ -567,6 +662,72 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
     let _ = session.wait();
 }
 
+#[test]
+fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
+    // The direction that had no coverage anywhere, and the one where a
+    // stale paint area is actually destructive: with the shadow still sized
+    // to the old, larger terminal, every cell emitted past the new last row
+    // is addressed to a row the terminal does not have and gets clamped
+    // onto one it does, overwriting real content.
+    let mut session = spawn_view_pty();
+
+    // fills well past the shrunk window's bottom edge, so the rows that
+    // disappear held real content rather than blank padding: a clamped
+    // write is only observable when there is something for it to land on
+    let mut input = Vec::from(*b"i");
+    for line in 0..20 {
+        input.extend_from_slice(format!("LINE{line:02}\r").as_bytes());
+    }
+    input.extend_from_slice(b"LINE20\x1b");
+    session.send(&input).unwrap();
+    assert!(
+        session.wait_for("LINE00", Duration::from_secs(5)),
+        "the buffer never painted before the shrink; last screen:\n{}",
+        session.screen()
+    );
+
+    // 24 -> 12 rows. `PtySession::resize` flips the local vt100 parser's
+    // own dimensions synchronously, so geometry alone says nothing about
+    // whether nvim's window followed. The observable that does: at 24 rows
+    // the whole buffer fits, LINE00 included; at 12 rows it cannot, and
+    // nvim keeps the cursor (left on LINE20) visible, so a window that
+    // genuinely shrank shows LINE20 and no longer shows LINE00.
+    let shrunk = session
+        .resize_until(80, 12, Duration::from_secs(5), |s| {
+            s.wait_for("LINE20", Duration::from_millis(400)) && !s.screen().contains("LINE00")
+        })
+        .unwrap();
+    assert!(
+        shrunk,
+        "shrink never reached nvim's own window even after repeated resize \
+         retries; last screen:\n{}",
+        session.screen()
+    );
+
+    // the property: nothing may be addressed past the terminal's new last
+    // row. vt100 clamps a CUP beyond the screen, so an over-tall frame does
+    // not show up as an out-of-range row -- it shows up as the content that
+    // *should* be on the bottom rows having been overwritten by content
+    // meant for rows that no longer exist. Typing a fresh marker after the
+    // shrink and finding it intact is what proves the frame that painted it
+    // was sized to the real terminal.
+    session.send(b"GoSHRINKMARKER\x1b").unwrap();
+    assert!(
+        session.wait_for("SHRINKMARKER", Duration::from_secs(5)),
+        "text typed after the shrink never painted intact, so a frame was \
+         still being composed at the pre-shrink size; last screen:\n{}",
+        session.screen()
+    );
+    assert_eq!(
+        session.screen_raw().size(),
+        (12, 80),
+        "pty/vt100 geometry itself never reached the shrunk dimensions"
+    );
+
+    session.send(b"\x1b:qa!\r").unwrap();
+    let _ = session.wait();
+}
+
 /// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
 /// the real `nvim` (resolved via `which`, matching this file's other
 /// `nvim`-locating helpers) with every argument forwarded verbatim --
@@ -574,6 +735,7 @@ fn view_resizes_with_tabline_open_and_reaches_the_new_row_count() {
 /// Marked executable directly (`portable_pty`/`Command` exec it, not a
 /// shell), and disambiguated by pid the same way this file's scratch paths
 /// are, since parallel tests in this binary could otherwise collide.
+#[cfg(unix)]
 fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     let real_nvim = String::from_utf8(
         std::process::Command::new("which")
@@ -586,10 +748,7 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     .trim()
     .to_string();
 
-    let path = std::env::temp_dir().join(format!(
-        "view-oracle-delayed-nvim-{}.sh",
-        std::process::id()
-    ));
+    let path = common::scratch_root().join(format!("delayed-nvim-{}.sh", std::process::id()));
     let script = format!(
         "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
         f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0
@@ -602,6 +761,48 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     std::fs::set_permissions(&path, perms).unwrap();
 
     path
+}
+
+/// nvim's own empty-buffer line marker, the first thing a fresh buffer's
+/// grid content puts on screen. The startup shell paints no `~` of its own
+/// (only a blank statusline bar and the placeholder label) and no scratch
+/// path this file uses contains one, so its presence on screen means the
+/// engine attached and its grid reached the terminal.
+#[cfg(unix)]
+const ENGINE_CONTENT_MARKER: char = '~';
+
+/// Asserts the ordering the startup shell exists for: the placeholder frame
+/// reaches the terminal while the engine's own content is not yet on
+/// screen. Both halves are read from a single screen state, so what is
+/// proven is the order of the two frames in the pty stream, not the wall
+/// time either took to get there.
+///
+/// Deliberately not a latency bar. Measured shell-frame paint spans roughly
+/// 50ms on Linux to 450ms on macOS on developer hardware, so any fixed
+/// millisecond bar tight enough to be meaningful on one platform sits
+/// inside the other's ordinary distribution; absolute first-paint budgets
+/// are gated in the bench matrix, on a release build under a controlled
+/// protocol, rather than by a debug binary on whatever host runs the tests.
+/// The caller's delayed-engine wrapper is what makes the two frames
+/// separately observable, by holding nvim back far longer than a pty read
+/// takes to deliver the frame already written.
+///
+/// Proves only the first half of the ordering: the caller must go on to
+/// establish that the engine really did attach afterwards (otherwise a
+/// `view` that never starts an engine at all would satisfy this vacuously).
+#[cfg(unix)]
+fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
+    let ordered = session.wait_for_screen(Duration::from_secs(15), |screen| {
+        let text = screen.contents();
+        text.contains(SHELL_PLACEHOLDER) && !text.contains(ENGINE_CONTENT_MARKER)
+    });
+    assert!(
+        ordered,
+        "never observed the startup shell frame ({SHELL_PLACEHOLDER:?}) on screen ahead of the \
+         engine's own content ({ENGINE_CONTENT_MARKER:?}): either the placeholder never painted, \
+         or engine content was already on screen by the time it did; last screen:\n{}",
+        session.screen()
+    );
 }
 
 /// The startup sequence's shell frame -- a themed statusline placeholder
@@ -617,6 +818,7 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
 /// deadlock anywhere in that path would hang this test's `:wq` at the very
 /// end (nvim can never fully start, let alone quit) rather than merely
 /// fail an assertion.
+#[cfg(unix)]
 #[test]
 fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order() {
     let wrapper = write_delayed_nvim_wrapper(500);
@@ -624,12 +826,7 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert!(
-        session.wait_for("waiting for nvim", Duration::from_millis(200)),
-        "shell frame did not appear within 200ms against a 500ms-delayed \
-         engine; last screen:\n{}",
-        session.screen()
-    );
+    assert_shell_frame_precedes_attach(&mut session);
 
     // typed immediately, well before the delayed engine has attached: this
     // is exactly the pre-attach window startup::drain_pre_attach buffers
@@ -637,7 +834,10 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 
     // the wrapper sleeps 500ms before nvim even starts; wait comfortably
     // past attach plus startup for the buffered keys to replay into the
-    // real buffer
+    // real buffer. Text in the buffer is also the engine-attached half of
+    // the ordering asserted above: buffer content can only be on screen
+    // once the engine attached and painted, so the placeholder observed
+    // without it genuinely preceded attach
     assert!(
         session.wait_for("hello world", Duration::from_secs(5)),
         "pre-attach keys never replayed into the buffer after attach, or \
@@ -687,18 +887,14 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 /// reproducible through this harness's timing. Kept here anyway as
 /// end-to-end coverage that a heavy, realistic flood against a real engine
 /// still behaves correctly.
+#[cfg(unix)]
 #[test]
 fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let wrapper = write_delayed_nvim_wrapper(300);
     let mut session =
         spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
 
-    assert!(
-        session.wait_for("waiting for nvim", Duration::from_millis(200)),
-        "shell frame did not appear within 200ms against a 300ms-delayed \
-         engine; last screen:\n{}",
-        session.screen()
-    );
+    assert_shell_frame_precedes_attach(&mut session);
 
     // 150 keystrokes, one at a time, over ~450ms: comfortably past
     // KEY_RING_CAPACITY (64), and comfortably past the wrapper's 300ms
@@ -708,6 +904,17 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         session.send(b"x").unwrap();
         std::thread::sleep(Duration::from_millis(3));
     }
+    // the engine-attached half of the ordering asserted above: the
+    // placeholder was observed without this content, and now the content
+    // is here, so the shell frame genuinely preceded attach rather than
+    // standing in for an engine that never arrived
+    assert!(
+        session.wait_for(&ENGINE_CONTENT_MARKER.to_string(), Duration::from_secs(15)),
+        "the engine never put its own content on screen, so the shell frame \
+         preceded nothing; last screen:\n{}",
+        session.screen()
+    );
+
     session.send(b"\x1b:q!\r").unwrap();
 
     let exit = session.wait_for_exit(Duration::from_secs(15)).expect(
@@ -739,7 +946,11 @@ fn spawn_view_pty_with_unwritable_view_log() -> ViewPtySession {
     cmd.env("VIEW_LOG", "/nonexistent-dir-xyz/log.txt");
 
     let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
-    ViewPtySession { session, paths }
+    ViewPtySession {
+        session,
+        paths,
+        _isolation: shared_isolation(),
+    }
 }
 
 /// Regression: an unwritable `VIEW_LOG` path must degrade to no diagnostic
@@ -767,5 +978,133 @@ fn view_degrades_gracefully_when_view_log_path_is_unwritable() {
         saved.contains("hello from an unwritable VIEW_LOG"),
         "saved file did not contain the typed text; an unwritable VIEW_LOG \
          path must never take the session down with it; contents:\n{saved:?}"
+    );
+}
+
+/// The synchronized-output bracket `view` writes around a frame once it
+/// believes the terminal supports mode 2026. Its presence is the only
+/// external evidence of the derived tier: a private mode leaves no cell for
+/// a screen assertion to read.
+const SYNC_BRACKET_OPEN: &[u8] = b"\x1b[?2026h";
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Pins the chain a benchmark's stated tier depends on: the pty's answers
+/// decide what the child's probe resolves, which decides how much work each
+/// of its frames does.
+///
+/// Without this, a session could silently downgrade every child it hosts and
+/// nothing would fail -- the screen looks identical either way, because the
+/// difference is a mode the terminal applies and the parser discards. A row
+/// promised at the full tier would then be timed against cheaper frames than
+/// it names.
+#[test]
+fn the_terminals_answers_decide_which_tier_the_child_paints_at() {
+    for (policy, want_sync) in [
+        (QueryPolicy::AnswerDa1, false),
+        (QueryPolicy::AnswerFullTier, true),
+    ] {
+        let mut session = build_view_pty(&[], shared_isolation(), policy);
+        // before any drain: recording captures from the next drain onward,
+        // and the probe traffic under test is the first thing the child writes
+        session.record_raw_output();
+        assert!(
+            session.wait_for("~", Duration::from_secs(5)),
+            "view never painted a buffer under {policy:?}"
+        );
+
+        session.send(b"itier probe").unwrap();
+        session.send(b"\x1b:wq\r").unwrap();
+        let exit = session.wait().expect("view never exited after :wq");
+        assert!(exit.success(), "view did not exit cleanly under {policy:?}");
+
+        assert_eq!(
+            contains_subslice(session.raw_output(), SYNC_BRACKET_OPEN),
+            want_sync,
+            "under {policy:?} the synchronized-output bracket should{} have been \
+             written; a child derives that capability only from the reply this \
+             pty chose to send",
+            if want_sync { "" } else { " not" }
+        );
+    }
+}
+
+/// The tier `view` derives, read from its own startup log line rather than
+/// inferred from what it painted.
+///
+/// The two inputs are independent and neither is visible on screen: the
+/// probe replies this pty chooses to send, and `COLORTERM` in the child's
+/// environment. `Tier::Full` -- the tier the measurement protocol's budget
+/// rows name -- needs both, so a bench that set only one would report a row
+/// at a tier its child never reached.
+fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
+    let paths = common::ScratchPaths::new("smoke-tier");
+    let log_path = paths.isolated_home.join("view.log");
+
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    cmd.env("VIEW_LOG", &log_path);
+    if let Some(value) = colorterm {
+        cmd.env("COLORTERM", value);
+    }
+
+    let mut session = ViewPtySession {
+        session: PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap(),
+        paths,
+        _isolation: shared_isolation(),
+    };
+    assert!(
+        session.wait_for("~", Duration::from_secs(5)),
+        "view never painted a buffer under {policy:?} / COLORTERM={colorterm:?}"
+    );
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+
+    let log = std::fs::read_to_string(&log_path).unwrap();
+    let tier = log
+        .lines()
+        .find_map(|line| line.split("caps tier=").nth(1))
+        .and_then(|after| after.split_whitespace().next())
+        .map(str::to_string);
+    assert!(
+        tier.is_some(),
+        "no startup line in VIEW_LOG; the log was:\n{log}"
+    );
+    tier.unwrap_or_default()
+}
+
+/// Pins the condition the budget rows are stated at, against the child's own
+/// report of it.
+///
+/// Both inputs are load-bearing and each fails silently on its own: a probe
+/// reply this pty withholds and an environment variable it forgets produce
+/// the same screen as the full tier, so nothing but this assertion stands
+/// between a row that says `tier full` and a child that painted at `Basic`.
+#[test]
+fn the_bench_configuration_is_the_only_one_that_reaches_the_full_tier() {
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerDa1, None),
+        "Basic",
+        "a DA1-only terminal resolves no optional capability"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTier, None),
+        "Basic",
+        "answering the whole probe batch is not enough on its own: COLORTERM \
+         is the sole input to the truecolor bit that Full also requires"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerDa1, Some("truecolor")),
+        "Standard",
+        "COLORTERM alone reaches Standard, not Full"
+    );
+    assert_eq!(
+        derived_tier(QueryPolicy::AnswerFullTier, Some("truecolor")),
+        "Full",
+        "the configuration `BenchSession::spawn` and the bench environment \
+         set together is what the budget rows name"
     );
 }

@@ -1,0 +1,14 @@
+# Mutating the process environment is a whole-binary act: the change outlives
+# the scope that made it and every later reader in the same process sees it,
+# including children that inherit it at spawn. Test binaries are where this
+# bites, since one binary runs many tests on many threads and a plant left
+# standing silently becomes another test's input.
+#
+# Each crate that genuinely needs to mutate the environment allows this lint
+# at the one site that does it, next to the guard that bounds the mutation.
+# The allow is the marker: a new call site has to justify itself rather than
+# blend in.
+disallowed-methods = [
+    { path = "std::env::set_var", reason = "route through the crate's env-mutation guard so the plant is serialized and restored" },
+    { path = "std::env::remove_var", reason = "route through the crate's env-mutation guard so the plant is serialized and restored" },
+]

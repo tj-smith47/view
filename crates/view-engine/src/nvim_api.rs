@@ -5,6 +5,7 @@
 //! way for it to reach the same calls.
 
 use crate::handle::{EngineError, EngineHandle};
+use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
 
@@ -29,6 +30,20 @@ const REGISTER_VIM_ENTER_TIMEOUT: Duration = Duration::from_secs(5);
 /// paint loop itself, but an unbounded wait against a wedged engine would
 /// still hang whatever harness is blocked on the answer.
 const EVAL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on how long [`EngineHandle::get_mode`] waits for nvim's
+/// reply. `nvim_get_mode` is answered on receipt even while nvim's main
+/// loop is busy or blocked (see [`EngineHandle::get_mode`]), so a healthy
+/// engine replies near-instantly; this bound only covers a dead or wedged
+/// connection.
+const GET_MODE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The lua chunk [`EngineHandle::feed_keys`] runs inside nvim, taking the
+/// key notation as its single vararg. Constant by construction: no caller
+/// data is ever interpolated into it, so no quote, backslash, or newline in
+/// a notation can change what runs.
+const FEED_KEYS_CHUNK: &str =
+    "vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -146,6 +161,61 @@ impl EngineHandle {
         self.notify("nvim_input", vec![Value::from(notation)])
     }
 
+    /// Queues one encoded key `notation` into nvim's typeahead via
+    /// `feedkeys()` in `"t"` mode: remapped and accounted for exactly as if
+    /// the user had typed it, appended after anything already queued, and
+    /// left for the main loop to consume rather than executed inline (no
+    /// `"x"` flag).
+    ///
+    /// Distinct from [`input`](Self::input), not a replacement for it. Keys
+    /// sent through `nvim_input` land in nvim's low-level input buffer and
+    /// move into the typeahead buffer in pieces, so a driver watching for
+    /// nvim's own idle signal can observe an empty typeahead while the tail
+    /// of what it sent is still queued a layer further out -- live-observed
+    /// as a `SafeState` firing in the middle of a script. `feedkeys()`
+    /// inserts the whole string into the typeahead in one step instead,
+    /// which is what a caller sending a *script* it intends to wait for
+    /// needs. `input` remains the right call for a single interactive
+    /// keystroke and the only one that reaches a session already blocked in
+    /// a key-wait, which never services the deferred request this one is.
+    ///
+    /// The `<...>` notation is translated by `nvim_replace_termcodes`
+    /// inside nvim rather than translated here and passed as key bytes:
+    /// those bytes carry `K_SPECIAL` (`0x80`) prefixes and are not valid
+    /// UTF-8, so they cannot survive a round trip through the wire's string
+    /// type on this side. Only the notation itself -- plain text -- crosses
+    /// the connection.
+    ///
+    /// `nvim_exec_lua(String code, Array args) -> Object` (verified against
+    /// the pinned engine's own `api_info`) with `notation` passed as an
+    /// *argument*, not interpolated into the chunk: a constant chunk cannot
+    /// be escaped by anything a caller sends. Quoting the notation into a
+    /// command string instead would make every quote, backslash, and
+    /// newline in a script a correctness question -- and a literal newline
+    /// would end the command outright, a way to lose a script that
+    /// `nvim_input` never had.
+    ///
+    /// A request, not a notify: a rejected chunk (a runtime error inside
+    /// nvim) must surface as an error rather than as a script that silently
+    /// never ran.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the call, or the reply does not arrive within
+    /// [`EVAL_TIMEOUT`].
+    pub fn feed_keys(&self, notation: &str) -> Result<(), EngineError> {
+        self.request_timeout(
+            "nvim_exec_lua",
+            vec![
+                Value::from(FEED_KEYS_CHUNK),
+                Value::Array(vec![Value::from(notation)]),
+            ],
+            EVAL_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
     /// Notifies nvim of a terminal resize to `width` x `height` cells via
     /// `nvim_ui_try_resize`.
     ///
@@ -250,6 +320,57 @@ impl EngineHandle {
     pub fn eval_str(&self, expr: &str) -> Result<String, EngineError> {
         let value = self.request_timeout("nvim_eval", vec![Value::from(expr)], EVAL_TIMEOUT)?;
         Ok(value_to_string(&value))
+    }
+
+    /// Reads nvim's current mode name and blocked flag via `nvim_get_mode`
+    /// (`nvim_get_mode() -> {"mode": String, "blocking": Boolean}`, the
+    /// mode string in `mode(1)`'s own format). Unlike every other request
+    /// here, `nvim_get_mode` is one of the few the pinned nvim documents as
+    /// non-deferred, or `fast` (`:help api-fast` names it outright): nvim
+    /// answers it immediately on receipt, even while its main loop is
+    /// blocked waiting for a key -- a hit-enter prompt, a pending
+    /// `t`/`f`/`r` character argument, a register name after `"` -- states
+    /// in which a deferred request like `nvim_eval` waits until the key
+    /// arrives (live-verified against the pinned nvim: `nvim_eval` times
+    /// out in every `blocking = true` state this reply reports, while this
+    /// call still answers). That makes it the one probe an embedded driver
+    /// can use to distinguish "engine is wedged" from "engine is
+    /// deliberately waiting for a key", which is what `view-oracle`'s
+    /// quiesce and snapshot machinery calls it for.
+    ///
+    /// The API metadata is no second opinion on any of that, in either
+    /// direction: the pinned engine reports no per-function `fast` flag at
+    /// all (absent on every entry, including functions its own
+    /// documentation names as `fast`), so a method's flag reading as unset
+    /// there is the absence of an answer rather than a negative one.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// the reply does not arrive within [`GET_MODE_TIMEOUT`], or the reply
+    /// is not the documented map shape (surfaced as
+    /// [`RpcError::Malformed`] rather than degraded to a placeholder a
+    /// differential comparison could silently accept on both sides).
+    pub fn get_mode(&self) -> Result<(String, bool), EngineError> {
+        let value = self.request_timeout("nvim_get_mode", vec![], GET_MODE_TIMEOUT)?;
+        let malformed =
+            || EngineError::Rpc(RpcError::Malformed(format!("nvim_get_mode reply: {value}")));
+        let Value::Map(pairs) = &value else {
+            return Err(malformed());
+        };
+        let mut mode = None;
+        let mut blocking = None;
+        for (key, val) in pairs {
+            match key.as_str() {
+                Some("mode") => mode = val.as_str().map(str::to_string),
+                Some("blocking") => blocking = val.as_bool(),
+                _ => {}
+            }
+        }
+        match (mode, blocking) {
+            (Some(mode), Some(blocking)) => Ok((mode, blocking)),
+            _ => Err(malformed()),
+        }
     }
 
     /// Issues `nvim_get_hl(0, {name = "Normal"})` as an async probe tagged
@@ -406,6 +527,23 @@ mod tests {
         let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert_eq!(method, "nvim_eval");
         assert_eq!(params, vec![Value::from("getline(1)")]);
+    }
+
+    #[test]
+    fn feed_keys_passes_the_notation_as_an_argument_not_as_code() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        // every character a quoted-into-a-command implementation would
+        // have had to escape, in one notation
+        let hostile = "<Cmd>call setline(1, 'a\\b')<CR>\nix\"y'z";
+        let _ = h.feed_keys(hostile);
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(FEED_KEYS_CHUNK));
+        assert_eq!(params[1], Value::Array(vec![Value::from(hostile)]));
+        assert!(
+            !FEED_KEYS_CHUNK.contains("setline"),
+            "the chunk must stay constant, whatever the notation carries"
+        );
     }
 
     #[test]

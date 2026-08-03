@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="view eye mark">
+  <!-- Alternate view mark "aperture eye": view = seeing. A symmetric lens (top
+       arc purple to pink, bottom arc pink to cyan) around a single green pupil,
+       an eye onto a terminal. Kept as the secondary option to the primary V. -->
+  <defs>
+    <linearGradient id="bt" x1="56" y1="0" x2="200" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bd93f9"/>
+      <stop offset="1" stop-color="#ff79c6"/>
+    </linearGradient>
+    <linearGradient id="bb" x1="56" y1="0" x2="200" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ff79c6"/>
+      <stop offset="1" stop-color="#8be9fd"/>
+    </linearGradient>
+  </defs>
+  <rect width="256" height="256" rx="56" fill="#282a36"/>
+  <path d="M52 128 Q128 66 204 128" fill="none" stroke="url(#bt)"
+        stroke-width="15" stroke-linecap="round"/>
+  <path d="M52 128 Q128 190 204 128" fill="none" stroke="url(#bb)"
+        stroke-width="15" stroke-linecap="round"/>
+  <circle cx="128" cy="128" r="19" fill="#50fa7b"/>
+</svg>

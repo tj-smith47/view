@@ -36,26 +36,239 @@ jobs:
       - name: Install neovim (linux)
         if: runner.os == 'Linux'
         run: |
-          curl -fsSL -o nvim.appimage https://github.com/neovim/neovim/releases/download/stable/nvim-linux-x86_64.appimage
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
           chmod +x nvim.appimage
           ./nvim.appimage --appimage-extract >/dev/null
           echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
 
       - name: Install neovim (macos)
         if: runner.os == 'macOS'
-        run: brew install neovim
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf nvim-macos.tar.gz
+          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
 
       - name: Install neovim (windows)
         if: runner.os == 'Windows'
-        run: choco install neovim -y --no-progress
-
-      - name: Add neovim to PATH (windows)
-        if: runner.os == 'Windows'
         shell: bash
-        run: echo "/c/tools/neovim/nvim-win64/bin" >> "$GITHUB_PATH"
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-win64.zip "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-win64.zip"
+          unzip -q nvim-win64.zip
+          echo "$PWD/nvim-win64/bin" >> "$GITHUB_PATH"
 
       - name: Check neovim version
-        run: nvim --version
+        shell: bash
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
       - name: Run CI suite
         run: task ci
+
+  # The differential oracle corpus is merge-blocking on both tier-1
+  # platforms (spec section 14: linux + macos tier-1; Windows is tier-2,
+  # deferral 4). Its own job so the pty-driven corpus never extends the
+  # fast matrix's build/test feedback time.
+  oracle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install neovim (linux)
+        if: runner.os == 'Linux'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Install neovim (macos)
+        if: runner.os == 'macOS'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf nvim-macos.tar.gz
+          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Run differential oracle corpus
+        run: task oracle
+
+  # The plugin compat matrix runs on both tier-1 platforms (spec section
+  # 14); the pty layer, plugin bootstrap paths, and terminfo behavior all
+  # differ enough by OS that one linux leg cannot vouch for macos. Its own
+  # job (not a step of the fast matrix) so the cold-bootstrap scenario's
+  # real network installs never extend the fast legs' feedback time.
+  compat:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    # bounds the cold-bootstrap scenario, which clones lazy.nvim plus its
+    # pinned plugins from scratch on every run and is slow by the nature of
+    # that work (its own probe step allows up to 180s), plus a cold cargo
+    # build on a cache miss
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # the harness points warm scenarios' XDG_DATA_HOME at compat/.cache,
+      # keyed by lazy-lock.json hash, so a restored cache turns their
+      # plugin installs into no-ops; the cold-bootstrap scenario bypasses
+      # this cache by design and always exercises the real network path
+      - name: Cache plugin installs
+        uses: actions/cache@v4
+        with:
+          path: compat/.cache
+          key: compat-plugins-${{ runner.os }}-${{ hashFiles('compat/fixtures/**/lazy-lock.json') }}
+
+      - name: Install neovim (linux)
+        if: runner.os == 'Linux'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Install neovim (macos)
+        if: runner.os == 'macOS'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf nvim-macos.tar.gz
+          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Run compat harness
+        run: task compat
+
+  # Shared-runner bench legs. These record rather than gate until a
+  # reviewed gh-* baseline is committed; once it is, every row gates its
+  # view/nvim median ratio and its view-side absolute p99 against that
+  # baseline, while tail statistics stay recorded but ungated because gh-*
+  # runners are not controlled classes (spec section 3.1). The null-pair
+  # calibration refuses a record or a gate alike if ambient runner noise
+  # exceeds the measured floor, rather than writing or comparing numbers
+  # taken on a noisy host.
+  bench:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            class: gh-linux
+          - os: macos-latest
+            class: gh-macos
+    runs-on: ${{ matrix.os }}
+    # the full gated matrix took ~28 minutes on a 12-core dev host (the
+    # first_paint rows' 1100 cold spawn pairs dominate); shared runners
+    # are slower, plus a cold cargo build on a cache miss
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # same shared plugin cache as the compat job: the heavy fixture's
+      # cells point XDG_DATA_HOME at compat/.cache, and a warm cache keeps
+      # plugin cloning out of the settle window
+      - name: Cache plugin installs
+        uses: actions/cache@v4
+        with:
+          path: compat/.cache
+          key: compat-plugins-${{ runner.os }}-${{ hashFiles('compat/fixtures/**/lazy-lock.json') }}
+
+      - name: Install neovim (linux)
+        if: runner.os == 'Linux'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Install neovim (macos)
+        if: runner.os == 'macOS'
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim-macos.tar.gz "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-macos-arm64.tar.gz"
+          tar xzf nvim-macos.tar.gz
+          echo "$PWD/nvim-macos-arm64/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      # No gh-* baseline is committed, so there is nothing on this runner
+      # class to gate against and this leg records one instead: the TOML is
+      # uploaded below for review. It says --record rather than --gate
+      # because a gate with no baseline compares nothing, and a leg that
+      # reports success having compared nothing is worse than one that
+      # plainly records. This becomes --gate in the same commit that lands
+      # the reviewed baselines, and the upload step comes out with it
+      - name: Record bench matrix baseline (${{ matrix.class }})
+        run: task bench -- --all --class ${{ matrix.class }} --record
+
+      - name: Upload recorded baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-${{ matrix.class }}
+          path: crates/view-bench/baselines/${{ matrix.class }}.toml
+          if-no-files-found: error

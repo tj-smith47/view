@@ -1,0 +1,274 @@
+schema = 1
+
+# The spec 3.1 budget table, in the form the bench gate can hold a
+# measurement to. The spec states these as prose because it is read by
+# people; this file states them as data because it is read by the gate, and
+# scripts/check-budget-drift.sh fails CI if any number here stops appearing
+# in the spec row it names.
+#
+# `classes` is optional: absent means every machine class. A budget the spec
+# states for only one class, or a quantity a platform names differently, is
+# written as separate entries rather than a per-class map, so a divergence
+# between classes is visible in the file instead of hidden inside a value.
+#
+# A metric with no entry here has no spec budget. That is a real state, not
+# an oversight: dev-macos's input path sits there deliberately, and the spec
+# row says so.
+
+# 100, not the 232 this row carried until 2026-07-27. That 232 was the
+# then-recorded 154.749 times ABSOLUTE_HEADROOM 1.5: a bound computed from
+# the measurement it bounds, which no measurement can fail by construction.
+# 100 is the bar the spec stated before anyone measured anything, so it is a
+# promise rather than a restatement; the gap to it was carried as a
+# shortfall until the row measured inside the bar.
+#
+# dev-linux tried to publish a measured spread for this statistic and came
+# back with an honest inert one: "input_path.key_to_rpc_p99_us" = 1.15 in
+# dev-linux.headroom.toml, pooled from 10 of 16 report-only replicates
+# against the recorded 80.682 after excluding six whose pty->key-read
+# segment p99 (a single criterion, applied uniformly to all 16) showed
+# host-contention contamination the scenario has no calibration to refuse.
+# 80.682 x 1.15 = 92.784 stays under this row's 100.0 max, so this cell
+# still gates as a flat max with no excursion window -- the campaign could
+# not separate view's real spread from scheduler starvation on this host at
+# this statistic's scale. A breach here still fails as a new finding and
+# should be rerun quiet before being read as a regression; a genuinely
+# quieter campaign is the only route to a functional factor.
+[[budget]]
+spec_row = "view input path: key event read from the terminal -> RPC bytes written"
+scenario = "input_path"
+metric = "key_to_rpc_p99_us"
+max = 100.0
+classes = ["dev-linux"]
+
+[[budget]]
+spec_row = "view output path: redraw event parsed -> terminal write"
+scenario = "output_path"
+metric = "p99_ms"
+max = 1.0
+
+[[budget]]
+spec_row = "Keypress -> cell change end-to-end, steady typing"
+scenario = "echo"
+metric = "view_p99_ms"
+max = 8.0
+
+[[budget]]
+spec_row = "Keypress -> cell change end-to-end, steady typing"
+scenario = "echo"
+metric = "ratio_p50"
+max = 1.1
+
+[[budget]]
+spec_row = "Sustained scroll, 100k-line file, tier full"
+scenario = "scroll"
+metric = "staleness_p99_ms"
+max = 16.0
+
+[[budget]]
+spec_row = "First paint: view's own UI shell visible, engine still loading"
+scenario = "first_paint"
+metric = "shell_visible_ms"
+max = 50.0
+
+# 30 ms, not a rounder number, because the ratchet already bounds this
+# metric above it (the recorded 25.151 times the class's measured headroom;
+# 50.3 ms on dev-linux under the 2.0 in its headroom sidecar). Any budget
+# above that is one the ratchet always reaches first, so the budget could
+# never be the thing that fires -- the same defect the withdrawn cold_ms bar
+# had. 30 sits under the ratchet and over the measurement, so it can break.
+# 0.30 bounds the paired quantity the absolute cannot: a class whose cold
+# start is slow for reasons outside view still has to show view reaching
+# the file in under a third of bare nvim's time. marker_cold_ms is a p99
+# gated on the shared dev-linux class only because its name carries no
+# percentile component, and the 50.3 ms ratchet premise holds only under
+# that classification.
+#
+# 30 is also the bound the noise tolerance was built around. This row is
+# one-shot -- no median-of-trials stands between an ambient spike and the
+# verdict -- the class publishes a x2.0 spread for the statistic, and the
+# recorded 25.151 sits 19% under the bar. So a load excursion past 30 is
+# reported against the ceiling that recorded value earns, which is that
+# same 50.3 ms, and fails past it. The bar keeps its teeth two ways: the
+# tolerance applies only while the recorded quiet value stays under 30, and
+# every run above 30 prints a line saying so.
+[[budget]]
+spec_row = "First paint: the opened file's content on screen"
+scenario = "first_paint"
+metric = "marker_cold_ms"
+max = 30.0
+
+[[budget]]
+spec_row = "First paint: the opened file's content on screen"
+scenario = "first_paint"
+metric = "marker_ratio_p50"
+max = 0.30
+
+# The flood row states its bound by reference: "coalesced paint stays inside
+# the staleness budget". So the row that carries the number is the scroll
+# row, and that is the one named here. Restating 16.0 against the flood row
+# instead would put the same number in two spec rows, which is the drift this
+# file exists to prevent.
+#
+# dev-linux now publishes a measured spread for this statistic:
+# "flood.cadence_p99_ms" = 1.02 in dev-linux.headroom.toml, from an 8
+# report-only-replicate campaign against the recorded 14.566. That
+# campaign's own worst reading was 1.006x the recorded value across host
+# loads up to 4.32, well short of the 1.02 ceiling it earns, and it did
+# not reproduce the two earlier, unreproduced loaded-host crossings this
+# comment used to carry as raw readings (16.429 ms at load 3.9, 16.29 ms
+# under a loaded bracket) -- those stay above this ceiling and outside
+# what the published spread covers. A breach in (16.0, 14.566 x 1.02]
+# reports as an excursion rather than failing; a breach above that,
+# including a repeat of either earlier crossing, still fails as a new
+# finding and should be rerun quiet before being read as a regression:
+# median-of-3 absorbs a lone excursion, not a sustained loaded run.
+[[budget]]
+spec_row = "Sustained scroll, 100k-line file, tier full"
+scenario = "flood"
+metric = "cadence_p99_ms"
+max = 16.0
+
+# The spec row says "PSS", which names a Linux quantity. macOS has no PSS;
+# its counterpart is the phys_footprint the memory scenario already records.
+# Two entries rather than one renamed metric, so neither class pretends to
+# measure the other's quantity.
+[[budget]]
+spec_row = "view-side memory (PSS), 10 buffers, post-workload"
+scenario = "memory"
+metric = "pss_mb"
+max = 150.0
+classes = ["dev-linux"]
+
+[[budget]]
+spec_row = "view-side memory (PSS), 10 buffers, post-workload"
+scenario = "memory"
+metric = "phys_footprint_mb"
+max = 150.0
+classes = ["dev-macos"]
+
+# Metrics measured outside their budget today.
+#
+# A shortfall is how an unmet budget is allowed to exist: it must be written
+# down, with the value it was accepted at and why. The gate then fails on a
+# metric outside budget with no entry here (a new shortfall, silently
+# introduced) and on a listed one that got worse than its accepted value (an
+# existing shortfall, quietly widening). It passes a listed one that held or
+# improved, so a budget the project has not met yet does not block work on
+# everything else, and cannot be forgotten either.
+#
+# One reading does not earn an entry here: a metric whose recorded baseline
+# on this class is inside its budget, measuring outside it on a class that
+# has published a measured spread for that statistic, is reported as an
+# excursion against the ceiling the recorded value earns and does not fail.
+# Writing such a reading down as an accepted shortfall would put ambient
+# load in this file as though it were a property of view.
+#
+# Every entry below (five dev-linux, six dev-macos) was ratified by the user
+# on 2026-08-03 as accepted-and-gated debt, together with the spec §3.1
+# echo-row amendment. The four echo ratio_p50 entries carry a pinned closure
+# path in the P4 plan: input-thread/runtime-loop unification first,
+# incremental rendering second.
+#
+# Improving past the budget does not need an edit here to pass; deleting the
+# entry is the housekeeping that follows.
+
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.1719342968313597
+why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. What remains is per-hop wake cost on view's own path: collapsing the runtime-loop-to-writer-thread hop into an inline write took this from 1.3538, and the paint path's hops have not been attacked yet."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "ratio_p50"
+class = "dev-linux"
+accepted = 1.1837936337116466
+why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_cold_ms"
+class = "dev-linux"
+accepted = 120.464107
+why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 24.9 ms. Bare nvim opening the same fixture reaches the same marker at 199.8 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first by 79 ms. It is not a reason to widen the bar: the 30 ms promise is about the cold start of a config that is not paying for 14 plugins."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_ratio_p50"
+class = "dev-linux"
+accepted = 0.4601985941432818
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.135. Under the heavy fixture the p99 cold start grows 26.5 -> 120.5 ms for view against 131.4 -> 199.8 ms for bare nvim, so view's own cold start grows more in absolute ms with plugin count than nvim's does and the ratio degrades to 0.460 while view still reaches the file first. Why it scales that way is measured but not attributed."
+
+[[shortfall]]
+scenario = "input_path"
+fixture = "minimal"
+metric = "key_to_rpc_p99_us"
+class = "dev-linux"
+accepted = 112.647
+why = "not a property of view: a level shift in the two kernel-side hops after this guest (a 12-vCPU VM on the shared proxmox host) rebooted 2026-08-02 23:57, two days after the 80.682 baseline campaign. Quiet draws at guest loads 0.18-0.81 with zero steal and zero PSI read 108.985-113.059 where the campaign's ten clean replicates read 80.155-90.922; segment p99 moved pty->key-read from the 110-124us clean band to 134-147us and key-read->loop-wake to 84-88us, while view's own hops held at 21-24us, and the code diff since the campaign tip touches no input-path crate. This is not the starvation mode the campaign's 500us criterion excludes (those spikes read 1032-2965us): it is a stable level across guest loads 0.18-2.29. Attribution ends at the hypervisor boundary -- unpinned vCPU placement redrawn by the reboot is the leading candidate -- so this entry is expected to be spent by a re-measure after the host's placement changes, not by view work. A deliberate guest reboot 2026-08-03 tested exactly that: post-reboot quiet trials read 107.42/108.80/112.77 (gated 108.797) -- marginally below the first shift band but still ~20us above the clean campaign level, so a guest-side placement redraw does not spend the entry; the residual candidate is host-side (pve node) placement or a hypervisor change, and the entry stays until a measurement reads inside 100."
+
+# echo.minimal view_p99_ms is not listed: the 2026-08-02 quiet-host
+# re-record measured 5.244 against the 8 ms bar, so the prior 8.290
+# shortfall here is spent -- that reading was an ambient-load tail, not a
+# property of view. Deleting it is the housekeeping the header asks for.
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "view_p99_ms"
+class = "dev-macos"
+accepted = 10.311
+why = "29% over the 8 ms bar with the 14-plugin fixture's own paint cost on top; bare nvim's p99 in the same gated trial is 10.112 ms and the recorded gated ratio_p99 is 1.1481, so most of the absolute tail is the fixture rather than view. Individual clean trials span 8.6-20.9 ms on this cell -- run-to-run tail spread, not host contention, is the residual story -- and the accepted value follows the recorded median-of-3."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "minimal"
+metric = "ratio_p50"
+class = "dev-macos"
+accepted = 1.1066140177690031
+why = "0.6% over the 1.1 bar on the quiet-host re-record (the contaminated-host 1.1125 shrank to 1.1066). Same residual as dev-linux's echo.minimal shortfall -- the echo_control row on this class attributes it to view rather than the UI protocol -- but dev-macos has not had the round-trip stage decomposition dev-linux ran to localize the remaining per-hop cost."
+
+[[shortfall]]
+scenario = "echo"
+fixture = "heavy"
+metric = "ratio_p50"
+class = "dev-macos"
+accepted = 1.114
+why = "1.3% over the 1.1 bar at the median of a statistic this class cannot pin tighter: 8 quiet-host replicates span 0.974-1.218, within-replicate trial spread 2-8% against 25% between replicates -- both processes' absolute p50 redraw in discrete tiers per spawned pair (core placement), not with ambient load: the lowest draw (0.974) landed at load 1.39 and the highest clean draw on record (1.2513, same-commit gate run) at load 1.1. That gate draw and the 2026-08-02 recorded 1.0782 are both ordinary draws from this spread, so the accepted value and the recorded baseline are the replicate median (load-included 1.114, all eight 1.109) rather than any single draw a below-median record would false-fail against. Same own-path residual as echo.minimal on this class."
+
+# dev-macos first_paint, from the 2026-08-02 quiet-host re-record (the
+# class's first recording of this row was taken on a host with a busy login
+# stack and both marker_cold_ms cells shrank hard once it was cleaned:
+# 42.5 -> 32.9 minimal, 220.0 -> 84.0 heavy). Both fixtures still miss the
+# 30 ms marker_cold_ms bar and the heavy fixture still misses the 0.30
+# marker_ratio_p50 bar; the three entries below are the quiet-host reading.
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "minimal"
+metric = "marker_cold_ms"
+class = "dev-macos"
+accepted = 32.922
+why = "9.7% over the 30 ms bar. Bare nvim opening the same fixture reaches the same marker at 161.563 ms p99 in the same paired run, so view gets there first by 4.9x; the remaining 3 ms over the bar is unattributed cross-class overhead this campaign measured but did not localize."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_cold_ms"
+class = "dev-macos"
+accepted = 84.02604099999999
+why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 32.9 ms. Bare nvim opening the same fixture reaches the same marker at 204.186 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first at p99 by 120.2 ms -- the same shape the dev-linux heavy shortfall for this metric describes, at this class's own absolute scale."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_ratio_p50"
+class = "dev-macos"
+accepted = 0.39563655534133746
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.188 on this class. Under the heavy fixture view's own cold start grows more in absolute ms with plugin count than nvim's does (p50 29.9 -> 77.9 vs nvim's 158.9 -> 196.9) and the ratio degrades while view still reaches the file first (p99 paired delta -109.6 ms). Clean-host observations of this one-shot cell span 0.3785-0.3956 across three same-commit runs; the record landed at the top of that spread and the accepted value follows the record rather than picking a flattering draw. The 0.3818 it replaces sits inside the clean spread, so the superseded contaminated record carried no information about this cell that the clean runs do not."

@@ -63,7 +63,7 @@ fn response_is_not_starved_by_unbounded_notification_flood() {
         "request() took {elapsed:?}, should be under 2s"
     );
     assert_eq!(result.unwrap(), Value::from(1));
-    // Only now do we drain the channel, proving all 10,000 notifications
+    // Only now is the channel drained, proving all 10,000 notifications
     // were fully buffered while unread.
     let mut count = 0usize;
     while let Ok(note) = n.recv_timeout(Duration::from_millis(500)) {

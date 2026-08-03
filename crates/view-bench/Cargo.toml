@@ -8,11 +8,30 @@ repository.workspace = true
 [lints]
 workspace = true
 
-[[bin]]
-name = "latency"
-path = "src/bin/latency.rs"
-
 [dependencies]
-anyhow = "1.0.103"
 portable-pty = "0.9.0"
+thiserror = "2.0.18"
+view-oracle = { version = "0.0.1", path = "../view-oracle" }
 vt100 = "0.16.2"
+
+# The tap channel is a Unix mechanism: raw CLOCK_MONOTONIC reads comparable
+# with the tap records the instrumented view binary emits (std's Instant is
+# opaque and cannot cross a process boundary), plus FIFO creation for the
+# channel. rustix has neither on Windows, so it is a unix-only dependency and
+# the tap rows (input_path/output_path and the diagnostic decomposition)
+# loud-skip off-unix like the memory row does where its metric is undefined.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "time",
+    "fs",
+] }
+
+# FIFO creation on Apple targets only, where rustix excludes mknodat and
+# mkfifoat; a safe wrapper, so the crate keeps its no-unsafe guarantee
+# there. libc supplies libproc's proc_pid_rusage, the only interface that
+# reports another process's phys_footprint without a task port, for the
+# macOS memory row; no safe wrapper for it is already in the tree.
+[target.'cfg(target_vendor = "apple")'.dependencies]
+libc = "0.2"
+nix = { version = "0.31", default-features = false, features = ["fs"] }

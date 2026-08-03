@@ -47,7 +47,7 @@ fn drain_until<const N: usize>(
 
 #[test]
 fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
@@ -79,7 +79,7 @@ fn decodes_grid_line_and_flush_from_real_nvim_redraw() {
 
 #[test]
 fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
-    let mut engine = Engine::spawn(EngineConfig::default()).unwrap();
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
@@ -135,21 +135,23 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
 /// decode paths that could both be wrong the same way.
 #[test]
 fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_storm() {
-    // `--clean` isolates this test from the host's real nvim config
-    // (plugins, statuslines, autocmds): the ground-truth comparison below
-    // assumes row 0 of the grid is the window's first buffer line with no
-    // winbar/tabline chrome above it, which a plugin-loaded config is not
-    // guaranteed to preserve.
-    let cfg = EngineConfig {
-        extra_args: vec!["--clean".into()],
-        ..EngineConfig::default()
-    };
-    let mut engine = Engine::spawn(cfg).unwrap();
+    // an isolated config matters beyond the usual reason here: the
+    // ground-truth comparison below assumes row 0 of the grid is the
+    // window's first buffer line, with no winbar or tabline chrome above
+    // it, which a plugin-loaded config is not guaranteed to preserve
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
     let (tx, rx) = mpsc::sync_channel(64);
     let (pump, _cutover) = engine.start_pump(tx);
     engine.handle.ui_attach(80, 24).unwrap();
 
-    let dir = std::env::temp_dir().join(format!(
+    // under the build tree, never the system temp dir, which is
+    // world-writable and would let an unrelated process pre-create this
+    // predictable path as a symlink to somewhere the test then writes 5000
+    // lines through
+    let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    dir.pop(); // crates/
+    dir.pop(); // workspace root
+    let dir = dir.join("target").join(format!(
         "view-engine-redraw-live-storm-{}",
         std::process::id()
     ));
@@ -162,13 +164,27 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
         }
     }
 
+    // a request rather than a notification, and a length check after it:
+    // nvim answers this only once the command has run, so the scrolling
+    // below cannot start against a buffer that is still loading. A notified
+    // open races the paced keystrokes, and when the open loses, every
+    // `<C-e>` lands on a single blank line, emits no scroll at all, and the
+    // failure names the missing scroll rather than the race that caused it
     engine
         .handle
-        .notify(
+        .request_timeout(
             "nvim_command",
             vec![rmpv::Value::from(format!("e {}", file_path.display()))],
+            Duration::from_secs(10),
         )
         .unwrap();
+    let loaded = engine.handle.eval_str("line('$')").unwrap();
+    assert_eq!(
+        loaded, "5000",
+        "the child holds {loaded} lines rather than the 5000 generated, so \
+         paging through it says nothing about scroll traffic"
+    );
+
     // scroll down one line at a time, pacing each keystroke so nvim
     // actually redraws between them: a same-frame burst of many small
     // scrolls (or one big multi-page jump) leaves no overlap between the
@@ -255,7 +271,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
             .expect("getline must return a String result");
 
         assert_eq!(
-            model.engine.grid.row_text(i as u16).trim_end(),
+            model.engine.grid().row_text(i as u16).trim_end(),
             expected_text,
             "compacted damage's final grid row {i} does not match nvim's own \
              reported buffer line (top_line={top_line})"
@@ -281,7 +297,7 @@ fn compacted_damage_matches_nvim_ground_truth_across_a_real_edit_and_scroll_stor
     // (offset from top_line, also 1-based) while the column carries over
     // directly.
     let expected_cursor_row = nvim_cursor_line - top_line;
-    let (grid_cursor_row, grid_cursor_col) = model.engine.grid.cursor();
+    let (grid_cursor_row, grid_cursor_col) = model.engine.grid().cursor();
 
     assert_eq!(
         i64::from(grid_cursor_row),

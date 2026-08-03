@@ -1,0 +1,5 @@
+schema = 1
+name = "fuzz-2-115"
+input = '0bgtxehobxp.b<C-w>ssagTtdzkexqvyjjcu$0wsi sft gtkef xyyxij<Esc>oxypkxo!nmdk<Esc>tslj"0m qpl<CR>gsi <C-w>v0cc!oleoc<Esc>"0d"ax ama$yxxlfknsj.klejkfaojaacxccqp0nu<Esc>de$meei"1"apxaayv "0y$cpV'
+engine_pin = "v0.12.4"
+ext_set = "default"

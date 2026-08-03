@@ -52,6 +52,28 @@ struct Cli {
     tier: Option<TierArg>,
 }
 
+/// The engine config `cli` asks for: the ordinary spawn, plus the binary
+/// path and file argument the user named.
+///
+/// A function rather than four lines inside `main` so the constructor it
+/// starts from is assertable. This is the editor a user's own session runs
+/// and the one the measurement matrix measures a pinned fixture
+/// configuration through, so it must keep starting from
+/// [`EngineConfig::default`]: `EngineConfig::isolated` compiles here just as
+/// well, and would spawn a child with `--clean`, discarding the very config
+/// being measured. A matrix run recording that child's numbers reports a
+/// large improvement and gates green.
+fn engine_config(cli: &Cli) -> EngineConfig {
+    let mut cfg = EngineConfig::default();
+    if let Some(bin) = &cli.nvim_bin {
+        cfg = cfg.with_nvim_bin(bin.clone());
+    }
+    if let Some(file) = &cli.file {
+        cfg = cfg.with_arg(file.as_os_str());
+    }
+    cfg
+}
+
 fn main() -> Result<()> {
     // startup's own debug-build stderr log (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
@@ -60,13 +82,7 @@ fn main() -> Result<()> {
     let process_start = Instant::now();
     vlog::init(process_start);
     let cli = Cli::parse();
-    let mut cfg = EngineConfig::default();
-    if let Some(bin) = cli.nvim_bin {
-        cfg.nvim_bin = bin;
-    }
-    if let Some(file) = &cli.file {
-        cfg.extra_args.push(file.as_os_str().to_owned());
-    }
+    let cfg = engine_config(&cli);
 
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
@@ -113,7 +129,9 @@ fn main() -> Result<()> {
             // emphasis fallback for the pre-attach frame (see
             // theme_cache::load's doc comment)
             if let Some(cached) = cached {
-                theme_cache::seed_hl_table(&mut model.engine.hl, &cached);
+                model
+                    .engine
+                    .replace_hl(theme_cache::seeded_hl_table(&cached));
             }
         }
         None => {
@@ -134,7 +152,8 @@ fn main() -> Result<()> {
     // the engine exists to send them to, or anything typed during attach
     // would be lost to a not-yet-existing channel
     let (msg_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
-    view_tui::terminal::spawn_input_thread(msg_tx.clone());
+    let term_size = view_tui::terminal::TermSizeCell::default();
+    view_tui::terminal::spawn_input_thread(msg_tx.clone(), term_size.clone());
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
     let drained = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
@@ -207,7 +226,7 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, &mut term)?;
+    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, term_size, &mut term)?;
     persist_theme(&model, &config_path);
     vlog::log_with("engine", || format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be
@@ -224,7 +243,7 @@ fn main() -> Result<()> {
 /// cannot copy one and silently miss the store).
 fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
     if let Some(path) = config_path {
-        theme_cache::store(Theme::from_hl(&model.engine.hl), path);
+        theme_cache::store(Theme::from_hl(model.engine.hl()), path);
     }
 }
 
@@ -239,5 +258,45 @@ fn report_fatal_reason(model: &Model) {
     if let Some(reason) = &model.fatal_reason {
         vlog::log("fatal", reason);
         eprintln!("view: {reason}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn the_editor_spawns_the_users_own_environment_not_a_hermetic_one() {
+        let cfg = engine_config(&Cli::parse_from(["view"]));
+        assert!(
+            cfg.extra_args.is_empty(),
+            "the editor a user runs carries a spawn argument of its own: \
+             --clean here discards the user's config and plugins, and the \
+             measurement matrix would record a plugin-free baseline for a \
+             fixture it believes it measured; got {:?}",
+            cfg.extra_args
+        );
+        assert!(
+            cfg.env_plan().is_empty(),
+            "the editor a user runs rewrites their environment: a hermetic \
+             plan here detaches every session from the config it is supposed \
+             to load; got {:?}",
+            cfg.env_plan()
+        );
+    }
+
+    #[test]
+    fn a_file_argument_is_the_only_argument_the_cli_adds() {
+        let cfg = engine_config(&Cli::parse_from(["view", "notes.txt"]));
+        assert_eq!(cfg.extra_args, vec![OsString::from("notes.txt")]);
+        assert!(cfg.env_plan().is_empty(), "{:?}", cfg.env_plan());
+    }
+
+    #[test]
+    fn nvim_bin_replaces_the_path_lookup() {
+        let cfg = engine_config(&Cli::parse_from(["view", "--nvim-bin", "/opt/nvim"]));
+        assert_eq!(cfg.nvim_bin, std::path::PathBuf::from("/opt/nvim"));
     }
 }

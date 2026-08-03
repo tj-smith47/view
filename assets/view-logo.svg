@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="41 53 174 156" width="174" height="156" role="img" aria-label="view">
+  <!-- The view mark: one confident viewport chevron, a Dracula gradient
+       purple -> pink -> cyan. Transparent background so it sits on the page's
+       own color in both light and dark READMEs. -->
+  <defs>
+    <linearGradient id="v" x1="60" y1="0" x2="196" y2="0" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bd93f9"/>
+      <stop offset="0.5" stop-color="#ff79c6"/>
+      <stop offset="1" stop-color="#8be9fd"/>
+    </linearGradient>
+  </defs>
+  <path d="M64 76 L128 186 L192 76" fill="none" stroke="url(#v)"
+        stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

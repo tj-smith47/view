@@ -168,8 +168,14 @@ fn decode_hl_attr_define(args: &[Value]) -> Option<UiEvent> {
     };
     let map = rgb_attrs.as_map()?;
     let lookup = |key: &str| map_find(map, key);
-    let fg = lookup("foreground").and_then(as_u64).map(|v| v as u32);
-    let bg = lookup("background").and_then(as_u64).map(|v| v as u32);
+    // reject rather than truncate: a wire value past u32 is a malformed
+    // color, and `as` would silently fold it onto a valid-looking one
+    let fg = lookup("foreground")
+        .and_then(as_u64)
+        .and_then(|v| u32::try_from(v).ok());
+    let bg = lookup("background")
+        .and_then(as_u64)
+        .and_then(|v| u32::try_from(v).ok());
     let bold = lookup("bold").and_then(Value::as_bool).unwrap_or(false);
     let italic = lookup("italic").and_then(Value::as_bool).unwrap_or(false);
     let underline = lookup("underline")

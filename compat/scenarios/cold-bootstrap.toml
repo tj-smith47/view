@@ -1,0 +1,49 @@
+# Mandatory cold-bootstrap scenario: `cold_bootstrap
+# = true` makes resolve_fixture key this run's XDG_DATA_HOME by a fresh
+# scratch id every single invocation (never the shared
+# compat/.cache/<lockfile-hash>/ directory the warm heavy-fixture scenario
+# reuses), so this scenario always drives a genuinely from-scratch
+# lazy.nvim bootstrap: cloning lazy.nvim itself over the network, then
+# lazy.nvim cloning every pinned plugin in the lockfile, then loading them
+# -- exactly the
+# first-run experience a real user hits once, proven here on every run
+# instead of only historically when the fixture was first authored.
+#
+# The leading `send = "<CR>"` drives past any interactive startup prompt
+# (a hit-enter prompt, for instance) the same way a real user's keystroke
+# would: through the pty's actual input stream, not the EMBED nvim_eval
+# channel a blocking prompt defers (the wedge corpus/fuzz-42-6.toml once
+# reproduced; the corpus snapshot layer now dismisses blocked waits before
+# probing, while this driver stays on the pty path a real keystroke takes).
+# A bare <CR> in normal mode with nothing pending is a harmless
+# cursor-down no-op, so it is safe to send unconditionally rather than
+# needing to first detect whether a prompt actually appeared.
+#
+# Runs real network I/O (cloning lazy.nvim plus every pinned plugin repo);
+# slow by nature of the work it does, not by any fixed sleep in the driver.
+schema = 1
+plugin = "lualine"
+class = "ui-owning"
+fixture = "heavy"
+state = "present"
+cold_bootstrap = true
+steps = [
+  { send = "<CR>" },
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  # lualine can finish loading while lazy.nvim's install window still holds
+  # input focus (it stays open until every plugin is in and LazyDone has
+  # fired), so the load probe alone is not a safe gate for the keystroke
+  # below -- it must also wait for the install window to actually close.
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ihello<Esc>" },
+  # a translation regression in <Esc> handling would otherwise still pass
+  # this scenario: with no real key press sent, mode() stays "i" while
+  # every substring assertion below keeps passing against the literal text
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  # noice's startup health notifications overlay the upper grid rows
+  # (including buffer line 1, where this text renders) for the first few
+  # seconds after launch; the timeout must outlast their dismissal.
+  { wait_for = "hello", timeout_ms = 15000 },
+  { assert_absent = "E5108" },
+  { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
+]

@@ -1,3 +1,31 @@
 /target/
-.claude/
 .superpowers/
+
+# The durable engineering record under .claude/ IS tracked: the spec of
+# record, the phase plans, the measurement evidence, the QA scripts and the
+# conventions are the reasoning behind every budget and hard rule in this
+# repo, and a reviewer who cannot read them cannot check the code against
+# its own contract. What stays untracked below is either machine-local
+# (scratch, temp, per-user settings) or an operational log rather than a
+# durable record.
+.claude/tmp/
+.claude/scratch/
+.claude/bench-baselines/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/.headroom_wrap_marker.json
+# Per-user hook wiring (auto-executing hooks are a supply-chain exposure in a
+# public repo, and the wiring bakes machine-local paths) and the maintainer's
+# session-operational logs. The hook scripts under .claude/hooks/ stay tracked.
+.claude/settings.json
+.claude/HANDOFF.md
+.claude/STATUS.md
+.claude/known-bugs.md
+.claude/archive/
+.claude/pending-first-push.md
+/compat/.cache/
+/compat/results.json
+
+# a diagnostic a failed matrix run leaves for hand-diffing against the
+# baseline; committing one would put unratcheted numbers in the repo
+*.partial.toml

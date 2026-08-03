@@ -23,9 +23,15 @@ bench-support = []
 # needs the unbounded form. Enabled automatically for this crate's own test
 # session by the self dev-dependency below; off in every ordinary build.
 test-support = []
+# Compiles monotonic-timestamp taps at the RPC-written and redraw-parsed
+# boundaries (src/tap.rs) for the measurement harness. Off by default:
+# without it the tap module does not exist in the compilation at all, so
+# shipping builds carry zero tap code or cost.
+bench-taps = []
 
 [dependencies]
 rmpv = "1.3.1"
+
 thiserror = "2.0.18"
 view-core = { version = "0.0.1", path = "../view-core" }
 
@@ -38,7 +44,51 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # view-engine as its own dev-dependency, so test-support never leaks in.
 view-engine = { path = ".", features = ["test-support"] }
 
+# The hang fixture tests/spawn.rs drives. Behind `test-support` so it is
+# built for this crate's own `cargo test` session (where the self
+# dev-dependency unifies that feature on) and for nothing else: an ordinary
+# `cargo build -p view-engine` produces no such artifact.
+[[bin]]
+name = "view-engine-hang-fixture"
+path = "tests/fixtures/hang_fixture.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+doc = false
+
 [[bench]]
 name = "damage_fold"
 harness = false
 required-features = ["bench-support"]
+
+# Unix-only, and not optional: the outbox's inline-write fast path asks the
+# engine pipe whether a small write can complete without blocking, which is
+# what lets the runtime loop write RPC itself instead of waking a thread to
+# do it (see handle::Outbox). `time` additionally serves the bench-taps
+# records, whose CLOCK_MONOTONIC reads must be comparable across processes
+# in a way std's opaque Instant is not.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "time",
+    "event",
+    "fs",
+    # PIPE_BUF is the size half of what makes an inline write safe on unix
+    "pipe",
+] }
+
+# Windows-only, and not optional for the same reason rustix is not: the
+# inline path's readiness answer is `WriteQuotaAvailable` from
+# NtQueryInformationFile, and the pipe that can answer it has to be built by
+# CreatePipe rather than left to Stdio::piped() (see engine::winpipe).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Wdk_Storage_FileSystem",
+    "Win32_Foundation",
+    # CreatePipe takes a SECURITY_ATTRIBUTES pointer, so windows-sys gates the
+    # binding on this feature as well as on Win32_System_Pipes; without it the
+    # crate builds only while some other dependency happens to ask for it.
+    "Win32_Security",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+] }

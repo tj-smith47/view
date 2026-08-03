@@ -1,0 +1,63 @@
+schema = 1
+engine_pin = "v0.12.4"
+machine_class = "dev-macos"
+
+[echo.heavy]
+paired_delta_p99_ms = 7.241999999999999
+ratio_p50 = 1.114
+ratio_p99 = 1.1480989098643977
+view_p99_ms = 10.311
+
+[echo.minimal]
+paired_delta_p99_ms = 3.2880000000000003
+ratio_p50 = 1.1066140177690031
+ratio_p99 = 1.023219512195122
+view_p99_ms = 5.244
+
+[echo_control.heavy]
+control_delta_p99_ms = 5.997000000000001
+control_p99_ms = 9.737
+control_ratio_p50 = 1.0195479535736103
+control_ratio_p99 = 1.077459333849729
+
+[echo_control.minimal]
+control_delta_p99_ms = 2.299
+control_p99_ms = 4.789
+control_ratio_p50 = 1.0
+control_ratio_p99 = 1.3325415676959622
+
+[first_paint.heavy]
+marker_cold_ms = 84.02604099999999
+marker_ratio_p50 = 0.39563655534133746
+marker_ratio_p99 = 0.41151706839744245
+shell_visible_ms = 6.112
+
+[first_paint.minimal]
+marker_cold_ms = 32.922
+marker_ratio_p50 = 0.18811294962937786
+marker_ratio_p99 = 0.20377195493182318
+shell_visible_ms = 7.594208
+
+[flood.minimal]
+cadence_p99_ms = 13.352667
+cadence_p99_ratio = 1.0364998638846823
+pace_ratio = 1.0030877047265554
+
+[input_path.minimal]
+key_to_rpc_p99_us = 74.0
+
+[memory.minimal]
+phys_footprint_mb = 3.56329345703125
+
+[output_path.minimal]
+p99_ms = 0.055
+
+[scroll.heavy]
+ratio_p50 = 2.393156602249975
+ratio_p99 = 1.7097704636773465
+staleness_p99_ms = 8.833459
+
+[scroll.minimal]
+ratio_p50 = 2.381585467443348
+ratio_p99 = 1.6683195297774573
+staleness_p99_ms = 6.354875000000001
