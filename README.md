@@ -4,7 +4,7 @@
 
 # view
 
-The AI-first terminal editor: native Rust speed and a modern, coherent UI, with your entire Neovim setup running unmodified inside.
+An agent-native, Rust-fast terminal editor with a modern UI, where your Neovim config just works.
 
 [![CI](https://github.com/tj-smith47/view/actions/workflows/ci.yml/badge.svg)](https://github.com/tj-smith47/view/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
