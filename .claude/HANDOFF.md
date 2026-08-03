@@ -83,11 +83,11 @@ citations, then the user's adjudication.
 
 | # | Task | State / what remains |
 |---|------|----------------------|
-| 6 | dev-macos re-record | DONE — harness fix `d6ac7af`, bench TOMLs `f4521ab` = the FINAL TIP (see 3.2) |
+| 6 | dev-macos re-record | DONE — harness fix `d6ac7af`, bench TOMLs `f4521ab` (see 3.2). `f4521ab` was the frozen tip until #17's fixes moved it; the final tip is now `bb139c5` (+ docs `6043585`). Bench/gate evidence at `f4521ab` stays valid: the #17 commits touch only compat-runner/env-reset paths, no bench path |
 | 15 | `task ci` at final tip | re-run (green at `cdf5f26`: 796 passed, 32 suites) |
 | 16 | oracle corpus + fuzz seeds 1,2 x200 at final tip | re-run (at `cdf5f26`: 24/24 PARITY, both seeds 0 divergences) |
 | 19 | zero-clock greps at final tip | cheap re-observe |
-| 17 | compat at final tip | Linux matrix + `VIEW_DAILY_CONFIG=$HOME/.config/nvim task compat` (all 15 rows OK, none skipped) + mbp matrix via a fresh bundle + `task oracle -- page` regen; commit the page |
+| 17 | compat at final tip | DONE — daily-config exposed 3 real harness defects, fixed at `58006ef` + `bb139c5` (= the NEW FINAL TIP); page committed `6043585`. Linux: plain 0, daily 15/15 OK. mbp at `bb139c5`: env tests 0 (non-root proof of the read-only reset), plain 0, daily x2 back-to-back 15/15 OK (reset proven across runs), hermetic home left empty. Logs: local `~/.claude/tmp/compat-{plain,daily}-v3.log`, mbp `~/compat-mbp-{plain,daily1,daily2}-bb139c5.log`, `~/envtests-bb139c5.log` |
 | 18 | `task perf-audit CLASS=dev-linux` at final tip | quiet host, no overlapping loads |
 | 26 | dogfood refresh at final tip | pending |
 | 20 | citations into the plan's exit checklist | a draft exists but cites `cdf5f26`, which is stale — re-cite everything at the final tip |
