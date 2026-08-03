@@ -95,6 +95,31 @@ Task placement and detailed design happen at P4 design time; the ordering
 above is fixed. The four echo `ratio_p50` shortfall entries in
 `crates/view-bench/budgets.toml` are the ledger this workstream retires.
 
+## Measurement-layer carry-ins (from the 2026-08-03 dev-macos campaign)
+
+Open harness-semantics questions the P3 exit campaign surfaced. They do not
+block P3 exit — the gate fails loudly, never silently, in every case below —
+but they are adjudicated during this phase's bench work (Task 16 territory),
+not dropped:
+
+1. `--record`'s ratchet-only-tightens semantics can pin a wide-spread cell
+   to a below-median draw: `echo.heavy ratio_p50` on dev-macos spans
+   0.974–1.218 across quiet-host replicates (per-spawn core placement, not
+   load), so a lucky record becomes a bar honest draws then fail.
+2. Single-shot gating cannot resolve regressions smaller than ~25% on that
+   same cell. Candidates: gate on a replicate median, or placement-robust
+   pairing.
+3. The `scroll.minimal` headroom factor rests on quiet draws whose max
+   (2.438) sits knife-edge under the bar (2.4387); per the campaign
+   protocol a gate draw above it is new evidence to adjudicate, not
+   automatically a regression.
+4. Echo on dev-macos routes to the compiled 1.25 headroom default after the
+   falsified host-wide `ratio_p50 = 1.02` key was removed; per-scenario
+   spread characterization for the remaining scenarios is open.
+5. Auto-staleness is dormant on dev-macos under the compiled defaults (an
+   entry is provably spent only ~12-20% inside its bar), so shortfall-ledger
+   cleanup on that class stays human judgment.
+
 ## Coverage walk (planning protocol step 0)
 
 Every charter deliverable and spec MUST for this phase, mapped to a task

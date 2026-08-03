@@ -124,8 +124,10 @@ stable within ×1.07 across load regimes whose tails swung ×300):
   refuses and names the noise. A gate result is trustworthy by construction,
   never by hoping the host was quiet.
 
-**Amendment 2026-07-26, first-paint split. This amendment has NO user sign-off;
-it is provisional.** The single first-paint row above was one budget over two
+**Amendment 2026-07-26, first-paint split. Ratified by the user 2026-08-03:
+the 2026-07-27 budget ruling (marker p99 ≤ 30 ms, ratio_p50 ≤ 0.30×) already
+presupposed this split, and the user confirmed the amendment itself when that
+was surfaced.** The single first-paint row above was one budget over two
 different events, and the harness measured a third. The recorded metrics
 `cold_ms` (dev-linux 3.583243, dev-macos 8.60825) and `ratio_vs_nvim`
 (0.019123, 0.036566) were taken with an "any cell has ink" boundary, which
