@@ -199,6 +199,14 @@ class = "dev-linux"
 accepted = 0.4601985941432818
 why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.135. Under the heavy fixture the p99 cold start grows 26.5 -> 120.5 ms for view against 131.4 -> 199.8 ms for bare nvim, so view's own cold start grows more in absolute ms with plugin count than nvim's does and the ratio degrades to 0.460 while view still reaches the file first. Why it scales that way is measured but not attributed."
 
+[[shortfall]]
+scenario = "input_path"
+fixture = "minimal"
+metric = "key_to_rpc_p99_us"
+class = "dev-linux"
+accepted = 112.647
+why = "not a property of view: a level shift in the two kernel-side hops after this guest (a 12-vCPU VM on the shared proxmox host) rebooted 2026-08-02 23:57, two days after the 80.682 baseline campaign. Quiet draws at guest loads 0.18-0.81 with zero steal and zero PSI read 108.985-113.059 where the campaign's ten clean replicates read 80.155-90.922; segment p99 moved pty->key-read from the 110-124us clean band to 134-147us and key-read->loop-wake to 84-88us, while view's own hops held at 21-24us, and the code diff since the campaign tip touches no input-path crate. This is not the starvation mode the campaign's 500us criterion excludes (those spikes read 1032-2965us): it is a stable level across guest loads 0.18-2.29. Attribution ends at the hypervisor boundary -- unpinned vCPU placement redrawn by the reboot is the leading candidate -- so this entry is expected to be spent by a re-measure after the host's placement changes, not by view work."
+
 # echo.minimal view_p99_ms is not listed: the 2026-08-02 quiet-host
 # re-record measured 5.244 against the 8 ms bar, so the prior 8.290
 # shortfall here is spent -- that reading was an ambient-load tail, not a
