@@ -35,3 +35,14 @@ task, observed in real use rather than a harness. The differential oracle
 now watches this surface: corpus 24/24 PARITY at 56177dd (ten fuzz-found
 scripts promoted to regression entries) and seeded fuzz runs recorded in
 the P3 exit checklist evidence.
+
+P3 exit refresh (2026-08-03, code tip bb139c5): re-observed at the exit
+battery tip. Scripted tmux session against the release binary opened a
+scratch file, appended a line in normal->insert flow, and persisted it via
+:wq — contents verified after exit 0, terminal intact. The real config
+again rendered NvimTree, the alpha dashboard, and lualine through view,
+with noice.nvim's ext_cmdline warning surfacing as native toasts — the
+still-open noice ext_* suppression item, observed in real use. New since
+the 94f8732 entry: the daily-config compat scenario now exercises this
+same real-config surface as a harness row (15/15 OK on both hosts at
+bb139c5, twice back-to-back on macOS).
