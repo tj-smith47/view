@@ -57,13 +57,29 @@ jobs:
           ENGINE_PIN=$(cat .engine-pin)
           curl -fsSL -o nvim-win64.zip "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-win64.zip"
           unzip -q nvim-win64.zip
-          echo "$PWD/nvim-win64/bin" >> "$GITHUB_PATH"
+          # cygpath, not $PWD: this step runs under Git Bash, whose $PWD is a
+          # POSIX-style path (/d/a/...) that only other bash steps can resolve.
+          # CreateProcessW cannot, so a test that spawns nvim through the
+          # Windows API would fail with "program not found" while the bash
+          # version check below still passes.
+          cygpath -w "$PWD/nvim-win64/bin" >> "$GITHUB_PATH"
 
       - name: Check neovim version
         shell: bash
         run: |
           ENGINE_PIN=$(cat .engine-pin)
           nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      # A bash-only-visible nvim (POSIX-style GITHUB_PATH entry) passes the
+      # bash check above but is invisible to CreateProcessW, which is how the
+      # test suite actually spawns the engine. This pins the Windows-native
+      # resolution path itself.
+      - name: Check neovim resolves natively (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $pin = (Get-Content .engine-pin).Trim().TrimStart("v")
+          if (-not ((nvim --version | Select-Object -First 1) -match [regex]::Escape($pin))) { exit 1 }
 
       - name: Run CI suite
         run: task ci
