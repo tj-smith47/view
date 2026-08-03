@@ -520,9 +520,48 @@ pub fn reset_hermetic_home() -> io::Result<()> {
 /// is reading.
 fn reset_home_dir(path: &Path) -> io::Result<()> {
     match std::fs::remove_dir_all(path) {
+        Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+            // The observed contaminant is exactly this shape: a Go module
+            // cache marks its directories read-only, and unlinking an entry
+            // needs write permission on its parent directory, so a plain
+            // recursive delete dies partway through the tree.
+            make_tree_deletable(path)?;
+            match std::fs::remove_dir_all(path) {
+                Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+                _ => Ok(()),
+            }
+        }
         Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
         _ => Ok(()),
     }
+}
+
+/// Restores owner write (and, on Unix, traverse) permission on every
+/// directory under `path`, the precondition [`reset_home_dir`]'s recursive
+/// delete needs: unlink permission comes from the entry's parent directory,
+/// so only directories matter and files are left untouched. Symlinks are
+/// not followed; their targets sit outside the tree being deleted.
+fn make_tree_deletable(path: &Path) -> io::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Ok(());
+    }
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o700);
+    }
+    #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
+    // Not a world-writability hazard: the tree is being deleted, and on
+    // non-Unix the read-only attribute is the only bit blocking that.
+    permissions.set_readonly(false);
+    std::fs::set_permissions(path, permissions)?;
+    for entry in std::fs::read_dir(path)? {
+        make_tree_deletable(&entry?.path())?;
+    }
+    Ok(())
 }
 
 /// The refusal [`prepare_home_dir`] raises, naming the entry and the way
@@ -823,6 +862,21 @@ mod tests {
         assert!(!dir.exists(), "the reset left the contaminated home behind");
         reset_home_dir(&dir).unwrap();
         prepare_home_dir(&dir).unwrap();
+    }
+
+    /// The observed contaminant is a Go module cache, which marks its
+    /// directories read-only and thereby blocks a plain recursive delete.
+    #[cfg(unix)]
+    #[test]
+    fn resetting_a_home_holding_read_only_directories_still_deletes_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("home-reset-read-only");
+        let cache_dir = dir.join("go/pkg/mod");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        std::fs::write(cache_dir.join("module.txtar"), b"cached").unwrap();
+        std::fs::set_permissions(&cache_dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        reset_home_dir(&dir).unwrap();
+        assert!(!dir.exists(), "the reset left the read-only home behind");
     }
 
     /// Anything else under a hermetic home is input a child's subprocess
