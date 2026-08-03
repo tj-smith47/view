@@ -1087,16 +1087,22 @@ fn main() -> Result<()> {
                 eprintln!("{finding}");
             }
         }
-        // a shortfall the run measured back inside its budget has been fixed
-        // and its entry now describes nothing; only a full-coverage run can
-        // tell that apart from a cell it simply did not visit
+        // a shortfall the run measured back inside its budget by more than
+        // the class's spread for the statistic has been fixed and its entry
+        // now describes nothing; a bare inside reading is one draw of a
+        // statistic whose next draw may still need the entry. Stale-entry
+        // advice accompanies the full sweep, where the operator is
+        // adjudicating the whole ledger; a scoped run keeps its exit status
+        // about the cells it measured
         let mut stale_shortfalls = Vec::new();
         if cli.all {
-            stale_shortfalls = budgets::unreached_shortfalls(&budget_file, &cli.class, &findings);
+            stale_shortfalls =
+                budgets::unreached_shortfalls(&budget_file, &cli.class, &findings, &headroom);
             for shortfall in &stale_shortfalls {
                 eprintln!(
                     "BUDGET SHORTFALL STALE [{}.{}] {} on {}: measured inside its budget this \
-                     run, so the [[shortfall]] entry accepting {} is spent and should be deleted",
+                     run by more than the class's spread for the statistic, so the \
+                     [[shortfall]] entry accepting {} is spent and should be deleted",
                     shortfall.scenario,
                     shortfall.fixture,
                     shortfall.metric,

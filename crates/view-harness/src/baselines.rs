@@ -279,11 +279,11 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
 ///
 /// A `"scenario.metric"` entry wins over a bare `"metric"` entry, because
 /// the same statistic name carries a different run-to-run spread in
-/// different scenarios: on this class the echo replicates resolve
-/// `ratio_p50` to under 2%, while the scroll replicates put the same name's
-/// spread several times wider, and one factor cannot be honest about both.
-/// A bare entry stays the host-wide characterization for every scenario
-/// without a qualified one.
+/// different scenarios: on dev-macos the scroll replicates resolve the
+/// bar-relevant spread of `ratio_p50` to a few percent, while the echo
+/// replicates put the same name's spread an order of magnitude wider, and
+/// one factor cannot be honest about both. A bare entry stays the host-wide characterization
+/// for every scenario without a qualified one.
 ///
 /// An override only resizes an allowance that already exists: a metric the
 /// class does not gate at all stays ungated, because that exemption is about

@@ -401,6 +401,27 @@ fn shortfall_ceiling(
     Some((headroom, headroom.bar(accepted)))
 }
 
+/// Whether a reading inside its budget is inside by more than the spread
+/// this class grants the statistic -- the worst draw the spread allows for
+/// this reading would still be inside the bound.
+///
+/// The mirror of [`shortfall_ceiling`], for the same reason: one sample of
+/// a noisy statistic proves neither a regression nor a fix. A metric the
+/// class does not gate gets no spread and one inside reading stays one
+/// sample, so the entry stands.
+fn provably_inside(
+    scenario: &str,
+    metric: &str,
+    class: &str,
+    measured: f64,
+    budget: f64,
+    headroom_table: &crate::baselines::HeadroomTable,
+) -> bool {
+    let controlled = crate::baselines::is_controlled_class(class);
+    crate::baselines::headroom_for(headroom_table, scenario, metric, controlled)
+        .is_some_and(|headroom| headroom.bar(measured) <= budget)
+}
+
 /// The recorded value and the worst reading it accounts for, when a metric
 /// above its bound this run is inside what this class has measured the
 /// statistic to move; `None` when nothing earns that.
@@ -558,30 +579,52 @@ pub fn check_cell(
     findings
 }
 
-/// Shortfalls covering `class` that the run's findings did not reach, in
-/// deterministic order.
+/// Shortfalls covering `class` whose metric this run measured inside its
+/// budget by more than the spread the class grants the statistic, in
+/// deterministic order: the gap is fixed and the entry is stale.
 ///
-/// A shortfall whose metric was measured and is now inside budget has been
-/// fixed and its entry is stale; one whose cell never ran this invocation is
-/// simply unvisited. The caller distinguishes them by whether the run
-/// claimed full coverage, exactly as the baseline gate does for cells.
+/// Inside by less than that spread proves nothing: a statistic whose
+/// honest draws straddle the bound (dev-macos `echo.heavy` ratio_p50 spans
+/// 0.974-1.251 across clean same-commit runs against a 1.1 bound) would
+/// otherwise flip between a stale entry on a low draw and a missing one on
+/// a high draw, with no ledger state that passes both. The spread is the
+/// same one [`shortfall_ceiling`] grants above the bound, so the two
+/// directions agree about what one sample can prove.
+///
+/// A shortfall whose cell produced no finding this run is unvisited, not
+/// stale: a run that never measured the metric (a single-cell invocation,
+/// or a platform that skips the scenario) has no reading to prove
+/// anything with, and reporting it spent would claim a measurement that
+/// never happened.
 #[must_use]
 pub fn unreached_shortfalls<'a>(
     file: &'a BudgetFile,
     class: &str,
     findings: &[Finding],
+    headroom_table: &crate::baselines::HeadroomTable,
 ) -> Vec<&'a Shortfall> {
     let mut unreached: Vec<&Shortfall> = file
         .shortfall
         .iter()
         .filter(|s| s.class == class)
         .filter(|s| {
-            !findings.iter().any(|f| {
-                f.scenario == s.scenario
-                    && f.fixture == s.fixture
-                    && f.metric == s.metric
-                    && f.verdict != Verdict::Inside
-            })
+            let mut matched = findings.iter().filter(|f| {
+                f.scenario == s.scenario && f.fixture == s.fixture && f.metric == s.metric
+            });
+            let mut visited = false;
+            let live = matched.any(|f| {
+                visited = true;
+                f.verdict != Verdict::Inside
+                    || !provably_inside(
+                        &f.scenario,
+                        &f.metric,
+                        class,
+                        f.measured,
+                        f.budget,
+                        headroom_table,
+                    )
+            });
+            visited && !live
         })
         .collect();
     unreached.sort_by(|a, b| {
@@ -1367,9 +1410,89 @@ why = \"because\"
     }
 
     #[test]
-    fn a_shortfall_the_run_no_longer_reaches_is_reported_as_unreached() {
+    fn a_shortfall_measured_provably_inside_is_reported_stale() {
         let file = file_from(&format!(
             "{ONE_BUDGET}
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"minimal\"
+metric = \"view_p99_ms\"
+class = \"controlled-linux\"
+accepted = 9.0
+why = \"because\"
+"
+        ));
+        let none = crate::baselines::HeadroomTable::new();
+        // budget max 8.0; default ABSOLUTE_HEADROOM 1.5 puts a 1.0 reading
+        // inside even at its worst draw (1.5 <= 8.0), so the entry is spent
+        let fixed = check_cell(
+            &file,
+            "echo",
+            "minimal",
+            &metrics(&[("view_p99_ms", 1.0)]),
+            "controlled-linux",
+        );
+        let unreached = unreached_shortfalls(&file, "controlled-linux", &fixed, &none);
+        assert_eq!(unreached.len(), 1, "a fixed shortfall's entry is now stale");
+
+        let still_short = check_cell(
+            &file,
+            "echo",
+            "minimal",
+            &metrics(&[("view_p99_ms", 9.0)]),
+            "controlled-linux",
+        );
+        assert!(unreached_shortfalls(&file, "controlled-linux", &still_short, &none).is_empty());
+    }
+
+    /// A statistic whose honest draws straddle its bound must not spend its
+    /// shortfall entry on one low draw: with the entry gone, the next high
+    /// draw fails as a new shortfall, and no ledger state passes both.
+    #[test]
+    fn an_inside_reading_within_the_spread_does_not_spend_the_shortfall() {
+        let file = file_from(&format!(
+            "{ONE_BUDGET}
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"minimal\"
+metric = \"view_p99_ms\"
+class = \"controlled-linux\"
+accepted = 9.0
+why = \"because\"
+"
+        ));
+        // budget max 8.0; default ABSOLUTE_HEADROOM 1.5 says a 7.0 reading
+        // could as honestly have drawn 10.5, so the entry is still earning
+        let inside_within_spread = check_cell(
+            &file,
+            "echo",
+            "minimal",
+            &metrics(&[("view_p99_ms", 7.0)]),
+            "controlled-linux",
+        );
+        let none = crate::baselines::HeadroomTable::new();
+        assert!(
+            unreached_shortfalls(&file, "controlled-linux", &inside_within_spread, &none)
+                .is_empty(),
+            "an inside draw within the spread keeps the entry"
+        );
+
+        // a class that resolves the statistic to 5% proves the same 7.0
+        // reading inside: 7.35 <= 8.0, and the entry is spent
+        let tight: crate::baselines::HeadroomTable =
+            [("view_p99_ms".to_string(), 1.05)].into_iter().collect();
+        assert_eq!(
+            unreached_shortfalls(&file, "controlled-linux", &inside_within_spread, &tight).len(),
+            1,
+            "a spread the reading clears spends the entry"
+        );
+
+        // a tail statistic on a shared class publishes no spread at all, and
+        // one inside reading there proves nothing either
+        assert!(
+            unreached_shortfalls(
+                &file_from(&format!(
+                    "{ONE_BUDGET}
 [[shortfall]]
 scenario = \"echo\"
 fixture = \"minimal\"
@@ -1378,25 +1501,55 @@ class = \"dev-linux\"
 accepted = 9.0
 why = \"because\"
 "
-        ));
-        let fixed = check_cell(
-            &file,
-            "echo",
-            "minimal",
-            &metrics(&[("view_p99_ms", 1.0)]),
-            "dev-linux",
+                )),
+                "dev-linux",
+                &check_cell(
+                    &file,
+                    "echo",
+                    "minimal",
+                    &metrics(&[("view_p99_ms", 1.0)]),
+                    "dev-linux",
+                ),
+                &tight,
+            )
+            .is_empty(),
+            "no published spread leaves the entry standing"
         );
-        let unreached = unreached_shortfalls(&file, "dev-linux", &fixed);
-        assert_eq!(unreached.len(), 1, "a fixed shortfall's entry is now stale");
+    }
 
-        let still_short = check_cell(
+    /// A cell the run never measured (a platform-skipped scenario, or an
+    /// invocation scoped to another cell) produces no findings, and an
+    /// absent reading proves nothing about the entry either way.
+    #[test]
+    fn a_shortfall_whose_cell_never_ran_is_not_reported_stale() {
+        let file = file_from(&format!(
+            "{ONE_BUDGET}
+[[shortfall]]
+scenario = \"echo\"
+fixture = \"minimal\"
+metric = \"view_p99_ms\"
+class = \"controlled-linux\"
+accepted = 9.0
+why = \"because\"
+"
+        ));
+        let none = crate::baselines::HeadroomTable::new();
+        assert!(
+            unreached_shortfalls(&file, "controlled-linux", &[], &none).is_empty(),
+            "an unvisited cell leaves the entry standing"
+        );
+
+        let other_cell = check_cell(
             &file,
             "echo",
-            "minimal",
-            &metrics(&[("view_p99_ms", 9.0)]),
-            "dev-linux",
+            "heavy",
+            &metrics(&[("view_p99_ms", 1.0)]),
+            "controlled-linux",
         );
-        assert!(unreached_shortfalls(&file, "dev-linux", &still_short).is_empty());
+        assert!(
+            unreached_shortfalls(&file, "controlled-linux", &other_cell, &none).is_empty(),
+            "a reading from a different fixture is not this cell's"
+        );
     }
 
     /// A bound whose metric is declared but whose scenario never produces it
