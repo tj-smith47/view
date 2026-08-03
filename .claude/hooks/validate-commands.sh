@@ -46,8 +46,26 @@ FLAT=$(printf %s "$COMMAND" |
     -e "s/(^|[[:space:]])(-m|--message)[[:space:]=]+[^-[:space:];&|][^[:space:];&|]*/\1/g" \
     -e "s/([^[:alnum:]_]|^)git[[:space:]]+stash[[:space:]]+push([^[:alnum:]_]|\$)/\1git stash\2/g" |
   tr -d "'\"")
+# A singular, deliberate push is not refused here: it falls through to the
+# permission layer, whose ask-rule surfaces the exact command for interactive
+# approval. Only the standalone form qualifies -- the RAW command, one line,
+# literally starting `git push`, with no chaining, substitution, redirection,
+# expansion or escapes in its arguments -- so a push can never ride in on the
+# tail of a compound command, hide behind quoting, or smuggle a second command
+# past the approval prompt. Judged on $COMMAND, not $FLAT: the flattening
+# exists to expose hidden subcommands to the greps below, and would also erase
+# exactly the disguises (quotes, continuations) that disqualify a push from
+# being called deliberate.
+case "$COMMAND" in
+  *$'\n'*) : ;;
+  *)
+    if printf %s "$COMMAND" | grep -qE '^git push([[:space:]]+[^;&|<>`$\\]*)?$'; then
+      exit 0
+    fi
+    ;;
+esac
 if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bpush\b'; then
-  echo "BLOCKED: git push requires an explicit user ship instruction." >&2
+  echo "BLOCKED: git push requires interactive approval and must be a singular standalone command: git push <args>, nothing before or after it on the line." >&2
   exit 2
 fi
 if printf %s "$FLAT" | grep -qE '\bgit\b[^|;&]*\bcommit\b'; then

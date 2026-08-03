@@ -81,18 +81,35 @@ block_commit() { check 2 'commit via' "$1" "$2"; }
 allow() { check 0 '' "$1" "$2"; }
 
 # ---------------------------------------------------------------------------
+# must pass through to the interactive ask: a singular, standalone push.
+# rc=0 here does NOT mean the push runs -- it means the guard steps aside so
+# the permission layer's ask-rule can surface the exact command for approval.
+# That rule prefix-matches the raw command string, which is why only commands
+# literally starting `git push`, on one line, with no shell metacharacters,
+# may reach it: anything else would bypass the prompt instead of landing on it.
+# ---------------------------------------------------------------------------
+allow 'bare push' 'git push'
+allow 'push with remote and branch' 'git push origin main'
+allow 'force-with-lease push' 'git push --force-with-lease'
+allow 'push with upstream flag' 'git push -u origin HEAD'
+allow 'push with a refspec argument' 'git push origin HEAD:refs/heads/main'
+allow 'push with a flag resembling a message' 'git push -m x'
+allow 'push with a quoted message-looking flag' 'git push -m "notes"'
+
+# ---------------------------------------------------------------------------
 # must block as a push
 # ---------------------------------------------------------------------------
-block_push 'bare push' 'git push'
-block_push 'push with remote and branch' 'git push origin main'
 block_push 'push with repeated spaces' 'git   push'
-block_push 'force-with-lease push' 'git push --force-with-lease'
-block_push 'push with upstream flag' 'git push -u origin HEAD'
+block_push 'push chained after with &&' 'git push && echo done'
+block_push 'push chained before a second command' 'git push; echo done'
+block_push 'push with a command substitution' 'git push $(echo origin)'
+block_push 'push with a backtick substitution' 'git push `echo origin`'
+block_push 'push with a variable expansion' 'git push origin $BRANCH'
+block_push 'push with output redirected' 'git push >log'
+block_push 'push followed by a second line' $'git push\necho done'
 block_push 'double-quoted subcommand' 'git "push"'
 block_push 'single-quoted subcommand' "git 'push'"
 block_push 'quoted subcommand and remote' 'git "push" "origin" "main"'
-block_push 'flag resembling a message after the subcommand' 'git push -m x'
-block_push 'message flag after the subcommand, quoted' 'git push -m "notes"'
 block_push 'continuation split between words' $'git \\\npush'
 block_push 'continuation split inside the subcommand' $'git pu\\\nsh'
 block_push 'push behind a leading env assignment' 'GIT_DIR=/x git push'
@@ -106,7 +123,6 @@ block_push 'stash-looking push with a global option in between' 'git -C /x stash
 block_push 'global config value containing a space' 'git -c user.name="a b" push'
 block_push 'long message option before the subcommand' 'git --message=x push'
 block_push 'global git-dir option before the subcommand' 'git --git-dir=/x push'
-block_push 'push with a pathspec-looking argument' 'git push origin HEAD:refs/heads/main'
 # The attached-value family: `-m` is the tail of a `-c key=value` token, not a
 # flag, so nothing may be removed and the subcommand behind it must survive.
 block_push 'attached config value ending in the short message flag' 'git -c foo=-m push'
