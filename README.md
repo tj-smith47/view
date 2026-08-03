@@ -1,12 +1,15 @@
 <div align="center">
-  <img src="assets/view-logo.svg" alt="view" width="120" />
-  <h1>view</h1>
-  <p><b>A terminal-first modal editor with a modern, coherent UI, powered by an embedded, pinned Neovim.</b></p>
-  <p>
-    <a href="https://github.com/tj-smith47/view/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/tj-smith47/view/actions/workflows/ci.yml/badge.svg" /></a>
-    <img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-8be9fd?style=flat-square" />
-    <img alt="Status: pre-alpha" src="https://img.shields.io/badge/status-pre--alpha-ffb86c?style=flat-square" />
-  </p>
+
+<img src="assets/view-logo.svg" width="120" alt="view logo">
+
+# view
+
+The AI-first terminal editor: native Rust speed and a modern, coherent UI, with your entire Neovim setup running unmodified inside.
+
+[![CI](https://github.com/tj-smith47/view/actions/workflows/ci.yml/badge.svg)](https://github.com/tj-smith47/view/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+[![Status: pre-alpha](https://img.shields.io/badge/Status-pre--alpha-orange.svg)](#where-it-stands)
+
 </div>
 
 Your `init.lua`, plugins, LSP servers, and treesitter setup run unmodified,
