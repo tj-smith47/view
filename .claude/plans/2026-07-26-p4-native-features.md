@@ -8,9 +8,15 @@
 toasts, command palette, theming — native-wins with per-feature opt-out
 (spec §9, §5.5, §7; charter "the visible product surface").
 
-**Architecture:** `view-native` grows one sub-component per feature, each
-with its own model/msg/update, each rendered as a `view-surface` overlay
-layer and acting only through `Effect::Rpc`. A feature registry — a
+**Architecture:** each feature is a sub-component with its own pure
+model/msg/update — the pure state and update logic live in
+`crates/view-core/src/native/` so `Model` can hold them and `update()`
+can match on them without an edge (the crate-seam correction below
+records why) — rendered as a `view-surface` overlay layer and acting
+only through `Effect::Rpc`. `view-native` owns what genuinely needs a
+crate of its own: the workers (nucleo matcher, fs scanner, grep, git
+status), `[native]` config parsing, supersession planning, and the
+mapping/entry-point planning. A feature registry — a
 compile-time table, not a runtime registration list — is the single home
 for every feature's id, enabled bit, supersession record, and off switch;
 config, the first-run toast, and P6's doctor all read that one table. Input
@@ -25,15 +31,20 @@ also ride.
 `view-native` (each lands with its `scripts/audit-deps.sh` row in the same
 commit): `nucleo` (picker matcher, spec decision log), and `ignore` +
 `grep-searcher` (live-grep; the crates ripgrep itself is built from).
-No new dependency in `view-core`, which stays pure.
+The `view` bin gains `arboard` for the local clipboard worker (T6 records
+the decision and its runner-up). No new dependency in `view-core`, which
+stays pure.
 
-**Authored against:** tree at `4cd01bf` (branch `dev/p3-oracle-bench`, P3
-exit). Every interface in "As-built interfaces" below was read from source
-at that commit, per planning-protocol step 3.
+**Authored against:** tree at `b07f87a` (branch `dev/p3-oracle-bench`, P3
+exit tip at dispatch time; the plan was first drafted at `4cd01bf` and
+every interface in "As-built interfaces" below was re-verified against
+`b07f87a` source, per planning-protocol step 3 — all matched, so the
+re-pin changed no interface text).
 
 **Status:** DRAFT — not approved for execution. Planning-protocol step 5
-(fresh-context adversarial review against the spec, the charter, and the
-protocol verbatim) has not run. No task dispatches until it has.
+is complete: the adversarial pass, its re-review, and both rounds'
+findings are folded into this text. No task dispatches until the user
+approves the plan at P4 start.
 
 ## Global Constraints
 
@@ -59,7 +70,18 @@ requirements implicitly include this section.
   it emits `Effect::Rpc` values, and the runtime executes them.
 - Performance is a contract: any change touching key dispatch, grid
   apply, or paint states its latency consequence in the commit
-  description. Every task in this phase touches at least one of the three.
+  description. Nearly every task in this phase touches at least one of
+  the three; the ones that touch none (registry, supersession, CLI
+  surface, oracle coverage, bench rows — T1, T2, T7, T15, T16) commit
+  without a latency statement, and every task that does touch one
+  carries the statement in its own commit step below.
+- `serde`/`toml` stay allowlisted per crate: `scripts/audit-deps.sh`
+  confines them to the crates that genuinely parse config
+  (`check_absent` on every pure layer; `view-core` stays serde-free).
+  This phase widens that allowlist exactly once — `view-native` gains
+  `serde` + `toml` in T1, an audit-policy change that lands with its
+  audit row in the same commit, the same shape as `view-harness`'s
+  widening when the bench harness needed its own scenario files.
 - Use `task` targets, never raw cargo/git, for build/fmt/lint/test/commit.
   Commit only via `task commit -- -m "<msg>"`.
 - Production files stay under 1000 production LOC (`task loc`); tests
@@ -91,15 +113,22 @@ scope, in this order:
    incremental surfaces help least where paint volume is highest
    (scroll/streaming touch most rows).
 
-Task placement and detailed design happen at P4 design time; the ordering
-above is fixed. The four echo `ratio_p50` shortfall entries in
-`crates/view-bench/budgets.toml` are the ledger this workstream retires.
+T16a (lever 1) and T16b (lever 2) are those levers as tasks, in the
+ratified order, and both land **before** T16's features-enabled
+re-measure so T16 measures the shipped loop rather than the one being
+replaced. The four echo `ratio_p50` shortfall entries in
+`crates/view-bench/budgets.toml` (dev-linux minimal 1.1719 / heavy
+1.1838, dev-macos minimal 1.1066 / heavy 1.114) are the ledger those
+two tasks retire — by measurement inside the bar, or by a residual
+re-adjudicated with the user, never silently carried; the exit
+checklist holds the gate.
 
 ## Measurement-layer carry-ins (from the 2026-08-03 dev-macos campaign)
 
 Open harness-semantics questions the P3 exit campaign surfaced. They do not
 block P3 exit — the gate fails loudly, never silently, in every case below —
-but they are adjudicated during this phase's bench work (Task 16 territory),
+but they are adjudicated during this phase's bench work (T16 step 5 walks
+all five and records each ruling; the exit checklist cites the evidence),
 not dropped:
 
 1. `--record`'s ratchet-only-tightens semantics can pin a wide-spread cell
@@ -129,11 +158,13 @@ requirement absent from both lists has found a plan defect.
 | Requirement | Where |
 |---|---|
 | Feature registry the config surface and doctor expose (charter Produces) | T1 |
-| `[native]` per-feature keys: minimal file + flag read, enough for three states and the off switch (charter config split) | T1 |
+| `[native]` per-feature keys: minimal file + flag read, enough for three states and the off switch (charter config split) | T1 (file) + T7 (`--config` flag, T15's runner drives states through it) |
 | Per-feature off switch, exact, never all-or-nothing (§5.5) | T1 |
 | Supersession is runtime-only and reversible; nothing in the user's config is ever edited (§5.5) | T2 |
 | First-run toast reporting every supersession (charter) | T2 |
 | Overlay focus routing: `Focus::Native` gains real consumers; `<Esc>` always returns to `Engine` (§5.3, P2 as-built) | T3 |
+| Mouse routed by overlay hit-test: topmost native overlay under the pointer, else the engine (§5.3) | T3 |
+| Feature entry points: real nvim mappings post-`VimEnter`, `maparg()` claims reported, `:View` unconditional, per-feature restore (§5.3) | T3a |
 | Native overlay layers in `Surface`, z-ordered above engine grid (§7) | T4 |
 | Tier degradation for every native surface, golden snapshots per tier (§7, §13) | T4 |
 | Theme: named groups for native chrome; border style, padding scale, accent palette shared (§7) | T5 |
@@ -150,7 +181,7 @@ requirement absent from both lists has found a plan defect.
 | `ext_messages` modal prompts: `confirm`, `return_prompt`, inputlist-class take `Focus::Native`, reply through RPC, never time out (§9) | T8 |
 | `emsg`/`echoerr` sticky toasts until dismissed, captured in history (§9) | T9 |
 | Transient toasts with timeout + scrollback history (§9) | T9 |
-| Owning `ext_messages` forces `cmdheight=0` (§9) | T9 |
+| Owning `ext_messages` forces `cmdheight=0` (§9) | T9 (attach-level and unconditional — see T9's ownership note) |
 | Statusline: mode incl. macro `recording @q`, pending `showcmd`, file, diagnostics, git branch, ruler/position; single-line (§9) | T10 |
 | `msg_showmode`/`msg_showcmd`/`msg_ruler`/`search_count` routed to statusline segments (§9) | T10 |
 | Statusline supersession → `laststatus=0` (§5.5) | T10 |
@@ -161,6 +192,8 @@ requirement absent from both lists has found a plan defect.
 | Command palette: `ext_cmdline` → centered floating palette, completion via `ext_popupmenu` when cmdline-sourced (§9) | T14 |
 | Every shipped feature oracle-covered in all three states (charter exit gate, §5.5, §13.3) | T15 |
 | §9 non-interference test per feature: feature open causes no engine state drift (charter exit gate) | T15 |
+| Echo lever 1: input-thread/runtime-loop unification (ratified 2026-08-03) | T16a |
+| Echo lever 2: incremental rendering, shadow-equivalence guarded (ratified 2026-08-03) | T16b |
 | Picker §3.1 rows gated: match ≤ 16 ms @ 100k resident; 1M scan streaming, first page ≤ 100 ms warm (§3.1, P3 deferral 1) | T16 |
 | Budgets hold with features enabled — features may not eat the latency win (charter exit gate) | T16 |
 | Dogfood note; real daily-driving expected to start this phase (charter exit gate) | Exit checklist |
@@ -192,7 +225,7 @@ expires):
 
 ## As-built interfaces this plan builds on
 
-Read from the tree at `4cd01bf`, per planning-protocol step 3. Re-verify
+Read from the tree at `b07f87a`, per planning-protocol step 3. Re-verify
 with `grep -n "pub " crates/<crate>/src/<file>.rs` if a brief seems stale;
 reality wins and the plan gets fixed (protocol step 6).
 
@@ -296,47 +329,102 @@ the clipboard and wrong about prompts:
 | Modal prompt (`confirm`, `return_prompt`, inputlist) | nvim's own input loop, awaiting a keystroke | `Effect::Rpc(RpcCall::Input { notation })` — T8 |
 | Clipboard provider | a real `rpcrequest` from the injected Lua | `Msg::EngineRequest` + `Effect::Reply` — T6 |
 
-Both are "via RPC" and both keep the one-reply-per-arm dispatch contract;
-they are different mechanisms and T8 must not invent an `EngineRequest`
-variant for prompts. **This is a derivation from the as-built source and
-the capture in step 1 above must confirm it before T8 writes code. If the
-capture contradicts it, reality wins and this table gets fixed.**
+Both are "via RPC" and both keep the exactly-once reply discipline T6
+states; they are different mechanisms and T8 must not invent an
+`EngineRequest` variant for prompts. **This is a derivation from the
+as-built source and the capture in step 1 above must confirm it before T8
+writes code. If the capture contradicts it, reality wins and this table
+gets fixed.**
+
+**Plan-level correction on the crate seam, recorded per protocol step 6.**
+Spec §9 says each feature "is a `view-native` sub-component with its own
+Model/Msg/update" — read literally, that would put `PromptState`,
+`PickerState`, and their siblings in `view-native`, and then `Model`
+could not hold them and `update()` could not match on them without a
+`view-core → view-native` edge, which the dependency-direction hard rule
+(§4: core ← surface ← {native, ai}, `scripts/audit-deps.sh` enforced)
+forbids. §4 wins, and §9's phrasing is read as the feature's
+*ownership* — a native feature, superseding a plugin, carried in the
+native registry — not as its state's crate. The seam, which every
+feature task builds on:
+
+- **Pure state + pure update live in `view-core`**, under
+  `crates/view-core/src/native/{prompt,toast,statusline,picker,tree,palette}.rs`
+  — the identical reasoning that already put the registry table in core:
+  core holds the data so surface and native both read it without an edge.
+  This is also what keeps `update()` headless-testable and the Msg-level
+  oracle able to reach native behavior (§6: "what makes the core
+  headless-testable and the oracle cheap").
+- **`view-native` owns what actually needs a crate**: the workers (nucleo
+  matcher, fs scanner, live-grep, git status), `[native]` config parsing,
+  supersession planning, and mapping/entry-point planning. Worker threads
+  are spawned by the runtime and answer with generation-stamped `Msg`s.
+- **`LayerKind` payloads are named types in core**: `Picker(PickerView)`,
+  `Tree(TreeView)`, `Statusline(StatuslineView)`, `Prompt(PromptView)`,
+  `Palette(PaletteView)` — each a render-ready view struct produced by
+  its state's `view()`, defined beside that state in
+  `view-core::native::*` (surface depends on core, so the edge is legal).
+- **Dispatch-time overlay geometry lives in core**:
+  `crates/view-core/src/native/geometry.rs` defines `OverlayBox`
+  (width/height percentages, anchor) and `OverlayBox::rect(term_w,
+  term_h) -> OverlayRect`; `update()`'s mouse hit-test (T3) and
+  `view-surface::render`'s layer placement (T4) both call the same
+  function, so the painted rect and the routing rect cannot drift.
+
+The runner-up — state stays in `view-native` and overlay dispatch is
+hoisted out of `update()` into the runtime — was rejected: it moves input
+routing off the pure path, so the Msg-level oracle and the headless tests
+can no longer see it, which trades a compile-time seam question for a
+permanent testing hole.
 
 ## File structure (new/changed this phase)
 
 ```
 crates/view-core/src/
   model.rs          # T3: overlay stack; focus becomes DERIVED, not a field
-  msg.rs            # T6/T8/T11: EngineRequest + RpcCall + Msg arms
-  theme.rs          # T5: named groups for native chrome
-  native/           # T1: registry (pure data; the feature TABLE lives in core
-    registry.rs     #   so surface and native both read it without an edge)
+  msg.rs            # T2/T3a/T5/T6/T9/T11: EngineRequest + RpcCall + Msg arms
+  theme.rs          # T5: ChromeGroup enum + named groups for native chrome
+  native/           # pure state + update per feature (crate-seam correction
+    registry.rs     #   above): core holds the data so surface and native
+    geometry.rs     #   both read it without an edge. T3/T4 share geometry.rs
+    mappings.rs     # T3a: MappingSpec + the default map table (pure data)
+    prompt.rs       # T8: modal prompt state, accepts(), PromptView
+    toast.rs        # T9: kind routing, expiry state, history ring, view
+    statusline.rs   # T10: segment state + single-line truncating view
+    picker.rs       # T11/T12: query/results/selection/preview state, view
+    tree.rs         # T13: rows, expand/collapse, decorations, view
+    palette.rs      # T14: cmdline + cmdline-sourced popupmenu state, view
 crates/view-surface/src/
-  lib.rs            # T4: LayerKind native variants + z-order
-  overlay.rs        # T4: shared box/border/padding geometry
+  lib.rs            # T4: LayerKind native variants + z-order; T16b: render
+                    #   goes incremental behind the shadow-equivalence guard
+  overlay.rs        # T4: border/padding painting over core's OverlayBox rects
 crates/view-native/src/
   lib.rs            # module wiring
   config.rs         # T1: [native] table load
   supersede.rs      # T2: runtime-only, reversible supersession
-  prompt.rs         # T8: modal prompt overlay
-  toast.rs          # T9: sticky/transient routing + history
-  statusline.rs     # T10: segments
-  picker/           # T11/T12: mod.rs, sources.rs, matcher.rs, preview.rs
-  tree/             # T13: mod.rs, fs.rs, git.rs
-  palette.rs        # T14
+  mappings.rs       # T3a: registration plan, maparg() claims, :View command
+  picker/           # T11/T12: sources.rs, matcher.rs, preview.rs -- workers
+  tree/             # T13: fs.rs, git.rs -- workers
   clipboard.rs      # T6: provider state; the WORKER lives in `view`
 crates/view-tui/src/
   paint.rs          # T4: painters per native layer, per tier
+  terminal.rs       # T16a: blocking input thread becomes a pollable handle
 crates/view/src/
   main.rs           # T7: CLI surface
+  runtime.rs        # T9: toast-expiry timer worker; T16a: one loop
+                    #   polling terminal fd + engine stdout
+  startup.rs        # T7: CLI flags feed startup; T16a: attach wiring
+                    #   moves onto the unified loop
   clipboard.rs      # T6: worker thread + OSC52 (only view-tui touches the
                     #   terminal, so the OSC52 write routes through it)
-  bridge.rs         # T5/T10: autocmd -> rpcnotify bridge registration
+  bridge.rs         # T5: autocmd -> rpcnotify bridge registration
+                    #   (T10 consumes the bridge; it edits no file here)
+view.toml.example   # T1: every registry id keyed; the drift test reads it
 corpus/native-*.toml          # T15: three-state oracle entries
 compat/scenarios/*.toml       # T15: states[] added to UI-owning scenarios
 crates/view-bench/src/scenarios/picker.rs   # T16
 crates/view-bench/baselines/*.toml          # T16: picker rows
-scripts/audit-deps.sh         # T1/T11/T12/T13: new crate edges + dep rows
+scripts/audit-deps.sh         # T1/T6/T11/T12/T13: new crate edges + dep rows
 ```
 
 ---
@@ -471,19 +559,38 @@ the first assertion fail.
 
 **Files:**
 - Create: `crates/view-native/src/supersede.rs`
-- Modify: `crates/view-core/src/msg.rs` (no new variants expected; verify)
+- Modify: `crates/view-core/src/msg.rs` (`RpcCall::SetOption` +
+  `OptionValue`)
 
 **Consumer call-site first:**
 
 ```rust
 // applied post-VimEnter, only for features that are enabled
 let plan = supersede::plan(&cfg, registry::features());
-// -> [Supersession { feature: "statusline", rpc: RpcCall::Input {
-//        notation: ":set laststatus=0<CR>" }, reverses_with: "native.statusline = false" }]
+// -> [Supersession { feature: "statusline", rpc: RpcCall::SetOption {
+//        name: "laststatus".into(), value: OptionValue::Int(0) },
+//      reverses_with: "native.statusline = false" }]
 for s in plan.iter() { effects.push(Effect::Rpc(s.rpc.clone())); }
 toast::first_run(&plan);   // "view is drawing the statusline (lualine still
                            //  loads). Turn it off with native.statusline = false"
 ```
+
+**Options ride an API call, never the keyboard.** `RpcCall` gains
+
+```rust
+SetOption { name: String, value: OptionValue },   // nvim_set_option_value
+// with pub enum OptionValue { Int(i64), Bool(bool), Str(String) } -- core
+// stays rmpv-free; the runtime maps it to the wire value
+```
+
+because `RpcCall::Input` shares a stream with §8 step 3's buffered-key
+replay and with live typeahead: an ex-command interleaved into that
+stream lands wherever the mode happens to be (a user left in insert mode
+by replayed keys would get `:set laststatus=0` typed into their buffer).
+Every supersession entry, and any other non-interactive intent this
+phase writes, uses `SetOption` (or a dedicated `RpcCall` variant); the
+one legitimate `Input` use in this phase is T8's prompt answers, where
+nvim is genuinely waiting in its own input loop for a keystroke.
 
 **Runner-up rejected:** having each feature apply its own supersession
 inside its own `init`. It reads fine at the call site but there is then
@@ -527,6 +634,8 @@ pins "nothing in the user's config is ever edited".
 ### Task 3: Overlay stack — focus becomes derived
 
 **Files:**
+- Create: `crates/view-core/src/native/geometry.rs` (`OverlayBox` — the
+  rect function T4's placement shares)
 - Modify: `crates/view-core/src/model.rs`,
   `crates/view-core/src/update.rs`
 
@@ -567,8 +676,28 @@ impl Model {
     /// overlay, and the routing arms in `update()` would then send keys
     /// into nothing.
     #[must_use] pub fn focus(&self) -> Focus;
+    /// Topmost overlay whose rect contains (row, col), else `None` --
+    /// the engine. Mouse routing calls this, not `focus()`.
+    #[must_use] pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId>;
+}
+
+// view-core/src/native/geometry.rs (shared with T4 -- see the crate-seam
+// correction): each overlay state exposes its OverlayBox, and
+// OverlayBox::rect(term_w, term_h) is the ONE function both update()'s
+// hit-test and view-surface::render's placement call, so the painted
+// rect and the routing rect cannot drift.
+pub struct OverlayBox { pub width_pct: u16, pub height_pct: u16, .. }
+impl OverlayBox {
+    #[must_use] pub fn rect(&self, term_w: u16, term_h: u16) -> OverlayRect;
 }
 ```
+
+**Keys and paste route on `focus()`; mouse routes by hit-test** (§5.3:
+clicks/wheel go to the topmost native overlay *under the pointer*,
+otherwise to the engine). Focus alone would be wrong for the mouse: with
+a picker open, a click on a visible engine-grid cell outside the picker
+must fall through to the existing `InputMouse` path, not be swallowed by
+the focused overlay.
 
 `Model::focus` changes from a public field to a method. This is a
 breaking change to P2's as-built surface, made deliberately and named
@@ -579,15 +708,21 @@ become a `pop()`.
 **Falsifiable check:** `<Esc>` with two overlays stacked pops exactly one
 and leaves focus on the lower overlay, not on the engine — the behavior a
 single-field model cannot express. A test drives push/push/Esc and
-asserts the picker still holds focus.
+asserts the picker still holds focus. For the mouse: with an overlay
+open (a synthetic overlay state here; the picker is the eventual
+consumer, and T15's runs exercise it for real), a click on a cell inside
+the overlay's rect routes to that overlay's update, and a click outside
+it produces the `InputMouse` `RpcCall` — the engine cursor moves.
 
 - [ ] **Step 1: Failing test** for the push/push/Esc sequence above,
   against P2's current single-field model. Observe FAIL (it will report
   focus on `Engine`, which is the bug).
 - [ ] **Step 2:** Add `overlays: Vec<Overlay>` and `Model::focus()`;
   delete the `focus` field. Fix every call site the compiler names.
-- [ ] **Step 3:** `update()`'s Key/Paste/Mouse arms route on `focus()`.
-  `<Esc>` pops one overlay. Pass.
+- [ ] **Step 3:** `update()`'s Key and Paste arms route on `focus()`;
+  the Mouse arm routes on `overlay_at(row, col)` — topmost overlay
+  containing the point, else the existing `InputMouse` path. `<Esc>`
+  pops one overlay. Both directions of the mouse check above pass.
 - [ ] **Step 4: Totality.** Property test: any sequence of pushes, pops
   and `<Esc>` keys leaves `focus()` consistent with `overlays.last()`.
 - [ ] **Step 5:** Latency check — this is key-dispatch code. Run
@@ -598,6 +733,105 @@ asserts the picker still holds focus.
   cost.
 - [ ] **Step 6:** `task ci`. Commit: `refactor(core): derive focus from an
   overlay stack` with the latency delta in the description.
+
+---
+
+### Task 3a: Feature entry points — mappings, `:View`, key-claim reporting
+
+**Files:**
+- Create: `crates/view-core/src/native/mappings.rs`,
+  `crates/view-native/src/mappings.rs`
+- Modify: `crates/view-core/src/msg.rs` (`Msg::FeatureInvoke`,
+  `Msg::MappingsClaimed`, `RpcCall::RegisterMappings`),
+  `crates/view-core/src/update.rs` (the invoke arm)
+
+Spec §5.3's entry-point contract, without which no feature in this plan
+is reachable: native entry points are **real nvim mappings**
+(`<leader>ff` → `rpcnotify` back to view) so user remaps, which-key, and
+plugin introspection all see them. They register post-`VimEnter` — the
+same seam as `register_vim_enter_autocmd` — so `mapleader` is the
+user's. For each *enabled* feature, view's default keys are claimed even
+over a user mapping, `maparg()` checked first and **every claim recorded
+into T2's supersession plan** so the first-run toast and doctor report
+key claims and option supersessions through one mechanism, each with the
+exact `[native]` key to flip. Setting a feature `false` restores the
+user's mapping untouched; non-colliding user mappings are never touched.
+Every feature is *also* reachable via an unconditional `:View` command
+(`:View pick files`) — registered regardless of the enabled bit, so a
+user who turned the default keys off still has a path in. The full
+default map set renders into the docs from `default_maps()`, one table,
+one source.
+
+**Consumer call-site first:**
+
+```rust
+// post-VimEnter, alongside T2's supersession application
+effects.push(Effect::Rpc(mappings::register_plan(&cfg, channel_id)));
+// engine side (one Lua chunk): for each spec -- maparg() check, set the
+// map to `<Cmd>call rpcnotify(chan, 'view_invoke', 'picker', 'files')<CR>`,
+// register :View -- and notify the claims back:
+//   Msg::MappingsClaimed { claimed } -> folded into T2's report
+// later, the user presses <leader>ff (or runs :View pick files):
+//   Msg::FeatureInvoke { feature: "picker", verb: "files" }
+//   -> update() opens the overlay (T11 lands the picker arm)
+```
+
+**Interfaces** (later tasks rely on these exact names):
+
+```rust
+// view-core/src/native/mappings.rs -- pure data, like the registry
+pub struct MappingSpec { pub feature: &'static str,
+    pub lhs: &'static str, pub verb: &'static str }
+/// A default key that was set over an existing user mapping: what was
+/// claimed, and the off switch that gives it back.
+pub struct MappingClaim { pub feature: String, pub lhs: String,
+    pub had_user_mapping: bool }
+#[must_use] pub fn default_maps() -> &'static [MappingSpec];
+
+// view-core/src/msg.rs
+Msg::FeatureInvoke { feature: String, verb: String },
+Msg::MappingsClaimed { claimed: Vec<MappingClaim> },
+RpcCall::RegisterMappings { specs: Vec<MappingSpec>, channel_id: u64 },
+
+// view-native/src/mappings.rs -- the planner; reads config + registry
+#[must_use] pub fn register_plan(cfg: &NativeConfig, channel_id: u64) -> RpcCall;
+```
+
+**Runner-up rejected:** registering each mapping as its own RPC call
+from the runtime, with `maparg()` probed per key in separate requests.
+That splits one fact ("what did view claim?") across N replies
+interleaved with startup traffic, and the claim report would be
+reassembled view-side from partial answers. One `RegisterMappings` chunk
+executes atomically engine-side and returns the complete claim list in
+one notification.
+
+**Falsifiable check:** a fixture maps `<leader>ff` to a user command.
+With `native.picker = true`, pressing `<leader>ff` opens the picker and
+the claim is reported (toast text names `native.picker = false`
+verbatim). With `native.picker = false`, the user's mapping fires
+untouched — asserted via an RPC probe of `maparg('<leader>ff')` and the
+command's observable effect.
+
+- [ ] **Step 1: Failing test** for the per-feature restore: a plan built
+  from a config with `picker = false` contains no picker spec, and the
+  fixture's `<leader>ff` probe shows the user mapping intact. FAIL
+  first against a planner that registers unconditionally.
+- [ ] **Step 2:** `default_maps()` + a drift test: every spec's
+  `feature` is a `registry::features()` id, and every feature with an
+  entry point has at least one spec.
+- [ ] **Step 3:** `register_plan` + the engine-side chunk: `maparg()`
+  check, map registration, `:View` command (unconditional), claims
+  notified back as `Msg::MappingsClaimed`, folded into T2's report.
+- [ ] **Step 4:** `Msg::FeatureInvoke` routing arm in `update()`; until
+  T11 lands the picker, the test asserts the decoded Msg reaches the
+  arm and is dropped loudly (logged), never silently.
+- [ ] **Step 5: Disconfirm.** Remove the claim recording; the
+  claim-reported assertion in the falsifiable check fails naming the
+  missing claim; restore.
+- [ ] **Step 6:** `task ci`. Commit: `feat(native): feature entry
+  mappings with claim reporting and :View`. The description states the
+  latency consequence (`input_path` bench delta — this adds routing arms
+  to `update()`).
 
 ---
 
@@ -612,16 +846,21 @@ same way, so the geometry lives once:
 
 ```rust
 // in view-surface::render, for each overlay in model.overlays
-layers.push(overlay::centered(model, OverlayBox {
-    kind: LayerKind::Picker(state.view()),
-    width_pct: 80, height_pct: 60, border: theme.border_style(model.caps.tier),
-}));
+let rect = ov.boxspec().rect(model.term_width, model.term_height);
+//         ^ core's geometry.rs -- the SAME rect update()'s mouse
+//           hit-test uses (T3), so paint and routing cannot disagree
+layers.push(overlay::framed(rect, LayerKind::Picker(state.view()),
+    theme.border_style(model.caps.tier)));
 ```
 
 **Runner-up rejected:** each feature computing its own rect from
 `term_width`/`term_height`. Five features clamping independently is five
 chances to place a layer outside the frame — the exact class
-`clip_to_frame` exists to backstop, and a backstop is not a design.
+`clip_to_frame` exists to backstop, and a backstop is not a design. The
+rect math itself lives in `view-core::native::geometry` (not here)
+because `update()` needs it at dispatch time for mouse hit-testing and
+core cannot call into surface; `overlay.rs` owns what only paint needs —
+border, padding, and title framing over a rect it is handed.
 
 **Tier degradation is a tested surface, not a fallback apology** (§7):
 `full` gets rounded borders, `standard` gets the same layout with plain
@@ -633,8 +872,10 @@ overlay at all three tiers into `view_oracle::raster::screen_text` output
 and diffs against committed goldens. Changing a border glyph fails the
 `full` golden and leaves `basic` green.
 
-- [ ] **Step 1:** `LayerKind` gains `Picker`, `Tree`, `Statusline`,
-  `Prompt`, `Palette` variants. It is `#[non_exhaustive]`, so this is
+- [ ] **Step 1:** `LayerKind` gains `Picker(PickerView)`,
+  `Tree(TreeView)`, `Statusline(StatuslineView)`, `Prompt(PromptView)`,
+  `Palette(PaletteView)` — payload types from `view-core::native::*`
+  per the crate-seam correction. It is `#[non_exhaustive]`, so this is
   additive; every `match` in `view-tui` gains an arm and the compiler
   names them all.
 - [ ] **Step 2: Failing golden test** for the picker overlay at tier
@@ -659,15 +900,22 @@ and diffs against committed goldens. Changing a border glyph fails the
 
 **Files:**
 - Create: `crates/view/src/bridge.rs`
-- Modify: `crates/view-core/src/theme.rs`, `crates/view/src/theme_cache.rs`
+- Modify: `crates/view-core/src/theme.rs`, `crates/view/src/theme_cache.rs`,
+  `crates/view-core/src/msg.rs` (`Msg::ColorSchemeChanged`,
+  `RpcCall::RegisterBridge`)
 
 **Consumer call-site first:**
 
 ```rust
-// native chrome asks the theme for a role, never for a raw color
-let border = theme.named(hl, "ViewBorder",   theme.normal());
-let accent = theme.named(hl, "ViewAccent",   theme.emphasis());
-let sel    = theme.named(hl, "ViewSelected", theme.emphasis());
+// per-frame chrome paints use the O(1) enum accessor -- no string
+// compare, no allocation, so §3.3's allocation-free-after-warmup rule
+// holds trivially on the paint path
+let border = theme.chrome(ChromeGroup::Border);
+let accent = theme.chrome(ChromeGroup::Accent);
+let sel    = theme.chrome(ChromeGroup::Selected);
+// Theme::named stays for genuinely dynamic names (a user override
+// naming an arbitrary hl group); it is not the per-frame path
+let custom = theme.named(hl, user_group_name, theme.normal());
 ```
 
 `Theme::named` already exists as-built with exactly this fallback shape,
@@ -689,7 +937,9 @@ The audit's ruling stands: not urgent before groups multiply, wrong to
 do after. So T5 restructures BEFORE registering the bridge or adding
 any P4 group: a `#[non_exhaustive] enum ChromeGroup` with
 `ALL`/`hl_name()`/fallback-kind, `Theme` holding
-`[ResolvedStyle; ChromeGroup::COUNT]`, `from_hl` looping
+`[ResolvedStyle; ChromeGroup::COUNT]` behind
+`pub fn chrome(&self, g: ChromeGroup) -> ResolvedStyle` (the paint-side
+accessor in the call site above), `from_hl` looping
 `ChromeGroup::ALL`, and the cache serializing a map keyed by
 `hl_name()` — adding a group then touches exactly one enum arm plus its
 consumers. This is the *persisted* storage layer; `Theme::named` stays
@@ -735,7 +985,9 @@ cache files, verified by listing the cache dir.
 - [ ] **Step 6: Disconfirm.** Break the bridge registration; the oracle
   entry fails with the border unchanged; restore.
 - [ ] **Step 7:** `task ci`. Commit: `feat(theme): ColorScheme re-derive
-  bridge and native named groups`.
+  bridge and native named groups`. The description states the latency
+  consequence (`output_path` bench delta — this touches paint-side theme
+  lookups; the enum accessor should keep it inside noise).
 
 ---
 
@@ -777,6 +1029,25 @@ user did not most recently copy — a silent data-correctness bug, the
 worst category. B keeps the loop non-blocking because the executor only
 sends on a channel; the honest read happens where it must.
 
+**The local backend is a real dependency decision, made here.** Two
+shapes for how the worker actually touches the system clipboard:
+
+```rust
+// Option A -- platform commands, spawned per operation
+Command::new("pbcopy") / "xclip -sel clip" / "wl-copy" ...
+// Option B -- arboard, in-process (CHOSEN); dep lives in the `view` bin
+arboard::Clipboard::new()?.set_text(text)
+```
+
+**Chosen B over A.** A is the same first-five-minutes failure class T12
+rejects for `rg`: a Linux box without `xclip`/`wl-copy` installed (most
+minimal installs) silently loses `"+y`, and which command to spawn is a
+per-platform matrix view would then own. B is one crate that speaks the
+native clipboard APIs on all three §14 platforms with no external
+binary, and it avoids a subprocess spawn on the paste path. The `view`
+bin (where the worker lives) gains `arboard`; its
+`scripts/audit-deps.sh` row lands in the same commit.
+
 **OSC52 respects the crate boundary.** Only `view-tui` touches the
 terminal, so the OSC52 *write* is an effect routed to the terminal side,
 never a write from the clipboard worker. For the remote *read* path,
@@ -798,15 +1069,26 @@ view did not overwrite it.
 - [ ] **Step 2: Failing test** for the user-config-wins precedence.
 - [ ] **Step 3:** `EngineRequest::{ClipboardGet, ClipboardSet}` +
   `ReplyValue::Lines` + `Effect::ClipboardRead`/`ClipboardWrite`. Every
-  `EngineRequest` arm must produce exactly one `Effect::Reply` — that is
-  the as-built dispatch contract and the engine is blocked until it does.
-- [ ] **Step 4:** Worker thread in `view`; OSC52 write routed via view-tui.
+  `EngineRequest` token must be answered exactly once — never zero times
+  (a blocked engine), never twice (a corrupted msgid stream). For
+  `VimEnter` the arm answers directly with `Effect::Reply`; for
+  `ClipboardGet`/`ClipboardSet` the arm delegates via
+  `Effect::ClipboardRead`/`ClipboardWrite` and the WORKER owns the reply
+  obligation, sending it through the same writer channel. A test asserts
+  one-reply-per-token across both shapes (the step-5 disconfirm covers
+  the zero case; a double-reply assert covers the two case).
+- [ ] **Step 4:** Worker thread in `view` over `arboard` (dep + audit
+  row in this commit); OSC52 write routed via view-tui.
 - [ ] **Step 5: Disconfirm.** Drop the reply from one arm; assert the
   test suite catches a blocked engine rather than hanging forever (a
   hanging test is not a passing test — the check must be a timeout with a
   named failure).
 - [ ] **Step 6:** `task ci`. Commit: `feat(native): clipboard provider with
-  OSC52 remote support`.
+  OSC52 remote support`. The description states the latency consequence:
+  this adds `Msg::EngineRequest` routing arms to `update()`, so the
+  `input_path` delta is measured and stated — expected ~zero because the
+  arms sit off the keystroke path, but stated from the measurement, not
+  assumed.
 
 ---
 
@@ -822,11 +1104,14 @@ step 3):
 ```bash
 view +42 notes.md                 # engine passthrough: open at line 42
 view -c 'set nu' -R notes.md      # -c command, read-only
+view -d a.txt b.txt               # diff mode
 view -O a.rs b.rs                 # vertical splits
 view -u NONE notes.md             # explicit init
 view --clean                      # bundled engine, NO user config, native defaults
 ls | view -                       # stdin via stdin_fd at nvim_ui_attach
 view --appname work notes.md      # NVIM_APPNAME passthrough
+view --config ./off.toml notes.md # explicit view.toml path -> NativeConfig::load;
+                                  #   T15's runner drives the three states with it
 view --nvim-bin /opt/nvim/bin/nvim --tier basic notes.md   # as-built today
 ```
 
@@ -858,9 +1143,11 @@ process exit status is 3.
 - [ ] **Step 1: Failing test** for `+42` reaching the engine verbatim.
 - [ ] **Step 2:** `trailing_var_arg` passthrough; test passes.
 - [ ] **Step 3: Failing test** for `:cq 3` → exit 3. Implement; pass.
-- [ ] **Step 4:** `--clean`, `--appname`, and `-` (stdin via `stdin_fd`
-  at `nvim_ui_attach` — capture the parameter's exact name from
-  `nvim --api-info`, do not recall it).
+- [ ] **Step 4:** `--clean`, `--appname`, `--config` (feeds
+  `NativeConfig::load(config_path)` — this is the charter's "flag read"
+  half, and the mechanism T15's runner launches each state through), and
+  `-` (stdin via `stdin_fd` at `nvim_ui_attach` — capture the
+  parameter's exact name from `nvim --api-info`, do not recall it).
 - [ ] **Step 5: Disconfirm.** Assert `view --tier basic` is still parsed
   by view and NOT forwarded to the engine; a passthrough that swallows
   view's own flags is the failure mode option A risks.
@@ -872,8 +1159,24 @@ process exit status is 3.
 ### Task 8: Modal prompt overlays — the blocking path
 
 **Files:**
-- Create: `crates/view-native/src/prompt.rs`
+- Create: `crates/view-core/src/native/prompt.rs` (pure state + update,
+  per the crate-seam correction)
 - Modify: `crates/view-core/src/update.rs`
+
+**Interfaces** (T15 and the dispatch arm rely on these exact names):
+
+```rust
+// view-core/src/native/prompt.rs
+pub struct PromptState { .. }
+impl PromptState {
+    /// Some for the prompt kinds (confirm / return_prompt /
+    /// inputlist-class), None for every other message.
+    #[must_use] pub fn from_entry(e: &MessageEntry) -> Option<Self>;
+    /// Whether `notation` is one of the captured choice keys.
+    #[must_use] pub fn accepts(&self, notation: &str) -> bool;
+    #[must_use] pub fn view(&self) -> PromptView;   // LayerKind::Prompt payload
+}
+```
 
 **This is the highest-risk task in the phase.** Owning `ext_messages`
 means owning *dialogs*: `cmdheight=0` is forced and the engine's message
@@ -928,20 +1231,53 @@ why this is checkable at all.
   would then be unproven and must be re-derived, not assumed). Remove
   the timeout.
 - [ ] **Step 6:** `task ci` + `task compat`. Commit: `feat(native): modal
-  prompt overlays for confirm and return_prompt`.
+  prompt overlays for confirm and return_prompt`. The description states
+  the latency consequence (`input_path` bench delta — this adds a
+  routing arm; and a paint layer, so note `output_path` too if the
+  overlay is open in any measured scenario).
 
 ---
 
 ### Task 9: Toast routing — sticky, transient, and history
 
 **Files:**
-- Create: `crates/view-native/src/toast.rs`
-- Modify: `crates/view-core/src/model.rs`
+- Create: `crates/view-core/src/native/toast.rs` (pure routing + expiry
+  state + history, per the crate-seam correction)
+- Modify: `crates/view-core/src/model.rs`, `crates/view-core/src/msg.rs`
+  (`Msg::ToastExpired`), `crates/view/src/runtime.rs` (the timer worker)
 
 P2 already ships `Messages`, `MessageEntry::is_persistent` (the six
 error/warning kinds) and `is_prompt`, plus overflow ranking. T9 adds what
 §9's routing table still owes: a timeout for transient toasts, the
 scrollback history, and the `cmdheight=0` that owning messages forces.
+
+**`ext_messages` ownership is attach-level, not feature-level.**
+`ext_messages` sits in `wire::UI_EXT_OPTIONS`, fixed for the session at
+attach; `native.notifications = false` cannot un-attach it, and messages
+route to view either way. So `cmdheight=0` is applied unconditionally
+post-`VimEnter` as a documented consequence of the attach set (via
+`RpcCall::SetOption`), **not** keyed to the notifications feature —
+feature-off restoring the user's `cmdheight` while messages still route
+to view would be an incoherent state. The notifications feature's T2
+supersession entry is only the `vim.notify` re-point, which is what §5.5
+defines the feature as owning; with the feature off, message rendering
+falls back to P2's as-built minimal rendering and the plugin's
+`vim.notify` interception returns. T15's deferred state asserts exactly
+that meaning for nvim-notify/noice.
+
+**Interfaces** (T10 and T14 rely on these exact names):
+
+```rust
+// view-core/src/native/toast.rs
+pub enum Route { Prompt, Sticky, Statusline, Transient }
+#[must_use] pub fn route(kind: &str) -> Route;   // §9's table, one match
+pub struct ToastHistory { .. }                   // bounded ring
+impl ToastHistory {
+    pub fn push(&mut self, e: &MessageEntry);
+    /// Newest-first; the palette's message-history view (T14) reads it.
+    pub fn entries(&self) -> impl Iterator<Item = &MessageEntry>;
+}
+```
 
 **Consumer call-site first:**
 
@@ -975,18 +1311,39 @@ present after the same wait.
 - [ ] **Step 2:** Timer thread + `Msg::ToastExpired { id }`. Pass.
 - [ ] **Step 3:** History buffer with a bounded ring; a `:messages`-style
   view reachable from the palette (T14 wires the entry point).
-- [ ] **Step 4:** `cmdheight=0` applied as a T2 supersession entry, so it
-  is reversible and reported like every other one.
+- [ ] **Step 4:** `cmdheight=0` applied unconditionally post-`VimEnter`
+  via `RpcCall::SetOption` (the attach-level ownership note above); the
+  notifications feature's T2 supersession entry carries only the
+  `vim.notify` re-point. A test asserts `&cmdheight == 0` with
+  `native.notifications = false`.
 - [ ] **Step 5: Disconfirm.** Make the timer never fire; the idle test
   fails; restore.
 - [ ] **Step 6:** `task ci`. Commit: `feat(native): transient toast expiry
-  and message history`.
+  and message history`. The description states the latency consequence
+  (`output_path` bench delta — toast layers are paint code; the timer
+  worker adds no loop work until a toast exists).
 
 ---
 
 ### Task 10: Statusline
 
-**Files:** Create `crates/view-native/src/statusline.rs`
+**Files:** Create `crates/view-core/src/native/statusline.rs` (pure
+state + update, per the crate-seam correction; every segment source is
+an event or a bridge callback, so no worker crate is needed)
+
+**Interfaces** (T15 relies on these exact names):
+
+```rust
+// view-core/src/native/statusline.rs
+pub struct StatuslineState { .. }
+pub enum SegmentUpdate { Mode(..), Showcmd(..), Ruler(..), SearchCount(..),
+    Diagnostics(..), GitBranch(..) }   // from msg_* events + T5's bridge
+impl StatuslineState {
+    pub fn apply(&mut self, seg: SegmentUpdate);
+    /// One line, truncated least-important-segment-inward at `width`.
+    #[must_use] pub fn view(&self, width: u16) -> StatuslineView;
+}
+```
 
 **Consumer call-site first** — the user sees one line:
 
@@ -1025,20 +1382,46 @@ glyph at row 29 col 85, so state 2's assertion is already written).
 - [ ] **Step 5: Disconfirm.** Drop the macro branch; the step-1 test
   fails; restore.
 - [ ] **Step 6:** `task ci`. Commit: `feat(native): statusline with
-  mode, diagnostics, git and ruler segments`.
+  mode, diagnostics, git and ruler segments`. The description states the
+  latency consequence (`output_path` bench delta — a persistent paint
+  layer on every frame).
 
 ---
 
 ### Task 11: Picker core — nucleo, files and buffers, streaming
 
-**Files:** Create `crates/view-native/src/picker/{mod,sources,matcher}.rs`
+**Files:** Create `crates/view-core/src/native/picker.rs` (pure state,
+per the crate-seam correction) and
+`crates/view-native/src/picker/{mod,sources,matcher}.rs` (the workers);
+modify `crates/view-core/src/msg.rs` (`Effect::PickerQuery`,
+`Msg::PickerResults`)
 
 **Consumer call-site first:**
 
 ```rust
-let picker = Picker::open(Source::Files { root: cwd });
+let picker = PickerState::open(Source::Files { root: cwd });
 // keystroke -> Effect::PickerQuery { generation, needle }  (off-loop)
 // worker    -> Msg::PickerResults { generation, items }    (stale gens dropped)
+```
+
+**Interfaces** (T12/T15/T16 rely on these exact names):
+
+```rust
+// view-core/src/native/picker.rs -- pure; no matcher handle in the Model
+pub enum Source { Files { root: PathBuf }, Buffers, LiveGrep }   // LiveGrep: T12
+pub struct PickerState { .. }
+impl PickerState {
+    #[must_use] pub fn open(source: Source) -> Self;
+    /// Applies the edit, bumps and returns the new generation.
+    pub fn edit_query(&mut self, notation: &str) -> u64;
+    /// Results for a stale generation are dropped, never merged.
+    pub fn apply_results(&mut self, generation: u64, items: Vec<PickerItem>);
+    #[must_use] pub fn view(&self) -> PickerView;   // LayerKind::Picker payload
+}
+
+// view-native/src/picker/matcher.rs -- the nucleo worker; spawned by the
+// runtime, answers with Msg::PickerResults through the writer channel
+pub fn spawn(rx: Receiver<MatchRequest>, tx: Sender<Msg>) -> JoinHandle<()>;
 ```
 
 The generation stamp is not new machinery: P2's `HlProbeReply` already
@@ -1067,13 +1450,18 @@ observing a non-empty result set before the scan thread has exited.
   before scan completion.
 - [ ] **Step 6:** Measure the §3.1 latency row; record it.
 - [ ] **Step 7:** `task ci`. Commit: `feat(picker): nucleo matcher with
-  streaming files and buffers sources`.
+  streaming files and buffers sources`. The description states the
+  latency consequence (`input_path` bench delta for the routing arms,
+  plus the §3.1 picker number from step 6).
 
 ---
 
 ### Task 12: Picker live-grep + preview pane
 
-**Files:** Create `crates/view-native/src/picker/preview.rs`; modify `sources.rs`
+**Files:** Create `crates/view-native/src/picker/preview.rs`; modify
+`crates/view-native/src/picker/sources.rs` and
+`crates/view-core/src/native/picker.rs` (preview text joins the pure
+state)
 
 **Live-grep is spec-committed v0.1 scope, not optional** (charter).
 
@@ -1103,16 +1491,38 @@ text. That single test is the whole hard rule.
 - [ ] **Step 5: Disconfirm.** Revert to the disk read; step 2 fails;
   restore.
 - [ ] **Step 6:** `task ci`. Commit: `feat(picker): live-grep source and
-  RPC-backed preview`.
+  RPC-backed preview`. The description states the latency consequence
+  (`output_path` bench delta — the preview pane adds paint volume while
+  the picker is open; grep runs entirely off-loop).
 
 ---
 
 ### Task 13: File tree
 
-**Files:** Create `crates/view-native/src/tree/{mod,fs,git}.rs`
+**Files:** Create `crates/view-core/src/native/tree.rs` (pure state,
+per the crate-seam correction) and
+`crates/view-native/src/tree/{mod,fs,git}.rs` (the workers)
 
 **Consumer call-site first:** a toggleable sidebar overlay (not an nvim
 window — multigrid is P6), git status decorations, and file operations.
+
+**Interfaces** (T15 relies on these exact names):
+
+```rust
+// view-core/src/native/tree.rs
+pub struct TreeState { .. }
+impl TreeState {
+    pub fn toggle_expand(&mut self, ..);
+    pub fn apply_scan(&mut self, generation: u64, entries: Vec<TreeEntry>);
+    /// Decorations only; an empty status (no git) is a valid state, not
+    /// an error -- the tree renders undecorated.
+    pub fn apply_git(&mut self, generation: u64, status: Vec<GitEntry>);
+    #[must_use] pub fn view(&self) -> TreeView;   // LayerKind::Tree payload
+}
+
+// view-native/src/tree/{fs,git}.rs -- workers: `ignore`-walked scan;
+// `git status --porcelain=v2` on a thread, bridge-triggered, never polled
+```
 
 **File ops go through RPC where nvim owns the truth.** Opening a file is
 `RpcCall`; renaming a file with an open modified buffer must not orphan
@@ -1132,18 +1542,42 @@ still lists files and simply shows no decorations.
 
 - [ ] **Step 1: Failing test** for the rename-with-modified-buffer case.
 - [ ] **Step 2:** RPC-routed rename; pass.
-- [ ] **Step 3:** Tree model, expand/collapse, keys claimed per §5.3.
+- [ ] **Step 3:** Tree model, expand/collapse; entry keys registered and
+  claimed through T3a's mapping mechanism (`default_maps()` gains the
+  tree specs; claims report through T2's plan like every other).
 - [ ] **Step 4:** Git decorations on a worker; the no-git test.
 - [ ] **Step 5: Disconfirm.** Route rename through fs instead of RPC;
   step 1 fails; restore.
 - [ ] **Step 6:** `task ci`. Commit: `feat(native): file tree with git
-  decorations and RPC-routed file operations`.
+  decorations and RPC-routed file operations`. The description states
+  the latency consequence (`output_path` bench delta — a sidebar layer
+  present on every frame while toggled on; scans and git run off-loop).
 
 ---
 
 ### Task 14: Command palette
 
-**Files:** Create `crates/view-native/src/palette.rs`
+**Files:** Create `crates/view-core/src/native/palette.rs` (pure state,
+per the crate-seam correction)
+
+**Interfaces** (T15 relies on these exact names):
+
+```rust
+// view-core/src/native/palette.rs -- wraps P2's decoded state; no new decode
+pub struct PaletteState { .. }   // CmdlineState + cmdline-sourced PopupmenuState
+impl PaletteState {
+    #[must_use] pub fn view(&self) -> PaletteView;   // LayerKind::Palette payload
+}
+```
+
+**Runner-up rejected:** a second decode path (palette-owned handlers for
+`ext_cmdline`/`ext_popupmenu` events). P2's decode into
+`CmdlineState`/`PopupmenuState` is pinned by committed captures and
+oracle entries; a parallel decode would be a second interpretation of
+the same wire traffic that can drift from the first. The palette is a
+*presentation* of the already-decoded state — the only new logic is the
+cmdline-sourced/buffer-sourced popupmenu distinction, which is exactly
+what the step-1 capture pins.
 
 P2 already decodes `ext_cmdline` into `CmdlineState` and renders a
 `Cmdline` layer, and decodes `ext_popupmenu` into `PopupmenuState`. T14
@@ -1166,7 +1600,9 @@ That third assertion is the one that catches the mis-sourced case.
 - [ ] **Step 5: Disconfirm.** Route all popupmenus into the palette; step
   2 fails; restore.
 - [ ] **Step 6:** `task ci`. Commit: `feat(native): command palette with
-  cmdline-sourced completion`.
+  cmdline-sourced completion`. The description states the latency
+  consequence (`output_path` bench delta — the palette replaces the
+  bottom-line cmdline paint while `:` is open).
 
 ---
 
@@ -1182,17 +1618,47 @@ This closes P3's recorded deferral 2. Every UI-owning plugin in the
 [[states]]
 name = "superseded"          # default: native statusline wins
 native = {}
-steps = [ { wait_for_cell = { row = 29, col = 1, expected = "N" } } ]
+steps = [
+  # col 1 "N" alone proves nothing about WHO owns the line: lualine's own
+  # rendering (pinned by the present-state cells in this same file) also
+  # puts "N" at col 1. The discriminator is lualine's powerline separator
+  # glyph at col 85 being GONE -- the native line draws no powerline
+  # separators -- so each state's assertion is a cell the other state
+  # cannot also satisfy.
+  { wait_for_cell = { row = 29, col = 1, expected = "N" } },
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
 
 [[states]]
 name = "deferred"            # native off, plugin returns
 native = { statusline = false }
-steps = [ { wait_for_cell = { row = 29, col = 85, expected = "" } } ]
+steps = [ { wait_for_cell = { row = 29, col = 85, expected = "" } } ]
 
 [[states]]
 name = "native-only"         # no plugin present at all
 fixture = "minimal"
 ```
+
+**How a state launches:** the runner materializes each state's `native`
+table into a `view.toml` under the scenario's hermetic config dir and
+launches `view --config <that path>` (the flag T7 ships) — the same
+loader real users go through, so a state exercises the shipping config
+path, not a test-only backdoor.
+
+**What "deferred" asserts per feature:** for lualine, the plugin's own
+rendering returns (the glyph above). For nvim-notify/noice, the deferred
+state asserts the plugin's `vim.notify` interception is back in effect
+while message *rendering* falls back to P2's as-built minimal rendering —
+`cmdheight` stays 0 in every state because `ext_messages` ownership is
+attach-level (T9's ownership note), and the scenario must not assert
+otherwise.
+
+**Runner-up rejected:** one scenario file per state
+(`lualine-superseded.toml`, `lualine-deferred.toml`, …). Three files
+drift independently — the fixture and steps get copy-edited apart — and
+"a UI-owning scenario declares fewer than three states" stops being a
+checkable property of any single file, which is exactly the loader
+guarantee step 1 needs.
 
 **Non-interference per feature** (§9, charter exit gate): opening a
 feature must cause no engine state drift. The check is a state snapshot
@@ -1205,13 +1671,120 @@ changes the alternate file, fails.
 violation — deliberately have the picker set a mark, observe the test
 fail naming the drifted field, then remove it.
 
-- [ ] **Step 1:** Extend the scenario schema with `states[]`; the loader
-  rejects a UI-owning scenario that declares fewer than three.
+- [ ] **Step 1:** Extend the scenario schema with `states[]` and the
+  `assert_cell_not` step form (the discriminating negative the
+  superseded state needs); the loader rejects a UI-owning scenario that
+  declares fewer than three states. The runner materializes each state's
+  config and launches through `view --config`.
 - [ ] **Step 2:** Fill all three states for every UI-owning plugin.
 - [ ] **Step 3:** Non-interference harness over the parity snapshot.
 - [ ] **Step 4: Disconfirm** with the deliberate mark-setting picker.
 - [ ] **Step 5:** `task compat` + `task oracle`. Commit: `test(compat):
   three-state assertions and per-feature non-interference`.
+
+---
+
+### Task 16a: Input-thread/runtime-loop unification (echo lever 1)
+
+**Files:**
+- Modify: `crates/view-tui/src/terminal.rs` (`spawn_input_thread`
+  becomes a pollable handle), `crates/view/src/runtime.rs`,
+  `crates/view/src/startup.rs`, `crates/view/src/main.rs`
+
+The first of the two user-ratified echo levers (the workstream section
+above), and the biggest: `key-decoded->loop-wake` is 49.1 µs p50 of
+view's 139 µs share of a round trip — a cross-thread wake paid at
+deep-idle depth because a human pauses between keystrokes. The blocking
+input thread and its channel hop are replaced by one loop polling the
+terminal fd and the engine stdout together. Both hard rules survive by
+construction: a readiness poll is not an RPC await, and only view-tui
+touches the terminal — view-tui exposes the terminal's pollable fd plus
+a non-blocking read-and-decode on its own handle, and the runtime polls
+readiness; the fd's *readiness* is the only fact that crosses the crate
+boundary, every read and every byte of decode stays in view-tui.
+
+**Runner-up rejected:** keeping the input thread and tuning the wake
+(spin-then-park, eventfd). The cost is deep-idle wake latency at human
+keystroke cadence; tuning the parking strategy shrinks it, unification
+deletes the hop outright, and the ratified closure path pins
+unification as the lever.
+
+**Falsifiable check:** the taps decomposition re-measured after the
+change shows the `key-decoded->loop-wake` segment collapsed from ~49 µs
+p50 to poll-return cost, and the paired echo bench puts `echo.minimal
+ratio_p50` on dev-linux at or under the ≤ 1.10 bar — or the measured
+residual is recorded against its `[[shortfall]]` entry for
+re-adjudication. §8 step 3's buffered-key replay tests still pass
+unchanged: pre-attach keys are buffered and replayed in order.
+
+- [ ] **Step 1: Pin behavior first.** The startup buffered-replay and
+  input-ordering tests are the contract this restructure must not move;
+  run them and record the passing baseline before touching code.
+- [ ] **Step 2:** view-tui's pollable terminal handle: expose the fd for
+  readiness polling plus a non-blocking `read_keys()`; the input thread
+  is not yet deleted (both paths compile side by side).
+- [ ] **Step 3:** Unify the runtime loop over terminal fd + engine
+  stdout readiness; delete `spawn_input_thread` and its channel; fix
+  every call site the compiler names. Step 1's tests pass unchanged.
+- [ ] **Step 4:** Re-run the taps decomposition; record the
+  `key-decoded->loop-wake` segment before/after.
+- [ ] **Step 5:** Paired echo re-measure on dev-linux (and dev-macos
+  when that host is available): retire the echo `[[shortfall]]` entries
+  the measurement now clears — the ledger enumerates them, absolute
+  tails included — or record the residual with the numbers for
+  re-adjudication with the user — never silently carried.
+- [ ] **Step 6:** `task ci`. Commit: `perf(runtime): unify the input
+  thread into the runtime poll loop`. The description states the latency
+  consequence with the step-4/5 numbers — this task IS key dispatch.
+
+---
+
+### Task 16b: Incremental rendering behind a shadow-equivalence guard (echo lever 2)
+
+**Files:**
+- Modify: `crates/view-surface/src/lib.rs` (`render`),
+  `crates/view-tui/src/paint.rs`
+
+The second ratified echo lever, strictly after T16a. The paint side's
+68 µs share is attributed to cache and TLB residency, proportional to
+memory touched per frame: `view_surface::render` rebuilds a full-screen
+`Surface` every frame even for a one-cell change. This task extends the
+computed-damage path so `render` reuses the undamaged portion instead of
+rebuilding it. Expectations stay honest: this lever helps least where
+paint volume is highest (scroll/streaming touch most rows), so the echo
+scenarios are where the win should show and the scroll scenarios are
+where the guard must prove no regression.
+
+**The guard is the design, not an afterthought:** in debug and CI
+builds, every incremental frame is compared against a from-scratch full
+rebuild of the same `Model` (shadow equivalence — incremental == full,
+asserted cell-for-cell), and the differential oracle cross-checks the
+rendered raster against the reference session across the corpus. An
+incremental renderer without the equivalence guard is a silent-drift
+machine; with it, a divergence is a red assert naming the frame.
+
+**Falsifiable check:** seed a deliberate divergence (skip one damaged
+row in the incremental path); the shadow assert fires in debug/CI *and*
+the oracle corpus run catches the raster divergence; remove the seed.
+Both catchers must be observed catching — a guard that has never fired
+is unproven.
+
+- [ ] **Step 1:** Shadow-equivalence harness first: debug/CI-gated
+  comparison of incremental output against a full rebuild each frame,
+  wired before any incremental logic exists (it trivially passes while
+  `render` is still full-rebuild).
+- [ ] **Step 2: Disconfirm the guard.** Seed the deliberate divergence;
+  observe the shadow assert fail naming the frame and the oracle catch
+  the raster diff; remove the seed.
+- [ ] **Step 3:** Incremental path over the computed damage; the guard
+  and the full oracle corpus stay green.
+- [ ] **Step 4:** Paired bench: `output_path` plus the echo scenarios,
+  before/after; update the shortfall ledger together with T16a's step-5
+  ruling (the two levers' residuals are adjudicated as one picture).
+- [ ] **Step 5:** `task ci` + `task oracle`. Commit: `perf(surface):
+  incremental render behind a shadow-equivalence guard`. The description
+  states the latency consequence with the step-4 numbers — this task IS
+  the paint path.
 
 ---
 
@@ -1237,15 +1810,31 @@ picker rows must gate against the spec budget, not only against the first
 number they happen to record. A row whose first recording is 40 ms would
 otherwise ratchet at 40 ms and never report that it is 2.5× over budget.
 
+**Runs after T16a and T16b**, so the features-enabled matrix measures
+the shipped loop and renderer, not the ones they replaced.
+
+**Falsifiable check:** the picker gate fails on a deliberately slowed
+matcher (step 2 observes it), and deleting a picker baseline row makes
+the gate fail on the missing row rather than silently passing an
+ungated scenario.
+
 - [ ] **Step 1:** Picker scenario with a generated 100k-entry corpus.
 - [ ] **Step 2:** Measure; record; verify the gate fails on a
-  deliberately slowed matcher.
+  deliberately slowed matcher, and that deleting a baseline row fails
+  the gate; restore both.
 - [ ] **Step 3:** 1M scan row; assert streaming by observing painted
   results before scan completion.
 - [ ] **Step 4:** Full `task perf-audit` with features enabled; compare
   every row against the P3-exit baselines; any regression is a defect to
   fix in this phase.
-- [ ] **Step 5:** Commit: `test(bench): picker latency rows and
+- [ ] **Step 5:** Adjudicate measurement-layer carry-ins 1–5 (the
+  section above: replicate-median gating, `--record` pinning semantics,
+  the `scroll.minimal` knife-edge, dev-macos per-scenario headroom,
+  auto-staleness dormancy); record each ruling in `budgets.toml`
+  comments or `.claude/measurements/`, with the evidence that decided
+  it. A carry-in whose answer needs the user (a gating-semantics change)
+  is surfaced with the measured options, not decided silently.
+- [ ] **Step 6:** Commit: `test(bench): picker latency rows and
   features-enabled matrix`.
 
 ---
@@ -1263,6 +1852,14 @@ bare checkmark.
 - [ ] `task perf-audit` green with native features ENABLED, every §3.1
       row compared against its P3-exit baseline (T16).
 - [ ] Picker §3.1 rows measured and gated (closes P3 deferral 1).
+- [ ] The echo `[[shortfall]]` entries in
+      `crates/view-bench/budgets.toml` — the ledger enumerates them; the
+      four `ratio_p50` rows and the dev-macos `view_p99_ms` tail alike —
+      retired by measurement (T16a/T16b), or the residual re-adjudicated
+      with the user — never silently carried.
+- [ ] Measurement-layer carry-ins 1–5 adjudicated (T16 step 5), each
+      ruling recorded in `budgets.toml` comments or
+      `.claude/measurements/` with its evidence citation.
 - [ ] Non-interference test passing per feature, each shown to catch a
       deliberately introduced drift (T15 step 4).
 - [ ] Every feature in `registry::features()` reachable, opt-out-able by
