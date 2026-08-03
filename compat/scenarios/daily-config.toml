@@ -19,6 +19,12 @@ plugin = "daily-config"
 class = "semantic"
 state = "present"
 steps = [
+  # a daily config's startup screen is unknown ground: a dashboard, a file
+  # tree, or notification popups can own the window the editor opens into,
+  # where typed text either triggers mappings or lands in a buffer the
+  # screen never shows. A fresh empty buffer is the one editable surface
+  # every config can be brought to without naming any plugin.
+  { send = ":enew<CR>" },
   { send = "ihello from daily-config<Esc>" },
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while

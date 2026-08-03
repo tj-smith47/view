@@ -39,7 +39,9 @@ use view_harness::results::{
     load_results, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
 };
 use view_harness::scenario::{self, ScenarioFile};
-use view_oracle::compat::{CompatSession, PluginClass, ScenarioState};
+use view_oracle::compat::{
+    reset_hermetic_home, CompatSession, ErrorBaseline, PluginClass, ScenarioState,
+};
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
     ReferenceSession, ReferenceSide, ViewSide,
@@ -93,6 +95,19 @@ const PROBE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(15);
 /// unchanged, and the overall bound, before typing the priming command.
 const SCREEN_QUIESCE_SILENCE: Duration = Duration::from_millis(500);
 const SCREEN_QUIESCE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The stricter silence bar a fixture-less scenario's steps wait behind
+/// after priming. The pre-priming wait's 500ms window can latch onto a
+/// mid-startup gap: a daily config keeps arranging its UI (auto-opened
+/// file trees, dashboards, notification popups) in bursts separated by
+/// more than that, and the priming keystrokes themselves pop up further
+/// notifications the earlier wait cannot have seen. Steps typed into that
+/// churn land in a window the startup then replaces, leaving the scenario
+/// asserting against a grid that never shows them. Two seconds outlasts
+/// the burst gaps observed with a real tree + dashboard + notifier config
+/// while [`SCREEN_QUIESCE_DEADLINE`] still bounds a screen that never
+/// settles (an animated dashboard), which then fails on its own merits.
+const DAILY_STEPS_SILENCE: Duration = Duration::from_secs(2);
 
 /// Disambiguates concurrently-generated scratch paths (a hermetic XDG home,
 /// a probe socket) within one process, the same role
@@ -1239,27 +1254,43 @@ fn run_scenario(
         // screen here does not itself abort the scenario -- the priming
         // retry loop right below is what actually confirms success.
         let _ = session.wait_for_screen_quiescence(SCREEN_QUIESCE_SILENCE, SCREEN_QUIESCE_DEADLINE);
-        session.prime_probe_channel(PROBE_CHANNEL_TIMEOUT)
+        session
+            .prime_probe_channel(PROBE_CHANNEL_TIMEOUT)
+            .and_then(|()| {
+                // Settle again, and behind a stricter bar, before any step
+                // types: see DAILY_STEPS_SILENCE for the startup-burst race
+                // this closes. The error baseline is captured after that
+                // settle so the config's own startup noise lands inside it
+                // and only what the steps add can fail the epilogue.
+                let _ = session
+                    .wait_for_screen_quiescence(DAILY_STEPS_SILENCE, SCREEN_QUIESCE_DEADLINE);
+                session.error_baseline()
+            })
     } else {
-        session.await_probe_channel(PROBE_CHANNEL_TIMEOUT)
+        session
+            .await_probe_channel(PROBE_CHANNEL_TIMEOUT)
+            .map(|()| ErrorBaseline::default())
     };
-    if let Err(err) = channel_result {
-        // kill alone only requests termination; reaping (bounded, matching
-        // PtySession::wait_for_exit's own kill-then-wait standard) is what
-        // keeps a channel-failure exit from leaving a zombie entry in the
-        // process table for the rest of this run
-        session.pty().kill();
-        let _ = session.pty().wait_for_exit(Duration::from_secs(2));
-        return Ok(scenario_result(
-            scenario_path,
-            scenario,
-            pin,
-            ScenarioStatus::Failed,
-            None,
-            Some(err.to_string()),
-            start.elapsed().as_millis(),
-        ));
-    }
+    let baseline = match channel_result {
+        Ok(baseline) => baseline,
+        Err(err) => {
+            // kill alone only requests termination; reaping (bounded, matching
+            // PtySession::wait_for_exit's own kill-then-wait standard) is what
+            // keeps a channel-failure exit from leaving a zombie entry in the
+            // process table for the rest of this run
+            session.pty().kill();
+            let _ = session.pty().wait_for_exit(Duration::from_secs(2));
+            return Ok(scenario_result(
+                scenario_path,
+                scenario,
+                pin,
+                ScenarioStatus::Failed,
+                None,
+                Some(err.to_string()),
+                start.elapsed().as_millis(),
+            ));
+        }
+    };
 
     let mut failing_step = None;
     let mut detail = None;
@@ -1271,7 +1302,7 @@ fn run_scenario(
         }
     }
     if failing_step.is_none() {
-        if let Err(err) = session.zero_error_check() {
+        if let Err(err) = session.zero_error_check_since(&baseline) {
             failing_step = Some(scenario.steps.len());
             detail = Some(err.to_string());
         }
@@ -1283,6 +1314,22 @@ fn run_scenario(
     // may well fail to reach a cmdline prompt to type `:qa!` into).
     let _ = session.pty().send(b"\x1b:qa!\r");
     let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+
+    // The fixture-less arm just sourced the maintainer's live config, whose
+    // startup tooling may write entries under the shared hermetic home that
+    // the next spawn's preparation rightly refuses (a Go toolchain invoked
+    // by a plugin manager creates $HOME/go, for one observed case). The
+    // home holds nothing durable by contract, so restoring it by deletion
+    // keeps one maintainer-config scenario from vetoing every spawn after
+    // it, in this run and the next. A failed reset is loud twice: here, and
+    // in the refusal the next spawn raises against the leftover entry.
+    if ready.needs_priming {
+        if let Err(err) = reset_hermetic_home() {
+            eprintln!(
+                "compat: resetting the hermetic home after the fixture-less scenario failed: {err}"
+            );
+        }
+    }
 
     let status = if failing_step.is_some() {
         ScenarioStatus::Failed

@@ -64,6 +64,8 @@ use portable_pty::CommandBuilder;
 use crate::pty::PtySession;
 use crate::OracleError;
 
+pub use view_engine::env::reset_hermetic_home;
+
 /// Bound on how long a single probe subprocess (`nvim --server ... --remote-expr`)
 /// is allowed to run before [`wait_with_timeout`] kills it. Generous
 /// relative to a normal probe's near-instant reply (confirmed live: a clean
@@ -763,22 +765,70 @@ impl CompatSession {
     /// `"traceback"`, or any [`CompatError`] the two probes themselves can
     /// raise.
     pub fn zero_error_check(&self) -> Result<(), CompatError> {
+        self.zero_error_check_since(&ErrorBaseline::default())
+    }
+
+    /// Snapshots the two error surfaces [`zero_error_check`]
+    /// (`Self::zero_error_check`) probes, for a caller that will later hand
+    /// the snapshot to [`zero_error_check_since`]
+    /// (`Self::zero_error_check_since`).
+    ///
+    /// # Errors
+    ///
+    /// Returns any [`CompatError`] the two probes themselves can raise.
+    pub fn error_baseline(&self) -> Result<ErrorBaseline, CompatError> {
+        Ok(ErrorBaseline {
+            messages: self.probe("execute('messages')")?,
+            errmsg: self.probe("v:errmsg")?,
+        })
+    }
+
+    /// [`zero_error_check`](Self::zero_error_check), but attributing only
+    /// content that appeared *after* `baseline` to the scenario's steps.
+    /// Exists for the fixture-less (daily-config) scenario: a maintainer's
+    /// live config may set `v:errmsg` during its own startup (`nvim` under
+    /// the same config sets the identical value, so it is the config's own
+    /// property, not a compat divergence), and a committed fixture's
+    /// guarantee that startup is error-free does not extend to a config
+    /// this harness does not own.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CompatError::ZeroErrorViolation`] if `:messages` gained an
+    /// error line `baseline` did not hold, or `v:errmsg` changed to an
+    /// error value, or any [`CompatError`] the two probes themselves can
+    /// raise.
+    pub fn zero_error_check_since(&self, baseline: &ErrorBaseline) -> Result<(), CompatError> {
         let messages = self.probe("execute('messages')")?;
-        if let Some(detail) = error_marker(&messages) {
+        if let Some(detail) = new_error_line(&messages, &baseline.messages) {
             return Err(CompatError::ZeroErrorViolation {
                 origin: "messages",
                 detail,
             });
         }
         let errmsg = self.probe("v:errmsg")?;
-        if let Some(detail) = error_marker(&errmsg) {
-            return Err(CompatError::ZeroErrorViolation {
-                origin: "v:errmsg",
-                detail,
-            });
+        if errmsg != baseline.errmsg {
+            if let Some(detail) = error_marker(&errmsg) {
+                return Err(CompatError::ZeroErrorViolation {
+                    origin: "v:errmsg",
+                    detail,
+                });
+            }
         }
         Ok(())
     }
+}
+
+/// A snapshot of the two error surfaces the zero-error epilogue probes
+/// (`:messages` and `v:errmsg`), taken before a scenario's steps run so
+/// [`CompatSession::zero_error_check_since`] can attribute only content
+/// that appeared afterward to the steps. `Default` is the empty snapshot,
+/// against which every error is new -- the strict form
+/// [`CompatSession::zero_error_check`] applies to committed fixtures.
+#[derive(Debug, Default)]
+pub struct ErrorBaseline {
+    messages: String,
+    errmsg: String,
 }
 
 /// Scans `text` for an E-numbered Vim error (`E` followed by a digit,
@@ -790,13 +840,31 @@ impl CompatSession {
 /// scripted history.
 fn error_marker(text: &str) -> Option<String> {
     text.lines()
-        .find(|line| {
-            line.contains("traceback")
-                || line.as_bytes().windows(2).enumerate().any(|(i, w)| {
-                    w[0] == b'E' && w[1].is_ascii_digit() && starts_error_token(line, i)
-                })
-        })
+        .find(|line| is_error_line(line))
         .map(str::to_string)
+}
+
+/// [`error_marker`] restricted to lines absent from `baseline`: the
+/// line-delta scan behind [`CompatSession::zero_error_check_since`].
+/// Whole-line set membership (not positional diffing) because `:messages`
+/// only ever appends, and an error line the baseline already held is by
+/// definition not the steps' doing wherever it now sits.
+fn new_error_line(text: &str, baseline: &str) -> Option<String> {
+    let seen: std::collections::HashSet<&str> = baseline.lines().collect();
+    text.lines()
+        .find(|line| is_error_line(line) && !seen.contains(line))
+        .map(str::to_string)
+}
+
+/// The per-line predicate behind [`error_marker`] and [`new_error_line`]:
+/// an E-numbered Vim error token or a Lua traceback marker.
+fn is_error_line(line: &str) -> bool {
+    line.contains("traceback")
+        || line
+            .as_bytes()
+            .windows(2)
+            .enumerate()
+            .any(|(i, w)| w[0] == b'E' && w[1].is_ascii_digit() && starts_error_token(line, i))
 }
 
 /// True if the `E<digit>` found at byte offset `i` in `line` starts a token
@@ -1121,6 +1189,28 @@ mod tests {
             error_marker("E121: Undefined variable: foo"),
             Some("E121: Undefined variable: foo".to_string())
         );
+    }
+
+    #[test]
+    fn new_error_line_ignores_an_error_the_baseline_already_held() {
+        let baseline = "startup chatter\nE216: No such group or event: FileExplorer *";
+        assert_eq!(new_error_line(baseline, baseline), None);
+    }
+
+    #[test]
+    fn new_error_line_reports_an_error_the_baseline_did_not_hold() {
+        let baseline = "E216: No such group or event: FileExplorer *";
+        let grown = "E216: No such group or event: FileExplorer *\nE121: Undefined variable: foo";
+        assert_eq!(
+            new_error_line(grown, baseline),
+            Some("E121: Undefined variable: foo".to_string())
+        );
+    }
+
+    #[test]
+    fn new_error_line_against_an_empty_baseline_matches_error_marker() {
+        let text = "ok line\nE121: Undefined variable: foo";
+        assert_eq!(new_error_line(text, ""), error_marker(text));
     }
 
     #[test]

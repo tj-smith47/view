@@ -493,6 +493,38 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Restores [`hermetic_home`] to the state every spawn accepts by deleting
+/// it outright, for a caller that has just run code it does not vet and
+/// cannot enumerate what that code's subprocesses wrote under the home:
+/// the compat harness's daily-config scenario sources the maintainer's
+/// live editor config, whose startup tooling writes real state there (a
+/// Go toolchain invoked by a plugin manager creates `$HOME/go`, for one
+/// observed case). Deletion rather than a selective sweep because the
+/// home's own contract is that it holds nothing durable (see
+/// [`prepare_hermetic_home`]'s refusal message), so removing the whole
+/// directory is always a correct recovery, and the next spawn's
+/// preparation recreates it empty.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the directory exists and
+/// cannot be removed. An absent directory is already the restored state,
+/// not an error.
+pub fn reset_hermetic_home() -> io::Result<()> {
+    reset_home_dir(&hermetic_home())
+}
+
+/// The body of [`reset_hermetic_home`], taking its path as an argument for
+/// the same reason [`prepare_home_dir`] does: a test exercising the reset
+/// must not delete the home every concurrent spawn in the same test binary
+/// is reading.
+fn reset_home_dir(path: &Path) -> io::Result<()> {
+    match std::fs::remove_dir_all(path) {
+        Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+        _ => Ok(()),
+    }
+}
+
 /// The refusal [`prepare_home_dir`] raises, naming the entry and the way
 /// out: the directory holds nothing durable, so deleting it is always a
 /// correct recovery, and a message that only cried "plant" would leave the
@@ -776,6 +808,20 @@ mod tests {
         let dir = scratch("home-state");
         std::fs::create_dir_all(dir.join(".local/state/nvim")).unwrap();
         std::fs::create_dir_all(dir.join(".cache/nvim")).unwrap();
+        prepare_home_dir(&dir).unwrap();
+    }
+
+    /// A home an unvetted child contaminated must come back to the state
+    /// every spawn accepts, and resetting an already-absent home is the
+    /// restored state, not an error.
+    #[test]
+    fn resetting_a_contaminated_home_lets_the_next_spawn_prepare_it() {
+        let dir = scratch("home-reset");
+        std::fs::create_dir_all(dir.join("go/pkg")).unwrap();
+        prepare_home_dir(&dir).unwrap_err();
+        reset_home_dir(&dir).unwrap();
+        assert!(!dir.exists(), "the reset left the contaminated home behind");
+        reset_home_dir(&dir).unwrap();
         prepare_home_dir(&dir).unwrap();
     }
 
