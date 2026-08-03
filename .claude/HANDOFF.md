@@ -84,13 +84,13 @@ citations, then the user's adjudication.
 | # | Task | State / what remains |
 |---|------|----------------------|
 | 6 | dev-macos re-record | DONE — harness fix `d6ac7af`, bench TOMLs `f4521ab` (see 3.2). `f4521ab` was the frozen tip until #17's fixes moved it; the final tip is now `bb139c5` (+ docs `6043585`). Bench/gate evidence at `f4521ab` stays valid: the #17 commits touch only compat-runner/env-reset paths, no bench path |
-| 15 | `task ci` at final tip | re-run (green at `cdf5f26`: 796 passed, 32 suites) |
-| 16 | oracle corpus + fuzz seeds 1,2 x200 at final tip | re-run (at `cdf5f26`: 24/24 PARITY, both seeds 0 divergences) |
-| 19 | zero-clock greps at final tip | cheap re-observe |
+| 15 | `task ci` at final tip | DONE — the earlier "done" was at `f4521ab`/`cdf5f26`, which predates the `58006ef`+`bb139c5` harness code; re-run at `69f64fe` 2026-08-03: EXIT 0, 805 passed, 32 suites. Log `~/.claude/tmp/ci-tip-69f64fe.log` |
+| 16 | oracle corpus + fuzz seeds 1,2 x200 at final tip | DONE — same staleness, same fix: at `69f64fe` 24/24 PARITY, both seeds 0 divergences/timeouts/errors. Logs `~/.claude/tmp/oracle-{corpus,fuzz-s1,fuzz-s2}-69f64fe.log` |
+| 19 | zero-clock greps at final tip | DONE — re-observed at `69f64fe`, identical to the `cdf5f26` reading modulo oracle.rs line drift (826 -> 841). Log `~/.claude/tmp/clock-greps-69f64fe.txt` |
 | 17 | compat at final tip | DONE — daily-config exposed 3 real harness defects, fixed at `58006ef` + `bb139c5` (= the NEW FINAL TIP); page committed `6043585`. Linux: plain 0, daily 15/15 OK. mbp at `bb139c5`: env tests 0 (non-root proof of the read-only reset), plain 0, daily x2 back-to-back 15/15 OK (reset proven across runs), hermetic home left empty. Logs: local `~/.claude/tmp/compat-{plain,daily}-v3.log`, mbp `~/compat-mbp-{plain,daily1,daily2}-bb139c5.log`, `~/envtests-bb139c5.log` |
 | 18 | `task perf-audit CLASS=dev-linux` at final tip | DONE — quiet-host runs failed exactly one cell, reproducibly: `input_path.minimal key_to_rpc_p99_us` at a stable 109-113 (four draws, guest loads 0.18-2.29, zero steal, zero PSI) against the campaign's clean band 80.155-90.922. Growth localizes to the two kernel-side hops after this VM's 2026-08-02 23:57 self-reboot (systemd hang -> logind); view's own hops held 21-24us and the diff since the campaign tip touches no input-path crate. NOT the campaign's excluded contamination mode (those spikes read 1032-2965us). Accepted as a host-attributed `[[shortfall]]` at 112.647 (`f1fab01`); full gate re-run EXIT 0, 5 shortfalls, no fails. Logs `~/.claude/tmp/perf-audit-dev-linux-{v2,v3}.log`, `inputpath-leg{A,B}-*.log`. Spending it is the user's call: VM reboot / vCPU pinning on sir / later re-measure |
 | 26 | dogfood refresh at final tip | DONE — journal entry at `bb139c5` committed `977b189`: scripted tmux edit + :wq persisted and verified, real config rendered NvimTree/alpha/lualine with noice ext_cmdline toasts native. Captures `~/.claude/tmp/dogfood-leg{1,2}*.txt` |
-| 20 | citations into the plan's exit checklist | a draft exists but cites `cdf5f26`, which is stale — re-cite everything at the final tip |
+| 20 | citations into the plan's exit checklist | DONE — checklist in `2026-07-18-p3-oracle-bench-gates.md` cited at the battery tip (code `bb139c5`, tree `69f64fe`); ten items checked with evidence, three left open BY DESIGN because they close only on user decisions at #21 (echo escalation door, deferrals 1-4 re-confirmation, the last known-bugs item) |
 | 21 | surface the adjudication list to the user | LAST — see 3.4 |
 
 Sequence: #6 commit -> #15/#16/#19 -> #17 -> #18 -> #26 -> #20 -> #21.
@@ -390,15 +390,23 @@ No other file carries this list; it is the reason #21 runs last.
    `/opt/homebrew/bin/git`) — the "broken, needs bin-gitfix shim" note was
    stale; nothing to adjudicate.
 10. **Shortfall-ledger ratification.** Every `[[shortfall]]` in
-    `crates/view-bench/budgets.toml` (six dev-linux + four dev-macos once #6
-    commits) was accepted by the assistant with engineering rationale; none
-    carries user sign-off. Present the complete table — scenario, bar,
+    `crates/view-bench/budgets.toml` (five dev-linux + six dev-macos as of
+    `f1fab01`) was accepted by the assistant with engineering rationale;
+    none carries user sign-off. Present the complete table — scenario, bar,
     accepted value, why — for a single up-or-down ratification. Same pass
     ratifies the spec §3.1 echo-row amendment, which the spec itself flags
     "This amendment has NO user sign-off; it is provisional." (The
     input-path 232µs self-referential bar was already withdrawn and the
     original 100µs bar restored and met at 88.965µs; the first-paint
     30ms/0.30 bar is user-stated 2026-07-27 — those two need nothing.)
+11. **input_path dev-linux shortfall — how to spend it.** The `f1fab01`
+    entry (accepted 112.647 vs the 100µs bar) is host-attributed: a
+    kernel-side level shift after this guest VM's 2026-08-02 23:57
+    self-reboot (systemd/dbus hang -> logind reboot), with unpinned vCPU
+    placement on sir the leading candidate. Nothing to fix in view. Options
+    to spend it, all the user's call: reboot this VM to redraw placement
+    (kills live sessions), pin vCPUs on sir, or simply re-measure later and
+    delete the entry per the stale-shortfall mechanism.
 
 Carried from #6 (see 3.2): the host-wide `ratio_p50 = 1.02` headroom key is
 echo-derived but governs scenarios whose spread was never measured, and the
@@ -410,7 +418,9 @@ paragraph of 3.2).
 Separately, not a view matter: the sir/proxmox storage-incident follow-ups
 (retention does not fit the pool, backup-script defects, the next run does
 ~1T of FULL sends, the health check alerted nobody, host `bud` still down,
-sir RAM tight).
+sir RAM tight). New infra observations from the #18 investigation: this VM
+rebooted itself 2026-08-02 23:57 after a systemd/dbus hang; ksmd runs at
+~16% of a core on sir; this guest's swap is 100% full.
 
 ### 3.5 Constraints sessions lose first
 

@@ -1067,36 +1067,85 @@ silently reframe the budget.
 Every item closes with an evidence citation — the command run and its
 observed output — never a bare checkmark (planning protocol step 7).
 
-- [ ] `task ci` green at the branch tip (now includes oracle + compat
-  legs locally).
-- [ ] Oracle corpus green over the seed set; fuzz `--rounds 200` at two
+Citations below are at the battery tip: code tip `bb139c5` (2026-08-03),
+final tree tip `69f64fe` (docs and bench data only past `bb139c5`; the
+one code-adjacent file after it, `budgets.toml` at `f1fab01`, was itself
+gate-verified — see the perf-audit item).
+
+- [x] `task ci` green at the branch tip (now includes oracle + compat
+  legs locally). `task ci` at `69f64fe` (2026-08-03): EXIT 0 —
+  fmt-check, clippy `-D warnings`, dep-direction audit, style, loc,
+  test all green; 805 tests passed across 32 suites, 0 failed.
+- [x] Oracle corpus green over the seed set; fuzz `--rounds 200` at two
   seeds with zero unquarantined divergences — or every quarantined
-  entry fixed or user-approved as a known bug.
-- [ ] Compat matrix green across the §13.3 floor on Linux AND macOS
+  entry fixed or user-approved as a known bug. At `69f64fe`:
+  `task oracle` 24/24 PARITY; `task oracle -- fuzz --seed 1 --rounds
+  200` and `--seed 2` each "0 divergences, 0 timeouts, 0 errors";
+  `corpus/quarantine/` empty (`.gitkeep` only).
+- [x] Compat matrix green across the §13.3 floor on Linux AND macOS
   (CI legs per T11), plus a real-hardware `ssh mbp` run of
   `task compat` (§13.7 evidence, supplemental to CI); evidence page
-  regenerated from the run.
-- [ ] Every §3.1 row measurable without P4 features measured, and gated
+  regenerated from the run. At `bb139c5` (compat code unchanged
+  since): Linux `task compat` 14 OK + daily-config correctly SKIPPED
+  without `VIEW_DAILY_CONFIG`, and 15/15 OK with it; mbp real
+  hardware 15/15 OK twice back-to-back (hermetic-home reset proven
+  across runs) plus a plain run, all 2026-08-03; page regenerated and
+  committed `6043585`. The T11 CI legs are armed in the workflow but
+  have never executed remotely — nothing has been pushed; recorded in
+  `.claude/pending-first-push.md`.
+- [x] Every §3.1 row measurable without P4 features measured, and gated
   per T11's per-row table (CI paired gates armed with committed
   baselines; dev-class absolute gates green via `task perf-audit`) —
   baseline file diff cited. Picker rows recorded as gating at P4
-  (deferral 1).
+  (deferral 1). dev-linux: `task perf-audit CLASS=dev-linux` EXIT 0
+  at `f1fab01` content (2026-08-03), 5 shortfalls printed, none
+  failing. dev-macos: 12-cell clean re-record committed `f4521ab`
+  (the baseline diff), gate EXIT 0 on the cleaned mbp the same day.
+  Picker rows: deferral 1, re-confirmed 2026-07-26.
 - [ ] Echo ratio ≤ 1.10 gate passing (T12), or the escalation door
   taken with attribution evidence and the user's decision recorded.
-- [ ] Latency-gap attribution re-measured and written to the baseline
-  file (charter exit gate).
-- [ ] `perf-audit` target runs end-to-end.
-- [ ] Zero-clock discipline holds: the T4-era grep on runtime.rs still
+  OPEN — closes at #21. The gate does not pass (dev-linux `ratio_p50`
+  1.172/1.181; dev-macos `echo.minimal` accepted at 1.1125). The
+  escalation door is taken and attribution is complete —
+  `echo_control` puts out-of-process cost at ~1-2%, so the residual
+  is view's own input/paint path — but the user's decision is not yet
+  recorded; it is adjudication item 1.
+- [x] Latency-gap attribution re-measured and written to the baseline
+  file (charter exit gate). `baselines/dev-linux.toml` carries the
+  paired `echo_control` rows (`control_ratio_p50` 1.009 heavy / 0.994
+  minimal) against `echo` (`ratio_p50` 1.181 / 1.172): the gap is
+  attributed to view's own path, in the committed baseline itself.
+- [x] `perf-audit` target runs end-to-end. Both dev classes,
+  2026-08-03: dev-linux EXIT 0 (5 shortfalls, none failing);
+  dev-macos EXIT 0 at the `f4521ab` files on the cleaned mbp.
+- [x] Zero-clock discipline holds: the T4-era grep on runtime.rs still
   clean; no wall-clock defaults anywhere in oracle/bench harness code
-  (seeded RNG, harness-owned deadlines only).
+  (seeded RNG, harness-owned deadlines only). Greps re-run at
+  `69f64fe`: every `Instant::now` in runtime.rs sits under a
+  `#[cfg(test)]` boundary; zero unseeded-RNG hits in harness crates;
+  the single `SystemTime::now` is the oracle report-row date stamp
+  (`oracle.rs` `today_date_string`), unchanged from the `cdf5f26`
+  observation modulo line drift.
 - [ ] Coverage-walk deferrals 1-4 re-confirmed with the user at exit
-  (none silently expire).
+  (none silently expire). OPEN — closes at #21. Last user
+  re-confirmation 2026-07-26; the at-exit re-confirmation is
+  adjudication item 2.
 - [ ] `.claude/known-bugs.md` drained or user-approved deferrals only.
-- [ ] Dogfood note appended (real editing sessions through view, now
-  with the oracle watching).
-- [ ] Guided QA doc updated for P3 surface (oracle/compat/bench have no
+  OPEN — closes at #21. Drained to exactly one unchecked item
+  (tracked `.claude/settings.json` auto-executing machine-local
+  hooks), which awaits the user's call as adjudication item 6.
+- [x] Dogfood note appended (real editing sessions through view, now
+  with the oracle watching). `.claude/dogfood-journal.md` P3 entries:
+  2026-08-01 at `94f8732` and the 2026-08-03 refresh at `bb139c5`
+  (committed `977b189`).
+- [x] Guided QA doc updated for P3 surface (oracle/compat/bench have no
   user-visible UI, so this may be a no-op — record the decision).
-- [ ] P4 plan authored under the charter + planning protocol, against
+  `.claude/qa/p3-guided-qa.md` exists and opens by recording exactly
+  that decision: P3 shipped operator tools, and the doc covers the
+  operator surface.
+- [x] P4 plan authored under the charter + planning protocol, against
   the tree; S2 (Theme enum-keyed groups) explicitly in its scope per
-  the DRY/SSOT audit handoff.
+  the DRY/SSOT audit handoff. `2026-07-26-p4-native-features.md`
+  (last touched `cdf5f26`); S2 is named in its T5 row ("Theme group
+  storage enum-keyed before P4 adds groups (DRY/SSOT audit S2)").
 
