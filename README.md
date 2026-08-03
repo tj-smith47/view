@@ -16,7 +16,7 @@ An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 [Roadmap](#roadmap) &bull;
 [Building](#building-from-source)
 
-![view editing Rust code with a 14-plugin lazy.nvim config loaded](assets/view-screenshot.png)
+![view editing Rust code, Dracula themed, with a plugin-heavy lazy.nvim config loaded](assets/view-screenshot.png)
 
 </div>
 
