@@ -375,6 +375,36 @@ pub struct PtySession {
     parser: vt100::Parser,
     master: Box<dyn MasterPty + Send>,
     raw: Option<Vec<u8>>,
+    // once the child has been reaped its pid can be recycled by the OS, so a
+    // group kill aimed at that pid could hit an unrelated process; before
+    // reaping the pid is held (live or zombie) and the group signal is safe
+    reaped: bool,
+}
+
+/// Sends `SIGKILL` to the process group led by `pid`.
+///
+/// A pty child is spawned as a session leader (`setsid` runs before exec),
+/// so its pid names the process group holding everything it spawned. A
+/// kill aimed at the leader alone gives it no chance to reap its own
+/// children (`view` SIGKILLed mid-run leaves its embedded `nvim --embed`
+/// engine orphaned on init), while a group kill takes the whole tree down
+/// in one signal.
+///
+/// The caller must not have reaped `pid` yet: a reaped pid can be recycled
+/// and the signal would then land on an unrelated group.
+///
+/// On non-Unix platforms this is a no-op; process groups are a Unix
+/// mechanism, and the per-child kill is the only lever there.
+pub fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(pid) {
+        let _ = nix::sys::signal::killpg(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
 }
 
 /// How much of a child's raw output a recording session keeps.
@@ -496,6 +526,7 @@ impl PtySession {
             parser,
             master: pair.master,
             raw: None,
+            reaped: false,
         })
     }
 
@@ -733,7 +764,11 @@ impl PtySession {
     ///
     /// Returns [`OracleError::Io`] if the underlying wait fails.
     pub fn wait(&mut self) -> Result<portable_pty::ExitStatus, OracleError> {
-        self.child.wait().map_err(Into::into)
+        let status = self.child.wait();
+        if status.is_ok() {
+            self.reaped = true;
+        }
+        status.map_err(Into::into)
     }
 
     /// Blocks (up to `timeout`), polling rather than
@@ -752,11 +787,14 @@ impl PtySession {
         let deadline = Instant::now() + timeout;
         loop {
             if let Ok(Some(status)) = self.child.try_wait() {
+                self.reaped = true;
                 return Some(status);
             }
             if Instant::now() >= deadline {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                self.kill();
+                if self.child.wait().is_ok() {
+                    self.reaped = true;
+                }
                 return None;
             }
             std::thread::sleep(Duration::from_millis(50));
@@ -771,20 +809,31 @@ impl PtySession {
 
     /// Kills the child immediately, for a caller giving up mid-test rather
     /// than waiting out a full timeout.
+    ///
+    /// On Unix the kill targets the child's whole process group, not just
+    /// the child: see [`kill_process_group`] for why the leader alone is
+    /// not enough and why the group signal is skipped once the child has
+    /// been reaped.
     pub fn kill(&mut self) {
+        if !self.reaped {
+            if let Some(pid) = self.child.process_id() {
+                kill_process_group(pid);
+            }
+        }
         let _ = self.child.kill();
     }
 }
 
 impl Drop for PtySession {
-    /// Reaps the child, which nothing else guarantees: the writer is shared
-    /// with the reply thread, so this session is no longer its sole owner and
-    /// dropping it does not close the master or deliver the EOF that would
-    /// end the child on its own. Without this, a caller that gives up early
-    /// -- a failing assert, an early `?` -- leaks a live editor process and a
-    /// reader thread parked on it for the rest of the test binary's run.
+    /// Kills the child's process group and reaps the child, which nothing
+    /// else guarantees: the writer is shared with the reply thread, so this
+    /// session is no longer its sole owner and dropping it does not close
+    /// the master or deliver the EOF that would end the child on its own.
+    /// Without this, a caller that gives up early -- a failing assert, an
+    /// early `?` -- leaks a live editor process and a reader thread parked
+    /// on it for the rest of the test binary's run.
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        self.kill();
         let _ = self.child.wait();
     }
 }
@@ -895,6 +944,46 @@ mod tests {
         );
         session.kill();
         let _ = session.wait_for_exit(Duration::from_secs(2));
+    }
+
+    #[test]
+    fn dropping_a_session_kills_the_grandchildren_its_child_spawned() {
+        // /bin/sh stands in for `view` and its background `sleep` for the
+        // `nvim --embed` engine: a kill that reaches only the group leader
+        // leaves the sleep orphaned on init, which is the exact leak shape
+        // the group kill exists to prevent. The grandchild ignores SIGHUP
+        // because the real engine survives the hangup the closing pty
+        // master delivers; without that, the hangup alone would reap it
+        // here and hide a missing group kill.
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg("(trap '' HUP; exec sleep 300) & echo spawned-grandchild; wait");
+            PtySession::spawn_configured(cmd, 80, 24)
+        })
+        .unwrap();
+        assert!(
+            session.wait_for("spawned-grandchild", Duration::from_secs(5)),
+            "the shell never confirmed its background child; screen:\n{}",
+            session.screen()
+        );
+        let leader = session.pid().unwrap();
+        drop(session);
+
+        // signal 0 probes for existence: the group is fully gone only once
+        // every member (leader and grandchild alike) has been killed and
+        // reaped, and init reaps a SIGKILLed orphan promptly
+        let group = nix::unistd::Pid::from_raw(i32::try_from(leader).unwrap());
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while nix::sys::signal::killpg(group, None::<nix::sys::signal::Signal>)
+            != Err(nix::errno::Errno::ESRCH)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the child's process group survived the session drop"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
     }
 
     #[test]

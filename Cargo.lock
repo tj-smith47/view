@@ -2068,6 +2068,7 @@ version = "0.0.1"
 name = "view-oracle"
 version = "0.0.1"
 dependencies = [
+ "nix 0.31.3",
  "portable-pty",
  "thiserror 2.0.18",
  "view-core",

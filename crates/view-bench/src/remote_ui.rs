@@ -31,12 +31,17 @@ const LISTEN_TIMEOUT: Duration = Duration::from_secs(120);
 const LISTEN_RECHECK: Duration = Duration::from_millis(20);
 
 /// A headless nvim holding the buffer, with the socket a `--remote-ui`
-/// client attaches to. Killed on drop: a server outliving its run would
-/// hold the fixture's plugin cache open and leak into the next spawn.
+/// client attaches to. Killed on drop, process group and all: a server
+/// outliving its run would hold the fixture's plugin cache open and leak
+/// into the next spawn, and anything the server itself spawned would
+/// otherwise outlive the kill.
 #[derive(Debug)]
 pub struct RemoteUiServer {
     child: Child,
     socket: PathBuf,
+    // a reaped pid can be recycled, so the drop guard's group kill must be
+    // skipped once the exit status has been collected
+    reaped: bool,
 }
 
 /// The headless server's argument list for a bare-nvim spec.
@@ -100,13 +105,26 @@ impl RemoteUiServer {
         command.stdin(Stdio::null());
         command.stdout(Stdio::null());
         command.stderr(Stdio::null());
+        // its own process group, so the drop guard can group-kill whatever
+        // the server spawned without signalling the bench's own group; a
+        // pty-hosted child gets the same isolation from setsid, but this
+        // spawn has no pty to do it
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
         let child = command.spawn().map_err(|err| BenchError::Desync {
             context: format!(
                 "spawning the headless control server {}: {err}",
                 nvim.program.display()
             ),
         })?;
-        let mut server = Self { child, socket };
+        let mut server = Self {
+            child,
+            socket,
+            reaped: false,
+        };
         server.await_listening()?;
         Ok(server)
     }
@@ -135,6 +153,7 @@ impl RemoteUiServer {
                 return Ok(());
             }
             if let Ok(Some(status)) = self.child.try_wait() {
+                self.reaped = true;
                 return Err(BenchError::Desync {
                     context: format!(
                         "the headless control server exited with {status} before binding {}",
@@ -157,6 +176,9 @@ impl RemoteUiServer {
 
 impl Drop for RemoteUiServer {
     fn drop(&mut self) {
+        if !self.reaped {
+            view_oracle::kill_process_group(self.child.id());
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
         let _ = std::fs::remove_file(&self.socket);
