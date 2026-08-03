@@ -164,6 +164,12 @@ classes = ["dev-macos"]
 # Writing such a reading down as an accepted shortfall would put ambient
 # load in this file as though it were a property of view.
 #
+# Every entry below (five dev-linux, six dev-macos) was ratified by the user
+# on 2026-08-03 as accepted-and-gated debt, together with the spec §3.1
+# echo-row amendment. The four echo ratio_p50 entries carry a pinned closure
+# path in the P4 plan: input-thread/runtime-loop unification first,
+# incremental rendering second.
+#
 # Improving past the budget does not need an edit here to pass; deleting the
 # entry is the housekeeping that follows.
 

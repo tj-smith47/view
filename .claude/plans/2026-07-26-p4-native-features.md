@@ -72,6 +72,29 @@ requirements implicitly include this section.
 - Non-conventional commit prefixes are parenthesised scopes:
   `feat(picker):`, `test(bench):` — never `picker:` or `bench:`.
 
+## Echo workstream (user-ratified 2026-08-03)
+
+The shortfall-ledger ratification pinned two echo levers into this phase's
+scope, in this order:
+
+1. **Input-thread/runtime-loop unification** — replace the blocking-read
+   input thread with one loop polling the terminal fd and the engine stdout
+   together (HANDOFF §5.8). The biggest lever: `key-decoded->loop-wake` is
+   49.1 µs p50 of view's 139 µs share of a round trip; expected to take
+   `echo.minimal` near the ≤ 1.10 bar alone. Both hard rules survive — a
+   readiness poll is not an await, and only view-tui touches the terminal.
+2. **Incremental rendering** — extend the computed-damage path so
+   `view_surface::render` stops rebuilding a full-screen `Surface` per
+   frame; guarded by a shadow-equivalence assert (incremental result ==
+   full rebuild, debug/CI) and cross-checked by the differential oracle.
+   The second lever only: the 68 µs paint share is cache residency, and
+   incremental surfaces help least where paint volume is highest
+   (scroll/streaming touch most rows).
+
+Task placement and detailed design happen at P4 design time; the ordering
+above is fixed. The four echo `ratio_p50` shortfall entries in
+`crates/view-bench/budgets.toml` are the ledger this workstream retires.
+
 ## Coverage walk (planning protocol step 0)
 
 Every charter deliverable and spec MUST for this phase, mapped to a task

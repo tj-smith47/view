@@ -375,7 +375,10 @@ No other file carries this list; it is the reason #21 runs last.
    1.1125. Attribution is settled (see section 5.7): `echo_control` shows
    out-of-process costs ~1-2%, view's own path ~22%, so the
    protocol-inherent hypothesis is refuted and there is no permanent
-   limitation to publish.
+   limitation to publish. **RESOLVED 2026-08-03 by the ratification's P4
+   pin (item 10): the door is "through P4" — input-loop unification is in
+   P4 scope as the first echo lever, expected to reach the ≤1.10 bar
+   alone; no escalation before it, no permanent limitation published.**
 2. Deferrals 1-4 re-confirmation (the plan's exit checklist).
 3. noice residual (folke/noice.nvim#1137).
 4. `first_paint.minimal` `marker_cold_ms` budget 30 -> 50.302 — a
@@ -399,6 +402,11 @@ No other file carries this list; it is the reason #21 runs last.
     input-path 232µs self-referential bar was already withdrawn and the
     original 100µs bar restored and met at 88.965µs; the first-paint
     30ms/0.30 bar is user-stated 2026-07-27 — those two need nothing.)
+    **RESOLVED 2026-08-03: the user ratified all eleven entries and the
+    spec §3.1 echo-row amendment**, with the P4 pin: input-loop
+    unification first, incremental rendering second behind a
+    shadow-equivalence guard. Recorded in the spec flag, the budgets.toml
+    ledger header, and the P4 plan's echo-workstream section.
 11. **input_path dev-linux shortfall — how to spend it.** The `f1fab01`
     entry (accepted 112.647 vs the 100µs bar) is host-attributed: a
     kernel-side level shift after this guest VM's 2026-08-02 23:57
@@ -785,7 +793,7 @@ wired into `task bench-micro` so it cannot rot. **When a cost is attributed to
 something mandated, measure the mandated thing in isolation before accepting
 the attribution.**
 
-### 5.8 PITCH, needs the user's call: unify the input thread and the runtime loop
+### 5.8 RULED 2026-08-03: unify the input thread and the runtime loop
 
 This is the last lever on typing, and it is architectural, so it is a pitch
 rather than a task already in flight.
@@ -825,10 +833,13 @@ Cost is therefore proportional to memory touched per frame, and
 when one cell changed. Trading that for incremental rendering would cut it,
 and it is a deliberate property of the Elm-style runtime, not an oversight.
 
-**The call the user has to make:** do either of these go into P4's scope --
-unifying the input thread with the runtime loop, incremental rendering, or
-both -- or does the project accept ~1.17x typing through P4 and revisit
-later? All are defensible; the evidence sizes them but does not decide it.
+**The user's ruling (2026-08-03, with the shortfall ratification):** both go
+into P4's scope, in this order -- (1) input-thread/runtime-loop unification
+first, the biggest lever, expected to reach the ≤1.10 bar alone; (2)
+incremental rendering second, as a computed-damage extension guarded by a
+shadow-equivalence assert (incremental result == full rebuild, debug/CI) and
+the differential oracle, with detailed design at P4 design time. See the P4
+plan's echo-workstream section.
 
 **A caveat that outlives this pitch, now resolved (2026-08-01,
 `c215405`+`fc8186c`):** every criterion micro-bench carries a hot/cold
