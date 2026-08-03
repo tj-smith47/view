@@ -3,46 +3,61 @@ engine_pin = "v0.12.4"
 machine_class = "dev-macos"
 
 [echo.heavy]
-paired_delta_p99_ms = 8.676833
-ratio_p50 = 1.1083171364614424
-ratio_p99 = 1.1982607156901297
-view_p99_ms = 12.188708
+paired_delta_p99_ms = 7.241999999999999
+ratio_p50 = 1.114
+ratio_p99 = 1.1480989098643977
+view_p99_ms = 10.311
 
 [echo.minimal]
-paired_delta_p99_ms = 6.288375
-ratio_p50 = 1.3436376694300443
-ratio_p99 = 1.1942595941636012
-view_p99_ms = 8.290166999999999
+paired_delta_p99_ms = 3.2880000000000003
+ratio_p50 = 1.1066140177690031
+ratio_p99 = 1.023219512195122
+view_p99_ms = 5.244
 
-# This class records no first_paint cell. It was last recorded when the row
-# emitted one cold_ms plus a ratio taken across two unlike events; both names
-# were withdrawn when the row split into shell_visible_ms (view's own shell,
-# unpaired) and marker_cold_ms with marker_ratio_p50/p99 (the opened file, and
-# the only boundary both sides reach). 38dccdf, which made that split, opens
-# by saying the old row "had one budget over two different events and measured
-# a third": cold_ms timed a boundary neither surviving metric times. And one
-# metric became four, so there is no 1:1 rename to carry forward -- a partial
-# one would leave this class gating one metric of four while every log read it
-# as a class that gates first_paint. Absent, the row is reported as a cell the
-# baseline holds no bar for, which is the true state.
+[echo_control.heavy]
+control_delta_p99_ms = 5.997000000000001
+control_p99_ms = 9.737
+control_ratio_p50 = 1.0195479535736103
+control_ratio_p99 = 1.077459333849729
+
+[echo_control.minimal]
+control_delta_p99_ms = 2.299
+control_p99_ms = 4.789
+control_ratio_p50 = 1.0
+control_ratio_p99 = 1.3325415676959622
+
+[first_paint.heavy]
+marker_cold_ms = 84.02604099999999
+marker_ratio_p50 = 0.39563655534133746
+marker_ratio_p99 = 0.41151706839744245
+shell_visible_ms = 6.112
+
+[first_paint.minimal]
+marker_cold_ms = 32.922
+marker_ratio_p50 = 0.18811294962937786
+marker_ratio_p99 = 0.20377195493182318
+shell_visible_ms = 7.594208
 
 [flood.minimal]
-cadence_p99_ms = 12.80475
-pace_ratio = 1.0125227267569266
+cadence_p99_ms = 13.352667
+cadence_p99_ratio = 1.0364998638846823
+pace_ratio = 1.0030877047265554
 
+[input_path.minimal]
+key_to_rpc_p99_us = 74.0
 
 [memory.minimal]
-phys_footprint_mb = 3.57891845703125
+phys_footprint_mb = 3.56329345703125
 
 [output_path.minimal]
-p99_ms = 0.629
+p99_ms = 0.055
 
 [scroll.heavy]
-ratio_p50 = 2.6309536947932033
-ratio_p99 = 1.1463624037563767
-staleness_p99_ms = 10.893042000000001
+ratio_p50 = 2.393156602249975
+ratio_p99 = 1.7097704636773465
+staleness_p99_ms = 8.833459
 
 [scroll.minimal]
-ratio_p50 = 2.507758795267057
-ratio_p99 = 1.4325055459580798
-staleness_p99_ms = 9.893041
+ratio_p50 = 2.381585467443348
+ratio_p99 = 1.6683195297774573
+staleness_p99_ms = 6.354875000000001

@@ -1,0 +1,49 @@
+# Gate headroom measured on this host, overriding the compiled-in default
+# for the metric's kind. Hand-curated characterization: --record rewrites
+# dev-macos.toml and never this file, so entries and their provenance
+# comments survive every record pass. A metric absent here has not had its
+# run-to-run spread established on this class and gates on the conservative
+# default; absence is a statement, not a gap to fill with a plausible number.
+# A bare key characterizes the statistic host-wide; a quoted
+# "scenario.metric" key scopes it to one scenario and wins there, for a
+# statistic whose spread is a property of the scenario rather than of the
+# host.
+machine_class = "dev-macos"
+
+[headroom]
+# No bare ratio_p50 entry. A host-wide 1.02, characterized from 8 loaded-host
+# echo/minimal replicates (2026-08-02, loads 3.56-5.26, spread 1.4% min to
+# max), used to sit here. The 2026-08-03 quiet-host replicates falsified the
+# host-wide claim: echo/heavy resolves the same statistic to 0.974-1.218
+# across 8 replicates -- within-replicate trial spread 2-8% against 25%
+# between replicates, both processes' absolute p50 redrawing in discrete
+# tiers per spawned pair (core placement), not with ambient load: the lowest
+# draw (0.974) landed at load 1.39 and the highest clean draw on record
+# (1.2513, same-commit gate run) at load 1.1. A 1.02 bar would false-fail a
+# large fraction of honest echo/heavy draws, and the tight minimal spread it
+# generalized from characterized one fixture under sustained load, not the
+# host. Absence routes echo to the compiled default, which is the honest
+# statement of what this class resolves.
+
+# 8 interleaved report-only replicates per scroll fixture plus 4 later
+# minimal-only replicates, 2026-08-03, real mbp hardware, one unchanged
+# binary pair at the recorded commit (gated ratio_p50, median of 3 trials).
+# The pre-registered load exclusion (pre-replicate 1-min load > 2.0) keeps
+# heavy {2.362, 2.370, 2.402} and minimal {2.136, 2.380, 2.398, 2.414,
+# 2.438}. No replicate, included or excluded, exceeds the worst included
+# reading of its fixture (excluded heavy 2.308-2.364 against 2.402;
+# excluded minimal 2.137-2.161 and 2.349 against 2.438). The minimal draws
+# fall in two bands, 2.136-2.161 and 2.349-2.438, and band membership does
+# not track load -- the lowest draw landed at load 1.39 -- so the low band
+# is flattering scheduling luck, not a contention artifact to correct for;
+# only the high band presses the bar, and the recorded 2.3816 is itself a
+# high-band draw. Factor = worst reading over the recorded value, worse
+# fixture governing: max(2.402/2.3932, 2.438/2.3816) = max(1.0037, 1.0237),
+# rounded up at the third decimal. Replaces a 1.2 characterized on the
+# pre-cleanup loaded host (loads 2.60-8.89) against a since-superseded
+# recording; the quiet-host spread does not support a factor that wide.
+#
+# Scoped to scroll, not scroll.heavy: headroom_for looks up the bare
+# scenario name only (baselines.rs:304-309), so this key governs both
+# scroll fixtures; both were characterized above.
+"scroll.ratio_p50" = 1.024

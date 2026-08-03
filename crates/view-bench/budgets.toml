@@ -199,34 +199,62 @@ class = "dev-linux"
 accepted = 0.4601985941432818
 why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.135. Under the heavy fixture the p99 cold start grows 26.5 -> 120.5 ms for view against 131.4 -> 199.8 ms for bare nvim, so view's own cold start grows more in absolute ms with plugin count than nvim's does and the ratio degrades to 0.460 while view still reaches the file first. Why it scales that way is measured but not attributed."
 
-[[shortfall]]
-scenario = "echo"
-fixture = "minimal"
-metric = "view_p99_ms"
-class = "dev-macos"
-accepted = 8.290166999999999
-why = "3.6% over an 8ms bar on a shared laptop whose absolute tails move with ambient load; the paired ratio from the same run is the statistic that is stable here."
+# echo.minimal view_p99_ms is not listed: the 2026-08-02 quiet-host
+# re-record measured 5.244 against the 8 ms bar, so the prior 8.290
+# shortfall here is spent -- that reading was an ambient-load tail, not a
+# property of view. Deleting it is the housekeeping the header asks for.
 
 [[shortfall]]
 scenario = "echo"
 fixture = "heavy"
 metric = "view_p99_ms"
 class = "dev-macos"
-accepted = 12.188708
-why = "same as echo.minimal on this class, with the 14-plugin fixture's own paint cost on top."
+accepted = 10.311
+why = "29% over the 8 ms bar with the 14-plugin fixture's own paint cost on top; bare nvim's p99 in the same gated trial is 10.112 ms and the recorded gated ratio_p99 is 1.1481, so most of the absolute tail is the fixture rather than view. Individual clean trials span 8.6-20.9 ms on this cell -- run-to-run tail spread, not host contention, is the residual story -- and the accepted value follows the recorded median-of-3."
 
 [[shortfall]]
 scenario = "echo"
 fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-macos"
-accepted = 1.3436376694300443
-why = "same residual as dev-linux, which the echo_control row there attributed to view rather than to the UI protocol; bare metal measures a worse ratio than the virtualized host, which is what falsified the thread-hop explanation. This value predates the inline-write change and so is stale in the improving direction; re-recording it is task 21's job, and until then it is a ceiling this class has already beaten."
+accepted = 1.1066140177690031
+why = "0.6% over the 1.1 bar on the quiet-host re-record (the contaminated-host 1.1125 shrank to 1.1066). Same residual as dev-linux's echo.minimal shortfall -- the echo_control row on this class attributes it to view rather than the UI protocol -- but dev-macos has not had the round-trip stage decomposition dev-linux ran to localize the remaining per-hop cost."
 
 [[shortfall]]
 scenario = "echo"
 fixture = "heavy"
 metric = "ratio_p50"
 class = "dev-macos"
-accepted = 1.1083171364614424
-why = "same residual as echo.minimal on this class."
+accepted = 1.114
+why = "1.3% over the 1.1 bar at the median of a statistic this class cannot pin tighter: 8 quiet-host replicates span 0.974-1.218, within-replicate trial spread 2-8% against 25% between replicates -- both processes' absolute p50 redraw in discrete tiers per spawned pair (core placement), not with ambient load: the lowest draw (0.974) landed at load 1.39 and the highest clean draw on record (1.2513, same-commit gate run) at load 1.1. That gate draw and the 2026-08-02 recorded 1.0782 are both ordinary draws from this spread, so the accepted value and the recorded baseline are the replicate median (load-included 1.114, all eight 1.109) rather than any single draw a below-median record would false-fail against. Same own-path residual as echo.minimal on this class."
+
+# dev-macos first_paint, from the 2026-08-02 quiet-host re-record (the
+# class's first recording of this row was taken on a host with a busy login
+# stack and both marker_cold_ms cells shrank hard once it was cleaned:
+# 42.5 -> 32.9 minimal, 220.0 -> 84.0 heavy). Both fixtures still miss the
+# 30 ms marker_cold_ms bar and the heavy fixture still misses the 0.30
+# marker_ratio_p50 bar; the three entries below are the quiet-host reading.
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "minimal"
+metric = "marker_cold_ms"
+class = "dev-macos"
+accepted = 32.922
+why = "9.7% over the 30 ms bar. Bare nvim opening the same fixture reaches the same marker at 161.563 ms p99 in the same paired run, so view gets there first by 4.9x; the remaining 3 ms over the bar is unattributed cross-class overhead this campaign measured but did not localize."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_cold_ms"
+class = "dev-macos"
+accepted = 84.02604099999999
+why = "the 14-plugin fixture's cold start, against a bar set from the minimal fixture's 32.9 ms. Bare nvim opening the same fixture reaches the same marker at 204.186 ms p99 in the same paired run, so most of this is plugin init the engine child must finish before the file can be on screen, and view still gets there first at p99 by 120.2 ms -- the same shape the dev-linux heavy shortfall for this metric describes, at this class's own absolute scale."
+
+[[shortfall]]
+scenario = "first_paint"
+fixture = "heavy"
+metric = "marker_ratio_p50"
+class = "dev-macos"
+accepted = 0.39563655534133746
+why = "the same cell and the same event as the marker_cold_ms shortfall above, expressed paired. The 0.30x bar was set against the minimal fixture, which records 0.188 on this class. Under the heavy fixture view's own cold start grows more in absolute ms with plugin count than nvim's does (p50 29.9 -> 77.9 vs nvim's 158.9 -> 196.9) and the ratio degrades while view still reaches the file first (p99 paired delta -109.6 ms). Clean-host observations of this one-shot cell span 0.3785-0.3956 across three same-commit runs; the record landed at the top of that spread and the accepted value follows the record rather than picking a flattering draw. The 0.3818 it replaces sits inside the clean spread, so the superseded contaminated record carried no information about this cell that the clean runs do not."
