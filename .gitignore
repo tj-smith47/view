@@ -14,6 +14,15 @@
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 .claude/.headroom_wrap_marker.json
+# Per-user hook wiring (auto-executing hooks are a supply-chain exposure in a
+# public repo, and the wiring bakes machine-local paths) and the maintainer's
+# session-operational logs. The hook scripts under .claude/hooks/ stay tracked.
+.claude/settings.json
+.claude/HANDOFF.md
+.claude/STATUS.md
+.claude/known-bugs.md
+.claude/archive/
+.claude/pending-first-push.md
 /compat/.cache/
 /compat/results.json
 

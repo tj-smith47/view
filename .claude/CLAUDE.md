@@ -26,7 +26,10 @@ the differentiator.
 **START HERE:** read `.claude/HANDOFF.md` before acting. It carries the working
 mode, the open task list, and the judgment that no other file records. Create
 tasks from its open-task section at startup — the harness task store does not
-persist across sessions, so that file is the only carrier.
+persist across sessions, so that file is the only carrier. HANDOFF.md is
+machine-local and untracked (as are STATUS.md, known-bugs.md, archive/, and
+pending-first-push.md); a fresh clone has none of them and starts from the
+spec and plans instead.
 
 Spec of record: `.claude/specs/2026-07-17-view-design.md`. Plans:
 `.claude/plans/INDEX.md`. On conflict, spec wins.
