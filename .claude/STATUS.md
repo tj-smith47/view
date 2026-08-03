@@ -1,6 +1,6 @@
 # view — where we are
 
-One page. Updated 2026-08-02. If this disagrees with the task list, this
+One page. Updated 2026-08-03. If this disagrees with the task list, this
 file is stale and the task list wins — but fix this file in the same turn.
 
 ## The one-line answer
@@ -80,8 +80,12 @@ of this list — the two must be updated in the same turn or they drift.
    2 at 200 rounds, and the zero-clock greps, all re-run at that tip.
 3. **#17** — compat: the Linux matrix, the daily-config row un-skipped, the
    mbp matrix on real hardware, and a regenerated compat page.
-4. **#18** — `task perf-audit CLASS=dev-linux`, quiet host.
-5. **#26** — dogfood refresh.
+4. **#18** — DONE. The quiet-host gate reproducibly failed one cell,
+   `input_path.minimal key_to_rpc_p99_us`, at a stable 109-113 level that
+   appeared after this guest VM's 2026-08-02 reboot; kernel-side hops grew
+   while view's own held. Accepted as a host-attributed shortfall at
+   112.647 (`f1fab01`); gate re-run EXIT 0, no failures.
+5. **#26** — DONE. Journal entry at `bb139c5`, committed `977b189`.
 6. **#20** — write the exit-checklist citations at the final tip (the
    existing draft cites a stale commit).
 7. **#21** — surface the adjudication list to the user. Last, by design.
