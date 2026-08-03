@@ -86,9 +86,11 @@ of this list — the two must be updated in the same turn or they drift.
    while view's own held. Accepted as a host-attributed shortfall at
    112.647 (`f1fab01`); gate re-run EXIT 0, no failures.
 5. **#26** — DONE. Journal entry at `bb139c5`, committed `977b189`.
-6. **#20** — write the exit-checklist citations at the final tip (the
-   existing draft cites a stale commit).
-7. **#21** — surface the adjudication list to the user. Last, by design.
+6. **#20** — DONE. Checklist cited at code tip `bb139c5` / tree `69f64fe`
+   (commit `8a4cf2e`); ten items checked, three open by design pending
+   user decisions at #21.
+7. **#21** — SURFACED 2026-08-03. The battery is complete; every
+   remaining item is a user decision (HANDOFF 3.4). Nothing pushed.
 
 ## Deferred with user approval
 
