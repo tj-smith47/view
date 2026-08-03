@@ -83,11 +83,11 @@ citations, then the user's adjudication.
 
 | # | Task | State / what remains |
 |---|------|----------------------|
-| 6 | dev-macos re-record | in_progress — see 3.2. Its commit is the FINAL TIP |
+| 6 | dev-macos re-record | DONE — harness fix `d6ac7af`, bench TOMLs `f4521ab` = the FINAL TIP (see 3.2) |
 | 15 | `task ci` at final tip | re-run (green at `cdf5f26`: 796 passed, 32 suites) |
 | 16 | oracle corpus + fuzz seeds 1,2 x200 at final tip | re-run (at `cdf5f26`: 24/24 PARITY, both seeds 0 divergences) |
 | 19 | zero-clock greps at final tip | cheap re-observe |
-| 17 | compat at final tip | Linux matrix + `VIEW_DAILY_CONFIG=$HOME/.config/nvim task compat` (all 15 rows OK, none skipped) + mbp matrix via a fresh bundle (gitfix PATH) + `task oracle -- page` regen; commit the page |
+| 17 | compat at final tip | Linux matrix + `VIEW_DAILY_CONFIG=$HOME/.config/nvim task compat` (all 15 rows OK, none skipped) + mbp matrix via a fresh bundle + `task oracle -- page` regen; commit the page |
 | 18 | `task perf-audit CLASS=dev-linux` at final tip | quiet host, no overlapping loads |
 | 26 | dogfood refresh at final tip | pending |
 | 20 | citations into the plan's exit checklist | a draft exists but cites `cdf5f26`, which is stale — re-cite everything at the final tip |
@@ -122,10 +122,176 @@ pathspec; verify with `git show --stat HEAD` afterward.
 
 ### 3.2 Task #6 state — the validating gate is still owed
 
-The record is complete and honest: 12 cells on real mbp hardware, shortfall
-entries written with measured values, sidecar drafted. **What is missing is
-a single `task bench -- --all --gate --class dev-macos` at EXIT:0 against
-the files as they now stand.** Do not commit #6 before that run exists.
+**Superseded 2026-08-02 by gate-5: the record itself is contaminated.**
+The 12-cell record was taken on the pre-cleanup mbp — a host later found
+running Stocks.app pegging a core, CleanMyMac agents, php-fpm pools, a
+root mysqld, and Parallels helpers (all removed 2026-08-02, machine
+rebooted). gate-5 ran on the cleaned host at load 1.04 with null-pair
+calibration exactly 1.0000 and diverged from the record in BOTH
+directions, which is the signature of a contaminated baseline, not of an
+excursion:
+
+- `echo.heavy ratio_p50` measured 1.2513 vs recorded 1.0666 — the clean
+  number agrees with dev-linux (1.24-1.35) and the settled ~22% own-path
+  attribution (5.7); the 1.0666 record now reads as a load artifact that
+  slowed the nvim side of the pair.
+- `first_paint` far BETTER clean: minimal `marker_cold_ms` 33.036 vs
+  accepted 42.542; heavy 85.383 vs accepted 219.997.
+- `echo.minimal view_p99_ms` shortfall reported STALE (inside budget).
+- `echo.heavy ratio_p50` 1.251 vs spec 1.100 has NO shortfall entry
+  (it was deleted as spent at 1.0667) — BUDGET FAIL.
+
+Plan of record for #6 now: (1) full `--record` for dev-macos on the clean
+quiet host; (2) re-derive `budgets.toml` shortfalls from the clean numbers
+— stale ones deleted, `echo.heavy ratio_p50` re-enters vs the 1.10 spec
+bar, `first_paint` accepted values shrink to the clean measurements;
+(3) adversarial Fable 5 review of the baseline/shortfall diff (standing
+rule: no concession or metric degradation without it — the echo.heavy
+re-entry is concession-shaped even though it is an honesty correction);
+(4) a fresh `task bench -- --all --gate --class dev-macos` at EXIT:0 on
+the same quiet host; (5) only then the frozen-tip commit of exactly the
+three files. Do not commit #6 before the EXIT:0 run exists. gate-5 log:
+mbp `~/bench-gate-20260802-1621.log` (also in the dev-linux rtk tee dir).
+
+**2026-08-03 state:** steps 1-2 DONE (clean record EXIT:0, log mbp
+`~/bench-record-fresh2-20260802.log`; baseline pulled back, budgets
+re-derived). Step 3 Fable review returned CHANGES REQUIRED, 8 findings.
+Fixed so far: blocker 1 (marker_ratio_p50 why rewritten — clean spread
+0.3785-0.3956 straddles the dirty 0.3818, the old "load flattered the
+ratio" mechanism was false), warn 4 (echo.heavy view_p99_ms why: gated
+ratio_p99 is 1.1481 not 1.020; spread not contention), warn 6 (mbp file
+renamed `dev-macos.toml.ratchet-output-aborted-20260802`; true dirty
+record preserved as mbp `~/dev-macos.toml.dirty-record-fb53ab6`),
+suggestion 7 (percentiles labeled). IN FLIGHT: pre-registered spread
+campaign on mbp (`~/bench-campaign-20260803/`, protocol
+`~/campaign-20260803-protocol.md`, also local `~/.claude/tmp/`): 8
+report-only replicates each of echo.heavy / scroll.heavy / scroll.minimal,
+interleaved, fixed exclusion criteria (pre-load>2.0, calibration off >2%)
+and a fixed decision rule — resolves blocker 2 (echo.heavy clean runs
+disagree 1.0782 vs 1.2513; current diff would predictably gate-FAIL New)
+and warn 5 (scroll ×1.2 sidecar factor was characterized under load
+2.60-8.89; tightening owed). After campaign: apply decision rule
+(possible baseline re-base + shortfall re-entry for echo.heavy; re-derived
+scroll factor), rewrite the headroom sidecar provenance (blocker 3: its
+comments still cite superseded baseline arithmetic; suggestion 8: replace
+the "gate-3" label with the condition it names), then Fable RE-review
+(resume the same reviewer via SendMessage), then steps 4-5.
+
+**Campaign result + resolution (2026-08-03):** all 24 replicates EXIT:0,
+orphan-clean. echo.heavy gated ratio_p50 over 8 replicates: 0.974, 1.053,
+1.090, 1.104, 1.114, 1.177, 1.215, 1.218 — FAILED the pre-registered
+unimodality check, so the unimodal factor formula (W/M) does NOT apply;
+STOP-branch investigation found the mechanism: trials within a replicate
+agree <3% while both processes' absolute p50 redraw in discrete tiers
+between replicates (view ~3.2/3.5/3.9 ms, nvim ~2.9/3.3/3.6 ms) with NO
+load correlation — per-spawn core placement. 1.0782 (record) and 1.2513
+(gate-5) are ordinary draws. Resolution: baseline echo.heavy ratio_p50
+re-based to campaign median 1.114 (included-set median; all-8 median 1.109
+agrees within 0.5%); budgets.toml shortfall entry accepted=1.114 (median
+honestly exceeds the 1.1 bar); bare `ratio_p50 = 1.02` REMOVED from the
+sidecar (host-wide claim falsified — it was generalized from loaded-host
+echo.minimal, and would false-fail honest echo.heavy draws), routing echo
+to the compiled 1.25 default. scroll passed unimodality on the included
+set; pre-registered formula applied verbatim: `"scroll.ratio_p50" = 1.024`
+= max(2.402/2.3932, 2.438/2.3816) rounded up (excluded loaded replicates
+all sit LOWER — contention compresses this ratio — so exclusion discarded
+flattery). Also fixed the now-falsified `headroom_for` doc example in
+`view-harness/src/baselines.rs` (echo↔scroll spread roles inverted);
+commit that separately AFTER the three-file bench commit. Load-based
+exclusion cut 17/24 replicates (the campaign self-loads the 1-min avg);
+shown uncorrelated for echo, conservative-direction for scroll. NEW
+adjudication items for #21: (a) `--record` ratchet-only-tightens semantics
+re-tighten a wide-spread cell to any below-median draw — harness-level
+question; (b) single-shot gating cannot resolve <~25% regressions on
+echo.heavy ratio_p50 on dev-macos (candidates: gate on replicate median,
+placement-robust pairing); (c) scroll.minimal factor rests on high-band quiet
+draws max 2.438 — bar 2.4387 is knife-edge, a gate draw above it
+is new evidence per protocol, not a regression; (d) the bare-key removal +
+default-1.25 rationale itself. Campaign data: mbp
+`~/bench-campaign-20260803/`, extract `~/.claude/tmp/campaign-extract.txt`.
+
+**Re-review round (2026-08-03):** Fable re-review verified all 8 originals
+fixed but returned CHANGES REQUIRED: 1 new blocker (my "trials agree <3%"
+claim false — logs show 1.9-7.8% within-replicate; the honest contrast is
+2-8% within vs 25% between), 2 warns (load claims overreached — the
+high-load echo draws were the excluded ones and gate-5's 1.2513@load 1.1
+is the decisive low-load anchor; "every excluded scroll replicate sits
+lower" false for heavy r3 2.364 > included r2 2.362 — the load-bearing
+fact is no excluded draw exceeds the included worst), 1 suggestion (run
+more quiet scroll.minimal replicates BEFORE spending the 55-min gate).
+All four fixed: both comment blocks + the shortfall why reworded to the
+verified numbers; extension replicates r9-r12 run quiet (2.136@1.39,
+2.349@2.42 excl, 2.380, 2.398): W stays 2.438, factor stays 1.024, and r9
+falsified "contention compresses" for minimal too — two bands
+(2.136-2.161 / 2.349-2.438), band membership load-independent, low band =
+flattering scheduling luck, recorded 2.3816 is a high-band draw. Sidecar
+scroll block rewritten accordingly (n=12 minimal provenance).
+NEXT: Fable final verify, then hygiene check + validating gate, then commit.
+
+**Gate attempt 6 (2026-08-03, post-approval):** EXIT:201 — NOT a TOML
+defect: echo.heavy ratio_p50 drew 0.976 (low placement tier), inside the
+1.1 budget, and `unreached_shortfalls` declared the shortfall entry STALE
+and failed the run. Combined with gate-5's 1.2513-as-New, the wide cell
+fails when it draws high AND when it draws low: the STALE check's
+one-inside-draw-proves-spent premise is the same one-sample fallacy the
+module's docs correct for accepted values. Calibration clean (1.0039 /
+1.0073); two orphans leaked and were SIGKILLed post-run. HARNESS FIX
+implemented: `provably_inside` mirrors `shortfall_ceiling` — stale only
+if `headroom.bar(measured) <= budget.max`; no published spread → entry
+stands (fails open, deletion stays human judgment).
+`unreached_shortfalls` takes the headroom table; STALE message updated;
+existing test moved to controlled-linux (view_p99_ms is a tail statistic
+— uncontrolled classes never had a spread for it), new straddle +
+no-spread tests added. task ci green. Fable review of the semantics
+change IN FLIGHT (gate log mbp `~/bench-gate-20260803-validating.log`,
+diff `~/.claude/tmp/stale-shortfall-fix.diff`). On approval: sync
+budgets.rs+bench.rs to mbp, rebuild bench there, hygiene check, gate
+attempt 7. Commit order at EXIT:0 now: (1) harness fix commit
+(view-harness files), (2) three-file bench commit — the bench TOMLs
+depend on the fixed gate semantics, so the harness commit goes FIRST.
+
+**Skip-fix + gate attempt 7 (2026-08-03):** Fable APPROVED the stale-shortfall
+fix on all 4 attack surfaces, with two non-blocking notes. Note 1 (a
+platform-skipped cell yields zero findings, and the old all-quantifier filter
+would report its entry stale) FIXED: `unreached_shortfalls` restructured to
+visited/live semantics — stale iff at least one matching finding exists AND
+none is live; zero matching findings = unvisited, never stale. New test
+`a_shortfall_whose_cell_never_ran_is_not_reported_stale` (empty findings +
+different-fixture findings both leave the entry standing); doc comment gained
+the unvisited paragraph; bench.rs keeps the `cli.all` guard with the comment
+reworded (full-sweep adjudication rationale, scope-safety no longer the
+reason). task fmt + task ci EXIT:0, all three staleness tests pass by name.
+Files re-synced to mbp with md5 equality (budgets.rs 919b85fd, baselines.rs
+b38951aa, bench.rs 605b03cb). Skip-fix increment sent to the Fable reviewer
+for confirmation (resumed agent a3da59943c66c1ec1). Gate attempt 7 launched
+(mbp `~/bench-gate-20260803-attempt7.log`, rebuild + full `--all --gate
+--class dev-macos`); pre-run hygiene clean (load 1.16, no orphans).
+Reviewer CONFIRMED on all 3 surfaces (truth-table verify of the visited
+capture, evidence-granularity match with find_shortfall, guard-as-policy).
+Its one optional nit fixed: test renamed to
+`a_shortfall_measured_provably_inside_is_reported_stale` (old
+"no_longer_reaches...unreached" name collided with the new unvisited
+semantics). Rename is #[cfg(test)]-only, done AFTER attempt 7 launched, so
+the mbp gate binary is behavior-identical; budgets.rs re-synced to mbp
+post-gate (md5 6c7f814f both sides).
+
+**Gate attempt 7 result: EXIT:0.** gate OK, 12 cells within recorded bars,
+15 metrics checked, 5 accepted shortfalls held (echo.minimal ratio_p50
+1.104, echo.heavy view_p99_ms 9.807, first_paint.minimal marker_cold_ms
+33.141, first_paint.heavy marker_cold_ms 83.242 + marker_ratio_p50 0.393).
+Calibration 1.0036, end load 2.04. The fix's exact target replayed:
+echo.heavy ratio_p50 drew 0.990 (same low placement tier as attempt 6's
+0.976 that false-STALEd at EXIT:201) — zero STALE lines this time.
+scroll heavy 2.384 / minimal 2.371, both inside their 1.024 bars.
+Post-run sweep killed two PPID-1 `nvim --embed` orphans (the known leak,
+already an adjudication carry); pgrep clean after. COMMITTED: `d6ac7af`
+fix(harness) with exactly the 3 view-harness files, then `f4521ab`
+perf(bench) with exactly the 3 bench TOMLs — `f4521ab` is the frozen tip
+for #15-#21. Log: mbp `~/bench-gate-20260803-attempt7.log`. Note 2
+becomes adjudication item (g) for #21: auto-staleness is dormant on
+dev-macos under the compiled defaults — an entry is declared spent only
+below measured 0.88 (ratio, 1.1/1.25), ~20ms-under (absolute p99, x1.5), so
+in practice ledger cleanup on this class stays human judgment.
 
 Four gate attempts, in true chronological order (mbp local time; the copies
 under `~/.claude/tmp/` all share one scp mtime and cannot be ordered by it):
@@ -136,6 +302,7 @@ under `~/.claude/tmp/` all share one scp mtime and cannot be ordered by it):
 | gate-2 02:52 | 4.37 | EXIT:201 — tap overhead p99 7.125/6.833 us over the 5 us pre-gate |
 | gate-3 07:15 | 9.21 | EXIT:201 — `scroll.heavy ratio_p50` 2.2269 > bar 2.0040 |
 | gate-4 | 3.68 | killed mid-run, no verdict |
+| gate-5 2026-08-02 16:21 | 1.12 start / 1.04 end | EXIT:201 — `echo.heavy ratio_p50` 1.2513 > 1.0879; `scroll.heavy ratio_p50` 2.4075 > 2.3577; null-pair calibration 1.0000 |
 
 A later attempt ran on past those, orphaned to `PPID=1`, and was killed at
 1:05 elapsed. mbp was then verified to have zero surviving `bench`,
@@ -182,8 +349,9 @@ Two open items the #6 campaign surfaced:
 - Invoke as `ssh mbp 'zsh -lc "..."'` and backslash-escape remote variables
   (`\$HOME`, `\$PATH`), or the outer shell expands them and bakes a minimal
   PATH where `nvim` and `task` vanish.
-- Always `export PATH=\$HOME/bin-gitfix:\$PATH` first — homebrew git is
-  broken there.
+- Stale note removed 2026-08-02: homebrew git on mbp works (`git 2.55.0`
+  at `/opt/homebrew/bin/git`, verified via `zsh -lc`); no `bin-gitfix`
+  PATH prefix is needed.
 - Never leave an unquoted `===` inside `zsh -lc`: equals-expansion aborts
   the whole line (`zsh:1: == not found`) and everything after it silently
   never runs.
@@ -218,12 +386,26 @@ No other file carries this list; it is the reason #21 runs last.
    `known-bugs.md` item.
 7. Go-ahead for the classifier-blocked `known-bugs.md` repair script.
 8. daily-config E216 residual (cfgd-config `hijack_netrw`).
-9. mbp homebrew git is broken and works only via the `~/bin-gitfix` shim —
-   an infra fix that is the user's call.
+9. Resolved 2026-08-02: mbp homebrew git verified working (`git 2.55.0`,
+   `/opt/homebrew/bin/git`) — the "broken, needs bin-gitfix shim" note was
+   stale; nothing to adjudicate.
+10. **Shortfall-ledger ratification.** Every `[[shortfall]]` in
+    `crates/view-bench/budgets.toml` (six dev-linux + four dev-macos once #6
+    commits) was accepted by the assistant with engineering rationale; none
+    carries user sign-off. Present the complete table — scenario, bar,
+    accepted value, why — for a single up-or-down ratification. Same pass
+    ratifies the spec §3.1 echo-row amendment, which the spec itself flags
+    "This amendment has NO user sign-off; it is provisional." (The
+    input-path 232µs self-referential bar was already withdrawn and the
+    original 100µs bar restored and met at 88.965µs; the first-paint
+    30ms/0.30 bar is user-stated 2026-07-27 — those two need nothing.)
 
 Carried from #6 (see 3.2): the host-wide `ratio_p50 = 1.02` headroom key is
 echo-derived but governs scenarios whose spread was never measured, and the
-bench process leak (orphaned `PPID=1` `nvim --embed` children).
+bench process leak (orphaned `PPID=1` `nvim --embed` children). Also carried
+from #6: items (a)-(d) in the campaign paragraph of 3.2, and (g) dormant
+auto-staleness on dev-macos under compiled defaults (see the skip-fix
+paragraph of 3.2).
 
 Separately, not a view matter: the sir/proxmox storage-incident follow-ups
 (retention does not fit the pool, backup-script defects, the next run does
@@ -253,8 +435,12 @@ sir RAM tight).
   Get run times from the remote host, or from a timestamp inside the log.
 - No polling loops anywhere; they are hook-denied. A denial means switch
   mechanism, never reword.
-- Name the model explicitly on every subagent dispatch. No Fable
-  subagents; opus only at fix rounds 4-5.
+- Name the model explicitly on every subagent dispatch (an omitted model
+  silently inherits the session model). Model policy (user, 2026-08-02):
+  Fable reviewers are fine where the review gates a concession or a phase
+  exit; implementers default opus 5; sonnet 5 / opus 4.8 for mechanical
+  work; if a fix loop reaches round 3, escalate the model rather than
+  re-running the same tier — 5+ cheap rounds cost more than one strong one.
 - Comments are WHY-only. Banned: session-narrative markers, assistant
   references, finding tags. Fix on sight, before committing.
 - The bench/oracle spawn allowlist keeps neither `SSL_CERT_FILE` /
