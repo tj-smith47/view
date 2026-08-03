@@ -4,7 +4,7 @@
 
 # view
 
-An agent-native, Rust-fast terminal editor with a modern UI, where your Neovim config just works.
+An agentic, Rust-fast terminal editor with a modern UI and Neovim mechanics.
 
 [![CI](https://github.com/tj-smith47/view/actions/workflows/ci.yml/badge.svg)](https://github.com/tj-smith47/view/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](#license)
@@ -27,9 +27,9 @@ An agent-native, Rust-fast terminal editor with a modern UI, where your Neovim c
 
 ## What is view?
 
-view is a terminal editor with a real Neovim inside. Your `init.lua`,
-plugins, LSP servers, and treesitter setup work on day one, because the same
-Neovim you already run is running them. Around that engine, view draws its
+view is a terminal editor that embeds a real Neovim as its engine, so your
+existing config, plugins, LSP servers, and treesitter setup work on day one:
+the same Neovim you already run is running them. Around that engine, view draws its
 own UI in native Rust: one design system for the editor chrome instead of a
 patchwork of plugins, a process that paints before your config has finished
 loading, and (coming in a later phase) AI agents as a first-class part of
