@@ -195,18 +195,27 @@ fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos
         std::thread::yield_now();
     };
     session.send(b"\x7f")?;
+    // erased means the probed cell no longer holds the sample character,
+    // not that the screen equals the pre-probe baseline: chrome changes
+    // legitimately between the snapshot and the erase (a notification
+    // toast times out and vanishes, the modified flag appears in the
+    // statusline the moment the probe types), so baseline equality can
+    // become permanently unreachable on a host slow enough for a toast
+    // to outlive the settle window
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let now = session
-            .with_screen(|screen| crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR));
-        if now == baseline {
+        let cleared = session.with_screen(|screen| {
+            !crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR).contains(&position)
+        });
+        if cleared {
             return Ok(position);
         }
         if Instant::now() >= deadline {
             return Err(BenchError::Desync {
                 context: format!(
-                    "probe character never erased back to the chrome baseline {baseline:?}; \
-                     screen:\n{}",
+                    "probe character never erased from ({}, {}); screen:\n{}",
+                    position.row,
+                    position.col,
                     session.screen_text()
                 ),
             });
