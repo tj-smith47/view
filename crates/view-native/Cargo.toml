@@ -7,3 +7,9 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2.0.18"
+toml = "0.8"
+view-core = { version = "0.0.1", path = "../view-core" }

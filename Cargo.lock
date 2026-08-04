@@ -2063,6 +2063,12 @@ dependencies = [
 [[package]]
 name = "view-native"
 version = "0.0.1"
+dependencies = [
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
+ "view-core",
+]
 
 [[package]]
 name = "view-oracle"

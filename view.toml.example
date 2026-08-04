@@ -1,0 +1,15 @@
+# view.toml -- copy to $XDG_CONFIG_HOME/view/view.toml (~/.config/view/view.toml)
+#
+# Every key is optional. An absent or empty file is the full experience:
+# every native feature below is on.
+#
+# [native] turns a native feature off and hands that surface back to your
+# own plugins. Turning one off is reversible and touches nothing else: view
+# never edits your config, and your plugins keep loading either way.
+
+[native]
+picker = true
+tree = true
+statusline = true
+notifications = true
+palette = true
