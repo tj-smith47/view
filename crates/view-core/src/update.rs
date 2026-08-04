@@ -26,30 +26,33 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             {
                 model.dirty = true;
             }
-            match model.focus {
+            match model.focus() {
                 Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-                // no native overlay currently claims focus: every key is
-                // consumed here rather than dispatched to an overlay update
-                // arm, except <Esc> which always returns focus to Engine. The
-                // routing seam exists so overlays can take focus without
-                // touching this key path.
+                // the key belongs to the overlay on top of the stack, and no
+                // overlay carries a key handler, so consuming it is the whole
+                // of that routing. <Esc> closes exactly that one overlay,
+                // which is why it pops rather than clearing: an overlay
+                // underneath it keeps the keyboard.
                 Focus::Native(_) => {
                     if notation == "<Esc>" {
-                        model.focus = Focus::Engine;
+                        model.overlays.pop();
                     }
                     Vec::new()
                 }
             }
         }
-        Msg::Paste(text) => match model.focus {
+        Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
             // mapping interference, matching nvim_paste's own contract
             Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
             Focus::Native(_) => Vec::new(),
         },
-        Msg::Mouse(input) => match model.focus {
-            Focus::Engine => mouse_effect(model, input),
-            Focus::Native(_) => Vec::new(),
+        // position, not focus: an overlay owns the keyboard outright but
+        // only the cells it covers, so a click on grid that is still visible
+        // beside an open overlay belongs to the engine
+        Msg::Mouse(input) => match model.overlay_at(input.row, input.col) {
+            None => mouse_effect(model, input),
+            Some(_) => Vec::new(),
         },
         Msg::Redraw(events) => {
             let mut effects = Vec::new();
@@ -360,11 +363,36 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::UiEvent;
-    use crate::model::OverlayId;
+    use crate::model::{Overlay, OverlayId};
     use crate::msg::{ExitInfo, ReplyToken};
+    use crate::native::geometry::OverlayBox;
 
     fn model() -> Model {
         Model::new()
+    }
+
+    /// A model on an 80x24 terminal, so an overlay's share of it resolves to
+    /// a rect with cells both inside and outside to click on.
+    fn full_screen_model() -> Model {
+        Model::with_term_size(80, 24)
+    }
+
+    /// Pushes an overlay covering the middle half of the terminal: rows
+    /// 6..18 and columns 20..60 of an 80x24 one.
+    fn push_overlay(model: &mut Model, id: u64) {
+        model
+            .overlays
+            .push(Overlay::new(OverlayId(id), OverlayBox::new(50, 50)));
+    }
+
+    fn click(row: u16, col: u16) -> Msg {
+        Msg::Mouse(MouseInput {
+            button: "left".into(),
+            action: "press".into(),
+            modifier: String::new(),
+            row,
+            col,
+        })
     }
 
     #[test]
@@ -799,7 +827,7 @@ mod tests {
     #[test]
     fn key_in_native_focus_is_consumed_and_esc_returns_engine_focus() {
         let mut m = model();
-        m.focus = Focus::Native(OverlayId(1));
+        push_overlay(&mut m, 1);
         let effects = update(
             &mut m,
             Msg::Key(Key {
@@ -810,9 +838,10 @@ mod tests {
             effects.is_empty(),
             "native focus consumes keys, never forwards to the engine"
         );
-        assert!(
-            matches!(m.focus, Focus::Native(_)),
-            "a non-Esc key must not change focus"
+        assert_eq!(
+            m.focus(),
+            Focus::Native(OverlayId(1)),
+            "a non-Esc key must not close the overlay"
         );
 
         let effects = update(
@@ -825,28 +854,203 @@ mod tests {
             effects.is_empty(),
             "Esc returns focus without forwarding to the engine"
         );
-        assert!(
-            matches!(m.focus, Focus::Engine),
-            "Esc must return focus to Engine"
+        assert_eq!(
+            m.focus(),
+            Focus::Engine,
+            "closing the last overlay returns focus to the engine"
         );
+        assert!(m.overlays.is_empty());
     }
 
     #[test]
-    fn paste_and_mouse_in_native_focus_are_consumed_not_forwarded() {
+    fn any_sequence_of_pushes_pops_and_escapes_leaves_focus_on_the_stack_top() {
+        // a seeded xorshift rather than a property-test crate: view-core
+        // carries no dev-dependency beyond criterion, and the invariant lives
+        // in a state space (stack depth crossed with input kind) small enough
+        // that a fixed seed walks all of it. The expected focus comes from a
+        // shadow stack rebuilt from the operations alone, so the assertion
+        // cannot restate the implementation it checks.
+        let mut rng = 0x2545_f491_4f6c_dd1d_u64;
+        let mut roll = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        let mut next_id = 0_u64;
+
+        for _ in 0..2_000 {
+            let mut m = full_screen_model();
+            let mut shadow: Vec<u64> = Vec::new();
+
+            for _ in 0..(roll() % 24) {
+                let depth_before = shadow.len();
+                match roll() % 6 {
+                    0 => {
+                        next_id += 1;
+                        push_overlay(&mut m, next_id);
+                        shadow.push(next_id);
+                    }
+                    1 => {
+                        m.overlays.pop();
+                        shadow.pop();
+                    }
+                    2 => {
+                        let effects = update(
+                            &mut m,
+                            Msg::Key(Key {
+                                notation: "<Esc>".into(),
+                            }),
+                        );
+                        if depth_before == 0 {
+                            assert!(
+                                matches!(&effects[..], [Effect::Rpc(RpcCall::Input { .. })]),
+                                "Esc with no overlay open belongs to the engine"
+                            );
+                        } else {
+                            assert!(effects.is_empty(), "Esc must not reach the engine");
+                            shadow.pop();
+                        }
+                    }
+                    3 => {
+                        let effects = update(
+                            &mut m,
+                            Msg::Key(Key {
+                                notation: "j".into(),
+                            }),
+                        );
+                        assert_eq!(
+                            effects.is_empty(),
+                            depth_before > 0,
+                            "an ordinary key reaches the engine only with no overlay open"
+                        );
+                    }
+                    4 => {
+                        let effects = update(&mut m, click(0, 0));
+                        assert!(
+                            matches!(&effects[..], [Effect::Rpc(RpcCall::InputMouse { .. })]),
+                            "the terminal corner is outside every overlay pushed here"
+                        );
+                    }
+                    _ => {
+                        let effects = update(&mut m, Msg::Paste("p".into()));
+                        assert_eq!(effects.is_empty(), depth_before > 0);
+                    }
+                }
+
+                assert_eq!(
+                    m.overlays.iter().map(|o| o.id.0).collect::<Vec<_>>(),
+                    shadow,
+                    "the stack must hold exactly what the operations pushed"
+                );
+                let expected = match shadow.last() {
+                    Some(id) => Focus::Native(OverlayId(*id)),
+                    None => Focus::Engine,
+                };
+                assert_eq!(m.focus(), expected, "focus must name the topmost overlay");
+                assert!(
+                    shadow.len() + 1 >= depth_before,
+                    "no single operation may close more than one overlay"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn focus_is_the_top_of_the_stack_and_the_engine_when_it_is_empty() {
         let mut m = model();
-        m.focus = Focus::Native(OverlayId(1));
-        assert!(update(&mut m, Msg::Paste("x".into())).is_empty());
-        assert!(update(
+        assert_eq!(m.focus(), Focus::Engine, "no overlays means engine focus");
+        push_overlay(&mut m, 7);
+        assert_eq!(m.focus(), Focus::Native(OverlayId(7)));
+        push_overlay(&mut m, 8);
+        assert_eq!(
+            m.focus(),
+            Focus::Native(OverlayId(8)),
+            "the overlay pushed last is the one on top"
+        );
+        m.overlays.pop();
+        assert_eq!(m.focus(), Focus::Native(OverlayId(7)));
+    }
+
+    #[test]
+    fn esc_with_two_overlays_stacked_pops_one_and_leaves_the_lower_focused() {
+        let mut m = model();
+        let picker = OverlayId(1);
+        let prompt = OverlayId(2);
+        m.overlays
+            .push(Overlay::new(picker, OverlayBox::new(80, 80)));
+        m.overlays
+            .push(Overlay::new(prompt, OverlayBox::new(40, 20)));
+
+        let effects = update(
             &mut m,
-            Msg::Mouse(MouseInput {
-                button: "left".into(),
-                action: "press".into(),
-                modifier: String::new(),
-                row: 0,
-                col: 0,
-            })
-        )
-        .is_empty());
+            Msg::Key(Key {
+                notation: "<Esc>".into(),
+            }),
+        );
+        assert!(effects.is_empty(), "Esc must not reach the engine");
+        assert_eq!(
+            m.focus(),
+            Focus::Native(picker),
+            "Esc closes the top overlay only; the one beneath it keeps focus"
+        );
+        assert_eq!(m.overlays.len(), 1, "Esc pops exactly one overlay");
+    }
+
+    #[test]
+    fn paste_in_native_focus_is_consumed_not_forwarded() {
+        let mut m = model();
+        push_overlay(&mut m, 1);
+        assert!(update(&mut m, Msg::Paste("x".into())).is_empty());
+    }
+
+    #[test]
+    fn a_click_inside_an_overlay_is_claimed_by_it_and_never_reaches_the_engine() {
+        let mut m = full_screen_model();
+        push_overlay(&mut m, 1);
+        // the overlay covers the middle half of an 80x24 terminal: rows
+        // 6..18, columns 20..60
+        let effects = update(&mut m, click(12, 40));
+        assert!(
+            effects.is_empty(),
+            "a click on a cell the overlay covers belongs to the overlay"
+        );
+        assert_eq!(m.overlay_at(12, 40), Some(OverlayId(1)));
+    }
+
+    #[test]
+    fn a_click_outside_an_open_overlay_still_moves_the_engine_cursor() {
+        let mut m = full_screen_model();
+        push_overlay(&mut m, 1);
+        let effects = update(&mut m, click(2, 3));
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::InputMouse { row: 2, col: 3, .. })]
+            ),
+            "grid still visible beside an overlay keeps taking clicks: {effects:?}"
+        );
+        assert_eq!(m.overlay_at(2, 3), None);
+    }
+
+    #[test]
+    fn a_click_lands_on_the_topmost_overlay_covering_it_not_the_one_with_focus() {
+        let mut m = full_screen_model();
+        // a wide overlay with a narrower one stacked on top of it
+        m.overlays
+            .push(Overlay::new(OverlayId(1), OverlayBox::new(100, 100)));
+        m.overlays
+            .push(Overlay::new(OverlayId(2), OverlayBox::new(50, 50)));
+        assert_eq!(
+            m.overlay_at(12, 40),
+            Some(OverlayId(2)),
+            "where both cover the cell, the top one claims it"
+        );
+        assert_eq!(
+            m.overlay_at(0, 0),
+            Some(OverlayId(1)),
+            "outside the top overlay, the one beneath still claims its own cells"
+        );
     }
 
     #[test]

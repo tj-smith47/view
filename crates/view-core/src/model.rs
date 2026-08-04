@@ -3,12 +3,19 @@
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
 use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
+use crate::native::geometry::{OverlayBox, OverlayRect};
 
 /// The complete application state.
 #[non_exhaustive]
 pub struct Model {
     pub engine: EngineModel,
-    pub focus: Focus,
+    /// Open native overlays, innermost last: the tail is the one on top, the
+    /// one holding input focus, and the one `<Esc>` closes. Focus is read
+    /// off this stack by [`Model::focus`] rather than stored beside it,
+    /// because two overlays genuinely coexist (a confirm prompt can arrive
+    /// while a picker is open) and a stored focus would have to be restored
+    /// by hand on every close.
+    pub overlays: Vec<Overlay>,
     pub caps: TermCaps,
     /// Set by `update()` on `Flush`; cleared by the loop after paint.
     pub dirty: bool,
@@ -42,8 +49,8 @@ pub struct Model {
 
 impl Model {
     /// A freshly started application: an empty grid, an empty highlight
-    /// table, engine focus, conservative terminal capabilities, zero
-    /// terminal size, and no pending paint.
+    /// table, no open overlays (so the engine holds focus), conservative
+    /// terminal capabilities, zero terminal size, and no pending paint.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -57,7 +64,7 @@ impl Model {
                 popupmenu: None,
                 mouse_on: false,
             },
-            focus: Focus::Engine,
+            overlays: Vec::new(),
             caps: TermCaps::default(),
             dirty: false,
             running: true,
@@ -80,6 +87,49 @@ impl Model {
             term_height: height,
             ..Self::new()
         }
+    }
+
+    /// Who owns input this frame: the topmost open overlay, or the engine
+    /// when none is open.
+    ///
+    /// Derived from [`Model::overlays`] rather than stored alongside it. A
+    /// stored focus is a second fact that has to agree with overlay
+    /// presence, and every close is a chance to leave it naming an overlay
+    /// that is gone, which routes keys into nothing. Derivation makes that
+    /// state unrepresentable.
+    #[must_use]
+    pub fn focus(&self) -> Focus {
+        match self.overlays.last() {
+            Some(overlay) => Focus::Native(overlay.id),
+            None => Focus::Engine,
+        }
+    }
+
+    /// The topmost overlay covering the terminal cell at `(row, col)`, or
+    /// `None` when the cell belongs to the engine grid.
+    ///
+    /// Mouse input routes through this rather than through [`Model::focus`]:
+    /// an open overlay owns the keyboard outright, but it owns only the
+    /// cells it covers, so a click on visible grid outside it still reaches
+    /// the engine.
+    #[must_use]
+    pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId> {
+        self.overlays
+            .iter()
+            .rev()
+            .find(|overlay| self.overlay_rect(overlay).contains(row, col))
+            .map(|overlay| overlay.id)
+    }
+
+    /// The cells `overlay` covers on the current terminal.
+    ///
+    /// The one place an overlay's share of the terminal becomes cells, for
+    /// hit-testing and for painting alike: two resolutions reading two
+    /// terminal sizes would let a click land on a rect the user is not
+    /// looking at.
+    #[must_use]
+    pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect {
+        overlay.geometry.rect(self.term_width, self.term_height)
     }
 
     /// Terminal rows reserved for persistent chrome outside the engine
@@ -593,24 +643,47 @@ pub struct PopupmenuState {
     pub grid: u64,
 }
 
-/// Which surface currently owns input focus.
+/// Which surface currently owns input focus. Read from
+/// [`Model::focus`]; never stored.
 #[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Focus {
     /// The embedded nvim engine's grid: keys, paste, and mouse route to
     /// `RpcCall`s.
     Engine,
-    /// A native overlay identified by `OverlayId` owns input: keys, paste,
-    /// and mouse are consumed by that overlay's own `update()` arm instead
-    /// of reaching the engine, except `<Esc>` which always returns focus to
-    /// `Engine`. No native overlay currently claims this focus; the
-    /// variant exists so the routing seam is pinned by tests independent
-    /// of any concrete overlay consumer.
+    /// The native overlay identified by `OverlayId` owns the keyboard: keys
+    /// and paste are consumed by that overlay instead of reaching the
+    /// engine, and `<Esc>` closes it, handing focus to whatever overlay was
+    /// under it. Mouse input is the exception, routing by position through
+    /// [`Model::overlay_at`] rather than by focus.
     Native(OverlayId),
 }
 
-/// Opaque identifier for a native overlay that can hold input focus.
-/// Nothing constructs this yet; the newtype exists so `Focus::Native`
-/// is representable and the focus vocabulary is stable.
+/// One open native overlay: which overlay it is, and how much of the
+/// terminal it covers.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Overlay {
+    /// Identity, stable for as long as the overlay stays open, so an input
+    /// routed to an overlay can be checked against the one that was on top
+    /// when the frame was painted.
+    pub id: OverlayId,
+    /// The share of the terminal it covers; resolved to cells by
+    /// [`Model::overlay_rect`].
+    pub geometry: OverlayBox,
+}
+
+impl Overlay {
+    /// An overlay with the given identity and placement.
+    #[must_use]
+    pub fn new(id: OverlayId, geometry: OverlayBox) -> Self {
+        Self { id, geometry }
+    }
+}
+
+/// Opaque identifier for an open native overlay. Identity is the caller's
+/// to assign and keep unique; the model treats it as an opaque token and
+/// derives everything else from stack position.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayId(pub u64);
 

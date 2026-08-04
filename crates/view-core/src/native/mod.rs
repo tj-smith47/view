@@ -3,4 +3,5 @@
 //! these descriptions against a user's config, and the crates that paint or
 //! drive a feature read the same table for its name and its off switch.
 
+pub mod geometry;
 pub mod registry;
