@@ -140,6 +140,16 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.record_claimed_keys(claimed);
             Vec::new()
         }
+        // no effect and no state of its own: the colors arrive through the
+        // redraw stream and every frame re-derives its `Theme` from the
+        // live highlight table regardless. Marking the model dirty is the
+        // whole answer -- it guarantees the switch reaches the screen even
+        // when nvim's own batch carries no cell damage the paint loop would
+        // otherwise repaint for.
+        Msg::ColorSchemeChanged { .. } => {
+            model.dirty = true;
+            Vec::new()
+        }
     }
 }
 

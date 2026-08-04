@@ -109,7 +109,12 @@ pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &P
 /// derivation for both the environment `isolate_xdg` sets and the files
 /// planted under those directories, so a session never reads a config from
 /// a directory it was not pointed at.
-fn xdg_home(home: &Path, var: &str) -> PathBuf {
+///
+/// Public because a test that plants its own file under one of those
+/// directories -- or reads back a file the spawned process wrote to one --
+/// must derive the path the same single way, not spell it out a second
+/// time beside a definition it would silently diverge from.
+pub fn xdg_home(home: &Path, var: &str) -> PathBuf {
     home.join(var.to_lowercase())
 }
 

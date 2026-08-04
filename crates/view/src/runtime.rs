@@ -21,6 +21,7 @@
 //! `?`. The caller in `main.rs` never touches `Engine` again once it has
 //! been handed to `run`.
 
+use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
 use std::sync::mpsc;
 use view_core::model::Model;
@@ -79,6 +80,10 @@ pub trait EngineOps {
     /// chunk; never blocks, and never itself returns the claims (see
     /// `Msg::MappingsClaimed`).
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError>;
+    /// Registers the one `view_bridge` autocmd group carrying every editor
+    /// state change view reacts to; never blocks, and never itself returns an
+    /// event (see `RpcCall::RegisterBridge`).
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -115,6 +120,9 @@ impl EngineOps for EngineHandle {
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         self.register_mappings(specs, channel_id)
+    }
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.register_bridge(channel_id)
     }
 }
 
@@ -156,6 +164,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         (**self).register_mappings(specs, channel_id)
+    }
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_bridge(channel_id)
     }
 }
 
@@ -219,6 +230,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::RegisterMappings { specs, channel_id } => {
                         self.ops.register_mappings(&specs, channel_id)
                     }
+                    RpcCall::RegisterBridge { channel_id } => self.ops.register_bridge(channel_id),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -237,6 +249,21 @@ impl<E: EngineOps> Executor<E> {
             _ => Flow::Continue,
         }
     }
+}
+
+/// The session-scoped reactors [`dispatch`] drives after `update()`'s own
+/// effects have run: state that answers a message without being part of the
+/// pure model, and that therefore cannot live in `Model`.
+///
+/// One parameter rather than one per reactor, because every path that
+/// dispatches a message carries all of them: they are attached to a session,
+/// not to a message, so splitting them across a signature only spreads the
+/// same borrow over more call sites.
+pub struct FollowUps<'a> {
+    /// Native-feature takeover, key claim reporting and the first-run notice.
+    pub native: &'a mut NativeSession,
+    /// The cold-start theme cache's mid-session writer.
+    pub theme: &'a mut ThemeBridge,
 }
 
 /// Applies `msg` to `model` through the ordinary `update()` -> `Executor`
@@ -258,15 +285,21 @@ impl<E: EngineOps> Executor<E> {
 /// so nvim's blocking `VimEnter` request is answered before the takeover it
 /// unblocks, and so the first-run notice reads claims `update()` has already
 /// recorded.
+///
+/// The theme-cache follow-up sits at the same seam for the same reason, and
+/// before the native one because it emits no effects at all: it reads the
+/// highlight state `update()` just produced and, at most once per
+/// colorscheme change, writes it out.
 #[must_use]
 pub(crate) fn dispatch<E: EngineOps>(
     model: &mut Model,
     executor: &Executor<E>,
-    native: &mut NativeSession,
+    follow_ups: &mut FollowUps<'_>,
     msg: Msg,
 ) -> Flow {
     crate::vlog::log_msg(&msg);
     let stage = crate::native::stage(&msg);
+    let trigger = follow_ups.theme.classify(&msg);
     let mut flow = Flow::Continue;
     for eff in update(model, msg) {
         match executor.run(eff) {
@@ -280,7 +313,8 @@ pub(crate) fn dispatch<E: EngineOps>(
     if flow != Flow::Continue {
         return flow;
     }
-    for eff in native.follow_up(model, stage) {
+    follow_ups.theme.follow_up(model, trigger);
+    for eff in follow_ups.native.follow_up(model, stage) {
         match executor.run(eff) {
             Flow::Continue => {}
             other => {
@@ -376,7 +410,7 @@ pub fn run(
     pump: view_engine::DamagePump,
     msg_rx: mpsc::Receiver<Msg>,
     term_size: view_tui::terminal::TermSizeCell,
-    native: &mut NativeSession,
+    follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
@@ -392,7 +426,7 @@ pub fn run(
             match dispatch(
                 &mut model,
                 &executor,
-                native,
+                follow_ups,
                 Msg::Resized { width, height },
             ) {
                 Flow::Continue => {}
@@ -400,7 +434,7 @@ pub fn run(
                 Flow::EngineLost => {
                     let info = engine.wait_exit();
                     if let Flow::Quit(code) =
-                        dispatch(&mut model, &executor, native, Msg::EngineDown(info))
+                        dispatch(&mut model, &executor, follow_ups, Msg::EngineDown(info))
                     {
                         return Ok((model, code));
                     }
@@ -454,7 +488,7 @@ pub fn run(
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
-            match dispatch(&mut model, &executor, native, msg) {
+            match dispatch(&mut model, &executor, follow_ups, msg) {
                 Flow::Continue => {}
                 // run() owns engine: returning here runs Drop (graceful
                 // qa! then kill)
@@ -551,6 +585,9 @@ impl EngineOps for FakeOps {
             "register_mappings({},{channel_id})",
             keys.join(" ")
         ))
+    }
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.record(format!("register_bridge({channel_id})"))
     }
 }
 
@@ -721,6 +758,24 @@ mod tests {
     }
 
     #[test]
+    fn register_bridge_effect_maps_to_engine_ops_register_bridge() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::RegisterBridge { channel_id: 7 }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(*ops.calls.borrow(), vec!["register_bridge(7)".to_string()]);
+    }
+
+    #[test]
+    fn register_bridge_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::RegisterBridge { channel_id: 1 }));
+        assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    #[test]
     fn set_option_write_failure_returns_engine_lost() {
         let ops = FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
@@ -788,10 +843,15 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+        };
         let flow = dispatch(
             &mut model,
             &executor,
-            &mut native,
+            &mut follow_ups,
             Msg::Key(view_core::msg::Key {
                 notation: "x".into(),
             }),
@@ -807,10 +867,15 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+        };
         let flow = dispatch(
             &mut model,
             &executor,
-            &mut native,
+            &mut follow_ups,
             Msg::Key(view_core::msg::Key {
                 notation: "x".into(),
             }),
@@ -825,10 +890,15 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+        };
         let flow = dispatch(
             &mut model,
             &executor,
-            &mut native,
+            &mut follow_ups,
             Msg::Resized {
                 width: 100,
                 height: 50,
@@ -848,17 +918,22 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+        };
         let resize = Msg::Resized {
             width: 100,
             height: 50,
         };
         assert!(matches!(
-            dispatch(&mut model, &executor, &mut native, resize.clone()),
+            dispatch(&mut model, &executor, &mut follow_ups, resize.clone()),
             Flow::Continue
         ));
         model.dirty = false;
         assert!(matches!(
-            dispatch(&mut model, &executor, &mut native, resize),
+            dispatch(&mut model, &executor, &mut follow_ups, resize),
             Flow::Continue
         ));
         assert_eq!(
@@ -949,12 +1024,17 @@ mod tests {
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+        };
         let start = std::time::Instant::now();
         for i in 0..1000 {
             let flow = dispatch(
                 &mut model,
                 &executor,
-                &mut native,
+                &mut follow_ups,
                 Msg::Key(view_core::msg::Key {
                     notation: i.to_string(),
                 }),

@@ -372,6 +372,15 @@ impl EngineHandle {
                                 if let Some(msg) = decode_feature_invoke(&params) {
                                     let _ = pump.route_msg(msg);
                                 }
+                            } else if method == "view_bridge" {
+                                // best-effort for the same reason
+                                // `view_invoke` is: nvim is not blocked on an
+                                // autocommand's notification, and every
+                                // consumer of one recomputes from live state
+                                // on the next frame anyway
+                                if let Some(msg) = decode_bridge_event(&params) {
+                                    let _ = pump.route_msg(msg);
+                                }
                             }
                         } else if let Some(tx) = &notif_tx {
                             if tx.send(EngineNotification { method, params }).is_err() {
@@ -742,6 +751,28 @@ fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
         feature: feature.as_str()?.to_owned(),
         verb: verb.as_str()?.to_owned(),
     })
+}
+
+/// Decodes a `view_bridge` notification's `(event, match)` positional params
+/// into the message its consumer reads, or `None` when this build has no
+/// consumer for the event.
+///
+/// The bridge deliberately carries more triggers than there are consumers
+/// today (see `view-engine`'s registration chunk): the group is registered
+/// once, and adding a consumer must not mean re-registering autocommands on
+/// a running engine. An event with no consumer costs one dropped
+/// notification here, which is why the callbacks forward the event's own
+/// `match` instead of querying nvim for state nothing would read.
+fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
+    let [event, payload, ..] = params else {
+        return None;
+    };
+    match event.as_str()? {
+        "colorscheme" => Some(Msg::ColorSchemeChanged {
+            name: payload.as_str().unwrap_or_default().to_owned(),
+        }),
+        _ => None,
+    }
 }
 
 /// Decodes a mapping registration's reply: an array of `{feature, lhs,
@@ -1357,5 +1388,58 @@ mod tests {
         assert_eq!(generation, 1);
         assert_eq!(fg, None);
         assert_eq!(bg, None);
+    }
+
+    /// The reader routes a bridge notification the whole way through to the
+    /// runtime's sink, not merely as far as a decoder: the wire method name
+    /// and the event name are two separate strings a refactor can drift
+    /// apart, and nothing else in the build would notice.
+    #[test]
+    fn a_bridge_colorscheme_notification_reaches_the_sink_as_a_typed_message() {
+        let (_h, pump, _peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        let notif = RpcMessage::Notification {
+            method: "view_bridge".into(),
+            params: vec![Value::from("colorscheme"), Value::from("dracula")],
+        };
+        rmpv::encode::write_value(&mut peer_write, &notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::ColorSchemeChanged { name } = msg else {
+            unreachable!("expected ColorSchemeChanged, got {msg:?}");
+        };
+        assert_eq!(name, "dracula");
+    }
+
+    /// A trigger the bridge carries for a consumer this build does not have
+    /// yet must be dropped, not routed as something else: the registration
+    /// is deliberately wider than the set of consumers.
+    #[test]
+    fn a_bridge_event_with_no_consumer_decodes_to_nothing() {
+        for event in ["diagnostics", "git", "not-an-event"] {
+            assert!(
+                decode_bridge_event(&[Value::from(event), Value::from("x")]).is_none(),
+                "{event} has no consumer in this build and must not route"
+            );
+        }
+    }
+
+    /// nvim reports no name at all for a scheme cleared with `:colorscheme
+    /// default` in some paths. The switch still happened, so the message
+    /// must still arrive -- a consumer keys off the event, not the name.
+    #[test]
+    fn a_bridge_colorscheme_without_a_usable_name_still_reports_the_switch() {
+        let decoded = decode_bridge_event(&[Value::from("colorscheme"), Value::Nil]);
+        assert!(
+            matches!(decoded, Some(Msg::ColorSchemeChanged { ref name }) if name.is_empty()),
+            "a switch with no readable name must still report the switch, got {decoded:?}"
+        );
+        assert!(
+            decode_bridge_event(&[Value::from("colorscheme")]).is_none(),
+            "a notification missing its payload entirely is malformed, not a switch"
+        );
     }
 }

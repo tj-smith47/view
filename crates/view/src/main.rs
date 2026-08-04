@@ -3,6 +3,7 @@
 //! paint, background attach, pre-attach key buffering) lives in
 //! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
+mod bridge;
 mod native;
 mod runtime;
 mod startup;
@@ -203,6 +204,13 @@ fn main() -> Result<()> {
     // what triggers this session's takeover and key registration
     let mut native =
         native::NativeSession::load(config_path.clone(), engine.api_info.channel_id, &mut model);
+    // built alongside it, for the same reason: a config that sets a
+    // colorscheme has already fired the bridge's own autocmd by now
+    let mut theme_bridge = bridge::ThemeBridge::new(config_path.as_deref());
+    let mut follow_ups = runtime::FollowUps {
+        native: &mut native,
+        theme: &mut theme_bridge,
+    };
     // Resolves the presink messages, the pending redraw, and the pre-attach
     // input buffer directly through update()/Executor -- never by touching
     // msg_tx, whose only reader (runtime::run's loop) has not started yet.
@@ -211,7 +219,7 @@ fn main() -> Result<()> {
     let outcome = startup::run_cutover(
         &mut model,
         &executor,
-        &mut native,
+        &mut follow_ups,
         startup::CutoverInput {
             presink: cutover.presink,
             pending_redraw,
@@ -239,7 +247,7 @@ fn main() -> Result<()> {
         pump,
         msg_rx,
         term_size,
-        &mut native,
+        &mut follow_ups,
         &mut term,
     )?;
     persist_theme(&model, &config_path);

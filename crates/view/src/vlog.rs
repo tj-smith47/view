@@ -105,6 +105,9 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 log_ui_event(ev);
             }
         }
+        Msg::ColorSchemeChanged { name } => {
+            log_with("theme", || format!("colorscheme name={name}"));
+        }
         Msg::HlProbeReply { generation, fg, bg } => {
             log_with("theme", || {
                 format!("probe-reply generation={generation} fg={fg:?} bg={bg:?}")

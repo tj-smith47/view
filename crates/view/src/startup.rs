@@ -137,10 +137,12 @@ pub enum AttachFailure {
     Attach(EngineError),
 }
 
-/// Spawns `nvim --embed`, registers the `VimEnter` autocmd BEFORE
-/// `ui_attach` (see
+/// Spawns `nvim --embed`, registers the `VimEnter` autocmd and the
+/// `view_bridge` autocmd group BEFORE `ui_attach` (see
 /// [`EngineHandle::register_vim_enter_autocmd`](view_engine::handle::EngineHandle::register_vim_enter_autocmd)'s
-/// doc comment for why that ordering is load-bearing, not incidental),
+/// doc comment for why that ordering is load-bearing, not incidental, and
+/// [`EngineHandle::register_bridge`](view_engine::handle::EngineHandle::register_bridge)'s
+/// for the one difference between the two),
 /// attaches at `width`x`height`, and forwards the capability-probe's
 /// leftover `residue` bytes. Deliberately does not call
 /// [`Engine::start_pump`]: only `main.rs` does, once the buffered
@@ -156,6 +158,10 @@ fn spawn_and_attach(
     engine
         .handle
         .register_vim_enter_autocmd(engine.api_info.channel_id)
+        .map_err(AttachFailure::Attach)?;
+    engine
+        .handle
+        .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
     engine
         .handle
@@ -389,7 +395,7 @@ pub(crate) enum CutoverOutcome {
 pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     model: &mut Model,
     executor: &crate::runtime::Executor<E>,
-    native: &mut crate::native::NativeSession,
+    follow_ups: &mut crate::runtime::FollowUps<'_>,
     input: CutoverInput,
     engine_stopped_exit: impl FnOnce() -> view_core::msg::ExitInfo,
 ) -> CutoverOutcome {
@@ -417,7 +423,7 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
             }
             other => other,
         };
-        match crate::runtime::dispatch(model, executor, native, msg) {
+        match crate::runtime::dispatch(model, executor, follow_ups, msg) {
             crate::runtime::Flow::Continue => {}
             crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
             crate::runtime::Flow::EngineLost => {
@@ -429,14 +435,17 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
 
     if engine_alive && !pending_redraw.is_empty() {
         engine_alive =
-            crate::runtime::dispatch(model, executor, native, Msg::Redraw(pending_redraw))
+            crate::runtime::dispatch(model, executor, follow_ups, Msg::Redraw(pending_redraw))
                 == crate::runtime::Flow::Continue;
     }
     if engine_alive {
         if let Some((width, height)) = resize {
-            engine_alive =
-                crate::runtime::dispatch(model, executor, native, Msg::Resized { width, height })
-                    == crate::runtime::Flow::Continue;
+            engine_alive = crate::runtime::dispatch(
+                model,
+                executor,
+                follow_ups,
+                Msg::Resized { width, height },
+            ) == crate::runtime::Flow::Continue;
         }
     }
     // skipped entirely once an earlier write already reported the engine
@@ -445,7 +454,7 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     // pump is attached
     if engine_alive {
         for key in keys {
-            if crate::runtime::dispatch(model, executor, native, Msg::Key(key))
+            if crate::runtime::dispatch(model, executor, follow_ups, Msg::Key(key))
                 != crate::runtime::Flow::Continue
             {
                 break;
@@ -654,7 +663,10 @@ mod tests {
             let outcome = run_cutover(
                 &mut model,
                 &executor,
-                &mut crate::native::NativeSession::inert(),
+                &mut crate::runtime::FollowUps {
+                    native: &mut crate::native::NativeSession::inert(),
+                    theme: &mut crate::bridge::ThemeBridge::new(None),
+                },
                 CutoverInput {
                     presink,
                     pending_redraw: vec![UiEvent::Flush],
@@ -718,7 +730,10 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &mut crate::native::NativeSession::inert(),
+            &mut crate::runtime::FollowUps {
+                native: &mut crate::native::NativeSession::inert(),
+                theme: &mut crate::bridge::ThemeBridge::new(None),
+            },
             CutoverInput {
                 presink: vec![Msg::EngineStopped(None)],
                 pending_redraw: vec![UiEvent::Flush],
@@ -756,7 +771,10 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &mut crate::native::NativeSession::inert(),
+            &mut crate::runtime::FollowUps {
+                native: &mut crate::native::NativeSession::inert(),
+                theme: &mut crate::bridge::ThemeBridge::new(None),
+            },
             CutoverInput {
                 presink: vec![Msg::EngineStopped(Some("wedged reader".to_string()))],
                 pending_redraw: vec![],
@@ -791,7 +809,10 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &mut crate::native::NativeSession::inert(),
+            &mut crate::runtime::FollowUps {
+                native: &mut crate::native::NativeSession::inert(),
+                theme: &mut crate::bridge::ThemeBridge::new(None),
+            },
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },
@@ -829,7 +850,10 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
-            &mut native,
+            &mut crate::runtime::FollowUps {
+                native: &mut native,
+                theme: &mut crate::bridge::ThemeBridge::new(None),
+            },
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },

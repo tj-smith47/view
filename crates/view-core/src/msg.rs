@@ -100,6 +100,39 @@ pub enum Msg {
     MappingsClaimed {
         claimed: Vec<MappingClaim>,
     },
+    /// nvim applied a new colorscheme: the `ColorScheme` autocmd registered
+    /// by [`RpcCall::RegisterBridge`] fired, carrying the scheme's name (or
+    /// an empty string when nvim reported none).
+    ///
+    /// Carries no colors. The colors themselves arrive as ordinary
+    /// `default_colors_set`/`hl_attr_define`/`hl_group_set` redraw events
+    /// and are already in [`HlTable`](crate::hl::HlTable) by the time the
+    /// next frame derives a
+    /// [`Theme`](crate::theme::Theme) from it. What this message adds is
+    /// the *fact* that a switch happened, which the redraw stream does not
+    /// state anywhere: a highlight batch looks identical whether a plugin
+    /// redefined one group or the user changed their whole colorscheme, so
+    /// a consumer that must act once per switch (persisting the cold-start
+    /// theme cache) has nothing else to hang off.
+    ///
+    /// # Ordering: neither this message nor its colors is guaranteed first
+    ///
+    /// nvim fires the autocmd while applying the scheme and flushes the UI
+    /// batch afterwards, but that write order is not the order a consumer
+    /// observes. Redraw damage reaches the runtime loop coalesced behind a
+    /// wakeup token travelling the same channel, so highlights folded into a
+    /// token that was already queued are delivered ahead of an announcement
+    /// still waiting its turn. Both orders occur in ordinary sessions.
+    ///
+    /// A consumer that must act on the switch's colors therefore cannot read
+    /// the highlight table on receipt and stop: reading here may see the OLD
+    /// theme, and waiting for the next batch may wait forever because the
+    /// new one already went by. Act on both edges instead -- on this message
+    /// and on the following highlight-bearing batch -- and deduplicate on
+    /// the state already acted upon.
+    ColorSchemeChanged {
+        name: String,
+    },
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -314,6 +347,26 @@ pub enum RpcCall {
     /// turning the default keys off never removes the way in.
     RegisterMappings {
         specs: Vec<MappingSpec>,
+        channel_id: u64,
+    },
+    /// Registers the one autocmd group through which nvim tells view about
+    /// state no UI event reports: a colorscheme switch, a diagnostic
+    /// update, and the buffer/directory changes a branch indicator follows.
+    /// Every callback notifies back over `channel_id`, view's own RPC
+    /// channel.
+    ///
+    /// One group with several triggers rather than one registration per
+    /// consumer: the registration is what a restarted engine loses, and
+    /// three registrations are three chances for one of them to be missed
+    /// and for its consumer to go quietly stale while the other two keep
+    /// working. Cheap to keep whole -- the group clears itself on
+    /// re-registration, so issuing it again is idempotent.
+    ///
+    /// Must be issued BEFORE `nvim_ui_attach` returns. nvim cannot begin
+    /// sourcing the user's config until attach completes, and a config that
+    /// sets a colorscheme fires `ColorScheme` while sourcing; a
+    /// registration made afterwards misses that first switch entirely.
+    RegisterBridge {
         channel_id: u64,
     },
 }

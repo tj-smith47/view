@@ -30,58 +30,160 @@ pub struct ResolvedStyle {
     pub reverse: bool,
 }
 
+/// What a chrome group resolves to while nvim has not associated its name
+/// with a highlight id yet -- before the first `hl_group_set` batch, or
+/// under a minimal colorscheme that never redefines the group at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ChromeFallback {
+    /// [`Theme::normal`]: unmapped chrome should look like plain text.
+    Normal,
+    /// [`Theme::emphasis`]: a selection-style group stays visibly distinct
+    /// from the row beside it even with zero color information.
+    Emphasis,
+}
+
+/// How many identifiers were handed in, evaluated at compile time so
+/// `ALL`'s length is a fact about the declaration list rather than a number
+/// anyone maintains.
+macro_rules! chrome_group_count {
+    () => { 0usize };
+    ($head:ident $($tail:ident)*) => { 1usize + chrome_group_count!($($tail)*) };
+}
+
+/// Declares the chrome-group vocabulary: one line per group giving its
+/// variant, the name nvim's `hl_group_set` event uses for it, and what it
+/// resolves to before nvim has named it. The enum, `ALL`, `COUNT`,
+/// `hl_name` and `fallback` are all generated from that single list.
+///
+/// A group cannot be half-declared, because there is nowhere to half-declare
+/// it: the enum has no definition outside this list, so an arm that exists
+/// at all exists in `ALL`, carries a name and carries a fallback. That is
+/// the whole reason the vocabulary is generated rather than written out --
+/// the hand-written shape it replaced allowed an arm the exhaustive matches
+/// forced you to handle while `ALL` silently stayed one short, and every
+/// consumer that iterates `ALL` (derivation, the cache, every regression
+/// test) then skipped the new group without a single compiler complaint.
+macro_rules! chrome_groups {
+    ($($(#[$attr:meta])* $variant:ident => $hl_name:literal, $fallback:ident;)+) => {
+        /// One builtin chrome element nvim's `hl_group_set` event names, and
+        /// the key both the live derivation and the on-disk cache address
+        /// that element by.
+        ///
+        /// An enum rather than a struct field per group so a group is
+        /// declared once and every consumer follows from
+        /// [`ChromeGroup::ALL`]: derivation, the paint-side lookup, and the
+        /// persisted cache all iterate the same list, so a group that
+        /// reaches one of them reaches all three. The previous
+        /// one-field-per-group shape failed silently in exactly the
+        /// direction that costs a user colors -- a group added to the live
+        /// type but missed in the cache's mirror compiled clean and simply
+        /// never persisted, leaving cold start painting a stale default for
+        /// that one element.
+        ///
+        /// `#[repr(usize)]` is load-bearing: [`index`](Self::index) is the
+        /// discriminant cast, so slot assignment is declaration order by
+        /// construction and no separate table can disagree with it.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[repr(usize)]
+        #[non_exhaustive]
+        pub enum ChromeGroup {
+            $($(#[$attr])* $variant,)+
+        }
+
+        impl ChromeGroup {
+            /// Every chrome group, in the order [`index`](Self::index)
+            /// assigns.
+            pub const ALL: [Self; chrome_group_count!($($variant)+)] =
+                [$(Self::$variant),+];
+
+            /// How many chrome groups this build resolves.
+            pub const COUNT: usize = Self::ALL.len();
+
+            /// The name nvim's `hl_group_set` event uses for this group,
+            /// which is also the key it is cached under on disk. One
+            /// spelling for both, so a group cannot be looked up live under
+            /// one name and persisted under another.
+            #[must_use]
+            pub const fn hl_name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $hl_name,)+
+                }
+            }
+
+            /// What this group resolves to while nvim has not named it.
+            #[must_use]
+            pub const fn fallback(self) -> ChromeFallback {
+                match self {
+                    $(Self::$variant => ChromeFallback::$fallback,)+
+                }
+            }
+
+            /// This group's slot in [`Theme`]'s resolved-style array: an
+            /// O(1) integer, so a per-frame chrome lookup costs an array
+            /// read with no string compare and no allocation.
+            #[must_use]
+            pub const fn index(self) -> usize {
+                self as usize
+            }
+        }
+    };
+}
+
+chrome_groups! {
+    /// The statusline bar's own text. `view-tui`'s startup placeholder
+    /// paints it before the engine attaches; a full native statusline
+    /// widget over live buffer state is still unbuilt, and `Theme`'s
+    /// contract is to resolve every builtin group nvim names regardless of
+    /// how many consumers exist yet.
+    StatusLine => "StatusLine", Normal;
+    /// An unselected tab's label.
+    TabLine => "TabLine", Normal;
+    /// The current tab's label.
+    TabLineSel => "TabLineSel", Emphasis;
+    /// The tabline row's background beyond the tab labels themselves.
+    TabLineFill => "TabLineFill", Normal;
+    /// An unselected popup-menu row.
+    Pmenu => "Pmenu", Normal;
+    /// The selected popup-menu row.
+    PmenuSel => "PmenuSel", Emphasis;
+    /// The message-log overlay's text.
+    MsgArea => "MsgArea", Normal;
+}
+
 /// The active colorscheme's resolved design system: the default/"Normal"
-/// colors plus the builtin chrome groups nvim's `hl_group_set` event
-/// associates a name with (`StatusLine`, the tabline family, the popup-menu
-/// family, `MsgArea`), so native chrome renders in the colorscheme's own
-/// colors instead of a hardcoded style nvim has no way to reach.
+/// colors plus every [`ChromeGroup`] nvim's `hl_group_set` event associates
+/// a name with, so native chrome renders in the colorscheme's own colors
+/// instead of a hardcoded style nvim has no way to reach.
 ///
 /// Deliberately holds resolved *values*, not the live `HlTable` itself:
 /// per-cell grid attributes are always resolved fresh against the live
 /// table ([`Theme::style_for`], parametrized by `hl_id` per cell -- a fixed
-/// set of `Theme` fields could never cover every cell), but the fixed
-/// chrome vocabulary below is cheap to resolve once per frame and
-/// correspondingly cheap to persist to disk for a themed first paint before
-/// that live state exists, seeded from persisted state before attach.
+/// set of chrome slots could never cover every cell), but the fixed chrome
+/// vocabulary is cheap to resolve once per frame and correspondingly cheap
+/// to persist to disk for a themed first paint before that live state
+/// exists, seeded from persisted state before attach.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Theme {
     /// The default/"Normal" foreground color.
     pub fg: Option<u32>,
     /// The default/"Normal" background color.
     pub bg: Option<u32>,
-    /// The `StatusLine` builtin group. Consumed today by `view-tui`'s
-    /// `paint_shell` (the startup placeholder's statusline bar, painted
-    /// before the engine attaches); a full native statusline widget over
-    /// live buffer state is still unbuilt, and `Theme`'s contract is to
-    /// resolve every builtin group nvim's own `hl_group_set` event names
-    /// regardless of how many consumers exist yet.
-    pub status_line: ResolvedStyle,
-    /// The `TabLine` builtin group: an unselected tab's label.
-    pub tab_line: ResolvedStyle,
-    /// The `TabLineSel` builtin group: the current tab's label.
-    pub tab_line_sel: ResolvedStyle,
-    /// The `TabLineFill` builtin group: the tabline row's background beyond
-    /// the tab labels themselves.
-    pub tab_line_fill: ResolvedStyle,
-    /// The `Pmenu` builtin group: an unselected popup-menu row.
-    pub pmenu: ResolvedStyle,
-    /// The `PmenuSel` builtin group: the selected popup-menu row.
-    pub pmenu_sel: ResolvedStyle,
-    /// The `MsgArea` builtin group: the message-log overlay's text.
-    pub msg_area: ResolvedStyle,
+    /// Every chrome group's resolved style, indexed by
+    /// [`ChromeGroup::index`]. Private so the array and the enum can never
+    /// disagree about which slot belongs to which group: reads go through
+    /// [`Theme::chrome`], writes through [`Theme::set_chrome`].
+    chrome: [ResolvedStyle; ChromeGroup::COUNT],
 }
 
 impl Theme {
     /// Derives a `Theme` from the engine's live highlight table. Pure and
     /// deterministic: the same `HlTable` state always derives the same
     /// `Theme`, so callers may re-derive on every frame with no history to
-    /// track. A named group with no mapping yet -- before the first
-    /// `hl_group_set` batch, or under a minimal colorscheme that never
-    /// redefines every builtin group -- falls back to [`Theme::normal`] for
-    /// an ordinary chrome group or [`Theme::emphasis`] for a
-    /// selection-style one (`TabLineSel`, `PmenuSel`), so the
-    /// selected/current row stays visibly distinct even with zero color
-    /// information rather than degrading to indistinguishable-from-everything-else.
+    /// track. A group with no mapping yet falls back to its declared
+    /// [`ChromeGroup::fallback`], so a selection-style row stays visibly
+    /// distinct even with zero color information rather than degrading to
+    /// indistinguishable-from-everything-else.
     #[must_use]
     pub fn from_hl(hl: &HlTable) -> Self {
         // `confirmed` is trusted only when its generation matches the
@@ -118,16 +220,63 @@ impl Theme {
             bg,
             ..Self::default()
         };
-        let normal = theme.normal();
-        let emphasis = theme.emphasis();
-        theme.status_line = theme.named(hl, "StatusLine", normal);
-        theme.tab_line = theme.named(hl, "TabLine", normal);
-        theme.tab_line_sel = theme.named(hl, "TabLineSel", emphasis);
-        theme.tab_line_fill = theme.named(hl, "TabLineFill", normal);
-        theme.pmenu = theme.named(hl, "Pmenu", normal);
-        theme.pmenu_sel = theme.named(hl, "PmenuSel", emphasis);
-        theme.msg_area = theme.named(hl, "MsgArea", normal);
+        for group in ChromeGroup::ALL {
+            let fallback = theme.fallback_style(group);
+            let resolved = theme.named(hl, group.hl_name(), fallback);
+            theme.set_chrome(group, resolved);
+        }
         theme
+    }
+
+    /// A theme carrying only the default/"Normal" colors, with every chrome
+    /// group left unset.
+    ///
+    /// The constructor a caller outside this crate builds a `Theme` from:
+    /// the chrome slots are private (see [`Theme::chrome`]), so the struct
+    /// itself cannot be literal-constructed elsewhere, and a group is
+    /// written afterwards through [`Theme::set_chrome`].
+    #[must_use]
+    pub fn with_colors(fg: Option<u32>, bg: Option<u32>) -> Self {
+        Self {
+            fg,
+            bg,
+            ..Self::default()
+        }
+    }
+
+    /// One chrome group's resolved style: an array read keyed by
+    /// [`ChromeGroup::index`], so a per-frame paint pays no string compare
+    /// and allocates nothing.
+    ///
+    /// Total by construction rather than by indexing: a group whose slot
+    /// this build does not carry reads as its declared fallback, which is
+    /// the same honest answer as "nvim has not named this group yet", and
+    /// never a neighbouring group's colors.
+    #[must_use]
+    pub fn chrome(&self, group: ChromeGroup) -> ResolvedStyle {
+        self.chrome
+            .get(group.index())
+            .copied()
+            .unwrap_or_else(|| self.fallback_style(group))
+    }
+
+    /// Overwrites `group`'s resolved style. A no-op for a group whose slot
+    /// this build does not carry, for the same reason [`Theme::chrome`]
+    /// reads a fallback rather than panicking.
+    pub fn set_chrome(&mut self, group: ChromeGroup, style: ResolvedStyle) {
+        if let Some(slot) = self.chrome.get_mut(group.index()) {
+            *slot = style;
+        }
+    }
+
+    /// The style `group` resolves to while nvim has not named it, per its
+    /// declared [`ChromeGroup::fallback`].
+    #[must_use]
+    fn fallback_style(&self, group: ChromeGroup) -> ResolvedStyle {
+        match group.fallback() {
+            ChromeFallback::Normal => self.normal(),
+            ChromeFallback::Emphasis => self.emphasis(),
+        }
     }
 
     /// The base/"Normal" resolved style: this theme's colors, no attributes.
@@ -228,6 +377,97 @@ mod tests {
         }
     }
 
+    /// `ALL`'s ordering and `index`'s answers are two statements of the
+    /// same fact, and `Theme` reads its array through the second while
+    /// every consumer iterates the first. A disagreement between them would
+    /// hand one group another's colors with nothing failing loudly. The
+    /// generated vocabulary makes that disagreement unrepresentable -- both
+    /// follow from declaration order, one as the array literal and one as
+    /// the discriminant -- and this pins it anyway, because the thing that
+    /// would break it is a future `#[repr]` or explicit-discriminant edit
+    /// no other test would notice.
+    #[test]
+    fn every_group_indexes_its_own_slot_in_all() {
+        assert_eq!(ChromeGroup::ALL.len(), ChromeGroup::COUNT);
+        for (slot, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            assert_eq!(
+                group.index(),
+                slot,
+                "{} indexes a slot other than its own position in ALL",
+                group.hl_name()
+            );
+        }
+    }
+
+    /// Two groups sharing an `hl_name` would collide in the on-disk cache's
+    /// name-keyed map, where one would silently overwrite the other.
+    #[test]
+    fn every_group_has_its_own_hl_name() {
+        let names: std::collections::HashSet<&str> = ChromeGroup::ALL
+            .into_iter()
+            .map(ChromeGroup::hl_name)
+            .collect();
+        assert_eq!(names.len(), ChromeGroup::COUNT);
+    }
+
+    /// A style written for one group must be readable back from that group
+    /// alone, for every arm: the storage layer's whole contract.
+    #[test]
+    fn set_chrome_writes_only_the_group_it_names() {
+        let mut theme = Theme::default();
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            theme.set_chrome(
+                group,
+                ResolvedStyle {
+                    fg: Some(0x10_0000 + offset as u32),
+                    ..ResolvedStyle::default()
+                },
+            );
+        }
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            assert_eq!(
+                theme.chrome(group).fg,
+                Some(0x10_0000 + offset as u32),
+                "{} read back another group's style",
+                group.hl_name()
+            );
+        }
+    }
+
+    /// Derivation covers every arm, not just the ones a consumer happens to
+    /// paint today: a group added to the enum and left out of `from_hl`'s
+    /// loop would resolve to `ResolvedStyle::default()` -- an all-unset
+    /// style that is neither the colorscheme's answer nor the declared
+    /// fallback.
+    #[test]
+    fn from_hl_resolves_every_group_in_all() {
+        let mut hl = table_with(Some(0x101010), Some(0x202020), 1, no_attrs());
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            let id = 100 + offset as u64;
+            hl.define_attr(
+                id,
+                HlAttr {
+                    fg: Some(0x30_0000 + offset as u32),
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+            );
+            hl.set_group(group.hl_name().to_string(), id);
+        }
+        let theme = Theme::from_hl(&hl);
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            assert_eq!(
+                theme.chrome(group).fg,
+                Some(0x30_0000 + offset as u32),
+                "{} was not resolved from the live table",
+                group.hl_name()
+            );
+        }
+    }
+
     #[test]
     fn from_hl_derives_default_colors_as_normal() {
         // bg is deliberately non-zero here: 0 is the wire-ambiguous case
@@ -305,7 +545,10 @@ mod tests {
                 reverse: false,
             }
         );
-        assert_eq!(first.status_line, first.style_for(3, model.engine.hl()));
+        assert_eq!(
+            first.chrome(ChromeGroup::StatusLine),
+            first.style_for(3, model.engine.hl())
+        );
     }
 
     #[test]
@@ -400,9 +643,10 @@ mod tests {
         );
         hl.set_group("StatusLine".to_string(), 9);
         let theme = Theme::from_hl(&hl);
-        assert_eq!(theme.status_line.fg, Some(0x123456));
-        assert_eq!(theme.status_line.bg, Some(0x654321));
-        assert_ne!(theme.status_line, theme.normal());
+        let status_line = theme.chrome(ChromeGroup::StatusLine);
+        assert_eq!(status_line.fg, Some(0x123456));
+        assert_eq!(status_line.bg, Some(0x654321));
+        assert_ne!(status_line, theme.normal());
     }
 
     /// The other half of the same property: a selection-style group with
@@ -412,9 +656,9 @@ mod tests {
     fn named_selection_group_falls_back_to_emphasis_when_unmapped() {
         let hl = table_with(Some(0x1), Some(0x2), 1, no_attrs());
         let theme = Theme::from_hl(&hl);
-        assert_eq!(theme.tab_line_sel, theme.emphasis());
-        assert_eq!(theme.pmenu_sel, theme.emphasis());
-        assert_ne!(theme.tab_line_sel, theme.normal());
+        assert_eq!(theme.chrome(ChromeGroup::TabLineSel), theme.emphasis());
+        assert_eq!(theme.chrome(ChromeGroup::PmenuSel), theme.emphasis());
+        assert_ne!(theme.chrome(ChromeGroup::TabLineSel), theme.normal());
     }
 
     /// And the plain-group counterpart: an ordinary (non-selection) group
@@ -425,11 +669,17 @@ mod tests {
     fn named_plain_group_falls_back_to_normal_when_unmapped() {
         let hl = table_with(Some(0x1), Some(0x2), 1, no_attrs());
         let theme = Theme::from_hl(&hl);
-        assert_eq!(theme.status_line, theme.normal());
-        assert_eq!(theme.tab_line, theme.normal());
-        assert_eq!(theme.tab_line_fill, theme.normal());
-        assert_eq!(theme.pmenu, theme.normal());
-        assert_eq!(theme.msg_area, theme.normal());
+        for group in ChromeGroup::ALL {
+            if group.fallback() == ChromeFallback::Emphasis {
+                continue;
+            }
+            assert_eq!(
+                theme.chrome(group),
+                theme.normal(),
+                "{} must read as plain text while unmapped",
+                group.hl_name()
+            );
+        }
     }
 
     /// `default_colors_set` alone cannot tell "no background" from

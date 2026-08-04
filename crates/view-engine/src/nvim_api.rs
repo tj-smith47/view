@@ -181,6 +181,51 @@ end, {
 })
 return claimed";
 
+/// The lua chunk [`EngineHandle::register_bridge`] runs inside nvim, taking
+/// view's channel id as its single vararg. Constant by construction for the
+/// same reason as [`FEED_KEYS_CHUNK`]: no caller data is interpolated into
+/// the Lua source.
+///
+/// One augroup carrying every editor-state trigger view listens to, not one
+/// registration per consumer. The registration is precisely what a restarted
+/// engine loses, and three separate registrations are three chances for one
+/// to be missed -- leaving its consumer quietly stale while the other two
+/// keep working, a failure with no symptom at the point it happens. Created
+/// with `clear = true` so re-issuing it replaces the group rather than
+/// stacking a second copy of every autocommand.
+///
+/// The callbacks carry `args.match` -- the colorscheme's name for
+/// `ColorScheme`, the buffer's name for the rest -- rather than reading any
+/// state themselves. A callback that queried nvim would run inside the
+/// autocommand, on nvim's main loop, on every buffer switch; forwarding the
+/// event and letting the frontend decide what to do with it keeps the editor
+/// side to one `rpcnotify` per trigger.
+///
+/// `BufEnter`, `DirChanged`, and `FocusGained` are the git triggers: the
+/// repository a branch is read from changes when the active buffer changes
+/// or the working directory moves, and the branch itself can change under a
+/// backgrounded editor, which is what returning focus is the signal for.
+const REGISTER_BRIDGE_CHUNK: &str = "\
+local channel = ...
+local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
+local function relay(event)
+  return function(args)
+    vim.rpcnotify(channel, 'view_bridge', event, args.match or '')
+  end
+end
+vim.api.nvim_create_autocmd('ColorScheme', {
+  group = group,
+  callback = relay('colorscheme'),
+})
+vim.api.nvim_create_autocmd('DiagnosticChanged', {
+  group = group,
+  callback = relay('diagnostics'),
+})
+vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
+  group = group,
+  callback = relay('git'),
+})";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -280,6 +325,61 @@ impl EngineHandle {
             REGISTER_VIM_ENTER_TIMEOUT,
         )?;
         Ok(())
+    }
+
+    /// Registers the single `view_bridge` autocmd group -- the one channel
+    /// every editor-state change view reacts to arrives on. What it hooks,
+    /// and why it is one group rather than three, is in
+    /// [`REGISTER_BRIDGE_CHUNK`]. Each trigger answers asynchronously with a
+    /// `view_bridge` notification carrying an event name and the event's
+    /// `match`; `colorscheme` becomes `Msg::ColorSchemeChanged`.
+    ///
+    /// # Ordering: call this BEFORE [`ui_attach`](Self::ui_attach), never
+    /// after
+    ///
+    /// The window this needs is the one
+    /// [`register_vim_enter_autocmd`](Self::register_vim_enter_autocmd)
+    /// documents in full: nvim cannot begin sourcing the user's config until
+    /// `ui_attach` returns, and a config whose `:colorscheme` fires before
+    /// this group exists is a switch nothing observes -- the cold-start cache
+    /// then keeps whatever it was seeded with until the user changes scheme a
+    /// second time.
+    ///
+    /// A `notify`, where `register_vim_enter_autocmd` is a `request`, and the
+    /// difference is not an inconsistency. That one must be *live* before
+    /// `ui_attach` is called, because what it registers is a hook nvim will
+    /// block on. This one only needs to be *ordered* before it: the writer
+    /// thread preserves the order calls are made in and nvim services one
+    /// connection's stream in order, so this chunk runs before nvim answers
+    /// the `ui_attach` request and therefore before config sourcing can fire
+    /// anything. Waiting for a reply would buy nothing and would put a
+    /// bounded blocking call on the same trait the paint loop drives.
+    ///
+    /// The cost of a notify is that a chunk nvim rejects fails silently.
+    /// [`REGISTER_BRIDGE_CHUNK`] is constant, so the only way it can fail is
+    /// an engine that is already gone -- which the very next call reports --
+    /// and the arrival of a real notification is asserted end-to-end against
+    /// a live engine rather than inferred from a reply.
+    ///
+    /// `channel_id` is this connection's own id from `nvim_get_api_info`
+    /// (captured in [`crate::process::Engine::api_info`] at spawn time),
+    /// needed for the same reason
+    /// [`register_mappings`](Self::register_mappings) needs it: `rpcnotify`
+    /// dispatches to an explicit channel number and nvim has no loopback
+    /// shorthand for the connection asking.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_BRIDGE_CHUNK),
+                Value::Array(vec![Value::from(channel_id)]),
+            ],
+        )
     }
 
     /// Forwards one encoded key `notation` (see `view_tui::keys::encode_key`)
@@ -824,6 +924,60 @@ mod tests {
                 "{source} must be read before the first key is set"
             );
         }
+    }
+
+    /// The channel id crosses as an argument, not interpolated, and the
+    /// method is a notification: a `request` here would put a blocking call
+    /// on the surface the paint loop drives.
+    #[test]
+    fn register_bridge_sends_one_chunk_carrying_the_channel_as_an_argument() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.register_bridge(7).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(REGISTER_BRIDGE_CHUNK));
+        assert_eq!(
+            params[1],
+            Value::Array(vec![Value::from(7)]),
+            "the channel must cross as the chunk's only argument"
+        );
+        assert!(
+            !REGISTER_BRIDGE_CHUNK.contains('7'),
+            "the chunk must be constant: nothing about the caller may appear in its source"
+        );
+    }
+
+    /// Every trigger the bridge exists to carry lives in the one group, and
+    /// that group clears itself: a consumer added later must not need its own
+    /// registration, and re-registering after an engine restart must not
+    /// stack a second copy of every autocommand.
+    #[test]
+    fn the_bridge_chunk_hooks_every_trigger_in_one_self_clearing_group() {
+        for event in [
+            "'ColorScheme'",
+            "'DiagnosticChanged'",
+            "'BufEnter'",
+            "'DirChanged'",
+            "'FocusGained'",
+        ] {
+            assert!(
+                REGISTER_BRIDGE_CHUNK.contains(event),
+                "the bridge must hook {event}"
+            );
+        }
+        assert_eq!(
+            REGISTER_BRIDGE_CHUNK.matches("nvim_create_augroup").count(),
+            1,
+            "one group, or a restart can lose one registration and leave the others working"
+        );
+        assert!(REGISTER_BRIDGE_CHUNK.contains("'view_bridge', { clear = true }"));
+        assert_eq!(
+            REGISTER_BRIDGE_CHUNK
+                .matches("vim.rpcnotify(channel, 'view_bridge'")
+                .count(),
+            1,
+            "every trigger answers through the one relay, so the wire shape cannot drift per event"
+        );
     }
 
     /// This method takes any `&[MappingSpec]`, and the generated right-hand

@@ -11,11 +11,12 @@
 //! `Theme::default()` (or, for `store`, simply gives up) rather than
 //! propagating an error startup would have to handle specially.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use view_core::hl::{HlAttr, HlTable, ProbedDefaults};
-use view_core::theme::{ResolvedStyle, Theme};
+use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 
 /// The on-disk cache format version this build writes and the newest
 /// version it knows how to read. Bumped whenever [`CachedTheme`]'s field
@@ -24,7 +25,14 @@ use view_core::theme::{ResolvedStyle, Theme};
 /// `#[serde(default)]` already lets an older file omit it. A cache file
 /// carrying a *higher* version than this constant is from a newer build
 /// this one predates and is never guessed at (see [`load_from_path`]).
-const CACHE_SCHEMA_VERSION: u32 = 1;
+///
+/// v2 moved the chrome groups from one key per group to a single
+/// `[chrome]` table keyed by nvim's own highlight-group name, so a group is
+/// declared once in [`ChromeGroup`] instead of being mirrored here by hand.
+/// v1's per-group keys are unknown fields under the current schema and
+/// would otherwise be reported as corruption, so `load_from_path` tells an
+/// older file apart from a broken one and says so.
+const CACHE_SCHEMA_VERSION: u32 = 2;
 
 /// The on-disk mirror of [`ResolvedStyle`]: identical fields, but
 /// `Serialize`/`Deserialize` derive here instead of on `ResolvedStyle`
@@ -75,26 +83,41 @@ impl From<CachedResolvedStyle> for ResolvedStyle {
 /// The on-disk mirror of [`Theme`]. `schema_version` and every other field
 /// default on a missing key (`#[serde(default)]`), so a cache written by
 /// the pre-named-groups format (only `fg`/`bg`, no `schema_version` key at
-/// all) still parses as schema v0 with every named group defaulting to
-/// [`CachedResolvedStyle::default`] -- exactly the "no named color was
-/// ever cached" truth for that file, not a guess. `deny_unknown_fields`
-/// pairs with that default-on-missing behavior to catch the opposite case:
-/// a field this build does not recognize (a future rename or removal)
-/// fails to parse loudly instead of `toml` silently dropping it and this
-/// build unknowingly loading a theme missing data it thinks it has.
-#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+/// all) still parses as schema v0 with an empty `chrome` table -- exactly
+/// the "no named color was ever cached" truth for that file, not a guess.
+/// `deny_unknown_fields` pairs with that default-on-missing behavior to
+/// catch the opposite case: a field this build does not recognize (a future
+/// rename or removal) fails to parse loudly instead of `toml` silently
+/// dropping it and this build unknowingly loading a theme missing data it
+/// thinks it has.
+///
+/// `chrome` is keyed by [`ChromeGroup::hl_name`] rather than carrying one
+/// struct field per group: the field-per-group shape made every added group
+/// a second edit here that nothing forced, and a missed one persisted
+/// nothing while compiling clean. Keying by the group's own nvim name also
+/// makes the file readable to anyone inspecting it, since the keys are the
+/// highlight groups they would write in a colorscheme.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct CachedTheme {
     schema_version: u32,
     fg: Option<u32>,
     bg: Option<u32>,
-    status_line: CachedResolvedStyle,
-    tab_line: CachedResolvedStyle,
-    tab_line_sel: CachedResolvedStyle,
-    tab_line_fill: CachedResolvedStyle,
-    pmenu: CachedResolvedStyle,
-    pmenu_sel: CachedResolvedStyle,
-    msg_area: CachedResolvedStyle,
+    chrome: BTreeMap<String, CachedResolvedStyle>,
+}
+
+/// Reads nothing but `schema_version`, from a file the current schema
+/// refused. Deliberately without `deny_unknown_fields`, which is the whole
+/// point: it answers "which build wrote this?" for a file whose remaining
+/// keys this build cannot make sense of, so an upgrade reports an older
+/// cache honestly instead of accusing it of corruption.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct SchemaProbe {
+    /// Zero for a file that carries no version at all, which is a value
+    /// [`CACHE_SCHEMA_VERSION`] never takes, so "unversioned" stays
+    /// distinguishable from "written by schema 1".
+    schema_version: u32,
 }
 
 impl From<Theme> for CachedTheme {
@@ -103,30 +126,23 @@ impl From<Theme> for CachedTheme {
             schema_version: CACHE_SCHEMA_VERSION,
             fg: theme.fg,
             bg: theme.bg,
-            status_line: theme.status_line.into(),
-            tab_line: theme.tab_line.into(),
-            tab_line_sel: theme.tab_line_sel.into(),
-            tab_line_fill: theme.tab_line_fill.into(),
-            pmenu: theme.pmenu.into(),
-            pmenu_sel: theme.pmenu_sel.into(),
-            msg_area: theme.msg_area.into(),
+            chrome: ChromeGroup::ALL
+                .into_iter()
+                .map(|group| (group.hl_name().to_string(), theme.chrome(group).into()))
+                .collect(),
         }
     }
 }
 
 impl From<CachedTheme> for Theme {
     fn from(cached: CachedTheme) -> Self {
-        Self {
-            fg: cached.fg,
-            bg: cached.bg,
-            status_line: cached.status_line.into(),
-            tab_line: cached.tab_line.into(),
-            tab_line_sel: cached.tab_line_sel.into(),
-            tab_line_fill: cached.tab_line_fill.into(),
-            pmenu: cached.pmenu.into(),
-            pmenu_sel: cached.pmenu_sel.into(),
-            msg_area: cached.msg_area.into(),
+        let mut theme = Theme::with_colors(cached.fg, cached.bg);
+        for group in ChromeGroup::ALL {
+            if let Some(style) = cached.chrome.get(group.hl_name()) {
+                theme.set_chrome(group, (*style).into());
+            }
         }
+        theme
     }
 }
 
@@ -183,20 +199,34 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
 /// with all-false attributes, permanently defeating that fallback.
 #[must_use]
 pub fn load(config_path: &Path) -> Option<Theme> {
-    let Some(state_dir) = view_native::paths::state_dir() else {
+    let Some(path) = cache_target(config_path) else {
         eprintln!(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
         );
         return None;
     };
-    load_from_path(&cache_path(&state_dir, config_path))
+    load_from_path(&path)
+}
+
+/// The cache file `config_path`'s theme is read from and written to, or
+/// `None` when no state directory can be resolved at all.
+///
+/// Public to this crate so a caller that writes the cache more than once per
+/// session resolves the path a single time and never reads the environment
+/// again from inside a loop pass.
+#[must_use]
+pub(crate) fn cache_target(config_path: &Path) -> Option<PathBuf> {
+    let state_dir = view_native::paths::state_dir()?;
+    Some(cache_path(&state_dir, config_path))
 }
 
 /// [`load`]'s implementation given an already-resolved cache file path, so
 /// tests can exercise missing/corrupt/version-mismatched-file behavior
-/// without mutating process environment.
+/// without mutating process environment. Public to this crate for the same
+/// reason as [`store_to_path`]: it is the read side of a slot a caller
+/// already holds the path to.
 #[must_use]
-fn load_from_path(path: &Path) -> Option<Theme> {
+pub(crate) fn load_from_path(path: &Path) -> Option<Theme> {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -225,10 +255,29 @@ fn load_from_path(path: &Path) -> Option<Theme> {
         }
         Ok(cached) => Some(cached.into()),
         Err(e) => {
-            eprintln!(
-                "view: corrupt theme cache {}: {e}, using built-in defaults",
-                path.display()
-            );
+            match toml::from_str::<SchemaProbe>(&contents) {
+                // a version this build has since superseded: the file is
+                // intact, its shape simply predates the current schema, and
+                // saying "corrupt" about a perfectly good older cache would
+                // send a user deleting state that was never broken. Version
+                // 0 is excluded deliberately: the pre-versioning format
+                // carries no groups at all and parses cleanly above, so a
+                // file with no version that still failed is malformed, not
+                // old.
+                Ok(probe)
+                    if probe.schema_version > 0 && probe.schema_version < CACHE_SCHEMA_VERSION =>
+                {
+                    eprintln!(
+                        "view: theme cache {} is schema v{}, written before this build's v{CACHE_SCHEMA_VERSION}; using built-in defaults until this session stores its own",
+                        path.display(),
+                        probe.schema_version
+                    );
+                }
+                _ => eprintln!(
+                    "view: corrupt theme cache {}: {e}, using built-in defaults",
+                    path.display()
+                ),
+            }
             None
         }
     }
@@ -239,18 +288,20 @@ fn load_from_path(path: &Path) -> Option<Theme> {
 /// otherwise ignored: a cache write is a best-effort convenience for the
 /// *next* startup, never something the current session should fail over.
 pub fn store(theme: Theme, config_path: &Path) {
-    let Some(state_dir) = view_native::paths::state_dir() else {
+    let Some(path) = cache_target(config_path) else {
         eprintln!(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; cannot cache theme for next startup"
         );
         return;
     };
-    store_to_path(theme, &cache_path(&state_dir, config_path));
+    store_to_path(theme, &path);
 }
 
 /// [`store`]'s implementation given an already-resolved cache file path;
-/// see [`load_from_path`] for why the path-taking split exists.
-fn store_to_path(theme: Theme, path: &Path) {
+/// see [`load_from_path`] for why the path-taking split exists. Public to
+/// this crate for the same reason as [`cache_target`]: a mid-session write
+/// already holds its resolved path and must not re-read the environment.
+pub(crate) fn store_to_path(theme: Theme, path: &Path) {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             eprintln!(
@@ -316,19 +367,10 @@ pub fn seeded_hl_table(theme: &Theme) -> HlTable {
         fg: theme.fg,
         bg: theme.bg,
     });
-    let entries: [(&str, ResolvedStyle); 7] = [
-        ("StatusLine", theme.status_line),
-        ("TabLine", theme.tab_line),
-        ("TabLineSel", theme.tab_line_sel),
-        ("TabLineFill", theme.tab_line_fill),
-        ("Pmenu", theme.pmenu),
-        ("PmenuSel", theme.pmenu_sel),
-        ("MsgArea", theme.msg_area),
-    ];
     // offsets come from enumeration, not hand-written literals, so two
     // groups can never collide on a synthetic hl_id
-    for (offset, (name, style)) in entries.into_iter().enumerate() {
-        seed_named(&mut hl, name, style, offset as u64);
+    for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+        seed_named(&mut hl, group.hl_name(), theme.chrome(group), offset as u64);
     }
     hl
 }
@@ -435,11 +477,7 @@ mod tests {
     fn round_trip_preserves_theme_colors() {
         let dir = tmp_dir("roundtrip");
         let path = dir.join("theme.toml");
-        let theme = Theme {
-            fg: Some(0xABCDEF),
-            bg: Some(0x010203),
-            ..Theme::default()
-        };
+        let theme = Theme::with_colors(Some(0xABCDEF), Some(0x010203));
         store_to_path(theme, &path);
         let loaded = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
@@ -464,10 +502,10 @@ mod tests {
     fn round_trip_preserves_named_group_colors() {
         let dir = tmp_dir("roundtrip-named");
         let path = dir.join("theme.toml");
-        let theme = Theme {
-            fg: Some(0x111111),
-            bg: Some(0x222222),
-            status_line: ResolvedStyle {
+        let mut theme = Theme::with_colors(Some(0x111111), Some(0x222222));
+        theme.set_chrome(
+            ChromeGroup::StatusLine,
+            ResolvedStyle {
                 fg: Some(0x333333),
                 bg: Some(0x444444),
                 bold: true,
@@ -475,22 +513,28 @@ mod tests {
                 underline: true,
                 reverse: false,
             },
-            tab_line: ResolvedStyle::default(),
-            tab_line_sel: ResolvedStyle {
+        );
+        theme.set_chrome(
+            ChromeGroup::TabLineSel,
+            ResolvedStyle {
                 reverse: true,
                 ..ResolvedStyle::default()
             },
-            tab_line_fill: ResolvedStyle::default(),
-            pmenu: ResolvedStyle::default(),
-            pmenu_sel: ResolvedStyle {
+        );
+        theme.set_chrome(
+            ChromeGroup::PmenuSel,
+            ResolvedStyle {
                 reverse: true,
                 ..ResolvedStyle::default()
             },
-            msg_area: ResolvedStyle {
+        );
+        theme.set_chrome(
+            ChromeGroup::MsgArea,
+            ResolvedStyle {
                 fg: Some(0x555555),
                 ..ResolvedStyle::default()
             },
-        };
+        );
         store_to_path(theme, &path);
         let loaded = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
@@ -530,8 +574,14 @@ mod tests {
         let loaded = load_from_path(&path).expect("a successfully parsed legacy file is a hit");
         assert_eq!(loaded.fg, Some(16_777_215));
         assert_eq!(loaded.bg, Some(0));
-        assert_eq!(loaded.status_line, ResolvedStyle::default());
-        assert_eq!(loaded.pmenu_sel, ResolvedStyle::default());
+        assert_eq!(
+            loaded.chrome(ChromeGroup::StatusLine),
+            ResolvedStyle::default()
+        );
+        assert_eq!(
+            loaded.chrome(ChromeGroup::PmenuSel),
+            ResolvedStyle::default()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -547,6 +597,121 @@ mod tests {
         let loaded = load_from_path(&path);
         assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every arm of [`ChromeGroup::ALL`] survives a store/load round trip
+    /// carrying its own distinct style, so a group added to the enum but
+    /// missing from the cache's map is a red test rather than a silently
+    /// stale default painted at the next cold start. Distinct values per
+    /// group, not one shared style: a map that wrote every group under the
+    /// same key would round-trip a single shared value and pass a
+    /// same-value check.
+    #[test]
+    fn every_chrome_group_round_trips_through_the_cache() {
+        let dir = tmp_dir("roundtrip-every-group");
+        let path = dir.join("theme.toml");
+        let mut theme = Theme::with_colors(Some(0x111111), Some(0x222222));
+        for (offset, group) in ChromeGroup::ALL.into_iter().enumerate() {
+            let offset = offset as u32;
+            theme.set_chrome(
+                group,
+                ResolvedStyle {
+                    fg: Some(0x40_0000 + offset),
+                    bg: Some(0x50_0000 + offset),
+                    bold: offset.is_multiple_of(2),
+                    italic: offset.is_multiple_of(3),
+                    underline: offset.is_multiple_of(4),
+                    reverse: offset.is_multiple_of(5),
+                },
+            );
+        }
+        store_to_path(theme, &path);
+        let loaded = load_from_path(&path).expect("a freshly stored cache must load");
+        for group in ChromeGroup::ALL {
+            assert_eq!(
+                loaded.chrome(group),
+                theme.chrome(group),
+                "{} lost its cached style across the round trip",
+                group.hl_name()
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A cache written by an earlier schema (per-group keys, before the
+    /// name-keyed `[chrome]` table) is rejected -- its keys are unknown to
+    /// this build, and guessing at a partial parse is what
+    /// `deny_unknown_fields` exists to prevent -- but it is rejected as an
+    /// older file rather than as corruption, because it is intact and the
+    /// distinction is the difference between a user waiting one startup for
+    /// a fresh cache and a user deleting state that was never broken.
+    #[test]
+    fn a_cache_from_an_earlier_schema_is_rejected_as_older_not_as_corrupt() {
+        let dir = tmp_dir("older-schema");
+        let path = dir.join("theme.toml");
+        std::fs::write(
+            &path,
+            "schema_version = 1\nfg = 1\nbg = 2\n\n[status_line]\nfg = 3\n",
+        )
+        .unwrap();
+        assert_eq!(load_from_path(&path), None);
+        let probe: SchemaProbe = toml::from_str(
+            &std::fs::read_to_string(&path).expect("the planted file must be readable"),
+        )
+        .expect("a version probe must succeed on a file the strict schema refused");
+        assert!(
+            probe.schema_version > 0 && probe.schema_version < CACHE_SCHEMA_VERSION,
+            "the planted file must land in the older-schema branch, got v{}",
+            probe.schema_version
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The spec's "keyed by config path" requirement, asserted where a user
+    /// would see it: two sessions started against two different config
+    /// files leave two files in the cache directory, each holding its own
+    /// session's colors. Listing the directory rather than only comparing
+    /// two derived paths, so a keying that collapsed both configs onto one
+    /// file (or wrote outside the cache directory entirely) fails here.
+    #[test]
+    fn two_config_paths_leave_two_entries_in_the_cache_directory() {
+        let _guard = env_mutation_guard();
+        let dir = tmp_dir("two-configs");
+        let prev = std::env::var("XDG_STATE_HOME").ok();
+        std::env::set_var("XDG_STATE_HOME", &dir);
+
+        let first_config = Path::new("/home/first/.config/view/view.toml");
+        let second_config = Path::new("/home/second/.config/view/view.toml");
+        let first_theme = Theme::with_colors(Some(0x0A0A0A), Some(0x0B0B0B));
+        let second_theme = Theme::with_colors(Some(0x0C0C0C), Some(0x0D0D0D));
+        store(first_theme, first_config);
+        store(second_theme, second_config);
+        let first_loaded = load(first_config);
+        let second_loaded = load(second_config);
+        let cache_dir = view_native::paths::cache_dir(&dir);
+        let mut entries: Vec<PathBuf> = std::fs::read_dir(&cache_dir)
+            .expect("the cache directory must exist after two stores")
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("theme-"))
+            })
+            .collect();
+        entries.sort();
+
+        match prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            entries.len(),
+            2,
+            "two config paths must key two cache entries, found {entries:?}"
+        );
+        assert_eq!(first_loaded, Some(first_theme));
+        assert_eq!(second_loaded, Some(second_theme));
     }
 
     /// The other silent-misparse guard `deny_unknown_fields` provides: a
@@ -568,11 +733,7 @@ mod tests {
     fn store_creates_missing_parent_directories() {
         let dir = tmp_dir("nested");
         let path = dir.join("nested").join("dirs").join("theme.toml");
-        let theme = Theme {
-            fg: Some(1),
-            bg: Some(2),
-            ..Theme::default()
-        };
+        let theme = Theme::with_colors(Some(1), Some(2));
         store_to_path(theme, &path);
         assert!(path.exists());
         let loaded = load_from_path(&path);
@@ -587,10 +748,10 @@ mod tests {
     /// itself.
     #[test]
     fn seeded_hl_table_makes_named_groups_resolve_through_the_live_derivation_path() {
-        let cached_theme = Theme {
-            fg: Some(0x111111),
-            bg: Some(0x222222),
-            status_line: ResolvedStyle {
+        let mut cached_theme = Theme::with_colors(Some(0x111111), Some(0x222222));
+        cached_theme.set_chrome(
+            ChromeGroup::StatusLine,
+            ResolvedStyle {
                 fg: Some(0xAAAAAA),
                 bg: Some(0xBBBBBB),
                 bold: true,
@@ -598,7 +759,10 @@ mod tests {
                 underline: false,
                 reverse: false,
             },
-            pmenu_sel: ResolvedStyle {
+        );
+        cached_theme.set_chrome(
+            ChromeGroup::PmenuSel,
+            ResolvedStyle {
                 fg: Some(0xCCCCCC),
                 bg: Some(0xDDDDDD),
                 bold: false,
@@ -606,14 +770,19 @@ mod tests {
                 underline: false,
                 reverse: true,
             },
-            ..Theme::default()
-        };
+        );
         let hl = seeded_hl_table(&cached_theme);
         let derived = Theme::from_hl(&hl);
         assert_eq!(derived.fg, Some(0x111111));
         assert_eq!(derived.bg, Some(0x222222));
-        assert_eq!(derived.status_line, cached_theme.status_line);
-        assert_eq!(derived.pmenu_sel, cached_theme.pmenu_sel);
+        assert_eq!(
+            derived.chrome(ChromeGroup::StatusLine),
+            cached_theme.chrome(ChromeGroup::StatusLine)
+        );
+        assert_eq!(
+            derived.chrome(ChromeGroup::PmenuSel),
+            cached_theme.chrome(ChromeGroup::PmenuSel)
+        );
     }
 
     /// Seeding does not stop at the raw `default_fg`/`default_bg` pair, it
@@ -624,11 +793,7 @@ mod tests {
     /// to prevent.
     #[test]
     fn seeded_hl_table_marks_the_cached_theme_confirmed_at_the_current_generation() {
-        let cached_theme = Theme {
-            fg: Some(0xF8F8F2),
-            bg: None,
-            ..Theme::default()
-        };
+        let cached_theme = Theme::with_colors(Some(0xF8F8F2), None);
         let hl = seeded_hl_table(&cached_theme);
         let confirmed = hl
             .confirmed()
@@ -648,11 +813,7 @@ mod tests {
     /// `Some(0)` instead of `None`.
     #[test]
     fn a_seeded_transparent_theme_survives_attachs_own_ambiguous_default_colors_set() {
-        let cached_theme = Theme {
-            fg: Some(0xF8F8F2),
-            bg: None,
-            ..Theme::default()
-        };
+        let cached_theme = Theme::with_colors(Some(0xF8F8F2), None);
         let hl = seeded_hl_table(&cached_theme);
         assert_eq!(
             Theme::from_hl(&hl).bg,
@@ -689,11 +850,7 @@ mod tests {
     /// ever runs.
     #[test]
     fn a_seeded_black_theme_survives_attachs_own_ambiguous_default_colors_set() {
-        let cached_theme = Theme {
-            fg: Some(0xF8F8F2),
-            bg: Some(0),
-            ..Theme::default()
-        };
+        let cached_theme = Theme::with_colors(Some(0xF8F8F2), Some(0));
         let hl = seeded_hl_table(&cached_theme);
         assert_eq!(
             Theme::from_hl(&hl).bg,
@@ -723,22 +880,16 @@ mod tests {
     #[test]
     fn seeded_hl_table_gives_each_named_group_a_distinct_synthetic_hl_id() {
         let hl = seeded_hl_table(&Theme::default());
-        let names = [
-            "StatusLine",
-            "TabLine",
-            "TabLineSel",
-            "TabLineFill",
-            "Pmenu",
-            "PmenuSel",
-            "MsgArea",
-        ];
-        let ids: std::collections::HashSet<u64> = names
-            .iter()
-            .map(|n| hl.group(n).expect("seeding must map every named group"))
+        let ids: std::collections::HashSet<u64> = ChromeGroup::ALL
+            .into_iter()
+            .map(|group| {
+                hl.group(group.hl_name())
+                    .expect("seeding must map every named group")
+            })
             .collect();
         assert_eq!(
             ids.len(),
-            names.len(),
+            ChromeGroup::COUNT,
             "each named group must get its own synthetic hl_id, not a shared one"
         );
     }
@@ -756,11 +907,7 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", &dir);
 
         let config_path = Path::new("/home/x/.config/view/view.toml");
-        let theme = Theme {
-            fg: Some(0x123456),
-            bg: Some(0x654321),
-            ..Theme::default()
-        };
+        let theme = Theme::with_colors(Some(0x123456), Some(0x654321));
         store(theme, config_path);
         let loaded = load(config_path);
 

@@ -10,7 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
-use view_core::theme::{ResolvedStyle, Theme};
+use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{Layer, LayerKind, Rect, Surface};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
@@ -689,7 +689,8 @@ fn paint_messages(lines: &[String], theme: &Theme, area: ratatui::layout::Rect, 
         return;
     }
 
-    let style = ratatui_style(theme.msg_area);
+    let msg_area = theme.chrome(ChromeGroup::MsgArea);
+    let style = ratatui_style(msg_area);
     let blank = " ".repeat(usize::from(area.width));
     for row in 0..area.height {
         paint_text_row(&blank, style, area, row, buf);
@@ -697,7 +698,7 @@ fn paint_messages(lines: &[String], theme: &Theme, area: ratatui::layout::Rect, 
 
     let border_style = ratatui_style(ResolvedStyle {
         fg: Some(message_border_color(theme)),
-        bg: theme.msg_area.bg,
+        bg: msg_area.bg,
         ..ResolvedStyle::default()
     });
     paint_message_border(area, border_style, buf);
@@ -785,7 +786,7 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
 /// apart from empty screen. The floor is the plain (undimmed) neutral grey
 /// constant instead, which stays visible against any background.
 fn message_border_color(theme: &Theme) -> u32 {
-    border_color(theme.msg_area)
+    border_color(theme.chrome(ChromeGroup::MsgArea))
 }
 
 /// A frame's foreground given the style of the surface it encloses: a
@@ -818,7 +819,13 @@ fn paint_tabline(
     // in a wide terminal), matching what that builtin group names: the
     // row's background beyond the tabs
     let fill = " ".repeat(usize::from(area.width));
-    paint_text_row(&fill, ratatui_style(theme.tab_line_fill), area, 0, buf);
+    paint_text_row(
+        &fill,
+        ratatui_style(theme.chrome(ChromeGroup::TabLineFill)),
+        area,
+        0,
+        buf,
+    );
 
     let mut text = String::new();
     let mut current_range: Option<(u16, u16)> = None;
@@ -834,10 +841,17 @@ fn paint_tabline(
             current_range = Some((start, end));
         }
     }
-    paint_text_row(&text, ratatui_style(theme.tab_line), area, 0, buf);
+    paint_text_row(
+        &text,
+        ratatui_style(theme.chrome(ChromeGroup::TabLine)),
+        area,
+        0,
+        buf,
+    );
     if let Some((start, end)) = current_range {
         for col in start..end.min(area.width) {
-            buf[(area.x + col, area.y)].set_style(ratatui_style(theme.tab_line_sel));
+            buf[(area.x + col, area.y)]
+                .set_style(ratatui_style(theme.chrome(ChromeGroup::TabLineSel)));
         }
     }
 }
@@ -860,9 +874,9 @@ fn paint_popupmenu(
         }
         let is_selected = i64::try_from(i).is_ok_and(|idx| idx == state.selected);
         let style = if is_selected {
-            ratatui_style(theme.pmenu_sel)
+            ratatui_style(theme.chrome(ChromeGroup::PmenuSel))
         } else {
-            ratatui_style(theme.pmenu)
+            ratatui_style(theme.chrome(ChromeGroup::Pmenu))
         };
         paint_text_row(&item.display_text(), style, area, row, buf);
     }
@@ -904,20 +918,21 @@ fn paint_native_overlay(
     };
     let laid =
         view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
+    let pmenu = theme.chrome(ChromeGroup::Pmenu);
     let interior = if truecolor {
-        ratatui_style(theme.pmenu)
+        ratatui_style(pmenu)
     } else {
         Style::default()
     };
     let selected = if truecolor {
-        ratatui_style(theme.pmenu_sel)
+        ratatui_style(theme.chrome(ChromeGroup::PmenuSel))
     } else {
         Style::default().add_modifier(Modifier::REVERSED)
     };
     let frame = if truecolor {
         ratatui_style(ResolvedStyle {
-            fg: Some(border_color(theme.pmenu)),
-            bg: theme.pmenu.bg,
+            fg: Some(border_color(pmenu)),
+            bg: pmenu.bg,
             ..ResolvedStyle::default()
         })
     } else {
@@ -1010,7 +1025,7 @@ fn paint_shell(theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
     let bottom_row = area.height - 1;
     paint_text_row(
         &fill,
-        ratatui_style(theme.status_line),
+        ratatui_style(theme.chrome(ChromeGroup::StatusLine)),
         area,
         bottom_row,
         buf,
@@ -2098,13 +2113,14 @@ mod tests {
             "no msg_area foreground at all must fall back to the plain (undimmed) grey constant"
         );
 
-        let bg_only = Theme {
-            msg_area: ResolvedStyle {
+        let mut bg_only = Theme::default();
+        bg_only.set_chrome(
+            ChromeGroup::MsgArea,
+            ResolvedStyle {
                 bg: Some(0x0000_0000),
                 ..ResolvedStyle::default()
             },
-            ..Theme::default()
-        };
+        );
         assert_eq!(
             message_border_color(&bg_only),
             0x0080_8080,
@@ -2115,13 +2131,14 @@ mod tests {
 
     #[test]
     fn message_border_color_dims_a_set_msg_area_foreground() {
-        let theme = Theme {
-            msg_area: ResolvedStyle {
+        let mut theme = Theme::default();
+        theme.set_chrome(
+            ChromeGroup::MsgArea,
+            ResolvedStyle {
                 fg: Some(0x00FF_0000),
                 ..ResolvedStyle::default()
             },
-            ..Theme::default()
-        };
+        );
         assert_eq!(
             message_border_color(&theme),
             0x0099_0000,
@@ -3630,12 +3647,12 @@ mod tests {
         let theme = Theme::from_hl(model.engine.hl());
         assert_eq!(
             buf[(2, 1)].fg,
-            rgb(border_color(theme.pmenu)),
+            rgb(border_color(theme.chrome(ChromeGroup::Pmenu))),
             "corner glyph"
         );
         assert_eq!(
             buf[(4, 2)].fg,
-            rgb(theme.pmenu.fg.unwrap()),
+            rgb(theme.chrome(ChromeGroup::Pmenu).fg.unwrap()),
             "interior text"
         );
         assert_ne!(
