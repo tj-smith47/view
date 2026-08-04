@@ -15,6 +15,7 @@
 //! for eff in update(&mut model, msg) { /* executor, never blocks */ }
 //! ```
 use crate::events::UiEvent;
+use crate::native::mappings::{MappingClaim, MappingSpec};
 
 /// Every input `update()` can react to.
 #[non_exhaustive]
@@ -75,6 +76,29 @@ pub enum Msg {
         generation: u64,
         fg: Option<u32>,
         bg: Option<u32>,
+    },
+    /// A user reached a native feature, either through one of view's
+    /// registered default keys or through the `:View` command. `feature` is
+    /// a [`registry`](crate::native::registry) id and `verb` the entry point
+    /// named by the [`MappingSpec`] that registered the key.
+    ///
+    /// Unvalidated on arrival: the pair crosses back from nvim, where a user
+    /// can type any words after `:View`, so the arm that handles this is
+    /// what decides an unknown pair is not actionable.
+    FeatureInvoke {
+        feature: String,
+        verb: String,
+    },
+    /// The complete answer to one [`RpcCall::RegisterMappings`]: every
+    /// default key the session registered, and whether it landed over a
+    /// mapping the user's config had already made.
+    ///
+    /// One message rather than one per key. "What did view claim?" is a
+    /// single fact the user is told once, and reassembling it view-side from
+    /// N replies interleaved with startup traffic would make the report a
+    /// function of arrival order.
+    MappingsClaimed {
+        claimed: Vec<MappingClaim>,
     },
 }
 
@@ -273,5 +297,23 @@ pub enum RpcCall {
     /// emitted this effect.
     GetDefaultHl {
         generation: u64,
+    },
+    /// Registers `specs` as real nvim mappings and the `:View` command, in
+    /// one chunk, and answers with every claim as [`Msg::MappingsClaimed`].
+    /// `channel_id` is view's own RPC channel: the registered right-hand
+    /// side notifies back over it, so a key press reaches `update()` the
+    /// same way any other engine-originated traffic does.
+    ///
+    /// Issued after `VimEnter` so `<leader>` expands to the user's
+    /// `mapleader` rather than nvim's default, and carrying only the specs
+    /// of features the session actually enabled: a disabled feature
+    /// contributes nothing here, which is what leaves the user's own mapping
+    /// on that key untouched.
+    ///
+    /// The `:View` command registers regardless of any enabled bit, so
+    /// turning the default keys off never removes the way in.
+    RegisterMappings {
+        specs: Vec<MappingSpec>,
+        channel_id: u64,
     },
 }

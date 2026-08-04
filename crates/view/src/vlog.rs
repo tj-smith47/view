@@ -115,6 +115,18 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
                 format!("down code={:?} by_signal={}", exit.code, exit.by_signal)
             });
         }
+        Msg::FeatureInvoke { feature, verb } => {
+            log_with("native", || format!("invoke feature={feature} verb={verb}"));
+        }
+        Msg::MappingsClaimed { claimed } => {
+            log_with("native", || {
+                let keys: Vec<String> = claimed
+                    .iter()
+                    .map(|c| format!("{}={}", c.lhs, c.had_user_mapping))
+                    .collect();
+                format!("claimed {}", keys.join(","))
+            });
+        }
         _ => {}
     }
 }

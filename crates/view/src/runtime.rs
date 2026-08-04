@@ -24,6 +24,7 @@
 use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{Effect, ExitInfo, Msg, OptionValue, ReplyToken, ReplyValue, RpcCall};
+use view_core::native::mappings::MappingSpec;
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::process::Engine;
@@ -73,6 +74,10 @@ pub trait EngineOps {
     /// with `generation`; never blocks, and never itself returns the reply
     /// (see `Msg::HlProbeReply`).
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
+    /// Registers this session's default keys and the `:View` command in one
+    /// chunk; never blocks, and never itself returns the claims (see
+    /// `Msg::MappingsClaimed`).
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -106,6 +111,9 @@ impl EngineOps for EngineHandle {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.probe_default_hl(generation)
+    }
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
+        self.register_mappings(specs, channel_id)
     }
 }
 
@@ -144,6 +152,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_default_hl(generation)
+    }
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_mappings(specs, channel_id)
     }
 }
 
@@ -204,6 +215,9 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
+                    RpcCall::RegisterMappings { specs, channel_id } => {
+                        self.ops.register_mappings(&specs, channel_id)
+                    }
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -502,6 +516,13 @@ impl EngineOps for FakeOps {
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("probe_default_hl({generation})"))
     }
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
+        let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
+        self.record(format!(
+            "register_mappings({},{channel_id})",
+            keys.join(" ")
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -628,6 +649,46 @@ mod tests {
                 entry.rpc
             );
         }
+    }
+
+    /// The entry-point plan reaches the engine, on the same terms as a
+    /// supersession entry: an effect the executor does not recognize
+    /// degrades to a silent no-op, which for a registration means keys the
+    /// user is told about in a doctor listing and a `:View` command that
+    /// never existed.
+    #[test]
+    fn register_mappings_effect_maps_to_engine_ops_register_mappings() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let call = view_native::mappings::register_plan(
+            &view_native::config::NativeConfig::all_enabled(),
+            7,
+        );
+        let flow = executor.run(Effect::Rpc(call));
+        assert!(matches!(flow, Flow::Continue));
+        let calls = ops.calls.borrow();
+        assert_eq!(
+            calls.len(),
+            1,
+            "the whole plan must ride one call: {calls:?}"
+        );
+        assert!(
+            calls[0].starts_with("register_mappings(<leader>ff") && calls[0].ends_with(",7)"),
+            "every enabled key and the channel they answer over must reach the engine, got {:?}",
+            calls[0]
+        );
+    }
+
+    #[test]
+    fn register_mappings_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::RegisterMappings {
+            specs: view_core::native::mappings::default_maps().to_vec(),
+            channel_id: 1,
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
     }
 
     #[test]

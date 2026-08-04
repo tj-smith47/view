@@ -9,6 +9,7 @@ use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
 use view_core::msg::OptionValue;
+use view_core::native::mappings::{default_maps, MappingSpec, COMMAND};
 
 /// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
 /// reply before giving up.
@@ -88,6 +89,76 @@ vim.api.nvim_create_autocmd('SafeState', {
   group = group,
   callback = hold,
 })";
+
+/// The lua chunk [`EngineHandle::register_mappings`] runs inside nvim,
+/// taking view's channel id, the specs to register, every feature/verb pair
+/// the command can complete, and the command's own name as its four
+/// varargs. Constant by construction for the same reason as
+/// [`FEED_KEYS_CHUNK`]: no caller data is interpolated into the Lua source.
+///
+/// One chunk rather than a call per key, and it answers with the whole claim
+/// list: what view claimed is one fact a user is told once, so it is
+/// established in one atomic pass over the specs rather than reassembled
+/// from replies that interleave with startup traffic.
+///
+/// `maparg` is read BEFORE the key is set, since setting it is what destroys
+/// the answer. An empty answer means the key was free; anything else means
+/// this session took a key the user's own config had mapped, which is the
+/// only kind of claim that is news.
+///
+/// The right-hand side is a plain `<Cmd>rpcnotify(...)<CR>` string rather
+/// than a Lua callback so that `:map`, `maparg()`, and every plugin that
+/// introspects mappings show exactly what view did, in a form a user can
+/// read and copy. It is built with `string.format` from the spec's own
+/// fields inside the chunk, never interpolated into the chunk source, and
+/// the feature and verb tokens are `[a-z0-9_-]` by the table's own test.
+///
+/// The command registers unconditionally, outside the spec loop: a user who
+/// turned every default key off, or every feature, still has a way in.
+const REGISTER_MAPPINGS_CHUNK: &str = "\
+local channel, specs, entries, command = ...
+local claimed = {}
+for _, spec in ipairs(specs) do
+  local existing = vim.fn.maparg(spec.lhs, 'n')
+  local rhs = string.format(
+    \"<Cmd>call rpcnotify(%d, 'view_invoke', '%s', '%s')<CR>\",
+    channel, spec.feature, spec.verb)
+  vim.keymap.set('n', spec.lhs, rhs, {
+    desc = string.format('view: %s %s', spec.feature, spec.verb),
+    silent = true,
+  })
+  claimed[#claimed + 1] = {
+    feature = spec.feature,
+    lhs = spec.lhs,
+    had_user_mapping = existing ~= '',
+  }
+end
+vim.api.nvim_create_user_command(command, function(opts)
+  vim.rpcnotify(channel, 'view_invoke', opts.fargs[1] or '', opts.fargs[2] or '')
+end, {
+  nargs = '*',
+  desc = 'invoke a view native feature',
+  complete = function(lead, line)
+    local words = vim.split(vim.trim(line), '%s+')
+    local at = #words - 1 + ((line:sub(-1) == ' ') and 1 or 0)
+    local seen, out = {}, {}
+    for _, entry in ipairs(entries) do
+      local word = nil
+      if at <= 1 then
+        word = entry.feature
+      elseif entry.feature == words[2] then
+        word = entry.verb
+      end
+      if word and not seen[word] and vim.startswith(word, lead) then
+        seen[word] = true
+        out[#out + 1] = word
+      end
+    end
+    table.sort(out)
+    return out
+  end,
+})
+return claimed";
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -499,6 +570,69 @@ impl EngineHandle {
             generation,
         )
     }
+    /// Registers `specs` as real nvim mappings and the `:View` command in
+    /// one [`REGISTER_MAPPINGS_CHUNK`] pass, notifying back to `channel_id`
+    /// when either is used.
+    ///
+    /// Async by construction, like [`probe_default_hl`](Self::probe_default_hl):
+    /// this issues the request through
+    /// [`EngineHandle::request_mappings`] and returns immediately, and the
+    /// claim list crosses back as `Msg::MappingsClaimed` through the
+    /// connection's pump. The caller is the runtime loop, which never awaits
+    /// an RPC reply.
+    ///
+    /// A request rather than a notification, unlike the other calls the loop
+    /// emits: the reply is the claim list, and an error reply is how a chunk
+    /// nvim refused surfaces at all instead of as keys that silently never
+    /// registered.
+    ///
+    /// The `:View` completion candidates come from
+    /// [`default_maps`](view_core::native::mappings::default_maps) rather
+    /// than from `specs`: the command is registered whatever the user has
+    /// turned off, so what it completes is every entry point this build
+    /// has, not the subset this session mapped a key to.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn register_mappings(
+        &self,
+        specs: &[MappingSpec],
+        channel_id: u64,
+    ) -> Result<(), EngineError> {
+        let specs = specs
+            .iter()
+            .map(|spec| {
+                Value::Map(vec![
+                    (Value::from("feature"), Value::from(spec.feature)),
+                    (Value::from("lhs"), Value::from(spec.lhs)),
+                    (Value::from("verb"), Value::from(spec.verb)),
+                ])
+            })
+            .collect();
+        let entries = default_maps()
+            .iter()
+            .map(|spec| {
+                Value::Map(vec![
+                    (Value::from("feature"), Value::from(spec.feature)),
+                    (Value::from("verb"), Value::from(spec.verb)),
+                ])
+            })
+            .collect();
+        self.request_mappings(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_MAPPINGS_CHUNK),
+                Value::Array(vec![
+                    Value::from(channel_id),
+                    Value::Array(specs),
+                    Value::Array(entries),
+                    Value::from(COMMAND),
+                ]),
+            ],
+        )
+    }
 }
 
 /// Maps one [`OptionValue`] onto the msgpack value nvim's option API takes.
@@ -616,6 +750,43 @@ mod tests {
                 "autocmd VimEnter * ++once call rpcrequest(7, 'view_vim_enter')"
             )]
         );
+    }
+
+    /// The registration crosses as one chunk with its data as arguments,
+    /// never interpolated, and the chunk reads `maparg` before it sets the
+    /// key: the order is the whole claim report's source of truth, and
+    /// setting first would answer every key with view's own mapping.
+    #[test]
+    fn register_mappings_sends_one_chunk_carrying_its_data_as_arguments() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.register_mappings(default_maps(), 7).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(params[0], Value::from(REGISTER_MAPPINGS_CHUNK));
+        let args = params[1]
+            .as_array()
+            .expect("the chunk's arguments must cross as an array");
+        assert_eq!(args[0], Value::from(7));
+        assert_eq!(args[3], Value::from(COMMAND));
+        let specs = args[1]
+            .as_array()
+            .expect("the specs must cross as an array");
+        let entries = args[2]
+            .as_array()
+            .expect("the completion entries must cross as an array");
+        assert_eq!(specs.len(), default_maps().len());
+        assert_eq!(
+            entries.len(),
+            default_maps().len(),
+            "the command completes every entry point this build has, whatever this session mapped"
+        );
+        let read = REGISTER_MAPPINGS_CHUNK
+            .find("maparg")
+            .expect("the chunk must read the existing mapping");
+        let set = REGISTER_MAPPINGS_CHUNK
+            .find("vim.keymap.set")
+            .expect("the chunk must set the mapping");
+        assert!(read < set, "maparg must be read before the key is set");
     }
 
     #[test]

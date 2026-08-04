@@ -4,4 +4,5 @@
 //! drive a feature read the same table for its name and its off switch.
 
 pub mod geometry;
+pub mod mappings;
 pub mod registry;

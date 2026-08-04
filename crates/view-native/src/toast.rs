@@ -1,10 +1,10 @@
 //! The first-run notice: the one time view tells a user it has taken a
 //! surface over, and the exact line that gives it back.
 //!
-//! Once per feature per config path, not once per session. A message that
+//! Once per surface per config path, not once per session. A message that
 //! repeats every launch is noise a user learns to skip, and the reversal
 //! line it carries is exactly the part that must still be read the day they
-//! want it back. Keying on the config path as well as the feature means a
+//! want it back. Keying on the config path as well as the surface means a
 //! second config -- a bare `--clean` session, a machine-specific file --
 //! introduces itself on its own terms rather than inheriting the silence
 //! another config earned.
@@ -18,7 +18,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::supersede::Supersession;
+use crate::report::Handover;
 
 /// The record format this build writes. Bumped only when an older build
 /// would misread a newer file; a newer file is left untouched rather than
@@ -66,23 +66,24 @@ struct Record {
     /// Written by every build, read to decide whether this build
     /// understands the file at all.
     schema_version: u32,
-    /// Config path to the feature ids already announced under it. A
-    /// `BTreeMap` of sorted `Vec`s rather than hash-ordered containers so
-    /// the file is stable across writes: a record that reshuffles itself
-    /// every launch is unreadable as a diff and unusable as evidence.
+    /// Config path to the record keys already announced under it (see
+    /// [`Handover::record_key`]). A `BTreeMap` of sorted `Vec`s rather than
+    /// hash-ordered containers so the file is stable across writes: a record
+    /// that reshuffles itself every launch is unreadable as a diff and
+    /// unusable as evidence.
     #[serde(default)]
     announced: BTreeMap<String, Vec<String>>,
 }
 
-/// The notices to show for `plan` under `config_path`, recording them in
+/// The notices to show for `report` under `config_path`, recording them in
 /// `record` so they are shown once and never again.
 ///
-/// Returns one string per feature announcing itself for the first time, in
-/// plan order, and an empty vec when every feature in the plan has already
-/// been announced under this config. Writes the record before returning:
-/// the alternative -- record after the notice is displayed -- needs a
-/// second call the display path can forget to make, and forgetting it
-/// repeats the notice forever.
+/// Returns one string per surface announcing itself for the first time, in
+/// report order, and an empty vec when every surface in the report has
+/// already been announced under this config. Writes the record before
+/// returning: the alternative -- record after the notice is displayed --
+/// needs a second call the display path can forget to make, and forgetting
+/// it repeats the notice forever.
 ///
 /// `config_path` is `None` for a session running without a config file at
 /// all, which is recorded as its own key rather than merged into whichever
@@ -93,11 +94,11 @@ struct Record {
 /// as it is and nothing is announced, because a downgraded build cannot
 /// know what that file already promised the user.
 pub fn first_run(
-    plan: &[Supersession],
+    report: &[Handover],
     config_path: Option<&Path>,
     record: &Path,
 ) -> Result<Vec<String>, ToastError> {
-    if plan.is_empty() {
+    if report.is_empty() {
         return Ok(Vec::new());
     }
 
@@ -111,11 +112,12 @@ pub fn first_run(
     let announced = current.announced.entry(key).or_default();
 
     let mut notices = Vec::new();
-    for entry in plan {
-        if announced.iter().any(|id| id == entry.feature) {
+    for entry in report {
+        let key = entry.record_key();
+        if announced.contains(&key) {
             continue;
         }
-        announced.push(entry.feature.to_string());
+        announced.push(key);
         notices.push(entry.notice());
     }
     if notices.is_empty() {
@@ -172,8 +174,10 @@ mod tests {
     use super::*;
 
     use crate::config::NativeConfig;
+    use crate::report::report;
     use crate::supersede::plan;
     use std::path::PathBuf;
+    use view_core::native::mappings::MappingClaim;
     use view_core::native::registry;
 
     /// A scratch directory for one test's record file, named for the test
@@ -185,23 +189,37 @@ mod tests {
         dir
     }
 
-    fn statusline_plan() -> Vec<Supersession> {
-        plan(&NativeConfig::all_enabled(), registry::features())
+    fn claim(feature: &str, lhs: &str) -> MappingClaim {
+        MappingClaim {
+            feature: feature.to_string(),
+            lhs: lhs.to_string(),
+            had_user_mapping: true,
+        }
+    }
+
+    /// Both surface kinds in one report, since the toast has to introduce
+    /// held options and taken keys through the same pass.
+    fn handovers() -> Vec<Handover> {
+        report(
+            &plan(&NativeConfig::all_enabled(), registry::features()),
+            &[claim("picker", "<leader>ff")],
+            registry::features(),
+        )
     }
 
     #[test]
-    fn the_first_run_announces_every_superseded_feature_with_its_off_switch() {
+    fn the_first_run_announces_every_handed_over_surface_with_its_off_switch() {
         let dir = scratch("first");
         let record = dir.join("native-first-run.toml");
-        let plan = statusline_plan();
+        let report = handovers();
 
-        let notices = first_run(&plan, Some(Path::new("/cfg/view.toml")), &record)
+        let notices = first_run(&report, Some(Path::new("/cfg/view.toml")), &record)
             .expect("a writable record must not fail");
 
         assert_eq!(
             notices.len(),
-            plan.len(),
-            "every superseded feature introduces itself once, got {notices:?}"
+            report.len(),
+            "every handed-over surface introduces itself once, got {notices:?}"
         );
         let statusline = notices
             .iter()
@@ -215,6 +233,41 @@ mod tests {
             statusline.contains("lualine"),
             "the notice must name what it superseded, got {statusline:?}"
         );
+        let key = notices
+            .iter()
+            .find(|n| n.contains("<leader>ff"))
+            .expect("a taken key must introduce itself through the same pass");
+        assert!(
+            key.contains("native.picker = false"),
+            "the notice must name the off switch verbatim, got {key:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_key_taken_later_speaks_even_though_its_feature_already_announced() {
+        let dir = scratch("later-key");
+        let record = dir.join("native-first-run.toml");
+        let cfg = Some(Path::new("/cfg/view.toml"));
+        let features = registry::features();
+        let options = report(&plan(&NativeConfig::all_enabled(), features), &[], features);
+        let with_key = report(
+            &plan(&NativeConfig::all_enabled(), features),
+            &[claim("statusline", "<leader>ss")],
+            features,
+        );
+
+        let first = first_run(&options, cfg, &record).expect("the options must record");
+        assert!(!first.is_empty(), "the first run must announce something");
+        let second = first_run(&with_key, cfg, &record).expect("the key must record");
+
+        assert_eq!(
+            second.len(),
+            1,
+            "a key taken from the user is its own news, whatever its feature \
+             already said about an option, got {second:?}"
+        );
+        assert!(second[0].contains("<leader>ss"), "{second:?}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -222,12 +275,12 @@ mod tests {
     fn a_second_run_under_the_same_config_announces_nothing() {
         let dir = scratch("second");
         let record = dir.join("native-first-run.toml");
-        let plan = statusline_plan();
+        let report = handovers();
         let cfg = Some(Path::new("/cfg/view.toml"));
 
-        let first = first_run(&plan, cfg, &record).expect("the first run must record");
+        let first = first_run(&report, cfg, &record).expect("the first run must record");
         assert!(!first.is_empty(), "the first run must announce something");
-        let second = first_run(&plan, cfg, &record).expect("the second run must read the record");
+        let second = first_run(&report, cfg, &record).expect("the second run must read the record");
 
         assert!(
             second.is_empty(),
@@ -240,13 +293,13 @@ mod tests {
     fn a_different_config_path_introduces_itself_on_its_own_terms() {
         let dir = scratch("per-config");
         let record = dir.join("native-first-run.toml");
-        let plan = statusline_plan();
+        let report = handovers();
 
-        let first = first_run(&plan, Some(Path::new("/cfg/a.toml")), &record)
+        let first = first_run(&report, Some(Path::new("/cfg/a.toml")), &record)
             .expect("the first config must record");
-        let other = first_run(&plan, Some(Path::new("/cfg/b.toml")), &record)
+        let other = first_run(&report, Some(Path::new("/cfg/b.toml")), &record)
             .expect("the second config must record");
-        let none = first_run(&plan, None, &record).expect("a config-less session must record");
+        let none = first_run(&report, None, &record).expect("a config-less session must record");
 
         assert!(
             !first.is_empty(),
@@ -262,12 +315,12 @@ mod tests {
         let dir = scratch("incremental");
         let record = dir.join("native-first-run.toml");
         let cfg = Some(Path::new("/cfg/view.toml"));
-        let full = statusline_plan();
-        let partial: Vec<Supersession> = full.iter().take(1).cloned().collect();
+        let full = handovers();
+        let partial: Vec<Handover> = full.iter().take(1).cloned().collect();
 
-        let first = first_run(&partial, cfg, &record).expect("the partial plan must record");
+        let first = first_run(&partial, cfg, &record).expect("the partial report must record");
         assert_eq!(first.len(), partial.len());
-        let rest = first_run(&full, cfg, &record).expect("the full plan must record");
+        let rest = first_run(&full, cfg, &record).expect("the full report must record");
 
         assert_eq!(
             rest.len(),
@@ -284,7 +337,7 @@ mod tests {
         std::fs::write(&record, "this is not toml {{{").expect("the record must be writable");
 
         let notices =
-            first_run(&statusline_plan(), None, &record).expect("a corrupt record must not fail");
+            first_run(&handovers(), None, &record).expect("a corrupt record must not fail");
 
         assert!(
             !notices.is_empty(),
@@ -305,8 +358,8 @@ mod tests {
         let newer = format!("schema_version = {}\n", SCHEMA_VERSION + 1);
         std::fs::write(&record, &newer).expect("the record must be writable");
 
-        let notices = first_run(&statusline_plan(), None, &record)
-            .expect("a newer record must not fail the run");
+        let notices =
+            first_run(&handovers(), None, &record).expect("a newer record must not fail the run");
 
         assert!(
             notices.is_empty(),
@@ -326,7 +379,7 @@ mod tests {
         let record = dir.join("deeper").join("native-first-run.toml");
 
         let notices =
-            first_run(&statusline_plan(), None, &record).expect("the directory must be created");
+            first_run(&handovers(), None, &record).expect("the directory must be created");
 
         assert!(!notices.is_empty());
         assert!(record.exists(), "the record must exist after a first run");
@@ -334,11 +387,11 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_plan_writes_nothing_at_all() {
+    fn an_empty_report_writes_nothing_at_all() {
         let dir = scratch("empty");
         let record = dir.join("native-first-run.toml");
 
-        let notices = first_run(&[], None, &record).expect("an empty plan must not fail");
+        let notices = first_run(&[], None, &record).expect("an empty report must not fail");
 
         assert!(notices.is_empty());
         assert!(

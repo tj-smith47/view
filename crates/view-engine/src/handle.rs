@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
 use view_core::msg::{EngineRequest, Msg, ReplyToken, ReplyValue};
+use view_core::native::mappings::MappingClaim;
 
 /// Errors produced by [`EngineHandle`] operations.
 #[non_exhaustive]
@@ -67,6 +68,11 @@ enum Waiter {
     /// so its `Response` is decoded and routed to `pump` as
     /// `Msg::HlProbeReply` instead of sent anywhere synchronous.
     HlProbe { generation: u64 },
+    /// An async mapping registration (see
+    /// [`EngineHandle::request_mappings`]): nothing is blocked on this
+    /// `msgid` either, and its `Response` carries every key the chunk
+    /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
+    MappingClaims,
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -323,6 +329,24 @@ impl EngineHandle {
                                     });
                                 }
                             }
+                            Some(Waiter::MappingClaims) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "claimed
+                                    // nothing" rather than leaving the report
+                                    // permanently unanswered: the chunk is
+                                    // constant and its arguments are static
+                                    // table data, so the only way here is a
+                                    // registration that did not happen, and a
+                                    // registration that did not happen took
+                                    // no key it could name
+                                    let claimed = if error == Value::Nil {
+                                        decode_mapping_claims(&result)
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    pump.route_claims(Msg::MappingsClaimed { claimed });
+                                }
+                            }
                             None => {}
                         }
                     }
@@ -330,14 +354,24 @@ impl EngineHandle {
                         if let Some(pump) = &reader_pump {
                             // a pumped connection routes exclusively through
                             // `pump`: nothing else consumes this connection's
-                            // notifications, so a non-`redraw` method (none
-                            // exist yet) is simply dropped rather than routed
+                            // notifications, so a method outside this closed
+                            // vocabulary is simply dropped rather than routed
                             // anywhere
                             if method == "redraw" {
                                 let events = decode_redraw(&params);
                                 #[cfg(feature = "bench-taps")]
                                 crate::tap::tap(crate::tap::TAG_REDRAW_PARSED);
                                 pump.fold_redraw(events);
+                            } else if method == "view_invoke" {
+                                // best-effort, unlike `view_vim_enter`
+                                // below: nvim is not blocked on this one, so
+                                // a runtime channel that refuses it costs
+                                // the user one keypress, exactly as a
+                                // dropped key would, and is not worth
+                                // tearing the connection down for
+                                if let Some(msg) = decode_feature_invoke(&params) {
+                                    let _ = pump.route_msg(msg);
+                                }
                             }
                         } else if let Some(tx) = &notif_tx {
                             if tx.send(EngineNotification { method, params }).is_err() {
@@ -641,6 +675,34 @@ impl EngineHandle {
         params: Vec<Value>,
         generation: u64,
     ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::HlProbe { generation })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into every claimed key and routed to the connection's pump as
+    /// `Msg::MappingsClaimed` (see [`Waiter::MappingClaims`]). Async on the
+    /// same terms as [`request_probe`](Self::request_probe): the caller is
+    /// the runtime loop, which must never block on a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_mappings(&self, method: &str, params: Vec<Value>) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::MappingClaims)
+    }
+
+    /// Allocates a msgid, registers `waiter`, and enqueues the encoded
+    /// request, without a synchronous receiver for anything to block on.
+    /// Shared by every async request wrapper; how the eventual `Response` is
+    /// decoded and where it is routed is the `waiter`'s to say.
+    fn request_async(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        waiter: Waiter,
+    ) -> Result<(), EngineError> {
         let msgid = self.next_msgid.fetch_add(1, Ordering::Relaxed);
         let msg = RpcMessage::Request {
             msgid,
@@ -653,7 +715,7 @@ impl EngineHandle {
             if p.closed {
                 return Err(EngineError::Closed);
             }
-            p.waiters.insert(msgid, Waiter::HlProbe { generation });
+            p.waiters.insert(msgid, waiter);
         }
         if !self.outbox.send(bytes) {
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
@@ -662,6 +724,52 @@ impl EngineHandle {
         }
         Ok(())
     }
+}
+
+/// Decodes a `view_invoke` notification's `(feature, verb)` positional
+/// params into [`Msg::FeatureInvoke`], or `None` when the notification does
+/// not carry that pair.
+///
+/// The pair is not validated here: nvim is where a user types `:View`
+/// followed by any two words, so deciding an unknown pair is not actionable
+/// belongs to the one arm that knows what this build can act on, not to the
+/// reader thread.
+fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
+    let [feature, verb, ..] = params else {
+        return None;
+    };
+    Some(Msg::FeatureInvoke {
+        feature: feature.as_str()?.to_owned(),
+        verb: verb.as_str()?.to_owned(),
+    })
+}
+
+/// Decodes a mapping registration's reply: an array of `{feature, lhs,
+/// had_user_mapping}` rows, one per key the chunk registered, in
+/// registration order.
+///
+/// A row missing `feature` or `lhs` is dropped rather than reported as a
+/// claim naming nothing, and a missing `had_user_mapping` reads as `false`:
+/// the flag is what promotes a claim to news, so an undecodable one must not
+/// invent an announcement about a user's key.
+fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
+    let Some(rows) = result.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let pairs = row.as_map()?;
+            Some(MappingClaim {
+                feature: crate::wire::map_find(pairs, "feature")?
+                    .as_str()?
+                    .to_owned(),
+                lhs: crate::wire::map_find(pairs, "lhs")?.as_str()?.to_owned(),
+                had_user_mapping: crate::wire::map_find(pairs, "had_user_mapping")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
 }
 
 /// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map

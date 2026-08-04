@@ -307,31 +307,55 @@ struct Route {
     /// answer can still be the right one, so an older held reply is
     /// superseded rather than kept.
     deferred_probe: Option<Msg>,
+    /// The `Msg::MappingsClaimed` an attached-but-full sink refused, held
+    /// for the next routing attempt to retry.
+    ///
+    /// Its own slot rather than sharing [`Route::deferred_probe`]: a probe
+    /// reply is superseded by the next one, a claim report never is (it is
+    /// sent once per session), so one shared slot would let a probe reply
+    /// arriving a moment later evict the report for good.
+    deferred_claims: Option<Msg>,
+}
+
+/// Which never-drop slot a refused `Msg` waits in.
+#[derive(Debug, Clone, Copy)]
+enum Held {
+    Probe,
+    Claims,
 }
 
 impl Route {
-    /// Re-attempts a held probe reply, putting it back if the sink is still
-    /// full. Independent of whatever the caller is routing: this reply
+    fn slot(&mut self, which: Held) -> &mut Option<Msg> {
+        match which {
+            Held::Probe => &mut self.deferred_probe,
+            Held::Claims => &mut self.deferred_claims,
+        }
+    }
+
+    /// Re-attempts every held message, putting each back if the sink is
+    /// still full. Independent of whatever the caller is routing: these
     /// landing or not says nothing about that send.
-    fn retry_deferred_probe(&mut self) {
-        let Some(msg) = self.deferred_probe.take() else {
-            return;
-        };
-        let Some(sink) = self.sink.clone() else {
-            self.deferred_probe = Some(msg);
-            return;
-        };
-        self.hold_if_refused(sink.try_send(msg));
+    fn retry_deferred(&mut self) {
+        for which in [Held::Probe, Held::Claims] {
+            let Some(msg) = self.slot(which).take() else {
+                continue;
+            };
+            let Some(sink) = self.sink.clone() else {
+                *self.slot(which) = Some(msg);
+                continue;
+            };
+            self.hold_if_refused(which, sink.try_send(msg));
+        }
     }
 
     /// Holds a `try_send` result's message when the sink was merely full,
     /// and lets it go when the sink is disconnected: the runtime loop that
     /// would have painted the answer is gone, so there is nothing left for
     /// a later attempt to reach.
-    fn hold_if_refused(&mut self, sent: Result<(), TrySendError<Msg>>) {
+    fn hold_if_refused(&mut self, which: Held, sent: Result<(), TrySendError<Msg>>) {
         match sent {
             Ok(()) | Err(TrySendError::Disconnected(_)) => {}
-            Err(TrySendError::Full(msg)) => self.deferred_probe = Some(msg),
+            Err(TrySendError::Full(msg)) => *self.slot(which) = Some(msg),
         }
     }
 }
@@ -372,9 +396,9 @@ impl PumpShared {
         let sink = {
             let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
             // the frequent routing attempt, and so the one that actually
-            // carries a held probe reply through once the runtime loop
-            // starts draining again
-            route.retry_deferred_probe();
+            // carries a held message through once the runtime loop starts
+            // draining again
+            route.retry_deferred();
             route.sink.clone()
         };
         let Some(sink) = sink else {
@@ -400,7 +424,7 @@ impl PumpShared {
     /// this as fatal.
     pub(crate) fn route_msg(&self, msg: Msg) -> Result<(), ()> {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
-        route.retry_deferred_probe();
+        route.retry_deferred();
         match &route.sink {
             Some(sink) => sink.try_send(msg).map_err(|_| ()),
             None => {
@@ -422,13 +446,29 @@ impl PumpShared {
     /// thread, which must never block -- so a refused reply waits in
     /// [`Route::deferred_probe`] for the next routing attempt to carry it.
     pub(crate) fn route_probe_reply(&self, msg: Msg) {
+        self.route_held(msg, Held::Probe);
+    }
+
+    /// Routes a `Msg::MappingsClaimed` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped claim report is silent and permanent: mappings register
+    /// once per session, so nothing re-issues the answer, and a user whose
+    /// `<leader>ff` view has just taken over would never be told which
+    /// switch gives it back.
+    pub(crate) fn route_claims(&self, msg: Msg) {
+        self.route_held(msg, Held::Claims);
+    }
+
+    fn route_held(&self, msg: Msg, which: Held) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
-        route.retry_deferred_probe();
+        route.retry_deferred();
         let Some(sink) = route.sink.clone() else {
             route.presink.push_back(msg);
             return;
         };
-        route.hold_if_refused(sink.try_send(msg));
+        route.hold_if_refused(which, sink.try_send(msg));
     }
 
     /// Routes the terminal `Msg::EngineStopped` signal with a blocking

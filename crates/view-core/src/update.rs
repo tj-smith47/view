@@ -114,6 +114,24 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Msg::FeatureInvoke { feature, verb } => {
+            // no native feature has an overlay to open yet, and returning
+            // nothing at all here is indistinguishable to a user from a key
+            // that never registered: the entry point is answered with a
+            // visible line saying it arrived and this build has nothing
+            // behind it, through the same message surface every other
+            // locally-originated notice uses
+            model.engine.messages.push_native(
+                format!("view: no handler for {feature} {verb} in this build"),
+                false,
+            );
+            model.dirty = true;
+            Vec::new()
+        }
+        Msg::MappingsClaimed { claimed } => {
+            model.record_claimed_keys(claimed);
+            Vec::new()
+        }
     }
 }
 
@@ -2194,6 +2212,61 @@ mod tests {
             crate::theme::Theme::from_hl(m.engine.hl()).bg,
             Some(0),
             "must converge on the new theme's genuinely-black bg once its probe replies"
+        );
+    }
+
+    #[test]
+    fn an_invoked_feature_with_nothing_behind_it_says_so_rather_than_going_quiet() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        assert!(
+            effects.is_empty(),
+            "an entry point with no handler must not talk to the engine: {effects:?}"
+        );
+        let entry = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the invoke must reach the user through the message surface");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            text.contains("picker") && text.contains("files"),
+            "the notice must name what was invoked, got {text:?}"
+        );
+        assert!(m.dirty, "the notice must be painted without another event");
+        assert!(
+            m.overlays().is_empty(),
+            "no overlay exists to open yet: an invoke must not push one"
+        );
+    }
+
+    #[test]
+    fn claimed_keys_are_recorded_for_the_handover_report() {
+        use crate::native::mappings::MappingClaim;
+        let mut m = model();
+        let claimed = vec![MappingClaim {
+            feature: "picker".to_string(),
+            lhs: "<leader>ff".to_string(),
+            had_user_mapping: true,
+        }];
+        let effects = update(
+            &mut m,
+            Msg::MappingsClaimed {
+                claimed: claimed.clone(),
+            },
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(
+            m.claimed_keys(),
+            claimed.as_slice(),
+            "the report has no other source for what the keys took"
         );
     }
 }

@@ -679,7 +679,7 @@ pub struct Overlay { pub id: OverlayId, pub geometry: OverlayBox, pub kind: Over
 /// variant carrying their own state; none of them adds an `Option` field
 /// on `Model`.
 #[non_exhaustive]
-pub enum OverlayKind { Bare /* T5: Picker(PickerState), T8: Prompt(PromptState), ... */ }
+pub enum OverlayKind { Bare /* T11: Picker(PickerState), T8: Prompt(PromptState), ... */ }
 
 impl Model {
     /// Who owns input this frame: the top overlay if any, else the engine.

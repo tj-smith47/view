@@ -49,30 +49,6 @@ pub struct Supersession {
     pub supersedes: Option<&'static str>,
 }
 
-impl Supersession {
-    /// The user-facing sentence for this takeover: what view now draws,
-    /// that the superseded plugin still loads, and the line that hands the
-    /// surface back.
-    ///
-    /// Reads as prose because it is shown as prose, in a toast and in
-    /// doctor's output alike. The off switch is never reworded or
-    /// re-derived here, so what a user is told to paste is what the
-    /// registry says works.
-    #[must_use]
-    pub fn notice(&self) -> String {
-        match self.supersedes {
-            Some(plugin) => format!(
-                "view is drawing the {} ({plugin} still loads). Turn it off with {}",
-                self.feature, self.reverses_with
-            ),
-            None => format!(
-                "view is drawing the {}. Turn it off with {}",
-                self.feature, self.reverses_with
-            ),
-        }
-    }
-}
-
 /// One row of the takeover table: the feature that owns it, and the option
 /// its takeover sets on the live session.
 struct Takeover {
@@ -446,36 +422,6 @@ mod tests {
                 .find(|f| f.id == entry.feature)
                 .expect("every plan entry must name a registry feature");
             assert_eq!(entry.supersedes, desc.supersedes);
-        }
-    }
-
-    #[test]
-    fn a_notice_names_the_feature_the_plugin_and_the_off_switch_verbatim() {
-        let entry = plan(&NativeConfig::all_enabled(), registry::features())
-            .into_iter()
-            .find(|s| s.feature == "statusline")
-            .expect("an all-enabled plan must supersede the statusline");
-        assert_eq!(
-            entry.notice(),
-            "view is drawing the statusline (lualine still loads). \
-             Turn it off with native.statusline = false"
-        );
-    }
-
-    #[test]
-    fn a_notice_states_the_off_switch_the_registry_states() {
-        for entry in plan(&NativeConfig::all_enabled(), registry::features()) {
-            let desc = registry::features()
-                .iter()
-                .find(|f| f.id == entry.feature)
-                .expect("every plan entry must name a registry feature");
-            assert!(
-                entry.notice().contains(desc.off_switch),
-                "{}'s notice must quote {} verbatim, got {:?}",
-                entry.feature,
-                desc.off_switch,
-                entry.notice()
-            );
         }
     }
 

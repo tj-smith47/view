@@ -24,6 +24,14 @@ pub struct FeatureDesc {
     /// false` must be able to paste it, and deriving it at three call sites
     /// is three chances to drift.
     pub off_switch: &'static str,
+    /// Whether this build ships default keys that invoke the feature, which
+    /// [`mappings::default_maps`](super::mappings::default_maps) must then
+    /// carry rows for. Two tables stating the same fact independently is the
+    /// point: a key added for a feature nobody declared reachable, or a
+    /// feature declared reachable with no key, is drift a test can name.
+    /// `false` for a passive surface a user never invokes (a statusline is
+    /// drawn, not opened).
+    pub entry_keys: bool,
 }
 
 // `supersedes` carries the design spec's own "replaces for the 90% case"
@@ -34,26 +42,31 @@ static FEATURES: [FeatureDesc; 5] = [
         id: "picker",
         supersedes: Some("telescope"),
         off_switch: "native.picker = false",
+        entry_keys: true,
     },
     FeatureDesc {
         id: "tree",
         supersedes: Some("neo-tree / netrw"),
         off_switch: "native.tree = false",
+        entry_keys: false,
     },
     FeatureDesc {
         id: "statusline",
         supersedes: Some("lualine"),
         off_switch: "native.statusline = false",
+        entry_keys: false,
     },
     FeatureDesc {
         id: "notifications",
         supersedes: Some("nvim-notify / noice messages"),
         off_switch: "native.notifications = false",
+        entry_keys: false,
     },
     FeatureDesc {
         id: "palette",
         supersedes: Some("noice cmdline"),
         off_switch: "native.palette = false",
+        entry_keys: false,
     },
 ];
 

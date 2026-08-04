@@ -4,6 +4,7 @@ use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
 use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
 use crate::native::geometry::{OverlayBox, OverlayRect};
+use crate::native::mappings::MappingClaim;
 
 /// The complete application state.
 #[non_exhaustive]
@@ -59,6 +60,16 @@ pub struct Model {
     /// the user after `runtime::run` returns and the terminal is restored;
     /// nothing paints from it, so it carries no rendering contract.
     pub fatal_reason: Option<String>,
+    /// Every default key this session registered, as the engine reported it
+    /// back, in registration order. Empty until the mappings are registered
+    /// (post-`VimEnter`), and empty for the whole session when no feature
+    /// with default keys is enabled.
+    ///
+    /// Private, and written only through
+    /// [`Model::record_claimed_keys`]: the list is what the first-run toast
+    /// and doctor answer "what did view claim?" from, and a second recording
+    /// appending to the first would report every key twice.
+    claimed_keys: Vec<MappingClaim>,
 }
 
 impl Model {
@@ -88,6 +99,7 @@ impl Model {
             term_height: 0,
             content_painted: true,
             fatal_reason: None,
+            claimed_keys: Vec::new(),
         }
     }
 
@@ -103,6 +115,23 @@ impl Model {
             term_height: height,
             ..Self::new()
         }
+    }
+
+    /// The default keys this session registered; see
+    /// [`Model::record_claimed_keys`].
+    #[must_use]
+    pub fn claimed_keys(&self) -> &[MappingClaim] {
+        &self.claimed_keys
+    }
+
+    /// Records the engine's answer to one mapping registration, replacing
+    /// any earlier answer rather than appending to it.
+    ///
+    /// Registration happens once per session, so a second answer is a
+    /// re-registration and describes the same keys; appending would make the
+    /// claim report grow a duplicate row per key.
+    pub fn record_claimed_keys(&mut self, claimed: Vec<MappingClaim>) {
+        self.claimed_keys = claimed;
     }
 
     /// Who owns input this frame: the topmost open overlay, or the engine
