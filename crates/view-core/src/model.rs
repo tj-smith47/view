@@ -15,7 +15,21 @@ pub struct Model {
     /// because two overlays genuinely coexist (a confirm prompt can arrive
     /// while a picker is open) and a stored focus would have to be restored
     /// by hand on every close.
-    pub overlays: Vec<Overlay>,
+    ///
+    /// Private, and reachable only through [`Model::overlays`],
+    /// [`Model::push_overlay`] and [`Model::pop_overlay`], for the same
+    /// reason [`EngineModel::grid`] is: a `pub` field lets a caller push an
+    /// `OverlayId` that is already on the stack, and two entries sharing an
+    /// id make [`Model::overlay_at`] answer with a token that names two
+    /// overlays. Pushing through the accessor is what keeps ids unique.
+    overlays: Vec<Overlay>,
+    /// The next id [`Model::push_overlay`] hands out. Monotonic and never
+    /// reused, so an id captured from an overlay that has since closed can
+    /// never alias a live one.
+    next_overlay_id: u64,
+    /// Who owns the mouse gesture in flight, or `None` while no button is
+    /// down; see [`Model::mouse_capture`].
+    mouse_capture: Option<MouseCapture>,
     pub caps: TermCaps,
     /// Set by `update()` on `Flush`; cleared by the loop after paint.
     pub dirty: bool,
@@ -65,6 +79,8 @@ impl Model {
                 mouse_on: false,
             },
             overlays: Vec::new(),
+            next_overlay_id: 1,
+            mouse_capture: None,
             caps: TermCaps::default(),
             dirty: false,
             running: true,
@@ -119,6 +135,69 @@ impl Model {
             .rev()
             .find(|overlay| self.overlay_rect(overlay).contains(row, col))
             .map(|overlay| overlay.id)
+    }
+
+    /// The open overlays, bottom of the stack first.
+    #[must_use]
+    pub fn overlays(&self) -> &[Overlay] {
+        &self.overlays
+    }
+
+    /// The topmost overlay, the one holding focus, for a feature that needs
+    /// to fold its own state forward as input arrives.
+    #[must_use]
+    pub fn top_overlay_mut(&mut self) -> Option<&mut Overlay> {
+        self.overlays.last_mut()
+    }
+
+    /// Opens `kind` at `geometry` as the new topmost overlay, returning the
+    /// id it was assigned. The id is the model's to hand out, never the
+    /// caller's to choose, so no two open overlays can share one.
+    pub fn push_overlay(&mut self, geometry: OverlayBox, kind: OverlayKind) -> OverlayId {
+        let id = OverlayId(self.next_overlay_id);
+        // saturating rather than wrapping: a wrapped counter would reissue
+        // an id a live overlay already holds, and no session can open
+        // u64::MAX overlays to reach the saturation point
+        self.next_overlay_id = self.next_overlay_id.saturating_add(1);
+        self.overlays.push(Overlay { id, geometry, kind });
+        id
+    }
+
+    /// Closes the topmost overlay and returns it, or `None` when none is
+    /// open. Any mouse gesture that overlay had captured is released with
+    /// it, so a drag whose target closed mid-gesture cannot keep routing to
+    /// something that is gone.
+    pub fn pop_overlay(&mut self) -> Option<Overlay> {
+        let closed = self.overlays.pop();
+        if let (Some(overlay), Some(MouseCapture::Overlay(held))) = (&closed, self.mouse_capture) {
+            if overlay.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        closed
+    }
+
+    /// Who owns the mouse gesture in flight: the surface that received the
+    /// press, until the matching release. `None` while no button is down.
+    ///
+    /// A gesture belongs to one surface for its whole life. Routing each
+    /// event by the pointer's current cell instead would hand the engine a
+    /// release it never saw a press for whenever a drag crosses an overlay
+    /// edge, leaving nvim stuck mid-selection.
+    #[must_use]
+    pub fn mouse_capture(&self) -> Option<MouseCapture> {
+        self.mouse_capture
+    }
+
+    /// Records `target` as the owner of the gesture starting now.
+    pub fn capture_mouse(&mut self, target: MouseCapture) {
+        self.mouse_capture = Some(target);
+    }
+
+    /// Ends the gesture in flight, so the next event routes by position
+    /// again.
+    pub fn release_mouse(&mut self) {
+        self.mouse_capture = None;
     }
 
     /// The cells `overlay` covers on the current terminal.
@@ -659,10 +738,10 @@ pub enum Focus {
     Native(OverlayId),
 }
 
-/// One open native overlay: which overlay it is, and how much of the
-/// terminal it covers.
+/// One open native overlay: which overlay it is, how much of the terminal
+/// it covers, and the feature state it paints and routes from.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Overlay {
     /// Identity, stable for as long as the overlay stays open, so an input
     /// routed to an overlay can be checked against the one that was on top
@@ -671,21 +750,51 @@ pub struct Overlay {
     /// The share of the terminal it covers; resolved to cells by
     /// [`Model::overlay_rect`].
     pub geometry: OverlayBox,
+    /// Which feature this overlay belongs to, and its state.
+    pub kind: OverlayKind,
 }
 
-impl Overlay {
-    /// An overlay with the given identity and placement.
-    #[must_use]
-    pub fn new(id: OverlayId, geometry: OverlayBox) -> Self {
-        Self { id, geometry }
-    }
+/// Which native feature an overlay belongs to, carrying that feature's own
+/// state.
+///
+/// **Feature state lives here, inside the stack element, and never in a
+/// parallel `Option` field on [`Model`].** A `Model { picker:
+/// Option<PickerState> }` beside the stack is two facts (open-ness and
+/// presence) that must agree with nothing making them agree, which is the
+/// defect deriving focus from the stack exists to remove. Holding the state
+/// in the element makes an overlay that is open with no state, or holds
+/// state while closed, unrepresentable.
+///
+/// `id` and `geometry` are struct fields rather than per-variant payloads
+/// for the matching reason: no variant can forget them, and
+/// [`Model::focus`] and [`Model::overlay_at`] stay total without a
+/// per-feature arm.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverlayKind {
+    /// An overlay with no feature state: it owns its rect and, while it is
+    /// on top, the keyboard. This is the routing and geometry seam by
+    /// itself, with nothing painted into it.
+    Bare,
 }
 
-/// Opaque identifier for an open native overlay. Identity is the caller's
-/// to assign and keep unique; the model treats it as an opaque token and
-/// derives everything else from stack position.
+/// Opaque identifier for an open native overlay, handed out by
+/// [`Model::push_overlay`]. Unique among open overlays by construction, and
+/// never reused, so a token outliving its overlay names nothing rather than
+/// aliasing a later one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayId(pub u64);
+
+/// Who owns the mouse gesture in flight; see [`Model::mouse_capture`].
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseCapture {
+    /// The engine grid received the press, so the rest of the gesture is
+    /// forwarded to it wherever the pointer travels.
+    Engine,
+    /// The named overlay received the press.
+    Overlay(OverlayId),
+}
 
 /// Detected terminal capabilities.
 ///

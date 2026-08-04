@@ -3,7 +3,7 @@
 use crate::events::{clamp_dim, saturate_u16, UiEvent};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
-use crate::model::{CmdlineState, Focus, Model, PopupmenuState, TablineState};
+use crate::model::{CmdlineState, Focus, Model, MouseCapture, PopupmenuState, TablineState};
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 
 /// Applies one message to `model`, returning the effects the executor must
@@ -35,7 +35,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 // underneath it keeps the keyboard.
                 Focus::Native(_) => {
                     if notation == "<Esc>" {
-                        model.overlays.pop();
+                        model.pop_overlay();
                     }
                     Vec::new()
                 }
@@ -47,13 +47,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Focus::Engine => vec![Effect::Rpc(RpcCall::Paste { text })],
             Focus::Native(_) => Vec::new(),
         },
-        // position, not focus: an overlay owns the keyboard outright but
-        // only the cells it covers, so a click on grid that is still visible
-        // beside an open overlay belongs to the engine
-        Msg::Mouse(input) => match model.overlay_at(input.row, input.col) {
-            None => mouse_effect(model, input),
-            Some(_) => Vec::new(),
-        },
+        Msg::Mouse(input) => route_mouse(model, input),
         Msg::Redraw(events) => {
             let mut effects = Vec::new();
             for ev in events {
@@ -120,6 +114,53 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+    }
+}
+
+/// Routes one mouse event to the surface that owns it: the overlay under
+/// the pointer, or the engine when no overlay covers that cell.
+///
+/// A press claims the gesture, and the `drag`s and the `release` that
+/// follow go wherever the press went, however far the pointer travels.
+/// Routing every event by its own position instead would truncate any drag
+/// crossing an overlay edge: the engine would see a press with no release
+/// and stay stuck mid-selection, or a release for a press it never saw.
+/// `wheel` and `move` carry no gesture, so they always route by position
+/// and leave an in-flight capture alone.
+fn route_mouse(model: &mut Model, input: MouseInput) -> Vec<Effect> {
+    let owner = match input.action.as_str() {
+        "press" => {
+            let owner = position_owner(model, &input);
+            model.capture_mouse(owner);
+            owner
+        }
+        "drag" | "release" => {
+            // a gesture whose press was never seen (input started mid-drag)
+            // has no owner to honor, so it falls back to position
+            let owner = model
+                .mouse_capture()
+                .unwrap_or_else(|| position_owner(model, &input));
+            if input.action == "release" {
+                model.release_mouse();
+            }
+            owner
+        }
+        _ => position_owner(model, &input),
+    };
+    match owner {
+        // no overlay carries a mouse handler, so an overlay claiming the
+        // event is the whole of that routing
+        MouseCapture::Overlay(_) => Vec::new(),
+        MouseCapture::Engine => mouse_effect(model, input),
+    }
+}
+
+/// Which surface the pointer is over: the topmost overlay covering the
+/// cell, else the engine grid.
+fn position_owner(model: &Model, input: &MouseInput) -> MouseCapture {
+    match model.overlay_at(input.row, input.col) {
+        Some(id) => MouseCapture::Overlay(id),
+        None => MouseCapture::Engine,
     }
 }
 
@@ -363,7 +404,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::events::UiEvent;
-    use crate::model::{Overlay, OverlayId};
+    use crate::model::{OverlayId, OverlayKind};
     use crate::msg::{ExitInfo, ReplyToken};
     use crate::native::geometry::OverlayBox;
 
@@ -377,22 +418,29 @@ mod tests {
         Model::with_term_size(80, 24)
     }
 
-    /// Pushes an overlay covering the middle half of the terminal: rows
+    /// Opens an overlay covering the middle half of the terminal: rows
     /// 6..18 and columns 20..60 of an 80x24 one.
-    fn push_overlay(model: &mut Model, id: u64) {
-        model
-            .overlays
-            .push(Overlay::new(OverlayId(id), OverlayBox::new(50, 50)));
+    fn open_overlay(model: &mut Model) -> OverlayId {
+        model.push_overlay(OverlayBox::new(50, 50), OverlayKind::Bare)
     }
 
-    fn click(row: u16, col: u16) -> Msg {
+    /// The ids on the stack, bottom first.
+    fn stack_ids(model: &Model) -> Vec<u64> {
+        model.overlays().iter().map(|o| o.id.0).collect()
+    }
+
+    fn mouse(action: &str, row: u16, col: u16) -> Msg {
         Msg::Mouse(MouseInput {
             button: "left".into(),
-            action: "press".into(),
+            action: action.into(),
             modifier: String::new(),
             row,
             col,
         })
+    }
+
+    fn click(row: u16, col: u16) -> Msg {
+        mouse("press", row, col)
     }
 
     #[test]
@@ -827,7 +875,7 @@ mod tests {
     #[test]
     fn key_in_native_focus_is_consumed_and_esc_returns_engine_focus() {
         let mut m = model();
-        push_overlay(&mut m, 1);
+        let id = open_overlay(&mut m);
         let effects = update(
             &mut m,
             Msg::Key(Key {
@@ -840,7 +888,7 @@ mod tests {
         );
         assert_eq!(
             m.focus(),
-            Focus::Native(OverlayId(1)),
+            Focus::Native(id),
             "a non-Esc key must not close the overlay"
         );
 
@@ -859,7 +907,7 @@ mod tests {
             Focus::Engine,
             "closing the last overlay returns focus to the engine"
         );
-        assert!(m.overlays.is_empty());
+        assert!(m.overlays().is_empty());
     }
 
     #[test]
@@ -877,22 +925,26 @@ mod tests {
             rng ^= rng << 17;
             rng
         };
-        let mut next_id = 0_u64;
 
         for _ in 0..2_000 {
             let mut m = full_screen_model();
             let mut shadow: Vec<u64> = Vec::new();
+            let mut ever_issued: Vec<u64> = Vec::new();
 
             for _ in 0..(roll() % 24) {
                 let depth_before = shadow.len();
-                match roll() % 6 {
+                match roll() % 7 {
                     0 => {
-                        next_id += 1;
-                        push_overlay(&mut m, next_id);
-                        shadow.push(next_id);
+                        let id = open_overlay(&mut m).0;
+                        assert!(
+                            !ever_issued.contains(&id),
+                            "an overlay id must never be reissued: {id}"
+                        );
+                        ever_issued.push(id);
+                        shadow.push(id);
                     }
                     1 => {
-                        m.overlays.pop();
+                        m.pop_overlay();
                         shadow.pop();
                     }
                     2 => {
@@ -929,7 +981,23 @@ mod tests {
                         let effects = update(&mut m, click(0, 0));
                         assert!(
                             matches!(&effects[..], [Effect::Rpc(RpcCall::InputMouse { .. })]),
-                            "the terminal corner is outside every overlay pushed here"
+                            "the terminal corner is outside every overlay opened here"
+                        );
+                    }
+                    5 => {
+                        // the middle of the terminal is inside every overlay
+                        // this generator opens, and outside all of them when
+                        // the stack is empty
+                        let effects = update(&mut m, click(12, 40));
+                        assert_eq!(
+                            effects.is_empty(),
+                            depth_before > 0,
+                            "a click on a covered cell belongs to the overlay covering it"
+                        );
+                        assert_eq!(
+                            m.overlay_at(12, 40).map(|id| id.0),
+                            shadow.last().copied(),
+                            "the cell is claimed by the topmost overlay over it"
                         );
                     }
                     _ => {
@@ -939,9 +1007,9 @@ mod tests {
                 }
 
                 assert_eq!(
-                    m.overlays.iter().map(|o| o.id.0).collect::<Vec<_>>(),
+                    stack_ids(&m),
                     shadow,
-                    "the stack must hold exactly what the operations pushed"
+                    "the stack must hold exactly what the operations opened"
                 );
                 let expected = match shadow.last() {
                     Some(id) => Focus::Native(OverlayId(*id)),
@@ -960,27 +1028,41 @@ mod tests {
     fn focus_is_the_top_of_the_stack_and_the_engine_when_it_is_empty() {
         let mut m = model();
         assert_eq!(m.focus(), Focus::Engine, "no overlays means engine focus");
-        push_overlay(&mut m, 7);
-        assert_eq!(m.focus(), Focus::Native(OverlayId(7)));
-        push_overlay(&mut m, 8);
+        let lower = open_overlay(&mut m);
+        assert_eq!(m.focus(), Focus::Native(lower));
+        let upper = open_overlay(&mut m);
         assert_eq!(
             m.focus(),
-            Focus::Native(OverlayId(8)),
-            "the overlay pushed last is the one on top"
+            Focus::Native(upper),
+            "the overlay opened last is the one on top"
         );
-        m.overlays.pop();
-        assert_eq!(m.focus(), Focus::Native(OverlayId(7)));
+        m.pop_overlay();
+        assert_eq!(m.focus(), Focus::Native(lower));
+    }
+
+    #[test]
+    fn every_open_overlay_holds_an_id_no_other_one_holds() {
+        let mut m = model();
+        let ids: Vec<OverlayId> = (0..8).map(|_| open_overlay(&mut m)).collect();
+        let mut seen = ids.clone();
+        seen.sort_unstable_by_key(|id| id.0);
+        seen.dedup_by_key(|id| id.0);
+        assert_eq!(seen.len(), ids.len(), "the model must not reissue an id");
+
+        // an id is retired with its overlay rather than recycled: a token
+        // held past a close names nothing instead of a later overlay
+        let closed = m.pop_overlay().map(|o| o.id);
+        let reopened = open_overlay(&mut m);
+        assert_ne!(Some(reopened), closed);
+        assert_eq!(stack_ids(&m).len(), 8);
     }
 
     #[test]
     fn esc_with_two_overlays_stacked_pops_one_and_leaves_the_lower_focused() {
         let mut m = model();
-        let picker = OverlayId(1);
-        let prompt = OverlayId(2);
-        m.overlays
-            .push(Overlay::new(picker, OverlayBox::new(80, 80)));
-        m.overlays
-            .push(Overlay::new(prompt, OverlayBox::new(40, 20)));
+        let picker = m.push_overlay(OverlayBox::new(80, 80), OverlayKind::Bare);
+        let prompt = m.push_overlay(OverlayBox::new(40, 20), OverlayKind::Bare);
+        assert_ne!(picker, prompt);
 
         let effects = update(
             &mut m,
@@ -994,20 +1076,20 @@ mod tests {
             Focus::Native(picker),
             "Esc closes the top overlay only; the one beneath it keeps focus"
         );
-        assert_eq!(m.overlays.len(), 1, "Esc pops exactly one overlay");
+        assert_eq!(m.overlays().len(), 1, "Esc pops exactly one overlay");
     }
 
     #[test]
     fn paste_in_native_focus_is_consumed_not_forwarded() {
         let mut m = model();
-        push_overlay(&mut m, 1);
+        open_overlay(&mut m);
         assert!(update(&mut m, Msg::Paste("x".into())).is_empty());
     }
 
     #[test]
     fn a_click_inside_an_overlay_is_claimed_by_it_and_never_reaches_the_engine() {
         let mut m = full_screen_model();
-        push_overlay(&mut m, 1);
+        let id = open_overlay(&mut m);
         // the overlay covers the middle half of an 80x24 terminal: rows
         // 6..18, columns 20..60
         let effects = update(&mut m, click(12, 40));
@@ -1015,13 +1097,13 @@ mod tests {
             effects.is_empty(),
             "a click on a cell the overlay covers belongs to the overlay"
         );
-        assert_eq!(m.overlay_at(12, 40), Some(OverlayId(1)));
+        assert_eq!(m.overlay_at(12, 40), Some(id));
     }
 
     #[test]
     fn a_click_outside_an_open_overlay_still_moves_the_engine_cursor() {
         let mut m = full_screen_model();
-        push_overlay(&mut m, 1);
+        open_overlay(&mut m);
         let effects = update(&mut m, click(2, 3));
         assert!(
             matches!(
@@ -1037,19 +1119,156 @@ mod tests {
     fn a_click_lands_on_the_topmost_overlay_covering_it_not_the_one_with_focus() {
         let mut m = full_screen_model();
         // a wide overlay with a narrower one stacked on top of it
-        m.overlays
-            .push(Overlay::new(OverlayId(1), OverlayBox::new(100, 100)));
-        m.overlays
-            .push(Overlay::new(OverlayId(2), OverlayBox::new(50, 50)));
+        let lower = m.push_overlay(OverlayBox::new(100, 100), OverlayKind::Bare);
+        let upper = m.push_overlay(OverlayBox::new(50, 50), OverlayKind::Bare);
         assert_eq!(
             m.overlay_at(12, 40),
-            Some(OverlayId(2)),
+            Some(upper),
             "where both cover the cell, the top one claims it"
         );
         assert_eq!(
             m.overlay_at(0, 0),
-            Some(OverlayId(1)),
+            Some(lower),
             "outside the top overlay, the one beneath still claims its own cells"
+        );
+    }
+
+    #[test]
+    fn a_left_anchored_overlay_claims_the_column_it_is_painted_in() {
+        use crate::native::geometry::Anchor;
+        let mut m = full_screen_model();
+        let sidebar = m.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+            OverlayKind::Bare,
+        );
+        assert_eq!(
+            m.overlay_at(0, 0),
+            Some(sidebar),
+            "a sidebar owns the terminal's first column, not a centered band"
+        );
+        assert!(update(&mut m, click(0, 0)).is_empty());
+        assert_eq!(m.overlay_at(0, 40), None, "and nothing past its own width");
+        assert!(matches!(
+            &update(&mut m, click(0, 40))[..],
+            [Effect::Rpc(RpcCall::InputMouse { .. })]
+        ));
+    }
+
+    // gesture routing: a drag belongs to the surface that took its press for
+    // the whole of its life, however far the pointer travels
+
+    #[test]
+    fn a_drag_off_an_overlay_stays_with_the_overlay_through_its_release() {
+        let mut m = full_screen_model();
+        open_overlay(&mut m);
+        assert!(update(&mut m, mouse("press", 12, 40)).is_empty());
+        assert_eq!(m.mouse_capture(), Some(MouseCapture::Overlay(OverlayId(1))));
+
+        assert!(
+            update(&mut m, mouse("drag", 2, 3)).is_empty(),
+            "a drag that left the overlay must not start moving the engine cursor"
+        );
+        assert!(
+            update(&mut m, mouse("release", 2, 3)).is_empty(),
+            "the engine must not receive a release for a press it never saw"
+        );
+        assert_eq!(m.mouse_capture(), None, "release ends the gesture");
+    }
+
+    #[test]
+    fn a_drag_onto_an_overlay_keeps_delivering_to_the_engine_until_release() {
+        let mut m = full_screen_model();
+        open_overlay(&mut m);
+        assert!(matches!(
+            &update(&mut m, mouse("press", 2, 3))[..],
+            [Effect::Rpc(RpcCall::InputMouse { row: 2, col: 3, .. })]
+        ));
+        assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine));
+
+        // without capture the engine would be left mid-selection here, with
+        // a press it never got to finish
+        assert!(
+            matches!(
+                &update(&mut m, mouse("drag", 12, 40))[..],
+                [Effect::Rpc(RpcCall::InputMouse {
+                    row: 12,
+                    col: 40,
+                    ..
+                })]
+            ),
+            "a drag that crossed onto the overlay still belongs to the engine"
+        );
+        assert!(matches!(
+            &update(&mut m, mouse("release", 12, 40))[..],
+            [Effect::Rpc(RpcCall::InputMouse { .. })]
+        ));
+        assert_eq!(m.mouse_capture(), None);
+    }
+
+    #[test]
+    fn closing_an_overlay_mid_gesture_releases_the_capture_it_held() {
+        let mut m = full_screen_model();
+        open_overlay(&mut m);
+        let _ = update(&mut m, mouse("press", 12, 40));
+        assert!(m.mouse_capture().is_some());
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "<Esc>".into(),
+            }),
+        );
+        assert_eq!(
+            m.mouse_capture(),
+            None,
+            "a gesture must not stay captured by an overlay that is gone"
+        );
+        assert!(
+            matches!(
+                &update(&mut m, mouse("release", 2, 3))[..],
+                [Effect::Rpc(RpcCall::InputMouse { .. })]
+            ),
+            "with the overlay closed the gesture falls back to position routing"
+        );
+    }
+
+    #[test]
+    fn the_wheel_routes_by_position_and_leaves_a_gesture_in_flight_alone() {
+        let mut m = full_screen_model();
+        open_overlay(&mut m);
+        let _ = update(&mut m, mouse("press", 2, 3));
+        assert_eq!(m.mouse_capture(), Some(MouseCapture::Engine));
+
+        let wheel = Msg::Mouse(MouseInput {
+            button: "wheel".into(),
+            action: "up".into(),
+            modifier: String::new(),
+            row: 12,
+            col: 40,
+        });
+        assert!(
+            update(&mut m, wheel).is_empty(),
+            "a wheel over the overlay scrolls the overlay, not the buffer under it"
+        );
+        assert_eq!(
+            m.mouse_capture(),
+            Some(MouseCapture::Engine),
+            "a wheel carries no gesture and must not steal one in flight"
+        );
+    }
+
+    #[test]
+    fn a_release_with_no_press_behind_it_falls_back_to_position() {
+        let mut m = full_screen_model();
+        open_overlay(&mut m);
+        assert_eq!(m.mouse_capture(), None);
+        assert!(matches!(
+            &update(&mut m, mouse("release", 2, 3))[..],
+            [Effect::Rpc(RpcCall::InputMouse { .. })]
+        ));
+        assert!(
+            update(&mut m, mouse("drag", 12, 40)).is_empty(),
+            "an unclaimed drag over the overlay belongs to the overlay"
         );
     }
 

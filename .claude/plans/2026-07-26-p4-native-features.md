@@ -643,13 +643,16 @@ pins "nothing in the user's config is ever edited".
 
 ```rust
 // Option A -- overlay STACK, focus derived from the top (CHOSEN)
-model.overlays.push(Overlay::Picker(picker_state));
-assert!(matches!(model.focus(), Focus::Native(_)));
+let picker = model.push_overlay(OverlayBox::new(80, 60), OverlayKind::Picker(picker_state));
+assert_eq!(model.focus(), Focus::Native(picker));
 // a confirm prompt arrives while the picker is open:
-model.overlays.push(Overlay::Prompt(prompt_state));
+model.push_overlay(OverlayBox::new(40, 20), OverlayKind::Prompt(prompt_state));
 // ...prompt answered, popped, and the picker is still there, still focused:
-model.overlays.pop();
-assert!(matches!(model.overlays.last(), Some(Overlay::Picker(_))));
+model.pop_overlay();
+assert!(matches!(
+    model.overlays().last().map(|o| &o.kind),
+    Some(OverlayKind::Picker(_))
+));
 
 // Option B -- P2's shape kept: one `focus: Focus` field, overlays in Options
 model.picker = Some(picker_state);
@@ -666,10 +669,18 @@ derives focus from the stack top, so that state is unrepresentable. The
 stack is also *required*, not merely tidy: nvim can emit a `confirm` while
 a picker-triggered `:edit` is in flight, so two overlays genuinely coexist.
 
-**Interfaces:**
+**Interfaces (as built):**
 
 ```rust
 // view-core/src/model.rs
+pub struct Overlay { pub id: OverlayId, pub geometry: OverlayBox, pub kind: OverlayKind }
+
+/// Feature state lives HERE, inside the stack element. Later tasks add a
+/// variant carrying their own state; none of them adds an `Option` field
+/// on `Model`.
+#[non_exhaustive]
+pub enum OverlayKind { Bare /* T5: Picker(PickerState), T8: Prompt(PromptState), ... */ }
+
 impl Model {
     /// Who owns input this frame: the top overlay if any, else the engine.
     /// Derived rather than stored -- a stored focus can name a closed
@@ -679,18 +690,50 @@ impl Model {
     /// Topmost overlay whose rect contains (row, col), else `None` --
     /// the engine. Mouse routing calls this, not `focus()`.
     #[must_use] pub fn overlay_at(&self, row: u16, col: u16) -> Option<OverlayId>;
+    /// The stack, read-only. `overlays` itself is private so no caller can
+    /// push an id the model did not issue.
+    #[must_use] pub fn overlays(&self) -> &[Overlay];
+    #[must_use] pub fn top_overlay_mut(&mut self) -> Option<&mut Overlay>;
+    /// The ONLY way to open an overlay: it issues the id from a monotonic
+    /// counter, so duplicate ids are unrepresentable and `overlay_at` can
+    /// never be ambiguous.
+    pub fn push_overlay(&mut self, geometry: OverlayBox, kind: OverlayKind) -> OverlayId;
+    pub fn pop_overlay(&mut self) -> Option<Overlay>;
+    /// The rect an overlay occupies at the model's current terminal size.
+    #[must_use] pub fn overlay_rect(&self, overlay: &Overlay) -> OverlayRect;
 }
 
 // view-core/src/native/geometry.rs (shared with T4 -- see the crate-seam
-// correction): each overlay state exposes its OverlayBox, and
+// correction): each overlay carries its OverlayBox, and
 // OverlayBox::rect(term_w, term_h) is the ONE function both update()'s
 // hit-test and view-surface::render's placement call, so the painted
 // rect and the routing rect cannot drift.
-pub struct OverlayBox { pub width_pct: u16, pub height_pct: u16, .. }
+pub enum Anchor { Center, Left, Right, Top, Bottom }
+pub struct OverlayBox { pub width_pct: u16, pub height_pct: u16, pub anchor: Anchor }
 impl OverlayBox {
+    /// Centered; pair with `with_anchor` for T13's left-flush sidebar.
+    #[must_use] pub fn new(width_pct: u16, height_pct: u16) -> Self;
+    #[must_use] pub fn with_anchor(self, anchor: Anchor) -> Self;
     #[must_use] pub fn rect(&self, term_w: u16, term_h: u16) -> OverlayRect;
 }
 ```
+
+**Decision, binding on every later task in this phase: overlay state lives
+in the stack element, never in a parallel `Option` field on `Model`.** A
+feature that opens an overlay adds an `OverlayKind` variant carrying its
+state and reaches it through `overlays()` / `top_overlay_mut()`. The
+alternative -- `OverlayKind` as a bare tag beside `model.picker:
+Option<PickerState>` -- reintroduces exactly the two-facts-that-must-agree
+defect that sank Option B, one level down: the stack would say a picker is
+open while the field says it is not. `OverlayKind` is `#[non_exhaustive]`
+so adding a variant is not a breaking change, and `Overlay` therefore
+cannot be `Copy`/`Eq` once a variant carries state -- it is `Clone` +
+`PartialEq` only.
+
+A mouse gesture belongs to whoever took its `press` until the matching
+`release` (`Model::mouse_capture`), so a drag that crosses the overlay
+boundary cannot strand nvim mid-selection; `pop_overlay` drops a capture
+the closed overlay held.
 
 **Keys and paste route on `focus()`; mouse routes by hit-test** (§5.3:
 clicks/wheel go to the topmost native overlay *under the pointer*,
@@ -717,14 +760,18 @@ it produces the `InputMouse` `RpcCall` — the engine cursor moves.
 - [ ] **Step 1: Failing test** for the push/push/Esc sequence above,
   against P2's current single-field model. Observe FAIL (it will report
   focus on `Engine`, which is the bug).
-- [ ] **Step 2:** Add `overlays: Vec<Overlay>` and `Model::focus()`;
-  delete the `focus` field. Fix every call site the compiler names.
+- [ ] **Step 2:** Add a private `overlays: Vec<Overlay>` with its id
+  counter, `push_overlay`/`pop_overlay`/`overlays()`, and
+  `Model::focus()`; delete the `focus` field. Fix every call site the
+  compiler names.
 - [ ] **Step 3:** `update()`'s Key and Paste arms route on `focus()`;
   the Mouse arm routes on `overlay_at(row, col)` — topmost overlay
-  containing the point, else the existing `InputMouse` path. `<Esc>`
+  containing the point, else the existing `InputMouse` path — with a
+  press-to-release capture so a drag stays with its owner. `<Esc>`
   pops one overlay. Both directions of the mouse check above pass.
 - [ ] **Step 4: Totality.** Property test: any sequence of pushes, pops
-  and `<Esc>` keys leaves `focus()` consistent with `overlays.last()`.
+  and `<Esc>` keys leaves `focus()` consistent with `overlays().last()`
+  and every issued id distinct.
 - [ ] **Step 5:** Latency check — this is key-dispatch code. Run
   `task bench -- --scenario input_path --fixture minimal --class dev-linux`
   before and after; the commit description states the delta. A stack
@@ -845,12 +892,17 @@ command's observable effect.
 same way, so the geometry lives once:
 
 ```rust
-// in view-surface::render, for each overlay in model.overlays
-let rect = ov.boxspec().rect(model.term_width, model.term_height);
-//         ^ core's geometry.rs -- the SAME rect update()'s mouse
-//           hit-test uses (T3), so paint and routing cannot disagree
-layers.push(overlay::framed(rect, LayerKind::Picker(state.view()),
-    theme.border_style(model.caps.tier)));
+// in view-surface::render, for each overlay in model.overlays()
+for ov in model.overlays() {
+    let rect = model.overlay_rect(ov);
+    //         ^ core's geometry.rs -- the SAME rect update()'s mouse
+    //           hit-test uses (T3), so paint and routing cannot disagree
+    let kind = match &ov.kind {
+        OverlayKind::Picker(state) => LayerKind::Picker(state.view()),
+        OverlayKind::Bare => continue,
+    };
+    layers.push(overlay::framed(rect, kind, theme.border_style(model.caps.tier)));
+}
 ```
 
 **Runner-up rejected:** each feature computing its own rect from
@@ -1199,9 +1251,12 @@ and downstream briefs are re-extracted (protocol step 6).
 ```rust
 // the prompt overlay answers by feeding the engine a keystroke -- the
 // engine is blocked in its OWN input loop, not on an rpcrequest
-Overlay::Prompt(p) => match key.notation.as_str() {
-    n if p.accepts(n) => vec![Effect::Rpc(RpcCall::Input { notation: n.into() })],
-    _                 => vec![],   // unmatched: nvim re-arms; we stay open
+match model.top_overlay_mut().map(|ov| &mut ov.kind) {
+    Some(OverlayKind::Prompt(p)) => match key.notation.as_str() {
+        n if p.accepts(n) => vec![Effect::Rpc(RpcCall::Input { notation: n.into() })],
+        _                 => vec![],   // unmatched: nvim re-arms, overlay stays open
+    },
+    _ => vec![],
 }
 ```
 
@@ -1519,6 +1574,12 @@ impl TreeState {
     pub fn apply_git(&mut self, generation: u64, status: Vec<GitEntry>);
     #[must_use] pub fn view(&self) -> TreeView;   // LayerKind::Tree payload
 }
+
+// the sidebar is flush left and full height, which is what T3's anchor is for:
+model.push_overlay(
+    OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+    OverlayKind::Tree(tree_state),
+);
 
 // view-native/src/tree/{fs,git}.rs -- workers: `ignore`-walked scan;
 // `git status --porcelain=v2` on a thread, bridge-triggered, never polled
