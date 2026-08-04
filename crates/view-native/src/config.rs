@@ -74,7 +74,17 @@ impl NativeConfig {
             return Ok(Self::all_enabled());
         };
         match std::fs::read_to_string(path) {
-            Ok(s) => Self::from_toml_str(&s),
+            // a parse failure that came from a file names that file: a bare
+            // line/column is not actionable when a user has more than one
+            // config in play, and the read failure one arm below already
+            // answers with the path
+            Ok(s) => Self::from_toml_str(&s).map_err(|e| match e {
+                NativeConfigError::Toml(source) => NativeConfigError::ParseFile {
+                    path: path.to_path_buf(),
+                    source,
+                },
+                other => other,
+            }),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::all_enabled()),
             Err(source) => Err(NativeConfigError::Read {
                 path: path.to_path_buf(),
@@ -113,7 +123,17 @@ pub enum NativeConfigError {
         /// The underlying filesystem error.
         source: std::io::Error,
     },
-    /// The file is not valid TOML, or a `[native]` value is not a boolean.
+    /// A config file exists and was read, but is not valid TOML, or a
+    /// `[native]` value in it is not a boolean.
+    #[error("could not parse config file {path}: {source}")]
+    ParseFile {
+        /// The path whose contents failed to parse.
+        path: PathBuf,
+        /// The underlying TOML error, with its line and column.
+        source: toml::de::Error,
+    },
+    /// TOML given directly as a string is not valid, or a `[native]` value
+    /// in it is not a boolean. No path: there is no file behind it.
     #[error(transparent)]
     Toml(#[from] toml::de::Error),
     /// A key inside `[native]` names no feature in the registry.
@@ -248,6 +268,25 @@ mod tests {
         assert!(
             format!("{err}").contains("view-native"),
             "the error must name the path it failed on, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_file_is_reported_with_its_path() {
+        let dir = std::env::temp_dir().join(format!("view-native-broken-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[native\npicker = false\n").expect("a temp config must be writable");
+        let err = NativeConfig::load(Some(&path)).expect_err("a broken config must not resolve");
+        let msg = format!("{err}");
+        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
+        assert!(
+            matches!(err, NativeConfigError::ParseFile { .. }),
+            "expected a file parse error, got: {err:?}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "the parse error must name the file it failed on, got: {msg}"
         );
     }
 
