@@ -467,6 +467,99 @@ makes the core headless-testable and the oracle cheap.
 Degradation is a first-class tested surface (golden snapshots per tier, §13),
 not a fallback apology.
 
+### 7.1 Design language (drafted 2026-08-04; pending user ratification)
+
+The tier table above names "rounded borders" and "cell-eased animations"
+without defining either; this section is the concrete visual system P4
+builds to, so candidate surfaces are judged against renderings rather than
+adjectives. Reference renderings (Dracula, `full` tier) live in
+`assets/mockups/`; Dracula is the reference *rendering*, not the theme —
+every token below derives from the user's live colorscheme via the §7
+bridge, and every derivation is overridable in `view.toml`. Golden
+snapshots per tier (§13) become the enforcement once the surfaces exist.
+
+**Elevation.** Three background steps, derived, never hardcoded:
+
+| Token | Derivation | Used by |
+|---|---|---|
+| `surface.base` | `Normal` bg | the grid |
+| `surface.raised` | `NormalFloat` bg when the scheme defines a distinct one, else base with 8% of fg mixed in | every float: palette, picker, prompts, toasts, AI panel |
+| `surface.dim` | base with 30% black mixed in | shadows, modal backdrop |
+
+**Shadow.** Every float composites a drop shadow: the backdrop cells in the
+float's footprint offset by (+1 row, +2 cols) — clipped exactly to that
+offset footprint — keep their glyphs but restyle to `surface.dim` bg with
+fg blended 70% toward it. A shadow is a restyling of what lies beneath, not
+a black block, and because it is computed inside the view-side z-ordered
+compositor it structurally cannot bleed past its region the way `winblend`
+pseudo-transparency does. No other transparency exists in the system.
+
+**Modal backdrop.** While a native surface holds `Focus::Native` (palette,
+picker, confirm prompt), the grid beneath paints with fg blended 40% toward
+bg. Focus becomes legible at a glance instead of inferred from a cursor.
+Applies on `full` and `standard`; `basic` (no color derivation) skips it.
+
+**Borders and spacing.** Rounded corners `╭ ╮ ╰ ╯` on `full` and `standard`
+— corner glyphs are font coverage, not a terminal capability; `basic` falls
+back to ASCII `+ - |`. Border fg is `accent` blended 50% toward the
+surface's bg (`FloatBorder` when the scheme defines it). A float's title
+renders inside the top border run, space-padded, `accent` fg. Panels keep
+at least one row / two cols of padding inside the border; content never
+touches a border cell. Selection bars span the full inner width on
+`surface.sel` with a `▌` accent marker in the left padding column.
+
+**Accent roles.** Semantic, derived from highlight groups; components name
+roles, never colors:
+
+| Role | Derived from | Dracula renders as |
+|---|---|---|
+| `accent` | `Function` fg (fallback `Statement`) | purple |
+| `match` | `IncSearch`/`Search` fg | pink |
+| `info` | `DiagnosticInfo` | cyan |
+| `success` | `DiagnosticOk`, git add signs | green |
+| `warn` | `DiagnosticWarn` | yellow |
+| `error` | `DiagnosticError` | red |
+| `surface.sel` | `PmenuSel`/`Visual` bg | `#44475a` |
+
+**Motion** (`full` tier only; `standard` and `basic` paint final frames
+directly). Rules first, catalogue second:
+
+1. **State-first.** The model reaches its final state on the first frame;
+   motion is presentation-only interpolation toward what is already true.
+   Nothing waits on an animation and no animation adds latency to the
+   input path.
+2. **Interruptible.** Any input during an animation completes it on that
+   frame.
+3. **Ordinary paints.** Animation frames go through the same paint path
+   inside the §3.1 budgets, ticked by the runtime's existing timer effect
+   — no dedicated thread, and the paint loop still never awaits RPC.
+4. **Two durations.** `motion.fast = 80 ms`, `motion.slow = 120 ms`;
+   ease-out for enters, ease-in for exits, quantized to cell steps for
+   position and theme steps for fades. Anything longer than 120 ms is
+   latency wearing a costume.
+
+| Surface event | Motion |
+|---|---|
+| Palette / picker open | bg and border fade up through 3 theme steps at final geometry, `fast` ease-out; no position animation on open |
+| Palette / picker close | instant — dismissal returns focus and must feel like release, not choreography |
+| Toast enter | slides 3 cells in from the right edge, `fast` ease-out |
+| Toast exit | fades to backdrop over `slow`, then the row collapses |
+| Tree expand | children reveal top-down over `fast` |
+| Tree collapse | instant |
+| List scroll / selection move | instant, always — smoothness in a list is latency, not interpolation |
+
+Config surface (every key optional; defaults derive as above):
+
+```toml
+[ui]
+motion = "on"        # "off" for reduced motion; ignored below full tier
+backdrop = "dim"     # "none" keeps the grid at full brightness under modals
+
+[ui.tokens]          # explicit values override theme derivation per token
+accent = "#bd93f9"
+surface_raised = "#343746"
+```
+
 ---
 
 ## 8. Startup sequence
