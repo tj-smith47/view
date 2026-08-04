@@ -425,8 +425,8 @@ fn overlay_layer(
 /// cannot disagree about where an overlay is. The border charset comes from
 /// the terminal's own tier, resolved once here rather than per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
-    let cells = model.overlay_rect(open);
     let kind = layer_kind(&open.kind)?;
+    let cells = model.overlay_rect(open);
     Some(overlay::framed(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,

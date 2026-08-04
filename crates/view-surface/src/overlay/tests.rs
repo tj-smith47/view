@@ -294,3 +294,101 @@ fn a_framed_layer_carries_the_charset_it_was_built_with() {
     assert_eq!(layer.rect, rect);
     assert_eq!(layer.borders, Some(BorderSet::PLAIN));
 }
+
+/// Feature-supplied text is data, never a layout directive. A picker row
+/// (or a tree label, a palette label, a prompt choice) can legally hold a
+/// control character: `\x01` is a valid byte in a POSIX filename, and
+/// nvim-sourced text is not filtered on the way in. Such a row must render
+/// as its own literal content, left-flush like every other row, with the
+/// control character reduced to the one blank cell a terminal gives it.
+#[test]
+fn a_control_character_in_a_row_is_blanked_never_read_as_a_column_break() {
+    let kind = LayerKind::Picker(
+        PickerView::new("Files")
+            .with_rows(vec![
+                "src/\u{1}main.rs".to_string(),
+                "a\u{1}b\u{1}c\u{1}d".to_string(),
+            ])
+            .with_selected(0),
+    );
+    let framed = rows(30, 6, &kind, BorderSet::ASCII);
+
+    assert!(
+        framed
+            .lines
+            .iter()
+            .all(|l| !l.chars().any(char::is_control)),
+        "no control character survives into a painted row: {:?}",
+        framed.lines
+    );
+    assert!(
+        interior(&framed.lines[3]).starts_with("> src/ main.rs"),
+        "one mark must not right-align the tail of the row: {:?}",
+        framed.lines[3]
+    );
+    assert!(
+        interior(&framed.lines[4]).starts_with("  a b c d"),
+        "three marks must not fall through to a raw copy: {:?}",
+        framed.lines[4]
+    );
+}
+
+/// The statusline's three segments are placed because they are three
+/// separate values, so a control character inside one of them shifts
+/// nothing: the same text with and without it lands in the same columns.
+#[test]
+fn a_control_character_in_a_statusline_segment_moves_no_column() {
+    // the same display width as the dirty left segment: a blanked control
+    // character still occupies its cell, so a narrower clean segment would
+    // be measuring the sanitization rather than the placement
+    let clean = LayerKind::Statusline(view_core::native::views::StatuslineView::new(
+        "NOR MAL",
+        "src/main.rs",
+        "12:4",
+    ));
+    let dirty = LayerKind::Statusline(view_core::native::views::StatuslineView::new(
+        "NOR\u{1}MAL",
+        "src/main.rs",
+        "12:4",
+    ));
+    let clean = rows(40, 3, &clean, BorderSet::ASCII);
+    let dirty = rows(40, 3, &dirty, BorderSet::ASCII);
+    assert_eq!(interior(&clean.lines[1]), interior(&dirty.lines[1]));
+}
+
+/// A title is feature-supplied text like any row is. The `*View` types take
+/// `impl Into<String>` for it, so a future feature naming an overlay after a
+/// buffer, a path, or a search term can put a control character in the top
+/// edge just as easily as in a row.
+#[test]
+fn a_control_character_in_a_title_is_blanked_never_set_into_the_edge() {
+    let kind = LayerKind::Picker(
+        PickerView::new("Fi\u{1}les")
+            .with_rows(vec!["src/main.rs".to_string()])
+            .with_selected(0),
+    );
+    let framed = rows(30, 6, &kind, BorderSet::ASCII);
+
+    assert!(
+        !framed.lines[0].chars().any(char::is_control),
+        "no control character survives into the top edge: {:?}",
+        framed.lines[0]
+    );
+    assert!(
+        framed.lines[0].contains(" Fi les "),
+        "the title still reads, with the control character reduced to a blank: {:?}",
+        framed.lines[0]
+    );
+    assert_eq!(
+        cells(&framed.lines[0]),
+        30,
+        "blanking a control character moves no cell: {:?}",
+        framed.lines[0]
+    );
+
+    // a title with nothing left after blanking leaves the edge unbroken,
+    // rather than punching a hole of blanks into it
+    let blank_title = LayerKind::Picker(PickerView::new("\u{1}\u{2}"));
+    let edge = rows(30, 4, &blank_title, BorderSet::ASCII);
+    assert_eq!(edge.lines[0], format!("+{}+", "-".repeat(28)));
+}

@@ -38,16 +38,6 @@ const LINE_V: char = '│';
 /// box-drawing glyphs.
 const PROMPT_MARK: char = '>';
 
-/// The mark separating the columns of a row that carries more than one
-/// (a statusline's three segments, a palette row's label and binding).
-///
-/// A control character, which never survives into painted output:
-/// [`fit`] is the only reader, and it turns each mark into the exact run of
-/// spaces that pushes the following column where it belongs. Column
-/// *spacing* cannot be decided where these rows are built, because it
-/// depends on the interior width the frame leaves.
-const ALIGN: char = '\u{1}';
-
 /// The six glyphs an overlay's frame is drawn from.
 ///
 /// A charset rather than a tier: painting is handed the glyphs to use, so
@@ -223,13 +213,20 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
 
 /// The frame's top row: the two corners with the title, if it fits, set
 /// into the horizontal run between them.
+///
+/// The title is blanked here rather than where a [`Body`] is built, for the
+/// same reason [`fit`] blanks a column: this is the one place a title
+/// becomes painted cells, so a title carrying a control character cannot
+/// reach a row no matter which builder produced it or what a later feature
+/// puts in a view's title.
 fn top_edge(width: u16, borders: BorderSet, title: &str) -> String {
     let span = width - 2;
     let mut middle = String::new();
-    let label = if title.is_empty() {
+    let clean = sanitized(title);
+    let label = if clean.trim().is_empty() {
         String::new()
     } else {
-        format!(" {title} ")
+        format!(" {clean} ")
     };
     let label_cells = cells(&label);
     // the title needs a horizontal glyph on each side of it to read as set
@@ -260,9 +257,23 @@ fn bottom_edge(width: u16, borders: BorderSet) -> String {
 }
 
 /// One interior row before it is fitted to a width.
+///
+/// A row's columns are separate values, never runs of text inside one
+/// string with a marker byte between them. Which variant built the row is
+/// the only thing that decides how its parts are placed, so no byte of
+/// feature-supplied text -- a filename holding a control character, a
+/// label copied out of a buffer -- can name a layout. Column *spacing*
+/// cannot be decided where these rows are built anyway, because it depends
+/// on the interior width the frame leaves.
 enum Line {
-    /// Literal content, possibly carrying [`ALIGN`] marks.
+    /// One column, flush with the row's left edge.
     Text(String),
+    /// Two columns: the first flush left, the second against the right
+    /// edge.
+    Split(String, String),
+    /// Three columns: the first flush left, the second centered on the row
+    /// itself, the third against the right edge.
+    Spread(String, String, String),
     /// A horizontal rule spanning the full interior width, drawn from the
     /// frame's own edge glyph. Kept as an intent rather than a built string
     /// because the width it spans is only known once the frame is sized.
@@ -274,7 +285,9 @@ enum Line {
 struct Body {
     title: String,
     header: Vec<Line>,
-    items: Vec<String>,
+    /// The scrolling rows, each carrying the selection marker once
+    /// [`lay_out`] knows which of them is selected.
+    items: Vec<Line>,
     selected: Option<usize>,
 }
 
@@ -293,10 +306,7 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
         if lines.len() >= usize::from(height) {
             break;
         }
-        lines.push(match line {
-            Line::Text(text) => fit(text, width),
-            Line::Rule => borders.horizontal.to_string().repeat(usize::from(width)),
-        });
+        lines.push(fit(line, width, borders));
     }
     let header_rows = lines.len();
     let item_rows = usize::from(height).saturating_sub(header_rows);
@@ -313,10 +323,10 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
         } else {
             "  "
         };
-        lines.push(fit(&format!("{marker}{item}"), width));
+        lines.push(fit(&marked(item, marker), width, borders));
     }
     while lines.len() < usize::from(height) {
-        lines.push(fit("", width));
+        lines.push(" ".repeat(usize::from(width)));
     }
     let selected_row = selected
         .filter(|i| item_rows > 0 && *i >= first)
@@ -348,7 +358,7 @@ fn picker_body(view: &PickerView) -> Body {
             Line::Text(format!("{PROMPT_MARK} {}", view.query)),
             Line::Rule,
         ],
-        items: view.rows.clone(),
+        items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
     }
 }
@@ -357,7 +367,12 @@ fn tree_body(view: &TreeView) -> Body {
     Body {
         title: view.title.clone(),
         header: Vec::new(),
-        items: view.rows.iter().map(tree_row_text).collect(),
+        items: view
+            .rows
+            .iter()
+            .map(tree_row_text)
+            .map(Line::Text)
+            .collect(),
         selected: view.selected,
     }
 }
@@ -377,10 +392,11 @@ fn tree_row_text(row: &TreeRow) -> String {
 fn statusline_body(view: &StatuslineView) -> Body {
     Body {
         title: view.title.clone(),
-        header: vec![Line::Text(format!(
-            "{}{ALIGN}{}{ALIGN}{}",
-            view.left, view.center, view.right
-        ))],
+        header: vec![Line::Spread(
+            view.left.clone(),
+            view.center.clone(),
+            view.right.clone(),
+        )],
         items: Vec::new(),
         selected: None,
     }
@@ -399,7 +415,7 @@ fn prompt_body(view: &PromptView) -> Body {
             Line::Text(format!("{PROMPT_MARK} {}", view.input)),
             Line::Rule,
         ],
-        items: view.choices.clone(),
+        items: view.choices.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
     }
 }
@@ -411,33 +427,98 @@ fn palette_body(view: &PaletteView) -> Body {
             Line::Text(format!("{PROMPT_MARK} {}", view.query)),
             Line::Rule,
         ],
-        items: view.rows.iter().map(palette_row_text).collect(),
+        items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
     }
 }
 
-/// One palette row's text: the command's name, then its binding pushed
-/// against the row's right edge.
-fn palette_row_text(row: &PaletteRow) -> String {
+/// One palette row: the command's name, plus its binding as a second
+/// column pushed against the row's right edge when it has one.
+fn palette_row_line(row: &PaletteRow) -> Line {
     match &row.binding {
-        Some(binding) => format!("{}{ALIGN}{binding}", row.label),
-        None => row.label.clone(),
+        Some(binding) => Line::Split(row.label.clone(), binding.clone()),
+        None => Line::Text(row.label.clone()),
     }
 }
 
-/// Fits `text` to exactly `width` display cells: alignment marks expand to
-/// the spacing they call for, then the result is truncated or space-padded.
+/// `line` with `marker` prefixed to its leftmost column, which is the one
+/// flush with the row's left edge in every variant.
+fn marked(line: &Line, marker: &str) -> Line {
+    match line {
+        Line::Text(text) => Line::Text(format!("{marker}{text}")),
+        Line::Split(left, right) => Line::Split(format!("{marker}{left}"), right.clone()),
+        Line::Spread(left, center, right) => {
+            Line::Spread(format!("{marker}{left}"), center.clone(), right.clone())
+        }
+        Line::Rule => Line::Rule,
+    }
+}
+
+/// Renders `line` as exactly `width` display cells.
+///
+/// Every column is sanitized before it is measured or placed, so a control
+/// character in feature-supplied text becomes a plain space here rather
+/// than reaching a consumer: the terminal painter replaces one anyway, but
+/// the oracle's rasterizer writes what it is given straight into a screen
+/// dump, and a raw control byte in a golden is not a picture of anything.
 ///
 /// Display cells, never characters: a wide (CJK) glyph occupies two
 /// columns, and a row measured in characters would leave the frame's right
 /// edge one column out of place for every wide glyph on it. A glyph that
 /// would straddle the last column is dropped rather than half-drawn, which
 /// is what the terminal painter does with one too.
-fn fit(text: &str, width: u16) -> String {
-    let expanded = expand_alignment(text, width);
+///
+/// A centered column is centered on the row itself rather than on the
+/// space left between its neighbours, so a long left column does not drag
+/// it off centre. Columns wider than the row keep a single separating
+/// space and let the clip below truncate, rather than producing a negative
+/// gap.
+fn fit(line: &Line, width: u16, borders: BorderSet) -> String {
+    match line {
+        Line::Text(text) => clip(&sanitized(text), width),
+        Line::Split(left, right) => {
+            let (left, right) = (sanitized(left), sanitized(right));
+            let gap = gap_before_right(cells(&left), cells(&right), width);
+            clip(
+                &format!("{left}{}{right}", " ".repeat(usize::from(gap))),
+                width,
+            )
+        }
+        Line::Spread(left, center, right) => {
+            let (left, center, right) = (sanitized(left), sanitized(center), sanitized(right));
+            let start = width.saturating_sub(cells(&center)) / 2;
+            let lead = min_gap(start.saturating_sub(cells(&left)), &center);
+            let placed = cells(&left)
+                .saturating_add(lead)
+                .saturating_add(cells(&center));
+            let gap = gap_before_right(placed, cells(&right), width);
+            clip(
+                &format!(
+                    "{left}{}{center}{}{right}",
+                    " ".repeat(usize::from(lead)),
+                    " ".repeat(usize::from(gap))
+                ),
+                width,
+            )
+        }
+        Line::Rule => borders.horizontal.to_string().repeat(usize::from(width)),
+    }
+}
+
+/// `text` with every control character replaced by a plain space, so it
+/// occupies the one cell a terminal gives it and carries no meaning of its
+/// own.
+fn sanitized(text: &str) -> String {
+    text.chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect()
+}
+
+/// `text` truncated or space-padded to exactly `width` display cells.
+fn clip(text: &str, width: u16) -> String {
     let mut out = String::new();
     let mut used = 0_u16;
-    for ch in expanded.chars() {
+    for ch in text.chars() {
         let w = cell_width(ch);
         if used.saturating_add(w) > width {
             break;
@@ -449,39 +530,6 @@ fn fit(text: &str, width: u16) -> String {
         out.push(' ');
     }
     out
-}
-
-/// Replaces each [`ALIGN`] mark in `text` with the spaces that distribute
-/// its columns across `width`.
-///
-/// One mark yields a left column and a right column flush against the far
-/// edge. Two marks yield left, centered, and right, with the middle column
-/// centered on the row itself rather than on the space left between its
-/// neighbours, so a long left segment does not drag it off centre. Columns
-/// wider than the row keep a single separating space and let [`fit`]
-/// truncate, rather than producing a negative gap.
-fn expand_alignment(text: &str, width: u16) -> String {
-    let parts: Vec<&str> = text.split(ALIGN).collect();
-    match parts.as_slice() {
-        [left, right] => {
-            let gap = gap_before_right(cells(left), cells(right), width);
-            format!("{left}{}{right}", " ".repeat(usize::from(gap)))
-        }
-        [left, center, right] => {
-            let start = width.saturating_sub(cells(center)) / 2;
-            let lead = min_gap(start.saturating_sub(cells(left)), center);
-            let placed = cells(left)
-                .saturating_add(lead)
-                .saturating_add(cells(center));
-            let gap = gap_before_right(placed, cells(right), width);
-            format!(
-                "{left}{}{center}{}{right}",
-                " ".repeat(usize::from(lead)),
-                " ".repeat(usize::from(gap))
-            )
-        }
-        _ => text.to_string(),
-    }
 }
 
 /// The run of spaces that pushes a `right`-wide column flush against the
@@ -512,8 +560,9 @@ fn cells(text: &str) -> u16 {
         .fold(0_u16, |acc, c| acc.saturating_add(c))
 }
 
-/// One character's width in terminal display cells. A control character or
-/// combining mark occupies none.
+/// One character's width in terminal display cells. A combining mark
+/// occupies none (control characters never reach here: [`sanitized`]
+/// replaced each with a space before anything was measured).
 fn cell_width(ch: char) -> u16 {
     u16::try_from(ch.width().unwrap_or(0)).unwrap_or(u16::MAX)
 }
