@@ -81,6 +81,11 @@ struct Takeover {
     /// pointing at nothing.
     feature: &'static str,
     /// The nvim option name, exactly as `nvim_set_option_value` takes it.
+    ///
+    /// Unique across the whole table, not merely within one feature: the
+    /// guard a takeover installs is keyed on the option name alone, so a
+    /// second row naming it replaces the first row's guard whatever feature
+    /// wrote it (`no_two_takeover_rows_claim_one_option`).
     option: &'static str,
     /// The value that hands the surface to view.
     value: OptionValue,
@@ -146,8 +151,9 @@ pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc]) -> Vec<Supersession> {
 /// surface nvim is still half drawing -- silently, since the dropped row
 /// looks exactly like a row that was never written. Two rows setting the
 /// same option for one feature are the contradiction that cannot be
-/// resolved this way, and `no_two_takeover_rows_claim_one_option` rejects
-/// the table outright rather than letting later-wins ordering decide.
+/// resolved this way -- whichever features write them --, and
+/// `no_two_takeover_rows_claim_one_option` rejects the table outright
+/// rather than letting later-wins ordering decide.
 fn plan_from(
     cfg: &NativeConfig,
     features: &[FeatureDesc],
@@ -228,20 +234,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn no_two_takeover_rows_claim_one_option() {
-        for (i, t) in TAKEOVERS.iter().enumerate() {
-            let dupes = TAKEOVERS
+    /// The first option two rows both claim, as `(option, earlier feature,
+    /// later feature)`, or `None` if every row in `takeovers` claims a
+    /// distinct one.
+    ///
+    /// Blind to which features the two rows belong to, because the thing
+    /// that collides is not: the guard a hold installs is keyed on the
+    /// option name alone, so the second hold replaces the first one's guard
+    /// and its value silently wins -- while the plan still carries both
+    /// entries, each printing its own reversal line for a surface only one
+    /// of them holds. Two features claiming one surface is a contradiction
+    /// in the table, not something an ordering rule can settle.
+    fn colliding_option(
+        takeovers: &[Takeover],
+    ) -> Option<(&'static str, &'static str, &'static str)> {
+        takeovers.iter().enumerate().find_map(|(i, t)| {
+            takeovers
                 .iter()
                 .skip(i + 1)
-                .filter(|o| o.feature == t.feature && o.option == t.option)
-                .count();
-            assert_eq!(
-                dupes, 0,
-                "{} claims {} twice: one option cannot be handed over to two values",
-                t.feature, t.option
-            );
-        }
+                .find(|o| o.option == t.option)
+                .map(|o| (t.option, t.feature, o.feature))
+        })
+    }
+
+    #[test]
+    fn no_two_takeover_rows_claim_one_option() {
+        assert_eq!(
+            colliding_option(&TAKEOVERS),
+            None,
+            "one option cannot be handed over twice: the later row's hold \
+             replaces the earlier row's guard and its value wins silently"
+        );
+    }
+
+    #[test]
+    fn two_features_claiming_one_option_are_rejected() {
+        // the cross-feature shape, which a per-feature check waves through:
+        // both rows reach the plan, both hold the same option, and each
+        // entry offers a different off switch for a surface one of them no
+        // longer holds
+        let table = [
+            Takeover {
+                feature: "statusline",
+                option: "laststatus",
+                value: OptionValue::Int(0),
+            },
+            Takeover {
+                feature: "notifications",
+                option: "laststatus",
+                value: OptionValue::Int(3),
+            },
+        ];
+        assert_eq!(
+            colliding_option(&table),
+            Some(("laststatus", "statusline", "notifications"))
+        );
     }
 
     #[test]
