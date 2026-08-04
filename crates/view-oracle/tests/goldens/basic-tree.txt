@@ -1,0 +1,8 @@
+                                
+  +- Explorer -----------------+
+  |   - crates                 |
+  |     + view-core            |
+  |     - view-tui             |
+  | >       paint.rs           |
+  |     Cargo.toml             |
+  +----------------------------+

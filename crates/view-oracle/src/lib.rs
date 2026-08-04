@@ -40,7 +40,7 @@ pub mod compat;
 mod minimize;
 mod parity;
 pub mod pty;
-mod raster;
+pub mod raster;
 mod reference;
 mod settle;
 #[cfg(test)]

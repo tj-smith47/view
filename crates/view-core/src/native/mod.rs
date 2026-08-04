@@ -6,3 +6,4 @@
 pub mod geometry;
 pub mod mappings;
 pub mod registry;
+pub mod views;

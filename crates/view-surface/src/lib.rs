@@ -5,9 +5,14 @@
 //! data, no drawing here; `view-tui` is the only crate that turns a
 //! `Surface` into pixels.
 
+pub mod overlay;
+
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
-use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
+use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState};
+use view_core::native::views::{PaletteView, PickerView, PromptView, StatuslineView, TreeView};
+
+use crate::overlay::BorderSet;
 
 /// A rectangular region in terminal cells, addressed the same way as
 /// [`view_core::grid::Grid`]: `(row, col)` is the top-left corner.
@@ -21,6 +26,23 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// A rect at `row`/`col` of `width` x `height`, in whatever coordinate
+    /// space the caller is working in (this type carries no opinion about
+    /// grid space versus terminal space).
+    ///
+    /// `Rect` is `#[non_exhaustive]`, so this is how any other crate builds
+    /// one; the fields stay public because reading them is not a
+    /// compatibility hazard the way a struct literal is.
+    #[must_use]
+    pub fn new(row: u16, col: u16, width: u16, height: u16) -> Self {
+        Self {
+            row,
+            col,
+            width,
+            height,
+        }
+    }
+
     /// Clamps `self` to fit within a `bounds_width` x `bounds_height` grid:
     /// `row`/`col` are capped to the bounds first, then `width`/`height` are
     /// capped to whatever remains. A hostile rect (a huge row/col/width/
@@ -46,6 +68,16 @@ impl Rect {
 pub struct Layer {
     pub rect: Rect,
     pub kind: LayerKind,
+    /// The glyphs this layer's frame is drawn from, or `None` for a layer
+    /// that carries no frame of its own.
+    ///
+    /// Resolved here, at render time, from the terminal capabilities
+    /// [`Model::caps`] already holds, rather than at paint time: a `Surface`
+    /// is then a complete description of the frame, and every consumer of
+    /// one (the terminal painter, the oracle's rasterizer, a golden
+    /// snapshot) draws the same border without a second capability lookup
+    /// they could each answer differently.
+    pub borders: Option<overlay::BorderSet>,
 }
 
 /// What a [`Layer`] paints.
@@ -74,6 +106,16 @@ pub enum LayerKind {
     /// its `view-tui` painter: the runtime loop is timer-free, so this is a
     /// fixed glyph, never a frame that advances on its own clock.
     Shell,
+    /// A fuzzy picker's prompt line and candidate rows.
+    Picker(PickerView),
+    /// A file tree's visible entries.
+    Tree(TreeView),
+    /// A native statusline's three composed segments.
+    Statusline(StatuslineView),
+    /// A prompt's question, typed answer, and fixed choices.
+    Prompt(PromptView),
+    /// A command palette's prompt line, commands, and their bindings.
+    Palette(PaletteView),
 }
 
 /// The exact indicator text a [`LayerKind::Shell`] layer puts on screen.
@@ -114,6 +156,22 @@ pub struct CursorSpec {
     pub shape: CursorShape,
 }
 
+impl Layer {
+    /// A layer that draws no frame of its own: an engine grid, or one of
+    /// the chrome overlays that fills its whole rect with content.
+    ///
+    /// [`overlay::framed`] is the counterpart for a native overlay, which
+    /// carries the charset its border is drawn from.
+    #[must_use]
+    pub fn unframed(rect: Rect, kind: LayerKind) -> Self {
+        Self {
+            rect,
+            kind,
+            borders: None,
+        }
+    }
+}
+
 /// What to paint: an ordered (z ascending) list of layers plus the real
 /// terminal cursor spec.
 #[non_exhaustive]
@@ -121,6 +179,25 @@ pub struct CursorSpec {
 pub struct Surface {
     pub layers: Vec<Layer>,
     pub cursor: Option<CursorSpec>,
+}
+
+impl Surface {
+    /// A surface holding exactly `layers`, with no terminal cursor.
+    ///
+    /// [`render`] builds a live frame from a [`Model`]; this builds one from
+    /// a description, for a consumer that already knows the exact layers it
+    /// wants painted -- a golden pinning how a layer is framed, or a
+    /// scripted screen handed straight to a rasterizer. `Surface` is
+    /// `#[non_exhaustive]`, so without this it cannot be built outside this
+    /// crate at all, and every such consumer would have to route through a
+    /// `Model` it has no other use for.
+    #[must_use]
+    pub fn from_layers(layers: Vec<Layer>) -> Self {
+        Self {
+            layers,
+            cursor: None,
+        }
+    }
 }
 
 /// Builds the [`Surface`] for one frame from `model`.
@@ -151,30 +228,20 @@ pub fn render(model: &Model) -> Surface {
     let (grid_w, grid_h) = engine.grid().size();
     let offset = model.chrome_rows();
 
-    let mut layers = vec![Layer {
-        rect: Rect {
-            row: offset,
-            col: 0,
-            width: grid_w,
-            height: grid_h,
-        },
-        kind: LayerKind::EngineGrid,
-    }];
+    let mut layers = vec![Layer::unframed(
+        Rect::new(offset, 0, grid_w, grid_h),
+        LayerKind::EngineGrid,
+    )];
 
     if !model.content_painted {
         // sized from the real terminal, not the (still 0x0 pre-attach)
         // engine grid: the very first shell paint happens before nvim has
         // ever sent a grid_resize, so grid_w/grid_h are not yet meaningful
         // dimensions to paint a placeholder into
-        layers.push(Layer {
-            rect: Rect {
-                row: 0,
-                col: 0,
-                width: model.term_width,
-                height: model.term_height,
-            },
-            kind: LayerKind::Shell,
-        });
+        layers.push(Layer::unframed(
+            Rect::new(0, 0, model.term_width, model.term_height),
+            LayerKind::Shell,
+        ));
     }
 
     if let Some(tabline) = &engine.tabline {
@@ -186,16 +253,10 @@ pub fn render(model: &Model) -> Surface {
         // gets reserved with nothing painted into it or the tabline paints
         // over buffer content
         if offset > 0 {
-            layers.push(Layer {
-                rect: Rect {
-                    row: 0,
-                    col: 0,
-                    width: grid_w,
-                    height: 1,
-                }
-                .clamp_to(grid_w, grid_h),
-                kind: LayerKind::Tabline(tabline.clone()),
-            });
+            layers.push(Layer::unframed(
+                Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
+                LayerKind::Tabline(tabline.clone()),
+            ));
         }
     }
     if let Some(cmdline) = &engine.cmdline {
@@ -285,6 +346,16 @@ pub fn render(model: &Model) -> Surface {
             LayerKind::Popupmenu(pm.clone()),
         ));
     }
+    // last, and in stack order: a native overlay sits above every engine
+    // overlay, and the stack's tail is the one holding focus, so painting
+    // in stack order puts the focused overlay on top of the ones it opened
+    // over
+    layers.extend(
+        model
+            .overlays()
+            .iter()
+            .filter_map(|open| native_layer(model, open)),
+    );
 
     Surface {
         layers,
@@ -336,19 +407,47 @@ fn overlay_layer(
     offset: u16,
     kind: LayerKind,
 ) -> Layer {
-    let clamped = Rect {
-        row,
-        col,
-        width,
-        height,
-    }
-    .clamp_to(bounds.0, bounds.1);
-    Layer {
-        rect: Rect {
+    let clamped = Rect::new(row, col, width, height).clamp_to(bounds.0, bounds.1);
+    Layer::unframed(
+        Rect {
             row: clamped.row.saturating_add(offset),
             ..clamped
         },
         kind,
+    )
+}
+
+/// The framed [`Layer`] for one open native overlay, or `None` for an
+/// overlay carrying no paintable content.
+///
+/// The rect comes from [`Model::overlay_rect`], the same resolution
+/// `update()`'s mouse hit-test routes a click through, so paint and routing
+/// cannot disagree about where an overlay is. The border charset comes from
+/// the terminal's own tier, resolved once here rather than per painter.
+fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
+    let cells = model.overlay_rect(open);
+    let kind = layer_kind(&open.kind)?;
+    Some(overlay::framed(
+        Rect::new(cells.row, cells.col, cells.width, cells.height),
+        kind,
+        BorderSet::for_tier(model.caps.tier),
+    ))
+}
+
+/// The paint-facing layer content for one overlay's feature state, or
+/// `None` for an overlay with nothing to paint.
+///
+/// `OverlayKind::Bare` is the routing and geometry seam by itself: it owns
+/// its rect and, while it is on top, the keyboard, with no feature state
+/// behind it to draw. `OverlayKind` is `#[non_exhaustive]` and defined in
+/// another crate, so the wildcard arm is mandatory rather than a choice --
+/// cross-crate exhaustiveness checking is not available here, and a feature
+/// variant reaching this build without a mapping paints nothing rather than
+/// failing to compile.
+fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
+    match kind {
+        OverlayKind::Bare => None,
+        _ => None,
     }
 }
 
@@ -437,6 +536,36 @@ mod tests {
     /// constructing them directly.
     fn apply(model: &mut Model, ev: UiEvent) {
         let _ = update(model, Msg::Redraw(vec![ev]));
+    }
+
+    /// An overlay carrying no feature state is routing and geometry only:
+    /// it owns its rect and, while it is on top, the keyboard, and there is
+    /// nothing behind it to draw. Painting an empty frame for it would show
+    /// the user a box that no feature ever opened.
+    #[test]
+    fn a_bare_overlay_contributes_no_layer_to_paint() {
+        let mut model = model_with_grid(40, 12);
+        model.term_width = 40;
+        model.term_height = 12;
+        let id = model.push_overlay(
+            view_core::native::geometry::OverlayBox::new(60, 50),
+            view_core::model::OverlayKind::Bare,
+        );
+
+        let surface = render(&model);
+
+        assert_eq!(model.overlays().len(), 1, "the overlay is open");
+        assert!(
+            model.overlays().iter().any(|o| o.id == id),
+            "and it is the one just pushed"
+        );
+        assert_eq!(
+            surface.layers.len(),
+            1,
+            "yet paint sees the grid layer alone: {:?}",
+            surface.layers
+        );
+        assert_eq!(surface.layers[0].kind, LayerKind::EngineGrid);
     }
 
     #[test]

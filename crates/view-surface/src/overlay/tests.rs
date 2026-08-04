@@ -1,0 +1,296 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use super::*;
+use view_core::native::views::PickerView;
+
+fn picker() -> LayerKind {
+    LayerKind::Picker(
+        PickerView::new("Files")
+            .with_query("mai")
+            .with_rows(vec![
+                "src/main.rs".to_string(),
+                "src/lib.rs".to_string(),
+                "src/paint.rs".to_string(),
+            ])
+            .with_selected(0),
+    )
+}
+
+fn widths(rows: &Rows) -> Vec<u16> {
+    rows.lines.iter().map(|l| cells(l)).collect()
+}
+
+/// One row's text with its two edge glyphs and the padding column inside
+/// each of them removed: the span a content assertion is about.
+fn interior(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    chars[2..chars.len() - 2].iter().collect()
+}
+
+#[test]
+fn every_row_of_a_framed_overlay_is_exactly_the_rect_wide_and_the_rect_is_filled() {
+    for width in [2_u16, 3, 5, 6, 10, 24, 41] {
+        for height in [2_u16, 3, 7, 12] {
+            let rows = rows(width, height, &picker(), BorderSet::ROUNDED);
+            assert_eq!(
+                rows.lines.len(),
+                usize::from(height),
+                "{width}x{height} row count"
+            );
+            assert_eq!(
+                widths(&rows),
+                vec![width; usize::from(height)],
+                "{width}x{height} row widths"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
+    let full = rows(28, 8, &picker(), BorderSet::ROUNDED);
+    let standard = rows(28, 8, &picker(), BorderSet::PLAIN);
+    let basic = rows(28, 8, &picker(), BorderSet::ASCII);
+
+    assert!(full.lines[0].starts_with('╭'), "{}", full.lines[0]);
+    assert!(standard.lines[0].starts_with('┌'), "{}", standard.lines[0]);
+    assert!(basic.lines[0].starts_with('+'), "{}", basic.lines[0]);
+
+    // corners aside, full and standard draw the same edges, so a change to
+    // the shared glyph moves both tiers and leaves ASCII alone
+    assert_eq!(
+        full.lines[1], standard.lines[1],
+        "interior rows are identical"
+    );
+    assert_eq!(
+        full.selected, standard.selected,
+        "selection lands on the same row at every tier"
+    );
+    assert_eq!(full.selected, basic.selected);
+
+    let strip = |line: &str| -> String {
+        line.chars()
+            .filter(|c| !"╭╮╰╯┌┐└┘+-|─│".contains(*c))
+            .collect()
+    };
+    for (a, b) in full.lines.iter().zip(basic.lines.iter()) {
+        assert_eq!(strip(a), strip(b), "content is tier-independent");
+    }
+}
+
+#[test]
+fn the_title_is_set_into_the_top_edge_only_while_it_fits() {
+    let wide = rows(28, 5, &picker(), BorderSet::ASCII);
+    assert!(wide.lines[0].contains(" Files "), "{}", wide.lines[0]);
+
+    let narrow = rows(8, 5, &picker(), BorderSet::ASCII);
+    assert_eq!(
+        narrow.lines[0], "+------+",
+        "a top edge too short for the title keeps an unbroken run"
+    );
+}
+
+#[test]
+fn the_selection_marker_and_its_row_index_name_the_same_row() {
+    let framed = rows(28, 8, &picker(), BorderSet::ASCII);
+    let row = framed.selected.expect("the picker has a selection");
+    assert!(
+        framed.lines[usize::from(row)].contains("> src/main.rs"),
+        "{:?}",
+        framed.lines
+    );
+    for (i, line) in framed.lines.iter().enumerate() {
+        if i != usize::from(row) {
+            assert!(!line.contains("> src/"), "only one row is marked: {line}");
+        }
+    }
+}
+
+#[test]
+fn a_selection_below_the_window_scrolls_it_into_view_by_the_smallest_step() {
+    let many: Vec<String> = (0..20).map(|i| format!("row-{i:02}")).collect();
+    let kind = |selected: usize| {
+        LayerKind::Picker(
+            PickerView::new("Files")
+                .with_rows(many.clone())
+                .with_selected(selected),
+        )
+    };
+
+    // interior height 4, of which the prompt line and rule take 2: two item
+    // rows are visible at a time
+    let top = rows(20, 6, &kind(1), BorderSet::ASCII);
+    assert!(top.lines[3].contains("row-00"), "{:?}", top.lines);
+    assert!(top.lines[4].contains("> row-01"), "{:?}", top.lines);
+
+    let scrolled = rows(20, 6, &kind(7), BorderSet::ASCII);
+    assert!(scrolled.lines[3].contains("row-06"), "{:?}", scrolled.lines);
+    assert!(
+        scrolled.lines[4].contains("> row-07"),
+        "the selection sits on the last visible row, not the first: {:?}",
+        scrolled.lines
+    );
+    assert_eq!(scrolled.selected, Some(4));
+}
+
+#[test]
+fn a_selection_past_the_end_of_the_rows_highlights_nothing() {
+    let kind = LayerKind::Picker(
+        PickerView::new("Files")
+            .with_rows(vec!["only".to_string()])
+            .with_selected(9),
+    );
+    let framed = rows(20, 6, &kind, BorderSet::ASCII);
+    assert_eq!(framed.selected, None);
+    assert!(
+        framed.lines.iter().all(|l| !l.contains("> only")),
+        "{:?}",
+        framed.lines
+    );
+}
+
+#[test]
+fn a_layer_that_is_not_a_native_overlay_paints_no_rows_at_all() {
+    let framed = rows(20, 6, &LayerKind::EngineGrid, BorderSet::ASCII);
+    assert!(framed.lines.is_empty());
+    assert_eq!(framed.selected, None);
+}
+
+#[test]
+fn a_degenerate_rect_yields_no_rows_rather_than_half_a_frame() {
+    for (w, h) in [(0_u16, 6_u16), (20, 0), (0, 0)] {
+        let framed = rows(w, h, &picker(), BorderSet::ASCII);
+        assert!(framed.lines.is_empty(), "{w}x{h}");
+    }
+    // one cell on an axis has no distinct edge cells, so content is drawn
+    // unframed rather than as stacked corner glyphs
+    let thin = rows(6, 1, &picker(), BorderSet::ASCII);
+    assert_eq!(thin.lines, vec!["> mai ".to_string()]);
+}
+
+#[test]
+fn a_wide_glyph_is_counted_in_cells_so_the_right_edge_stays_put() {
+    let kind = LayerKind::Picker(
+        PickerView::new("界")
+            .with_query("界界界")
+            .with_rows(vec!["界界界界界界界界".to_string()])
+            .with_selected(0),
+    );
+    let framed = rows(16, 5, &kind, BorderSet::ASCII);
+    assert_eq!(widths(&framed), vec![16; 5], "{:?}", framed.lines);
+    for line in &framed.lines {
+        assert!(line.ends_with('|') || line.ends_with('+'), "{line}");
+    }
+}
+
+#[test]
+fn a_statusline_puts_its_three_segments_left_centered_and_right() {
+    let kind = LayerKind::Statusline(view_core::native::views::StatuslineView::new(
+        "NORMAL",
+        "src/main.rs",
+        "12:4",
+    ));
+    let framed = rows(40, 3, &kind, BorderSet::ASCII);
+    let row = interior(&framed.lines[1]);
+    assert!(row.starts_with("NORMAL"), "{row}");
+    assert!(row.trim_end().ends_with("12:4"), "{row}");
+    let center_at = row
+        .find("src/main.rs")
+        .expect("centered segment is present");
+    // 40 cells less the two edge glyphs and the two padding columns
+    let ideal = (36 - "src/main.rs".len()) / 2;
+    assert!(
+        center_at.abs_diff(ideal) <= 1,
+        "centered on the interior's own middle: {center_at} vs {ideal}"
+    );
+}
+
+#[test]
+fn a_palette_binding_is_pushed_against_the_right_edge_of_its_row() {
+    let kind = LayerKind::Palette(
+        view_core::native::views::PaletteView::new("Commands")
+            .with_rows(vec![
+                view_core::native::views::PaletteRow::new("Find File").with_binding("<C-p>"),
+                view_core::native::views::PaletteRow::new("Reload"),
+            ])
+            .with_selected(0),
+    );
+    let framed = rows(30, 6, &kind, BorderSet::ASCII);
+    let row = interior(&framed.lines[3]);
+    assert!(row.starts_with("> Find File"), "{row}");
+    assert!(row.trim_end().ends_with("<C-p>"), "{row}");
+    assert!(
+        !framed.lines[4].contains('<'),
+        "an unbound command has no binding column"
+    );
+}
+
+#[test]
+fn a_tree_row_shows_its_depth_and_whether_it_can_be_opened() {
+    use view_core::native::views::{TreeRow, TreeView};
+    let kind = LayerKind::Tree(
+        TreeView::new("Explorer")
+            .with_rows(vec![
+                TreeRow::dir(0, "src", true),
+                TreeRow::leaf(1, "main.rs"),
+                TreeRow::dir(0, "target", false),
+            ])
+            .with_selected(1),
+    );
+    let framed = rows(30, 5, &kind, BorderSet::ASCII);
+    assert!(framed.lines[1].contains("  - src"), "{:?}", framed.lines);
+    assert!(
+        framed.lines[2].contains(">   " /* marker */) && framed.lines[2].contains("main.rs"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(framed.lines[3].contains("  + target"), "{:?}", framed.lines);
+}
+
+#[test]
+fn a_prompt_carries_its_question_its_input_and_its_choices() {
+    use view_core::native::views::PromptView;
+    let kind = LayerKind::Prompt(
+        PromptView::new("Confirm", "Overwrite src/main.rs?")
+            .with_input("y")
+            .with_choices(vec!["Yes".to_string(), "No".to_string()])
+            .with_selected(1),
+    );
+    let framed = rows(34, 7, &kind, BorderSet::ASCII);
+    assert!(framed.lines[1].contains("Overwrite"), "{:?}", framed.lines);
+    assert!(framed.lines[2].contains("> y"), "{:?}", framed.lines);
+    assert!(
+        framed.lines[3].contains("---"),
+        "the rule separates the typed input from the choices, so the two
+         rows carrying the same marker glyph never touch"
+    );
+    assert!(framed.lines[4].contains("  Yes"), "{:?}", framed.lines);
+    assert!(framed.lines[5].contains("> No"), "{:?}", framed.lines);
+    assert_eq!(framed.selected, Some(5));
+}
+
+#[test]
+fn a_tier_maps_to_exactly_one_border_charset() {
+    assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);
+    assert_eq!(BorderSet::for_tier(Tier::Standard), BorderSet::PLAIN);
+    assert_eq!(BorderSet::for_tier(Tier::Basic), BorderSet::ASCII);
+    assert_eq!(
+        BorderSet::ROUNDED.horizontal,
+        BorderSet::PLAIN.horizontal,
+        "the two box-drawing tiers differ only at the corners"
+    );
+    assert_ne!(BorderSet::ASCII.horizontal, BorderSet::ROUNDED.horizontal);
+}
+
+#[test]
+fn a_framed_layer_carries_the_charset_it_was_built_with() {
+    let rect = Rect {
+        row: 2,
+        col: 4,
+        width: 20,
+        height: 6,
+    };
+    let layer = framed(rect, picker(), BorderSet::PLAIN);
+    assert_eq!(layer.rect, rect);
+    assert_eq!(layer.borders, Some(BorderSet::PLAIN));
+}

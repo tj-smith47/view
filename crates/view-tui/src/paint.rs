@@ -11,7 +11,7 @@ use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
 use view_core::theme::{ResolvedStyle, Theme};
-use view_surface::{LayerKind, Rect, Surface};
+use view_surface::{Layer, LayerKind, Rect, Surface};
 
 /// The terminal-space rows a frame's composite must repaint, so a redraw
 /// touches only the changed region instead of all ~4800 cells.
@@ -476,6 +476,13 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, buf),
             LayerKind::Shell => paint_shell(&theme, area, buf),
+            LayerKind::Picker(_)
+            | LayerKind::Tree(_)
+            | LayerKind::Statusline(_)
+            | LayerKind::Prompt(_)
+            | LayerKind::Palette(_) => {
+                paint_native_overlay(layer, &theme, model.caps.truecolor, area, buf);
+            }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
             _ => {}
@@ -778,7 +785,15 @@ fn set_border_cell(buf: &mut ratatui::buffer::Buffer, x: u16, y: u16, ch: char, 
 /// apart from empty screen. The floor is the plain (undimmed) neutral grey
 /// constant instead, which stays visible against any background.
 fn message_border_color(theme: &Theme) -> u32 {
-    theme.msg_area.fg.map_or(0x0080_8080, dim)
+    border_color(theme.msg_area)
+}
+
+/// A frame's foreground given the style of the surface it encloses: a
+/// dimmed variant of that surface's own foreground, or the neutral grey
+/// floor when it has none. See [`message_border_color`] for why the floor
+/// is a fixed color rather than a dimmed background.
+fn border_color(interior: ResolvedStyle) -> u32 {
+    interior.fg.map_or(0x0080_8080, dim)
 }
 
 /// Scales each RGB channel of `c` to 60% of its original value, the muted
@@ -851,6 +866,128 @@ fn paint_popupmenu(
         };
         paint_text_row(&item.display_text(), style, area, row, buf);
     }
+}
+
+/// Renders one native overlay: a picker, a file tree, a statusline, a
+/// prompt, or a command palette.
+///
+/// Layout is not repeated here. `view_surface::overlay::rows` already cut
+/// this layer's rect into exactly the strings that cover it -- frame,
+/// padding, title, scroll window, selection marker -- and those same
+/// strings are what the oracle's rasterizer blits into a golden screen
+/// dump. One layout pass serves both, so a golden depicts what a terminal
+/// actually receives instead of a parallel reimplementation of it. This
+/// function adds only the part that needs a terminal to decide: style.
+///
+/// Color derivation is gated on the probed `truecolor` bit, never on the
+/// capability tier. The tier's whole contribution was choosing the border
+/// charset, back at render time; here the question is whether this
+/// terminal proved it renders 24-bit color, and a terminal that did not
+/// gets attributes alone -- the selected row reverses, which every
+/// terminal honours, and the frame keeps the interior's own colors rather
+/// than being sent an SGR sequence for a color that was never established.
+///
+/// The overlay's colors come from the popup-menu groups the user's
+/// colorscheme already defines, so a native overlay reads as part of their
+/// theme rather than as a second, unrelated palette, and `Theme::from_hl`'s
+/// own emphasis fallback keeps the selected row distinct under a
+/// colorscheme that never defines `PmenuSel`.
+fn paint_native_overlay(
+    layer: &Layer,
+    theme: &Theme,
+    truecolor: bool,
+    area: ratatui::layout::Rect,
+    buf: &mut Buffer,
+) {
+    let Some(borders) = layer.borders else {
+        return;
+    };
+    let laid =
+        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
+    let interior = if truecolor {
+        ratatui_style(theme.pmenu)
+    } else {
+        Style::default()
+    };
+    let selected = if truecolor {
+        ratatui_style(theme.pmenu_sel)
+    } else {
+        Style::default().add_modifier(Modifier::REVERSED)
+    };
+    let frame = if truecolor {
+        ratatui_style(ResolvedStyle {
+            fg: Some(border_color(theme.pmenu)),
+            bg: theme.pmenu.bg,
+            ..ResolvedStyle::default()
+        })
+    } else {
+        Style::default()
+    };
+
+    let last = laid.lines.len().saturating_sub(1);
+    for (i, line) in laid.lines.iter().enumerate() {
+        let Ok(row) = u16::try_from(i) else {
+            break;
+        };
+        if row >= area.height {
+            break;
+        }
+        let edge_row = laid.framed && (i == 0 || i == last);
+        let style = if edge_row {
+            frame
+        } else if laid.selected == Some(row) {
+            selected
+        } else {
+            interior
+        };
+        paint_text_row(line, style, area, row, buf);
+        if laid.framed && !edge_row {
+            paint_frame_cells(line, layer.rect.width, area, row, frame, buf);
+        }
+    }
+}
+
+/// Restyles the two vertical frame glyphs of one already-painted interior
+/// row, which [`paint_native_overlay`] blitted in the interior's own style
+/// along with the content between them.
+///
+/// The glyphs are read back out of `line` rather than out of the border
+/// charset: the row that was painted is the only authority on what sits in
+/// its first and last cell, and re-deriving them here would put a second
+/// opinion about the frame in a module that deliberately holds none.
+/// `width` is the layer's own rect width, not `area`'s: when the terminal
+/// clipped the rect, the right-hand glyph was never painted and there is
+/// nothing at that column to restyle.
+fn paint_frame_cells(
+    line: &str,
+    width: u16,
+    area: ratatui::layout::Rect,
+    row: u16,
+    style: Style,
+    buf: &mut Buffer,
+) {
+    let mut chars = line.chars();
+    if let Some(left) = chars.next() {
+        reset_cell(buf, area.x, area.y + row);
+        set_border_cell(buf, area.x, area.y + row, left, style);
+    }
+    let right = width.saturating_sub(1);
+    if right < area.width {
+        if let Some(glyph) = line.chars().next_back() {
+            reset_cell(buf, area.x + right, area.y + row);
+            set_border_cell(buf, area.x + right, area.y + row, glyph, style);
+        }
+    }
+}
+
+/// Clears one cell back to the terminal's defaults.
+///
+/// `ratatui::buffer::Cell::set_style` merges attributes rather than
+/// replacing them, so a cell repainted in a second style keeps every
+/// modifier the first one set. A frame glyph must carry the frame's style
+/// alone, not the interior text's bold or italic as well.
+fn reset_cell(buf: &mut Buffer, x: u16, y: u16) {
+    buf[(x, y)].reset();
 }
 
 /// Renders the pre-content startup shell: a themed statusline placeholder
@@ -3356,5 +3493,187 @@ mod tests {
             shadow, full,
             "under-clip must be caught by the equality moat"
         );
+    }
+
+    /// A model whose only chrome is the terminal capabilities under test.
+    fn caps_model(sync: bool, truecolor: bool, kitty: bool) -> Model {
+        let mut model = Model::new();
+        model.caps = view_core::model::TermCaps::from_probe(sync, truecolor, kitty);
+        model
+    }
+
+    fn native_picker() -> LayerKind {
+        LayerKind::Picker(
+            view_core::native::views::PickerView::new("Files")
+                .with_query("ma")
+                .with_rows(vec!["src/main.rs".to_string(), "src/lib.rs".to_string()])
+                .with_selected(1),
+        )
+    }
+
+    /// Paints `layer` alone into a `width` x `height` terminal and returns
+    /// the painted buffer.
+    fn paint_layer_alone(
+        model: &Model,
+        layer: Layer,
+        width: u16,
+        height: u16,
+    ) -> ratatui::buffer::Buffer {
+        let surface = Surface::from_layers(vec![layer]);
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(model, &surface, f)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, row: u16, from: u16, to: u16) -> String {
+        (from..to)
+            .map(|c| buf[(c, row)].symbol().to_string())
+            .collect()
+    }
+
+    /// The painter must blit the layout pass verbatim. If it ever grows a
+    /// second opinion about framing, the goldens in `view-oracle` (which
+    /// go through the same layout pass, not through this painter) stop
+    /// describing what a terminal actually receives.
+    #[test]
+    fn a_native_overlay_paints_exactly_the_rows_the_layout_pass_produced() {
+        for (sync, truecolor, kitty) in [
+            (true, true, true),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let model = caps_model(sync, truecolor, kitty);
+            let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+            let rect = Rect::new(1, 2, 24, 7);
+            let layer = view_surface::overlay::framed(rect, native_picker(), borders);
+            let buf = paint_layer_alone(&model, layer, 30, 10);
+            let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
+            for (i, line) in laid.lines.iter().enumerate() {
+                let row = u16::try_from(i).unwrap();
+                assert_eq!(
+                    row_text(&buf, 1 + row, 2, 26),
+                    *line,
+                    "tier {:?} row {row}",
+                    model.caps.tier
+                );
+            }
+        }
+    }
+
+    /// The probed color bit, not the tier, is what decides whether any
+    /// color is derived: a terminal that never proved 24-bit color must be
+    /// sent attributes only.
+    #[test]
+    fn a_terminal_without_truecolor_gets_no_derived_color() {
+        let mut model = caps_model(false, false, false);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 30,
+            height: 10,
+        });
+        // a live highlight table with real colors: the gate must hold
+        // because of the probe, not because the theme happened to be empty
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00FF_FFFF),
+                bg: Some(0x0011_2233),
+                sp: None,
+            },
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        for row in 1..8_u16 {
+            for col in 2..26_u16 {
+                let cell = &buf[(col, row)];
+                assert_eq!(cell.fg, Color::Reset, "({col},{row}) fg");
+                assert_eq!(cell.bg, Color::Reset, "({col},{row}) bg");
+            }
+        }
+    }
+
+    /// Reverse video is the one selection signal every terminal honours,
+    /// so it must survive the no-color path rather than being dropped
+    /// along with the derived colors.
+    #[test]
+    fn the_selected_row_reverses_even_with_no_color_available() {
+        let model = caps_model(false, false, false);
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
+        let selected = laid.selected.expect("the picker has a selection");
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        for row in 0..u16::try_from(laid.lines.len()).unwrap() {
+            let reversed = buf[(4, 1 + row)].modifier.contains(Modifier::REVERSED);
+            assert_eq!(reversed, row == selected, "row {row} reversed={reversed}");
+        }
+    }
+
+    /// A truecolor terminal gets the popup-menu groups the colorscheme
+    /// already defines, with the frame dimmed off the interior's own
+    /// foreground rather than sharing it.
+    #[test]
+    fn a_truecolor_terminal_frames_a_native_overlay_in_a_dimmed_interior_color() {
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00C8_C8C8),
+                bg: Some(0x0011_2233),
+                sp: None,
+            },
+        );
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        let theme = Theme::from_hl(model.engine.hl());
+        assert_eq!(
+            buf[(2, 1)].fg,
+            rgb(border_color(theme.pmenu)),
+            "corner glyph"
+        );
+        assert_eq!(
+            buf[(4, 2)].fg,
+            rgb(theme.pmenu.fg.unwrap()),
+            "interior text"
+        );
+        assert_ne!(
+            buf[(2, 1)].fg,
+            buf[(4, 2)].fg,
+            "the frame must be distinguishable from the text it encloses"
+        );
+    }
+
+    /// A rect wider and taller than the terminal must paint what fits and
+    /// stop, never index past the buffer.
+    #[test]
+    fn a_native_overlay_larger_than_the_terminal_is_clipped_not_panicked() {
+        let model = caps_model(true, true, true);
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let layer =
+            view_surface::overlay::framed(Rect::new(1, 2, 400, 400), native_picker(), borders);
+        let buf = paint_layer_alone(&model, layer, 12, 5);
+        assert_eq!(buf.area.width, 12);
+        assert_eq!(
+            &buf[(2, 1)].symbol(),
+            &"╭",
+            "the top-left corner lands at the rect origin"
+        );
+    }
+
+    /// A layer carrying a native kind but no border charset cannot be
+    /// framed, and painting it half-framed would be worse than not
+    /// painting it: the rect keeps whatever is underneath.
+    #[test]
+    fn a_native_layer_with_no_border_charset_paints_nothing() {
+        let model = caps_model(true, true, true);
+        let layer = Layer::unframed(Rect::new(1, 2, 24, 7), native_picker());
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+        for row in 0..10_u16 {
+            for col in 0..30_u16 {
+                assert_eq!(&buf[(col, row)].symbol(), &" ", "({col},{row})");
+            }
+        }
     }
 }

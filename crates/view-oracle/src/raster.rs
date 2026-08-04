@@ -178,10 +178,44 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
         LayerKind::Cmdline(state) => paint_cmdline(canvas, layer, state),
         LayerKind::Messages(entries) => paint_messages(canvas, layer, entries),
         LayerKind::Popupmenu(state) => paint_popupmenu(canvas, layer, state),
+        LayerKind::Picker(_)
+        | LayerKind::Tree(_)
+        | LayerKind::Statusline(_)
+        | LayerKind::Prompt(_)
+        | LayerKind::Palette(_) => paint_native_overlay(canvas, layer),
         // LayerKind is #[non_exhaustive]: a future variant paints nothing
         // here until this raster gains explicit support for it, rather
         // than failing to compile against it
         _ => {}
+    }
+}
+
+/// Writes a framed native overlay's rows into `canvas`.
+///
+/// The rows themselves come from `view_surface::overlay::rows`, the same
+/// layout pass the terminal painter blits, so this raster reproduces a
+/// native overlay exactly rather than approximating it the way the
+/// tabline/cmdline arms above approximate nvim's own chrome. That is what
+/// makes a screen dump of one usable as a golden: a border glyph, a title,
+/// a scroll window, or a selection marker that changed in the layout shows
+/// up here without this module being taught about it.
+///
+/// A layer with no border charset is not a framed overlay at all and paints
+/// nothing, matching what the layout pass itself returns for one.
+fn paint_native_overlay(canvas: &mut Canvas<'_>, layer: &Layer) {
+    let Some(borders) = layer.borders else {
+        return;
+    };
+    let rows =
+        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
+    for (r, line) in rows.lines.iter().enumerate() {
+        let Ok(r) = u16::try_from(r) else { break };
+        paint_text(
+            canvas,
+            layer.rect.row.saturating_add(r),
+            layer.rect.col,
+            line,
+        );
     }
 }
 
