@@ -2003,6 +2003,7 @@ dependencies = [
  "toml",
  "view-core",
  "view-engine",
+ "view-native",
  "view-surface",
  "view-tui",
 ]

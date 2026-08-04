@@ -1,0 +1,11 @@
+# The other half of the supersession pair: a status line given up and then
+# given back, which is what a user sees after writing the off switch and
+# restarting. Distinct from `laststatus-superseded` in the transition it
+# drives, not just the end state: the grid gains a row and then loses it
+# again, and a decode that mishandled either direction would still agree
+# with the reference on a session that only ever had one layout.
+schema = 1
+name = "laststatus-restored"
+input = ":set laststatus=0<CR>:set laststatus=3<CR>ihello<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"

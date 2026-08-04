@@ -8,6 +8,7 @@ use crate::handle::{EngineError, EngineHandle};
 use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
+use view_core::msg::OptionValue;
 
 /// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
 /// reply before giving up.
@@ -295,6 +296,27 @@ impl EngineHandle {
         )
     }
 
+    /// Sets option `name` to `value` via `nvim_set_option_value(String
+    /// name, Object value, Dict opts)`, with an empty `opts` map: no
+    /// `win`/`buf` key means nvim applies the change the way `:set` does,
+    /// which is what a session-wide takeover of a surface needs.
+    ///
+    /// A notification, not a request: nothing waits on the result, so the
+    /// paint loop that emitted it never blocks on nvim's reply. A rejected
+    /// option name surfaces as an nvim error message rather than as an
+    /// `Err` here, the same tradeoff every other fire-and-forget wrapper on
+    /// this handle makes.
+    pub fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_set_option_value",
+            vec![
+                Value::from(name),
+                option_value(value),
+                Value::Map(Vec::new()),
+            ],
+        )
+    }
+
     /// Evaluates `expr` via `nvim_eval` and renders the result as a string,
     /// the state-parity probe engine-attached oracles use to compare their
     /// decoded screen state against nvim's own ground truth (buffer text,
@@ -400,6 +422,20 @@ impl EngineHandle {
     }
 }
 
+/// Maps one [`OptionValue`] onto the msgpack value nvim's option API takes.
+///
+/// Total by construction, and deliberately so: `OptionValue` is closed over
+/// nvim's three option types, so a new variant must break this match rather
+/// than fall through to a default that would set an option to something
+/// nvim never asked for.
+fn option_value(value: &OptionValue) -> Value {
+    match value {
+        OptionValue::Int(n) => Value::from(*n),
+        OptionValue::Bool(b) => Value::from(*b),
+        OptionValue::Str(s) => Value::from(s.as_str()),
+    }
+}
+
 /// Renders an `nvim_eval` result as plain text for [`EngineHandle::eval_str`].
 ///
 /// `Value`'s own `Display` impl is unsuitable: `rmpv::Utf8String::fmt`
@@ -438,6 +474,10 @@ mod tests {
     /// a test can assert on the exact wire shape a typed wrapper sends
     /// without a real nvim. Pass `Value::Nil` for tests that only care
     /// about the outgoing request shape, not the reply.
+    ///
+    /// Notifications are captured through the same channel: a
+    /// fire-and-forget wrapper puts exactly as much on the wire as a
+    /// blocking one does, and its shape is exactly as easy to get wrong.
     fn fake_peer_replying_with(
         result: Value,
     ) -> (
@@ -450,24 +490,29 @@ mod tests {
         std::thread::spawn(move || {
             let mut r = BufReader::new(peer_read);
             while let Ok(v) = rmpv::decode::read_value(&mut r) {
-                if let Ok(RpcMessage::Request {
-                    msgid,
-                    method,
-                    params,
-                }) = RpcMessage::from_value(v)
-                {
-                    let _ = cap_tx.send((method, params));
-                    let resp = RpcMessage::Response {
+                match RpcMessage::from_value(v) {
+                    Ok(RpcMessage::Request {
                         msgid,
-                        error: Value::Nil,
-                        result: result.clone(),
-                    };
-                    if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
-                        break;
+                        method,
+                        params,
+                    }) => {
+                        let _ = cap_tx.send((method, params));
+                        let resp = RpcMessage::Response {
+                            msgid,
+                            error: Value::Nil,
+                            result: result.clone(),
+                        };
+                        if rmpv::encode::write_value(&mut peer_write, &resp.to_value()).is_err() {
+                            break;
+                        }
+                        if peer_write.flush().is_err() {
+                            break;
+                        }
                     }
-                    if peer_write.flush().is_err() {
-                        break;
+                    Ok(RpcMessage::Notification { method, params }) => {
+                        let _ = cap_tx.send((method, params));
                     }
+                    _ => {}
                 }
             }
         });
@@ -543,6 +588,32 @@ mod tests {
         assert!(
             !FEED_KEYS_CHUNK.contains("setline"),
             "the chunk must stay constant, whatever the notation carries"
+        );
+    }
+
+    #[test]
+    fn set_option_sends_name_value_and_an_empty_scope_map() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.set_option("laststatus", &OptionValue::Int(0)).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_set_option_value");
+        assert_eq!(
+            params,
+            vec![
+                Value::from("laststatus"),
+                Value::from(0),
+                Value::Map(Vec::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn every_option_value_kind_maps_to_its_own_msgpack_type() {
+        assert_eq!(option_value(&OptionValue::Int(3)), Value::from(3));
+        assert_eq!(option_value(&OptionValue::Bool(true)), Value::from(true));
+        assert_eq!(
+            option_value(&OptionValue::Str("%f".to_string())),
+            Value::from("%f")
         );
     }
 

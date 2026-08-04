@@ -163,12 +163,40 @@ pub enum Effect {
     },
 }
 
+/// The value side of [`RpcCall::SetOption`], spelled in Rust's own scalar
+/// types so `view-core` stays free of `rmpv`: the crate that speaks the
+/// wire maps each variant onto a msgpack value.
+///
+/// Deliberately NOT `#[non_exhaustive]`, unlike its neighbours here. These
+/// three are nvim's whole option value domain (`:help option-types`:
+/// number, boolean, string), so the enum is closed by the API it models
+/// rather than by this crate's current needs, and every mapping of it can
+/// be total. A fourth variant would be a genuine change of what an nvim
+/// option is, and the compile error it would cause at each mapping site is
+/// the desired outcome: an unmapped option value silently degrading to a
+/// no-op would leave a feature believing it had taken over a surface it
+/// never touched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionValue {
+    /// A number option, e.g. `laststatus`.
+    Int(i64),
+    /// A boolean option, e.g. `ruler`.
+    Bool(bool),
+    /// A string option, e.g. `statusline`.
+    Str(String),
+}
+
 /// A closed vocabulary of RPC calls instead of `(method, Vec<Value>)`: core
 /// stays rmpv-free and an unencodable call is unrepresentable. Runner-up
 /// (stringly method + opaque params) rejected: re-opens the door to core
 /// building wire values.
+// PartialEq/Eq (which `Msg` and `Effect` do not carry): a call is a value a
+// caller assembles ahead of emitting it, so the assembled call has to be
+// comparable to the exact call that was meant, field for field, without a
+// hand-written `matches!` arm per variant that silently stops checking a
+// field the day one is added.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RpcCall {
     Input {
         notation: String,
@@ -191,6 +219,25 @@ pub enum RpcCall {
         modifier: String,
         row: u16,
         col: u16,
+    },
+    /// Sets one nvim option to `value` via `nvim_set_option_value`, the
+    /// non-interactive channel every option change view makes on the user's
+    /// behalf rides.
+    ///
+    /// Never `Input`: that variant shares one stream with startup's
+    /// buffered-key replay and with live typeahead, so an ex-command
+    /// interleaved into it lands wherever the session's mode happens to be
+    /// at that instant. A user left in insert mode by replayed keys would
+    /// get `:set laststatus=0` typed into their buffer rather than applied
+    /// to their session. An API call carries no mode dependency at all.
+    ///
+    /// Fire-and-forget like every other `RpcCall`, and reversible by
+    /// construction: nothing here writes to the user's config, so the
+    /// option returns to whatever that config set the moment the feature
+    /// that asked for it is turned off and the session is restarted.
+    SetOption {
+        name: String,
+        value: OptionValue,
     },
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe, tagged
     /// with `generation` (`HlTable::probe_generation` at the moment

@@ -112,7 +112,7 @@ fn main() -> Result<()> {
     // path identity here is enough to key the theme cache, so cold start
     // can already paint last session's colors before nvim answers
     // `ui_attach` with its own `default_colors_set`.
-    let config_path = theme_cache::resolved_config_path();
+    let config_path = view_native::paths::config_path();
     match &config_path {
         Some(path) => {
             let cached = theme_cache::load(path);

@@ -23,7 +23,7 @@
 
 use std::sync::mpsc;
 use view_core::model::Model;
-use view_core::msg::{Effect, ExitInfo, Msg, ReplyToken, ReplyValue, RpcCall};
+use view_core::msg::{Effect, ExitInfo, Msg, OptionValue, ReplyToken, ReplyValue, RpcCall};
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::process::Engine;
@@ -61,6 +61,9 @@ pub trait EngineOps {
         row: u16,
         col: u16,
     ) -> Result<(), EngineError>;
+    /// Sets one nvim option via `nvim_set_option_value`, the channel every
+    /// non-interactive option change rides (see `RpcCall::SetOption`).
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
@@ -88,6 +91,9 @@ impl EngineOps for EngineHandle {
         col: u16,
     ) -> Result<(), EngineError> {
         self.input_mouse(button, action, modifier, row, col)
+    }
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.set_option(name, value)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
@@ -120,6 +126,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         col: u16,
     ) -> Result<(), EngineError> {
         (**self).input_mouse(button, action, modifier, row, col)
+    }
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).set_option(name, value)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -183,6 +192,7 @@ impl<E: EngineOps> Executor<E> {
                         row,
                         col,
                     } => self.ops.input_mouse(&button, &action, &modifier, row, col),
+                    RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
@@ -470,6 +480,9 @@ impl EngineOps for FakeOps {
             "input_mouse({button},{action},{modifier},{row},{col})"
         ))
     }
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.record(format!("set_option({name},{value:?})"))
+    }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.record(format!("reply({},{value:?})", token.msgid))
     }
@@ -540,6 +553,56 @@ mod tests {
         });
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "reply(9,Nil)");
+    }
+
+    #[test]
+    fn set_option_effect_maps_to_engine_ops_set_option() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::SetOption {
+            name: "laststatus".into(),
+            value: OptionValue::Int(0),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "set_option(laststatus,Int(0))");
+    }
+
+    /// Every entry a supersession plan produces has to reach the engine.
+    /// An effect the executor does not recognize degrades to a silent
+    /// no-op by design, which for a takeover means view believing it owns a
+    /// surface nvim is still drawing.
+    #[test]
+    fn every_supersession_entry_reaches_an_engine_op() {
+        let plan = view_native::supersede::plan(
+            &view_native::config::NativeConfig::all_enabled(),
+            view_core::native::registry::features(),
+        );
+        assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
+        for entry in &plan {
+            let ops = FakeOps::default();
+            let executor = Executor::new(&ops);
+            let flow = executor.run(Effect::Rpc(entry.rpc.clone()));
+            assert!(matches!(flow, Flow::Continue));
+            assert_eq!(
+                ops.calls.borrow().len(),
+                1,
+                "{}'s takeover reached no engine op: {:?}",
+                entry.feature,
+                entry.rpc
+            );
+        }
+    }
+
+    #[test]
+    fn set_option_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::SetOption {
+            name: "laststatus".into(),
+            value: OptionValue::Int(0),
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
     }
 
     #[test]

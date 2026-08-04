@@ -153,55 +153,18 @@ fn fnv1a(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// Resolves `$XDG_STATE_HOME`, falling back to the unix convention
-/// (`~/.local/state`) or the Windows convention (`%LOCALAPPDATA%`, itself
-/// already a state-like per-user directory) when unset. `None` when no
-/// usable base directory can be determined at all (e.g. `HOME` also
-/// unset), which callers treat as "caching is unavailable this run" rather
-/// than an error.
-#[must_use]
-fn state_dir_from_env() -> Option<PathBuf> {
-    env_dir("XDG_STATE_HOME")
-        .or_else(|| env_dir("HOME").map(|h| h.join(".local").join("state")))
-        .or_else(|| env_dir("LOCALAPPDATA"))
-}
-
-/// A directory path from environment variable `var`, treating unset and
-/// empty identically: shells routinely export empty XDG vars, and an empty
-/// base would silently anchor cache paths at the filesystem root.
-#[must_use]
-fn env_dir(var: &str) -> Option<PathBuf> {
-    match std::env::var(var) {
-        Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
-        _ => None,
-    }
-}
-
-/// Resolves the config file path the cache is keyed on:
-/// `$XDG_CONFIG_HOME/view/view.toml`, falling back to `~/.config/view/view.toml`
-/// (unix) or `%APPDATA%/view/view.toml` (Windows), matching this project's
-/// documented config location. This computes only the path *identity* the
-/// cache key hashes over -- no config file is read or parsed here, so it
-/// carries no dependency on whatever loads `view.toml`'s contents. `None`
-/// when no usable base directory can be determined at all, the same
-/// "caching unavailable this run" condition [`state_dir_from_env`] signals.
-#[must_use]
-pub fn resolved_config_path() -> Option<PathBuf> {
-    env_dir("XDG_CONFIG_HOME")
-        .or_else(|| env_dir("HOME").map(|h| h.join(".config")))
-        .or_else(|| env_dir("APPDATA"))
-        .map(|base| base.join("view").join("view.toml"))
-}
-
 /// The cache file path for `config_path` under `state_dir`: pure and
 /// env-free so path construction is directly testable, separate from the
-/// env-resolution `state_dir_from_env` performs for the public API.
+/// env-resolution [`view_native::paths::state_dir`] performs for the public
+/// API.
+///
+/// The directory comes from [`view_native::paths::cache_dir`] rather than
+/// being joined here, so every file view caches lands in one directory a
+/// user can inspect or delete wholesale.
 #[must_use]
 fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
     let hash = fnv1a(config_path.as_os_str().as_encoded_bytes());
-    state_dir
-        .join("view")
-        .join(format!("theme-{hash:016x}.toml"))
+    view_native::paths::cache_dir(state_dir).join(format!("theme-{hash:016x}.toml"))
 }
 
 /// Loads the last-cached theme for `config_path`, or `None`, loudly logged
@@ -220,7 +183,7 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
 /// with all-false attributes, permanently defeating that fallback.
 #[must_use]
 pub fn load(config_path: &Path) -> Option<Theme> {
-    let Some(state_dir) = state_dir_from_env() else {
+    let Some(state_dir) = view_native::paths::state_dir() else {
         eprintln!(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
         );
@@ -276,7 +239,7 @@ fn load_from_path(path: &Path) -> Option<Theme> {
 /// otherwise ignored: a cache write is a best-effort convenience for the
 /// *next* startup, never something the current session should fail over.
 pub fn store(theme: Theme, config_path: &Path) {
-    let Some(state_dir) = state_dir_from_env() else {
+    let Some(state_dir) = view_native::paths::state_dir() else {
         eprintln!(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; cannot cache theme for next startup"
         );
@@ -433,50 +396,6 @@ mod tests {
         ENV_MUTATION_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-    }
-
-    #[test]
-    fn resolved_config_path_prefers_xdg_config_home_then_home_then_appdata() {
-        let _guard = env_mutation_guard();
-        let prev_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        let prev_home = std::env::var("HOME").ok();
-        let prev_appdata = std::env::var("APPDATA").ok();
-
-        std::env::set_var("XDG_CONFIG_HOME", "/xdg-cfg");
-        assert_eq!(
-            resolved_config_path(),
-            Some(PathBuf::from("/xdg-cfg/view/view.toml"))
-        );
-
-        std::env::remove_var("XDG_CONFIG_HOME");
-        std::env::set_var("HOME", "/home/x");
-        assert_eq!(
-            resolved_config_path(),
-            Some(PathBuf::from("/home/x/.config/view/view.toml"))
-        );
-
-        std::env::remove_var("HOME");
-        std::env::set_var("APPDATA", "/appdata");
-        assert_eq!(
-            resolved_config_path(),
-            Some(PathBuf::from("/appdata/view/view.toml"))
-        );
-
-        std::env::remove_var("APPDATA");
-        assert_eq!(resolved_config_path(), None);
-
-        match prev_xdg {
-            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
-            None => std::env::remove_var("XDG_CONFIG_HOME"),
-        }
-        match prev_home {
-            Some(v) => std::env::set_var("HOME", v),
-            None => std::env::remove_var("HOME"),
-        }
-        match prev_appdata {
-            Some(v) => std::env::set_var("APPDATA", v),
-            None => std::env::remove_var("APPDATA"),
-        }
     }
 
     #[test]
@@ -826,10 +745,9 @@ mod tests {
 
     /// The state-dir env precedence and the public `load`/`store` wiring
     /// both need at least one end-to-end check that does not bypass
-    /// `state_dir_from_env`; see `ENV_MUTATION_LOCK`'s doc comment for why
-    /// this and the `XDG_CONFIG_HOME`/`HOME`/`APPDATA` test above serialize
-    /// against each other via the shared lock rather than relying on
-    /// owning disjoint var names.
+    /// [`view_native::paths::state_dir`]; see `ENV_MUTATION_LOCK`'s doc
+    /// comment for why every env-planting test here serializes against the
+    /// shared lock rather than relying on owning disjoint var names.
     #[test]
     fn load_and_store_round_trip_through_xdg_state_home() {
         let _guard = env_mutation_guard();

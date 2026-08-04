@@ -1,0 +1,12 @@
+# The screen a superseded status line produces. `laststatus = 0` is what
+# view's own statusline feature sets on the live session when it takes the
+# surface over (see view-native's supersede table), so this entry pins that
+# view decodes the resulting one-row-taller grid exactly as the reference
+# applier does. Driven as an ex-command because the corpus drives keys
+# only; the takeover itself rides an API call, proven live in view's
+# supersede_live integration test.
+schema = 1
+name = "laststatus-superseded"
+input = ":set laststatus=0<CR>ihello<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"

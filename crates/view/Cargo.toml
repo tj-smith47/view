@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
+view-native = { version = "0.0.1", path = "../view-native" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 view-tui = { version = "0.0.1", path = "../view-tui" }
 
