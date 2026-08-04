@@ -3,6 +3,7 @@
 //! paint, background attach, pre-attach key buffering) lives in
 //! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
+mod native;
 mod runtime;
 mod startup;
 mod theme_cache;
@@ -107,11 +108,11 @@ fn main() -> Result<()> {
     // on the first grid Flush
     model.content_painted = false;
 
-    // config loading itself lands with the config system (view.toml
-    // sourcing is out of this crate's scope so far); resolving just the
-    // path identity here is enough to key the theme cache, so cold start
-    // can already paint last session's colors before nvim answers
-    // `ui_attach` with its own `default_colors_set`.
+    // resolved before the engine exists because the theme cache is keyed on
+    // it, so cold start can already paint last session's colors before nvim
+    // answers `ui_attach` with its own `default_colors_set`. The `[native]`
+    // table behind the same path is read later, once there is a channel for
+    // the features it enables to notify back over (see `NativeSession`).
     let config_path = view_native::paths::config_path();
     match &config_path {
         Some(path) => {
@@ -197,6 +198,11 @@ fn main() -> Result<()> {
     };
 
     let executor = runtime::Executor::new(engine.handle.clone());
+    // built before the cutover, not after: a config that sources quickly has
+    // already fired `VimEnter` into the presink by now, and that message is
+    // what triggers this session's takeover and key registration
+    let mut native =
+        native::NativeSession::load(config_path.clone(), engine.api_info.channel_id, &mut model);
     // Resolves the presink messages, the pending redraw, and the pre-attach
     // input buffer directly through update()/Executor -- never by touching
     // msg_tx, whose only reader (runtime::run's loop) has not started yet.
@@ -205,6 +211,7 @@ fn main() -> Result<()> {
     let outcome = startup::run_cutover(
         &mut model,
         &executor,
+        &mut native,
         startup::CutoverInput {
             presink: cutover.presink,
             pending_redraw,
@@ -226,7 +233,15 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
-    let (model, exit_code) = runtime::run(model, engine, pump, msg_rx, term_size, &mut term)?;
+    let (model, exit_code) = runtime::run(
+        model,
+        engine,
+        pump,
+        msg_rx,
+        term_size,
+        &mut native,
+        &mut term,
+    )?;
     persist_theme(&model, &config_path);
     vlog::log_with("engine", || format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be

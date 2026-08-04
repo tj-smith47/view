@@ -118,9 +118,12 @@ fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
 }
 
 /// leg (a) (pty-level injection) at the integration tier: a real `view`
-/// process inside a real pty shows a typed character on screen. Full stack,
-/// full fidelity, the slowest and least isolated of the three legs by
-/// design.
+/// process inside a real pty shows a typed character on screen, and a first
+/// launch introduces the surfaces it took over. Full stack, full fidelity,
+/// the slowest and least isolated of the three legs by design, and the only
+/// place in the tree where the binary's own startup wiring -- reading
+/// `view.toml`, holding the superseded options, registering the feature
+/// keys, and announcing all of it once -- is exercised as a user runs it.
 #[cfg(unix)]
 #[test]
 fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
@@ -128,7 +131,7 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
 
     let mut session = PtySession::spawn_configured(cmd, 80, 24)
         .expect("PtySession::spawn_configured against target/debug/view");
@@ -139,7 +142,24 @@ fn pty_session_against_the_view_binary_shows_a_typed_character_on_screen() {
         session.screen()
     );
 
-    session.send(b"iZ").unwrap();
+    // the isolated home has no first-run record, so this launch is a first
+    // launch and owes the user the handover notice. Waiting for it before
+    // typing is also what makes the rest of this test deterministic: the
+    // notice arrives with the asynchronous claim reply, so typing first
+    // would race a toast that is about to appear.
+    assert!(
+        session.wait_for("view is drawing the statusline", Duration::from_secs(5)),
+        "a first launch never introduced what it took over: the startup path \
+         that reads the config, holds the superseded options and registers \
+         the feature keys is not running in the real binary; screen:\n{}",
+        session.screen()
+    );
+
+    // the notice is a toast anchored over the top rows of the grid, so the
+    // first cell of an empty buffer is legitimately covered while it is up.
+    // The newlines put the typed character on a line below it rather than
+    // depending on a dismissal this leg would have to race.
+    session.send(b"i\r\r\r\rZ").unwrap();
     assert!(
         session.wait_for("Z", Duration::from_secs(5)),
         "typed character never appeared on screen; screen:\n{}",

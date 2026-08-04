@@ -1,0 +1,14 @@
+# Both comparison harnesses drive this fixture against view and nvim on the
+# same work. A native takeover is a deliberate divergence -- view stops nvim
+# drawing a surface and draws it itself -- so a scenario run with one on
+# asserts two independent contracts at once and fails for a reason it is not
+# measuring, and a bench arm credits view for work it skipped rather than
+# work it did faster. The takeovers carry their own gates: task
+# compat-supersede against this fixture's live plugins, and the
+# laststatus-superseded / laststatus-restored corpus entries.
+[native]
+picker = false
+tree = false
+statusline = false
+notifications = false
+palette = false

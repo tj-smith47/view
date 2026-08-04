@@ -74,6 +74,54 @@ pub fn default_maps() -> &'static [MappingSpec] {
     &DEFAULT_MAPS
 }
 
+/// Whether `spec`'s tokens can be spelled verbatim inside the mapping the
+/// registration chunk generates for it.
+///
+/// The generated right-hand side is a readable
+/// `<Cmd>call rpcnotify(.., 'feature', 'verb')<CR>` string rather than an
+/// opaque callback, so a token carrying a quote, a backslash, a bar, or a
+/// newline would close that command early and leave the rest of the token
+/// running as a command of its own. Stated here, next to the table, and
+/// applied again where a caller's specs actually reach the interpolation:
+/// [`default_maps`] is static data a test in this module vets, and the
+/// engine accepts any spec a caller builds.
+#[must_use]
+pub fn is_spellable(spec: &MappingSpec) -> bool {
+    is_token(spec.feature) && is_token(spec.verb) && !spec.lhs.contains(['"', '\\', '\n', '\''])
+}
+
+/// Whether `s` is a bare lowercase word: the shape a feature id and a verb
+/// share, and the shape that needs no escaping anywhere view spells one.
+fn is_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.starts_with(|c: char| c.is_ascii_lowercase())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+}
+
+/// Every `feature verb` form `:View` answers, in registration order.
+///
+/// Read from [`default_maps`] like the docs table and the command's own
+/// completion, so a build cannot offer a form in one place and refuse it in
+/// another.
+#[must_use]
+pub fn invocations() -> Vec<String> {
+    default_maps()
+        .iter()
+        .map(|spec| format!("{} {}", spec.feature, spec.verb))
+        .collect()
+}
+
+/// The one-line usage for `:View`, naming the command's shape and every
+/// form it accepts.
+#[must_use]
+pub fn render_usage() -> String {
+    format!(
+        ":{COMMAND} needs a feature and a verb -- try: {}",
+        invocations().join(", ")
+    )
+}
+
 /// The default map set as a markdown table, so the docs and the registered
 /// keys cannot disagree: both read [`default_maps`].
 #[must_use]
@@ -136,21 +184,60 @@ mod tests {
     // the review.
     #[test]
     fn tokens_are_safe_to_spell_in_a_lua_string() {
-        let word = |s: &str| {
-            !s.is_empty()
-                && s.starts_with(|c: char| c.is_ascii_lowercase())
-                && s.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-        };
         for spec in default_maps() {
-            assert!(word(spec.feature), "unsafe feature token {}", spec.feature);
-            assert!(word(spec.verb), "unsafe verb token {}", spec.verb);
             assert!(
-                !spec.lhs.contains(['"', '\\', '\n', '\'']),
-                "unsafe lhs {}",
+                is_spellable(spec),
+                "{} carries a token the registration chunk cannot spell",
                 spec.lhs
             );
         }
+    }
+
+    #[test]
+    fn a_token_that_could_close_the_generated_command_is_not_spellable() {
+        let hostile = [
+            MappingSpec {
+                feature: "picker",
+                lhs: "<leader>ff",
+                verb: "files', 'x')|call system('id",
+            },
+            MappingSpec {
+                feature: "pick'er",
+                lhs: "<leader>ff",
+                verb: "files",
+            },
+            MappingSpec {
+                feature: "picker",
+                lhs: "<leader>'ff",
+                verb: "files",
+            },
+            MappingSpec {
+                feature: "",
+                lhs: "<leader>ff",
+                verb: "files",
+            },
+        ];
+        for spec in &hostile {
+            assert!(
+                !is_spellable(spec),
+                "{spec:?} would break out of the generated mapping"
+            );
+        }
+    }
+
+    #[test]
+    fn the_usage_line_offers_exactly_the_forms_this_build_answers() {
+        let usage = render_usage();
+        assert!(usage.contains(&format!(":{COMMAND}")), "{usage}");
+        for spec in default_maps() {
+            assert!(
+                usage.contains(&format!("{} {}", spec.feature, spec.verb)),
+                "{} {} is registered but the usage line omits it: {usage}",
+                spec.feature,
+                spec.verb
+            );
+        }
+        assert_eq!(invocations().len(), default_maps().len());
     }
 
     #[test]

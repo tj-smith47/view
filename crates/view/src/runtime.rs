@@ -21,6 +21,7 @@
 //! `?`. The caller in `main.rs` never touches `Engine` again once it has
 //! been handed to `run`.
 
+use crate::native::NativeSession;
 use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{Effect, ExitInfo, Msg, OptionValue, ReplyToken, ReplyValue, RpcCall};
@@ -239,20 +240,47 @@ impl<E: EngineOps> Executor<E> {
 }
 
 /// Applies `msg` to `model` through the ordinary `update()` -> `Executor`
-/// path, stopping early on the first non-`Continue` flow. A pub(crate) seam
-/// so `main.rs`'s pre-run replay of the pre-attach buffer (see
-/// `startup::drain_pre_attach`) can drive the same dispatch `run()`'s loop
-/// uses, instead of hand-rolling a second copy of "call `update`, then run
-/// every effect through the executor." Deliberately does not replicate
-/// `run()`'s loop machinery for `Quit`, residue draining, or `EngineLost`
-/// requeueing: none of it is reachable from the `Msg::Key`/`Msg::Resized`
-/// messages replay ever sends (see `view_core::update::update`), so
-/// reproducing it here would be dead code, not defensive coverage.
+/// path, then whatever `native` owes the same message, stopping early on the
+/// first non-`Continue` flow. A pub(crate) seam so `main.rs`'s pre-run replay
+/// of the pre-attach buffer (see `startup::drain_pre_attach`) can drive the
+/// same dispatch `run()`'s loop uses, instead of hand-rolling a second copy
+/// of "call `update`, then run every effect through the executor."
+/// Deliberately does not replicate `run()`'s loop machinery for `Quit`,
+/// residue draining, or `EngineLost` requeueing: none of it is reachable from
+/// the `Msg::Key`/`Msg::Resized` messages replay ever sends (see
+/// `view_core::update::update`), so reproducing it here would be dead code,
+/// not defensive coverage.
+///
+/// The native follow-up runs here rather than at either loop, because both
+/// loops resolve the two messages it hangs off: nvim's `VimEnter` lands in
+/// the pump's presink whenever it fires before the sink attaches, and in
+/// `msg_rx` whenever it fires after. It runs after `update()`'s own effects
+/// so nvim's blocking `VimEnter` request is answered before the takeover it
+/// unblocks, and so the first-run notice reads claims `update()` has already
+/// recorded.
 #[must_use]
-pub(crate) fn dispatch<E: EngineOps>(model: &mut Model, executor: &Executor<E>, msg: Msg) -> Flow {
+pub(crate) fn dispatch<E: EngineOps>(
+    model: &mut Model,
+    executor: &Executor<E>,
+    native: &mut NativeSession,
+    msg: Msg,
+) -> Flow {
     crate::vlog::log_msg(&msg);
+    let stage = crate::native::stage(&msg);
     let mut flow = Flow::Continue;
     for eff in update(model, msg) {
+        match executor.run(eff) {
+            Flow::Continue => {}
+            other => {
+                flow = other;
+                break;
+            }
+        }
+    }
+    if flow != Flow::Continue {
+        return flow;
+    }
+    for eff in native.follow_up(model, stage) {
         match executor.run(eff) {
             Flow::Continue => {}
             other => {
@@ -348,6 +376,7 @@ pub fn run(
     pump: view_engine::DamagePump,
     msg_rx: mpsc::Receiver<Msg>,
     term_size: view_tui::terminal::TermSizeCell,
+    native: &mut NativeSession,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
     let executor = Executor::new(engine.handle.clone());
@@ -360,12 +389,18 @@ pub fn run(
         // at a shape the terminal has left. Costs one relaxed load per pass
         // when nothing resized, which is the whole steady state.
         if let Some((width, height)) = term_size.take() {
-            match dispatch(&mut model, &executor, Msg::Resized { width, height }) {
+            match dispatch(
+                &mut model,
+                &executor,
+                native,
+                Msg::Resized { width, height },
+            ) {
                 Flow::Continue => {}
                 Flow::Quit(code) => return Ok((model, code)),
                 Flow::EngineLost => {
                     let info = engine.wait_exit();
-                    if let Flow::Quit(code) = dispatch(&mut model, &executor, Msg::EngineDown(info))
+                    if let Flow::Quit(code) =
+                        dispatch(&mut model, &executor, native, Msg::EngineDown(info))
                     {
                         return Ok((model, code));
                     }
@@ -419,24 +454,18 @@ pub fn run(
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
-            crate::vlog::log_msg(&msg);
-            for eff in update(&mut model, msg) {
-                match executor.run(eff) {
-                    Flow::Continue => {}
-                    // run() owns engine: returning here runs Drop (graceful
-                    // qa! then kill)
-                    Flow::Quit(code) => return Ok((model, code)),
-                    // an engine write failed: the engine is gone, not the
-                    // UI; resolve the real exit status and let update()
-                    // decide
-                    // the rest of this batch targets an engine that is
-                    // already gone: running it would fail identically and
-                    // queue a duplicate EngineDown per remaining effect
-                    Flow::EngineLost => {
-                        queue.push(Msg::EngineDown(engine.wait_exit()));
-                        break;
-                    }
-                }
+            match dispatch(&mut model, &executor, native, msg) {
+                Flow::Continue => {}
+                // run() owns engine: returning here runs Drop (graceful
+                // qa! then kill)
+                Flow::Quit(code) => return Ok((model, code)),
+                // an engine write failed: the engine is gone, not the UI;
+                // resolve the real exit status and let update() decide. The
+                // rest of that batch targeted an engine that is already
+                // gone, which is why `dispatch` stops on the first failure
+                // rather than queueing a duplicate EngineDown per remaining
+                // effect
+                Flow::EngineLost => queue.push(Msg::EngineDown(engine.wait_exit())),
             }
             // a RedrawReady is dropped when the shared channel is
             // momentarily full (the pump disarms pending so a later fold
@@ -758,9 +787,11 @@ mod tests {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
         let flow = dispatch(
             &mut model,
             &executor,
+            &mut native,
             Msg::Key(view_core::msg::Key {
                 notation: "x".into(),
             }),
@@ -775,9 +806,11 @@ mod tests {
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
         let flow = dispatch(
             &mut model,
             &executor,
+            &mut native,
             Msg::Key(view_core::msg::Key {
                 notation: "x".into(),
             }),
@@ -791,9 +824,11 @@ mod tests {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
         let flow = dispatch(
             &mut model,
             &executor,
+            &mut native,
             Msg::Resized {
                 width: 100,
                 height: 50,
@@ -812,17 +847,18 @@ mod tests {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
         let resize = Msg::Resized {
             width: 100,
             height: 50,
         };
         assert!(matches!(
-            dispatch(&mut model, &executor, resize.clone()),
+            dispatch(&mut model, &executor, &mut native, resize.clone()),
             Flow::Continue
         ));
         model.dirty = false;
         assert!(matches!(
-            dispatch(&mut model, &executor, resize),
+            dispatch(&mut model, &executor, &mut native, resize),
             Flow::Continue
         ));
         assert_eq!(
@@ -912,11 +948,13 @@ mod tests {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
         let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
         let start = std::time::Instant::now();
         for i in 0..1000 {
             let flow = dispatch(
                 &mut model,
                 &executor,
+                &mut native,
                 Msg::Key(view_core::msg::Key {
                     notation: i.to_string(),
                 }),

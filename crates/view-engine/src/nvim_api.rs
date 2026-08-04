@@ -9,7 +9,7 @@ use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
 use view_core::msg::OptionValue;
-use view_core::native::mappings::{default_maps, MappingSpec, COMMAND};
+use view_core::native::mappings::{default_maps, is_spellable, MappingSpec, COMMAND};
 
 /// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
 /// reply before giving up.
@@ -101,25 +101,46 @@ vim.api.nvim_create_autocmd('SafeState', {
 /// established in one atomic pass over the specs rather than reassembled
 /// from replies that interleave with startup traffic.
 ///
-/// `maparg` is read BEFORE the key is set, since setting it is what destroys
-/// the answer. An empty answer means the key was free; anything else means
-/// this session took a key the user's own config had mapped, which is the
-/// only kind of claim that is news.
+/// What the user's config already mapped is snapshotted BEFORE the first key
+/// is set, since setting it is what destroys the answer. The snapshot spans
+/// the global table and every loaded buffer's own, because
+/// `vim.fn.maparg(lhs, 'n')` answers only for the current buffer: a
+/// buffer-local mapping elsewhere -- an ftplugin's, most commonly -- beats
+/// view's global one wherever it applies, so a claim report built from
+/// `maparg` alone would say a key was free while the user watches it keep
+/// doing what it always did. Keys are compared after
+/// `nvim_replace_termcodes`, which is what turns `<leader>ff` into the bytes
+/// a registered mapping is actually stored under.
 ///
 /// The right-hand side is a plain `<Cmd>rpcnotify(...)<CR>` string rather
 /// than a Lua callback so that `:map`, `maparg()`, and every plugin that
 /// introspects mappings show exactly what view did, in a form a user can
 /// read and copy. It is built with `string.format` from the spec's own
 /// fields inside the chunk, never interpolated into the chunk source, and
-/// the feature and verb tokens are `[a-z0-9_-]` by the table's own test.
+/// every token reaching it is `[a-z0-9_-]` by
+/// [`is_spellable`](view_core::native::mappings::is_spellable), applied in
+/// [`register_mappings`](EngineHandle::register_mappings).
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.
 const REGISTER_MAPPINGS_CHUNK: &str = "\
 local channel, specs, entries, command = ...
+local taken = {}
+local function note(maps)
+  for _, m in ipairs(maps) do
+    if m.lhsraw then taken[m.lhsraw] = true end
+    taken[m.lhs] = true
+  end
+end
+note(vim.api.nvim_get_keymap('n'))
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) then
+    note(vim.api.nvim_buf_get_keymap(buf, 'n'))
+  end
+end
 local claimed = {}
 for _, spec in ipairs(specs) do
-  local existing = vim.fn.maparg(spec.lhs, 'n')
+  local resolved = vim.api.nvim_replace_termcodes(spec.lhs, true, true, true)
   local rhs = string.format(
     \"<Cmd>call rpcnotify(%d, 'view_invoke', '%s', '%s')<CR>\",
     channel, spec.feature, spec.verb)
@@ -130,7 +151,7 @@ for _, spec in ipairs(specs) do
   claimed[#claimed + 1] = {
     feature = spec.feature,
     lhs = spec.lhs,
-    had_user_mapping = existing ~= '',
+    had_user_mapping = (taken[resolved] or taken[spec.lhs]) == true,
   }
 end
 vim.api.nvim_create_user_command(command, function(opts)
@@ -592,6 +613,15 @@ impl EngineHandle {
     /// turned off, so what it completes is every entry point this build
     /// has, not the subset this session mapped a key to.
     ///
+    /// A spec whose tokens
+    /// [cannot be spelled](view_core::native::mappings::is_spellable) inside
+    /// the mapping the chunk generates is dropped here rather than sent: this
+    /// method takes any `&[MappingSpec]`, and the table's own vetting in
+    /// `view-core` cannot speak for a spec a future caller assembles.
+    /// Dropping is the safe direction -- view registers nothing, so the key
+    /// stays whatever the user's config made it -- and the omission is
+    /// visible, since a dropped spec returns no claim either.
+    ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
@@ -603,6 +633,7 @@ impl EngineHandle {
     ) -> Result<(), EngineError> {
         let specs = specs
             .iter()
+            .filter(|spec| is_spellable(spec))
             .map(|spec| {
                 Value::Map(vec![
                     (Value::from("feature"), Value::from(spec.feature)),
@@ -753,9 +784,10 @@ mod tests {
     }
 
     /// The registration crosses as one chunk with its data as arguments,
-    /// never interpolated, and the chunk reads `maparg` before it sets the
-    /// key: the order is the whole claim report's source of truth, and
-    /// setting first would answer every key with view's own mapping.
+    /// never interpolated, and the chunk snapshots the existing mappings
+    /// before it sets the first key: the order is the whole claim report's
+    /// source of truth, and setting first would answer every key with view's
+    /// own mapping.
     #[test]
     fn register_mappings_sends_one_chunk_carrying_its_data_as_arguments() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
@@ -780,13 +812,54 @@ mod tests {
             default_maps().len(),
             "the command completes every entry point this build has, whatever this session mapped"
         );
-        let read = REGISTER_MAPPINGS_CHUNK
-            .find("maparg")
-            .expect("the chunk must read the existing mapping");
         let set = REGISTER_MAPPINGS_CHUNK
             .find("vim.keymap.set")
             .expect("the chunk must set the mapping");
-        assert!(read < set, "maparg must be read before the key is set");
+        for source in ["nvim_get_keymap", "nvim_buf_get_keymap"] {
+            let read = REGISTER_MAPPINGS_CHUNK
+                .find(source)
+                .unwrap_or_else(|| unreachable!("the chunk must consult {source}"));
+            assert!(
+                read < set,
+                "{source} must be read before the first key is set"
+            );
+        }
+    }
+
+    /// This method takes any `&[MappingSpec]`, and the generated right-hand
+    /// side spells the feature and verb inside a quoted vimscript call. A
+    /// spec that could close that call must never reach the chunk, whatever
+    /// the shipped table happens to contain.
+    #[test]
+    fn a_spec_that_could_break_out_of_the_generated_mapping_never_reaches_the_chunk() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        let hostile = [
+            MappingSpec {
+                feature: "picker",
+                lhs: "<leader>ff",
+                verb: "files', 'x')|call system('id",
+            },
+            MappingSpec {
+                feature: "picker",
+                lhs: "<leader>fb",
+                verb: "buffers",
+            },
+        ];
+        h.register_mappings(&hostile, 7).unwrap();
+        let (_, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let args = params[1].as_array().expect("the arguments array");
+        let specs = args[1].as_array().expect("the specs array");
+        assert_eq!(
+            specs.len(),
+            1,
+            "only the spellable spec may cross, got {specs:?}"
+        );
+        let rendered = format!("{specs:?}");
+        assert!(
+            !rendered.contains("system("),
+            "the hostile verb reached the chunk: {rendered}"
+        );
+        assert!(rendered.contains("buffers"), "{rendered}");
     }
 
     #[test]

@@ -381,9 +381,15 @@ pub(crate) enum CutoverOutcome {
 /// strictly before `runtime::run`'s loop starts consuming `msg_tx`, so
 /// this is the one place in the whole process that resolves messages
 /// staged before a consumer of `msg_tx` existed.
+///
+/// That includes nvim's `VimEnter`, which is why `native` is threaded here
+/// rather than only into `runtime::run`: a config that sources quickly fires
+/// `VimEnter` before the sink attaches, so the presink is the ordinary place
+/// this session's takeover and key registration are triggered from.
 pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     model: &mut Model,
     executor: &crate::runtime::Executor<E>,
+    native: &mut crate::native::NativeSession,
     input: CutoverInput,
     engine_stopped_exit: impl FnOnce() -> view_core::msg::ExitInfo,
 ) -> CutoverOutcome {
@@ -411,7 +417,7 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
             }
             other => other,
         };
-        match crate::runtime::dispatch(model, executor, msg) {
+        match crate::runtime::dispatch(model, executor, native, msg) {
             crate::runtime::Flow::Continue => {}
             crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
             crate::runtime::Flow::EngineLost => {
@@ -422,13 +428,14 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     }
 
     if engine_alive && !pending_redraw.is_empty() {
-        engine_alive = crate::runtime::dispatch(model, executor, Msg::Redraw(pending_redraw))
-            == crate::runtime::Flow::Continue;
+        engine_alive =
+            crate::runtime::dispatch(model, executor, native, Msg::Redraw(pending_redraw))
+                == crate::runtime::Flow::Continue;
     }
     if engine_alive {
         if let Some((width, height)) = resize {
             engine_alive =
-                crate::runtime::dispatch(model, executor, Msg::Resized { width, height })
+                crate::runtime::dispatch(model, executor, native, Msg::Resized { width, height })
                     == crate::runtime::Flow::Continue;
         }
     }
@@ -438,7 +445,7 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
     // pump is attached
     if engine_alive {
         for key in keys {
-            if crate::runtime::dispatch(model, executor, Msg::Key(key))
+            if crate::runtime::dispatch(model, executor, native, Msg::Key(key))
                 != crate::runtime::Flow::Continue
             {
                 break;
@@ -647,6 +654,7 @@ mod tests {
             let outcome = run_cutover(
                 &mut model,
                 &executor,
+                &mut crate::native::NativeSession::inert(),
                 CutoverInput {
                     presink,
                     pending_redraw: vec![UiEvent::Flush],
@@ -710,6 +718,7 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
+            &mut crate::native::NativeSession::inert(),
             CutoverInput {
                 presink: vec![Msg::EngineStopped(None)],
                 pending_redraw: vec![UiEvent::Flush],
@@ -747,6 +756,7 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
+            &mut crate::native::NativeSession::inert(),
             CutoverInput {
                 presink: vec![Msg::EngineStopped(Some("wedged reader".to_string()))],
                 pending_redraw: vec![],
@@ -781,6 +791,7 @@ mod tests {
         let outcome = run_cutover(
             &mut model,
             &executor,
+            &mut crate::native::NativeSession::inert(),
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
                     token: ReplyToken { msgid: 1 },
@@ -801,5 +812,64 @@ mod tests {
         let calls = executor.into_ops().calls.into_inner();
         assert_eq!(calls, vec!["reply(1,Nil)"]);
         assert!(!model.content_painted);
+    }
+
+    /// The takeover a real session performs is triggered here, not by
+    /// `runtime::run`'s loop: a config that sources quickly fires `VimEnter`
+    /// into the presink, and nothing else in the process resolves that.
+    #[test]
+    fn a_presink_vim_enter_hands_the_surfaces_over_after_answering_nvim() {
+        use view_core::msg::{EngineRequest, ReplyToken};
+
+        let ops = crate::runtime::FakeOps::default();
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = crate::native::NativeSession::all_enabled(7, None);
+
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &mut native,
+            CutoverInput {
+                presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
+                    token: ReplyToken { msgid: 1 },
+                })],
+                pending_redraw: vec![],
+                resize: None,
+                keys: vec![],
+            },
+            || view_core::msg::ExitInfo {
+                code: None,
+                by_signal: false,
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Continue));
+        let calls = executor.into_ops().calls.into_inner();
+        assert_eq!(
+            calls.first().map(String::as_str),
+            Some("reply(1,Nil)"),
+            "nvim's blocking request is answered before the takeover it \
+             unblocks: {calls:?}"
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|c| c.starts_with("hold_option(laststatus")),
+            "the planned option takeover must reach the engine: {calls:?}"
+        );
+        let registrations: Vec<&String> = calls
+            .iter()
+            .filter(|c| c.starts_with("register_mappings("))
+            .collect();
+        assert_eq!(
+            registrations.len(),
+            1,
+            "the keys register exactly once per session: {calls:?}"
+        );
+        assert!(
+            registrations[0].contains("ff") && registrations[0].ends_with(",7)"),
+            "the registration carries this session's keys and channel: {registrations:?}"
+        );
     }
 }

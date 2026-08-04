@@ -120,11 +120,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // that never registered: the entry point is answered with a
             // visible line saying it arrived and this build has nothing
             // behind it, through the same message surface every other
-            // locally-originated notice uses
-            model.engine.messages.push_native(
-                format!("view: no handler for {feature} {verb} in this build"),
-                false,
-            );
+            // locally-originated notice uses. A bare `:View` reaches here
+            // with two empty strings, which the same sentence would render
+            // as a gap between two spaces, so an invocation this build does
+            // not answer is told what it could have asked for instead.
+            let known = crate::native::mappings::default_maps()
+                .iter()
+                .any(|spec| spec.feature == feature && spec.verb == verb);
+            let notice = if known {
+                format!("view: no handler for {feature} {verb} in this build")
+            } else {
+                format!("view: {}", crate::native::mappings::render_usage())
+            };
+            model.engine.messages.push_native(notice, false);
             model.dirty = true;
             Vec::new()
         }
@@ -2244,6 +2252,55 @@ mod tests {
         assert!(
             m.overlays().is_empty(),
             "no overlay exists to open yet: an invoke must not push one"
+        );
+    }
+
+    #[test]
+    fn a_bare_view_command_is_answered_with_what_it_could_have_asked_for() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: String::new(),
+                verb: String::new(),
+            },
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        let entry = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("a bare :View must still reach the user");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            !text.contains("  "),
+            "a bare invocation must not render its two empty tokens as a gap, got {text:?}"
+        );
+        for form in crate::native::mappings::invocations() {
+            assert!(
+                text.contains(&form),
+                "the usage line must offer {form}, got {text:?}"
+            );
+        }
+        assert!(m.dirty);
+    }
+
+    #[test]
+    fn a_verb_this_build_does_not_answer_is_told_the_ones_it_does() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "nonesuch".to_string(),
+            },
+        );
+        let entry = m.engine.messages.entries.last().expect("a notice");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            text.contains("picker files"),
+            "an unanswerable verb must be told the forms that work, got {text:?}"
         );
     }
 
