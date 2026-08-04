@@ -64,6 +64,9 @@ pub trait EngineOps {
     /// Sets one nvim option via `nvim_set_option_value`, the channel every
     /// non-interactive option change rides (see `RpcCall::SetOption`).
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
+    /// Sets one nvim option and keeps it there for the session, the durable
+    /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
     /// Answers a request nvim is blocked on.
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
     /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
@@ -94,6 +97,9 @@ impl EngineOps for EngineHandle {
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.set_option(name, value)
+    }
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.hold_option(name, value)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.reply(token, value)
@@ -129,6 +135,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         (**self).set_option(name, value)
+    }
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).hold_option(name, value)
     }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         (**self).reply(token, value)
@@ -193,6 +202,7 @@ impl<E: EngineOps> Executor<E> {
                         col,
                     } => self.ops.input_mouse(&button, &action, &modifier, row, col),
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
+                    RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
@@ -483,6 +493,9 @@ impl EngineOps for FakeOps {
     fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
         self.record(format!("set_option({name},{value:?})"))
     }
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.record(format!("hold_option({name},{value:?})"))
+    }
     fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         self.record(format!("reply({},{value:?})", token.msgid))
     }
@@ -565,6 +578,30 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "set_option(laststatus,Int(0))");
+    }
+
+    #[test]
+    fn hold_option_effect_maps_to_engine_ops_hold_option() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::HoldOption {
+            name: "laststatus".into(),
+            value: OptionValue::Int(0),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "hold_option(laststatus,Int(0))");
+    }
+
+    #[test]
+    fn hold_option_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::HoldOption {
+            name: "laststatus".into(),
+            value: OptionValue::Int(0),
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
     }
 
     /// Every entry a supersession plan produces has to reach the engine.

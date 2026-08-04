@@ -26,8 +26,14 @@ use crate::config::NativeConfig;
 pub struct Supersession {
     /// The registry id of the feature doing the superseding.
     pub feature: &'static str,
-    /// The call that performs the takeover. Always an API call, never
-    /// `RpcCall::Input`: see that variant's own note on mode dependence.
+    /// The call that performs the takeover, and the only call a consumer
+    /// has to make for it: a takeover that has to survive the superseded
+    /// plugin re-asserting its option carries that durability inside this
+    /// one call rather than in a second field a caller could forget (see
+    /// [`takeover_call`]).
+    ///
+    /// Always an API call, never `RpcCall::Input`: see that variant's own
+    /// note on mode dependence.
     pub rpc: RpcCall,
     /// The exact line a user writes to reverse this, verbatim from the
     /// registry's `off_switch` so the reversal a notice prints and the
@@ -80,6 +86,25 @@ struct Takeover {
     value: OptionValue,
 }
 
+/// Renders one row as the call that performs it: always
+/// [`RpcCall::HoldOption`], never a plain `SetOption`.
+///
+/// A superseded plugin keeps running, and a plugin that owns a surface
+/// re-asserts its own option on its own events. lualine re-runs `setup()`
+/// on `ColorScheme` and on `OptionSet background`, and that `setup()` sets
+/// `laststatus`: measured against the compat harness's heavy fixture, a
+/// plain one-shot set to `0` was back at `2` after the first
+/// `:colorscheme`, with nothing failing and view still drawing a status
+/// line it no longer owned. The takeover therefore has to be the kind that
+/// holds, and expressing it as one call rather than as a set plus a
+/// separate guard entry means no consumer can apply half of it.
+fn takeover_call(row: &Takeover) -> RpcCall {
+    RpcCall::HoldOption {
+        name: row.option.to_string(),
+        value: row.value.clone(),
+    }
+}
+
 /// Every takeover this build performs, as data rather than as a `match`, so
 /// the set is enumerable: the drift check that every row still names a live
 /// registry feature has something to walk.
@@ -108,20 +133,39 @@ static TAKEOVERS: [Takeover; 1] = [Takeover {
 /// listing of these features already uses.
 #[must_use]
 pub fn plan(cfg: &NativeConfig, features: &[FeatureDesc]) -> Vec<Supersession> {
+    plan_from(cfg, features, &TAKEOVERS)
+}
+
+/// [`plan`] against an arbitrary takeover table, so the table-walking rules
+/// (every row of a feature contributes; a feature with no row contributes
+/// nothing) are testable against shapes the shipped table does not have yet.
+///
+/// Every matching row becomes an entry, rather than the first one: a
+/// surface that needs two options to change hands is one feature with two
+/// rows, and taking only the first would leave view believing it owns a
+/// surface nvim is still half drawing -- silently, since the dropped row
+/// looks exactly like a row that was never written. Two rows setting the
+/// same option for one feature are the contradiction that cannot be
+/// resolved this way, and `no_two_takeover_rows_claim_one_option` rejects
+/// the table outright rather than letting later-wins ordering decide.
+fn plan_from(
+    cfg: &NativeConfig,
+    features: &[FeatureDesc],
+    takeovers: &[Takeover],
+) -> Vec<Supersession> {
     features
         .iter()
         .filter(|f| cfg.enabled(f.id))
-        .filter_map(|f| {
-            let takeover = TAKEOVERS.iter().find(|t| t.feature == f.id)?;
-            Some(Supersession {
-                feature: f.id,
-                rpc: RpcCall::SetOption {
-                    name: takeover.option.to_string(),
-                    value: takeover.value.clone(),
-                },
-                reverses_with: f.off_switch,
-                supersedes: f.supersedes,
-            })
+        .flat_map(|f| {
+            takeovers
+                .iter()
+                .filter(move |t| t.feature == f.id)
+                .map(move |t| Supersession {
+                    feature: f.id,
+                    rpc: takeover_call(t),
+                    reverses_with: f.off_switch,
+                    supersedes: f.supersedes,
+                })
         })
         .collect()
 }
@@ -155,7 +199,7 @@ mod tests {
         assert_eq!(entries[0].reverses_with, desc.off_switch);
         assert_eq!(
             entries[0].rpc,
-            RpcCall::SetOption {
+            RpcCall::HoldOption {
                 name: "laststatus".to_string(),
                 value: OptionValue::Int(0),
             }
@@ -182,6 +226,82 @@ mod tests {
                 t.feature
             );
         }
+    }
+
+    #[test]
+    fn no_two_takeover_rows_claim_one_option() {
+        for (i, t) in TAKEOVERS.iter().enumerate() {
+            let dupes = TAKEOVERS
+                .iter()
+                .skip(i + 1)
+                .filter(|o| o.feature == t.feature && o.option == t.option)
+                .count();
+            assert_eq!(
+                dupes, 0,
+                "{} claims {} twice: one option cannot be handed over to two values",
+                t.feature, t.option
+            );
+        }
+    }
+
+    #[test]
+    fn every_takeover_row_for_one_feature_reaches_the_plan() {
+        // a feature whose surface needs two options: the shipped table has
+        // no such row yet, and the walk that only ever sees one row per
+        // feature is the walk that silently drops the second one
+        let table = [
+            Takeover {
+                feature: "statusline",
+                option: "laststatus",
+                value: OptionValue::Int(0),
+            },
+            Takeover {
+                feature: "statusline",
+                option: "ruler",
+                value: OptionValue::Bool(false),
+            },
+        ];
+        let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
+        // a non-option entry drops out here rather than being asserted on
+        // directly, and the comparison below still catches it: the expected
+        // list names both options, so anything that failed to arrive as one
+        // fails this assertion
+        let options: Vec<&str> = entries
+            .iter()
+            .filter_map(|entry| match &entry.rpc {
+                RpcCall::HoldOption { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            options,
+            vec!["laststatus", "ruler"],
+            "every row of an enabled feature must reach the plan, in table order"
+        );
+        assert!(entries.iter().all(|entry| entry.feature == "statusline"));
+    }
+
+    #[test]
+    fn a_disabled_feature_supersedes_nothing_however_many_rows_it_has() {
+        let table = [
+            Takeover {
+                feature: "statusline",
+                option: "laststatus",
+                value: OptionValue::Int(0),
+            },
+            Takeover {
+                feature: "statusline",
+                option: "ruler",
+                value: OptionValue::Bool(false),
+            },
+        ];
+        let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
+            .expect("a known key must parse");
+        let entries = plan_from(&cfg, registry::features(), &table);
+        assert!(
+            !entries.iter().any(|s| s.feature == "statusline"),
+            "a disabled feature must take over nothing at all, got {entries:?}"
+        );
     }
 
     #[test]
@@ -317,8 +437,8 @@ mod tests {
         let plan = plan(&NativeConfig::all_enabled(), registry::features());
         for entry in &plan {
             assert!(
-                matches!(entry.rpc, RpcCall::SetOption { .. }),
-                "{} must supersede through an API call, got {:?}",
+                matches!(entry.rpc, RpcCall::HoldOption { .. }),
+                "{} must supersede through a durable API call, got {:?}",
                 entry.feature,
                 entry.rpc
             );

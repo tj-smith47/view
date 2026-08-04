@@ -63,6 +63,14 @@ tasks:
     desc: Run the plugin compat harness against the pinned nvim (task compat -- compat/scenarios/lualine.toml for one scenario)
     cmd: cargo run -p view-harness --bin oracle -- compat {{.CLI_ARGS}}
 
+  compat-supersede:
+    desc: Assert a native takeover against the heavy fixture's live plugins (needs the compat plugin cache; run after task compat)
+    # ignored by default in `task test` because a cold cache clones the whole
+    # pinned plugin stack from the network; this target is the only caller
+    # that opts them in, and it serializes them so two live heavy sessions
+    # never contend for the same machine
+    cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
+
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     cmds:

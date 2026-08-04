@@ -91,8 +91,8 @@ fn session(dir: &Path) -> Engine {
 fn apply(handle: &EngineHandle, plan: &[Supersession]) {
     for entry in plan {
         match &entry.rpc {
-            RpcCall::SetOption { name, value } => handle.set_option(name, value).unwrap(),
-            other => panic!("a plan entry must ride an option call, got {other:?}"),
+            RpcCall::HoldOption { name, value } => handle.hold_option(name, value).unwrap(),
+            other => panic!("a plan entry must ride a durable option call, got {other:?}"),
         }
     }
 }

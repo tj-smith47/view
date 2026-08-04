@@ -163,9 +163,9 @@ pub enum Effect {
     },
 }
 
-/// The value side of [`RpcCall::SetOption`], spelled in Rust's own scalar
-/// types so `view-core` stays free of `rmpv`: the crate that speaks the
-/// wire maps each variant onto a msgpack value.
+/// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
+/// spelled in Rust's own scalar types so `view-core` stays free of `rmpv`:
+/// the crate that speaks the wire maps each variant onto a msgpack value.
 ///
 /// Deliberately NOT `#[non_exhaustive]`, unlike its neighbours here. These
 /// three are nvim's whole option value domain (`:help option-types`:
@@ -236,6 +236,27 @@ pub enum RpcCall {
     /// option returns to whatever that config set the moment the feature
     /// that asked for it is turned off and the session is restarted.
     SetOption {
+        name: String,
+        value: OptionValue,
+    },
+    /// Sets one nvim option to `value` and keeps it there for the rest of
+    /// the session: the durable form of [`SetOption`](Self::SetOption), for
+    /// a surface view has taken over from a plugin that is still running.
+    ///
+    /// A one-shot write is not enough for a takeover. A plugin that owns a
+    /// surface re-asserts its own option on its own events -- lualine
+    /// re-runs `setup()` on `ColorScheme` and on `OptionSet background`,
+    /// and that `setup()` sets `laststatus` back (observed live against the
+    /// compat harness's heavy fixture: `laststatus` returned to `2` on the
+    /// first `:colorscheme` after a plain set to `0`). Nothing about that
+    /// fails loudly: view would go on drawing a status line it no longer
+    /// owned, over the one nvim had resumed drawing.
+    ///
+    /// Reversible on exactly the same terms as every other call here: the
+    /// hold is session state, never a config edit, so it is gone the moment
+    /// the session ends and it is never issued at all for a feature the
+    /// user has turned off.
+    HoldOption {
         name: String,
         value: OptionValue,
     },

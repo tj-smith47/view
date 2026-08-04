@@ -2057,6 +2057,9 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "view-bench",
+ "view-core",
+ "view-engine",
+ "view-native",
  "view-oracle",
  "view-surface",
 ]

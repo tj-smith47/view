@@ -46,6 +46,49 @@ const GET_MODE_TIMEOUT: Duration = Duration::from_secs(5);
 const FEED_KEYS_CHUNK: &str =
     "vim.fn.feedkeys(vim.api.nvim_replace_termcodes(..., true, true, true), 't')";
 
+/// The lua chunk [`EngineHandle::hold_option`] runs inside nvim, taking the
+/// option name and its value as its two varargs. Constant by construction
+/// for the same reason as [`FEED_KEYS_CHUNK`]: no caller data is
+/// interpolated, so no option name or value can change what runs.
+///
+/// Two guards, because one cannot see every write. `OptionSet` catches a
+/// write the moment it happens, before anything redraws -- but nvim does
+/// not nest autocommands, so a write made *inside* another autocommand's
+/// callback fires no `OptionSet` at all, and that is exactly how a
+/// superseded plugin re-asserts its option (lualine's `ColorScheme`
+/// autocmd, defined without `nested`, re-runs its `setup()`). `SafeState`
+/// is the backstop for that class: it fires once nvim is back in its main
+/// loop with nothing pending, which nvim reaches before it redraws, so the
+/// value is restored ahead of the first frame that could have shown the
+/// plugin's. Both halves were measured against the live heavy fixture --
+/// an `OptionSet`-only guard left `laststatus` at lualine's `2` after
+/// `:colorscheme`, and with `SafeState` added every frame a redraw witness
+/// recorded was painted with the held `0`.
+///
+/// The re-assert is guarded by a read so the common case (nothing changed
+/// the option) is one API call per idle transition and writes no option,
+/// which matters because `SafeState` fires every time nvim waits for input.
+/// The guard's own write cannot re-enter it for the same
+/// no-nesting reason it exists.
+const HOLD_OPTION_CHUNK: &str = "\
+local name, value = ...
+vim.api.nvim_set_option_value(name, value, {})
+local group = vim.api.nvim_create_augroup('view-hold-' .. name, { clear = true })
+local function hold()
+  if vim.api.nvim_get_option_value(name, {}) ~= value then
+    vim.api.nvim_set_option_value(name, value, {})
+  end
+end
+vim.api.nvim_create_autocmd('OptionSet', {
+  group = group,
+  pattern = name,
+  callback = hold,
+})
+vim.api.nvim_create_autocmd('SafeState', {
+  group = group,
+  callback = hold,
+})";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -313,6 +356,42 @@ impl EngineHandle {
                 Value::from(name),
                 option_value(value),
                 Value::Map(Vec::new()),
+            ],
+        )
+    }
+
+    /// Sets `name` to `value` and installs a session-lifetime guard that
+    /// puts it back whenever anything else changes it: the durable takeover
+    /// [`crate::RpcCall::HoldOption`] describes.
+    ///
+    /// One `nvim_exec_lua` chunk rather than a set call followed by an
+    /// autocmd call, because the two halves are not independently useful: a
+    /// takeover that set the option but failed to install its guard is the
+    /// silent lapse this whole call exists to prevent, and there is no
+    /// caller that wants one without the other. `name` and `value` ride as
+    /// *arguments* to a constant chunk (same rule as
+    /// [`feed_keys`](Self::feed_keys)): no option name or value can escape
+    /// into the Lua source.
+    ///
+    /// The guard lives in a per-option augroup created with `clear = true`,
+    /// so re-applying a plan replaces both of its autocommands rather than
+    /// stacking a second pair, and it compares before it writes, so an
+    /// unrelated event costs one option read. Why it takes two events, and
+    /// which write each one catches, is in [`HOLD_OPTION_CHUNK`].
+    ///
+    /// A notification, not a request, like every other call the paint loop
+    /// may emit: nothing waits on the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(HOLD_OPTION_CHUNK),
+                Value::Array(vec![Value::from(name), option_value(value)]),
             ],
         )
     }
@@ -604,6 +683,38 @@ mod tests {
                 Value::from(0),
                 Value::Map(Vec::new()),
             ]
+        );
+    }
+
+    #[test]
+    fn hold_option_sends_the_constant_chunk_with_name_and_value_as_arguments() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.hold_option("laststatus", &OptionValue::Int(0)).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params,
+            vec![
+                Value::from(HOLD_OPTION_CHUNK),
+                Value::Array(vec![Value::from("laststatus"), Value::from(0)]),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hold_chunk_both_sets_the_option_and_guards_it() {
+        // the halves are what make a takeover durable; a chunk that lost
+        // any one of them would still pass the wire-shape test above
+        assert!(HOLD_OPTION_CHUNK.contains("nvim_set_option_value(name, value, {})"));
+        assert!(HOLD_OPTION_CHUNK.contains("'OptionSet'"));
+        assert!(
+            HOLD_OPTION_CHUNK.contains("'SafeState'"),
+            "without the idle backstop the guard cannot see a write made inside \
+             another autocommand, which is how a superseded plugin re-asserts"
+        );
+        assert!(
+            HOLD_OPTION_CHUNK.contains("{ clear = true }"),
+            "a re-applied plan must replace its guard rather than stack a second one"
         );
     }
 

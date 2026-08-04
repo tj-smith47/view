@@ -30,3 +30,13 @@ view-oracle = { version = "0.0.1", path = "../view-oracle" }
 # exact text the product paints, read from the crate that owns the layer
 # rather than hand-copied into the harness where it would drift
 view-surface = { version = "0.0.1", path = "../view-surface" }
+
+# Test-only, for the heavy-fixture supersession leg: it builds a plan from
+# the same crates the product does and applies it over a real engine, so
+# the evidence is about the shipped plan rather than a restatement of it.
+# Dev-only by design -- the harness bins themselves stay free of the
+# feature crates they measure.
+[dev-dependencies]
+view-core = { version = "0.0.1", path = "../view-core" }
+view-engine = { version = "0.0.1", path = "../view-engine" }
+view-native = { version = "0.0.1", path = "../view-native" }

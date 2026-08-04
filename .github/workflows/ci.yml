@@ -203,6 +203,11 @@ jobs:
       - name: Run compat harness
         run: task compat
 
+      # after the harness, so the plugin stack the takeover is asserted
+      # against is already installed under the cache this job restores
+      - name: Assert native supersession against live plugins
+        run: task compat-supersede
+
   # Shared-runner bench legs. These record rather than gate until a
   # reviewed gh-* baseline is committed; once it is, every row gates its
   # view/nvim median ratio and its view-side absolute p99 against that
