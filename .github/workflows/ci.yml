@@ -272,19 +272,8 @@ jobs:
           ENGINE_PIN=$(cat .engine-pin)
           nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
-      # No gh-* baseline is committed, so there is nothing on this runner
-      # class to gate against and this leg records one instead: the TOML is
-      # uploaded below for review. It says --record rather than --gate
-      # because a gate with no baseline compares nothing, and a leg that
-      # reports success having compared nothing is worse than one that
-      # plainly records. This becomes --gate in the same commit that lands
-      # the reviewed baselines, and the upload step comes out with it
-      - name: Record bench matrix baseline (${{ matrix.class }})
-        run: task bench -- --all --class ${{ matrix.class }} --record
-
-      - name: Upload recorded baseline
-        uses: actions/upload-artifact@v4
-        with:
-          name: bench-baseline-${{ matrix.class }}
-          path: crates/view-bench/baselines/${{ matrix.class }}.toml
-          if-no-files-found: error
+      # Shared-runner noise cannot silently pass this gate: the null-pair
+      # calibration bracket refuses a host too noisy to measure, and tail
+      # (p99) metrics never gate on shared classes
+      - name: Gate bench matrix against baseline (${{ matrix.class }})
+        run: task bench -- --all --class ${{ matrix.class }} --gate

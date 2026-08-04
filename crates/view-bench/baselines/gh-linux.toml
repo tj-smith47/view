@@ -1,0 +1,63 @@
+schema = 1
+engine_pin = "v0.12.4"
+machine_class = "gh-linux"
+
+[echo.heavy]
+paired_delta_p99_ms = 0.978245
+ratio_p50 = 1.139405693248307
+ratio_p99 = 1.0882649125183297
+view_p99_ms = 1.672663
+
+[echo.minimal]
+paired_delta_p99_ms = 0.27052499999999996
+ratio_p50 = 1.208872714970104
+ratio_p99 = 1.1947349214948375
+view_p99_ms = 0.753246
+
+[echo_control.heavy]
+control_delta_p99_ms = 0.7250650000000001
+control_p99_ms = 1.469202
+control_ratio_p50 = 1.009346790816689
+control_ratio_p99 = 1.007715339120072
+
+[echo_control.minimal]
+control_delta_p99_ms = 0.18762
+control_p99_ms = 0.721107
+control_ratio_p50 = 1.0385668880868222
+control_ratio_p99 = 1.0786170417869194
+
+[first_paint.heavy]
+marker_cold_ms = 87.80524100000001
+marker_ratio_p50 = 0.42622682364179454
+marker_ratio_p99 = 0.45887056984492347
+shell_visible_ms = 3.967567
+
+[first_paint.minimal]
+marker_cold_ms = 26.553036
+marker_ratio_p50 = 0.17330279745760482
+marker_ratio_p99 = 0.20177850569483782
+shell_visible_ms = 3.94175
+
+[flood.minimal]
+cadence_p99_ms = 23.517096000000002
+cadence_p99_ratio = 1.0665704699648504
+pace_ratio = 0.9881605234695989
+
+[input_path.minimal]
+key_to_rpc_p99_us = 60.161
+
+[memory.minimal]
+pss_mb = 3.3857421875
+
+[output_path.minimal]
+p99_ms = 0.089963
+
+[scroll.heavy]
+ratio_p50 = 2.4288741643823273
+ratio_p99 = 2.337079483688592
+staleness_p99_ms = 1.759887
+
+[scroll.minimal]
+ratio_p50 = 2.29456046705588
+ratio_p99 = 2.265844308712498
+staleness_p99_ms = 1.649691
