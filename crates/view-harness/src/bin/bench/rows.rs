@@ -238,7 +238,11 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             );
             println!(
                 "{}",
-                report::aggregate_line("shell_visible_ms", outcome.gated_shell_visible_ms, 1)
+                report::aggregate_line(
+                    "shell_visible_cold_ms",
+                    outcome.gated_shell_visible_cold_ms,
+                    1
+                )
             );
             println!(
                 "{}",
@@ -255,8 +259,8 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             verify_fixture_copies_untouched(&world, fixture)?;
             let mut metrics = CellMetrics::new();
             metrics.insert(
-                "shell_visible_ms".to_string(),
-                outcome.gated_shell_visible_ms,
+                "shell_visible_cold_ms".to_string(),
+                outcome.gated_shell_visible_cold_ms,
             );
             metrics.insert("marker_cold_ms".to_string(), outcome.gated_marker_cold_ms);
             metrics.insert(

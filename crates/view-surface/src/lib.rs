@@ -81,7 +81,7 @@ pub enum LayerKind {
 /// Nothing else in the product paints this string, so its presence on a
 /// terminal identifies the pre-attach shell frame specifically -- which is
 /// what the oracle's ordering assertion and the bench matrix's
-/// `shell_visible_ms` boundary both match on. It lives here, beside the
+/// `shell_visible_cold_ms` boundary both match on. It lives here, beside the
 /// layer whose content it is, because three separate hand-written copies
 /// had already drifted apart: the reference rasterizer and the oracle test
 /// both carried `"waiting for nvim"` while the painter wrote

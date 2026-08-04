@@ -212,11 +212,13 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// The gate policy for one metric on one machine class: `None` means
 /// recorded for reference but never gated on this mechanism.
 ///
-/// Every statistic that [`derives_from_tail`] is exempt on a shared class;
-/// a size or a median is not, and gates everywhere. Ratios take
-/// [`RATIO_HEADROOM`] and everything else [`ABSOLUTE_HEADROOM`], except a
-/// paired delta, which is signed and so cannot take a proportional
-/// allowance at all.
+/// Two families are exempt on a shared class: every statistic that
+/// [`derives_from_tail`], and every [`is_cold_start_absolute`] metric,
+/// whose value is set by cross-boot state a shared host cannot hold
+/// fixed rather than by run-to-run scheduler noise. A size or a median is
+/// neither, and gates everywhere. Ratios take [`RATIO_HEADROOM`] and
+/// everything else [`ABSOLUTE_HEADROOM`], except a paired delta, which is
+/// signed and so cannot take a proportional allowance at all.
 ///
 /// The shared-class exemption is lifted per statistic, by measuring one
 /// unchanged binary pair across host-load regimes. Two have been measured:
@@ -260,18 +262,26 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     } else {
         ABSOLUTE_HEADROOM
     };
-    if !derives_from_tail(metric) {
-        return Some(Headroom::Proportional(factor));
-    }
-    if metric.contains("delta") {
+    // Shape and exemption are independent questions -- what allowance the
+    // value earns versus whether a shared class may consume it at all --
+    // decided in that order so a metric that happened to answer both
+    // exemption predicates at once still keeps the shape its own kind
+    // demands rather than falling through to the wrong one.
+    let shape = if metric.contains("delta") {
         // p99(view[i] - nvim[i]): negative whenever view beats nvim, which
         // is a state the paired scenario is built to reach and report
-        return controlled.then_some(Headroom::Signed {
+        Headroom::Signed {
             factor: RATIO_HEADROOM,
             floor: SIGNED_DELTA_FLOOR_MS,
-        });
+        }
+    } else {
+        Headroom::Proportional(factor)
+    };
+    let exempt_on_shared = derives_from_tail(metric) || is_cold_start_absolute(metric);
+    if !exempt_on_shared {
+        return Some(shape);
     }
-    controlled.then_some(Headroom::Proportional(factor))
+    controlled.then_some(shape)
 }
 
 /// The gate policy for `scenario`'s `metric`, preferring `table`'s measured
@@ -391,6 +401,26 @@ fn derives_from_tail(metric: &str) -> bool {
         .any(|component| component.starts_with("p99"))
 }
 
+/// Whether `metric` names a cold-start absolute -- a p99 taken over cold
+/// process starts rather than over warm samples within a run.
+///
+/// A cold-start absolute is set by state a process boot carries across
+/// process starts: page cache occupancy, dyld/inode cache warmth, the
+/// power and thermal state at the moment each spawn begins. A shared host
+/// cannot hold any of that fixed between runs any more than it can hold a
+/// scheduler's queue depth fixed for a tail percentile, and the evidence
+/// is the same shape: `shell_visible` moved 6x cross-boot on gh-linux with
+/// no change to the code it measured. It is recorded on a shared class
+/// and gated on a controlled one, like a tail.
+///
+/// Matched on a name component rather than a substring, for the same
+/// reason [`derives_from_tail`] is: `coldstart_ms` holds the letters of
+/// "cold" without naming the cross-boot state this predicate exempts, and
+/// a substring rule would exempt it on the strength of a coincidence.
+fn is_cold_start_absolute(metric: &str) -> bool {
+    metric.split('_').any(|component| component == "cold")
+}
+
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
 
@@ -410,7 +440,7 @@ pub const RECORDED_METRICS: [&str; 20] = [
     "paired_delta_p99_ms",
     "view_p99_ms",
     "staleness_p99_ms",
-    "shell_visible_ms",
+    "shell_visible_cold_ms",
     "marker_cold_ms",
     "marker_ratio_p50",
     "marker_ratio_p99",
@@ -1636,9 +1666,9 @@ mod tests {
             metrics(&[("ratio_p50", 1.5)]),
         );
         let measured = vec![
-            measured_cell("first_paint", "minimal", &[("shell_visible_ms", 4.3)]),
+            measured_cell("first_paint", "minimal", &[("shell_visible_cold_ms", 4.3)]),
             measured_cell("echo", "minimal", &[("ratio_p50", 1.4)]),
-            measured_cell("first_paint", "heavy", &[("shell_visible_ms", 9.1)]),
+            measured_cell("first_paint", "heavy", &[("shell_visible_cold_ms", 9.1)]),
         ];
         assert_eq!(
             unrecorded_cells(&file, &measured),
@@ -1798,14 +1828,15 @@ mod tests {
         });
         // a median and a size do not move with ambient load, so they gate on
         // every class; everything built on a p99 does not, until that
-        // statistic has its own load-regime characterization
+        // statistic has its own load-regime characterization; a cold-start
+        // absolute is the same shape as a tail for a different reason --
+        // cross-boot state rather than run-to-run scheduler noise -- and
+        // gates the same way
         let roster = [
             ("ratio_p50", ratio, ratio),
             ("pace_ratio", ratio, ratio),
             ("marker_ratio_p50", ratio, ratio),
             ("control_ratio_p50", ratio, ratio),
-            ("shell_visible_ms", absolute, absolute),
-            ("marker_cold_ms", absolute, absolute),
             ("pss_mb", absolute, absolute),
             ("phys_footprint_mb", absolute, absolute),
             ("ratio_p99", None, ratio),
@@ -1818,6 +1849,8 @@ mod tests {
             ("control_p99_ms", None, absolute),
             ("key_to_rpc_p99_us", None, absolute),
             ("p99_ms", None, absolute),
+            ("shell_visible_cold_ms", None, absolute),
+            ("marker_cold_ms", None, absolute),
             ("paired_delta_p99_ms", None, signed),
             ("control_delta_p99_ms", None, signed),
         ];
@@ -1866,6 +1899,22 @@ mod tests {
         assert_eq!(gate_headroom("p999_ms", true), absolute);
         assert_eq!(gate_headroom("warmup99_ms", false), absolute);
         assert_eq!(gate_headroom("warmup99_ms", true), absolute);
+    }
+
+    /// The cold-start rule reads a name component, not the letters anywhere
+    /// in the name: `cold` as a whole component names the cross-boot state
+    /// the exemption exists for, while a name that merely contains those
+    /// letters carries none of it and must keep gating.
+    ///
+    /// Disconfirm: match `metric.contains("cold")` instead, and
+    /// `coldstart_ms` loses its gate on a shared class.
+    #[test]
+    fn the_cold_start_rule_reads_a_component_not_the_letters_cold() {
+        let absolute = Some(Headroom::Proportional(ABSOLUTE_HEADROOM));
+        assert_eq!(gate_headroom("marker_cold_ms", false), None);
+        assert_eq!(gate_headroom("marker_cold_ms", true), absolute);
+        assert_eq!(gate_headroom("coldstart_ms", false), absolute);
+        assert_eq!(gate_headroom("coldstart_ms", true), absolute);
     }
 
     /// A metric no policy row classifies would still get one from the

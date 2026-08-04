@@ -68,30 +68,36 @@ max = 16.0
 [[budget]]
 spec_row = "First paint: view's own UI shell visible, engine still loading"
 scenario = "first_paint"
-metric = "shell_visible_ms"
+metric = "shell_visible_cold_ms"
 max = 50.0
 
 # 30 ms, not a rounder number, because the ratchet already bounds this
-# metric above it (the recorded 25.151 times the class's measured headroom;
-# 50.3 ms on dev-linux under the 2.0 in its headroom sidecar). Any budget
-# above that is one the ratchet always reaches first, so the budget could
-# never be the thing that fires -- the same defect the withdrawn cold_ms bar
-# had. 30 sits under the ratchet and over the measurement, so it can break.
-# 0.30 bounds the paired quantity the absolute cannot: a class whose cold
-# start is slow for reasons outside view still has to show view reaching
-# the file in under a third of bare nvim's time. marker_cold_ms is a p99
-# gated on the shared dev-linux class only because its name carries no
-# percentile component, and the 50.3 ms ratchet premise holds only under
-# that classification.
+# metric above it on a class where both gates run (the recorded 25.151
+# times the class's measured headroom; 50.3 ms under the 2.0 factor
+# dev-linux's headroom sidecar has sized, which stands as the sizing
+# witness here since no controlled-* class has published its own factor
+# yet). Any budget above that is one the ratchet always reaches first, so
+# the budget could never be the thing that fires -- the same defect the
+# withdrawn cold_ms bar had. 30 sits under the ratchet and over the
+# measurement, so it can break. 0.30 bounds the paired quantity the
+# absolute cannot: a class whose cold start is slow for reasons outside
+# view still has to show view reaching the file in under a third of bare
+# nvim's time. marker_cold_ms is a cold-start absolute: the spec budget
+# gate reads this row, and the ratchet reads its own entry, on a
+# controlled class only -- a shared class is exempt from both, per the
+# attestation split -- so the 50.3 ms ratchet premise, and this bar's
+# teeth, are live only there.
 #
-# 30 is also the bound the noise tolerance was built around. This row is
-# one-shot -- no median-of-trials stands between an ambient spike and the
-# verdict -- the class publishes a x2.0 spread for the statistic, and the
-# recorded 25.151 sits 19% under the bar. So a load excursion past 30 is
-# reported against the ceiling that recorded value earns, which is that
-# same 50.3 ms, and fails past it. The bar keeps its teeth two ways: the
-# tolerance applies only while the recorded quiet value stays under 30, and
-# every run above 30 prints a line saying so.
+# 30 is also the bound the noise tolerance was built around, for the class
+# that gates this row. This row is one-shot -- no median-of-trials stands
+# between an ambient spike and the verdict -- the gating class publishes a
+# x2.0 spread for the statistic (dev-linux's sidecar entry, pending a
+# controlled-* class's own), and the recorded 25.151 sits 19% under the
+# bar. So a load excursion past 30 is reported against the ceiling that
+# recorded value earns, which is that same 50.3 ms, and fails past it. The
+# bar keeps its teeth two ways: the tolerance applies only while the
+# recorded quiet value stays under 30, and every run above 30 prints a
+# line saying so.
 [[budget]]
 spec_row = "First paint: the opened file's content on screen"
 scenario = "first_paint"

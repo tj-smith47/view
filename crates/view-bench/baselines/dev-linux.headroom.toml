@@ -35,34 +35,44 @@ ratio_p50 = 1.06
 # 8 report-only replicates, 2026-08-01, host loads 0.79 to 5.74, one
 # unchanged binary pair, both first_paint fixtures (16 observations of a p99
 # over 1000 cold spawns; the name carries no percentile component, so this
-# escapes the shared-class tail exemption and gates here). Pooled median
-# 3.72 ms, half-width 2.63 ms (70.7% of median): the six quiet replicates
-# per fixture sit inside 3.62..3.78 ms, and the elevated-load ones measured
-# 6.08, 6.13 and 8.88 ms on unchanged code. Worst excursion above the
-# recorded value 2.34x (8.881 against heavy's recorded 3.788); the 2x
-# half-width rule asks 2.41x. 2.5 clears both, and replaces a default of 1.5
-# that this host's own weather breaches -- the quiet-recorded bar was broken
-# by an ambient excursion, not by a change to view. Scoped to first_paint,
-# the scenario the replicates ran: a future scenario reusing this metric
-# name must earn its own characterization rather than inherit this one.
-"first_paint.shell_visible_ms" = 2.5
-
-# Same 8 replicates as shell_visible_ms, same statistic shape (a p99 of
-# 1000 cold spawns whose name carries no percentile component). Relative
-# half-width agrees across fixtures: minimal median 23.6 ms, half-width
-# 42.3%; heavy median 84.4 ms, half-width 42.1%. Worst excursion above the
-# recorded value 1.91x (151.206 against heavy's recorded 79.267); the 2x
-# half-width rule asks 1.85x. 2.0 clears both. Scoped to first_paint for the
-# same reason as shell_visible_ms.
+# is a cold-start absolute rather than a tail -- set by cross-boot state,
+# not by scheduler noise within a run). Pooled median 3.72 ms, half-width
+# 2.63 ms (70.7% of median): the six quiet replicates per fixture sit inside
+# 3.62..3.78 ms, and the elevated-load ones measured 6.08, 6.13 and 8.88 ms
+# on unchanged code. Worst excursion above the recorded value 2.34x (8.881
+# against heavy's recorded 3.788); the 2x half-width rule asks 2.41x. 2.5
+# clears both, and replaces a default of 1.5 that this host's own weather
+# breaches -- the quiet-recorded bar was broken by an ambient excursion, not
+# by a change to view. Scoped to first_paint, the scenario the replicates
+# ran: a future scenario reusing this metric name must earn its own
+# characterization rather than inherit this one.
 #
-# This factor reaches further than the others: the minimal fixture's spec
-# budget of 30 ms sits under this ratchet ceiling (25.151 x 2.0 = 50.301),
-# and marker_cold_ms is not tail-exempt, so the budget gate reads this entry
-# too. A reading in (30.0, 50.301] on that cell is reported as an excursion
-# rather than failed, which makes 50.301 the value both gates fail at.
-# Changing this number therefore moves a spec bound's effective firing
-# point, not only the regression bar -- size it from the replicates, never
-# from what would be convenient for a run to pass.
+# dev-linux is a shared class, so the cold-start exemption keeps the
+# ratchet from reading this entry here, and the spec budget gate now runs
+# on a controlled class only -- neither reader consumes 2.5 on this class
+# today. It stands as the sized characterization on record, so a future
+# controlled-* class, or a lifted ratchet exemption, starts from a measured
+# factor instead of the conservative default.
+"first_paint.shell_visible_cold_ms" = 2.5
+
+# Same 8 replicates as shell_visible_cold_ms, same statistic shape (a p99 of
+# 1000 cold spawns whose name carries no percentile component, so this is a
+# cold-start absolute too). Relative half-width agrees across fixtures:
+# minimal median 23.6 ms, half-width 42.3%; heavy median 84.4 ms, half-width
+# 42.1%. Worst excursion above the recorded value 1.91x (151.206 against
+# heavy's recorded 79.267); the 2x half-width rule asks 1.85x. 2.0 clears
+# both. Scoped to first_paint for the same reason as shell_visible_cold_ms.
+#
+# This factor was sized to also reach the spec budget: the minimal
+# fixture's 30 ms budget sits under the ratchet ceiling this factor would
+# produce (25.151 x 2.0 = 50.301) on a class where both gates run. On
+# dev-linux neither one does -- the cold-start exemption keeps the ratchet
+# from reading this entry, and the spec budget gate itself now runs only on
+# a controlled class -- so today this factor is retained as the sizing
+# witness rather than something either gate consumes here. On a class where
+# both run, changing this number still moves the spec bound's effective
+# firing point, not only the regression bar, so size it from the
+# replicates, never from what would be convenient for a run to pass.
 "first_paint.marker_cold_ms" = 2.0
 
 # 8 report-only replicates, 2026-08-01, host loads 1.58 to 4.32, one

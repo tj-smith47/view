@@ -130,8 +130,9 @@ pub struct FirstPaintOutcome {
     /// paints nothing before its buffer window, so there is no counterpart
     /// series to divide by.
     pub shell: Distribution,
-    /// The view side's p99 time to the startup shell, in milliseconds.
-    pub gated_shell_visible_ms: f64,
+    /// The view side's p99 cold time to the startup shell, in
+    /// milliseconds.
+    pub gated_shell_visible_cold_ms: f64,
 }
 
 /// Runs `protocol.warmup + protocol.samples` cold spawns per side,
@@ -196,14 +197,14 @@ pub fn run(
     let gated_marker_cold_ms = summary.view.p99();
     let gated_marker_ratio_p50 = summary.ratio_p50;
     let gated_marker_ratio_p99 = summary.ratio_p99;
-    let gated_shell_visible_ms = shell.p99();
+    let gated_shell_visible_cold_ms = shell.p99();
     Ok(FirstPaintOutcome {
         summary,
         gated_marker_cold_ms,
         gated_marker_ratio_p50,
         gated_marker_ratio_p99,
         shell,
-        gated_shell_visible_ms,
+        gated_shell_visible_cold_ms,
     })
 }
 

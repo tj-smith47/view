@@ -230,7 +230,10 @@ fn require_gatable(gating: bool, class: &str, path: &Path) -> Result<()> {
 /// Where the spec 3.1 budget table lives. One file for every class: a
 /// budget is a property of the spec, not of the machine that measures it,
 /// and the entries that do vary by class say so in their own `classes`
-/// field rather than by living in separate files.
+/// field rather than by living in separate files. That is only half the
+/// doctrine: attestation requires a witness that can measure it, so the
+/// gate reads this table on controlled classes alone, and a shared class
+/// says so in its log instead of failing bounds it cannot witness.
 fn budgets_path() -> PathBuf {
     workspace_root()
         .join("crates")
@@ -1141,63 +1144,81 @@ fn main() -> Result<()> {
             }
         }
         // the recorded bars answer "is this worse than last time"; the spec
-        // budgets answer "is this where the spec says it must be". Both run,
-        // and they are reported apart, because a metric can be regression
-        // green forever at a value the spec never accepted
-        let budget_path = budgets_path();
-        let budget_file = budgets::load(&budget_path).with_context(|| {
-            format!(
-                "gating requires the budget table at {}",
-                budget_path.display()
-            )
-        })?;
-        let findings = budgets::check_run(&budget_file, &file, &measured, &cli.class, &headroom);
-        let budget_failures = findings
-            .iter()
-            .filter(|finding| finding.verdict.is_failure())
-            .count();
-        for finding in &findings {
-            // an accepted shortfall prints every run on purpose: it is the
-            // only thing that keeps an unmet budget from going quiet
-            if finding.verdict != budgets::Verdict::Inside {
-                eprintln!("{finding}");
-            }
-        }
-        // a shortfall the run measured back inside its budget by more than
-        // the class's spread for the statistic has been fixed and its entry
-        // now describes nothing; a bare inside reading is one draw of a
-        // statistic whose next draw may still need the entry. Stale-entry
-        // advice accompanies the full sweep, where the operator is
-        // adjudicating the whole ledger; a scoped run keeps its exit status
-        // about the cells it measured
+        // budgets answer "is this where the spec says it must be". Both are
+        // reported apart, because a metric can be regression green forever
+        // at a value the spec never accepted -- but the budget verdict runs
+        // only where a controlled host can witness it: a shared class keeps
+        // the ratchet and announces the skip instead of failing spec bounds
+        // its own draws cannot attest
+        let budget_file = if controlled {
+            let budget_path = budgets_path();
+            Some(budgets::load(&budget_path).with_context(|| {
+                format!(
+                    "gating requires the budget table at {}",
+                    budget_path.display()
+                )
+            })?)
+        } else {
+            println!(
+                "BUDGET SKIP [{}]: spec 3.1 budgets attest on controlled classes only; this \
+                 shared class ratchets its recorded bars and leaves the budget verdict to a \
+                 witness that can measure it",
+                cli.class
+            );
+            None
+        };
+        let mut findings = Vec::new();
+        let mut budget_failures = 0;
         let mut stale_shortfalls = Vec::new();
-        if cli.all {
-            stale_shortfalls =
-                budgets::unreached_shortfalls(&budget_file, &cli.class, &findings, &headroom);
-            for shortfall in &stale_shortfalls {
-                eprintln!(
-                    "BUDGET SHORTFALL STALE [{}.{}] {} on {}: measured inside its budget this \
-                     run by more than the class's spread for the statistic, so the \
-                     [[shortfall]] entry accepting {} is spent and should be deleted",
-                    shortfall.scenario,
-                    shortfall.fixture,
-                    shortfall.metric,
-                    shortfall.class,
-                    shortfall.accepted
-                );
-            }
-        }
-        // a budget whose scenario ran without producing its metric matched
-        // nothing and reported nothing, which is the shape of a pass
         let mut dead_budgets = Vec::new();
-        if cli.all {
-            dead_budgets = budgets::unreached_budgets(&budget_file, &cli.class, &measured);
-            for budget in &dead_budgets {
-                eprintln!(
-                    "BUDGET UNENFORCED [{}] {} on {}: the run measured this scenario and it \
-                     produced no such metric, so the spec bound {} checked nothing [{}]",
-                    budget.scenario, budget.metric, cli.class, budget.max, budget.spec_row
-                );
+        if let Some(budget_file) = &budget_file {
+            findings = budgets::check_run(budget_file, &file, &measured, &cli.class, &headroom);
+            budget_failures = findings
+                .iter()
+                .filter(|finding| finding.verdict.is_failure())
+                .count();
+            for finding in &findings {
+                // an accepted shortfall prints every run on purpose: it is
+                // the only thing that keeps an unmet budget from going quiet
+                if finding.verdict != budgets::Verdict::Inside {
+                    eprintln!("{finding}");
+                }
+            }
+            // a shortfall the run measured back inside its budget by more
+            // than the class's spread for the statistic has been fixed and
+            // its entry now describes nothing; a bare inside reading is one
+            // draw of a statistic whose next draw may still need the entry.
+            // Stale-entry advice accompanies the full sweep, where the
+            // operator is adjudicating the whole ledger; a scoped run keeps
+            // its exit status about the cells it measured
+            if cli.all {
+                stale_shortfalls =
+                    budgets::unreached_shortfalls(budget_file, &cli.class, &findings, &headroom);
+                for shortfall in &stale_shortfalls {
+                    eprintln!(
+                        "BUDGET SHORTFALL STALE [{}.{}] {} on {}: measured inside its budget \
+                         this run by more than the class's spread for the statistic, so the \
+                         [[shortfall]] entry accepting {} is spent and should be deleted",
+                        shortfall.scenario,
+                        shortfall.fixture,
+                        shortfall.metric,
+                        shortfall.class,
+                        shortfall.accepted
+                    );
+                }
+            }
+            // a budget whose scenario ran without producing its metric
+            // matched nothing and reported nothing, which is the shape of a
+            // pass
+            if cli.all {
+                dead_budgets = budgets::unreached_budgets(budget_file, &cli.class, &measured);
+                for budget in &dead_budgets {
+                    eprintln!(
+                        "BUDGET UNENFORCED [{}] {} on {}: the run measured this scenario and it \
+                         produced no such metric, so the spec bound {} checked nothing [{}]",
+                        budget.scenario, budget.metric, cli.class, budget.max, budget.spec_row
+                    );
+                }
             }
         }
         let tally = GateTally {

@@ -30,13 +30,13 @@ control_ratio_p99 = 1.3325415676959622
 marker_cold_ms = 84.02604099999999
 marker_ratio_p50 = 0.39563655534133746
 marker_ratio_p99 = 0.41151706839744245
-shell_visible_ms = 6.112
+shell_visible_cold_ms = 6.112
 
 [first_paint.minimal]
 marker_cold_ms = 32.922
 marker_ratio_p50 = 0.18811294962937786
 marker_ratio_p99 = 0.20377195493182318
-shell_visible_ms = 7.594208
+shell_visible_cold_ms = 7.594208
 
 [flood.minimal]
 cadence_p99_ms = 13.352667
