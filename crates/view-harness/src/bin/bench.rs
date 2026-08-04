@@ -75,6 +75,33 @@ const MATRIX: &[(&str, &str)] = &[
 /// quantity any recorded bar was taken from.
 const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[("echo_path", "minimal"), ("echo_path", "heavy")];
 
+/// What one matrix row handed back: the metrics it stands behind, and the
+/// reason it withheld its number when it did.
+///
+/// A refusal is neither of its two neighbors. A failed cell voids the
+/// whole matrix (no record, no verdict), and a trusted empty cell
+/// (echo_path) simply has nothing to record. The refusal lane exists for a
+/// row whose own honesty check failed on a class where the refused number
+/// never gates: failing the matrix there would let one cell's ambient
+/// contention void eleven trusted measurements to protect a number no
+/// gate reads.
+struct RowOutcome {
+    /// The metrics the row stands behind this run.
+    metrics: CellMetrics,
+    /// Why the row withheld its number, when it did.
+    refused: Option<String>,
+}
+
+impl RowOutcome {
+    /// A row that stands behind every metric it measured.
+    fn trusted(metrics: CellMetrics) -> Self {
+        Self {
+            metrics,
+            refused: None,
+        }
+    }
+}
+
 /// Minimum sampling discipline for a number that may be recorded or
 /// gated, per the measurement protocol; ad hoc smaller runs are allowed
 /// only for report-only invocations.
@@ -743,6 +770,7 @@ fn main() -> Result<()> {
     let recording = cli.record;
     let mut masked_regressions = 0usize;
     let gating = cli.gate;
+    let controlled = baselines::is_controlled_class(&cli.class);
 
     let under_gha = std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true");
     let mut skipped: Vec<CellId> = Vec::new();
@@ -832,7 +860,7 @@ fn main() -> Result<()> {
             println!(
                 "class {}: {}",
                 cli.class,
-                if baselines::is_controlled_class(&cli.class) {
+                if controlled {
                     "controlled policy, tail metrics gated"
                 } else {
                     "shared policy, tail metrics recorded but not gated"
@@ -864,14 +892,29 @@ fn main() -> Result<()> {
     }
 
     let mut measured: Vec<baselines::MeasuredCell> = Vec::new();
+    let mut refused: Vec<CellId> = Vec::new();
     let mut failed: Vec<String> = Vec::new();
     for cell in &cells {
         let (scenario, fixture) = (&cell.scenario, &cell.fixture);
-        match run_cell(cell, &bins, &protocol) {
-            Ok(metrics) => measured.push(baselines::MeasuredCell {
-                id: cell.clone(),
-                metrics,
-            }),
+        match run_cell(cell, &bins, &protocol, controlled) {
+            Ok(outcome) => {
+                if let Some(reason) = &outcome.refused {
+                    // a refusal is quieter than a failure by design, so on CI
+                    // it gets the same checks-page annotation a platform skip
+                    // does: visible without opening the run log
+                    if under_gha {
+                        println!(
+                            "::warning::bench cell {scenario}/{fixture} refused its own \
+                             measurement: {reason}"
+                        );
+                    }
+                    refused.push(cell.clone());
+                }
+                measured.push(baselines::MeasuredCell {
+                    id: cell.clone(),
+                    metrics: outcome.metrics,
+                });
+            }
             // one cell failing says nothing about the cells that already
             // measured, and the cells still queued behind it are worth the
             // minutes the matrix has already spent getting here: keep
@@ -965,6 +1008,7 @@ fn main() -> Result<()> {
         } else {
             baselines::RecordMode::SingleCell
         };
+        require_record_survives_refusal(mode, &refused)?;
         let existing = if path.exists() {
             let existing = baselines::load(&path)?;
             // a single-cell record keeps the file's other cells, so a pin or
@@ -985,7 +1029,26 @@ fn main() -> Result<()> {
         // replaced: a record that drops the last cell measuring a
         // characterized metric must refuse rather than orphan the sidecar
         // entry and fail the next load
-        baselines::require_headroom_bound(&headroom, &plan.file, &headroom_file)?;
+        let bound = baselines::require_headroom_bound(&headroom, &plan.file, &headroom_file);
+        if refused.is_empty() {
+            bound?;
+        } else {
+            // an unbound sidecar entry here may be unbound only because the
+            // cell that measures it refused this run; without the naming, the
+            // error reads as an invitation to delete a valid entry
+            bound.with_context(|| {
+                format!(
+                    "cell(s) {} refused their own measurement this run, so the file about to be \
+                     written holds them empty; if the entry binds through one of them, re-run \
+                     when the host is quieter instead of deleting it",
+                    refused
+                        .iter()
+                        .map(|id| format!("{}.{}", id.scenario, id.fixture))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?;
+        }
         baselines::save(&path, &plan.file)?;
         let report = plan.report(&path.display().to_string());
         for line in report.info {
@@ -1025,8 +1088,21 @@ fn main() -> Result<()> {
                 continue;
             };
             breaches.extend(baselines::gate_cell(cell, recorded, &cli.class, &headroom));
+            // a refused cell's absent metrics are attributed, not coverage
+            // gaps: the row said loudly why it withheld its number, and on
+            // this class (a controlled one bails before reaching the gate)
+            // the recorded bar it left untested is one no gate reads anyway
+            let cell_refused = refused.contains(&cell.id);
             for metric in baselines::unmeasured_metrics(cell, recorded) {
-                unmeasured.push((cell.id.clone(), metric));
+                if cell_refused {
+                    println!(
+                        "GATE SKIP [{}.{}] {metric}: the row refused its own measurement this \
+                         run, so the recorded bar was not tested",
+                        cell.id.scenario, cell.id.fixture
+                    );
+                } else {
+                    unmeasured.push((cell.id.clone(), metric));
+                }
             }
         }
         for breach in &breaches {
@@ -1170,6 +1246,27 @@ fn main() -> Result<()> {
         std::process::exit(EXIT_RECORD_MASKED_REGRESSION);
     }
 
+    Ok(())
+}
+
+/// Refuses a record whose written file would erase recorded bars behind a
+/// refusal. A single-cell record upserts exactly what the one cell
+/// measured, so a refusal there would replace the cell's existing bars
+/// with an empty cell under a command that reports success. A full-matrix
+/// record survives the same refusal: it rebuilds the whole file, the
+/// refusal has already been announced beside eleven trusted cells, and
+/// the next quiet record re-adds the bars as fresh metrics.
+fn require_record_survives_refusal(mode: baselines::RecordMode, refused: &[CellId]) -> Result<()> {
+    if matches!(mode, baselines::RecordMode::SingleCell) {
+        if let Some(id) = refused.first() {
+            bail!(
+                "{}/{} refused its own measurement, and recording the single cell would replace \
+                 its recorded bars with nothing; re-run when the host is quieter",
+                id.scenario,
+                id.fixture
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1490,6 +1587,24 @@ mod tests {
         std::fs::write(&missing, "schema = 1\n").unwrap();
         require_gatable(true, "gh-linux", &missing).unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_single_cell_record_never_erases_bars_behind_a_refusal() {
+        // the failure this forbids reports success: SingleCell mode upserts
+        // exactly what the cell measured, so an empty refusal cell would
+        // overwrite the recorded bars and the run would still exit 0
+        let refused = vec![CellId::new("input_path", "minimal")];
+        let err = require_record_survives_refusal(baselines::RecordMode::SingleCell, &refused)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("input_path/minimal") && err.contains("re-run"),
+            "the refusal must name the cell and the way forward, got: {err}"
+        );
+        // a full-matrix record rebuilds the file and keeps the refusal loud
+        require_record_survives_refusal(baselines::RecordMode::FullMatrix, &refused).unwrap();
+        require_record_survives_refusal(baselines::RecordMode::SingleCell, &[]).unwrap();
     }
 
     #[test]

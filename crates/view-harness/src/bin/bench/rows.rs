@@ -14,17 +14,36 @@ use super::*;
 /// gate policy from a rule over its components: an undeclared one is not
 /// rejected downstream, it is silently gated on every class under whichever
 /// arm its spelling happens to reach.
-pub(super) fn run_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellMetrics> {
+pub(super) fn run_cell(
+    cell: &CellId,
+    bins: &Bins,
+    protocol: &Protocol,
+    controlled: bool,
+) -> Result<RowOutcome> {
     let (scenario, fixture) = (&cell.scenario, &cell.fixture);
-    let metrics = measure_cell(cell, bins, protocol)?;
-    let undeclared = baselines::undeclared_metrics(&metrics);
+    // the only consumer is the unix-only taps arm, so off unix the
+    // parameter has no reader and `-D warnings` fails the build there
+    #[cfg(not(unix))]
+    let _ = controlled;
+    // the taps rows dispatch here rather than in measure_cell because they
+    // are the only rows that can refuse their own number; every other row
+    // either measures or fails, so measure_cell keeps the simpler contract
+    let outcome = match scenario.as_str() {
+        #[cfg(unix)]
+        "input_path" | "output_path" => {
+            let world = CellWorld::create(fixture)?;
+            taps_rows::run_taps_row(cell, &world, bins, protocol, controlled)?
+        }
+        _ => RowOutcome::trusted(measure_cell(cell, bins, protocol)?),
+    };
+    let undeclared = baselines::undeclared_metrics(&outcome.metrics);
     ensure!(
         undeclared.is_empty(),
         "{scenario}/{fixture} recorded {}, which baselines::RECORDED_METRICS does not declare; \
          add the name there and give it a policy row before the row can record it",
         undeclared.join(", ")
     );
-    Ok(metrics)
+    Ok(outcome)
 }
 
 fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellMetrics> {
@@ -35,8 +54,6 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
     let nvim_bin = bins.nvim.as_path();
     let world = CellWorld::create(fixture)?;
     match scenario {
-        #[cfg(unix)]
-        "input_path" | "output_path" => taps_rows::run_taps_row(cell, &world, bins, protocol),
         #[cfg(unix)]
         "echo_path" => taps_rows::run_echo_path_row(fixture, &world, bins, protocol),
         #[cfg(unix)]

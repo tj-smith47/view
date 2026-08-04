@@ -2157,6 +2157,34 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn an_empty_cell_survives_the_round_trip_as_present() {
+        // what a refused row records: a cell with no metrics. It must load
+        // back as present-and-empty, not absent -- absent would fail the
+        // gate's unrecorded_cells walk on the very next run, turning an
+        // attributed refusal into an unattributed coverage failure
+        let dir = std::env::temp_dir().join(format!("view-baselines-empty-{}", std::process::id()));
+        let path = dir.join("gh-macos.toml");
+        let mut file = BaselineFile::new("gh-macos", "v0.12.4");
+        let id = CellId::new("output_path", "minimal");
+        file.upsert_cell(&id, CellMetrics::new());
+        save(&path, &file).unwrap();
+        let loaded = load(&path).unwrap();
+        let cell = loaded
+            .cell(&id)
+            .expect("an empty cell must still be a recorded cell");
+        assert!(cell.is_empty());
+        assert!(unrecorded_cells(
+            &loaded,
+            &[MeasuredCell {
+                id,
+                metrics: CellMetrics::new(),
+            }]
+        )
+        .is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn outcome_for<'a>(outcomes: &'a [RatchetOutcome], name: &str) -> &'a RatchetOutcome {
         outcomes
             .iter()

@@ -13,12 +13,22 @@ use view_bench::scenarios::taps;
 const PTY_FLOOR_SAMPLES: usize = 500;
 const PTY_FLOOR_WARMUP: usize = 50;
 
-/// Ceiling on the measured tap-operation p99 before the taps rows are
-/// allowed to run at all. The gated input-path interval carries two
+/// Ceiling on the measured tap-operation p99 before a taps row may stand
+/// behind its number. The gated input-path interval carries two
 /// interior taps (loop-wake, rpc-handoff) plus the tail of the one that
 /// opens it, so a tap at this bar puts ~15 microseconds of
 /// instrumentation inside a boundary whose per-class p99 floors are
 /// ~150-300; above it, the measurement would be reporting mostly itself.
+///
+/// What exceeding the bar costs depends on what the row's number is for.
+/// The taps rows' only metrics are tail statistics, which gate only on a
+/// controlled class (see [`baselines::gate_headroom`]): there the run
+/// fails outright, because an untrusted tap invalidates a number the gate
+/// enforces. On a shared class the row refuses its own measurement and
+/// the rest of the matrix stands -- failing eleven trusted cells over a
+/// number that never gates there would hand one runner's contention spike
+/// the whole matrix's verdict. The echo_path decomposition always fails,
+/// because everything it reports flows through the taps.
 const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 
 /// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
@@ -49,13 +59,16 @@ fn shim_taps_spec(inner: SpawnSpec, tap_path: &Path) -> SpawnSpec {
 
 /// Runs one taps row (`input_path` or `output_path`) end to end, then
 /// refuses to report through taps that would distort the row's own
-/// budget.
+/// budget. `controlled` selects what that refusal does -- fail the run
+/// where the number gates, withhold only the number where it never does
+/// (see [`TAP_OVERHEAD_BAR_US`]).
 pub(crate) fn run_taps_row(
     cell: &CellId,
     world: &CellWorld,
     bins: &Bins,
     protocol: &Protocol,
-) -> Result<CellMetrics> {
+    controlled: bool,
+) -> Result<RowOutcome> {
     let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
     let (pipe, spec, _cwd) = taps_side(fixture, world, bins)?;
     let deadline = settle_deadline(fixture);
@@ -97,14 +110,31 @@ pub(crate) fn run_taps_row(
             segment.label, segment.p50_us, segment.p99_us, segment.samples
         );
     }
-    report_overhead(&outcome.overhead, outcome.overhead_pace)?;
+    report_overhead(&outcome.overhead, outcome.overhead_pace);
+    if let Some(reason) = overhead_refusal(&outcome.overhead) {
+        if controlled {
+            bail!(
+                "{reason}; this class gates the row's p99, so the tap design must change before \
+                 the row can be trusted"
+            );
+        }
+        println!(
+            "      TAPS ROW REFUSED [{scenario}.{fixture}]: {reason}; the row records and \
+             compares nothing this run -- its only metric is a tail statistic, which never gates \
+             on a shared class"
+        );
+        return Ok(RowOutcome {
+            metrics: CellMetrics::new(),
+            refused: Some(reason),
+        });
+    }
     println!(
         "{}",
         report::aggregate_line(metric_key, outcome.gated_p99, protocol.trials)
     );
     let mut metrics = CellMetrics::new();
     metrics.insert(metric_key.to_string(), outcome.gated_p99);
-    Ok(metrics)
+    Ok(RowOutcome::trusted(metrics))
 }
 
 /// Prepares one instrumented-build side: the tap FIFO and the shimmed
@@ -129,16 +159,12 @@ fn taps_side(
     Ok((pipe, spec, cwd))
 }
 
-/// Prints the row's own tap-overhead characterization and refuses the row
-/// if the instrumentation is a material share of what it measured.
+/// Prints the row's own tap-overhead characterization.
 ///
 /// The characterization runs inside the live session, not before it: an
 /// idle-host number cannot see the contention the tap sites run under, and
 /// a bar compared against it is a bar against a different operation.
-fn report_overhead(
-    overhead: &view_bench::sampling::Distribution,
-    pace: std::time::Duration,
-) -> Result<()> {
+fn report_overhead(overhead: &view_bench::sampling::Distribution, pace: std::time::Duration) {
     println!(
         "      tap overhead p50 {:.3}us p99 {:.3}us over {} iterations at {}us pace \
          (bar {TAP_OVERHEAD_BAR_US}us)",
@@ -147,14 +173,22 @@ fn report_overhead(
         overhead.len(),
         pace.as_micros()
     );
-    if overhead.p99() > TAP_OVERHEAD_BAR_US {
-        bail!(
-            "measured tap overhead p99 {:.3}us exceeds {TAP_OVERHEAD_BAR_US}us; the tap design \
-             must change before this row can be trusted",
+}
+
+/// Why the measured tap overhead disqualifies the instrumentation, when
+/// it does: a tap p99 over [`TAP_OVERHEAD_BAR_US`] means the measurement
+/// would be a material share of instrumentation rather than editor.
+///
+/// The reason states the finding alone; each caller appends the
+/// consequence, because what an untrusted tap costs depends on what the
+/// row's number is for (see [`TAP_OVERHEAD_BAR_US`]).
+fn overhead_refusal(overhead: &view_bench::sampling::Distribution) -> Option<String> {
+    (overhead.p99() > TAP_OVERHEAD_BAR_US).then(|| {
+        format!(
+            "measured tap overhead p99 {:.3}us exceeds the {TAP_OVERHEAD_BAR_US}us bar",
             overhead.p99()
-        );
-    }
-    Ok(())
+        )
+    })
 }
 
 /// Runs the report-only `echo_path` decomposition: the echo round trip on
@@ -235,7 +269,13 @@ pub(crate) fn run_echo_path_row(
         );
     }
 
-    report_overhead(&outcome.overhead, outcome.overhead_pace)?;
+    report_overhead(&outcome.overhead, outcome.overhead_pace);
+    if let Some(reason) = overhead_refusal(&outcome.overhead) {
+        bail!(
+            "{reason}; the decomposition is measured entirely through the taps, so nothing in \
+             this row survives untrusted instrumentation"
+        );
+    }
     let floor = taps::run_pty_floor(
         &cwd,
         PTY_FLOOR_SAMPLES,
@@ -252,4 +292,27 @@ pub(crate) fn run_echo_path_row(
     // report-only: the cell records no metric, so no baseline can be
     // written from it and no gate can read one
     Ok(CellMetrics::new())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use view_bench::sampling::Distribution;
+
+    #[test]
+    fn the_overhead_bar_admits_at_the_bar_and_refuses_above_it() {
+        // the bar is inclusive: a tap at exactly the stated ceiling is the
+        // design's stated cost, not an excess, so refusing it would make
+        // the row unrunnable on a host that meets the design
+        let at_bar = Distribution::from_samples(&[TAP_OVERHEAD_BAR_US; 200], 0).unwrap();
+        assert_eq!(overhead_refusal(&at_bar), None);
+
+        let over = Distribution::from_samples(&[TAP_OVERHEAD_BAR_US * 3.5; 200], 0).unwrap();
+        let reason = overhead_refusal(&over).expect("a tap p99 over the bar must disqualify");
+        assert!(
+            reason.contains("17.500us") && reason.contains("5us bar"),
+            "the reason must carry the measured value and the bar it broke, got: {reason}"
+        );
+    }
 }
