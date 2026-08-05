@@ -60,6 +60,17 @@ pub struct EngineConfig {
     /// that holds only while nobody touches the config, and a child that
     /// lost it looks exactly like one that kept it.
     hermetic: bool,
+    /// A duplicate of the caller's own stdin, relayed into the child at a
+    /// fixed descriptor (`crate::nvim_api::STDIN_RELAY_CHILD_FD`) rather
+    /// than child fd 0, which `--embed` already claims for the
+    /// msgpack-RPC channel (see `:help ui-startup-stdin`). Private: a
+    /// caller arms it through [`with_stdin_relay`](Self::with_stdin_relay)
+    /// and reads it back only through
+    /// [`stdin_relay_requested`](Self::stdin_relay_requested), never the
+    /// fd itself, since [`build_command`] is the only place that must ever
+    /// touch it directly.
+    #[cfg(unix)]
+    stdin_relay: Option<std::os::fd::OwnedFd>,
 }
 
 impl Default for EngineConfig {
@@ -72,6 +83,8 @@ impl Default for EngineConfig {
             handshake_timeout: Duration::from_secs(5),
             shutdown_timeout: Duration::from_millis(500),
             hermetic: false,
+            #[cfg(unix)]
+            stdin_relay: None,
         }
     }
 }
@@ -160,6 +173,40 @@ impl EngineConfig {
     pub fn with_shutdown_timeout(mut self, timeout: Duration) -> Self {
         self.shutdown_timeout = timeout;
         self
+    }
+
+    /// Arranges for `fd` -- a duplicate of the caller's own stdin -- to
+    /// reach the child at a descriptor `--embed` has not already claimed
+    /// (see the `stdin_relay` field doc), so a caller whose own stdin is
+    /// piped (`ls | view -`) can still deliver that content to nvim once it
+    /// also attaches through
+    /// [`EngineHandle::ui_attach_with_stdin_relay`](crate::nvim_api),
+    /// rather than the plain [`ui_attach`](crate::nvim_api), which nvim's
+    /// `stdin_fd` option depends on.
+    #[cfg(unix)]
+    #[must_use]
+    pub fn with_stdin_relay(mut self, fd: std::os::fd::OwnedFd) -> Self {
+        self.stdin_relay = Some(fd);
+        self
+    }
+
+    /// Whether a caller armed [`with_stdin_relay`](Self::with_stdin_relay).
+    /// Always `false` off Unix, where no relay mechanism exists yet.
+    ///
+    /// The caller must read this *before* passing `self` to
+    /// [`Engine::spawn`], which consumes the config by value: the choice
+    /// between `ui_attach` and `ui_attach_with_stdin_relay` depends on the
+    /// answer, and there is no config left to ask once `spawn` has it.
+    #[must_use]
+    pub fn stdin_relay_requested(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.stdin_relay.is_some()
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 
     /// The environment plan this config applies to a child: `Some(value)`
@@ -556,7 +603,58 @@ fn build_command(cfg: &EngineConfig) -> Command {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(unix)]
+    if let Some(relay) = &cfg.stdin_relay {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        // copied out to a plain integer so the pre_exec closure below (which
+        // must be `'static`) does not have to borrow `cfg`, which does not
+        // outlive this function
+        let source = relay.as_raw_fd();
+        // SAFETY: `relay_stdin_fd` only calls `dup2` and `mem::forget`, both
+        // async-signal-safe, and touches no heap allocator or lock -- the
+        // constraint `pre_exec` imposes on code running between `fork` and
+        // `exec` in the child. See its own doc comment for why the
+        // `mem::forget` is required, not incidental.
+        #[allow(unsafe_code)]
+        unsafe {
+            command.pre_exec(move || relay_stdin_fd(source));
+        }
+    }
     command
+}
+
+/// Duplicates `source` onto the child's fd
+/// [`crate::nvim_api::STDIN_RELAY_CHILD_FD`], for a caller's own real stdin
+/// to reach nvim over a descriptor `--embed`'s RPC channel does not already
+/// claim (child fd 0 is the RPC write end nvim reads its own commands from;
+/// see `:help ui-startup-stdin`).
+///
+/// Runs inside [`std::process::Command::pre_exec`], after `fork` and
+/// before `exec`, where only async-signal-safe calls are sound:
+/// `rustix::io::dup2` is one, wrapping the raw `dup2(2)` syscall directly.
+/// `OwnedFd::from_raw_fd` performs no syscall of its own -- it only wraps an
+/// integer -- so wrapping the fixed descriptor number here is exactly as
+/// safe as anywhere else; what makes it a real, open descriptor is the
+/// `dup2` call itself. The `mem::forget` right after is required, not
+/// optional: without it, this function's return drops `target`, which
+/// closes the very descriptor `dup2` just installed, before `exec` ever
+/// replaces the process image and gets a chance to use it.
+#[cfg(unix)]
+fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
+    use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
+    // SAFETY: see this function's own doc comment.
+    #[allow(unsafe_code)]
+    let mut target = unsafe { OwnedFd::from_raw_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD) };
+    // SAFETY: `source` is a raw copy of the fd `EngineConfig::stdin_relay`
+    // owns; that `EngineConfig` (and therefore the fd) outlives the whole
+    // `Command::spawn()` call this closure runs inside of, in
+    // `Engine::spawn`.
+    #[allow(unsafe_code)]
+    let source = unsafe { BorrowedFd::borrow_raw(source) };
+    rustix::io::dup2(source, &mut target)?;
+    std::mem::forget(target);
+    Ok(())
 }
 
 /// Sends `qa!` as a fire-and-forget notification, polls `try_wait` until
@@ -971,5 +1069,18 @@ mod tests {
         let info = exit_info_from_status(status);
         assert_eq!(info.code, Some(137));
         assert!(info.by_signal);
+    }
+
+    /// `build_command`'s `pre_exec` closure is opaque to `Command`'s own
+    /// introspection (`get_envs`/`get_args` say nothing about it), so the
+    /// fd-duplication path itself is only provable end-to-end against a
+    /// spawned child; what a unit test can pin is the flag that decides
+    /// whether `build_command` installs it at all.
+    #[test]
+    fn stdin_relay_requested_tracks_whether_a_relay_fd_was_armed() {
+        assert!(!EngineConfig::default().stdin_relay_requested());
+        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
+        let cfg = EngineConfig::default().with_stdin_relay(dev_null.into());
+        assert!(cfg.stdin_relay_requested());
     }
 }

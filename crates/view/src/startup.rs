@@ -154,6 +154,9 @@ fn spawn_and_attach(
     height: u16,
     residue: Vec<u8>,
 ) -> Result<Engine, AttachFailure> {
+    // read before `Engine::spawn` consumes `cfg` by value: there is no
+    // config left to ask afterward, and the choice below depends on it
+    let stdin_relay = cfg.stdin_relay_requested();
     let engine = Engine::spawn(cfg).map_err(AttachFailure::Spawn)?;
     engine
         .handle
@@ -163,10 +166,17 @@ fn spawn_and_attach(
         .handle
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
-    engine
-        .handle
-        .ui_attach(width, height)
-        .map_err(AttachFailure::Attach)?;
+    if stdin_relay {
+        engine
+            .handle
+            .ui_attach_with_stdin_relay(width, height)
+            .map_err(AttachFailure::Attach)?;
+    } else {
+        engine
+            .handle
+            .ui_attach(width, height)
+            .map_err(AttachFailure::Attach)?;
+    }
     // best-effort, matching this project's original startup ordering: a
     // write failure here means the connection is already gone, which the
     // caller discovers through the engine's own EngineDown path moments

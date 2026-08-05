@@ -291,6 +291,17 @@ pub const UI_EXT_OPTIONS: &[&str] = &[
     "ext_tabline",
 ];
 
+/// The child descriptor [`crate::process::EngineConfig::with_stdin_relay`]
+/// duplicates the caller's own stdin onto, and the value
+/// [`EngineHandle::ui_attach_with_stdin_relay`] sends as `nvim_ui_attach`'s
+/// `stdin_fd` option. Fixed at 3 rather than discovered at runtime: child
+/// fd 0 is `--embed`'s own RPC write end and fd 1 its read end (see
+/// `build_command` in `process.rs`), fd 2 is `Stdio::null()`, and
+/// `:help ui-startup-stdin` names exactly this constraint ("fd=0 is
+/// already... used to send RPC data... it must use some other file
+/// descriptor, like fd=3 or higher").
+pub(crate) const STDIN_RELAY_CHILD_FD: i32 = 3;
+
 impl EngineHandle {
     /// Attaches this connection as nvim's UI at `width` x `height` cells
     /// with the full set of native-rendering extensions enabled:
@@ -320,6 +331,37 @@ impl EngineHandle {
             .iter()
             .map(|&name| (Value::from(name), Value::from(true)))
             .collect();
+        self.request_timeout(
+            "nvim_ui_attach",
+            vec![Value::from(width), Value::from(height), Value::Map(opts)],
+            UI_ATTACH_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    /// Identical to [`ui_attach`](Self::ui_attach), plus the `stdin_fd`
+    /// option naming [`STDIN_RELAY_CHILD_FD`] as the descriptor nvim should
+    /// read piped stdin content from (`:help ui-startup-stdin`), for a
+    /// caller whose `EngineConfig` was built with
+    /// [`with_stdin_relay`](crate::process::EngineConfig::with_stdin_relay).
+    ///
+    /// A second, additive method rather than a parameter on `ui_attach`
+    /// itself: every other caller across this workspace (the oracle, every
+    /// live integration test, `view`'s own ordinary startup) attaches with
+    /// no relay and would otherwise all need a new argument they never use.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`ui_attach`](Self::ui_attach).
+    pub fn ui_attach_with_stdin_relay(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        let mut opts: Vec<(Value, Value)> = UI_EXT_OPTIONS
+            .iter()
+            .map(|&name| (Value::from(name), Value::from(true)))
+            .collect();
+        opts.push((
+            Value::from("stdin_fd"),
+            Value::from(i64::from(STDIN_RELAY_CHILD_FD)),
+        ));
         self.request_timeout(
             "nvim_ui_attach",
             vec![Value::from(width), Value::from(height), Value::Map(opts)],
@@ -694,6 +736,30 @@ impl EngineHandle {
     pub fn eval_str(&self, expr: &str) -> Result<String, EngineError> {
         let value = self.request_timeout("nvim_eval", vec![Value::from(expr)], EVAL_TIMEOUT)?;
         Ok(value_to_string(&value))
+    }
+
+    /// Runs `cmd` as an ex command via `nvim_command`, waiting for nvim to
+    /// finish executing it (or fail) before returning.
+    ///
+    /// `nvim_command(String command) -> nil` (verified against the pinned
+    /// engine's own `api_info`): a *request*, not `notify`, and
+    /// deliberately so -- a caller that needs a synchronous barrier ahead
+    /// of a command that may end the connection outright (`:cq`, `:qa!`)
+    /// needs the request's own `Err` as proof the command already ran,
+    /// which a fire-and-forget `notify` cannot provide (contrast
+    /// [`input`](Self::input), whose whole point is never blocking on
+    /// nvim). An ordinary command that answers normally just returns
+    /// `Ok(())`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the command (a vimscript error), the connection closes
+    /// before a reply arrives (e.g. `:cq`/`:qa!` ending the process
+    /// mid-request), or the reply does not arrive within [`EVAL_TIMEOUT`].
+    pub fn command(&self, cmd: &str) -> Result<(), EngineError> {
+        self.request_timeout("nvim_command", vec![Value::from(cmd)], EVAL_TIMEOUT)?;
+        Ok(())
     }
 
     /// Reads nvim's current mode name and blocked flag via `nvim_get_mode`
@@ -1121,6 +1187,35 @@ mod tests {
                 "missing or false {ext} in ui_attach options"
             );
         }
+    }
+
+    #[test]
+    fn ui_attach_with_stdin_relay_adds_stdin_fd_over_the_same_ext_set() {
+        let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
+        h.ui_attach_with_stdin_relay(80, 24).unwrap();
+        let (method, params) = cap_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(method, "nvim_ui_attach");
+        let Value::Map(opts) = &params[2] else {
+            unreachable!("expected an options map, got {:?}", params[2]);
+        };
+        for ext in [
+            "ext_linegrid",
+            "ext_cmdline",
+            "ext_popupmenu",
+            "ext_messages",
+            "ext_tabline",
+        ] {
+            assert!(
+                opts.iter()
+                    .any(|(k, v)| k.as_str() == Some(ext) && v.as_bool() == Some(true)),
+                "missing or false {ext} in ui_attach_with_stdin_relay options"
+            );
+        }
+        assert!(
+            opts.iter().any(|(k, v)| k.as_str() == Some("stdin_fd")
+                && v.as_i64() == Some(i64::from(STDIN_RELAY_CHILD_FD))),
+            "stdin_fd must name the child descriptor build_command relays onto, got {opts:?}"
+        );
     }
 
     #[test]

@@ -45,14 +45,28 @@ impl From<TierArg> for Tier {
 #[derive(Parser)]
 #[command(name = "view", about = "A modern terminal editor powered by Neovim")]
 struct Cli {
-    /// File to open
-    file: Option<std::path::PathBuf>,
     /// Path to the nvim binary (defaults to PATH lookup)
     #[arg(long)]
     nvim_bin: Option<std::path::PathBuf>,
     /// Override auto-detected terminal capabilities instead of probing
     #[arg(long)]
     tier: Option<TierArg>,
+    /// Spawns the bundled engine with no user config at all: `view.toml`
+    /// and `init.lua` are both skipped, and every native feature stays on.
+    /// This is view's own triage tool, distinct from `nvim --clean` --
+    /// see `engine_config`'s doc comment for why the two must never share
+    /// a constructor.
+    #[arg(long)]
+    clean: bool,
+    /// Sets `NVIM_APPNAME` in the spawned engine's own environment, so it
+    /// reads `$XDG_CONFIG_HOME/<name>` instead of `$XDG_CONFIG_HOME/nvim`.
+    #[arg(long)]
+    appname: Option<String>,
+    /// An explicit `view.toml` path, replacing the platform default
+    /// [`view_native::paths::config_path`] would otherwise resolve. Feeds
+    /// `NativeConfig::load` directly.
+    #[arg(long)]
+    config: Option<std::path::PathBuf>,
     /// Prints the system clipboard's current text for `register` ('+' or
     /// '*') to stdout and exits, bypassing the editor entirely. Exists for
     /// the compat oracle's own out-of-band verification: every other check
@@ -63,6 +77,21 @@ struct Cli {
     /// no-clipboard-available case).
     #[arg(long, hide = true)]
     print_clipboard: Option<char>,
+    /// Everything not claimed by a flag above, forwarded to the engine
+    /// exactly as typed: `+42`, `-c 'set nu'`, `-R`, `-d`, `-O`, `-u NONE`,
+    /// file paths, `-` for stdin. clap must not try to interpret any of
+    /// this; `allow_hyphen_values` is what lets an nvim short flag like
+    /// `-c` start this catch-all instead of erroring as an unrecognized
+    /// argument naming *view*. Enumerating each nvim flag here instead was
+    /// rejected as a maintenance treadmill that silently breaks on every
+    /// engine-pin bump that adds one.
+    ///
+    /// Because this is a trailing var-arg, view's own long flags above must
+    /// appear before the first passthrough token on the command line --
+    /// once this field starts matching, it swallows every remaining token,
+    /// `--tier`/`--clean` included.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    passthrough: Vec<std::ffi::OsString>,
 }
 
 /// `print_clipboard`'s exit code when `arboard::Clipboard::new()` itself
@@ -94,26 +123,85 @@ fn print_clipboard(register: char) -> Result<()> {
     Ok(())
 }
 
-/// The engine config `cli` asks for: the ordinary spawn, plus the binary
-/// path and file argument the user named.
+/// The engine config `cli` asks for: the ordinary spawn, every passthrough
+/// argument forwarded verbatim, and `--clean`/`--appname`/the stdin relay
+/// layered on top of it.
 ///
-/// A function rather than four lines inside `main` so the constructor it
+/// A function rather than a few lines inside `main` so the constructor it
 /// starts from is assertable. This is the editor a user's own session runs
 /// and the one the measurement matrix measures a pinned fixture
 /// configuration through, so it must keep starting from
 /// [`EngineConfig::default`]: `EngineConfig::isolated` compiles here just as
-/// well, and would spawn a child with `--clean`, discarding the very config
-/// being measured. A matrix run recording that child's numbers reports a
-/// large improvement and gates green.
+/// well, and would spawn a child with `--clean` and a hermetic environment,
+/// discarding the very config being measured. A matrix run recording that
+/// child's numbers reports a large improvement and gates green. `--clean`
+/// therefore appends the flag itself via `with_arg` rather than switching
+/// constructors -- see [`Cli`]'s `clean` field for the rest of that
+/// distinction.
 fn engine_config(cli: &Cli) -> EngineConfig {
     let mut cfg = EngineConfig::default();
     if let Some(bin) = &cli.nvim_bin {
         cfg = cfg.with_nvim_bin(bin.clone());
     }
-    if let Some(file) = &cli.file {
-        cfg = cfg.with_arg(file.as_os_str());
+    if cli.clean {
+        cfg = cfg.with_arg("--clean");
     }
+    if let Some(appname) = &cli.appname {
+        cfg = cfg.with_env("NVIM_APPNAME", appname.clone());
+    }
+    for arg in &cli.passthrough {
+        cfg = cfg.with_arg(arg.clone());
+    }
+    maybe_relay_stdin(cfg, &cli.passthrough)
+}
+
+/// Arms `cfg`'s stdin relay when `passthrough` names `-` and the process's
+/// own stdin is not a terminal (`ls | view -`): duplicates it onto the
+/// fixed descriptor `startup::spawn_and_attach` tells nvim to read via
+/// `stdin_fd` (`EngineHandle::ui_attach_with_stdin_relay`), since child fd
+/// 0 is already `--embed`'s own RPC channel and cannot double as the piped
+/// content's descriptor.
+///
+/// A no-op everywhere else, including `-` typed at an interactive
+/// terminal: there is no piped content to relay, so nvim reads its own
+/// controlling terminal exactly like an ordinary `nvim -` invocation
+/// would.
+#[cfg(unix)]
+fn maybe_relay_stdin(cfg: EngineConfig, passthrough: &[std::ffi::OsString]) -> EngineConfig {
+    use std::io::IsTerminal;
+    use std::os::fd::AsFd;
+
+    let wants_stdin = passthrough.iter().any(|arg| arg == "-");
+    if !wants_stdin || std::io::stdin().is_terminal() {
+        return cfg;
+    }
+    match std::io::stdin().as_fd().try_clone_to_owned() {
+        Ok(fd) => cfg.with_stdin_relay(fd),
+        Err(_) => cfg,
+    }
+}
+
+/// No relay mechanism exists off Unix yet: `-` still reaches nvim as a
+/// literal passthrough argument, unchanged from `engine_config`'s ordinary
+/// forwarding.
+#[cfg(not(unix))]
+fn maybe_relay_stdin(cfg: EngineConfig, _passthrough: &[std::ffi::OsString]) -> EngineConfig {
     cfg
+}
+
+/// The `view.toml` path this session reads: `None` for `--clean` (no user
+/// config at all, matching [`Cli`]'s `clean` field doc), `cli.config`
+/// verbatim when given, otherwise the platform default
+/// [`view_native::paths::config_path`] resolves.
+///
+/// A pure function of `cli` alone, hoisted out of `main` so the three-way
+/// choice is assertable without a process environment or filesystem.
+#[must_use]
+fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
+    if cli.clean {
+        return None;
+    }
+    cli.config.clone().or_else(view_native::paths::config_path)
 }
 
 fn main() -> Result<()> {
@@ -157,7 +245,7 @@ fn main() -> Result<()> {
     // answers `ui_attach` with its own `default_colors_set`. The `[native]`
     // table behind the same path is read later, once there is a channel for
     // the features it enables to notify back over (see `NativeSession`).
-    let config_path = view_native::paths::config_path();
+    let config_path = resolve_config_path(&cli);
     match &config_path {
         Some(path) => {
             let cached = theme_cache::load(path);
@@ -179,6 +267,9 @@ fn main() -> Result<()> {
                     .replace_hl(theme_cache::seeded_hl_table(&cached));
             }
         }
+        // --clean asked for exactly this: no config path at all, so there
+        // is nothing to warn about
+        None if cli.clean => {}
         None => {
             eprintln!(
                 "view: cannot resolve a config path (no XDG_CONFIG_HOME, HOME, or APPDATA set); theme cache disabled this run"
@@ -354,7 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn a_file_argument_is_the_only_argument_the_cli_adds() {
+    fn a_bare_positional_argument_is_the_only_argument_the_cli_adds() {
         let cfg = engine_config(&Cli::parse_from(["view", "notes.txt"]));
         assert_eq!(cfg.extra_args, vec![OsString::from("notes.txt")]);
         assert!(cfg.env_plan().is_empty(), "{:?}", cfg.env_plan());
@@ -364,5 +455,154 @@ mod tests {
     fn nvim_bin_replaces_the_path_lookup() {
         let cfg = engine_config(&Cli::parse_from(["view", "--nvim-bin", "/opt/nvim"]));
         assert_eq!(cfg.nvim_bin, std::path::PathBuf::from("/opt/nvim"));
+    }
+
+    // A leading `+42` (an engine "go to line" argument) must reach the
+    // engine byte-for-byte, not be rejected by clap or split from the file
+    // that follows it.
+    #[test]
+    fn a_leading_plus_line_number_reaches_the_engine_verbatim() {
+        let cfg = engine_config(&Cli::parse_from(["view", "+42", "notes.md"]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![OsString::from("+42"), OsString::from("notes.md")],
+            "a +N argument must reach nvim exactly as typed, in order"
+        );
+    }
+
+    #[test]
+    fn short_flags_and_their_own_values_pass_through_untouched() {
+        let cfg = engine_config(&Cli::parse_from(["view", "-c", "set nu", "-R", "notes.md"]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("-c"),
+                OsString::from("set nu"),
+                OsString::from("-R"),
+                OsString::from("notes.md"),
+            ]
+        );
+    }
+
+    #[test]
+    fn diff_mode_forwards_both_files_after_the_flag() {
+        let cfg = engine_config(&Cli::parse_from(["view", "-d", "a.txt", "b.txt"]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("-d"),
+                OsString::from("a.txt"),
+                OsString::from("b.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn vertical_split_flag_forwards_both_files() {
+        let cfg = engine_config(&Cli::parse_from(["view", "-O", "a.rs", "b.rs"]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("-O"),
+                OsString::from("a.rs"),
+                OsString::from("b.rs"),
+            ]
+        );
+    }
+
+    #[test]
+    fn explicit_init_forwards_u_and_its_value() {
+        let cfg = engine_config(&Cli::parse_from(["view", "-u", "NONE", "notes.md"]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("-u"),
+                OsString::from("NONE"),
+                OsString::from("notes.md"),
+            ]
+        );
+    }
+
+    // view's own long flags must still be parsed by view and never leak
+    // into the engine's argument list -- the failure mode a trailing_var_arg
+    // catch-all risks.
+    #[test]
+    fn tier_basic_is_parsed_by_view_and_never_forwarded_to_the_engine() {
+        let cli = Cli::parse_from(["view", "--tier", "basic", "notes.md"]);
+        assert!(matches!(cli.tier, Some(TierArg::Basic)));
+        let cfg = engine_config(&cli);
+        assert_eq!(
+            cfg.extra_args,
+            vec![OsString::from("notes.md")],
+            "--tier and its value must never reach the engine, got {:?}",
+            cfg.extra_args
+        );
+    }
+
+    #[test]
+    fn nvim_bin_before_passthrough_is_claimed_by_view_not_forwarded() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--nvim-bin",
+            "/opt/nvim/bin/nvim",
+            "--tier",
+            "basic",
+            "notes.md",
+        ]));
+        assert_eq!(cfg.nvim_bin, std::path::PathBuf::from("/opt/nvim/bin/nvim"));
+        assert_eq!(cfg.extra_args, vec![OsString::from("notes.md")]);
+    }
+
+    #[test]
+    fn appname_sets_nvim_appname_in_the_childs_environment() {
+        let cfg = engine_config(&Cli::parse_from(["view", "--appname", "work", "notes.md"]));
+        assert_eq!(
+            cfg.env_plan(),
+            vec![(OsString::from("NVIM_APPNAME"), Some(OsString::from("work")))],
+            "got {:?}",
+            cfg.env_plan()
+        );
+        assert_eq!(cfg.extra_args, vec![OsString::from("notes.md")]);
+    }
+
+    // --clean is view's own triage tool: bundled engine, no user config,
+    // native defaults on. It must append the bare flag through `with_arg`,
+    // never route through `EngineConfig::isolated`, whose extra `-n` and
+    // hermetic environment plan are reserved for the oracle/measurement
+    // matrix (see `engine_config`'s doc comment).
+    #[test]
+    fn clean_appends_only_the_clean_flag_never_isolateds_extra_n_or_hermetic_env() {
+        let cfg = engine_config(&Cli::parse_from(["view", "--clean"]));
+        assert_eq!(cfg.extra_args, vec![OsString::from("--clean")]);
+        assert!(
+            cfg.env_plan().is_empty(),
+            "--clean must not carry isolated()'s hermetic environment plan, got {:?}",
+            cfg.env_plan()
+        );
+    }
+
+    #[test]
+    fn clean_forces_no_config_path_even_when_config_is_also_given() {
+        let cli = Cli::parse_from(["view", "--clean", "--config", "./off.toml"]);
+        assert_eq!(
+            resolve_config_path(&cli),
+            None,
+            "--clean means no user config at all, overriding --config"
+        );
+    }
+
+    #[test]
+    fn an_explicit_config_flag_is_used_verbatim() {
+        let cli = Cli::parse_from(["view", "--config", "./off.toml"]);
+        assert_eq!(
+            resolve_config_path(&cli),
+            Some(std::path::PathBuf::from("./off.toml"))
+        );
+    }
+
+    #[test]
+    fn with_neither_clean_nor_config_the_platform_default_is_used() {
+        let cli = Cli::parse_from(["view"]);
+        assert_eq!(resolve_config_path(&cli), view_native::paths::config_path());
     }
 }
