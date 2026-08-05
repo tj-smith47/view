@@ -1125,8 +1125,43 @@ mod tests {
     /// that leaves whatever `FD_CLOEXEC` state was already there
     /// untouched) makes this test fail; the real fix
     /// (`fcntl_setfd(FdFlags::empty())`) passes.
+    ///
+    /// Seizing the process-global fd slot 3 can't happen in the shared
+    /// `--lib` test binary's process: `task test` runs that binary
+    /// multi-threaded, and sibling tests elsewhere in the crate (file
+    /// opens in particular) can legitimately hold or want that slot at the
+    /// same moment, racing this test's `dup2`/`fcntl` calls. So this
+    /// function is a thin re-exec wrapper: absent the child marker env
+    /// var, it spawns a *fresh* invocation of this same test binary
+    /// filtered to itself alone (`--exact ... --test-threads=1`) and waits
+    /// on it; only the resulting child process, which owns fd 3 with no
+    /// other test running anywhere in it, does the actual seizure below.
     #[test]
     fn relay_stdin_fd_clears_cloexec_in_place_when_source_already_is_fd_3() {
+        const CHILD_MARKER: &str = "VIEW_ENGINE_FD3_TEST_CHILD";
+        const TEST_PATH: &str =
+            "process::tests::relay_stdin_fd_clears_cloexec_in_place_when_source_already_is_fd_3";
+
+        if std::env::var_os(CHILD_MARKER).is_none() {
+            let exe = std::env::current_exe()
+                .expect("the running test binary always resolves its own path");
+            let status = std::process::Command::new(exe)
+                .arg(TEST_PATH)
+                .arg("--exact")
+                .arg("--test-threads=1")
+                .arg("--nocapture")
+                .env(CHILD_MARKER, "1")
+                .status()
+                .expect("spawn the isolated child that owns fd 3 alone");
+            assert!(
+                status.success(),
+                "the isolated fd-3 child test failed ({status:?}); its own \
+                 stderr (inherited, not captured by this wrapper) carries \
+                 the actual assertion failure"
+            );
+            return;
+        }
+
         use rustix::fd::AsFd;
         use rustix::io::FdFlags;
 
@@ -1149,6 +1184,9 @@ mod tests {
         // Force it onto fd 3 via dup2-to-a-different-destination (clears
         // `FD_CLOEXEC` on arrival, as noted above), then explicitly set the
         // flag back so the probe starts from the state this test needs.
+        // Safe here specifically because this process was spawned solely
+        // to run this one test: no sibling test anywhere in it holds or
+        // expects anything at fd 3.
         #[allow(unsafe_code)]
         let mut relay_fd = unsafe { OwnedFd::from_raw_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD) };
         rustix::io::dup2(source.as_fd(), &mut relay_fd).expect("force the probe onto fd 3");
@@ -1175,10 +1213,11 @@ mod tests {
              {flags_after:?}"
         );
 
-        // Matches `relay_stdin_fd`'s own contract for the caller it was
-        // actually written for (`build_command`'s `pre_exec` closure,
-        // right before `exec` takes over): the fd stays open, nothing
-        // drops it here.
-        std::mem::forget(relay_fd);
+        // Unlike the production `pre_exec` caller this mirrors (which
+        // `mem::forget`s because `exec` immediately takes the process
+        // over), no `exec` follows here -- this process's only job was
+        // this one test, and it's done, so close the fd deterministically
+        // rather than leaking it for whatever remains of the process.
+        drop(relay_fd);
     }
 }
