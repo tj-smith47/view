@@ -340,8 +340,10 @@ Compat has three classes; only the first is "by construction":
   behaves exactly like `ls | nvim -`.
 - Exit codes propagate: `:cq[uit] N` exits view with N (git mergetool and
   `GIT_EDITOR=view` abort flows depend on it).
-- Server/remote workflows (`view --remote`, attaching to a running instance
-  via nvim 0.12 `:detach`/`:connect`) are a recorded post-v0.1 candidate.
+- Remote editing is v0.1 core (§9 invented capabilities, ruled 2026-08-05):
+  the engine spawns over SSH while paint and input stay local. Attaching to
+  an already-running instance via nvim 0.12 `:detach`/`:connect` remains a
+  recorded post-v0.1 candidate.
 
 ### 5.2 RPC client (own, thin — decided)
 
@@ -594,6 +596,19 @@ engine state drift).
 | Notifications | nvim-notify / noice messages | `ext_messages` with kind-aware routing (table below); kills "Press ENTER" without ever eating a prompt |
 | Command palette | noice cmdline | `ext_cmdline` → centered floating palette with completion rendering (`ext_popupmenu` when sourced from cmdline) |
 
+Invented capabilities — also v0.1 core (ruled 2026-08-05; plans authored at
+the P4 exit, supervision and remote editing sequenced first). These are not
+plugin replacements: each is possible only because the UI and the engine are
+separate processes with view interposed on every keystroke and frame.
+
+| Capability | v0.1 scope |
+|---|---|
+| Engine supervision | The UI survives an engine hang or crash: stall detection, interrupt offer, automatic restart with swap (`-r`) rehydration — a misbehaving plugin cannot take the editor down |
+| Remote editing | Engine spawned over SSH, paint and input local, speculative echo hides link latency (§5.6); clipboard already identical local/remote via OSC52 (§5.3) |
+| Session DVR | Visual scrub/replay of what the screen showed, branch from any point, exportable replay file — over the same keystream+frame recording the oracle uses |
+| Key introspector | `:View keys`: which mapping fired, whose it was, what it displaced — live, over the key-claim reporting layer (§5.3) |
+| Image viewing | kitty graphics protocol on the `full` tier (§7), half-block cell fallback below, painted as a native overlay; extends to picker preview and tree hover; the engine keeps the buffer, view supersedes only the paint |
+
 `ext_messages` routing — owning messages means owning *dialogs* (it forces
 `cmdheight=0`; the engine's message area ceases to exist):
 
@@ -837,6 +852,7 @@ copyable ones (polish).
 | AI protocol | ACP (agent-agnostic) | Bespoke per-agent integrations: N× maintenance, no ecosystem leverage |
 | Engine distribution | Bundled pinned pair + override | System nvim default: compat claims float against unknown versions |
 | Native-vs-plugin overlap default | Native wins, per-feature opt-out, runtime supersession only (§5.5) | Defer-to-plugins default (reviewer-recommended): maximally unsurprising, but ships the product hidden — the migration audience would never see what view is |
+| First-release scope (ruled 2026-08-05) | Five invented capabilities (§9: supervision, remote editing, session DVR, key introspector, image viewing) ship in v0.1 as core features alongside AI | Post-v0.1 rollout: differentiation would rest on refined plugin equivalents alone, which reads as repackaged nvim rather than a new category |
 
 ## 19. Risks
 
