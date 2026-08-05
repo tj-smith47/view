@@ -632,27 +632,44 @@ fn build_command(cfg: &EngineConfig) -> Command {
 ///
 /// Runs inside [`std::process::Command::pre_exec`], after `fork` and
 /// before `exec`, where only async-signal-safe calls are sound:
-/// `rustix::io::dup2` is one, wrapping the raw `dup2(2)` syscall directly.
-/// `OwnedFd::from_raw_fd` performs no syscall of its own -- it only wraps an
-/// integer -- so wrapping the fixed descriptor number here is exactly as
-/// safe as anywhere else; what makes it a real, open descriptor is the
-/// `dup2` call itself. The `mem::forget` right after is required, not
-/// optional: without it, this function's return drops `target`, which
-/// closes the very descriptor `dup2` just installed, before `exec` ever
-/// replaces the process image and gets a chance to use it.
+/// `rustix::io::dup2`/`fcntl_setfd` are, wrapping the raw `dup2(2)`/
+/// `fcntl(2)` syscalls directly. `OwnedFd::from_raw_fd` performs no syscall
+/// of its own -- it only wraps an integer -- so wrapping the fixed
+/// descriptor number here is exactly as safe as anywhere else; what makes
+/// it a real, open descriptor is the `dup2` call itself. The `mem::forget`
+/// right after is required, not optional: without it, this function's
+/// return drops `target`, which closes the very descriptor `dup2` just
+/// installed, before `exec` ever replaces the process image and gets a
+/// chance to use it.
+///
+/// `source == STDIN_RELAY_CHILD_FD` is a real, reachable case, not a
+/// theoretical one: `std`'s own `AsFd::try_clone_to_owned` (what
+/// `main::maybe_relay_stdin` calls on the process's own stdin) allocates at
+/// the lowest free descriptor via `F_DUPFD_CLOEXEC`, and with only stdio
+/// open at the point `engine_config` runs -- before `Term::init`, before
+/// any pipe exists -- that lowest free descriptor already IS fd 3. A
+/// `dup2`/`dup3` of a descriptor onto itself is platform-inconsistent
+/// (`dup2` is a documented no-op that leaves `FD_CLOEXEC` set, so `exec`
+/// closes it anyway; `dup3` rejects equal descriptors with `EINVAL`
+/// outright), so this case is handled separately: the descriptor is
+/// already the right one, and only its close-on-exec flag needs clearing.
 #[cfg(unix)]
 fn relay_stdin_fd(source: std::os::fd::RawFd) -> std::io::Result<()> {
     use std::os::fd::{BorrowedFd, FromRawFd, OwnedFd};
-    // SAFETY: see this function's own doc comment.
-    #[allow(unsafe_code)]
-    let mut target = unsafe { OwnedFd::from_raw_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD) };
     // SAFETY: `source` is a raw copy of the fd `EngineConfig::stdin_relay`
     // owns; that `EngineConfig` (and therefore the fd) outlives the whole
     // `Command::spawn()` call this closure runs inside of, in
     // `Engine::spawn`.
     #[allow(unsafe_code)]
-    let source = unsafe { BorrowedFd::borrow_raw(source) };
-    rustix::io::dup2(source, &mut target)?;
+    let source_fd = unsafe { BorrowedFd::borrow_raw(source) };
+    if source == crate::nvim_api::STDIN_RELAY_CHILD_FD {
+        rustix::io::fcntl_setfd(source_fd, rustix::io::FdFlags::empty())?;
+        return Ok(());
+    }
+    // SAFETY: see this function's own doc comment.
+    #[allow(unsafe_code)]
+    let mut target = unsafe { OwnedFd::from_raw_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD) };
+    rustix::io::dup2(source_fd, &mut target)?;
     std::mem::forget(target);
     Ok(())
 }

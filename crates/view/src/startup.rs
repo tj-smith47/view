@@ -158,24 +158,31 @@ fn spawn_and_attach(
     // config left to ask afterward, and the choice below depends on it
     let stdin_relay = cfg.stdin_relay_requested();
     let engine = Engine::spawn(cfg).map_err(AttachFailure::Spawn)?;
+    crate::vlog::log_with("engine", || {
+        format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
+    });
     engine
         .handle
         .register_vim_enter_autocmd(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
+    crate::vlog::log("engine", "registered VimEnter autocmd");
     engine
         .handle
         .register_bridge(engine.api_info.channel_id)
         .map_err(AttachFailure::Attach)?;
+    crate::vlog::log("engine", "registered view_bridge autocmd group");
     if stdin_relay {
         engine
             .handle
             .ui_attach_with_stdin_relay(width, height)
             .map_err(AttachFailure::Attach)?;
+        crate::vlog::log("engine", "ui_attach_with_stdin_relay returned ok");
     } else {
         engine
             .handle
             .ui_attach(width, height)
             .map_err(AttachFailure::Attach)?;
+        crate::vlog::log("engine", "ui_attach returned ok");
     }
     // best-effort, matching this project's original startup ordering: a
     // write failure here means the connection is already gone, which the
@@ -483,6 +490,42 @@ mod tests {
         Key {
             notation: notation.to_string(),
         }
+    }
+
+    // `spawn_and_attach` is private to this crate, and `view` ships no lib
+    // target for an integration test under tests/ to link against, so this
+    // is the only place its stdin-relay branch (the `if stdin_relay`
+    // dispatch to `ui_attach_with_stdin_relay` rather than plain
+    // `ui_attach`) can be exercised at all. Spawns a real nvim, matching
+    // `cli_live.rs`'s own live-relay test and this crate's `task test`
+    // target, which already documents "requires nvim >= 0.11 on PATH".
+    #[cfg(unix)]
+    #[test]
+    fn spawn_and_attach_takes_the_stdin_relay_branch_when_armed() {
+        use std::os::fd::AsFd;
+
+        let content = std::env::temp_dir().join(format!(
+            "view-startup-spawn-and-attach-stdin-relay-{}.txt",
+            std::process::id()
+        ));
+        std::fs::write(&content, "hello from spawn_and_attach\n").unwrap();
+        let source = std::fs::File::open(&content).unwrap();
+
+        let cfg = EngineConfig::isolated()
+            .with_arg("-")
+            .with_stdin_relay(source.as_fd().try_clone_to_owned().unwrap());
+        let mut engine = spawn_and_attach(cfg, 80, 24, Vec::new()).unwrap();
+
+        assert_eq!(
+            engine.handle.eval_str("getline(1)").unwrap(),
+            "hello from spawn_and_attach",
+            "spawn_and_attach must call ui_attach_with_stdin_relay, not \
+             plain ui_attach, whenever EngineConfig::stdin_relay_requested() \
+             is true, or the fd nvim was told to read from never gets wired \
+             up at all"
+        );
+        let _ = engine.wait_exit();
+        std::fs::remove_file(&content).ok();
     }
 
     #[test]

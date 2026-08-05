@@ -183,10 +183,52 @@ fn maybe_relay_stdin(cfg: EngineConfig, passthrough: &[std::ffi::OsString]) -> E
 
 /// No relay mechanism exists off Unix yet: `-` still reaches nvim as a
 /// literal passthrough argument, unchanged from `engine_config`'s ordinary
-/// forwarding.
+/// forwarding. Safe only because `main`'s own `deny_unsupported_stdin_relay`
+/// has already refused to start at all whenever `-` is combined with a
+/// non-tty stdin on this platform: `build_command` pipes the child's fd 0
+/// unconditionally as the `--embed` RPC channel, so nvim has no inherited
+/// stdin of its own left to fall back to here the way a plain `nvim -`
+/// invocation would -- a `-` this function let through undefended would
+/// have nvim read that RPC stream itself as buffer text instead.
 #[cfg(not(unix))]
 fn maybe_relay_stdin(cfg: EngineConfig, _passthrough: &[std::ffi::OsString]) -> EngineConfig {
     cfg
+}
+
+/// Refuses to start when `-` is combined with a non-tty stdin on a platform
+/// with no stdin-relay mechanism ([`maybe_relay_stdin`]'s `cfg(not(unix))`
+/// arm): `build_command` pipes the child's fd 0 unconditionally as the
+/// `--embed` RPC channel (`process::build_command`), so unlike a plain
+/// `nvim -` invocation, there is no inherited stdin left for nvim to read on
+/// its own here -- letting the session start anyway would have nvim
+/// consume the RPC stream itself as buffer text, corrupting the very
+/// channel `view` talks to it over rather than merely doing nothing.
+///
+/// A no-op on Unix, where [`maybe_relay_stdin`]'s own `cfg(unix)` arm gives
+/// `-` a real fd instead, and a no-op everywhere `-` is typed at an
+/// interactive terminal, since there is no piped content to protect nvim
+/// from reading in the first place.
+#[cfg(not(unix))]
+fn deny_unsupported_stdin_relay(passthrough: &[std::ffi::OsString]) -> Result<()> {
+    use std::io::IsTerminal;
+    let wants_stdin = passthrough.iter().any(|arg| arg == "-");
+    if wants_stdin && !std::io::stdin().is_terminal() {
+        anyhow::bail!(
+            "view: `-` (read piped stdin into the first buffer) is not \
+             supported on this platform yet: nvim's own fd 0 here is \
+             already the --embed RPC channel this process spawns it over, \
+             and there is no relay mechanism to give nvim a separate \
+             descriptor for the caller's own piped content the way the \
+             Unix build does. Redirect the piped content to a file and \
+             open that instead."
+        );
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn deny_unsupported_stdin_relay(_passthrough: &[std::ffi::OsString]) -> Result<()> {
+    Ok(())
 }
 
 /// The `view.toml` path this session reads: `None` for `--clean` (no user
@@ -215,6 +257,7 @@ fn main() -> Result<()> {
     if let Some(register) = cli.print_clipboard {
         return print_clipboard(register);
     }
+    deny_unsupported_stdin_relay(&cli.passthrough)?;
     let cfg = engine_config(&cli);
 
     let mut term =
@@ -604,5 +647,49 @@ mod tests {
     fn with_neither_clean_nor_config_the_platform_default_is_used() {
         let cli = Cli::parse_from(["view"]);
         assert_eq!(resolve_config_path(&cli), view_native::paths::config_path());
+    }
+
+    // `-` must both reach the engine as a literal passthrough argument (so
+    // nvim itself still sees the flag it interprets as "read stdin") and
+    // arm `maybe_relay_stdin`'s clone: cargo test's own stdin is never a
+    // controlling terminal, so this exercises the same `is_terminal() ==
+    // false` branch `ls | view -` takes.
+    #[test]
+    fn a_bare_dash_reaches_the_engine_and_arms_the_stdin_relay() {
+        let cfg = engine_config(&Cli::parse_from(["view", "-"]));
+        assert_eq!(cfg.extra_args, vec![OsString::from("-")]);
+        assert!(
+            cfg.stdin_relay_requested(),
+            "`view -` with a non-tty stdin must arm the relay, or piped \
+             content silently reaches nvim as an empty stream instead"
+        );
+    }
+
+    // Runs only where `deny_unsupported_stdin_relay`'s real (non-Unix) arm
+    // exists: on Unix the function is an unconditional `Ok(())`, so this
+    // would assert nothing there. Exercised by the Windows CI mirror this
+    // project already runs (`winserver`); cargo test's own stdin is not a
+    // terminal, matching `ls | view -`'s shape.
+    #[cfg(not(unix))]
+    #[test]
+    fn a_bare_dash_off_unix_refuses_to_start_against_a_piped_stdin() {
+        let err = deny_unsupported_stdin_relay(&[OsString::from("-")])
+            .expect_err("no relay mechanism exists off Unix; starting anyway would have nvim read its own RPC channel as buffer text");
+        assert!(
+            err.to_string().contains('-'),
+            "the error must name the flag it is refusing, got {err}"
+        );
+    }
+
+    #[test]
+    fn print_clipboard_is_claimed_by_view_and_never_forwarded() {
+        let cli = Cli::parse_from(["view", "--print-clipboard", "+"]);
+        assert_eq!(cli.print_clipboard, Some('+'));
+        assert!(
+            cli.passthrough.is_empty(),
+            "--print-clipboard must not leak its register into the \
+             engine's own argument list, got {:?}",
+            cli.passthrough
+        );
     }
 }

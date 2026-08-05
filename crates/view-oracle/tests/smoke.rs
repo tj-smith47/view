@@ -14,7 +14,7 @@
 //! oracle), `Deref`/`DerefMut` to the promoted type for everything else
 //! (`send`, `wait_for`, `wait_for_cell`, `wait_for_exit`, `screen`,
 //! `screen_raw`, `pid`, `wait`).
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Every test in this file drives the wired `view` binary inside a real pty;
 // view's Windows terminal runtime is a tier-2 surface validated on winserver
 // rather than in CI, so the whole suite is gated off the Windows build. There
@@ -168,7 +168,22 @@ fn build_view_pty(
     isolation: Option<RwLockReadGuard<'static, ()>>,
     policy: QueryPolicy,
 ) -> ViewPtySession {
+    build_view_pty_with_content(extra_args, None, isolation, policy)
+}
+
+/// Like [`build_view_pty`], but seeds the scratch file with `content` before
+/// spawning, for tests whose falsifiable claim (e.g. "line 42 is on screen
+/// for `+42`") only means something against a file with real content in it.
+fn build_view_pty_with_content(
+    extra_args: &[&std::ffi::OsStr],
+    content: Option<&str>,
+    isolation: Option<RwLockReadGuard<'static, ()>>,
+    policy: QueryPolicy,
+) -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
+    if let Some(content) = content {
+        std::fs::write(&paths.scratch, content).expect("scratch fixture must be writable");
+    }
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     for arg in extra_args {
@@ -536,6 +551,289 @@ fn view_propagates_cquit_exit_code() {
         5,
         "view did not propagate :cq's exit code; screen:\n{}",
         session.screen()
+    );
+}
+
+#[test]
+fn a_leading_plus_line_number_places_the_cursor_on_that_line() {
+    // `+42` is `main.rs`'s CLI passthrough for nvim's own "go to line N on
+    // startup" argument (see `a_leading_plus_line_number_reaches_the_engine_verbatim`
+    // in `crates/view/src/main.rs`, which pins that it reaches the engine
+    // byte-for-byte); this is that argument's falsifiable end-to-end claim
+    // against a real spawned `view` -- the cursor is actually on line 42,
+    // not merely that the flag was forwarded.
+    let mut content = String::new();
+    for n in 1..=60 {
+        content.push_str(&format!("line {n}\n"));
+    }
+    let mut session = build_view_pty_with_content(
+        &[std::ffi::OsStr::new("+42")],
+        Some(&content),
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+    // `~` (nvim's empty-buffer-line marker) never appears here: the seeded
+    // 60-line fixture fills every row of the 24-row viewport, unlike the
+    // blank scratch buffer `spawn_view_pty`'s own `~` wait assumes. `line
+    // 42` is the one string guaranteed on screen once the buffer paints,
+    // since `+42` scrolls the viewport to make the cursor's own line
+    // visible.
+    assert!(
+        session.wait_for("line 42", Duration::from_secs(5)),
+        "view never painted the seeded buffer around line 42; last screen:\n{}",
+        session.screen()
+    );
+
+    // `line('.')` reads the cursor's real position out of nvim itself,
+    // rather than trusting the screen's own row math (which a scrolled
+    // viewport would make an off-by-N lie): the saved-file oracle this
+    // file otherwise relies on can't answer a cursor-position question at
+    // all, since a cursor position is not buffer text.
+    session
+        .send(b"\x1b:echo 'CURSORLINE=' . line('.')\r")
+        .unwrap();
+    assert!(
+        session.wait_for("CURSORLINE=42", Duration::from_secs(5)),
+        "+42 did not place the cursor on line 42; last screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
+#[test]
+fn minus_capital_o_opens_two_vertical_splits() {
+    // `-O`'s two files land in `extra_args` directly (see
+    // `vertical_split_flag_forwards_both_files` in `crates/view/src/main.rs`),
+    // not through `build_view_pty`'s single scratch-file positional, so this
+    // test builds its own two-file pty session instead of reusing the shared
+    // helper.
+    let a = common::ScratchPaths::new("smoke-split-a");
+    let b = common::ScratchPaths::new("smoke-split-b");
+
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg("-O");
+    cmd.arg(&a.scratch);
+    cmd.arg(&b.scratch);
+    common::isolate_xdg(&mut cmd, &a.isolated_home);
+
+    let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
+    let mut session = ViewPtySession {
+        session,
+        paths: a,
+        _isolation: shared_isolation(),
+    };
+    assert!(
+        session.wait_for("~", Duration::from_secs(5)),
+        "view never painted the two-file split"
+    );
+
+    // `winnr('$')` is nvim's own window count, the least ambiguous proof
+    // that two windows actually opened (as opposed to two buffers stacked
+    // in one window, which would still show two filenames somewhere on
+    // screen). `│` (nvim's default vertical-split separator glyph) is the
+    // most direct, literal evidence that the split is vertical rather than
+    // horizontal (`-o`), which a window *count* alone cannot distinguish.
+    session
+        .send(b"\x1b:echo 'WINCOUNT=' . winnr('$')\r")
+        .unwrap();
+    assert!(
+        session.wait_for("WINCOUNT=2", Duration::from_secs(5)),
+        "-O did not open two windows; last screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        session.screen().contains('\u{2502}'),
+        "-O's windows are not separated by nvim's vertical-split glyph, so \
+         the split is not actually vertical; last screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:qa!\r").unwrap();
+    let _ = session.wait();
+}
+
+#[test]
+fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
+    // `ls | view -`'s defining property is that the child's fd 0 is a real
+    // pipe, not a tty: `main::maybe_relay_stdin` only arms when
+    // `std::io::stdin().is_terminal()` is false, and a pty's own fd 0 is
+    // always a terminal. `view_oracle::PtySession` /
+    // `portable_pty::SlavePty::spawn_command` always wires stdin to the
+    // same pty slave as stdout/stderr (confirmed in `portable-pty-0.9.0`'s
+    // own `unix.rs`, with no public hook to split them), so this test hand
+    // -rolls a pty (for a real controlling terminal on stdout/stderr, which
+    // crossterm's raw-mode and `/dev/tty` input still need) plus a plain
+    // pipe (for stdin) instead of going through that shared harness.
+    use std::io::{Read, Write};
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let paths = common::ScratchPaths::new("smoke-stdin-relay");
+    let piped_content = "piped stdin content for view -";
+
+    let winsize = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty for the piped-stdin test");
+    let (stdin_read, mut stdin_write) = {
+        // `pipe()` wraps raw `libc::pipe()` with neither end `O_CLOEXEC`
+        // (confirmed against `nix-0.31.3`'s own `unistd.rs`), so a plain
+        // `pipe()` here leaves `stdin_write` inherited across this test
+        // process's own `cmd.spawn()` fork+exec of `view`, and again across
+        // `view`'s own fork+exec of nvim -- a live write-end duplicate
+        // surviving in both descendant processes forever, so nvim's read on
+        // its relayed stdin fd never reaches EOF (this was the stdin-relay
+        // "deadlock" this test used to report: not a `view`/nvim bug, a
+        // leaked fd from this harness's own pipe). `pipe2(O_CLOEXEC)` sets
+        // close-on-exec atomically on both ends; the read end still reaches
+        // the child fine since `cmd.stdin(Stdio::from(stdin_read))` redirects
+        // it onto fd 0 via an explicit `dup2` during exec setup, which does
+        // not carry `FD_CLOEXEC` over to the new descriptor.
+        let (read, write) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
+            .expect("cloexec pipe for the child's stdin");
+        (read, std::fs::File::from(write))
+    };
+    let stdout_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stdout");
+    let stderr_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stderr");
+
+    let mut cmd = std::process::Command::new(common::view_bin_path());
+    cmd.arg("-").arg(&paths.scratch);
+    view_oracle::make_hermetic(&mut cmd).expect("hermetic env for the piped-stdin child");
+    for var in [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        cmd.env(var, common::xdg_home(&paths.isolated_home, var));
+    }
+    common::disable_native_features(&paths.isolated_home);
+
+    cmd.stdin(Stdio::from(stdin_read));
+    cmd.stdout(Stdio::from(stdout_fd));
+    cmd.stderr(Stdio::from(stderr_fd));
+    // A pty slave is only a controlling terminal once the child both starts
+    // a new session (`setsid`) and claims the slave as that session's
+    // controlling terminal (`TIOCSCTTY`); `std::process::Command::setsid`
+    // is nightly-only (`#105376`), so both calls live in this one pre_exec
+    // closure instead of the declarative `CommandExt::setsid`.
+    //
+    // SAFETY: runs after std's own stdio dup2 (confirmed against
+    // `library/std/src/sys/process/unix/unix.rs`'s `do_exec` ordering) and
+    // before execvp, so fd 1 already is the pty slave; both calls here are
+    // async-signal-safe, and `TIOCSCTTY` on fd 1 is side-effect-free beyond
+    // claiming the controlling terminal the preceding `setsid` just
+    // detached the child from.
+    #[allow(unsafe_code)]
+    unsafe {
+        cmd.pre_exec(|| {
+            nix::unistd::setsid().map_err(std::io::Error::from)?;
+            if nix::libc::ioctl(nix::libc::STDOUT_FILENO, nix::libc::TIOCSCTTY as _, 0) != 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+
+    let mut child = cmd
+        .spawn()
+        .expect("spawn view against a piped stdin and a hand-rolled pty");
+    // The child now owns its own dup'd copies of the slave; holding this
+    // one open in the parent too would keep the pty from ever hanging up,
+    // so the drain thread's read below would never see EOF once the child
+    // exits.
+    drop(pty.slave);
+
+    stdin_write
+        .write_all(piped_content.as_bytes())
+        .expect("write piped content to the child's stdin");
+    // Closes the write end, so nvim's `stdin_fd` startup read reaches EOF
+    // and returns instead of blocking forever waiting for more.
+    drop(stdin_write);
+
+    let mut master = std::fs::File::from(pty.master);
+    let mut drain = master
+        .try_clone()
+        .expect("clone pty master for the drain thread");
+    // Captured (not just discarded) so a failure can report the last thing
+    // the child actually painted -- this hand-rolled pty has no vt100
+    // parser, so this is raw bytes rather than a rendered screen.
+    let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let screen_writer = std::sync::Arc::clone(&screen);
+    std::thread::spawn(move || {
+        let mut sink = [0_u8; 4096];
+        while let Ok(n) = drain.read(&mut sink) {
+            if n == 0 {
+                break;
+            }
+            if let Ok(mut buf) = screen_writer.lock() {
+                buf.extend_from_slice(&sink[..n]);
+            }
+        }
+    });
+
+    // Fixed sleep, not a screen-content wait: see the module doc and the
+    // Silent-policy tests above for the same tradeoff this suite always
+    // makes when there is no settled-redraw signal to wait on instead.
+    std::thread::sleep(Duration::from_millis(800));
+    // `nvim - <scratch>` (per `docs/stdin-relay-wire-capture.md`'s captured
+    // `:help -`) opens the piped content into buffer 1 (current, unnamed)
+    // and `<scratch>` as a separate buffer 2 -- it does not name the piped
+    // buffer `<scratch>`. A bare `:wq` targets buffer 1, which has no file
+    // name, so it fails with `E32: No file name` and never reaches `:quit`.
+    // Writing buffer 1's content to the scratch path explicitly, then
+    // force-quitting every window, is what the two-buffer startup shape
+    // actually requires.
+    let write_cmd = format!("\x1b:w {}\r:qa!\r", paths.scratch.display());
+    master
+        .write_all(write_cmd.as_bytes())
+        .expect("write the explicit :w + :qa! sequence to the pty master");
+
+    // `Child::wait` has no built-in timeout, and a genuinely deadlocked
+    // stdin relay (the parent's own copy of the relay fd never closing, so
+    // the engine never sees EOF) must surface as a named, bounded failure
+    // rather than hang the whole suite -- a hung child was already observed
+    // to survive external `task test` termination as an orphan.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .expect("poll view for exit after :w + :qa!")
+        {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            let dump = screen
+                .lock()
+                .map(|buf| String::from_utf8_lossy(&buf).into_owned());
+            panic!(
+                "view never exited within 15s of the stdin-relay :w + :qa! sequence \
+                 (stdin relay deadlock); last pty bytes:\n{dump:?}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let dump = screen
+        .lock()
+        .map(|buf| String::from_utf8_lossy(&buf).into_owned());
+    assert!(
+        status.success(),
+        "view did not exit cleanly after :w + :qa!; status={status:?}; last pty bytes:\n{dump:?}"
+    );
+
+    let saved =
+        std::fs::read_to_string(&paths.scratch).expect("saved file should exist and be readable");
+    assert!(
+        saved.contains(piped_content),
+        "saved file did not contain the piped stdin content; contents:\n{saved:?}"
     );
 }
 

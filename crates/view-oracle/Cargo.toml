@@ -19,5 +19,12 @@ vt100 = "0.16.2"
 # Process groups are a Unix mechanism; killpg is what lets a session kill
 # everything its pty child spawned, not just the child. Windows keeps the
 # per-child kill portable-pty provides.
+#
+# "term" pulls in `nix::pty::openpty`; "fs" pulls in `nix::unistd::dup`
+# (`std::process::Command::setsid` is nightly-only, `#105376`, so the
+# piped-stdin CLI smoke test's pre_exec calls `nix::unistd::setsid`
+# instead): both back the piped-stdin CLI smoke test's hand-rolled pty,
+# needed because portable_pty's own `SlavePty::spawn_command` always wires
+# stdin/stdout/stderr to the same slave fd.
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "term", "fs"] }

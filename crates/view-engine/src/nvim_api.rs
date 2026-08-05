@@ -742,7 +742,9 @@ impl EngineHandle {
     /// finish executing it (or fail) before returning.
     ///
     /// `nvim_command(String command) -> nil` (verified against the pinned
-    /// engine's own `api_info`): a *request*, not `notify`, and
+    /// engine's own `api_info`; the decoded capture backing this signature
+    /// lives in `docs/stdin-relay-wire-capture.md`'s `nvim --api-info`
+    /// section): a *request*, not `notify`, and
     /// deliberately so -- a caller that needs a synchronous barrier ahead
     /// of a command that may end the connection outright (`:cq`, `:qa!`)
     /// needs the request's own `Err` as proof the command already ran,

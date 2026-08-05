@@ -72,6 +72,69 @@ than assumed, in `crates/view/tests/cli_live.rs`'s
 getline(1) = "hello from the pipe"
 ```
 
+## `nvim --api-info` (msgpack-RPC metadata, decoded)
+
+The brief's own mandated source, captured directly rather than recalled: `nvim
+--api-info` writes the same `nvim_get_api_info` metadata `Engine::spawn`'s
+handshake decodes, as msgpack on stdout. Decoded here with `python3 -m
+msgpack` for a readable diff against the two claims below; the bytes
+themselves are exactly what `EngineHandle`'s own msgpack-rpc reader parses at
+spawn time.
+
+```
+$ nvim --api-info > api-info.mpack
+$ python3 -c '
+import msgpack, json
+with open("api-info.mpack", "rb") as f:
+    data = msgpack.unpackb(f.read(), raw=False, strict_map_key=False)
+meta = data[1] if isinstance(data, list) else data
+for fn in meta["functions"]:
+    if fn["name"] in ("nvim_command", "nvim_ui_attach"):
+        print(json.dumps(fn, indent=2))
+'
+{
+  "parameters": [["String", "cmd"]],
+  "since": 1,
+  "method": false,
+  "return_type": "void",
+  "name": "nvim_command"
+}
+{
+  "parameters": [["Integer", "width"], ["Integer", "height"], ["Dict", "options"]],
+  "since": 1,
+  "method": false,
+  "return_type": "void",
+  "name": "nvim_ui_attach"
+}
+```
+
+Engine identity from the same capture (`meta["version"]`), matching
+`.engine-pin` and the `nvim --version` capture above:
+
+```json
+{"major": 0, "minor": 12, "patch": 4, "prerelease": false, "api_level": 14, "api_compatible": 0, "api_prerelease": false, "build": null}
+```
+
+Backs the two claims this project makes elsewhere without their own committed
+capture:
+
+- `nvim_api.rs`'s `command`/`request_timeout` doc comment claims
+  `nvim_command(String command) -> nil` was "verified against the pinned
+  engine's own `api_info`": the capture above confirms the parameter list
+  (`String cmd`), and `"return_type": "void"` is the msgpack-RPC metadata's
+  own spelling of a reply whose value is `nil` -- `void` functions still
+  return one reply message, just with a `nil` result, which is what every
+  `request`-based caller in this codebase (`command`, `eval_str`, ...) reads.
+- The `stdin_fd` UI-attach option this document's `:help` captures describe:
+  `nvim_ui_attach`'s own third parameter is an opaque `Dict` named
+  `options`, not individually-enumerated keys, so `--api-info` cannot name
+  `stdin_fd` any more specifically than that -- confirming structurally
+  that it is passed through this call's options map (exactly what
+  `EngineHandle::ui_attach_with_stdin_relay` does), while the `:help
+  ui-startup-stdin` and `:help ui-ext-options` captures above are what name
+  and define `stdin_fd` itself, since `--api-info` documents the RPC
+  surface's shape, not the semantics of an arbitrary dict key within it.
+
 ## Conclusions for the implementation
 
 - Child fd 0 is `--embed`'s own RPC channel and cannot double as the piped
@@ -86,6 +149,11 @@ getline(1) = "hello from the pipe"
   a follow-up call after the ordinary `ui_attach`.
 - The relay is Unix-only (`std::os::unix::process::CommandExt::pre_exec`);
   `EngineConfig::stdin_relay_requested` returns `false` unconditionally off
-  Unix, and `-` still reaches the engine as a literal passthrough argument
-  there, unchanged from ordinary forwarding (nvim then reads its own
-  inherited stdin, exactly as an ordinary `nvim -` invocation would).
+  Unix. Off Unix, nvim does **not** fall back to reading its own inherited
+  stdin the way a plain `nvim -` invocation would: `build_command` pipes the
+  child's fd 0 unconditionally as the `--embed` RPC channel, so a `-`
+  combined with piped content there would have nvim read that RPC stream
+  itself as buffer text -- corrupting the channel `view` talks to it over,
+  not merely doing nothing. `main::deny_unsupported_stdin_relay` refuses to
+  start at all in that combination instead, with a clear error naming the
+  limitation.
