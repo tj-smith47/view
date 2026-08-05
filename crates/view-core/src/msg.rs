@@ -204,10 +204,15 @@ pub enum EngineRequest {
     /// this `rpcrequest` the same way `ClipboardGet` does, so a copy and a
     /// paste that race each other serialize through the same one-token,
     /// one-reply contract instead of one silently overtaking the other.
+    /// `regtype` is nvim's own copy of the register type for these `lines`,
+    /// forwarded unchanged from the `copy` closure's second argument -- see
+    /// [`RegisterType`] for why the system-clipboard backend needs it at
+    /// all.
     ClipboardSet {
         token: ReplyToken,
         register: char,
         lines: Vec<String>,
+        regtype: RegisterType,
     },
 }
 
@@ -217,19 +222,74 @@ pub struct ReplyToken {
     pub msgid: u64,
 }
 
+/// nvim's register type for a `g:clipboard` copy/paste, per `:help
+/// setreg()`. Only the two shapes this provider's system-clipboard backend
+/// distinguishes: `Charwise` for `"v"`, `Linewise` for `"V"`. A blockwise
+/// regtype (`"\x16{width}"`, `:help blockwise-visual`) decodes to
+/// `Charwise` -- the system clipboard is plain text with no column-block
+/// concept to keep one for, and falling back loses only the block shape,
+/// never the copied text.
+///
+/// This is the fix for the cross-process yank/paste divergence a
+/// same-session round trip through view alone could not catch: nvim's own
+/// shell-based clipboard providers signal linewise by writing a trailing
+/// `\n` onto the plain text they hand the system clipboard tool (and read
+/// that same trailing `\n` back to reconstruct it), which is the exact
+/// signal a `char`-only register model has no field to carry. Threading
+/// this enum end to end -- into [`EngineRequest::ClipboardSet`],
+/// [`Effect::ClipboardWrite`], [`Effect::Osc52Copy`], and back out as half
+/// of the `[lines, regtype]` pair [`ReplyValue::ClipboardLines`] answers a
+/// paste with -- is what lets `view-native::clipboard`'s text/line
+/// conversion apply that same trailing-newline convention instead of
+/// discarding the one signal nvim itself relies on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegisterType {
+    Charwise,
+    Linewise,
+}
+
+impl RegisterType {
+    /// Decodes nvim's own regtype string (`"v"`, `"V"`, or a blockwise
+    /// `"\x16{width}"`) into the two shapes this provider keeps. Any string
+    /// not starting with `'V'` decodes to `Charwise`, matching nvim's own
+    /// default when a `g:clipboard.paste` closure omits a regtype
+    /// entirely (see [`RegisterType`]'s doc).
+    #[must_use]
+    pub fn from_nvim(regtype: &str) -> Self {
+        match regtype.chars().next() {
+            Some('V') => Self::Linewise,
+            _ => Self::Charwise,
+        }
+    }
+
+    /// nvim's own wire spelling for this shape, used when answering a
+    /// paste with the `[lines, regtype]` pair form (see
+    /// `docs/clipboard-provider-wire-capture.md`).
+    #[must_use]
+    pub fn as_nvim_str(self) -> &'static str {
+        match self {
+            Self::Charwise => "v",
+            Self::Linewise => "V",
+        }
+    }
+}
+
 /// The value an `Effect::Reply` sends back to the engine.
 #[non_exhaustive]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ReplyValue {
     Nil,
-    /// The system clipboard's current lines, answering
-    /// [`EngineRequest::ClipboardGet`]. Carries no register-type: the
-    /// system clipboard is plain text with no linewise/charwise concept of
-    /// its own, so the Lua paste closure returns this bare list and nvim
-    /// defaults the register to charwise (`v`) -- one of the two accepted
-    /// `g:clipboard.paste` return shapes, verified against the pinned
-    /// engine (see `docs/clipboard-provider-wire-capture.md`).
-    Lines(Vec<String>),
+    /// The system clipboard's current lines and register type, answering
+    /// [`EngineRequest::ClipboardGet`] with the `[lines, regtype]` pair
+    /// form `g:clipboard.paste` accepts -- the shape
+    /// `docs/clipboard-provider-wire-capture.md` verified against the
+    /// pinned engine and the one that round-trips linewise/charwise
+    /// fidelity through `"+yy`/`"+p` (see [`RegisterType`]'s doc for why a
+    /// bare list, which nvim would default to charwise, is not enough).
+    ClipboardLines {
+        lines: Vec<String>,
+        regtype: RegisterType,
+    },
 }
 
 /// Everything `update()` can ask the loop's executor to carry out. The
@@ -262,11 +322,14 @@ pub enum Effect {
     /// [`Osc52Copy`](Self::Osc52Copy), which `update()` emits alongside
     /// this on every copy: the local write and the terminal escape are two
     /// effects from one arm, not a branch on whether a local display is
-    /// present, so `"+yy` behaves identically over SSH.
+    /// present, so `"+yy` behaves identically over SSH. `regtype` is
+    /// forwarded from `EngineRequest::ClipboardSet` unchanged; see
+    /// [`RegisterType`] for why the local write needs it.
     ClipboardWrite {
         token: ReplyToken,
         register: char,
         lines: Vec<String>,
+        regtype: RegisterType,
     },
     /// Writes an OSC 52 clipboard-set escape sequence to the real terminal.
     /// Routed to `view-tui`, never issued by the clipboard worker itself:
@@ -275,10 +338,15 @@ pub enum Effect {
     /// buffered frame flush. Carries no `ReplyToken`: unlike
     /// `ClipboardRead`/`ClipboardWrite`, nothing on the wire is blocked on
     /// this, so a terminal that ignores or strips OSC 52 costs nothing
-    /// beyond the escape sequence itself.
+    /// beyond the escape sequence itself. `regtype` is the same one
+    /// `ClipboardWrite` carries for this copy: the remote clipboard this
+    /// escape targets must see the identical linewise/charwise text shape
+    /// the local system clipboard just got, not a charwise-only rendering
+    /// of the same `lines` (see [`RegisterType`]).
     Osc52Copy {
         register: char,
         lines: Vec<String>,
+        regtype: RegisterType,
     },
     Quit {
         exit_code: i32,

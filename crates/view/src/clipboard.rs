@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
-use view_core::msg::{ReplyToken, ReplyValue};
+use view_core::msg::{RegisterType, ReplyToken, ReplyValue};
 use view_native::clipboard::{lines_to_text, text_to_lines};
 
 use crate::runtime::EngineOps;
@@ -41,9 +41,39 @@ pub struct ClipboardJob {
 /// share one backend (see `Effect::ClipboardRead`'s doc for why), but the
 /// shadow fallback keeps them as separate entries, so a design that later
 /// gave them distinct backends would not have to replumb this job shape.
+/// `Write` carries the copy's [`RegisterType`] alongside its lines: the
+/// system clipboard has no field of its own for it, so it must ride here
+/// to reach [`lines_to_text`]'s trailing-newline convention (see
+/// `view_native::clipboard`'s module doc).
 pub enum ClipboardJobKind {
-    Read { register: char },
-    Write { register: char, lines: Vec<String> },
+    Read {
+        register: char,
+    },
+    Write {
+        register: char,
+        lines: Vec<String>,
+        regtype: RegisterType,
+    },
+}
+
+/// The one capability this worker needs of a system clipboard, factored out
+/// of `arboard::Clipboard` so a test can drive `run`'s exact logic --
+/// including the unreachable-vs-reachable-but-failed distinction
+/// `read_lines` branches on -- against a fake that does not depend on a
+/// host display, rather than only against the reply-exactly-once contract
+/// `spawn`'s own tests can prove without one.
+trait ClipboardBackend {
+    fn get_text(&mut self) -> Result<String, ()>;
+    fn set_text(&mut self, text: String) -> Result<(), ()>;
+}
+
+impl ClipboardBackend for arboard::Clipboard {
+    fn get_text(&mut self) -> Result<String, ()> {
+        self.get_text().map_err(|_| ())
+    }
+    fn set_text(&mut self, text: String) -> Result<(), ()> {
+        self.set_text(text).map_err(|_| ())
+    }
 }
 
 /// Spawns the clipboard worker and returns its handle; the caller (`run`'s
@@ -68,33 +98,47 @@ pub fn spawn<E: EngineOps + Send + 'static>(
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("view-clipboard".to_owned())
-        .spawn(move || run(&ops, &jobs))
+        .spawn(move || run(&ops, &jobs, || arboard::Clipboard::new().ok()))
 }
 
 /// The worker's body: one register-keyed shadow map, one lazily-created
-/// `arboard::Clipboard` (see `ensure_clip`'s doc for why it must outlive any
-/// single job), both live for the thread's whole lifetime, and one reply per
-/// job -- the loop's one-reply-per-token invariant (see `EngineRequest`'s
-/// doc) is this function's contract to keep, since `update()` has already
+/// backend (see `ensure_clip`'s doc for why it must outlive any single
+/// job), both live for the thread's whole lifetime, and one reply per job
+/// -- the loop's one-reply-per-token invariant (see `EngineRequest`'s doc)
+/// is this function's contract to keep, since `update()` has already
 /// handed both obligations here and has no further chance to answer them
 /// itself.
-fn run<E: EngineOps>(ops: &E, jobs: &mpsc::Receiver<ClipboardJob>) {
+///
+/// Generic over [`ClipboardBackend`] via an injected `connect` closure
+/// rather than calling `arboard::Clipboard::new()` directly: `spawn` is the
+/// only caller that needs the real backend, and a test supplying a fake
+/// instead is the only way to prove `read_lines`'s unreachable-vs-failed
+/// branches without a host display.
+fn run<E: EngineOps, C: ClipboardBackend>(
+    ops: &E,
+    jobs: &mpsc::Receiver<ClipboardJob>,
+    connect: impl Fn() -> Option<C>,
+) {
     let mut shadow: HashMap<char, String> = HashMap::new();
-    let mut clip: Option<arboard::Clipboard> = arboard::Clipboard::new().ok();
+    let mut clip: Option<C> = connect();
     while let Ok(job) = jobs.recv() {
         match job.kind {
             ClipboardJobKind::Read { register } => {
-                let lines = read_lines(&mut clip, register, &shadow);
+                let (lines, regtype) = read_lines(&mut clip, &connect, register, &shadow);
                 // an EngineError here means the engine connection is
                 // already gone (the writer thread exited); there is no
                 // second engine to answer, and the paint loop's own
                 // EngineLost/EngineDown path is what notices the
                 // connection is down, not this reply
-                let _ = ops.reply(job.token, ReplyValue::Lines(lines));
+                let _ = ops.reply(job.token, ReplyValue::ClipboardLines { lines, regtype });
             }
-            ClipboardJobKind::Write { register, lines } => {
-                let text = lines_to_text(&lines);
-                write_system(&mut clip, &text);
+            ClipboardJobKind::Write {
+                register,
+                lines,
+                regtype,
+            } => {
+                let text = lines_to_text(&lines, regtype);
+                write_system(&mut clip, &connect, &text);
                 shadow.insert(register, text);
                 let _ = ops.reply(job.token, ReplyValue::Nil);
             }
@@ -102,50 +146,67 @@ fn run<E: EngineOps>(ops: &E, jobs: &mpsc::Receiver<ClipboardJob>) {
     }
 }
 
-/// Returns the live `arboard::Clipboard`, retrying `Clipboard::new()` if the
-/// worker started before a display was reachable and none has been claimed
-/// yet. Once a connection exists it is never dropped and re-opened between
-/// jobs: on X11, dropping the last non-global `Clipboard` handle (this
-/// worker's own instance, once no other thread in the process holds one)
-/// tears the whole clipboard connection down -- destroys the selection
-/// window and hands the data to a clipboard manager to persist it, which no
-/// manager is running to receive under a bare Xvfb/CI/SSH session -- so a
-/// fresh instance per call would silently erase whatever it had just
-/// written before any reader, including this same thread's own next read,
-/// could observe it.
-fn ensure_clip(clip: &mut Option<arboard::Clipboard>) -> Option<&mut arboard::Clipboard> {
+/// Returns the live backend, retrying `connect()` if the worker started
+/// before a display was reachable and none has been claimed yet. Once a
+/// connection exists it is never dropped and re-opened between jobs: on
+/// X11, dropping the last non-global `Clipboard` handle (this worker's own
+/// instance, once no other thread in the process holds one) tears the
+/// whole clipboard connection down -- destroys the selection window and
+/// hands the data to a clipboard manager to persist it, which no manager is
+/// running to receive under a bare Xvfb/CI/SSH session -- so a fresh
+/// instance per call would silently erase whatever it had just written
+/// before any reader, including this same thread's own next read, could
+/// observe it.
+fn ensure_clip<'a, C: ClipboardBackend>(
+    clip: &'a mut Option<C>,
+    connect: &impl Fn() -> Option<C>,
+) -> Option<&'a mut C> {
     if clip.is_none() {
-        *clip = arboard::Clipboard::new().ok();
+        *clip = connect();
     }
     clip.as_mut()
 }
 
-/// Reads the system clipboard via `arboard`, falling back to `shadow`'s
-/// entry for `register` when `arboard` cannot reach a clipboard at all (no
-/// `Clipboard::new()`, e.g. no display) or reports no text -- see the
-/// module doc's remote-paste contract for why a fallback, not an error, is
-/// correct here.
-fn read_lines(
-    clip: &mut Option<arboard::Clipboard>,
+/// Reads the system clipboard, falling back to `shadow`'s entry for
+/// `register` only when the clipboard is unreachable at all (`ensure_clip`
+/// returns `None`, e.g. no display) -- see the module doc's remote-paste
+/// contract for why a fallback, not an error, is correct in exactly that
+/// case. A clipboard that *is* reachable but fails the read for any other
+/// reason (non-text content, e.g. an image copied in a browser) must not
+/// fall back to the shadow: that would silently resurrect this session's
+/// own last yank as the answer to a paste of something else entirely,
+/// which is a stale read, not a missing one -- it degrades to no lines
+/// instead, matching what a real clipboard with nothing pasteable in it
+/// looks like.
+fn read_lines<C: ClipboardBackend>(
+    clip: &mut Option<C>,
+    connect: &impl Fn() -> Option<C>,
     register: char,
     shadow: &HashMap<char, String>,
-) -> Vec<String> {
-    let text = ensure_clip(clip)
-        .and_then(|clip| clip.get_text().ok())
-        .or_else(|| shadow.get(&register).cloned());
-    match text {
-        Some(text) => text_to_lines(&text),
-        None => Vec::new(),
+) -> (Vec<String>, RegisterType) {
+    match ensure_clip(clip, connect) {
+        Some(clip) => match clip.get_text() {
+            Ok(text) => text_to_lines(&text),
+            Err(()) => (Vec::new(), RegisterType::Charwise),
+        },
+        None => shadow
+            .get(&register)
+            .map(|text| text_to_lines(text))
+            .unwrap_or((Vec::new(), RegisterType::Charwise)),
     }
 }
 
-/// Writes `text` to the system clipboard via `arboard`. Failure (no
-/// `Clipboard::new()`, e.g. no display) is silent: the shadow register the
-/// caller updates regardless is what keeps `"+p` working in exactly that
-/// case, and there is nowhere to report a clipboard failure that both this
-/// background thread and a headless remote session could reach anyway.
-fn write_system(clip: &mut Option<arboard::Clipboard>, text: &str) {
-    if let Some(clip) = ensure_clip(clip) {
+/// Writes `text` to the system clipboard. Failure (no reachable backend,
+/// e.g. no display) is silent: the shadow register the caller updates
+/// regardless is what keeps `"+p` working in exactly that case, and there
+/// is nowhere to report a clipboard failure that both this background
+/// thread and a headless remote session could reach anyway.
+fn write_system<C: ClipboardBackend>(
+    clip: &mut Option<C>,
+    connect: &impl Fn() -> Option<C>,
+    text: &str,
+) {
+    if let Some(clip) = ensure_clip(clip, connect) {
         let _ = clip.set_text(text.to_owned());
     }
 }
@@ -155,14 +216,148 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// A [`ClipboardBackend`] a test can drive without a host display:
+    /// `unreachable()` models `connect()` returning `None` (no display, the
+    /// worker's own `ensure_clip` never gets a backend at all); `reachable`
+    /// models a backend that exists but whose read can still fail on its
+    /// own terms (e.g. non-text content) independently of reachability --
+    /// the exact distinction finding 2's bug collapsed.
+    #[derive(Clone)]
+    struct FakeClipboard {
+        text: Option<String>,
+        fail_get: bool,
+    }
+
+    impl FakeClipboard {
+        fn reachable(text: Option<&str>) -> Self {
+            Self {
+                text: text.map(str::to_owned),
+                fail_get: false,
+            }
+        }
+
+        fn reachable_but_unreadable() -> Self {
+            Self {
+                text: None,
+                fail_get: true,
+            }
+        }
+    }
+
+    impl ClipboardBackend for FakeClipboard {
+        fn get_text(&mut self) -> Result<String, ()> {
+            if self.fail_get {
+                Err(())
+            } else {
+                self.text.clone().ok_or(())
+            }
+        }
+        fn set_text(&mut self, text: String) -> Result<(), ()> {
+            self.text = Some(text);
+            Ok(())
+        }
+    }
+
+    fn unreachable_connect() -> Option<FakeClipboard> {
+        None
+    }
+
     #[test]
-    fn a_register_never_written_this_session_reads_no_shadow_fallback() {
+    fn ensure_clip_lazily_connects_once_and_reuses_the_same_backend() {
+        let calls = std::cell::Cell::new(0);
+        let connect = || {
+            calls.set(calls.get() + 1);
+            Some(FakeClipboard::reachable(Some("first")))
+        };
+        let mut clip: Option<FakeClipboard> = None;
+        assert!(ensure_clip(&mut clip, &connect).is_some());
+        assert!(ensure_clip(&mut clip, &connect).is_some());
+        assert_eq!(
+            calls.get(),
+            1,
+            "an already-live backend must never be reconnected between calls \
+             (see ensure_clip's doc: a fresh instance per call can erase an \
+             X11 selection before any reader observes it)"
+        );
+    }
+
+    #[test]
+    fn an_unreachable_clipboard_with_no_shadow_entry_reads_no_lines() {
         let shadow: HashMap<char, String> = HashMap::new();
-        // arboard's own success/failure depends on the host's display,
-        // which this test must not assume either way; what is provable
-        // without one is that an empty shadow contributes nothing to the
-        // fallback path a display-less read would take
-        assert!(!shadow.contains_key(&'+'));
+        let mut clip: Option<FakeClipboard> = None;
+        let (lines, regtype) = read_lines(&mut clip, &unreachable_connect, '+', &shadow);
+        assert!(lines.is_empty());
+        assert_eq!(regtype, RegisterType::Charwise);
+    }
+
+    /// The unreachable case (no display, `ensure_clip` returns `None`) is
+    /// the one case a shadow fallback is correct for -- the SSH-with-no-
+    /// forwarded-display scenario the module doc's remote-paste contract
+    /// exists for.
+    #[test]
+    fn an_unreachable_clipboard_falls_back_to_its_own_shadow_entry() {
+        let mut shadow: HashMap<char, String> = HashMap::new();
+        shadow.insert(
+            '+',
+            lines_to_text(&["yanked".to_owned()], RegisterType::Charwise),
+        );
+        let mut clip: Option<FakeClipboard> = None;
+        let (lines, regtype) = read_lines(&mut clip, &unreachable_connect, '+', &shadow);
+        assert_eq!(lines, vec!["yanked"]);
+        assert_eq!(regtype, RegisterType::Charwise);
+    }
+
+    /// A clipboard that *is* reachable but fails the read for its own
+    /// reason (e.g. an image copied in a browser, which decodes to no
+    /// text) must not fall back to a stale shadow entry from this
+    /// session's last yank -- doing so silently answers a paste of
+    /// something else entirely with the wrong text instead of reporting
+    /// nothing pasteable.
+    #[test]
+    fn a_reachable_but_unreadable_clipboard_does_not_fall_back_to_a_stale_shadow_entry() {
+        let mut shadow: HashMap<char, String> = HashMap::new();
+        shadow.insert(
+            '+',
+            lines_to_text(&["stale session yank".to_owned()], RegisterType::Charwise),
+        );
+        let mut clip = Some(FakeClipboard::reachable_but_unreadable());
+        let connect = || Some(FakeClipboard::reachable_but_unreadable());
+        let (lines, regtype) = read_lines(&mut clip, &connect, '+', &shadow);
+        assert!(
+            lines.is_empty(),
+            "a reachable-but-unreadable clipboard must read as empty, not resurrect \
+             the shadow's stale entry: got {lines:?}"
+        );
+        assert_eq!(regtype, RegisterType::Charwise);
+    }
+
+    #[test]
+    fn a_reachable_clipboard_with_text_ignores_the_shadow_entirely() {
+        let mut shadow: HashMap<char, String> = HashMap::new();
+        shadow.insert(
+            '+',
+            lines_to_text(&["stale".to_owned()], RegisterType::Charwise),
+        );
+        let mut clip = Some(FakeClipboard::reachable(Some("fresh\n")));
+        let connect = || Some(FakeClipboard::reachable(Some("fresh\n")));
+        let (lines, regtype) = read_lines(&mut clip, &connect, '+', &shadow);
+        assert_eq!(lines, vec!["fresh"]);
+        assert_eq!(regtype, RegisterType::Linewise);
+    }
+
+    #[test]
+    fn write_system_writes_through_to_a_reachable_backend() {
+        let mut clip = Some(FakeClipboard::reachable(None));
+        let connect = || Some(FakeClipboard::reachable(None));
+        write_system(&mut clip, &connect, "hello\n");
+        assert_eq!(clip.unwrap().text.as_deref(), Some("hello\n"));
+    }
+
+    #[test]
+    fn write_system_to_an_unreachable_clipboard_is_silent_and_never_panics() {
+        let mut clip: Option<FakeClipboard> = None;
+        write_system(&mut clip, &unreachable_connect, "hello");
+        assert!(clip.is_none());
     }
 
     #[test]
@@ -170,10 +365,14 @@ mod tests {
         let mut shadow: HashMap<char, String> = HashMap::new();
         shadow.insert(
             '+',
-            lines_to_text(&["hello".to_owned(), "world".to_owned()]),
+            lines_to_text(
+                &["hello".to_owned(), "world".to_owned()],
+                RegisterType::Charwise,
+            ),
         );
-        let read_back = text_to_lines(shadow.get(&'+').unwrap());
-        assert_eq!(read_back, vec!["hello", "world"]);
+        let (lines, regtype) = read_lines(&mut None, &unreachable_connect, '+', &shadow);
+        assert_eq!(lines, vec!["hello", "world"]);
+        assert_eq!(regtype, RegisterType::Charwise);
     }
 
     /// An [`EngineOps`] whose only live method is `reply`: every other
@@ -277,7 +476,7 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(2))
             .expect("a read job must answer its token within 2s, not block the engine forever");
         assert_eq!(msgid, 42, "the reply must answer the token the job carried");
-        assert!(matches!(value, ReplyValue::Lines(_)));
+        assert!(matches!(value, ReplyValue::ClipboardLines { .. }));
         assert!(
             reply_rx.try_recv().is_err(),
             "a read job must reply exactly once, never twice"
@@ -298,6 +497,7 @@ mod tests {
                 kind: ClipboardJobKind::Write {
                     register: '+',
                     lines: vec!["hello".to_owned()],
+                    regtype: RegisterType::Charwise,
                 },
             })
             .unwrap();
@@ -310,6 +510,99 @@ mod tests {
         assert!(
             reply_rx.try_recv().is_err(),
             "a write job must reply exactly once, never twice"
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// `spawn`'s own tests above only ever exercise the real `arboard`
+    /// backend, whose reachability depends on the host's display -- proof
+    /// of the reply-exactly-once contract, but not of `run`'s own
+    /// unreachable-vs-reachable-but-failed branching (that is what
+    /// `read_lines`'s own tests above prove directly). This helper drives
+    /// `run` end to end, through the real job channel and `EngineOps`
+    /// contract, with a `FakeClipboard` in place of `arboard` -- covering
+    /// the seam between the two: that `run` actually calls `read_lines`/
+    /// `write_system` with the connect closure it was given, and answers
+    /// with the [`ReplyValue::ClipboardLines`] pair form the fake's own
+    /// text and regtype produced.
+    fn spawn_fake<E: EngineOps + Send + 'static>(
+        ops: E,
+        jobs: mpsc::Receiver<ClipboardJob>,
+        connect: impl Fn() -> Option<FakeClipboard> + Send + 'static,
+    ) -> JoinHandle<()> {
+        thread::spawn(move || run(&ops, &jobs, connect))
+    }
+
+    #[test]
+    fn a_read_job_against_a_reachable_fake_replies_with_its_lines_and_regtype() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let worker = spawn_fake(ReplyRecorder { tx: reply_tx }, job_rx, || {
+            Some(FakeClipboard::reachable(Some("hi\nthere\n")))
+        });
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 1 },
+                kind: ClipboardJobKind::Read { register: '+' },
+            })
+            .unwrap();
+
+        let (_msgid, value) = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("a read job must answer within 2s");
+        assert_eq!(
+            value,
+            ReplyValue::ClipboardLines {
+                lines: vec!["hi".to_owned(), "there".to_owned()],
+                regtype: RegisterType::Linewise,
+            }
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// The end-to-end version of finding 2's regression test: a write
+    /// populates the shadow while the backend is unreachable, and the very
+    /// next read on the same register must answer from that shadow -- the
+    /// worker's real job-handling loop, not just `read_lines` called
+    /// directly.
+    #[test]
+    fn a_write_then_read_through_an_unreachable_backend_round_trips_via_the_shadow() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let worker = spawn_fake(ReplyRecorder { tx: reply_tx }, job_rx, || None);
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 1 },
+                kind: ClipboardJobKind::Write {
+                    register: '+',
+                    lines: vec!["shadowed".to_owned()],
+                    regtype: RegisterType::Charwise,
+                },
+            })
+            .unwrap();
+        reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the write must reply within 2s");
+
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 2 },
+                kind: ClipboardJobKind::Read { register: '+' },
+            })
+            .unwrap();
+        let (_msgid, value) = reply_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the read must reply within 2s");
+        assert_eq!(
+            value,
+            ReplyValue::ClipboardLines {
+                lines: vec!["shadowed".to_owned()],
+                regtype: RegisterType::Charwise,
+            }
         );
 
         drop(job_tx);

@@ -235,16 +235,24 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
 /// the lines synchronously (nvim has no async paste-provider hook), so the
 /// closure blocks on the same `EngineRequest`/`Effect::Reply` contract
 /// `VimEnter` uses (see [`view_core::msg::EngineRequest::ClipboardGet`]).
-/// It returns the bare list `view_clipboard_get` answers with, one of the
-/// two accepted `g:clipboard.paste` return shapes -- nvim defaults the
-/// register to charwise (`v`), verified against the pinned engine (see
+/// It returns the `[lines, regtype]` pair `view_clipboard_get` answers
+/// with -- the pair form, not the bare-list form, is what lets a paste
+/// restore a linewise copy's register type instead of nvim defaulting
+/// every paste to charwise (`v`); verified against the pinned engine (see
 /// `docs/clipboard-provider-wire-capture.md`).
 ///
 /// `copy` also issues a blocking `rpcrequest`, not `rpcnotify`: nvim
 /// ignores its return value, but routing it through the same
 /// `EngineRequest`/reply contract as `paste` means a copy and a paste that
 /// race each other serialize through one channel instead of a notify
-/// silently overtaking a request already in flight.
+/// silently overtaking a request already in flight. `copy`'s second
+/// argument is nvim's own `regtype` for the yank (`v`/`V`/blockwise
+/// `<C-v>` with an optional trailing width), forwarded verbatim as a
+/// fourth positional `rpcrequest` argument so `view_clipboard_set`'s
+/// decoder (see `decode_clipboard_set`) can round-trip it back through
+/// the system clipboard's trailing-newline convention instead of losing
+/// it -- the bug the wire capture doc's `[lines, regtype]` conclusion
+/// exists to prevent.
 ///
 /// Both `'+'` and `'*'` are wired, and to the same backend: `copy`/`paste`
 /// dicts missing either key error on that register when accessed (verified
@@ -260,8 +268,8 @@ if vim.g.clipboard == nil then
   vim.g.clipboard = {
     name = 'view',
     copy = {
-      ['+'] = function(lines) vim.rpcrequest(channel, 'view_clipboard_set', '+', lines) end,
-      ['*'] = function(lines) vim.rpcrequest(channel, 'view_clipboard_set', '*', lines) end,
+      ['+'] = function(lines, regtype) vim.rpcrequest(channel, 'view_clipboard_set', '+', lines, regtype) end,
+      ['*'] = function(lines, regtype) vim.rpcrequest(channel, 'view_clipboard_set', '*', lines, regtype) end,
     },
     paste = {
       ['+'] = function() return vim.rpcrequest(channel, 'view_clipboard_get', '+') end,

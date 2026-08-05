@@ -83,13 +83,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             token,
             register,
             lines,
+            regtype,
         }) => vec![
             Effect::ClipboardWrite {
                 token,
                 register,
                 lines: lines.clone(),
+                regtype,
             },
-            Effect::Osc52Copy { register, lines },
+            Effect::Osc52Copy {
+                register,
+                lines,
+                regtype,
+            },
         ],
         Msg::Resized { width, height } => {
             // an already-applied size is a no-op, not a repeat: the
@@ -460,7 +466,7 @@ mod tests {
     use super::*;
     use crate::events::UiEvent;
     use crate::model::{OverlayId, OverlayKind};
-    use crate::msg::{ExitInfo, ReplyToken};
+    use crate::msg::{ExitInfo, RegisterType, ReplyToken};
     use crate::native::geometry::OverlayBox;
 
     fn model() -> Model {
@@ -1390,6 +1396,64 @@ mod tests {
                 token: ReplyToken { msgid: 9 },
                 value: ReplyValue::Nil
             }]
+        ));
+    }
+
+    /// The worker owns the actual reply (see `Effect::ClipboardRead`'s
+    /// doc); this arm's whole job is routing the token and register
+    /// through unmodified.
+    #[test]
+    fn clipboard_get_produces_a_clipboard_read_effect_carrying_the_token_and_register() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::EngineRequest(EngineRequest::ClipboardGet {
+                token: ReplyToken { msgid: 11 },
+                register: '+',
+            }),
+        );
+        assert!(matches!(
+            &effects[..],
+            [Effect::ClipboardRead {
+                token: ReplyToken { msgid: 11 },
+                register: '+'
+            }]
+        ));
+    }
+
+    /// One arm, two effects: the local write and the OSC52 escape are
+    /// companions (see `Effect::Osc52Copy`'s doc), not a branch on whether
+    /// a display is present, and both must carry the same `lines` and
+    /// `regtype` the copy itself carried -- deleting either effect from
+    /// this arm would fail nothing else in the suite.
+    #[test]
+    fn clipboard_set_produces_a_write_and_an_osc52_copy_effect_from_one_arm() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::EngineRequest(EngineRequest::ClipboardSet {
+                token: ReplyToken { msgid: 12 },
+                register: '*',
+                lines: vec!["a".to_string(), "b".to_string()],
+                regtype: RegisterType::Linewise,
+            }),
+        );
+        assert!(matches!(
+            &effects[..],
+            [
+                Effect::ClipboardWrite {
+                    token: ReplyToken { msgid: 12 },
+                    register: '*',
+                    lines: ref w_lines,
+                    regtype: RegisterType::Linewise,
+                },
+                Effect::Osc52Copy {
+                    register: '*',
+                    lines: ref o_lines,
+                    regtype: RegisterType::Linewise,
+                }
+            ] if w_lines == &vec!["a".to_string(), "b".to_string()]
+                && o_lines == &vec!["a".to_string(), "b".to_string()]
         ));
     }
 

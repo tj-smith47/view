@@ -25,7 +25,9 @@ use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
 use std::sync::mpsc;
 use view_core::model::Model;
-use view_core::msg::{Effect, ExitInfo, Msg, OptionValue, ReplyToken, ReplyValue, RpcCall};
+use view_core::msg::{
+    Effect, ExitInfo, Msg, OptionValue, RegisterType, ReplyToken, ReplyValue, RpcCall,
+};
 use view_core::native::mappings::MappingSpec;
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
@@ -217,6 +219,7 @@ pub struct Executor<E: EngineOps> {
 pub struct Osc52Job {
     pub register: char,
     pub lines: Vec<String>,
+    pub regtype: RegisterType,
 }
 
 impl<E: EngineOps> Executor<E> {
@@ -314,12 +317,26 @@ impl<E: EngineOps> Executor<E> {
                         };
                         if tx.send(job).is_err() {
                             // the worker thread is gone; still owe the
-                            // token exactly one reply
-                            let _ = self.ops.reply(token, ReplyValue::Lines(Vec::new()));
+                            // token exactly one reply -- charwise-empty is
+                            // the safest default a paste of nothing can
+                            // report, matching an unreachable clipboard
+                            let _ = self.ops.reply(
+                                token,
+                                ReplyValue::ClipboardLines {
+                                    lines: Vec::new(),
+                                    regtype: RegisterType::Charwise,
+                                },
+                            );
                         }
                     }
                     None => {
-                        let _ = self.ops.reply(token, ReplyValue::Lines(Vec::new()));
+                        let _ = self.ops.reply(
+                            token,
+                            ReplyValue::ClipboardLines {
+                                lines: Vec::new(),
+                                regtype: RegisterType::Charwise,
+                            },
+                        );
                     }
                 }
                 Flow::Continue
@@ -328,12 +345,17 @@ impl<E: EngineOps> Executor<E> {
                 token,
                 register,
                 lines,
+                regtype,
             } => {
                 match &self.clipboard {
                     Some(tx) => {
                         let job = crate::clipboard::ClipboardJob {
                             token,
-                            kind: crate::clipboard::ClipboardJobKind::Write { register, lines },
+                            kind: crate::clipboard::ClipboardJobKind::Write {
+                                register,
+                                lines,
+                                regtype,
+                            },
                         };
                         if tx.send(job).is_err() {
                             let _ = self.ops.reply(token, ReplyValue::Nil);
@@ -350,9 +372,17 @@ impl<E: EngineOps> Executor<E> {
             // one whose receiver is gone) costs nothing beyond the escape
             // never being written -- an ordinary fire-and-forget degrade,
             // unlike the two effects above
-            Effect::Osc52Copy { register, lines } => {
+            Effect::Osc52Copy {
+                register,
+                lines,
+                regtype,
+            } => {
                 if let Some(tx) = &self.osc52 {
-                    let _ = tx.send(Osc52Job { register, lines });
+                    let _ = tx.send(Osc52Job {
+                        register,
+                        lines,
+                        regtype,
+                    });
                 }
                 Flow::Continue
             }
@@ -546,7 +576,7 @@ pub fn run(
         while let Ok(job) = osc52_rx.try_recv() {
             term.write_osc52(
                 job.register,
-                &view_native::clipboard::lines_to_text(&job.lines),
+                &view_native::clipboard::lines_to_text(&job.lines, job.regtype),
             )?;
         }
         // a resize the input thread has already seen describes the terminal
@@ -970,6 +1000,181 @@ mod tests {
             value: ReplyValue::Nil,
         });
         assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    /// The no-worker-wired shape (every bare `Executor::new`, per its own
+    /// doc): with no clipboard worker to own the reply, the executor must
+    /// still answer the token itself, exactly once, rather than silently
+    /// dropping it -- a charwise-empty read, the safest default for a
+    /// clipboard this build cannot reach.
+    #[test]
+    fn clipboard_read_with_no_worker_wired_replies_directly_and_charwise_empty() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::ClipboardRead {
+            token: ReplyToken { msgid: 3 },
+            register: '+',
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            ops.calls.borrow()[0],
+            format!(
+                "reply(3,{:?})",
+                ReplyValue::ClipboardLines {
+                    lines: Vec::new(),
+                    regtype: RegisterType::Charwise,
+                }
+            )
+        );
+    }
+
+    /// The worker-delegated shape: with a clipboard channel wired, the
+    /// executor must forward the job (token, register) rather than answer
+    /// it itself -- answering here too would violate the one-reply-per-
+    /// token contract once the worker also replies.
+    #[test]
+    fn clipboard_read_with_a_worker_wired_forwards_the_job_and_does_not_reply_itself() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardRead {
+            token: ReplyToken { msgid: 4 },
+            register: '*',
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert!(
+            ops.calls.borrow().is_empty(),
+            "a worker-wired read must not self-reply"
+        );
+        let job = rx.try_recv().expect("the read job must be forwarded");
+        assert_eq!(job.token.msgid, 4);
+        assert!(matches!(
+            job.kind,
+            crate::clipboard::ClipboardJobKind::Read { register: '*' }
+        ));
+    }
+
+    /// A clipboard channel wired but whose receiver has already been
+    /// dropped (the worker thread exited) must still answer the token
+    /// exactly once, directly -- the same degrade the no-worker-wired case
+    /// takes, reached through a different path.
+    #[test]
+    fn clipboard_read_with_a_dropped_receiver_still_replies_exactly_once() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardRead {
+            token: ReplyToken { msgid: 5 },
+            register: '+',
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow().len(), 1, "must reply exactly once");
+        assert_eq!(
+            ops.calls.borrow()[0],
+            format!(
+                "reply(5,{:?})",
+                ReplyValue::ClipboardLines {
+                    lines: Vec::new(),
+                    regtype: RegisterType::Charwise,
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn clipboard_write_with_no_worker_wired_replies_directly_with_nil() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::ClipboardWrite {
+            token: ReplyToken { msgid: 6 },
+            register: '+',
+            lines: vec!["a".to_owned()],
+            regtype: RegisterType::Linewise,
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "reply(6,Nil)");
+    }
+
+    #[test]
+    fn clipboard_write_with_a_worker_wired_forwards_the_job_including_regtype() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardWrite {
+            token: ReplyToken { msgid: 7 },
+            register: '*',
+            lines: vec!["x".to_owned(), "y".to_owned()],
+            regtype: RegisterType::Linewise,
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert!(
+            ops.calls.borrow().is_empty(),
+            "a worker-wired write must not self-reply"
+        );
+        let job = rx.try_recv().expect("the write job must be forwarded");
+        assert_eq!(job.token.msgid, 7);
+        let crate::clipboard::ClipboardJobKind::Write {
+            register,
+            lines,
+            regtype,
+        } = job.kind
+        else {
+            unreachable!("expected a Write job kind");
+        };
+        assert_eq!(register, '*');
+        assert_eq!(lines, vec!["x", "y"]);
+        assert_eq!(regtype, RegisterType::Linewise);
+    }
+
+    #[test]
+    fn clipboard_write_with_a_dropped_receiver_still_replies_exactly_once() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        drop(rx);
+        let executor = Executor::new(&ops).with_clipboard(tx);
+        let flow = executor.run(Effect::ClipboardWrite {
+            token: ReplyToken { msgid: 8 },
+            register: '+',
+            lines: vec!["a".to_owned()],
+            regtype: RegisterType::Charwise,
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow().len(), 1, "must reply exactly once");
+        assert_eq!(ops.calls.borrow()[0], "reply(8,Nil)");
+    }
+
+    /// `Osc52Copy` carries no `ReplyToken` (see the effect's own doc): an
+    /// unwired channel is an ordinary fire-and-forget no-op, unlike the two
+    /// clipboard effects above which owe a reply regardless.
+    #[test]
+    fn osc52_copy_with_no_channel_wired_is_a_silent_no_op() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Osc52Copy {
+            register: '+',
+            lines: vec!["a".to_owned()],
+            regtype: RegisterType::Charwise,
+        });
+        assert!(matches!(flow, Flow::Continue));
+        assert!(ops.calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn osc52_copy_with_a_channel_wired_forwards_the_job_including_regtype() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_osc52(tx);
+        let flow = executor.run(Effect::Osc52Copy {
+            register: '*',
+            lines: vec!["a".to_owned(), "b".to_owned()],
+            regtype: RegisterType::Linewise,
+        });
+        assert!(matches!(flow, Flow::Continue));
+        let job = rx.try_recv().expect("the osc52 job must be forwarded");
+        assert_eq!(job.register, '*');
+        assert_eq!(job.lines, vec!["a", "b"]);
+        assert_eq!(job.regtype, RegisterType::Linewise);
     }
 
     #[test]

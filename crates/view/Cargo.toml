@@ -24,8 +24,14 @@ anyhow = "1.0.103"
 # clipboard APIs on all three §14 platforms, no external binary to spawn
 # per operation and no per-platform "which command is installed" matrix.
 # Confined to this bin crate by scripts/audit-deps.sh; see the clipboard
-# worker in src/clipboard.rs for the crate-boundary reasoning.
-arboard = "3"
+# worker in src/clipboard.rs for the crate-boundary reasoning. Default
+# features off: the default image-data stack is dead weight this text-only
+# provider never calls, and wayland-data-control (opt-in, not default) is
+# needed explicitly for a Wayland session to work at all -- X11 support is
+# unconditional in arboard's own manifest, not behind either feature.
+arboard = { version = "3", default-features = false, features = [
+    "wayland-data-control",
+] }
 clap = { version = "4.6.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

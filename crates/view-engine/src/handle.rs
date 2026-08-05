@@ -7,7 +7,7 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
-use view_core::msg::{EngineRequest, Msg, ReplyToken, ReplyValue};
+use view_core::msg::{EngineRequest, Msg, RegisterType, ReplyToken, ReplyValue};
 use view_core::native::mappings::MappingClaim;
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -764,16 +764,6 @@ fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
     })
 }
 
-/// Decodes a `view_bridge` notification's `(event, match)` positional params
-/// into the message its consumer reads, or `None` when this build has no
-/// consumer for the event.
-///
-/// The bridge deliberately carries more triggers than there are consumers
-/// today (see `view-engine`'s registration chunk): the group is registered
-/// once, and adding a consumer must not mean re-registering autocommands on
-/// a running engine. An event with no consumer costs one dropped
-/// notification here, which is why the callbacks forward the event's own
-/// `match` instead of querying nvim for state nothing would read.
 /// Decodes a `"+p`/`"*p` paste's `(register)` positional param into the
 /// message the loop routes to `update()`. `register` must decode to exactly
 /// one `char` (`'+'` or `'*'`); anything else falls through to the reader
@@ -790,12 +780,19 @@ fn decode_clipboard_get(token: ReplyToken, params: &[Value]) -> Option<Msg> {
     }))
 }
 
-/// Decodes a `"+yy`/`"*yy` copy's `(register, lines)` positional params.
-/// `lines` must decode to an array of strings in full -- one undecodable
-/// line drops the whole request rather than silently copying a truncated
-/// selection.
+/// Decodes a `"+yy`/`"*yy` copy's `(register, lines, regtype)` positional
+/// params -- `regtype` is the injected `copy` closure's second argument,
+/// forwarded by [`REGISTER_CLIPBOARD_CHUNK`] alongside `lines`. `lines`
+/// must decode to an array of strings in full -- one undecodable line
+/// drops the whole request rather than silently copying a truncated
+/// selection. `regtype` must be present and a string, or the request drops
+/// the same way, but an unrecognized string (a blockwise regtype this
+/// provider does not keep, see [`RegisterType`]) degrades to
+/// [`RegisterType::Charwise`] rather than dropping the request: the copy
+/// itself is never in question, only which trailing-newline convention
+/// its text gets.
 fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Option<Msg> {
-    let [register, lines, ..] = params else {
+    let [register, lines, regtype, ..] = params else {
         return None;
     };
     let register = register.as_str()?.chars().next()?;
@@ -804,13 +801,25 @@ fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Option<Msg> {
         .iter()
         .map(|v| v.as_str().map(str::to_owned))
         .collect::<Option<Vec<String>>>()?;
+    let regtype = RegisterType::from_nvim(regtype.as_str()?);
     Some(Msg::EngineRequest(EngineRequest::ClipboardSet {
         token,
         register,
         lines,
+        regtype,
     }))
 }
 
+/// Decodes a `view_bridge` notification's `(event, match)` positional params
+/// into the message its consumer reads, or `None` when this build has no
+/// consumer for the event.
+///
+/// The bridge deliberately carries more triggers than there are consumers
+/// today (see `view-engine`'s registration chunk): the group is registered
+/// once, and adding a consumer must not mean re-registering autocommands on
+/// a running engine. An event with no consumer costs one dropped
+/// notification here, which is why the callbacks forward the event's own
+/// `match` instead of querying nvim for state nothing would read.
 fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
     let [event, payload, ..] = params else {
         return None;
@@ -897,13 +906,19 @@ fn close_and_drain(pending: &Pending) {
 // `ReplyValue` is `#[non_exhaustive]` from view-core (rmpv-free by design,
 // per the crate dependency direction `scripts/audit-deps.sh` enforces), so
 // the wildcard arm is required for a future variant to compile against, not
-// reachable with today's single `Nil` variant.
+// reachable with today's variants.
 fn reply_value_to_wire(value: &ReplyValue) -> Value {
     match value {
         ReplyValue::Nil => Value::Nil,
-        ReplyValue::Lines(lines) => {
-            Value::Array(lines.iter().map(|l| Value::from(l.as_str())).collect())
-        }
+        // The `[lines, regtype]` pair form, not a bare list: the wire
+        // capture (`docs/clipboard-provider-wire-capture.md`) confirmed
+        // nvim's `paste` closure accepts this shape and it is the only one
+        // that lets a linewise `"+p` restore the register type a bare list
+        // would silently collapse to charwise.
+        ReplyValue::ClipboardLines { lines, regtype } => Value::Array(vec![
+            Value::Array(lines.iter().map(|l| Value::from(l.as_str())).collect()),
+            Value::from(regtype.as_nvim_str()),
+        ]),
         #[allow(unreachable_patterns)]
         _ => Value::Nil,
     }
@@ -1491,6 +1506,113 @@ mod tests {
         assert!(
             decode_bridge_event(&[Value::from("colorscheme")]).is_none(),
             "a notification missing its payload entirely is malformed, not a switch"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_get_with_a_valid_register_decodes_to_the_request() {
+        let token = ReplyToken { msgid: 5 };
+        let decoded = decode_clipboard_get(token, &[Value::from("+")]);
+        assert!(matches!(
+            decoded,
+            Some(Msg::EngineRequest(EngineRequest::ClipboardGet {
+                token: t,
+                register: '+',
+            })) if t.msgid == 5
+        ));
+    }
+
+    #[test]
+    fn a_clipboard_get_with_a_missing_or_malformed_register_decodes_to_nothing() {
+        let token = ReplyToken { msgid: 6 };
+        assert!(
+            decode_clipboard_get(token, &[]).is_none(),
+            "no params at all must not guess a register"
+        );
+        assert!(
+            decode_clipboard_get(token, &[Value::Nil]).is_none(),
+            "a non-string register must not decode"
+        );
+        assert!(
+            decode_clipboard_get(token, &[Value::from("")]).is_none(),
+            "an empty register string has no char to take"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_set_with_valid_params_decodes_to_the_request_with_its_regtype() {
+        let token = ReplyToken { msgid: 7 };
+        let decoded = decode_clipboard_set(
+            token,
+            &[
+                Value::from("*"),
+                Value::Array(vec![Value::from("a"), Value::from("b")]),
+                Value::from("V"),
+            ],
+        );
+        let Some(Msg::EngineRequest(EngineRequest::ClipboardSet {
+            token: t,
+            register,
+            lines,
+            regtype,
+        })) = decoded
+        else {
+            unreachable!("expected a decoded ClipboardSet, got {decoded:?}");
+        };
+        assert_eq!(t.msgid, 7);
+        assert_eq!(register, '*');
+        assert_eq!(lines, vec!["a", "b"]);
+        assert_eq!(regtype, RegisterType::Linewise);
+    }
+
+    #[test]
+    fn a_clipboard_set_with_one_undecodable_line_drops_the_whole_request() {
+        let token = ReplyToken { msgid: 8 };
+        let decoded = decode_clipboard_set(
+            token,
+            &[
+                Value::from("+"),
+                Value::Array(vec![Value::from("a"), Value::Nil]),
+                Value::from("v"),
+            ],
+        );
+        assert!(
+            decoded.is_none(),
+            "one undecodable line must drop the whole request, not silently truncate it"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_set_missing_its_regtype_decodes_to_nothing() {
+        let token = ReplyToken { msgid: 9 };
+        let decoded = decode_clipboard_set(
+            token,
+            &[Value::from("+"), Value::Array(vec![Value::from("a")])],
+        );
+        assert!(
+            decoded.is_none(),
+            "a request with no regtype param at all must not guess one"
+        );
+    }
+
+    #[test]
+    fn a_clipboard_set_with_an_unrecognized_regtype_string_defaults_to_charwise() {
+        let token = ReplyToken { msgid: 10 };
+        let decoded = decode_clipboard_set(
+            token,
+            &[
+                Value::from("+"),
+                Value::Array(vec![Value::from("a")]),
+                Value::from("b"),
+            ],
+        );
+        let Some(Msg::EngineRequest(EngineRequest::ClipboardSet { regtype, .. })) = decoded else {
+            unreachable!("expected a decoded ClipboardSet, got {decoded:?}");
+        };
+        assert_eq!(
+            regtype,
+            RegisterType::Charwise,
+            "an unrecognized regtype (e.g. blockwise 'b') must degrade to charwise, not drop the copy"
         );
     }
 }
