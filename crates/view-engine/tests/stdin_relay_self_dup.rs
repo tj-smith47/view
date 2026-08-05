@@ -21,6 +21,7 @@
 
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 
+use rustix::io::FdFlags;
 use view_engine::process::{Engine, EngineConfig};
 
 #[test]
@@ -53,6 +54,20 @@ fn relay_survives_when_the_source_fd_already_is_the_child_target_fd() {
     let mut relay_fd = unsafe { OwnedFd::from_raw_fd(3) };
     rustix::io::dup2(source.as_fd(), &mut relay_fd).unwrap();
     drop(source);
+
+    // `dup2` to a *different* destination fd (source is 64, destination is
+    // 3) unconditionally clears `FD_CLOEXEC` on arrival regardless of the
+    // source's own flags, so without this line fd 3 would already be
+    // `FD_CLOEXEC`-clear before `relay_stdin_fd` ever runs -- making the
+    // pre-fix self-dup2(3, 3) no-op (which leaves whatever flag state was
+    // already there untouched) indistinguishable from the real fix's
+    // explicit clear: both would land on "already cleared" by accident,
+    // and this test would pass against either. Re-arming it here is what
+    // makes the assertion below actually exercise the fix: confirmed by
+    // hand -- reverting `relay_stdin_fd`'s self-dup branch to a plain
+    // `dup2(source_fd, &mut target)` makes this test fail (`ui_attach_with_stdin_relay`
+    // or the `getline` equality below), the real fix passes.
+    rustix::io::fcntl_setfd(relay_fd.as_fd(), FdFlags::CLOEXEC).unwrap();
 
     let cfg = EngineConfig::isolated()
         .with_arg("-")

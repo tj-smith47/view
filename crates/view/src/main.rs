@@ -654,6 +654,13 @@ mod tests {
     // arm `maybe_relay_stdin`'s clone: cargo test's own stdin is never a
     // controlling terminal, so this exercises the same `is_terminal() ==
     // false` branch `ls | view -` takes.
+    //
+    // `#[cfg(unix)]`-gated: `stdin_relay_requested()` is hardcoded `false`
+    // off Unix (`process.rs`'s `#[cfg(not(unix))]` arm -- no relay
+    // mechanism exists there), so this exact assertion would fail on
+    // windows-latest, which is in `ci.yml`'s matrix. The non-Unix half of
+    // this behavior is covered by its sibling immediately below.
+    #[cfg(unix)]
     #[test]
     fn a_bare_dash_reaches_the_engine_and_arms_the_stdin_relay() {
         let cfg = engine_config(&Cli::parse_from(["view", "-"]));

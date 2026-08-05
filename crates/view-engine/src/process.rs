@@ -1067,6 +1067,7 @@ mod config_tests {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use std::os::fd::{FromRawFd, OwnedFd};
     use std::os::unix::process::ExitStatusExt;
 
     #[test]
@@ -1089,15 +1090,95 @@ mod tests {
     }
 
     /// `build_command`'s `pre_exec` closure is opaque to `Command`'s own
-    /// introspection (`get_envs`/`get_args` say nothing about it), so the
-    /// fd-duplication path itself is only provable end-to-end against a
-    /// spawned child; what a unit test can pin is the flag that decides
-    /// whether `build_command` installs it at all.
+    /// introspection (`get_envs`/`get_args` say nothing about it), so
+    /// *whether the closure gets installed at all* is only provable
+    /// end-to-end against a spawned child; what a unit test can pin here is
+    /// the flag that decides that. `relay_stdin_fd`'s own fd-flag effect,
+    /// once installed, is directly testable without a spawn at all -- see
+    /// `relay_stdin_fd_clears_cloexec_in_place_when_source_already_is_fd_3`
+    /// below.
     #[test]
     fn stdin_relay_requested_tracks_whether_a_relay_fd_was_armed() {
         assert!(!EngineConfig::default().stdin_relay_requested());
         let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
         let cfg = EngineConfig::default().with_stdin_relay(dev_null.into());
         assert!(cfg.stdin_relay_requested());
+    }
+
+    /// `relay_stdin_fd`'s own fd-flag effect, isolated from the spawn
+    /// plumbing above: calls it directly against a descriptor already
+    /// forced onto `STDIN_RELAY_CHILD_FD` with `FD_CLOEXEC` explicitly SET
+    /// beforehand, then reads the flag straight back with `fcntl`
+    /// (`F_GETFD`).
+    ///
+    /// The explicit re-arm matters: `dup2` to a *different* destination fd
+    /// unconditionally clears `FD_CLOEXEC` on arrival regardless of the
+    /// source's own flags, so landing the probe on fd 3 and calling
+    /// `relay_stdin_fd` right after -- without setting the flag back first
+    /// -- would start from "already cleared" and could never tell the
+    /// self-dup branch's own no-op-preserves-whatever-was-there behavior
+    /// apart from the fix's explicit clear: both would land on the same
+    /// end state by accident, not because the code under test did
+    /// anything. Confirmed falsifiable by hand: reverting
+    /// `relay_stdin_fd`'s self-dup branch to a plain
+    /// `dup2(source_fd, &mut target)` (dup2-onto-self, a documented no-op
+    /// that leaves whatever `FD_CLOEXEC` state was already there
+    /// untouched) makes this test fail; the real fix
+    /// (`fcntl_setfd(FdFlags::empty())`) passes.
+    #[test]
+    fn relay_stdin_fd_clears_cloexec_in_place_when_source_already_is_fd_3() {
+        use rustix::fd::AsFd;
+        use rustix::io::FdFlags;
+
+        let content = std::env::temp_dir().join(format!(
+            "view-engine-relay-stdin-fd-unit-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&content, "probe").expect("scratch file for the fd under test");
+        let opened = std::fs::File::open(&content).expect("just wrote it");
+        std::fs::remove_file(&content).ok();
+
+        // Land the probe on a scratch fd first, never fd 3 directly, so
+        // nothing here ever holds two `OwnedFd`s pointing at the same raw
+        // number at once -- std aborts on drop if it catches that.
+        let source: OwnedFd =
+            rustix::io::fcntl_dupfd_cloexec(opened.as_fd(), 64).expect("dup onto a scratch fd");
+        drop(opened);
+
+        // Force it onto fd 3 via dup2-to-a-different-destination (clears
+        // `FD_CLOEXEC` on arrival, as noted above), then explicitly set the
+        // flag back so the probe starts from the state this test needs.
+        #[allow(unsafe_code)]
+        let mut relay_fd = unsafe { OwnedFd::from_raw_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD) };
+        rustix::io::dup2(source.as_fd(), &mut relay_fd).expect("force the probe onto fd 3");
+        drop(source);
+        rustix::io::fcntl_setfd(relay_fd.as_fd(), FdFlags::CLOEXEC)
+            .expect("re-arm FD_CLOEXEC before the call under test");
+        assert!(
+            rustix::io::fcntl_getfd(relay_fd.as_fd())
+                .expect("read the flag back")
+                .contains(FdFlags::CLOEXEC),
+            "test setup must start with FD_CLOEXEC set, or this test can't \
+             discriminate the pre-fix self-dup2 no-op from the fix"
+        );
+
+        relay_stdin_fd(crate::nvim_api::STDIN_RELAY_CHILD_FD)
+            .expect("relay_stdin_fd must succeed against fd 3 with itself as the source");
+
+        let flags_after = rustix::io::fcntl_getfd(relay_fd.as_fd()).expect("read the flag back");
+        assert!(
+            !flags_after.contains(FdFlags::CLOEXEC),
+            "relay_stdin_fd must clear FD_CLOEXEC on fd 3 in place when the \
+             source already is fd 3, or the descriptor is silently closed \
+             at exec and the piped content never reaches the child -- got \
+             {flags_after:?}"
+        );
+
+        // Matches `relay_stdin_fd`'s own contract for the caller it was
+        // actually written for (`build_command`'s `pre_exec` closure,
+        // right before `exec` takes over): the fd stays open, nothing
+        // drops it here.
+        std::mem::forget(relay_fd);
     }
 }
