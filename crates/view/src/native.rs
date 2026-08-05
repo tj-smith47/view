@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use view_core::model::Model;
-use view_core::msg::{Effect, EngineRequest, Msg};
+use view_core::msg::{Effect, EngineRequest, Msg, RpcCall};
 use view_core::native::registry;
 use view_native::config::NativeConfig;
 use view_native::report::report;
@@ -132,6 +132,12 @@ impl NativeSession {
     /// Options first: they are what nvim stops drawing, and issuing them
     /// ahead of a registration that answers asynchronously means the session
     /// is never briefly holding a key for a surface it has not taken yet.
+    ///
+    /// The clipboard provider registers unconditionally, unlike every option
+    /// and mapping above: `"+yy`/`"+p` are core editing infrastructure, not a
+    /// feature a config can decline the way it declines the picker or
+    /// statusline, so this push does not read `self.cfg` or `self.plan` at
+    /// all.
     fn take_over(&mut self) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
@@ -146,6 +152,9 @@ impl NativeSession {
             &self.cfg,
             self.channel_id,
         )));
+        effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
+            channel_id: self.channel_id,
+        }));
         crate::vlog::log_with("native", || {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
             format!("takeover options={taken:?} channel={}", self.channel_id)
@@ -224,7 +233,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use view_core::msg::{ReplyToken, RpcCall};
+    use view_core::msg::ReplyToken;
     use view_core::native::mappings::MappingClaim;
 
     fn model() -> Model {
@@ -299,9 +308,38 @@ mod tests {
             }
             other => unreachable!("{other:?}"),
         }
+        let clipboard_registrations = effects
+            .iter()
+            .filter(|e| matches!(e, Effect::Rpc(RpcCall::RegisterClipboard { .. })))
+            .count();
+        assert_eq!(
+            clipboard_registrations, 1,
+            "the clipboard provider registers exactly once, unconditionally: {effects:?}"
+        );
         assert!(
             session.follow_up(&mut m, Stage::VimEnter).is_empty(),
             "a second VimEnter must register nothing: the second pass would read view's own keys back as the user's"
+        );
+    }
+
+    #[test]
+    fn the_takeover_registers_the_clipboard_provider_even_with_every_plan_entry_empty() {
+        let mut session = NativeSession {
+            cfg: NativeConfig::all_enabled(),
+            plan: Vec::new(),
+            config_path: None,
+            record: None,
+            channel_id: 9,
+            handed_over: false,
+        };
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Rpc(RpcCall::RegisterClipboard { channel_id: 9 })
+            )),
+            "clipboard registration is not registry-gated: it must survive an empty plan, got {effects:?}"
         );
     }
 

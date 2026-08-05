@@ -1,5 +1,6 @@
 //! Native features: picker, file tree, statusline, notifications, palette.
 
+pub mod clipboard;
 pub mod config;
 pub mod mappings;
 pub mod paths;

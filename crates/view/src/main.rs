@@ -4,6 +4,7 @@
 //! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
 mod bridge;
+mod clipboard;
 mod native;
 mod runtime;
 mod startup;
@@ -52,6 +53,45 @@ struct Cli {
     /// Override auto-detected terminal capabilities instead of probing
     #[arg(long)]
     tier: Option<TierArg>,
+    /// Prints the system clipboard's current text for `register` ('+' or
+    /// '*') to stdout and exits, bypassing the editor entirely. Exists for
+    /// the compat oracle's own out-of-band verification: every other check
+    /// that harness can run reads state inside the same nvim/view session
+    /// under test, but the system clipboard can only be checked
+    /// independently of view's own claims by a second, freshly spawned
+    /// process reading it directly (see `NO_DISPLAY_EXIT`'s doc for the
+    /// no-clipboard-available case).
+    #[arg(long, hide = true)]
+    print_clipboard: Option<char>,
+}
+
+/// `print_clipboard`'s exit code when `arboard::Clipboard::new()` itself
+/// fails (no display, e.g. a headless CI host or an SSH session with no
+/// forwarded X11/Wayland): distinct from a normal failure so a caller can
+/// treat it as "skip this check, not a regression" rather than a hard
+/// failure of the content it expected to find.
+const NO_DISPLAY_EXIT: i32 = 3;
+
+/// `view --print-clipboard <register>`'s body: reads the system clipboard
+/// directly via `arboard`, the same backend the clipboard worker
+/// (`clipboard::run`) uses. Never touches nvim, the terminal, or any other
+/// part of the editor: a check that the worker's own shadow-register
+/// fallback could otherwise satisfy without ever reaching the real system
+/// clipboard needs a read from a wholly separate process to be a genuine
+/// proof, not an internally-consistent one.
+fn print_clipboard(register: char) -> Result<()> {
+    let mut clip = match arboard::Clipboard::new() {
+        Ok(clip) => clip,
+        Err(err) => {
+            eprintln!("view: no system clipboard available for register '{register}': {err}");
+            std::process::exit(NO_DISPLAY_EXIT);
+        }
+    };
+    let text = clip
+        .get_text()
+        .with_context(|| format!("reading the system clipboard for register '{register}'"))?;
+    print!("{text}");
+    Ok(())
 }
 
 /// The engine config `cli` asks for: the ordinary spawn, plus the binary
@@ -84,6 +124,9 @@ fn main() -> Result<()> {
     let process_start = Instant::now();
     vlog::init(process_start);
     let cli = Cli::parse();
+    if let Some(register) = cli.print_clipboard {
+        return print_clipboard(register);
+    }
     let cfg = engine_config(&cli);
 
     let mut term =

@@ -388,14 +388,25 @@ impl EngineHandle {
                             }
                         }
                     }
-                    Ok(RpcMessage::Request { msgid, method, .. }) => {
-                        if method == "view_vim_enter" {
+                    Ok(RpcMessage::Request {
+                        msgid,
+                        method,
+                        params,
+                    }) => {
+                        let token = ReplyToken {
+                            msgid: u64::from(msgid),
+                        };
+                        let routed = if method == "view_vim_enter" {
+                            Some(Msg::EngineRequest(EngineRequest::VimEnter { token }))
+                        } else if method == "view_clipboard_get" {
+                            decode_clipboard_get(token, &params)
+                        } else if method == "view_clipboard_set" {
+                            decode_clipboard_set(token, &params)
+                        } else {
+                            None
+                        };
+                        if let Some(msg) = routed {
                             if let Some(pump) = &reader_pump {
-                                let msg = Msg::EngineRequest(EngineRequest::VimEnter {
-                                    token: ReplyToken {
-                                        msgid: u64::from(msgid),
-                                    },
-                                });
                                 if pump.route_msg(msg).is_err() {
                                     // the runtime loop is gone or wedged
                                     // behind a full channel: no compaction
@@ -763,6 +774,43 @@ fn decode_feature_invoke(params: &[Value]) -> Option<Msg> {
 /// a running engine. An event with no consumer costs one dropped
 /// notification here, which is why the callbacks forward the event's own
 /// `match` instead of querying nvim for state nothing would read.
+/// Decodes a `"+p`/`"*p` paste's `(register)` positional param into the
+/// message the loop routes to `update()`. `register` must decode to exactly
+/// one `char` (`'+'` or `'*'`); anything else falls through to the reader
+/// thread's generic "method not supported" response rather than guessing a
+/// register, which would silently answer a paste from the wrong clipboard.
+fn decode_clipboard_get(token: ReplyToken, params: &[Value]) -> Option<Msg> {
+    let [register, ..] = params else {
+        return None;
+    };
+    let register = register.as_str()?.chars().next()?;
+    Some(Msg::EngineRequest(EngineRequest::ClipboardGet {
+        token,
+        register,
+    }))
+}
+
+/// Decodes a `"+yy`/`"*yy` copy's `(register, lines)` positional params.
+/// `lines` must decode to an array of strings in full -- one undecodable
+/// line drops the whole request rather than silently copying a truncated
+/// selection.
+fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Option<Msg> {
+    let [register, lines, ..] = params else {
+        return None;
+    };
+    let register = register.as_str()?.chars().next()?;
+    let lines = lines
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    Some(Msg::EngineRequest(EngineRequest::ClipboardSet {
+        token,
+        register,
+        lines,
+    }))
+}
+
 fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
     let [event, payload, ..] = params else {
         return None;
@@ -853,6 +901,9 @@ fn close_and_drain(pending: &Pending) {
 fn reply_value_to_wire(value: &ReplyValue) -> Value {
     match value {
         ReplyValue::Nil => Value::Nil,
+        ReplyValue::Lines(lines) => {
+            Value::Array(lines.iter().map(|l| Value::from(l.as_str())).collect())
+        }
         #[allow(unreachable_patterns)]
         _ => Value::Nil,
     }

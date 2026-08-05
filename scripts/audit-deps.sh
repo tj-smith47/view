@@ -43,6 +43,14 @@ done
 for crate in view-core view-surface view-native view-ai view-tui view-oracle view-bench view view-harness; do
   check_absent "$crate" rmpv
 done
+# arboard is the clipboard worker's local-backend dependency, confined to
+# the view bin crate (see crates/view/src/clipboard.rs): every other crate,
+# including view-native (which owns the clipboard line-shaping helpers, not
+# the system-clipboard call) and view-tui (which owns the OSC 52 escape
+# write, not the local read/write), must stay free of it.
+for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness; do
+  check_absent "$crate" arboard
+done
 # serde + toml exist for the theme cache file, the corpus loader, and the
 # [native] table of view.toml, confined to the crates that own a file
 # format (view, view-harness, view-native); any other lib crate gaining
@@ -124,6 +132,7 @@ check_transitive_reach serde view view-harness view-native
 check_transitive_reach toml view view-harness view-native
 check_transitive_reach crossterm view-tui view
 check_transitive_reach ratatui view-tui view
+check_transitive_reach arboard view
 check_transitive_reach tokio
 check_transitive_reach async-std
 check_transitive_reach smol

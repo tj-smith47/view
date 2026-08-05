@@ -72,6 +72,25 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             token,
             value: ReplyValue::Nil,
         }],
+        // delegated, not answered here: the worker owns the reply (see
+        // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
+        // blocks on the system clipboard the way a direct Effect::Reply
+        // would require reading it inline to produce
+        Msg::EngineRequest(EngineRequest::ClipboardGet { token, register }) => {
+            vec![Effect::ClipboardRead { token, register }]
+        }
+        Msg::EngineRequest(EngineRequest::ClipboardSet {
+            token,
+            register,
+            lines,
+        }) => vec![
+            Effect::ClipboardWrite {
+                token,
+                register,
+                lines: lines.clone(),
+            },
+            Effect::Osc52Copy { register, lines },
+        ],
         Msg::Resized { width, height } => {
             // an already-applied size is a no-op, not a repeat: the
             // frontend may fold a resize in ahead of this message to keep

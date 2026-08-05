@@ -226,6 +226,51 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
   callback = relay('git'),
 })";
 
+/// The lua chunk [`EngineHandle::register_clipboard`] runs inside nvim,
+/// taking view's channel id as its single vararg. Installs `g:clipboard`
+/// (`:help g:clipboard`) so `"+y`/`"+p` route through view's own clipboard
+/// worker instead of nvim's auto-detected shell tool.
+///
+/// `paste` issues a blocking `rpcrequest`: `g:clipboard.paste` must return
+/// the lines synchronously (nvim has no async paste-provider hook), so the
+/// closure blocks on the same `EngineRequest`/`Effect::Reply` contract
+/// `VimEnter` uses (see [`view_core::msg::EngineRequest::ClipboardGet`]).
+/// It returns the bare list `view_clipboard_get` answers with, one of the
+/// two accepted `g:clipboard.paste` return shapes -- nvim defaults the
+/// register to charwise (`v`), verified against the pinned engine (see
+/// `docs/clipboard-provider-wire-capture.md`).
+///
+/// `copy` also issues a blocking `rpcrequest`, not `rpcnotify`: nvim
+/// ignores its return value, but routing it through the same
+/// `EngineRequest`/reply contract as `paste` means a copy and a paste that
+/// race each other serialize through one channel instead of a notify
+/// silently overtaking a request already in flight.
+///
+/// Both `'+'` and `'*'` are wired, and to the same backend: `copy`/`paste`
+/// dicts missing either key error on that register when accessed (verified
+/// empirically, see the capture doc above), and arboard exposes one system
+/// clipboard with no cross-platform primary-selection equivalent to give
+/// `'*'` a distinct backend.
+///
+/// `cache_enabled = 0`: nvim reads the clipboard freshly at every paste
+/// rather than caching between the copy and paste calls, so `"+p` never
+/// returns text that was current only when some earlier copy ran.
+const REGISTER_CLIPBOARD_CHUNK: &str = "local channel = ...
+if vim.g.clipboard == nil then
+  vim.g.clipboard = {
+    name = 'view',
+    copy = {
+      ['+'] = function(lines) vim.rpcrequest(channel, 'view_clipboard_set', '+', lines) end,
+      ['*'] = function(lines) vim.rpcrequest(channel, 'view_clipboard_set', '*', lines) end,
+    },
+    paste = {
+      ['+'] = function() return vim.rpcrequest(channel, 'view_clipboard_get', '+') end,
+      ['*'] = function() return vim.rpcrequest(channel, 'view_clipboard_get', '*') end,
+    },
+    cache_enabled = 0,
+  }
+end";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -377,6 +422,34 @@ impl EngineHandle {
             "nvim_exec_lua",
             vec![
                 Value::from(REGISTER_BRIDGE_CHUNK),
+                Value::Array(vec![Value::from(channel_id)]),
+            ],
+        )
+    }
+
+    /// Injects view's `g:clipboard` provider (see
+    /// [`REGISTER_CLIPBOARD_CHUNK`]). A `notify`, like `register_bridge`:
+    /// this only needs to be *ordered*, never *live before `ui_attach`
+    /// returns* -- and in fact cannot be issued that early at all, since the
+    /// user's config has not sourced yet at that point. The precedence check
+    /// it performs (leave an existing `g:clipboard` untouched) depends on
+    /// exactly the fact that only exists once sourcing is done: whether the
+    /// user's config set it.
+    ///
+    /// `channel_id` is this connection's own id from `nvim_get_api_info`,
+    /// needed for the same reason [`register_bridge`](Self::register_bridge)
+    /// needs it: the registered closures dispatch back to this connection
+    /// by explicit channel number.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(REGISTER_CLIPBOARD_CHUNK),
                 Value::Array(vec![Value::from(channel_id)]),
             ],
         )

@@ -1,0 +1,18 @@
+# Black-box proof of the "user's g:clipboard wins" contract at the real
+# binary level (crates/view-engine/tests/clipboard_precedence.rs already
+# proves the same contract directly against EngineHandle::register_clipboard;
+# this scenario proves the full startup path -- config sourcing, VimEnter,
+# and the exec_lua chunk view's own take-over sends -- never clobbers a
+# provider the fixture's own init.lua already installed).
+schema = 1
+plugin = "clipboard-precedence"
+class = "semantic"
+fixture = "clipboard-precedence"
+state = "present"
+steps = [
+  # a bounded retry, not a single probe: the exec_lua chunk that would
+  # overwrite g:clipboard (if the precedence check ever regressed) only
+  # runs once view's own VimEnter handling completes, and this scenario
+  # has no other on-screen signal to wait on first
+  { wait_for_probe = "g:clipboard.name", expect = "user-provider", timeout_ms = 5000 },
+]

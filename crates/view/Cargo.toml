@@ -20,6 +20,12 @@ bench-taps = ["view-engine/bench-taps", "view-tui/bench-taps"]
 
 [dependencies]
 anyhow = "1.0.103"
+# The clipboard provider's local backend ("+yy"/"+p"): in-process, native
+# clipboard APIs on all three §14 platforms, no external binary to spawn
+# per operation and no per-platform "which command is installed" matrix.
+# Confined to this bin crate by scripts/audit-deps.sh; see the clipboard
+# worker in src/clipboard.rs for the crate-boundary reasoning.
+arboard = "3"
 clap = { version = "4.6.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

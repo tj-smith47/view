@@ -84,6 +84,10 @@ pub trait EngineOps {
     /// state change view reacts to; never blocks, and never itself returns an
     /// event (see `RpcCall::RegisterBridge`).
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError>;
+    /// Injects view's `g:clipboard` provider, conditionally on the user's
+    /// own config leaving it unset; never blocks, and never itself answers
+    /// a paste or copy request (see `RpcCall::RegisterClipboard`).
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -123,6 +127,9 @@ impl EngineOps for EngineHandle {
     }
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         self.register_bridge(channel_id)
+    }
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.register_clipboard(channel_id)
     }
 }
 
@@ -168,6 +175,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_bridge(channel_id)
     }
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_clipboard(channel_id)
+    }
 }
 
 /// What the runtime loop does after one effect crosses [`Executor::run`].
@@ -189,12 +199,55 @@ pub enum Flow {
 /// requests the process makes).
 pub struct Executor<E: EngineOps> {
     ops: E,
+    /// The clipboard worker's job channel (`crate::clipboard::spawn`), or
+    /// `None` when no worker is wired -- every test `Executor` built via
+    /// plain `new`, and the only state a `ClipboardRead`/`ClipboardWrite`
+    /// effect has to check before it must degrade to a direct reply rather
+    /// than silently drop the token (see `run`'s match arms below and
+    /// `EngineRequest`'s one-reply-per-token contract).
+    clipboard: Option<mpsc::Sender<crate::clipboard::ClipboardJob>>,
+    /// The terminal's OSC52 job channel, drained synchronously by `run`'s
+    /// loop on the thread that owns `Term` (see `Effect::Osc52Copy`'s doc
+    /// for why this cannot be a write from the clipboard worker thread).
+    osc52: Option<mpsc::Sender<Osc52Job>>,
+}
+
+/// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
+/// drained by [`run`]'s loop into [`view_tui::terminal::Term::write_osc52`].
+pub struct Osc52Job {
+    pub register: char,
+    pub lines: Vec<String>,
 }
 
 impl<E: EngineOps> Executor<E> {
-    /// Wraps `ops` for the runtime loop to drive.
+    /// Wraps `ops` for the runtime loop to drive, with neither the
+    /// clipboard worker nor the OSC52 terminal channel wired: every
+    /// existing call site stays source-compatible, and a bare `Executor`
+    /// (every test today) still answers a clipboard effect safely (see
+    /// `run`'s match arms) rather than needing every one of them updated to
+    /// wire a channel it does not otherwise exercise.
     pub fn new(ops: E) -> Self {
-        Self { ops }
+        Self {
+            ops,
+            clipboard: None,
+            osc52: None,
+        }
+    }
+
+    /// Wires the clipboard worker's job channel; `ClipboardRead`/
+    /// `ClipboardWrite` effects forward to it instead of self-answering.
+    #[must_use]
+    pub fn with_clipboard(mut self, tx: mpsc::Sender<crate::clipboard::ClipboardJob>) -> Self {
+        self.clipboard = Some(tx);
+        self
+    }
+
+    /// Wires the terminal's OSC52 job channel; `Osc52Copy` effects forward
+    /// to it instead of silently no-oping.
+    #[must_use]
+    pub fn with_osc52(mut self, tx: mpsc::Sender<Osc52Job>) -> Self {
+        self.osc52 = Some(tx);
+        self
     }
 
     /// Unwraps back to the owned `ops`, so a test can inspect what a fake
@@ -231,6 +284,9 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.register_mappings(&specs, channel_id)
                     }
                     RpcCall::RegisterBridge { channel_id } => self.ops.register_bridge(channel_id),
+                    RpcCall::RegisterClipboard { channel_id } => {
+                        self.ops.register_clipboard(channel_id)
+                    }
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -244,6 +300,62 @@ impl<E: EngineOps> Executor<E> {
                 Ok(()) => Flow::Continue,
                 Err(_) => Flow::EngineLost,
             },
+            // forwarded to the clipboard worker when one is wired; when
+            // none is (every bare test Executor), the token still must be
+            // answered exactly once, so this replies here directly with the
+            // safest default rather than silently dropping it the way an
+            // ordinary unmapped fire-and-forget RpcCall may
+            Effect::ClipboardRead { token, register } => {
+                match &self.clipboard {
+                    Some(tx) => {
+                        let job = crate::clipboard::ClipboardJob {
+                            token,
+                            kind: crate::clipboard::ClipboardJobKind::Read { register },
+                        };
+                        if tx.send(job).is_err() {
+                            // the worker thread is gone; still owe the
+                            // token exactly one reply
+                            let _ = self.ops.reply(token, ReplyValue::Lines(Vec::new()));
+                        }
+                    }
+                    None => {
+                        let _ = self.ops.reply(token, ReplyValue::Lines(Vec::new()));
+                    }
+                }
+                Flow::Continue
+            }
+            Effect::ClipboardWrite {
+                token,
+                register,
+                lines,
+            } => {
+                match &self.clipboard {
+                    Some(tx) => {
+                        let job = crate::clipboard::ClipboardJob {
+                            token,
+                            kind: crate::clipboard::ClipboardJobKind::Write { register, lines },
+                        };
+                        if tx.send(job).is_err() {
+                            let _ = self.ops.reply(token, ReplyValue::Nil);
+                        }
+                    }
+                    None => {
+                        let _ = self.ops.reply(token, ReplyValue::Nil);
+                    }
+                }
+                Flow::Continue
+            }
+            // carries no ReplyToken (see the effect's own doc): nothing on
+            // the wire is blocked on this, so an unwired osc52 channel (or
+            // one whose receiver is gone) costs nothing beyond the escape
+            // never being written -- an ordinary fire-and-forget degrade,
+            // unlike the two effects above
+            Effect::Osc52Copy { register, lines } => {
+                if let Some(tx) = &self.osc52 {
+                    let _ = tx.send(Osc52Job { register, lines });
+                }
+                Flow::Continue
+            }
             Effect::Quit { exit_code } => Flow::Quit(exit_code),
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
             _ => Flow::Continue,
@@ -413,10 +525,30 @@ pub fn run(
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
-    let executor = Executor::new(engine.handle.clone());
+    let (clipboard_tx, clipboard_rx) = mpsc::channel();
+    let (osc52_tx, osc52_rx) = mpsc::channel();
+    // kept alive for the session's duration; the worker exits once
+    // `clipboard_tx` (held by `executor`) drops at the end of this
+    // function, same lifetime as the engine's own reader/writer threads
+    let _clipboard_worker = crate::clipboard::spawn(engine.handle.clone(), clipboard_rx)?;
+    let executor = Executor::new(engine.handle.clone())
+        .with_clipboard(clipboard_tx)
+        .with_osc52(osc52_tx);
     let mut write_stall = OutboxStallWatch::default();
 
     loop {
+        // drained at the top of every pass rather than right after the
+        // dispatch that queued it: nothing blocks between here and the
+        // bottom of the previous pass's own dispatch loop, so this is
+        // effectively immediate, and one drain site covers every dispatch
+        // call this loop makes (resize, below, and the main queue) instead
+        // of one per call site
+        while let Ok(job) = osc52_rx.try_recv() {
+            term.write_osc52(
+                job.register,
+                &view_native::clipboard::lines_to_text(&job.lines),
+            )?;
+        }
         // a resize the input thread has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
         // Msg::Resized: folding it in here means no frame is ever painted
@@ -588,6 +720,9 @@ impl EngineOps for FakeOps {
     }
     fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
         self.record(format!("register_bridge({channel_id})"))
+    }
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.record(format!("register_clipboard({channel_id})"))
     }
 }
 

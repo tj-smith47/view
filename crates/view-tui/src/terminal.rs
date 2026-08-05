@@ -170,6 +170,52 @@ fn write_cursor_shape<W: Write>(writer: &mut W, shape: CursorShape) -> std::io::
     write!(writer, "\x1b[{} q", decscusr_param(shape))
 }
 
+const BASE64_ALPHABET: &[u8; 64] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+/// Minimal RFC 4648 base64 encoder (standard alphabet, `=` padding).
+/// Hand-rolled rather than a dependency: OSC 52 is the only base64 consumer
+/// this crate has, and the whole encoder is smaller than the `Cargo.lock`
+/// diff and `scripts/audit-deps.sh` row a new crate would cost for it.
+fn write_base64<W: Write>(writer: &mut W, bytes: &[u8]) -> std::io::Result<()> {
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied();
+        let b2 = chunk.get(2).copied();
+        let n =
+            (u32::from(b0) << 16) | (u32::from(b1.unwrap_or(0)) << 8) | u32::from(b2.unwrap_or(0));
+        let c0 = BASE64_ALPHABET[usize::try_from((n >> 18) & 0x3f).unwrap_or(0)];
+        let c1 = BASE64_ALPHABET[usize::try_from((n >> 12) & 0x3f).unwrap_or(0)];
+        let c2 = if b1.is_some() {
+            BASE64_ALPHABET[usize::try_from((n >> 6) & 0x3f).unwrap_or(0)]
+        } else {
+            b'='
+        };
+        let c3 = if b2.is_some() {
+            BASE64_ALPHABET[usize::try_from(n & 0x3f).unwrap_or(0)]
+        } else {
+            b'='
+        };
+        writer.write_all(&[c0, c1, c2, c3])?;
+    }
+    Ok(())
+}
+
+/// Writes an OSC 52 clipboard-set escape (`ESC ] 5 2 ; {selection} ;
+/// {base64} ESC \`, `:help clipboard-osc52`) for `text` to `writer`.
+/// `register` selects the selection code the same way nvim's own bundled
+/// `lua/vim/ui/clipboard/osc52.lua` provider does (read directly off the
+/// pinned install, see `docs/clipboard-provider-wire-capture.md`): `'*'`
+/// maps to the primary-selection code `p`, everything else (in practice
+/// always `'+'`) to the clipboard code `c`. Generic over `Write` for the
+/// same testability reason as `write_cursor_shape`.
+fn write_osc52_bytes<W: Write>(writer: &mut W, register: char, text: &str) -> std::io::Result<()> {
+    let selection = if register == '*' { 'p' } else { 'c' };
+    write!(writer, "\x1b]52;{selection};")?;
+    write_base64(writer, text.as_bytes())?;
+    write!(writer, "\x1b\\")
+}
+
 /// The whole-terminal paint area for one frame, sized from the model's
 /// last-known terminal dimensions rather than an OS query on every frame.
 ///
@@ -465,6 +511,31 @@ impl Term {
         Ok(())
     }
 
+    /// Writes an OSC 52 clipboard-set escape directly to the real
+    /// terminal, bypassing `frame_buf`. The clipboard worker thread must
+    /// never write to stdout itself -- only `view-tui` touches the
+    /// terminal, and a background thread racing `draw_surface`'s own
+    /// buffered flush could interleave escape sequences into a corrupted
+    /// stream -- so this is the method that lets the thread already
+    /// driving `Term` speak on the worker's behalf (see
+    /// `view_core::msg::Effect::Osc52Copy`'s doc).
+    ///
+    /// Mirrors the free [`restore`] function's direct-write pattern rather
+    /// than `draw_surface`'s buffered one: an OSC 52 write is not part of
+    /// any frame's damage and has no shadow state to reconcile against, so
+    /// routing it through `frame_buf` would only delay it to the next
+    /// paint for no benefit.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying `std::io::Error` if the write or flush
+    /// fails.
+    pub fn write_osc52(&mut self, register: char, text: &str) -> std::io::Result<()> {
+        let mut out = std::io::stdout().lock();
+        write_osc52_bytes(&mut out, register, text)?;
+        out.flush()
+    }
+
     /// Restores the terminal immediately rather than waiting for [`Drop`].
     ///
     /// `std::process::exit` bypasses destructors, so the exit path that
@@ -680,5 +751,34 @@ mod tests {
         buf.clear();
         write_cursor_shape(&mut buf, CursorShape::Vertical(25)).unwrap();
         assert_eq!(buf, b"\x1b[6 q", "vertical/bar is DECSCUSR 6");
+    }
+
+    #[test]
+    fn write_base64_pads_to_the_next_multiple_of_four() {
+        let mut buf = Vec::new();
+        write_base64(&mut buf, b"hello").unwrap();
+        assert_eq!(buf, b"aGVsbG8=", "5 bytes -> one pad char");
+
+        buf.clear();
+        write_base64(&mut buf, b"hi!").unwrap();
+        assert_eq!(buf, b"aGkh", "3 bytes -> no padding needed");
+
+        buf.clear();
+        write_base64(&mut buf, b"").unwrap();
+        assert_eq!(buf, b"", "empty input encodes to nothing");
+    }
+
+    #[test]
+    fn write_osc52_bytes_selects_c_for_plus_and_p_for_star() {
+        let mut buf = Vec::new();
+        write_osc52_bytes(&mut buf, '+', "hi!").unwrap();
+        assert_eq!(buf, b"\x1b]52;c;aGkh\x1b\\", "'+' maps to clipboard code c");
+
+        buf.clear();
+        write_osc52_bytes(&mut buf, '*', "hi!").unwrap();
+        assert_eq!(
+            buf, b"\x1b]52;p;aGkh\x1b\\",
+            "'*' maps to primary-selection code p"
+        );
     }
 }

@@ -188,7 +188,27 @@ pub struct ExitInfo {
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum EngineRequest {
-    VimEnter { token: ReplyToken },
+    VimEnter {
+        token: ReplyToken,
+    },
+    /// `"+p`/`"*p`: the injected `g:clipboard.paste` closure blocks nvim on
+    /// this `rpcrequest`, so the loop must delegate rather than answer
+    /// inline -- see [`Effect::ClipboardRead`]. `register` is `'+'` or
+    /// `'*'`; view wires both to the same backend (see
+    /// `Effect::ClipboardRead`'s doc for why).
+    ClipboardGet {
+        token: ReplyToken,
+        register: char,
+    },
+    /// `"+yy`/`"*yy`: the injected `g:clipboard.copy` closure blocks nvim on
+    /// this `rpcrequest` the same way `ClipboardGet` does, so a copy and a
+    /// paste that race each other serialize through the same one-token,
+    /// one-reply contract instead of one silently overtaking the other.
+    ClipboardSet {
+        token: ReplyToken,
+        register: char,
+        lines: Vec<String>,
+    },
 }
 
 /// Identifies the pending msgpack-RPC request a reply must answer.
@@ -202,6 +222,14 @@ pub struct ReplyToken {
 #[derive(Debug, Clone)]
 pub enum ReplyValue {
     Nil,
+    /// The system clipboard's current lines, answering
+    /// [`EngineRequest::ClipboardGet`]. Carries no register-type: the
+    /// system clipboard is plain text with no linewise/charwise concept of
+    /// its own, so the Lua paste closure returns this bare list and nvim
+    /// defaults the register to charwise (`v`) -- one of the two accepted
+    /// `g:clipboard.paste` return shapes, verified against the pinned
+    /// engine (see `docs/clipboard-provider-wire-capture.md`).
+    Lines(Vec<String>),
 }
 
 /// Everything `update()` can ask the loop's executor to carry out. The
@@ -214,6 +242,43 @@ pub enum Effect {
     Reply {
         token: ReplyToken,
         value: ReplyValue,
+    },
+    /// Hands a paste read to the clipboard worker off the loop thread; the
+    /// worker, not this arm, owns answering `token` (see
+    /// [`EngineRequest::ClipboardGet`]). Never a cached read (Option A,
+    /// rejected): the system clipboard can change between a cache refresh
+    /// and the paste that reads it, and a cache would then hand back text
+    /// the user did not most recently copy -- a silent data-correctness
+    /// bug. `register` is `'+'` or `'*'`, forwarded unchanged; both map to
+    /// the one system clipboard arboard exposes; there is no cross-platform
+    /// primary-selection equivalent to give `'*'` a distinct backend.
+    ClipboardRead {
+        token: ReplyToken,
+        register: char,
+    },
+    /// Hands a yank write to the clipboard worker the same way
+    /// `ClipboardRead` hands off a paste; the worker owns answering `token`
+    /// (see [`EngineRequest::ClipboardSet`]). Companion to
+    /// [`Osc52Copy`](Self::Osc52Copy), which `update()` emits alongside
+    /// this on every copy: the local write and the terminal escape are two
+    /// effects from one arm, not a branch on whether a local display is
+    /// present, so `"+yy` behaves identically over SSH.
+    ClipboardWrite {
+        token: ReplyToken,
+        register: char,
+        lines: Vec<String>,
+    },
+    /// Writes an OSC 52 clipboard-set escape sequence to the real terminal.
+    /// Routed to `view-tui`, never issued by the clipboard worker itself:
+    /// only `view-tui` touches the terminal, and the worker thread writing
+    /// raw bytes to stdout could interleave with the paint loop's own
+    /// buffered frame flush. Carries no `ReplyToken`: unlike
+    /// `ClipboardRead`/`ClipboardWrite`, nothing on the wire is blocked on
+    /// this, so a terminal that ignores or strips OSC 52 costs nothing
+    /// beyond the escape sequence itself.
+    Osc52Copy {
+        register: char,
+        lines: Vec<String>,
     },
     Quit {
         exit_code: i32,
@@ -367,6 +432,20 @@ pub enum RpcCall {
     /// sets a colorscheme fires `ColorScheme` while sourcing; a
     /// registration made afterwards misses that first switch entirely.
     RegisterBridge {
+        channel_id: u64,
+    },
+    /// Injects view's `g:clipboard` provider, conditionally: the chunk (see
+    /// `view-engine`'s `REGISTER_CLIPBOARD_CHUNK`) checks `vim.g.clipboard`
+    /// and only installs view's dict when the user's config left it unset,
+    /// so a user's own clipboard tool always wins. Issued after config
+    /// sourcing has already run, which is exactly
+    /// when the precedence check needs to happen -- unlike `RegisterBridge`,
+    /// this cannot run ahead of `ui_attach`, because the fact it depends on
+    /// (whether the user set `g:clipboard`) does not exist yet at that
+    /// point. `channel_id` is view's own RPC channel, the same one every
+    /// other registration here uses to target callbacks back at this
+    /// connection.
+    RegisterClipboard {
         channel_id: u64,
     },
 }
