@@ -49,10 +49,28 @@ pub fn text_to_lines(text: &str) -> (Vec<String>, RegisterType) {
 /// [`RegisterType::Linewise`] copy signals to the next reader of the system
 /// clipboard (see the module doc); a [`RegisterType::Charwise`] copy gets
 /// none, matching every non-view tool's own charwise convention.
+///
+/// A real `g:clipboard.copy` invocation from nvim (verified against the
+/// pinned nvim by instrumenting a throwaway `copy` closure and yanking
+/// through it directly, headless -- never assumed) already terminates
+/// `lines` with an empty-string element whenever the source register's
+/// text ends at a line boundary, matching `jobsend()`/`chansend()`'s own
+/// documented list-to-bytestream convention: nvim's bundled `xclip`-based
+/// provider relies on that exact same trailing `""` to make its piped
+/// child process see the final newline. `Vec::join` already reproduces
+/// that byte for a trailing `""` element, so appending a second `\n`
+/// whenever one is already present would double it -- the fix for the
+/// `"+p` charwise-instead-of-linewise regression this module exists to
+/// close. Only append the synthesized `\n` when nvim's own marker is
+/// absent, which happens for every regtype `text_to_lines` itself can
+/// produce (its output never carries the marker) and keeps this a true
+/// inverse for that path.
 #[must_use]
 pub fn lines_to_text(lines: &[String], regtype: RegisterType) -> String {
     let joined = lines.join("\n");
+    let already_newline_terminated = lines.last().is_some_and(String::is_empty);
     match regtype {
+        RegisterType::Linewise if already_newline_terminated => joined,
         RegisterType::Linewise => format!("{joined}\n"),
         RegisterType::Charwise => joined,
     }
@@ -112,6 +130,34 @@ mod tests {
             lines_to_text(&["a".to_string(), "b".to_string()], RegisterType::Charwise),
             "a\nb"
         );
+    }
+
+    /// nvim's real `copy()` invocation for a linewise yank -- confirmed by
+    /// instrumenting a throwaway `g:clipboard.copy` closure against the
+    /// pinned nvim, headless, and reading back exactly what it received for
+    /// `"+yy` -- already terminates `lines` with an empty-string marker
+    /// element (`{ "hello world", "" }`, matching `jobsend()`'s own
+    /// trailing-newline convention). `lines_to_text` must not add a second
+    /// `\n` on top of that marker: doing so is exactly the
+    /// `"view-clipboard-oracle-marker\n\n"` double-newline regression this
+    /// test locks in against ever reappearing without a live probe.
+    #[test]
+    fn a_linewise_copy_carrying_nvims_own_trailing_marker_is_not_double_newlined() {
+        let lines = vec!["hello world".to_string(), String::new()];
+        assert_eq!(
+            lines_to_text(&lines, RegisterType::Linewise),
+            "hello world\n"
+        );
+    }
+
+    /// The same marker convention nvim used for a single-line yank also
+    /// appears, unchanged, on a multi-line linewise yank (`VG"+y` observed
+    /// against the pinned nvim as `{ "a", "b", "" }`): only the final
+    /// element is the marker, interior lines are untouched.
+    #[test]
+    fn a_multi_line_linewise_copy_carrying_nvims_own_trailing_marker_joins_once() {
+        let lines = vec!["a".to_string(), "b".to_string(), String::new()];
+        assert_eq!(lines_to_text(&lines, RegisterType::Linewise), "a\nb\n");
     }
 
     /// The pair-form contract [`docs/clipboard-provider-wire-capture.md`]

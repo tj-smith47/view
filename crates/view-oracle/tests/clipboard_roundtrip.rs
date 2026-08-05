@@ -105,6 +105,16 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     );
     session.send(b"0\"+yy").unwrap();
 
+    // `"+yy` yanks a whole line, which nvim's `g:clipboard` contract marks
+    // linewise; the system clipboard's raw bytes must carry the trailing
+    // `\n` that convention signals (`view --print-clipboard` never adds one
+    // itself -- it's a bare `print!("{text}")` of exactly what `arboard`
+    // returned), so this compares the full string rather than `.trim()`ed
+    // content. A `.trim()`-based comparison would pass identically whether
+    // or not the trailing newline made it onto the real clipboard, which is
+    // exactly the byte this leg exists to prove.
+    const EXPECTED_LINEWISE_TEXT: &str = "view-clipboard-oracle-marker\n";
+
     // a single-line yank prints no cmdline message under nvim's default
     // 'report', so there is no on-screen signal this leg can wait on
     // instead; this polls the independent read process (never the session
@@ -117,7 +127,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
         match read_system_clipboard(&bin, '+', &display) {
             ClipboardProbe::Text(text) => {
                 last_seen = text;
-                if last_seen.trim() == "view-clipboard-oracle-marker" {
+                if last_seen == EXPECTED_LINEWISE_TEXT {
                     confirmed = true;
                     break 'poll;
                 }
@@ -148,7 +158,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     std::thread::sleep(Duration::from_millis(400));
     let durable = matches!(
         read_system_clipboard(&bin, '+', &display),
-        ClipboardProbe::Text(text) if text.trim() == "view-clipboard-oracle-marker"
+        ClipboardProbe::Text(text) if text == EXPECTED_LINEWISE_TEXT
     );
 
     session.send(b"\x1b:q!\r").unwrap();
@@ -157,7 +167,8 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     assert!(
         confirmed,
         "a fresh `view --print-clipboard +` process never independently observed the yanked \
-         text on the system clipboard; last read: {last_seen:?}"
+         text, WITH its linewise trailing newline, on the system clipboard; expected \
+         {EXPECTED_LINEWISE_TEXT:?}, last read: {last_seen:?}"
     );
     assert!(
         durable,
