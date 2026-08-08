@@ -41,7 +41,7 @@ use view_harness::results::{
 };
 use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
-    reset_hermetic_home, state_name, CompatSession, ErrorBaseline, PluginClass,
+    reset_hermetic_home, state_name, CompatSession, ErrorBaseline, PluginClass, ScenarioState,
 };
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
@@ -1205,6 +1205,30 @@ fn render_native_toml(native: &BTreeMap<String, bool>) -> String {
     out
 }
 
+/// The `view.toml` `[native]` body [`run_scenario`] should write for
+/// `state`, or `None` if it should write nothing at all and leave the
+/// fixture's own copied `view/view.toml` (already placed by
+/// [`resolve_fixture`]'s directory copy) standing as-is.
+///
+/// Only a `present` state that declares no `native` table takes the `None`
+/// path. Every `present`-named scenario file in `compat/scenarios/`
+/// declares exactly this shape (no `native` key at all), and the three
+/// fixtures they run against each commit their own `[native]` table with
+/// every feature off -- that committed table, not the all-enabled default
+/// below, is what a `present` state has always evidenced. A `superseded`/
+/// `deferred`/`native-only` state that omits `native` keeps its
+/// longstanding meaning instead: a bare `[native]` header, i.e. every
+/// feature on, since those three states exist specifically to assert a
+/// supersession outcome under an explicit or all-enabled config, never to
+/// evidence a fixture's own ambient one.
+fn native_toml_override(state: &ScenarioStateEntry) -> Option<String> {
+    match (&state.native, state.name) {
+        (None, ScenarioState::Present) => None,
+        (Some(native), _) => Some(render_native_toml(native)),
+        (None, _) => Some(render_native_toml(&BTreeMap::new())),
+    }
+}
+
 /// Drives one `(scenario, state)` pair end to end: resolves the state's
 /// effective fixture, materializes its `[native]` table into a hermetic
 /// `view.toml` and spawns `view --config <that path>` against it (the same
@@ -1260,12 +1284,14 @@ fn run_scenario(
     };
 
     let view_config_path = ready.xdg_config_home.join("view").join("view.toml");
-    if let Some(parent) = view_config_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("creating {}", parent.display()))?;
+    if let Some(rendered) = native_toml_override(state) {
+        if let Some(parent) = view_config_path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating {}", parent.display()))?;
+        }
+        std::fs::write(&view_config_path, rendered)
+            .with_context(|| format!("writing {}", view_config_path.display()))?;
     }
-    std::fs::write(&view_config_path, render_native_toml(&state.native))
-        .with_context(|| format!("writing {}", view_config_path.display()))?;
 
     let mut cmd = CommandBuilder::new(view_bin);
     cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
@@ -1632,6 +1658,93 @@ mod tests {
             version.as_deref(),
             Some("4213bd6"),
             "heavy fixture's lazy-lock.json pins nvim-tree.lua at 4213bd6..."
+        );
+    }
+
+    /// Pins the fix for the silent flip a runner bug once introduced: a
+    /// `present`-named state that declares no `[native]` table must
+    /// materialize its fixture's own committed `view/view.toml` verbatim,
+    /// not the all-enabled default `render_native_toml` falls back to for
+    /// every other omitted case. `native_toml_override` returning `None`
+    /// is the mechanism -- `run_scenario` then never touches the file
+    /// `resolve_fixture`'s directory copy already placed -- so this test
+    /// exercises both halves together: the `None` return, and that the
+    /// file `resolve_fixture` actually leaves behind is the fixture's own,
+    /// read from the same committed source a hand-duplicated constant
+    /// could silently drift from.
+    #[test]
+    fn present_state_with_no_native_table_leaves_the_fixtures_own_view_toml_untouched() {
+        let state = ScenarioStateEntry {
+            name: ScenarioState::Present,
+            native: None,
+            fixture: None,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            native_toml_override(&state),
+            None,
+            "a present state with no native table must not override view.toml at all"
+        );
+
+        let committed = std::fs::read_to_string(
+            fixtures_root()
+                .join("minimal")
+                .join("view")
+                .join("view.toml"),
+        )
+        .expect("committed minimal fixture must carry view/view.toml");
+
+        let sock_path = compat_scratch_root().join(format!(
+            "view-harness-oracle-test-native-override-{}.sock",
+            std::process::id()
+        ));
+        let resolved =
+            resolve_fixture(Some("minimal"), false, &sock_path).expect("minimal fixture resolves");
+        let FixtureResolution::Ready(ready) = resolved else {
+            panic!("minimal fixture must resolve to Ready, never Skipped");
+        };
+        let materialized =
+            std::fs::read_to_string(ready.xdg_config_home.join("view").join("view.toml"))
+                .expect("resolve_fixture's own directory copy must have placed view.toml");
+
+        assert_eq!(
+            materialized, committed,
+            "with no run_scenario write, the copied view.toml must still read exactly what \
+             compat/fixtures/minimal/view/view.toml commits"
+        );
+    }
+
+    /// Every other state -- `superseded`/`deferred`/`native-only`, and even
+    /// a hypothetical `present` state that does set `native` -- keeps its
+    /// longstanding materialization: an explicit table renders as given,
+    /// and an omitted one (only reachable for a non-`present` state) still
+    /// renders the bare, all-enabled `[native]` header.
+    #[test]
+    fn non_present_states_keep_the_established_native_rendering() {
+        let mut explicit = BTreeMap::new();
+        explicit.insert("tree".to_string(), false);
+        let with_table = ScenarioStateEntry {
+            name: ScenarioState::Deferred,
+            native: Some(explicit.clone()),
+            fixture: None,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            native_toml_override(&with_table),
+            Some(render_native_toml(&explicit))
+        );
+
+        let omitted = ScenarioStateEntry {
+            name: ScenarioState::Superseded,
+            native: None,
+            fixture: None,
+            steps: Vec::new(),
+        };
+        assert_eq!(
+            native_toml_override(&omitted),
+            Some(render_native_toml(&BTreeMap::new())),
+            "an omitted native table on a non-present state must still render the \
+             all-enabled bare [native] header"
         );
     }
 

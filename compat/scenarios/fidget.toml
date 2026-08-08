@@ -1,14 +1,19 @@
 # fidget is ui-owning: it draws LSP progress as floating text in the
 # bottom-right corner of the grid. No entry in the `[native]` registry
 # supersedes LSP progress (confirmed against view-native's supersede
-# module and the mapping table: neither carries a row for it), so toggling
-# every native feature off changes nothing this scenario can observe -- the
-# superseded and deferred states below run the identical assertions on
-# purpose, and that equality is itself the fact being proven, not an
-# oversight. No LSP server runs in this fixture, so the progress event is
-# scripted through fidget's own public progress API (a synthetic handle
-# standing in for an LSP client), which renders through the exact same
-# notification pipeline a real server's $/progress would.
+# module and the mapping table: neither carries a row for it), so the
+# fidget-specific assertions in the superseded and deferred states below
+# are identical on purpose, and that equality is itself the fact being
+# proven, not an oversight. No LSP server runs in this fixture, so the
+# progress event is scripted through fidget's own public progress API (a
+# synthetic handle standing in for an LSP client), which renders through
+# the exact same notification pipeline a real server's $/progress would.
+# The deferred state's `native` table does turn every feature off at the
+# config level even though fidget itself can't observe that; this fixture
+# also carries lualine, so column 85 of the statusline row (the same
+# discriminator lualine.toml uses) still differs between the two states,
+# and asserting it here is what stops a runner bug that silently ignores
+# the `native` table from passing both states by coincidence.
 schema = 1
 plugin = "fidget"
 class = "ui-owning"
@@ -32,6 +37,10 @@ steps = [
   # Completing the handle lets the progress float decay normally instead
   # of leaving a perpetual spinner behind for the epilogue probes.
   { send = ":lua _G.compat_fidget:finish()<CR>" },
+  # config-level cross-check, not a fidget behavior: native wins here, so
+  # row 29 stays the statusline row and lualine's own separator glyph never
+  # reaches column 85 (see lualine.toml).
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
 ]
 
 [[states]]
@@ -43,6 +52,10 @@ steps = [
   { send = ":lua _G.compat_fidget = require('fidget.progress').handle.create({ title = 'compat-sync', message = 'fidget-compat-marker', lsp_client = { name = 'compatlsp' } })<CR>" },
   { wait_for = "fidget-compat-marker", timeout_ms = 15000 },
   { send = ":lua _G.compat_fidget:finish()<CR>" },
+  # config-level cross-check, not a fidget behavior: native.statusline is
+  # off here, so lualine's own setup() keeps laststatus and paints its
+  # separator glyph into column 85 (see lualine.toml).
+  { wait_for_cell = { row = 29, col = 85, expected = "" }, timeout_ms = 5000 },
 ]
 
 [[states]]

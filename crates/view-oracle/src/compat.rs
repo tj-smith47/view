@@ -1216,7 +1216,7 @@ fn is_keypad_name(lower: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     use crate::testenv;
@@ -1993,6 +1993,57 @@ mod tests {
              screen:\n{}",
             session.pty().screen()
         );
+
+        session.pty().kill();
+        let _ = session.pty().wait_for_exit(Duration::from_secs(5));
+    }
+
+    // `Step::AssertCellNot`'s own failure path (`ForbiddenCellPresent`) had
+    // no test exercising it before this one: every scenario using it
+    // (lualine.toml and friends) only ever drives the passing arm in CI,
+    // where the glyph never shows up. This target positions a known glyph
+    // at a known cell via a raw ANSI cursor-move escape, then prints a
+    // second marker so the driver's `wait_for_ready_marker` synchronizes on
+    // the write actually landing before the assertion runs, the same two-
+    // marker pattern `send_step_with_confirm_hard_fails_when_the_probe_channel_never_confirms`
+    // and its neighbors use to rule out a screen-timing race.
+    #[cfg(unix)]
+    #[test]
+    fn assert_cell_not_step_fires_forbidden_cell_present_when_the_glyph_matches() {
+        let script = "stty raw -echo; printf 'READY\\r\\n'; printf '\\033[6;6HX'; \
+                       printf 'SET\\r\\n'; sleep 5";
+
+        let mut session = testenv::spawning(|| {
+            let mut cmd = CommandBuilder::new("/bin/sh");
+            cmd.arg("-c");
+            cmd.arg(script);
+            CompatSession::spawn_configured(
+                cmd,
+                80,
+                24,
+                PathBuf::from("nvim"),
+                PathBuf::from("/dev/null"),
+            )
+        })
+        .expect("spawning the fake pty target");
+        wait_for_ready_marker(&mut session, "READY");
+        wait_for_ready_marker(&mut session, "SET");
+
+        let err = session
+            .drive_step(&Step::AssertCellNot {
+                row: 5,
+                col: 5,
+                glyph: "X".to_string(),
+            })
+            .expect_err("the target wrote exactly the forbidden glyph at (5,5)");
+
+        match err {
+            CompatError::ForbiddenCellPresent { row, col, glyph } => {
+                assert_eq!((row, col), (5, 5));
+                assert_eq!(glyph, "X");
+            }
+            other => panic!("expected ForbiddenCellPresent, got {other:?}"),
+        }
 
         session.pty().kill();
         let _ = session.pty().wait_for_exit(Duration::from_secs(5));

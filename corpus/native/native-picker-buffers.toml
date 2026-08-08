@@ -1,0 +1,14 @@
+# Non-interference proof for the picker's buffers source:
+# `crates/view-harness/tests/native_interference.rs` drives this file's
+# `input` (the picker's "buffers" entry key) through a real session and
+# asserts the engine's own state (buffer, cursor, mode, registers, marks) is
+# byte-identical before the key opens the picker and after `<Esc>` closes
+# it. Unlike the "files"/"grep" entry keys, this source issues a real
+# `RpcCall::ListBuffers` (`update.rs::open_picker`) rather than only a
+# `PickerQuery` effect, so it is the one verb that actually exercises
+# `Driver::forward_effect`'s `ListBuffers` allowlist arm.
+schema = 1
+name = "native-picker-buffers"
+input = "\\fb"
+engine_pin = "v0.12.4"
+ext_set = "default"

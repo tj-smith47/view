@@ -2,14 +2,19 @@
 # prompt with a floating input window it draws itself. No entry in the
 # `[native]` registry supersedes `vim.ui.input` (confirmed against
 # view-native's supersede module and the mapping table: neither carries a
-# row for it), so toggling every native feature off changes nothing this
-# scenario can observe -- the superseded and deferred states below run the
-# identical assertions on purpose, and that equality is itself the fact
-# being proven, not an oversight. The prompt string doubles as the grid
-# marker: dressing renders it as the float's border title, and without the
-# plugin the same call falls back to nvim's own blocking `input()`, whose
-# prompt still lands on screen because `ext_cmdline` -- unlike a
-# `[native]` feature -- attaches at session level regardless.
+# row for it), so the dressing-specific assertions in the superseded and
+# deferred states below are identical on purpose, and that equality is
+# itself the fact being proven, not an oversight. The prompt string doubles
+# as the grid marker: dressing renders it as the float's border title, and
+# without the plugin the same call falls back to nvim's own blocking
+# `input()`, whose prompt still lands on screen because `ext_cmdline` --
+# unlike a `[native]` feature -- attaches at session level regardless.
+# The deferred state's `native` table does turn every feature off at the
+# config level even though dressing itself can't observe that; this
+# fixture also carries lualine, so column 85 of the statusline row (the
+# same discriminator lualine.toml uses) still differs between the two
+# states, and asserting it here is what stops a runner bug that silently
+# ignores the `native` table from passing both states by coincidence.
 schema = 1
 plugin = "dressing"
 class = "ui-owning"
@@ -38,6 +43,10 @@ steps = [
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+  # config-level cross-check, not a dressing behavior: native wins here, so
+  # row 29 stays the statusline row and lualine's own separator glyph never
+  # reaches column 85 (see lualine.toml).
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
 ]
 
 [[states]]
@@ -54,6 +63,10 @@ steps = [
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+  # config-level cross-check, not a dressing behavior: native.statusline is
+  # off here, so lualine's own setup() keeps laststatus and paints its
+  # separator glyph into column 85 (see lualine.toml).
+  { wait_for_cell = { row = 29, col = 85, expected = "" }, timeout_ms = 5000 },
 ]
 
 [[states]]

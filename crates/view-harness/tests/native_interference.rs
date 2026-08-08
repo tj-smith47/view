@@ -19,10 +19,13 @@
 //! that closes that gap, wired the same way
 //! `crates/view/tests/mappings_live.rs::Session` already is: a real
 //! `Engine` plus a real `Model`, every `Msg` off the raw pump channel
-//! applied through the same `update()` production drives, with
-//! `Effect::Rpc(RpcCall::Input)` -- the one RPC effect these three
-//! features' open/close paths ever produce -- forwarded back to nvim the
-//! way the runtime's own `Executor` would.
+//! applied through the same `update()` production drives. `RpcCall` is
+//! `#[non_exhaustive]`, so `Driver::forward_effect` names an explicit
+//! allowlist of the read-only calls these open/close paths are known to
+//! produce (`Input`, the picker's `buffers` source's `ListBuffers`) and
+//! panics on anything else, rather than assuming `Input` is the only kind
+//! and silently dropping a future state-mutating call this charter-exit
+//! gate exists to catch.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::path::Path;
@@ -86,19 +89,41 @@ impl Driver {
             .expect("registration must answer with MappingsClaimed");
     }
 
-    /// Applies one `Msg` through view-core's own `update()`, forwarding the
-    /// one RPC effect kind (`RpcCall::Input`) these three features' open and
-    /// close paths ever produce back to nvim the way the runtime's
-    /// `Executor` would. Every other effect (`TreeScan`, `PickerQuery`,
-    /// `PickerClose`, ...) is a non-RPC worker/matcher effect this driver
-    /// has no worker for and deliberately drops: this test proves engine
-    /// state parity, not picker/tree functional behavior, which the compat
-    /// scenarios already cover.
+    /// Applies one `Msg` through view-core's own `update()`. Non-RPC
+    /// effects (`TreeScan`, `PickerQuery`, `PickerClose`, ...) are worker/
+    /// matcher effects this driver has no worker for and deliberately
+    /// drops: this test proves engine state parity, not picker/tree
+    /// functional behavior, which the compat scenarios already cover.
+    /// `Effect::Rpc` payloads go through [`Self::forward_effect`] instead,
+    /// which is exhaustive over the calls this driver is willing to serve.
     fn apply(&mut self, msg: Msg) {
         for effect in update(&mut self.model, msg) {
-            if let Effect::Rpc(RpcCall::Input { notation }) = effect {
-                self.engine.handle.input(&notation).unwrap();
+            if let Effect::Rpc(call) = effect {
+                self.forward_effect(call);
             }
+        }
+    }
+
+    /// Forwards an `RpcCall` the way the runtime's own `Executor` would, for
+    /// the narrow allowlist these three features' open/close paths are
+    /// known to produce: every keypress (`Input`), and the picker's
+    /// `buffers` source's read-only buffer list (`ListBuffers`,
+    /// `update.rs::open_picker`). `RpcCall` is `#[non_exhaustive]`, so an
+    /// unrecognized variant panics by name instead of being silently
+    /// dropped -- a future state-mutating RPC added to one of these paths
+    /// must fail this test loudly, not slip through unnoticed.
+    fn forward_effect(&mut self, call: RpcCall) {
+        match call {
+            RpcCall::Input { notation } => self.engine.handle.input(&notation).unwrap(),
+            RpcCall::ListBuffers { generation } => {
+                self.engine.handle.list_buffers(generation).unwrap();
+            }
+            other => panic!(
+                "native feature open/close path produced an RPC call outside \
+                 Driver::forward_effect's allowlist: {other:?} -- extend the allowlist if this \
+                 is a legitimate read-only call this driver should serve, or investigate why \
+                 this path now mutates engine state"
+            ),
         }
     }
 
@@ -179,29 +204,24 @@ impl Probe for Driver {
     }
 }
 
-/// Loads `corpus/native/<name>.toml`, plus the feature id its invoking key
-/// must produce -- derived from the file's own `native-` prefix rather than
-/// carried as a second field, since the corpus schema's
-/// `#[serde(deny_unknown_fields)]` has no room for one and a derived name
-/// cannot drift from the file it names.
-fn load(name: &str) -> (CorpusEntry, String) {
+/// Loads `corpus/native/<name>.toml`.
+fn load(name: &str) -> CorpusEntry {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../corpus/native")
         .join(format!("{name}.toml"));
-    let entry = corpus::load_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let feature = name
-        .strip_prefix("native-")
-        .unwrap_or_else(|| panic!("{name} must carry the native- prefix"))
-        .to_string();
-    (entry, feature)
+    corpus::load_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
 /// Runs one feature's full non-interference proof: seed a baseline with
 /// something in every field a mark/register/cursor drift could show up in,
 /// snapshot it, open the feature by its corpus-declared key, close it with
 /// `<Esc>`, snapshot again, and assert the two are the same fact.
-fn assert_no_interference(entry_name: &str) {
-    let (entry, expect_feature) = load(entry_name);
+/// `expect_feature` is passed explicitly rather than derived from
+/// `entry_name`'s `native-` prefix: `native-picker-buffers` and
+/// `native-picker-grep` both invoke the `picker` feature through a
+/// different verb, so the corpus file's own name no longer determines it.
+fn assert_no_interference(entry_name: &str, expect_feature: &str) {
+    let entry = load(entry_name);
 
     let mut driver = Driver::start();
     driver.register_native_mappings();
@@ -226,15 +246,25 @@ fn assert_no_interference(entry_name: &str) {
 
 #[test]
 fn opening_and_closing_the_picker_leaves_the_engine_untouched() {
-    assert_no_interference("native-picker");
+    assert_no_interference("native-picker", "picker");
 }
 
 #[test]
 fn opening_and_closing_the_tree_leaves_the_engine_untouched() {
-    assert_no_interference("native-tree");
+    assert_no_interference("native-tree", "tree");
 }
 
 #[test]
 fn opening_and_closing_message_history_leaves_the_engine_untouched() {
-    assert_no_interference("native-notifications");
+    assert_no_interference("native-notifications", "notifications");
+}
+
+#[test]
+fn opening_and_closing_the_picker_buffers_source_leaves_the_engine_untouched() {
+    assert_no_interference("native-picker-buffers", "picker");
+}
+
+#[test]
+fn opening_and_closing_the_picker_grep_source_leaves_the_engine_untouched() {
+    assert_no_interference("native-picker-grep", "picker");
 }

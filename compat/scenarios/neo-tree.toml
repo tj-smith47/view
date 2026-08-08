@@ -38,8 +38,13 @@ steps = [
   { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   # native.tree = false hands `<leader>e` back unclaimed; the fixture never
-  # binds it either, so the plugin returns through its own command instead,
-  # exactly as a user who turned the takeover off would still invoke it.
+  # binds it either, so pressing it here must not draw view's own sidebar --
+  # the negative half of the pair the superseded state's own
+  # "lazy-lock.json" appearance proves the positive half of.
+  { send = "\\e" },
+  { assert_absent = "lazy-lock.json" },
+  # the plugin returns through its own command instead, exactly as a user
+  # who turned the takeover off would still invoke it.
   { send = ":Neotree<CR>" },
   { wait_for = "lazy-lock.json", timeout_ms = 15000 },
   { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },

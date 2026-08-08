@@ -31,6 +31,17 @@ use view_oracle::compat::{
 /// requirement on the file's own `[[states]]` ordering).
 const REQUIRED_UI_OWNING_STATES: [&str; 3] = ["superseded", "deferred", "native-only"];
 
+/// The one scenario file stem `cold_bootstrap = true` is honored for. Tying
+/// the exemption to a filename rather than trusting the flag on its face
+/// closes the loophole a bare boolean leaves open: any `ui-owning` scenario
+/// could otherwise set `cold_bootstrap = true` to dodge
+/// [`REQUIRED_UI_OWNING_STATES`] coverage with no structural cost. A
+/// filesystem directory cannot hold two entries with the same stem, so at
+/// most one file can ever claim this exemption, and claiming it means
+/// replacing `compat/scenarios/cold-bootstrap.toml` itself -- an
+/// unmistakably reviewable act, not a quiet flag flip.
+const COLD_BOOTSTRAP_STEM: &str = "cold-bootstrap";
+
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
 
@@ -59,18 +70,24 @@ struct RawScenario {
 }
 
 /// One `[[states]]` entry's wire shape: the reconciliation state's own name
-/// (`"present"` / `"superseded"` / `"deferred"` / `"native-only"`), the
-/// `[native]` table this state's materialized `view.toml` carries (empty --
-/// every feature on -- when the entry omits `native` entirely, matching
-/// `NativeConfig`'s own "absent table means every feature stays on"
-/// default), an optional per-state fixture override (a `native-only` state
-/// commonly swaps to a plugin-free fixture), and this state's own steps.
+/// (`"present"` / `"superseded"` / `"deferred"` / `"native-only"`), an
+/// optional `[native]` override, an optional per-state fixture override (a
+/// `native-only` state commonly swaps to a plugin-free fixture), and this
+/// state's own steps.
+///
+/// `native` is `Option` rather than a plain, default-empty map because the
+/// two absent cases mean different things and the runner needs to tell
+/// them apart: a `present` state that omits `native` entirely leaves its
+/// fixture's own committed `view/view.toml` untouched (see
+/// `bin/oracle.rs`'s `run_scenario`), while every other state that omits it
+/// still materializes the empty-table default -- a bare `[native]` header,
+/// matching `NativeConfig`'s own "absent table means every feature stays
+/// on" default, exactly as it always has for `superseded`/`native-only`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawState {
     name: String,
-    #[serde(default)]
-    native: BTreeMap<String, bool>,
+    native: Option<BTreeMap<String, bool>>,
     fixture: Option<String>,
     steps: Vec<RawStep>,
 }
@@ -148,11 +165,13 @@ pub struct ScenarioFile {
 /// One validated `[[states]]` entry: everything [`view_oracle::compat::CompatSession`]
 /// needs to drive this state (`name`/`steps` already `view-oracle` types)
 /// plus the `native`/`fixture` overrides the runner materializes into a
-/// hermetic `view.toml` and spawns `view --config` against.
+/// hermetic `view.toml` and spawns `view --config` against. See
+/// [`RawState`]'s doc comment for what `native: None` means for a
+/// `present` state versus every other one.
 #[derive(Debug, Clone)]
 pub struct ScenarioStateEntry {
     pub name: ScenarioState,
-    pub native: BTreeMap<String, bool>,
+    pub native: Option<BTreeMap<String, bool>>,
     pub fixture: Option<String>,
     pub steps: Vec<Step>,
 }
@@ -201,6 +220,16 @@ pub enum ScenarioError {
          (needs superseded, deferred, native-only)"
     )]
     IncompleteUiOwningStates { missing: Vec<String> },
+    /// `cold_bootstrap = true` was set on a scenario file whose stem is not
+    /// [`COLD_BOOTSTRAP_STEM`]: the exemption from the three-state
+    /// completeness gate is reserved for that one file, so no other
+    /// `ui-owning` scenario can self-exempt.
+    #[error(
+        "cold_bootstrap = true is reserved for the scenario file named \
+         \"cold-bootstrap.toml\"; rename this file to opt in, or drop \
+         cold_bootstrap and declare the required ui-owning states instead"
+    )]
+    UnauthorizedColdBootstrap,
     /// A step set zero, or more than one, of its mutually exclusive action
     /// fields (`send` / `wait_for` / `wait_for_cell` / `assert_absent` /
     /// `assert_cell_not` / `probe` / `wait_for_probe`).
@@ -417,12 +446,30 @@ fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioErr
     })
 }
 
+/// Rejects `cold_bootstrap = true` on any file but [`COLD_BOOTSTRAP_STEM`].
+/// `source_stem` is `None` for [`parse`]'s raw-string entry point, which
+/// carries no filename at all -- so a scenario parsed directly from a
+/// string literal (every unit test in this module, and any future caller
+/// with no file on disk) can never claim the exemption either, the same
+/// strict default an unrecognized stem gets.
+fn check_cold_bootstrap_authorization(
+    cold_bootstrap: bool,
+    source_stem: Option<&str>,
+) -> Result<(), ScenarioError> {
+    if cold_bootstrap && source_stem != Some(COLD_BOOTSTRAP_STEM) {
+        return Err(ScenarioError::UnauthorizedColdBootstrap);
+    }
+    Ok(())
+}
+
 /// Checks the scenario-wide invariants over the full `states` list that no
 /// single entry's own validation can see: at least one state exists, no two
 /// states share a name, and a `ui-owning` scenario (unless exempted by
 /// `cold_bootstrap`, whose network-bound bootstrap cost is already paid once
 /// and should not triple for orthogonal supersession-state coverage)
-/// declares all of [`REQUIRED_UI_OWNING_STATES`].
+/// declares all of [`REQUIRED_UI_OWNING_STATES`]. Callers must run
+/// [`check_cold_bootstrap_authorization`] first: this function trusts
+/// `cold_bootstrap` at face value, the same way it always has.
 fn validate_state_completeness(
     class: PluginClass,
     cold_bootstrap: bool,
@@ -453,18 +500,10 @@ fn validate_state_completeness(
     Ok(())
 }
 
-/// Parses and validates one scenario from its raw TOML text.
-///
-/// # Errors
-///
-/// Returns [`ScenarioError::Toml`] on malformed TOML or an unrecognized
-/// field, [`ScenarioError::UnsupportedSchema`] if `schema` is not
-/// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
-/// if `class`/a state's `name` do not name a recognized value,
-/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]
-/// if the `states` list itself is invalid, or any of the per-step errors
-/// [`validate_step`] can raise.
-pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
+/// Parses and validates one scenario from its raw TOML text, `source_stem`
+/// being the filename stem [`check_cold_bootstrap_authorization`] checks a
+/// `cold_bootstrap = true` flag against.
+fn parse_from(raw_toml: &str, source_stem: Option<&str>) -> Result<ScenarioFile, ScenarioError> {
     let raw: RawScenario = toml::from_str(raw_toml)?;
     if raw.schema != SUPPORTED_SCHEMA {
         return Err(ScenarioError::UnsupportedSchema(raw.schema));
@@ -475,6 +514,7 @@ pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
         .into_iter()
         .map(validate_state_entry)
         .collect::<Result<Vec<_>, _>>()?;
+    check_cold_bootstrap_authorization(raw.cold_bootstrap, source_stem)?;
     validate_state_completeness(class, raw.cold_bootstrap, &states)?;
 
     Ok(ScenarioFile {
@@ -486,7 +526,29 @@ pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
     })
 }
 
-/// Reads `path` from disk and [`parse`]s it.
+/// Parses and validates one scenario from its raw TOML text.
+///
+/// Carries no filename, so `cold_bootstrap = true` is always rejected here
+/// -- see [`check_cold_bootstrap_authorization`]. A scenario that
+/// legitimately needs the exemption is only ever read through
+/// [`load_file`].
+///
+/// # Errors
+///
+/// Returns [`ScenarioError::Toml`] on malformed TOML or an unrecognized
+/// field, [`ScenarioError::UnsupportedSchema`] if `schema` is not
+/// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
+/// if `class`/a state's `name` do not name a recognized value,
+/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]/[`ScenarioError::UnauthorizedColdBootstrap`]
+/// if the `states` list itself is invalid, or any of the per-step errors
+/// [`validate_step`] can raise.
+pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
+    parse_from(raw_toml, None)
+}
+
+/// Reads `path` from disk and parses it, the same as [`parse`] but with
+/// `path`'s own file stem available to authorize `cold_bootstrap = true`
+/// (see [`check_cold_bootstrap_authorization`]).
 ///
 /// # Errors
 ///
@@ -497,7 +559,8 @@ pub fn load_file(path: &Path) -> Result<ScenarioFile, ScenarioError> {
         path: path.to_path_buf(),
         source,
     })?;
-    parse(&raw)
+    let stem = path.file_stem().and_then(|s| s.to_str());
+    parse_from(&raw, stem)
 }
 
 #[cfg(test)]
@@ -728,6 +791,65 @@ states = []
                     if missing == &vec!["native-only".to_string()]
             ),
             "expected IncompleteUiOwningStates{{[\"native-only\"]}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_ui_owning_scenario_cannot_self_exempt_via_cold_bootstrap() {
+        // Drop the "native-only" state (as above) but also set
+        // cold_bootstrap = true: without the stem check, this would dodge
+        // IncompleteUiOwningStates entirely. parse()'s source_stem is
+        // always None, so no file can claim the exemption through it.
+        let (two_state_toml, _) = VALID_UI_OWNING
+            .split_once("\n[[states]]\nname = \"native-only\"")
+            .expect("VALID_UI_OWNING must contain a native-only state to split off");
+        // cold_bootstrap must precede the first [[states]] table -- TOML
+        // attaches a bare top-level key to the nearest preceding
+        // array-of-tables entry, not to the document root, if it trails one.
+        let toml = two_state_toml.replacen(
+            "class = \"ui-owning\"",
+            "class = \"ui-owning\"\ncold_bootstrap = true",
+            1,
+        );
+        let err = parse(&toml).expect_err(
+            "cold_bootstrap = true must not let a ui-owning scenario dodge the three-state gate \
+             through parse(), which never carries a file stem",
+        );
+        assert!(
+            matches!(err, ScenarioError::UnauthorizedColdBootstrap),
+            "expected UnauthorizedColdBootstrap, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn cold_bootstrap_is_authorized_only_for_the_cold_bootstrap_stem() {
+        let (two_state_toml, _) = VALID_UI_OWNING
+            .split_once("\n[[states]]\nname = \"native-only\"")
+            .expect("VALID_UI_OWNING must contain a native-only state to split off");
+        // cold_bootstrap must precede the first [[states]] table -- TOML
+        // attaches a bare top-level key to the nearest preceding
+        // array-of-tables entry, not to the document root, if it trails one.
+        let toml = two_state_toml.replacen(
+            "class = \"ui-owning\"",
+            "class = \"ui-owning\"\ncold_bootstrap = true",
+            1,
+        );
+
+        let err = parse_from(&toml, Some("daily-config"))
+            .expect_err("an unrelated file stem must not authorize cold_bootstrap = true");
+        assert!(
+            matches!(err, ScenarioError::UnauthorizedColdBootstrap),
+            "expected UnauthorizedColdBootstrap for stem \"daily-config\", got {err:?}"
+        );
+
+        let scenario = parse_from(&toml, Some(COLD_BOOTSTRAP_STEM)).expect(
+            "the cold-bootstrap-named file must be authorized to set cold_bootstrap = true",
+        );
+        assert!(scenario.cold_bootstrap);
+        assert_eq!(
+            scenario.states.len(),
+            2,
+            "authorization must exempt from IncompleteUiOwningStates, not just from the flag check"
         );
     }
 
