@@ -810,26 +810,48 @@ fn decode_clipboard_set(token: ReplyToken, params: &[Value]) -> Option<Msg> {
     }))
 }
 
-/// Decodes a `view_bridge` notification's `(event, match)` positional params
-/// into the message its consumer reads, or `None` when this build has no
-/// consumer for the event.
+/// Decodes a `view_bridge` notification's `(event, ...payload)` positional
+/// params into the message its consumer reads, or `None` when this build
+/// has no consumer for the event. Each event names its own payload shape
+/// (see [`crate::nvim_api::REGISTER_BRIDGE_CHUNK`]'s doc): `colorscheme`
+/// carries the scheme's name alone, `diagnostics` an `(errors, warnings)`
+/// count pair, `git` the branch name alone, and `buffer` a `(name,
+/// modified)` pair.
 ///
 /// The bridge deliberately carries more triggers than there are consumers
-/// today (see `view-engine`'s registration chunk): the group is registered
-/// once, and adding a consumer must not mean re-registering autocommands on
-/// a running engine. An event with no consumer costs one dropped
-/// notification here, which is why the callbacks forward the event's own
-/// `match` instead of querying nvim for state nothing would read.
+/// today: the group is registered once, and adding a consumer must not mean
+/// re-registering autocommands on a running engine. An event with no
+/// consumer costs one dropped notification here.
 fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
-    let [event, payload, ..] = params else {
+    let [event, first, rest @ ..] = params else {
         return None;
     };
     match event.as_str()? {
         "colorscheme" => Some(Msg::ColorSchemeChanged {
-            name: payload.as_str().unwrap_or_default().to_owned(),
+            name: first.as_str().unwrap_or_default().to_owned(),
         }),
+        "diagnostics" => {
+            let errors = saturate_u32(first.as_u64()?);
+            let warnings = saturate_u32(rest.first()?.as_u64()?);
+            Some(Msg::DiagnosticsChanged { errors, warnings })
+        }
+        "git" => Some(Msg::GitBranchChanged {
+            branch: first.as_str().unwrap_or_default().to_owned(),
+        }),
+        "buffer" => {
+            let name = first.as_str()?.to_owned();
+            let modified = rest.first()?.as_bool()?;
+            Some(Msg::BufferChanged { name, modified })
+        }
         _ => None,
     }
+}
+
+/// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
+/// of truncating, matching `view_core::events::saturate_u16`'s convention
+/// for every other untrusted wire integer this crate decodes.
+fn saturate_u32(v: u64) -> u32 {
+    u32::try_from(v).unwrap_or(u32::MAX)
 }
 
 /// Decodes a mapping registration's reply: an array of `{feature, lhs,
@@ -1485,12 +1507,51 @@ mod tests {
     /// is deliberately wider than the set of consumers.
     #[test]
     fn a_bridge_event_with_no_consumer_decodes_to_nothing() {
-        for event in ["diagnostics", "git", "not-an-event"] {
-            assert!(
-                decode_bridge_event(&[Value::from(event), Value::from("x")]).is_none(),
-                "{event} has no consumer in this build and must not route"
-            );
-        }
+        assert!(
+            decode_bridge_event(&[Value::from("not-an-event"), Value::from("x")]).is_none(),
+            "an unrecognized event has no consumer in this build and must not route"
+        );
+    }
+
+    #[test]
+    fn a_bridge_diagnostics_event_decodes_error_and_warning_counts() {
+        let decoded =
+            decode_bridge_event(&[Value::from("diagnostics"), Value::from(2), Value::from(1)]);
+        assert!(
+            matches!(
+                decoded,
+                Some(Msg::DiagnosticsChanged {
+                    errors: 2,
+                    warnings: 1
+                })
+            ),
+            "got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn a_bridge_git_event_decodes_the_branch_name() {
+        let decoded = decode_bridge_event(&[Value::from("git"), Value::from("main")]);
+        assert!(
+            matches!(decoded, Some(Msg::GitBranchChanged { ref branch }) if branch == "main"),
+            "got {decoded:?}"
+        );
+    }
+
+    #[test]
+    fn a_bridge_buffer_event_decodes_the_name_and_modified_flag() {
+        let decoded = decode_bridge_event(&[
+            Value::from("buffer"),
+            Value::from("statusline.rs"),
+            Value::from(true),
+        ]);
+        assert!(
+            matches!(
+                decoded,
+                Some(Msg::BufferChanged { ref name, modified: true }) if name == "statusline.rs"
+            ),
+            "got {decoded:?}"
+        );
     }
 
     /// nvim reports no name at all for a scheme cleared with `:colorscheme

@@ -116,6 +116,21 @@ impl NativeSession {
                 NativeConfig::all_enabled()
             }
         };
+        model.statusline_enabled = cfg.enabled("statusline");
+        // `ui_attach` already ran, at the raw terminal height, before this
+        // config was even read (see `main.rs`'s call ordering), so nvim's
+        // live grid still claims every row `statusline_rows()` now needs to
+        // reserve. Without this, `view_surface::render` places the
+        // statusline at `offset + grid_h` using nvim's still-full grid
+        // height and paints it one row below the terminal entirely, same
+        // shape as `UiEvent::TablineUpdate`'s resize-on-change below.
+        if model.statusline_enabled {
+            let (grid_width, grid_height) = model.grid_target();
+            effects.push(Effect::Rpc(RpcCall::TryResize {
+                width: grid_width,
+                height: grid_height,
+            }));
+        }
         let plan = plan(&cfg, registry::features());
         let session = Self {
             cfg,
@@ -437,6 +452,62 @@ mod tests {
             shown(&later),
             "",
             "a surface introduces itself once per config, not every launch"
+        );
+    }
+
+    /// `ui_attach` already ran, at the raw terminal height, before `load`
+    /// ever reads a config (see `main.rs`'s call ordering): nvim's live
+    /// grid still claims the row the default-on statusline now needs.
+    /// Without a resize here, `view_surface::render` would place the
+    /// statusline at `offset + grid_h` using nvim's still-full grid height
+    /// and paint it one row below the terminal entirely.
+    #[test]
+    fn load_reserves_the_statusline_row_with_a_resize_when_nothing_disables_it() {
+        let mut m = model();
+        let (_session, effects) = NativeSession::load(None, 7, &mut m);
+        assert!(m.statusline_enabled, "an absent config is every feature on");
+        assert!(
+            effects.iter().any(|e| matches!(
+                e,
+                Effect::Rpc(RpcCall::TryResize {
+                    width: 80,
+                    height: 23
+                })
+            )),
+            "load must reserve the statusline's row the moment it turns the \
+             feature on, got {effects:?}"
+        );
+    }
+
+    /// The opposite of the row-reservation test above: a config that turns
+    /// the statusline off must never touch nvim's grid, or a shrunk grid
+    /// with no statusline painted over it would leave a permanently blank
+    /// row a user never asked to give up.
+    #[test]
+    fn load_skips_the_resize_when_the_config_turns_the_statusline_off() {
+        let dir = std::env::temp_dir().join(format!(
+            "view-native-statusline-resize-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[native]\nstatusline = false\n")
+            .expect("a temp config must be writable");
+
+        let mut m = model();
+        let (_session, effects) = NativeSession::load(Some(path), 7, &mut m);
+        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
+
+        assert!(
+            !m.statusline_enabled,
+            "the config explicitly disabled the feature"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::TryResize { .. }))),
+            "a disabled statusline reserves no row and must not resize nvim's \
+             already-correct grid, got {effects:?}"
         );
     }
 }

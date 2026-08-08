@@ -136,6 +136,35 @@ pub enum Msg {
     ColorSchemeChanged {
         name: String,
     },
+    /// The `DiagnosticChanged` autocmd registered by [`RpcCall::RegisterBridge`]
+    /// fired; `errors`/`warnings` are `vim.diagnostic.count(0)`'s totals for
+    /// severities 1 and 2, computed inside the Lua callback itself (a
+    /// synchronous, non-blocking nvim API call -- see
+    /// `docs/statusline-wire-capture.md`'s "no worker crate" conclusion) so
+    /// no separate RPC round trip is needed to learn the count that fired
+    /// the autocmd in the first place.
+    DiagnosticsChanged {
+        errors: u32,
+        warnings: u32,
+    },
+    /// The bridge's git-branch trigger group (`BufEnter`, `DirChanged`,
+    /// `FocusGained`) fired and the Lua callback's `vim.system()` git lookup
+    /// (async, off nvim's main loop) resolved. Empty `branch` means either
+    /// no repo or the lookup failed -- the statusline segment hides itself
+    /// on empty, the same convention `SegmentUpdate`'s other segments use.
+    GitBranchChanged {
+        branch: String,
+    },
+    /// The bridge's new `buffer` trigger group (`BufEnter`, `BufFilePost`,
+    /// `BufWritePost`, `BufModifiedSet`) fired, carrying the current
+    /// buffer's tail name and modified flag for the statusline's file
+    /// segment. Deliberately not `TextChanged`/`TextChangedI`: those fire
+    /// once per keystroke in insert mode, and `BufModifiedSet` alone already
+    /// covers every actual modified-flag transition.
+    BufferChanged {
+        name: String,
+        modified: bool,
+    },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
     /// [`MessageEntry`](crate::model::MessageEntry) `toast::route` scheduled

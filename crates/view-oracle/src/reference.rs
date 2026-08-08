@@ -259,7 +259,6 @@ impl RefGrid {
 /// silently widening what `unknown_events` reports as novel.
 const KNOWN_UNMODELED_EVENTS: &[&str] = &[
     "chdir",
-    "msg_showmode",
     "option_set",
     "set_icon",
     "set_title",
@@ -662,6 +661,9 @@ impl ReferenceSession {
             | UiEvent::CmdlineHide
             | UiEvent::MsgShow { .. }
             | UiEvent::MsgClear
+            | UiEvent::MsgShowmode { .. }
+            | UiEvent::MsgShowcmd { .. }
+            | UiEvent::MsgRuler { .. }
             | UiEvent::PopupmenuShow { .. }
             | UiEvent::PopupmenuSelect { .. }
             | UiEvent::PopupmenuHide

@@ -346,6 +346,23 @@ pub fn render(model: &Model) -> Surface {
             LayerKind::Popupmenu(pm.clone()),
         ));
     }
+    if model.statusline_rows() > 0 {
+        // `grid_target()` already shrank the engine's own grid by
+        // `statusline_rows()`, so this row sits immediately below whatever
+        // `grid_h` the engine actually reported -- never recomputed from
+        // `term_height`, which would disagree the moment a resize is still
+        // in flight to nvim.
+        layers.push(overlay::framed(
+            Rect::new(
+                offset.saturating_add(grid_h),
+                0,
+                grid_w,
+                model.statusline_rows(),
+            ),
+            LayerKind::Statusline(engine.statusline.view(grid_w)),
+            BorderSet::for_tier(model.caps.tier),
+        ));
+    }
     // last, and in stack order: a native overlay sits above every engine
     // overlay, and the stack's tail is the one holding focus, so painting
     // in stack order puts the focused overlay on top of the ones it opened

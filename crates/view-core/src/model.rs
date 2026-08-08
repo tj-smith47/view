@@ -70,6 +70,14 @@ pub struct Model {
     /// and doctor answer "what did view claim?" from, and a second recording
     /// appending to the first would report every key twice.
     claimed_keys: Vec<MappingClaim>,
+    /// Whether the `statusline` native feature is enabled for this session,
+    /// set once at startup from `NativeConfig::enabled("statusline")`
+    /// (`crates/view/src/native.rs`'s `NativeSession::load`, the one place
+    /// config resolution reaches `Model` -- `view-core` cannot depend on
+    /// `view-native` itself, so this is a plain bool rather than a config
+    /// handle). Gates [`Model::statusline_rows`], which in turn gates
+    /// whether `view-surface::render` reserves a bottom row for the bar.
+    pub statusline_enabled: bool,
 }
 
 impl Model {
@@ -89,6 +97,7 @@ impl Model {
                 tabline: None,
                 popupmenu: None,
                 mouse_on: false,
+                statusline: crate::native::statusline::StatuslineState::default(),
             },
             overlays: Vec::new(),
             next_overlay_id: 1,
@@ -101,6 +110,7 @@ impl Model {
             content_painted: true,
             fatal_reason: None,
             claimed_keys: Vec::new(),
+            statusline_enabled: false,
         }
     }
 
@@ -254,6 +264,16 @@ impl Model {
         }
     }
 
+    /// Terminal rows reserved for the bottom-row statusline bar: one while
+    /// the `statusline` native feature is enabled, zero otherwise. Distinct
+    /// from [`Model::chrome_rows`] (a top-row offset for the tabline, not a
+    /// total reservation) -- `view-surface::render` uses both together to
+    /// find the engine grid's target size and the statusline layer's row.
+    #[must_use]
+    pub fn statusline_rows(&self) -> u16 {
+        u16::from(self.statusline_enabled)
+    }
+
     /// Drains what changed since the last call, so a repaint can clip
     /// compositing to the damaged region. The runtime calls this once per
     /// frame, alongside clearing [`Model::dirty`]; see
@@ -288,7 +308,8 @@ impl Model {
     pub fn grid_target(&self) -> (u16, u16) {
         (
             self.term_width,
-            self.term_height.saturating_sub(self.chrome_rows()),
+            self.term_height
+                .saturating_sub(self.chrome_rows() + self.statusline_rows()),
         )
     }
 }
@@ -336,6 +357,14 @@ pub struct EngineModel {
     /// swallow the host terminal's own selection/scrollback gestures even
     /// when nvim's `'mouse'` option is off.
     pub mouse_on: bool,
+    /// The statusline bar's current segment text, applied from
+    /// `msg_showmode`/`msg_showcmd`/`msg_ruler` redraw events, the
+    /// `search_count` `msg_show` kind (through [`EngineModel::record_message`]'s
+    /// `Route::Statusline` branch), and the bridge's diagnostics/git/buffer
+    /// callbacks. Present regardless of whether the feature is enabled --
+    /// see [`Model::statusline_enabled`] for the gate that decides whether
+    /// `view-surface::render` ever reads it.
+    pub statusline: crate::native::statusline::StatuslineState,
 }
 
 // the three accessors the compositor reaches for every frame carry
@@ -426,6 +455,20 @@ impl EngineModel {
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
         let route = crate::native::toast::route(&kind);
+        if route == crate::native::toast::Route::Statusline {
+            // only `search_count` reaches here as a `kind`
+            // (`msg_showmode`/`msg_showcmd`/`msg_ruler` arrive as their own
+            // `UiEvent` variants instead -- see
+            // docs/statusline-wire-capture.md); feeding it into the ordinary
+            // message log would strand it there forever, since
+            // `Route::Statusline` schedules no expiry
+            // (`toast::timeout_for`) and `Messages`' own visible-lines
+            // selection does no route-based filtering to hide it either.
+            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
+            self.statusline
+                .apply(crate::native::statusline::SegmentUpdate::SearchCount(text));
+            return Vec::new();
+        }
         let id = self.messages.push(kind, content, replace_last);
         // recorded by id, not `.entries.last()`: `push`'s replace path can
         // overwrite an entry that sits before a still-open condition

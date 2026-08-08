@@ -9,6 +9,7 @@ use crate::model::{
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::prompt::PromptState;
+use crate::native::statusline::SegmentUpdate;
 
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
@@ -209,6 +210,30 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // when nvim's own batch carries no cell damage the paint loop would
         // otherwise repaint for.
         Msg::ColorSchemeChanged { .. } => {
+            model.dirty = true;
+            Vec::new()
+        }
+        Msg::DiagnosticsChanged { errors, warnings } => {
+            model
+                .engine
+                .statusline
+                .apply(SegmentUpdate::Diagnostics { errors, warnings });
+            model.dirty = true;
+            Vec::new()
+        }
+        Msg::GitBranchChanged { branch } => {
+            model
+                .engine
+                .statusline
+                .apply(SegmentUpdate::GitBranch(branch));
+            model.dirty = true;
+            Vec::new()
+        }
+        Msg::BufferChanged { name, modified } => {
+            model
+                .engine
+                .statusline
+                .apply(SegmentUpdate::Buffer { name, modified });
             model.dirty = true;
             Vec::new()
         }
@@ -494,6 +519,24 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
         }
         UiEvent::MsgClear => {
             model.engine.messages.clear();
+            Vec::new()
+        }
+        UiEvent::MsgShowmode { content } => {
+            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
+            model.engine.statusline.apply(SegmentUpdate::Mode(text));
+            model.dirty = true;
+            Vec::new()
+        }
+        UiEvent::MsgShowcmd { content } => {
+            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
+            model.engine.statusline.apply(SegmentUpdate::Showcmd(text));
+            model.dirty = true;
+            Vec::new()
+        }
+        UiEvent::MsgRuler { content } => {
+            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
+            model.engine.statusline.apply(SegmentUpdate::Ruler(text));
+            model.dirty = true;
             Vec::new()
         }
         UiEvent::TablineUpdate { current, tabs } => {

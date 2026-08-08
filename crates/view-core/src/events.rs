@@ -100,6 +100,22 @@ pub enum UiEvent {
     },
     /// Every shown message was cleared.
     MsgClear,
+    /// `'showmode'` and |recording| text, for the statusline's mode/macro
+    /// segment. A separate top-level event from `MsgShow`, not one of its
+    /// `kind`s (see `docs/statusline-wire-capture.md`): nvim fuses mode text
+    /// and macro-recording text into one opaque string with no separator
+    /// when both are active, so this is rendered verbatim rather than
+    /// treated as two independently addressable pieces. Empty `content`
+    /// hides the segment.
+    MsgShowmode { content: Vec<(u64, String)> },
+    /// `'showcmd'` text (pending count/operator/keys), for the statusline's
+    /// pending-keys segment. Empty `content` hides the segment.
+    MsgShowcmd { content: Vec<(u64, String)> },
+    /// `'ruler'` text, for the statusline's ruler/position segment. Only
+    /// fires while nvim has no room for its own ruler in a statusline (i.e.
+    /// `laststatus=0`, which the statusline native feature's supersession
+    /// sets). Empty `content` hides the segment.
+    MsgRuler { content: Vec<(u64, String)> },
     /// The open tabs changed. `current` is the active tab.
     TablineUpdate {
         current: TabHandle,

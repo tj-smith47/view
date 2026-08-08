@@ -194,17 +194,37 @@ return claimed";
 /// with `clear = true` so re-issuing it replaces the group rather than
 /// stacking a second copy of every autocommand.
 ///
-/// The callbacks carry `args.match` -- the colorscheme's name for
-/// `ColorScheme`, the buffer's name for the rest -- rather than reading any
-/// state themselves. A callback that queried nvim would run inside the
-/// autocommand, on nvim's main loop, on every buffer switch; forwarding the
-/// event and letting the frontend decide what to do with it keeps the editor
-/// side to one `rpcnotify` per trigger.
+/// `ColorScheme` alone forwards `args.match` (the scheme's name) through the
+/// shared `relay` closure, reading no state of its own. The statusline's
+/// three segment triggers each compute their own richer payload instead of
+/// a bare match, because "the buffer's name" is not what any of their
+/// consumers need:
+///
+/// - `DiagnosticChanged`'s callback calls `vim.diagnostic.count(0)` --
+///   synchronous and already how nvim itself would answer `:call
+///   diagnostic#count()`, so it costs the autocommand nothing a plain match
+///   forward would not have.
+/// - The git trigger group's callback calls `vim.system(...)`
+///   asynchronously, off nvim's main loop, and only sends its `rpcnotify`
+///   once that resolves -- never blocking the autocommand itself despite
+///   shelling out.
+/// - The new buffer trigger group's callback reads `vim.fn.expand('%:t')`
+///   and `vim.bo.modified`, both plain synchronous option/API reads.
+///
+/// None of the three blocks nvim's main loop for longer than an ordinary
+/// autocommand already would; only the git lookup does real I/O, and it is
+/// the one callback that hands that off asynchronously rather than doing it
+/// inline.
 ///
 /// `BufEnter`, `DirChanged`, and `FocusGained` are the git triggers: the
 /// repository a branch is read from changes when the active buffer changes
 /// or the working directory moves, and the branch itself can change under a
 /// backgrounded editor, which is what returning focus is the signal for.
+/// `BufEnter`, `BufFilePost`, `BufWritePost`, and `BufModifiedSet` are the
+/// buffer triggers: the first three cover a new or renamed file landing in
+/// the current window, and `BufModifiedSet` alone covers every actual
+/// modified-flag transition without the per-keystroke flood
+/// `TextChanged`/`TextChangedI` would add.
 const REGISTER_BRIDGE_CHUNK: &str = "\
 local channel = ...
 local group = vim.api.nvim_create_augroup('view_bridge', { clear = true })
@@ -219,11 +239,30 @@ vim.api.nvim_create_autocmd('ColorScheme', {
 })
 vim.api.nvim_create_autocmd('DiagnosticChanged', {
   group = group,
-  callback = relay('diagnostics'),
+  callback = function()
+    local counts = vim.diagnostic.count(0)
+    local errors = counts[vim.diagnostic.severity.ERROR] or 0
+    local warnings = counts[vim.diagnostic.severity.WARN] or 0
+    vim.rpcnotify(channel, 'view_bridge', 'diagnostics', errors, warnings)
+  end,
 })
 vim.api.nvim_create_autocmd({ 'BufEnter', 'DirChanged', 'FocusGained' }, {
   group = group,
-  callback = relay('git'),
+  callback = function()
+    vim.system({ 'git', 'rev-parse', '--abbrev-ref', 'HEAD' }, { text = true }, function(res)
+      local branch = ''
+      if res.code == 0 and res.stdout then
+        branch = res.stdout:gsub('%s+$', '')
+      end
+      vim.rpcnotify(channel, 'view_bridge', 'git', branch)
+    end)
+  end,
+})
+vim.api.nvim_create_autocmd({ 'BufEnter', 'BufFilePost', 'BufWritePost', 'BufModifiedSet' }, {
+  group = group,
+  callback = function()
+    vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'), vim.bo.modified)
+  end,
 })";
 
 /// The lua chunk [`EngineHandle::register_clipboard`] runs inside nvim,
@@ -1108,6 +1147,9 @@ mod tests {
             "'BufEnter'",
             "'DirChanged'",
             "'FocusGained'",
+            "'BufFilePost'",
+            "'BufWritePost'",
+            "'BufModifiedSet'",
         ] {
             assert!(
                 REGISTER_BRIDGE_CHUNK.contains(event),
@@ -1124,8 +1166,30 @@ mod tests {
             REGISTER_BRIDGE_CHUNK
                 .matches("vim.rpcnotify(channel, 'view_bridge'")
                 .count(),
-            1,
-            "every trigger answers through the one relay, so the wire shape cannot drift per event"
+            4,
+            "colorscheme through the shared relay, plus diagnostics/git/buffer each sending \
+             their own richer payload instead of a bare match"
+        );
+    }
+
+    /// The statusline's diagnostics, git, and buffer triggers each compute a
+    /// real payload rather than forwarding `args.match` -- see
+    /// [`REGISTER_BRIDGE_CHUNK`]'s doc for why none of the three blocks
+    /// nvim's main loop by doing so.
+    #[test]
+    fn the_bridge_chunk_computes_richer_payloads_for_the_statusline_triggers() {
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("vim.diagnostic.count(0)"),
+            "diagnostics must read real counts, not forward a bare match"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("vim.system("),
+            "the git lookup must run asynchronously, off nvim's main loop"
+        );
+        assert!(
+            REGISTER_BRIDGE_CHUNK.contains("vim.fn.expand('%:t')")
+                && REGISTER_BRIDGE_CHUNK.contains("vim.bo.modified"),
+            "the buffer trigger must carry the current file's name and modified flag"
         );
     }
 

@@ -905,7 +905,10 @@ fn paint_popupmenu(
 /// colorscheme already defines, so a native overlay reads as part of their
 /// theme rather than as a second, unrelated palette, and `Theme::from_hl`'s
 /// own emphasis fallback keeps the selected row distinct under a
-/// colorscheme that never defines `PmenuSel`.
+/// colorscheme that never defines `PmenuSel`. The statusline is the one
+/// exception: it derives its interior and frame from `ChromeGroup::StatusLine`
+/// instead, because a status line is a distinct piece of chrome a
+/// colorscheme styles on its own, not a popup.
 fn paint_native_overlay(
     layer: &Layer,
     theme: &Theme,
@@ -918,9 +921,17 @@ fn paint_native_overlay(
     };
     let laid =
         view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
-    let pmenu = theme.chrome(ChromeGroup::Pmenu);
+    // every overlay reads its colors from the popup-menu groups except the
+    // statusline, which is its own chrome group (a status line is not a
+    // popup and a colorscheme that restyles one must not restyle the other)
+    let group = if matches!(layer.kind, LayerKind::Statusline(_)) {
+        ChromeGroup::StatusLine
+    } else {
+        ChromeGroup::Pmenu
+    };
+    let base = theme.chrome(group);
     let interior = if truecolor {
-        ratatui_style(pmenu)
+        ratatui_style(base)
     } else {
         Style::default()
     };
@@ -931,8 +942,8 @@ fn paint_native_overlay(
     };
     let frame = if truecolor {
         ratatui_style(ResolvedStyle {
-            fg: Some(border_color(pmenu)),
-            bg: pmenu.bg,
+            fg: Some(border_color(base)),
+            bg: base.bg,
             ..ResolvedStyle::default()
         })
     } else {

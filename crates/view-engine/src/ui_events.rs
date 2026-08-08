@@ -61,6 +61,9 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "cmdline_hide" => UiEvent::CmdlineHide,
         "msg_show" => decode_msg_show(args).unwrap_or_else(unknown),
         "msg_clear" => UiEvent::MsgClear,
+        "msg_showmode" => decode_msg_showmode(args).unwrap_or_else(unknown),
+        "msg_showcmd" => decode_msg_showcmd(args).unwrap_or_else(unknown),
+        "msg_ruler" => decode_msg_ruler(args).unwrap_or_else(unknown),
         "tabline_update" => decode_tabline_update(args).unwrap_or_else(unknown),
         "popupmenu_show" => decode_popupmenu_show(args).unwrap_or_else(unknown),
         "popupmenu_select" => decode_popupmenu_select(args).unwrap_or_else(unknown),
@@ -320,6 +323,37 @@ fn decode_msg_show(args: &[Value]) -> Option<UiEvent> {
         kind: kind.as_str()?.to_string(),
         content: decode_content_chunks(content)?,
         replace_last: replace_last.as_bool()?,
+    })
+}
+
+/// `msg_showmode`/`msg_showcmd`/`msg_ruler` each carry one `content` array,
+/// identical in shape to `msg_show`'s (see `docs/statusline-wire-capture.md`)
+/// -- decoded with the same [`decode_content_chunks`] rather than a second
+/// copy of its chunk-unpacking loop.
+fn decode_msg_showmode(args: &[Value]) -> Option<UiEvent> {
+    let [content, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::MsgShowmode {
+        content: decode_content_chunks(content)?,
+    })
+}
+
+fn decode_msg_showcmd(args: &[Value]) -> Option<UiEvent> {
+    let [content, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::MsgShowcmd {
+        content: decode_content_chunks(content)?,
+    })
+}
+
+fn decode_msg_ruler(args: &[Value]) -> Option<UiEvent> {
+    let [content, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::MsgRuler {
+        content: decode_content_chunks(content)?,
     })
 }
 
@@ -807,6 +841,60 @@ mod tests {
                     replace_last: false,
                 },
                 UiEvent::MsgClear,
+            ]
+        );
+    }
+
+    #[test]
+    fn decodes_msg_showmode_showcmd_ruler() {
+        // docs/statusline-wire-capture.md: `qq` (start macro recording)
+        // captured live as
+        //   ['msg_showcmd', [[[0, 'qq', 0]]]]
+        //   ['msg_showmode', [[[15, 'recording @q', 11]]]]
+        //   ['msg_showcmd', [[]]]
+        // and `laststatus=0` cursor motion as
+        //   ['msg_ruler', [[[1, '0,0-1         All', 63]]]]
+        let params = vec![
+            arr(vec![
+                Value::from("msg_showcmd"),
+                arr(vec![arr(vec![arr(vec![
+                    Value::from(0),
+                    Value::from("qq"),
+                    Value::from(0),
+                ])])]),
+            ]),
+            arr(vec![
+                Value::from("msg_showmode"),
+                arr(vec![arr(vec![arr(vec![
+                    Value::from(15),
+                    Value::from("recording @q"),
+                    Value::from(11),
+                ])])]),
+            ]),
+            arr(vec![Value::from("msg_showcmd"), arr(vec![arr(vec![])])]),
+            arr(vec![
+                Value::from("msg_ruler"),
+                arr(vec![arr(vec![arr(vec![
+                    Value::from(1),
+                    Value::from("0,0-1         All"),
+                    Value::from(63),
+                ])])]),
+            ]),
+        ];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![
+                UiEvent::MsgShowcmd {
+                    content: vec![(0, "qq".to_string())],
+                },
+                UiEvent::MsgShowmode {
+                    content: vec![(15, "recording @q".to_string())],
+                },
+                UiEvent::MsgShowcmd { content: vec![] },
+                UiEvent::MsgRuler {
+                    content: vec![(1, "0,0-1         All".to_string())],
+                },
             ]
         );
     }
