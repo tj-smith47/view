@@ -64,7 +64,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 )
             {
                 model.pop_overlay();
-                return Vec::new();
+                // tells the matcher worker to drop its live Session so a
+                // Files scan still walking a huge tree does not keep
+                // running unobserved -- see Effect::PickerClose's doc; the
+                // session-replacement path in the worker only fires on a
+                // later query for a different source, which closing here
+                // may never produce
+                return vec![Effect::PickerClose];
             }
             match model.focus() {
                 Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
@@ -2962,6 +2968,45 @@ mod tests {
             m.overlays().len(),
             1,
             "the resolved prompt must be gone from the stack"
+        );
+    }
+
+    /// The real close path a user takes to abandon a picker: `<Esc>` routed
+    /// through `update()`, not a direct `model.pop_overlay()` call, must
+    /// emit `Effect::PickerClose` so the matcher worker drops its live
+    /// `Session` and stops any `Files` scan still walking a huge tree (see
+    /// `Effect::PickerClose`'s own doc). Disabling the emission at the
+    /// `Msg::Key` `<Esc>`-on-Picker arm makes this fail by name.
+    #[test]
+    fn esc_on_an_open_picker_emits_picker_close() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                m.overlays().last().map(|o| &o.kind),
+                Some(OverlayKind::Picker(_))
+            ),
+            "FeatureInvoke picker/files must open a Picker overlay on top"
+        );
+
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "<Esc>".into(),
+            }),
+        );
+
+        assert!(m.overlays().is_empty(), "Esc must close the picker overlay");
+        assert!(
+            matches!(effects.as_slice(), [Effect::PickerClose]),
+            "closing the picker via Esc must emit exactly Effect::PickerClose: \
+             {effects:?}"
         );
     }
 

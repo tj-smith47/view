@@ -456,6 +456,19 @@ pub enum Effect {
         source: Source,
         resolved: Option<Vec<PickerItem>>,
     },
+    /// Tells the matcher worker to drop its live `Session` (see
+    /// `view_native::picker::matcher::Session`), the moment a picker overlay
+    /// closes rather than only when a later, differently-sourced query
+    /// happens to replace it. A `Files` scan is a background thread that
+    /// keeps walking a possibly huge tree until told otherwise; without this
+    /// effect, closing a picker (the dominant way a user abandons a scan --
+    /// `<Esc>` on a topmost `Picker` overlay, see `update::update`'s
+    /// `Msg::Key` arm) would leave that thread running unobserved, since
+    /// `PickerQuery`'s own session-replacement path only fires on the next
+    /// `MatchRequest` for a different source, which may never arrive.
+    /// Carries no fields: the worker keeps at most one session alive at a
+    /// time, so "close it" needs no source or generation to disambiguate.
+    PickerClose,
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],

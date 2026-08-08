@@ -15,7 +15,7 @@
 //! different picker verb, or a different `Files` root.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::{Receiver, RecvError, SyncSender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -50,13 +50,30 @@ pub struct MatchRequest {
     pub resolved: Option<Vec<PickerItem>>,
 }
 
+/// Everything the runtime loop can hand the matcher worker over its one
+/// channel. A query and a close share a channel rather than each getting
+/// its own, so the worker never has to pick between two receivers to learn
+/// which arrived first -- `Close` racing ahead of a stale `Query` (a picker
+/// closed the instant after its last keystroke queued) must be seen in
+/// send order, which one channel guarantees and two separate ones would
+/// not.
+pub enum WorkerRequest {
+    /// Mirrors `Effect::PickerQuery`; see [`MatchRequest`]'s own doc.
+    Query(MatchRequest),
+    /// Mirrors `Effect::PickerClose`: drops the worker's live `Session`,
+    /// cancelling any `Files` scan still in flight against it (see
+    /// `Session`'s `Drop`) -- see that effect's doc for why this cannot
+    /// wait for the next differently-sourced query instead.
+    Close,
+}
+
 /// Spawns the matcher worker: one thread for the process's lifetime, torn
 /// down only when `rx` disconnects (the runtime's `Executor` drops its
 /// sender at process exit, the same shutdown shape `view::clipboard::spawn`
 /// uses). Long-lived rather than per-session, so a `Files` scan already
 /// walked survives a picker close/reopen instead of re-walking the tree on
 /// every open.
-pub fn spawn(rx: Receiver<MatchRequest>, tx: SyncSender<Msg>) -> JoinHandle<()> {
+pub fn spawn(rx: Receiver<WorkerRequest>, tx: SyncSender<Msg>) -> JoinHandle<()> {
     std::thread::spawn(move || run(&rx, &tx))
 }
 
@@ -102,29 +119,59 @@ impl Drop for Session {
     }
 }
 
-fn run(rx: &Receiver<MatchRequest>, tx: &SyncSender<Msg>) {
+/// Drops the worker's live session, cancelling any `Files` scan still in
+/// flight against it (`Session`'s own `Drop` flips the cancel flag -- see
+/// its doc). The one place a close the picker overlay itself initiated,
+/// rather than a later query for a different source, tears the session
+/// down -- shared by [`run`]'s own `WorkerRequest::Close` arm and this
+/// module's close test, so the test exercises the exact code production
+/// runs rather than a look-alike.
+fn close_session(session: &mut Option<Session>) {
+    *session = None;
+}
+
+fn run(rx: &Receiver<WorkerRequest>, tx: &SyncSender<Msg>) {
     let mut session: Option<Session> = None;
     let mut next = rx.recv();
     while let Ok(request) = next {
-        ensure_session(&mut session, &request.source);
-        let Some(active) = session.as_mut() else {
-            // `ensure_session` always leaves `session` populated; this arm
-            // exists only so the match stays total for the borrow checker.
-            next = rx.recv();
-            continue;
+        next = match request {
+            WorkerRequest::Close => {
+                close_session(&mut session);
+                rx.recv()
+            }
+            WorkerRequest::Query(request) => handle_query(&mut session, request, rx, tx),
         };
-        seed_or_scan(active, request.resolved);
-        active.nucleo.pattern.reparse(
-            0,
-            &request.needle,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            false,
-        );
-        next = match stream_until_preempted(active, request.generation, rx, tx) {
-            Some(preempting) => Ok(preempting),
-            None => rx.recv(),
-        };
+    }
+}
+
+/// Runs one `MatchRequest` to completion or preemption, returning the next
+/// request to process: whatever preempted this one mid-stream (a newer
+/// query, or a close -- either stops `stream_until_preempted`'s tick loop
+/// the same way), or whatever `rx.recv()` yields once this one finishes
+/// cleanly instead.
+fn handle_query(
+    session: &mut Option<Session>,
+    request: MatchRequest,
+    rx: &Receiver<WorkerRequest>,
+    tx: &SyncSender<Msg>,
+) -> Result<WorkerRequest, RecvError> {
+    ensure_session(session, &request.source);
+    let Some(active) = session.as_mut() else {
+        // `ensure_session` always leaves `session` populated; this arm
+        // exists only so the match stays total for the borrow checker.
+        return rx.recv();
+    };
+    seed_or_scan(active, request.resolved);
+    active.nucleo.pattern.reparse(
+        0,
+        &request.needle,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        false,
+    );
+    match stream_until_preempted(active, request.generation, rx, tx) {
+        Some(preempting) => Ok(preempting),
+        None => rx.recv(),
     }
 }
 
@@ -182,9 +229,9 @@ fn seed_resolved(active: &mut Session, items: Vec<PickerItem>) {
 fn stream_until_preempted(
     active: &mut Session,
     generation: u64,
-    rx: &Receiver<MatchRequest>,
+    rx: &Receiver<WorkerRequest>,
     tx: &SyncSender<Msg>,
-) -> Option<MatchRequest> {
+) -> Option<WorkerRequest> {
     loop {
         let status = active.nucleo.tick(TICK_BUDGET_MS);
         if status.changed {
@@ -193,10 +240,11 @@ fn stream_until_preempted(
         if !status.running {
             return None;
         }
-        // a newer query has already arrived: stop ticking the superseded
-        // one and let the caller pick it up, rather than spending the rest
-        // of this pass's budget on results `PickerState::apply_results`
-        // will drop as stale anyway
+        // a newer query or a close has already arrived: stop ticking the
+        // superseded request and let the caller pick it up, rather than
+        // spending the rest of this pass's budget on results
+        // `PickerState::apply_results` will drop as stale anyway (or a
+        // session about to be dropped regardless)
         if let Ok(next) = rx.try_recv() {
             return Some(next);
         }
@@ -288,7 +336,7 @@ mod tests {
         let (msg_tx, msg_rx) = mpsc::sync_channel(16);
         let _worker = spawn(req_rx, msg_tx);
         req_tx
-            .send(MatchRequest {
+            .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
                 needle: "buf".to_string(),
                 source: Source::Buffers,
@@ -296,7 +344,7 @@ mod tests {
                     PickerItem::new("src/buffer.rs"),
                     PickerItem::new("README.md"),
                 ]),
-            })
+            }))
             .expect("worker channel closed");
         let msg = msg_rx
             .recv_timeout(Duration::from_secs(5))
@@ -482,6 +530,76 @@ mod tests {
             "expected the old session's scan to stop before walking the \
              whole {}-entry tree once its session was replaced, got {last} \
              items",
+            tree.total
+        );
+    }
+
+    /// The same falsifiable check as `replacing_a_session_cancels_its_
+    /// files_scan_in_flight`, but for the close path (`Effect::PickerClose`
+    /// -> `WorkerRequest::Close`) instead of a session replaced by a later,
+    /// differently-sourced query: closing the picker overlay is the
+    /// dominant real way a user abandons a huge scan, and unlike a
+    /// replacement it may never be followed by another query at all, so it
+    /// cannot rely on that path to eventually cancel the walker. Calls
+    /// `close_session` directly rather than driving the real `spawn`/`run`
+    /// channel loop, the same directness `replacing_a_session_cancels_its_
+    /// files_scan_in_flight` uses -- and `run`'s own `WorkerRequest::Close`
+    /// arm calls this exact function, so the test exercises production
+    /// code rather than a look-alike. Disabling the `cancel` check in
+    /// `sources::spawn_file_scan` makes this fail by name the same way, at
+    /// exactly `tree.total`.
+    #[test]
+    fn closing_the_picker_cancels_its_files_scan_in_flight() {
+        let tree = CancelTestTree::build();
+        let mut session: Option<Session> = None;
+        ensure_session(
+            &mut session,
+            &Source::Files {
+                root: tree.root.clone(),
+            },
+        );
+        let active = session
+            .as_mut()
+            .expect("ensure_session always populates session");
+        let injector = active.nucleo.injector();
+        seed_or_scan(active, None);
+
+        let start_deadline = Instant::now() + Duration::from_secs(10);
+        while injector.injected_items() == 0 {
+            assert!(
+                Instant::now() < start_deadline,
+                "the scan never produced a single item"
+            );
+        }
+
+        // the shape `run()` takes on a `WorkerRequest::Close`: drops the
+        // session outright, which must cancel the old one's still-running
+        // Files scan the same way a replacement does
+        close_session(&mut session);
+        assert!(
+            session.is_none(),
+            "close_session must leave no session behind"
+        );
+
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = injector.injected_items();
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let now = injector.injected_items();
+            if now == last {
+                break;
+            }
+            last = now;
+            assert!(
+                Instant::now() < settle_deadline,
+                "the injected item count never stopped growing after the \
+                 picker was closed"
+            );
+        }
+        assert!(
+            last < tree.total,
+            "expected the scan to stop before walking the whole \
+             {}-entry tree once the picker was closed, got {last} items",
             tree.total
         );
     }

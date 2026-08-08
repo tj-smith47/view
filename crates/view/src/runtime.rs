@@ -235,7 +235,7 @@ pub struct Executor<E: EngineOps> {
     /// effect's own doc), so an unwired channel degrades to a silent no-op
     /// the same way `Osc52Copy`/`ScheduleToastExpiry` do below, not the
     /// must-answer-the-token shape `ClipboardRead`/`Write` need.
-    picker: Option<mpsc::Sender<view_native::picker::matcher::MatchRequest>>,
+    picker: Option<mpsc::Sender<view_native::picker::matcher::WorkerRequest>>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -288,12 +288,12 @@ impl<E: EngineOps> Executor<E> {
         self
     }
 
-    /// Wires the matcher worker's query channel; `PickerQuery` effects
-    /// forward to it instead of silently no-oping.
+    /// Wires the matcher worker's query channel; `PickerQuery`/`PickerClose`
+    /// effects forward to it instead of silently no-oping.
     #[must_use]
     pub fn with_picker(
         mut self,
-        tx: mpsc::Sender<view_native::picker::matcher::MatchRequest>,
+        tx: mpsc::Sender<view_native::picker::matcher::WorkerRequest>,
     ) -> Self {
         self.picker = Some(tx);
         self
@@ -461,12 +461,24 @@ impl<E: EngineOps> Executor<E> {
                 resolved,
             } => {
                 if let Some(tx) = &self.picker {
-                    let _ = tx.send(view_native::picker::matcher::MatchRequest {
-                        generation,
-                        needle,
-                        source,
-                        resolved,
-                    });
+                    let _ = tx.send(view_native::picker::matcher::WorkerRequest::Query(
+                        view_native::picker::matcher::MatchRequest {
+                            generation,
+                            needle,
+                            source,
+                            resolved,
+                        },
+                    ));
+                }
+                Flow::Continue
+            }
+            // carries no ReplyToken (see the effect's own doc): forwarded to
+            // the matcher worker when one is wired, silently dropped
+            // otherwise, the same unwired-channel degrade every other
+            // fire-and-forget effect here uses
+            Effect::PickerClose => {
+                if let Some(tx) = &self.picker {
+                    let _ = tx.send(view_native::picker::matcher::WorkerRequest::Close);
                 }
                 Flow::Continue
             }
