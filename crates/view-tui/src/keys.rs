@@ -79,8 +79,9 @@ pub fn encode_key(ev: &KeyEvent) -> Option<String> {
 }
 
 /// Translates raw bytes read during the startup capability probe (before
-/// [`spawn_input_thread`](crate::terminal::spawn_input_thread)'s own reader
-/// exists) into nvim input notation strings, so [`Term::init`](crate::terminal::Term::init)'s
+/// the real input reader -- the runtime loop's inline drain on unix, the
+/// dedicated input thread elsewhere -- exists) into nvim input notation
+/// strings, so [`Term::init`](crate::terminal::Term::init)'s
 /// caller can forward anything the user typed at spawn instead of losing
 /// it (see [`tiers::detect`](crate::tiers::detect) for how this residue is
 /// separated from the probe's own capability replies).

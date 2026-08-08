@@ -882,10 +882,11 @@ pub struct InputHandles<'a> {
 /// over the terminal fd, the SIGWINCH pipe, and the wake pipe, so a
 /// keystroke wakes this thread directly and is decoded inline in
 /// `view-tui` -- the cross-thread hop the input thread used to charge
-/// every key is gone by construction. Channel messages win ties: a wake
-/// for one was signaled before the poll returned, and terminal events are
-/// staged into `pending` so the loop still paints between messages during
-/// a burst exactly as it did when each arrived as its own `recv` wakeup.
+/// every key is gone by construction. Staged terminal events win ties: a
+/// keystroke already drained into `pending` pops before the channel is
+/// checked, and each call returns one message, so the loop still paints
+/// between a burst's events exactly as it did when each arrived as its
+/// own `recv` wakeup.
 ///
 /// The rearm ordering is the lost-wakeup guard: [`LoopWaker::clear`]
 /// runs *before* the final queue re-check, so a send consumed by an

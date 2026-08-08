@@ -251,8 +251,8 @@ impl ReplySource for StdinReplySource {
         // bypassing std's locking, internally-buffered handle to this same
         // fd: that handle can pull more than 256 bytes out of the kernel in
         // one call and strand the remainder in its own userspace buffer,
-        // where crossterm's own direct-fd reader can never see it once the
-        // probe hands off to `spawn_input_thread`. A raw read leaves every
+        // where the crossterm reader that takes over after the probe can
+        // never see it. A raw read leaves every
         // byte beyond what this call consumes still sitting in the kernel's
         // tty input queue for the next reader to pick up.
         use std::os::fd::AsFd;
