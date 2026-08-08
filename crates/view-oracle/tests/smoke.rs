@@ -762,11 +762,12 @@ fn minus_capital_o_opens_two_vertical_splits() {
     cmd.arg(&b.scratch);
     common::isolate_xdg(&mut cmd, &a.isolated_home);
 
+    let isolation = shared_isolation();
     let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
     let mut session = ViewPtySession {
         session,
         paths: a,
-        _isolation: shared_isolation(),
+        _isolation: isolation,
     };
     assert!(
         session.wait_for("~", Duration::from_secs(5)),
@@ -1443,11 +1444,12 @@ fn spawn_view_pty_with_unwritable_view_log() -> ViewPtySession {
     common::isolate_xdg(&mut cmd, &paths.isolated_home);
     cmd.env("VIEW_LOG", "/nonexistent-dir-xyz/log.txt");
 
+    let isolation = shared_isolation();
     let session = PtySession::spawn_configured(cmd, 80, 24).unwrap();
     ViewPtySession {
         session,
         paths,
-        _isolation: shared_isolation(),
+        _isolation: isolation,
     }
 }
 
@@ -1549,10 +1551,11 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
         cmd.env("COLORTERM", value);
     }
 
+    let isolation = shared_isolation();
     let mut session = ViewPtySession {
         session: PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap(),
         paths,
-        _isolation: shared_isolation(),
+        _isolation: isolation,
     };
     assert!(
         session.wait_for("~", Duration::from_secs(5)),
