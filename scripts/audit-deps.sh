@@ -51,6 +51,16 @@ done
 for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness; do
   check_absent "$crate" arboard
 done
+# nucleo (the picker's matcher engine, spec §18) and ignore (the Files
+# source's .gitignore-respecting walker) are confined to view-native's own
+# matcher worker thread (crates/view-native/src/picker/matcher.rs and
+# sources.rs) on the same terms as arboard above: view-core stays free of a
+# matching-library dependency (its PickerState only ever asks the worker,
+# never matches itself), and no other crate needs either.
+for crate in view-core view-engine view-surface view-ai view-tui view-oracle view-bench view view-harness; do
+  check_absent "$crate" nucleo
+  check_absent "$crate" ignore
+done
 # serde + toml exist for the theme cache file, the corpus loader, and the
 # [native] table of view.toml, confined to the crates that own a file
 # format (view, view-harness, view-native); any other lib crate gaining

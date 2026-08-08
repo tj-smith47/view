@@ -90,6 +90,10 @@ pub trait EngineOps {
     /// own config leaving it unset; never blocks, and never itself answers
     /// a paste or copy request (see `RpcCall::RegisterClipboard`).
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError>;
+    /// Enumerates listed, loaded buffers for `Source::Buffers`, tagged
+    /// `generation`; never blocks, and never itself returns the list (see
+    /// `Msg::PickerBufferList`).
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -132,6 +136,9 @@ impl EngineOps for EngineHandle {
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         self.register_clipboard(channel_id)
+    }
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        self.list_buffers(generation)
     }
 }
 
@@ -180,6 +187,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         (**self).register_clipboard(channel_id)
     }
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).list_buffers(generation)
+    }
 }
 
 /// What the runtime loop does after one effect crosses [`Executor::run`].
@@ -219,6 +229,13 @@ pub struct Executor<E: EngineOps> {
     /// executor panicking or blocking, matching every other unwired-channel
     /// degrade in this type.
     toast_timer: Option<mpsc::SyncSender<Msg>>,
+    /// The matcher worker's query channel (`view_native::picker::matcher::spawn`),
+    /// or `None` when no worker is wired -- every test `Executor` built via
+    /// plain `new`. `PickerQuery` carries no `ReplyToken` (see that
+    /// effect's own doc), so an unwired channel degrades to a silent no-op
+    /// the same way `Osc52Copy`/`ScheduleToastExpiry` do below, not the
+    /// must-answer-the-token shape `ClipboardRead`/`Write` need.
+    picker: Option<mpsc::Sender<view_native::picker::matcher::MatchRequest>>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -242,6 +259,7 @@ impl<E: EngineOps> Executor<E> {
             clipboard: None,
             osc52: None,
             toast_timer: None,
+            picker: None,
         }
     }
 
@@ -267,6 +285,17 @@ impl<E: EngineOps> Executor<E> {
     #[must_use]
     pub fn with_toast_timer(mut self, tx: mpsc::SyncSender<Msg>) -> Self {
         self.toast_timer = Some(tx);
+        self
+    }
+
+    /// Wires the matcher worker's query channel; `PickerQuery` effects
+    /// forward to it instead of silently no-oping.
+    #[must_use]
+    pub fn with_picker(
+        mut self,
+        tx: mpsc::Sender<view_native::picker::matcher::MatchRequest>,
+    ) -> Self {
+        self.picker = Some(tx);
         self
     }
 
@@ -307,6 +336,7 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::RegisterClipboard { channel_id } => {
                         self.ops.register_clipboard(channel_id)
                     }
+                    RpcCall::ListBuffers { generation } => self.ops.list_buffers(generation),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -416,6 +446,26 @@ impl<E: EngineOps> Executor<E> {
                     std::thread::spawn(move || {
                         std::thread::sleep(after);
                         let _ = tx.send(Msg::ToastExpired { id });
+                    });
+                }
+                Flow::Continue
+            }
+            // carries no ReplyToken (see the effect's own doc): forwarded
+            // to the matcher worker when one is wired, silently dropped
+            // otherwise -- the worker, not this arm, owns streaming back
+            // `Msg::PickerResults`
+            Effect::PickerQuery {
+                generation,
+                needle,
+                source,
+                resolved,
+            } => {
+                if let Some(tx) = &self.picker {
+                    let _ = tx.send(view_native::picker::matcher::MatchRequest {
+                        generation,
+                        needle,
+                        source,
+                        resolved,
                     });
                 }
                 Flow::Continue
@@ -610,10 +660,16 @@ pub fn run(
     // `clipboard_tx` (held by `executor`) drops at the end of this
     // function, same lifetime as the engine's own reader/writer threads
     let _clipboard_worker = crate::clipboard::spawn(engine.handle.clone(), clipboard_rx)?;
+    let (picker_tx, picker_rx) = mpsc::channel();
+    // kept alive for the process's duration, the same shape as
+    // `_clipboard_worker` above: the matcher worker exits once `picker_tx`
+    // (held by `executor`) drops at the end of this function
+    let _picker_worker = view_native::picker::matcher::spawn(picker_rx, msg_tx.clone());
     let executor = Executor::new(engine.handle.clone())
         .with_clipboard(clipboard_tx)
         .with_osc52(osc52_tx)
-        .with_toast_timer(msg_tx);
+        .with_toast_timer(msg_tx)
+        .with_picker(picker_tx);
     let mut write_stall = OutboxStallWatch::default();
 
     loop {
@@ -803,6 +859,9 @@ impl EngineOps for FakeOps {
     }
     fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
         self.record(format!("register_clipboard({channel_id})"))
+    }
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("list_buffers({generation})"))
     }
 }
 

@@ -318,6 +318,25 @@ if vim.g.clipboard == nil then
   }
 end";
 
+/// Lists every listed, loaded buffer for the picker's `Source::Buffers`
+/// corpus, verified live against the pinned engine -- see
+/// `docs/picker-buffer-list-wire-capture.md` for the captured reply shapes
+/// this chunk's `buflisted` filter and `[No Name]`-eligible empty `name`
+/// both depend on. Constant, like every other chunk here: no caller data is
+/// interpolated into it.
+const BUFFER_LIST_CHUNK: &str = "\
+local out = {}
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and vim.bo[buf].buflisted then
+    out[#out + 1] = {
+      bufnr = buf,
+      name = vim.api.nvim_buf_get_name(buf),
+      modified = vim.bo[buf].modified,
+    }
+  end
+end
+return out";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -950,6 +969,27 @@ impl EngineHandle {
                     Value::from(COMMAND),
                 ]),
             ],
+        )
+    }
+
+    /// Issues [`BUFFER_LIST_CHUNK`] as an async request tagged with
+    /// `generation`, resolving `Source::Buffers`'s corpus. Async by
+    /// construction, like [`probe_default_hl`](Self::probe_default_hl): this
+    /// issues the request through [`EngineHandle::request_buffer_list`] and
+    /// returns immediately; the list crosses back as `Msg::PickerBufferList`
+    /// through the connection's pump. See
+    /// `docs/picker-buffer-list-wire-capture.md` for the reply shapes
+    /// `crate::handle`'s `decode_buffer_list_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_buffer_list(
+            "nvim_exec_lua",
+            vec![Value::from(BUFFER_LIST_CHUNK)],
+            generation,
         )
     }
 }

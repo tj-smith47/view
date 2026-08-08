@@ -49,6 +49,10 @@ pub enum StyleRole {
     DiagnosticError,
     /// The statusline's warning-diagnostic glyph and count.
     DiagnosticWarning,
+    /// A picker candidate row's matched substring: the byte ranges nucleo
+    /// scored as part of the fuzzy match, so the user sees which characters
+    /// of a long path or buffer name actually satisfied their query.
+    Match,
 }
 
 impl StyleRole {
@@ -65,6 +69,7 @@ impl StyleRole {
             Self::GitBranch => Some(ChromeGroup::Directory),
             Self::DiagnosticError => Some(ChromeGroup::DiagnosticError),
             Self::DiagnosticWarning => Some(ChromeGroup::DiagnosticWarn),
+            Self::Match => Some(ChromeGroup::IncSearch),
         }
     }
 }
@@ -114,8 +119,14 @@ pub struct PickerView {
     pub title: String,
     /// The query as typed so far, drawn on the prompt line.
     pub query: String,
-    /// The candidate rows, best match first, already formatted for display.
-    pub rows: Vec<String>,
+    /// The candidate rows, best match first, already formatted for display
+    /// and already carrying [`StyleRole::Match`] spans over whatever
+    /// substrings the matcher scored -- see [`PickerView::with_span_rows`].
+    /// [`PickerView::with_rows`] builds this from plain strings for callers
+    /// that never had match indices to begin with (every pre-picker test
+    /// fixture, and any future feature that reuses this view for a row with
+    /// no highlighting).
+    pub rows: Vec<Vec<Span>>,
     /// Index into `rows` of the highlighted candidate, or `None` when the
     /// query matched nothing. An index past the end of `rows` highlights
     /// nothing rather than being clamped onto a row the feature did not
@@ -142,9 +153,25 @@ impl PickerView {
         }
     }
 
-    /// The same view showing `rows` as its candidates.
+    /// The same view showing `rows` as its candidates, each rendered as one
+    /// unstyled [`Span`]. For a picker with match-highlighted rows, use
+    /// [`PickerView::with_span_rows`] instead.
     #[must_use]
     pub fn with_rows(self, rows: Vec<String>) -> Self {
+        Self {
+            rows: rows
+                .into_iter()
+                .map(|text| vec![Span::plain(text)])
+                .collect(),
+            ..self
+        }
+    }
+
+    /// The same view showing `rows` as its candidates, each row already
+    /// split into styled spans (e.g. plain text around a
+    /// [`StyleRole::Match`] run over the matched substring).
+    #[must_use]
+    pub fn with_span_rows(self, rows: Vec<Vec<Span>>) -> Self {
         Self { rows, ..self }
     }
 
@@ -469,7 +496,7 @@ mod tests {
             .with_selected(0);
         assert_eq!(picker.title, "Files");
         assert_eq!(picker.query, "mai");
-        assert_eq!(picker.rows, vec!["src/main.rs".to_string()]);
+        assert_eq!(picker.rows, vec![vec![Span::plain("src/main.rs")]]);
         assert_eq!(picker.selected, Some(0));
 
         let bare = PickerView::new("Files");

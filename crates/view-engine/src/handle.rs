@@ -73,6 +73,13 @@ enum Waiter {
     /// `msgid` either, and its `Response` carries every key the chunk
     /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
     MappingClaims,
+    /// An async buffer-list enumeration for a picker's `Source::Buffers`
+    /// (see [`EngineHandle::request_buffer_list`]): nothing is blocked on
+    /// this `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::PickerBufferList`, tagged with `generation` so a reply a later
+    /// query has since superseded can be dropped by `update()` instead of
+    /// clobbering it.
+    BufferList { generation: u64 },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -345,6 +352,26 @@ impl EngineHandle {
                                         Vec::new()
                                     };
                                     pump.route_claims(Msg::MappingsClaimed { claimed });
+                                }
+                            }
+                            Some(Waiter::BufferList { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to an empty
+                                    // buffer list, the same "safe default
+                                    // over a stuck generation" precedent
+                                    // decode_hl_probe_reply and
+                                    // decode_mapping_claims already follow
+                                    // -- see
+                                    // docs/picker-buffer-list-wire-capture.md
+                                    let names = if error == Value::Nil {
+                                        decode_buffer_list_reply(&result)
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    pump.route_buffer_list(Msg::PickerBufferList {
+                                        generation,
+                                        names,
+                                    });
                                 }
                             }
                             None => {}
@@ -713,6 +740,27 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::MappingClaims)
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into the picker's buffer-list corpus and routed to the connection's
+    /// pump as `Msg::PickerBufferList` (see [`Waiter::BufferList`]). Async
+    /// on the same terms as [`request_probe`](Self::request_probe):
+    /// `Source::Buffers`'s picker query is issued from the runtime loop,
+    /// which must never block on a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_buffer_list(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::BufferList { generation })
+    }
+
     /// Allocates a msgid, registers `waiter`, and enqueues the encoded
     /// request, without a synchronous receiver for anything to block on.
     /// Shared by every async request wrapper; how the eventual `Response` is
@@ -878,6 +926,26 @@ fn decode_mapping_claims(result: &Value) -> Vec<MappingClaim> {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             })
+        })
+        .collect()
+}
+
+/// Decodes a buffer-list reply into each listed buffer's `name`, dropping
+/// `bufnr`/`modified` (the picker's `Source::Buffers` corpus is a plain path
+/// list; nothing here orders or annotates by either field -- see
+/// `docs/picker-buffer-list-wire-capture.md`). A row missing `name` is
+/// dropped: an unnamed scratch buffer still round-trips, since nvim replies
+/// `name = ""` for one rather than omitting the key (capture #1), so a
+/// missing key here can only mean a row shape this crate has never actually
+/// seen from the pinned engine.
+fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
+    let Some(rows) = result.as_array() else {
+        return Vec::new();
+    };
+    rows.iter()
+        .filter_map(|row| {
+            let pairs = row.as_map()?;
+            Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
         })
         .collect()
 }

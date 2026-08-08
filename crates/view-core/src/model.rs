@@ -1,5 +1,7 @@
 //! Application state `update()` reads and mutates. No I/O, no rendering.
 
+use std::path::PathBuf;
+
 use crate::events::{ModeInfo, PmItem, TabEntry, TabHandle};
 use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
@@ -79,6 +81,11 @@ pub struct Model {
     /// handle). Gates [`Model::statusline_rows`], which in turn gates
     /// whether `view-surface::render` reserves a bottom row for the bar.
     pub statusline_enabled: bool,
+    /// The working directory a relative [`crate::native::picker::Source`]
+    /// resolves against, learned once at startup
+    /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
+    /// ask for it itself. Empty until startup sets it.
+    pub cwd: PathBuf,
 }
 
 impl Model {
@@ -112,6 +119,7 @@ impl Model {
             fatal_reason: None,
             claimed_keys: Vec::new(),
             statusline_enabled: false,
+            cwd: PathBuf::new(),
         }
     }
 
@@ -127,6 +135,13 @@ impl Model {
             term_height: height,
             ..Self::new()
         }
+    }
+
+    /// Like [`Model::new`], but with `cwd` pre-filled from the process's
+    /// working directory at startup, before any picker ever opens.
+    #[must_use]
+    pub fn with_cwd(cwd: PathBuf) -> Self {
+        Self { cwd, ..Self::new() }
     }
 
     /// The default keys this session registered; see
@@ -189,6 +204,21 @@ impl Model {
     #[must_use]
     pub fn top_overlay_mut(&mut self) -> Option<&mut Overlay> {
         self.overlays.last_mut()
+    }
+
+    /// The open picker's state, wherever it sits in the stack -- not only
+    /// when it is topmost. A picker keeps running its query underneath a
+    /// prompt that opened over it (see `OverlayKind::Picker`'s doc on the
+    /// stacking rule), so the matcher worker's streamed reply must still be
+    /// able to reach it even while a prompt, not the picker, holds focus.
+    #[must_use]
+    pub fn picker_mut(&mut self) -> Option<&mut crate::native::picker::PickerState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::Picker(p) => Some(p),
+                _ => None,
+            })
     }
 
     /// Opens `kind` at `geometry` as the new topmost overlay, returning the
@@ -979,6 +1009,13 @@ pub enum OverlayKind {
     /// A modal confirm-class prompt -- nvim blocked in its own input loop,
     /// waiting for an answer. See [`crate::native::prompt::PromptState`].
     Prompt(crate::native::prompt::PromptState),
+    /// A fuzzy picker over files, buffers, or a live grep. Unlike a prompt,
+    /// a picker never blocks nvim, so it can sit under a prompt on the
+    /// stack: opening a confirm dialog while a picker is open pushes the
+    /// prompt on top without closing the picker underneath, and
+    /// [`Model::focus`] resolves to the prompt until it closes. See
+    /// [`crate::native::picker::PickerState`].
+    Picker(crate::native::picker::PickerState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

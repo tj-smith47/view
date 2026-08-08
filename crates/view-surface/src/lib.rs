@@ -468,6 +468,7 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
 fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
+        OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
         _ => None,
     }
 }

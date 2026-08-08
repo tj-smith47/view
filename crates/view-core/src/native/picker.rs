@@ -1,0 +1,385 @@
+//! Pure state for the fuzzy picker overlay: the query text, the corpus it
+//! searches, and the last result set the matcher worker delivered. No
+//! matcher handle lives here -- `view-native`'s nucleo-backed worker owns
+//! matching and streaming; this module only tracks what to ask it and what
+//! it last answered.
+//!
+//! # The generation stamp
+//!
+//! `PickerState` never reuses a generation across an open/close cycle: every
+//! generation this module hands out comes from one process-wide monotonic
+//! counter ([`next_generation`]), not from a per-`PickerState` sequence
+//! starting at zero. A per-instance counter would let a reply the matcher
+//! worker is still in flight to answer -- issued by a picker session that
+//! has since closed -- land on a brand-new session whose own counter
+//! happens to have reached the same small number, and be wrongly accepted
+//! as current. The worker thread that answers these requests is long-lived
+//! (spawned once, outliving any one picker session, the same shape
+//! `view::clipboard`'s worker takes), so that collision is not theoretical:
+//! a query in flight when a picker closes can still be being matched when
+//! the next one opens. A process-wide counter makes every generation this
+//! process ever issues unique for the run's whole lifetime, closing the
+//! hole the same way `HlTable::probe_generation` closes it for highlight
+//! probes -- see that type's doc for the identical hazard at lower
+//! frequency.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use super::views::{PickerView, Span, StyleRole};
+
+/// The next generation [`PickerState::open`] or [`PickerState::edit_query`]
+/// will hand out. Starts at `1`: `0` is reserved as "no query has ever been
+/// issued", available to a future caller that wants a sentinel default
+/// without colliding with a real generation.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// What a picker session searches. `LiveGrep` is declared here so
+/// `PickerState::open` is total over the picker's whole feature surface, but
+/// no worker matches against it yet: a session opened with it emits queries
+/// the matcher currently answers with an empty result set, never with a
+/// compile error or a panic.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    /// Every file under `root` that `ignore`'s `.gitignore`-aware walk
+    /// yields, matched against the query as a path.
+    Files { root: PathBuf },
+    /// The current session's listed buffers (`:ls`'s own set: loaded and
+    /// `buflisted`), resolved from engine state -- see
+    /// `docs/picker-buffer-list-wire-capture.md`.
+    Buffers,
+    /// A live `ripgrep`-style content search, not yet matched by any worker.
+    LiveGrep,
+}
+
+/// One candidate the matcher scored: its display text and the byte ranges
+/// within it nucleo's matcher attributed to the query, already sorted and
+/// deduplicated by the worker that produced them.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PickerItem {
+    /// The text matched against and displayed: a path relative to
+    /// `Source::Files`'s root, or a buffer name (`[No Name]` for an unnamed
+    /// buffer -- see the wire-capture doc's conclusions).
+    pub label: String,
+    /// Byte offsets into `label` the match touched. Empty for an item that
+    /// has not been scored against a query yet (the unfiltered corpus, or a
+    /// pre-resolved `Buffers` seed before its first pattern reparse).
+    pub indices: Vec<u32>,
+}
+
+impl PickerItem {
+    /// A candidate with no match indices yet.
+    #[must_use]
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            indices: Vec::new(),
+        }
+    }
+}
+
+/// One open picker session: which corpus it searches, the query typed so
+/// far, and the last (never stale) result set the matcher answered.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PickerState {
+    source: Source,
+    query: String,
+    generation: u64,
+    items: Vec<PickerItem>,
+    selected: usize,
+}
+
+impl PickerState {
+    /// Opens a session over `source` with an empty query and no results yet.
+    /// The caller issues the initial `Effect::PickerQuery` at
+    /// [`PickerState::generation`] itself -- `open` only allocates the
+    /// generation, it does not query, so a pure constructor never has to
+    /// smuggle an effect out through a side channel.
+    #[must_use]
+    pub fn open(source: Source) -> Self {
+        Self {
+            source,
+            query: String::new(),
+            generation: next_generation(),
+            items: Vec::new(),
+            selected: 0,
+        }
+    }
+
+    /// This session's corpus.
+    #[must_use]
+    pub fn source(&self) -> &Source {
+        &self.source
+    }
+
+    /// The query as typed so far.
+    #[must_use]
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// This session's current generation: the one its most recent query was
+    /// tagged with, and the one a fresh [`PickerState::apply_results`] must
+    /// match to be accepted.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    /// Applies one key-notation edit to the query: a single non-`<`-prefixed
+    /// character inserts, `<BS>` deletes the last character, anything else
+    /// is a no-op edit. Bumps and returns the new generation regardless --
+    /// the caller decides which keys reach this at all (see `update()`'s
+    /// picker key routing), so by the time a call lands here the edit is
+    /// always meant to be attempted.
+    pub fn edit_query(&mut self, notation: &str) -> u64 {
+        if notation == "<BS>" {
+            self.query.pop();
+        } else if let Some(c) = single_char(notation) {
+            self.query.push(c);
+        }
+        self.generation = next_generation();
+        self.selected = 0;
+        self.generation
+    }
+
+    /// Applies the matcher worker's answer for `generation`, or drops it if
+    /// a later query has since superseded it -- the identical hazard
+    /// `HlTable::probe_generation`'s doc names, at far higher frequency (see
+    /// this module's doc).
+    pub fn apply_results(&mut self, generation: u64, items: Vec<PickerItem>) {
+        if generation != self.generation {
+            return;
+        }
+        self.items = items;
+        if self.selected >= self.items.len() {
+            self.selected = self.items.len().saturating_sub(1);
+        }
+    }
+
+    /// This session's paint-facing projection: the query line, the
+    /// candidate rows with their matched substrings carrying
+    /// [`StyleRole::Match`], and which row is highlighted.
+    #[must_use]
+    pub fn view(&self) -> PickerView {
+        let title = match &self.source {
+            Source::Files { .. } => "Files",
+            Source::Buffers => "Buffers",
+            Source::LiveGrep => "Live Grep",
+        };
+        let rows = self.items.iter().map(item_spans).collect();
+        let mut view = PickerView::new(title)
+            .with_query(self.query.clone())
+            .with_span_rows(rows);
+        if !self.items.is_empty() {
+            view = view.with_selected(self.selected);
+        }
+        view
+    }
+}
+
+/// A single non-`<`-prefixed character, or `None` for an empty string, a
+/// multi-character notation (`<CR>`, `<Esc>`, ...), or a multi-byte grapheme
+/// this simple editor does not attempt to compose.
+fn single_char(notation: &str) -> Option<char> {
+    let mut chars = notation.chars();
+    let c = chars.next()?;
+    if c == '<' || chars.next().is_some() {
+        return None;
+    }
+    Some(c)
+}
+
+/// Splits `item.label` into spans around its matched byte ranges: the
+/// matched runs carry [`StyleRole::Match`], everything else is
+/// [`StyleRole::Plain`]. `item.indices` are byte offsets of individual
+/// matched characters (nucleo's own unit), coalesced into contiguous runs
+/// here so adjacent matched characters paint as one span rather than one per
+/// byte.
+fn item_spans(item: &PickerItem) -> Vec<Span> {
+    if item.indices.is_empty() {
+        return vec![Span::plain(item.label.clone())];
+    }
+    let bytes = item.label.as_bytes();
+    let mut sorted = item.indices.clone();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let mut spans = Vec::new();
+    let mut cursor = 0usize;
+    let mut i = 0usize;
+    while i < sorted.len() {
+        let start = sorted[i] as usize;
+        if start >= bytes.len() {
+            break;
+        }
+        if start > cursor {
+            push_valid(&mut spans, &item.label, cursor, start, StyleRole::Plain);
+        }
+        let mut end = start;
+        while i < sorted.len() && sorted[i] as usize == end {
+            end += 1;
+            i += 1;
+        }
+        end = end.min(bytes.len());
+        push_valid(&mut spans, &item.label, start, end, StyleRole::Match);
+        cursor = end;
+    }
+    if cursor < item.label.len() {
+        push_valid(
+            &mut spans,
+            &item.label,
+            cursor,
+            item.label.len(),
+            StyleRole::Plain,
+        );
+    }
+    if spans.is_empty() {
+        spans.push(Span::plain(item.label.clone()));
+    }
+    spans
+}
+
+/// Pushes `label[start..end]` as a span of `role`, or does nothing for a
+/// range that does not land on a UTF-8 char boundary -- nucleo's indices are
+/// char-based, not byte-based, on non-ASCII input, and a boundary
+/// mismatch here must degrade to "skip this run" rather than panic slicing
+/// a multi-byte character in half.
+fn push_valid(spans: &mut Vec<Span>, label: &str, start: usize, end: usize, role: StyleRole) {
+    if let Some(slice) = label.get(start..end) {
+        spans.push(Span::new(slice, role));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_starts_with_no_query_and_no_results() {
+        let state = PickerState::open(Source::Buffers);
+        assert!(state.query().is_empty());
+        assert!(state.view().rows.is_empty());
+        assert_eq!(state.view().selected, None);
+    }
+
+    #[test]
+    fn edit_query_inserts_a_plain_character_and_bumps_generation() {
+        let mut state = PickerState::open(Source::Buffers);
+        let g0 = state.generation();
+        let g1 = state.edit_query("m");
+        assert!(g1 > g0);
+        assert_eq!(state.generation(), g1);
+        assert_eq!(state.query(), "m");
+    }
+
+    #[test]
+    fn edit_query_bs_deletes_the_last_character() {
+        let mut state = PickerState::open(Source::Buffers);
+        state.edit_query("m");
+        state.edit_query("a");
+        state.edit_query("<BS>");
+        assert_eq!(state.query(), "m");
+    }
+
+    #[test]
+    fn edit_query_ignores_multi_char_notation_but_still_bumps() {
+        let mut state = PickerState::open(Source::Buffers);
+        let before = state.generation();
+        let after = state.edit_query("<Up>");
+        assert_eq!(state.query(), "");
+        assert!(after > before);
+    }
+
+    #[test]
+    fn a_reply_for_a_stale_generation_is_dropped_not_merged() {
+        // this is the falsifiable check the brief names: feed results for
+        // an old generation after a newer one has already been issued, and
+        // confirm they never reach the view -- a naive `apply_results` that
+        // always overwrites passes every other test in this module and only
+        // this one catches it
+        let mut state = PickerState::open(Source::Files {
+            root: PathBuf::from("/tmp"),
+        });
+        let gen1 = state.generation();
+        state.apply_results(gen1, vec![PickerItem::new("a.rs")]);
+        assert_eq!(state.view().rows.len(), 1);
+
+        let gen2 = state.edit_query("a");
+        assert!(gen2 > gen1);
+
+        // the stale gen1 reply arrives after gen2 was already issued
+        state.apply_results(
+            gen1,
+            vec![
+                PickerItem::new("stale.rs"),
+                PickerItem::new("also-stale.rs"),
+            ],
+        );
+        assert_eq!(
+            state.view().rows,
+            vec![vec![Span::plain("a.rs")]],
+            "a reply for a superseded generation must be ignored entirely, not merged"
+        );
+
+        state.apply_results(gen2, vec![PickerItem::new("b.rs")]);
+        assert_eq!(state.view().rows, vec![vec![Span::plain("b.rs")]]);
+    }
+
+    #[test]
+    fn view_highlights_matched_byte_ranges_and_leaves_the_rest_plain() {
+        let mut state = PickerState::open(Source::Files {
+            root: PathBuf::from("/tmp"),
+        });
+        let gen = state.generation();
+        let item = PickerItem {
+            label: "main.rs".to_string(),
+            indices: vec![0, 1, 5],
+        };
+        state.apply_results(gen, vec![item]);
+        let rows = state.view().rows;
+        assert_eq!(
+            rows,
+            vec![vec![
+                Span::new("ma", StyleRole::Match),
+                Span::new("in.", StyleRole::Plain),
+                Span::new("r", StyleRole::Match),
+                Span::new("s", StyleRole::Plain),
+            ]]
+        );
+    }
+
+    #[test]
+    fn view_selects_the_first_row_once_results_arrive() {
+        let mut state = PickerState::open(Source::Buffers);
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::new("a"), PickerItem::new("b")]);
+        assert_eq!(state.view().selected, Some(0));
+    }
+
+    #[test]
+    fn selection_clamps_when_a_new_result_set_is_smaller() {
+        let mut state = PickerState::open(Source::Buffers);
+        let gen = state.generation();
+        state.apply_results(gen, vec![PickerItem::new("a"), PickerItem::new("b")]);
+        state.selected = 1;
+        let gen2 = state.edit_query("x");
+        state.apply_results(gen2, vec![PickerItem::new("a")]);
+        assert_eq!(state.view().selected, Some(0));
+    }
+
+    #[test]
+    fn each_open_call_issues_a_process_unique_generation() {
+        let a = PickerState::open(Source::Buffers);
+        let b = PickerState::open(Source::Buffers);
+        assert_ne!(a.generation(), b.generation());
+    }
+}

@@ -315,6 +315,14 @@ struct Route {
     /// sent once per session), so one shared slot would let a probe reply
     /// arriving a moment later evict the report for good.
     deferred_claims: Option<Msg>,
+    /// The newest `Msg::PickerBufferList` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_probe`]: a picker
+    /// issues at most one `RpcCall::ListBuffers` per open, so only the
+    /// latest generation's answer can still be the one a live picker is
+    /// waiting on.
+    deferred_buffer_list: Option<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -322,6 +330,7 @@ struct Route {
 enum Held {
     Probe,
     Claims,
+    BufferList,
 }
 
 impl Route {
@@ -329,6 +338,7 @@ impl Route {
         match which {
             Held::Probe => &mut self.deferred_probe,
             Held::Claims => &mut self.deferred_claims,
+            Held::BufferList => &mut self.deferred_buffer_list,
         }
     }
 
@@ -336,7 +346,7 @@ impl Route {
     /// still full. Independent of whatever the caller is routing: these
     /// landing or not says nothing about that send.
     fn retry_deferred(&mut self) {
-        for which in [Held::Probe, Held::Claims] {
+        for which in [Held::Probe, Held::Claims, Held::BufferList] {
             let Some(msg) = self.slot(which).take() else {
                 continue;
             };
@@ -459,6 +469,19 @@ impl PumpShared {
     /// switch gives it back.
     pub(crate) fn route_claims(&self, msg: Msg) {
         self.route_held(msg, Held::Claims);
+    }
+
+    /// Routes a `Msg::PickerBufferList` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped buffer list is silent for the rest of that picker session:
+    /// nothing re-issues `RpcCall::ListBuffers` on its own, so a refused
+    /// reply that was simply discarded would leave `Source::Buffers` picker
+    /// showing no rows with no way for the user to tell "empty" apart from
+    /// "lost".
+    pub(crate) fn route_buffer_list(&self, msg: Msg) {
+        self.route_held(msg, Held::BufferList);
     }
 
     fn route_held(&self, msg: Msg, which: Held) {

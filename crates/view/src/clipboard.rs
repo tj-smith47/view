@@ -455,6 +455,9 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn list_buffers(&self, _generation: u64) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
     }
 
     #[test]

@@ -364,13 +364,7 @@ fn picker_body(view: &PickerView) -> Body {
             Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.query))),
             Line::Rule,
         ],
-        items: view
-            .rows
-            .iter()
-            .cloned()
-            .map(plain_spans)
-            .map(Line::Text)
-            .collect(),
+        items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
     }
 }

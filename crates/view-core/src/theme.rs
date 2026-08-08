@@ -173,6 +173,13 @@ chrome_groups! {
     /// nvim's builtin LSP/diagnostic warning group (`:h diagnostic-highlights`),
     /// the warning counterpart of [`ChromeGroup::DiagnosticError`].
     DiagnosticWarn => "DiagnosticWarn", Emphasis;
+    /// nvim's builtin incremental-search group (`:h hl-IncSearch`). The
+    /// picker's [`crate::native::views::StyleRole::Match`] resolves through
+    /// this: a matched substring inside a candidate row is exactly what
+    /// `IncSearch` already exists to draw the eye to, so a colorscheme that
+    /// themes incremental search gets a matching picker highlight for free
+    /// instead of an unthemed picker-only group.
+    IncSearch => "IncSearch", Emphasis;
 }
 
 /// The active colorscheme's resolved design system: the default/"Normal"

@@ -9,6 +9,15 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# The picker's fuzzy matcher engine (spec §18): confined to this crate by
+# scripts/audit-deps.sh, the same confinement `arboard` has in the `view`
+# bin crate -- view-core stays free of a matching-library dependency, and
+# only this crate's worker thread ever touches a `Nucleo` handle.
+nucleo = "0.5.0"
+# The picker's Files source walker: respects .gitignore/.ignore the same
+# way `rg`/fd do (it is ripgrep's own walker crate), confined to this crate
+# on the same terms as `nucleo`.
+ignore = "0.4.33"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "0.8"

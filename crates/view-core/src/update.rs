@@ -51,6 +51,21 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 model.pop_overlay();
                 model.dirty = true;
             }
+            // <Esc> closes a picker sitting directly on top of the stack.
+            // Checked here, ahead of the focus match below, so a picker
+            // buried under a still-open prompt (the stacking rule a modal
+            // prompt keeps its focus, see `OverlayKind::Picker`'s doc) never
+            // sees this: `top_overlay_mut` names the prompt in that case,
+            // not the picker, and the pattern below simply does not match.
+            if notation == "<Esc>"
+                && matches!(
+                    model.top_overlay_mut().map(|ov| &ov.kind),
+                    Some(OverlayKind::Picker(_))
+                )
+            {
+                model.pop_overlay();
+                return Vec::new();
+            }
             match model.focus() {
                 Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
                 Focus::Native(_) => match model.top_overlay_mut().map(|ov| &mut ov.kind) {
@@ -64,6 +79,22 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                         } else {
                             Vec::new()
                         }
+                    }
+                    // every other key edits the query and re-asks the
+                    // matcher worker; edit_query itself decides what a
+                    // notation means (a plain char, <BS>, or a no-op it
+                    // still bumps the generation for), so this arm never
+                    // inspects notation itself.
+                    Some(OverlayKind::Picker(p)) => {
+                        let generation = p.edit_query(&notation);
+                        let needle = p.query().to_string();
+                        let source = p.source().clone();
+                        vec![Effect::PickerQuery {
+                            generation,
+                            needle,
+                            source,
+                            resolved: None,
+                        }]
                     }
                     // the key belongs to the overlay on top of the stack,
                     // and no other overlay kind carries a key handler yet,
@@ -179,6 +210,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::FeatureInvoke { feature, verb } => {
+            if feature == "picker" {
+                if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {
+                    return open_picker(model, source);
+                }
+            }
             // no native feature has an overlay to open yet, and returning
             // nothing at all here is indistinguishable to a user from a key
             // that never registered: the entry point is answered with a
@@ -191,11 +227,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let known = crate::native::mappings::default_maps()
                 .iter()
                 .any(|spec| spec.feature == feature && spec.verb == verb);
-            let notice = if known {
-                format!("view: no handler for {feature} {verb} in this build")
-            } else {
-                format!("view: {}", crate::native::mappings::render_usage())
-            };
+            let notice = feature_invoke_notice(&feature, &verb, known);
             model.dirty = true;
             model.engine.record_native_notice(notice, false)
         }
@@ -237,6 +269,45 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             Vec::new()
         }
+        Msg::PickerResults { generation, items } => {
+            if let Some(p) = model.picker_mut() {
+                p.apply_results(generation, items);
+                model.dirty = true;
+            }
+            Vec::new()
+        }
+        // not matched here: the engine's Lua reply lists every listed
+        // buffer unconditionally, with no needle to filter by, so the
+        // actual fuzzy match still has to happen in the matcher worker --
+        // this arm's whole job is turning the raw reply into a corpus and
+        // handing it to the worker as `resolved`, gated on the generation
+        // still being the picker's own (see `Effect::PickerQuery`'s doc for
+        // why `Source::Buffers` alone needs `resolved` at all)
+        Msg::PickerBufferList { generation, names } => {
+            let Some(p) = model.picker_mut() else {
+                return Vec::new();
+            };
+            if p.generation() != generation {
+                return Vec::new();
+            }
+            let needle = p.query().to_string();
+            let items = names
+                .into_iter()
+                .map(|name| {
+                    crate::native::picker::PickerItem::new(if name.is_empty() {
+                        "[No Name]".to_string()
+                    } else {
+                        name
+                    })
+                })
+                .collect();
+            vec![Effect::PickerQuery {
+                generation,
+                needle,
+                source: crate::native::picker::Source::Buffers,
+                resolved: Some(items),
+            }]
+        }
         Msg::ToastExpired { id } => {
             // races the same entry being cleared, replaced (which stamps a
             // fresh id, so this id simply no longer matches anything), or
@@ -250,6 +321,60 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+    }
+}
+
+/// The notice text for a `Msg::FeatureInvoke` this build has nothing behind:
+/// `known` distinguishes a registered entry point with no handler yet
+/// (echoes back exactly what was invoked) from one the registry has never
+/// heard of (offers the forms that do work instead of naming a typo).
+fn feature_invoke_notice(feature: &str, verb: &str, known: bool) -> String {
+    if known {
+        format!("view: no handler for {feature} {verb} in this build")
+    } else {
+        format!("view: {}", crate::native::mappings::render_usage())
+    }
+}
+
+/// The picker source `verb` names, or `None` when `verb` is not one of the
+/// picker's own three entry points. `cwd` seeds `Source::Files`'s root: a
+/// relative walk root would need `view-core` to ask the filesystem what
+/// "here" means, which it cannot do (see [`Model::cwd`]'s doc), so the
+/// caller resolves it once, at startup, and this just reads the result back.
+fn picker_source_for_verb(
+    verb: &str,
+    cwd: &std::path::Path,
+) -> Option<crate::native::picker::Source> {
+    use crate::native::picker::Source;
+    match verb {
+        "files" => Some(Source::Files {
+            root: cwd.to_path_buf(),
+        }),
+        "buffers" => Some(Source::Buffers),
+        "grep" => Some(Source::LiveGrep),
+        _ => None,
+    }
+}
+
+/// Opens a new picker overlay over `source` and issues whatever first query
+/// its corpus needs: an empty-needle `Effect::PickerQuery` for a source the
+/// matcher worker walks itself, or `Effect::Rpc(RpcCall::ListBuffers)` for
+/// `Source::Buffers`, whose corpus lives in the engine rather than on disk.
+fn open_picker(model: &mut Model, source: crate::native::picker::Source) -> Vec<Effect> {
+    let needs_buffer_list = matches!(source, crate::native::picker::Source::Buffers);
+    let state = crate::native::picker::PickerState::open(source.clone());
+    let generation = state.generation();
+    model.push_overlay(OverlayBox::new(70, 60), OverlayKind::Picker(state));
+    model.dirty = true;
+    if needs_buffer_list {
+        vec![Effect::Rpc(RpcCall::ListBuffers { generation })]
+    } else {
+        vec![Effect::PickerQuery {
+            generation,
+            needle: String::new(),
+            source,
+            resolved: None,
+        }]
     }
 }
 
@@ -657,7 +782,9 @@ mod tests {
             level: 1,
         };
         let mut kind = some_overlay_kind();
-        let OverlayKind::Prompt(p) = &mut kind;
+        let OverlayKind::Prompt(p) = &mut kind else {
+            unreachable!("some_overlay_kind always returns OverlayKind::Prompt")
+        };
         p.learn_cmdline(&cmdline);
         model.engine.cmdline = Some(cmdline);
         model.push_overlay(OverlayBox::new(50, 50), kind)
@@ -2629,18 +2756,23 @@ mod tests {
     }
 
     #[test]
-    fn an_invoked_feature_with_nothing_behind_it_says_so_rather_than_going_quiet() {
+    fn an_unregistered_invoke_says_so_rather_than_going_quiet() {
+        // every registered picker verb (files/buffers/grep) now has a real
+        // handler, so a feature+verb the registry has never heard of is the
+        // only way left to exercise this "must not go quiet" contract
+        // end-to-end; the sibling test below locks the wording for the
+        // still-real "registered but unhandled" branch directly
         let mut m = model();
         let effects = update(
             &mut m,
             Msg::FeatureInvoke {
-                feature: "picker".to_string(),
-                verb: "files".to_string(),
+                feature: "wat".to_string(),
+                verb: "huh".to_string(),
             },
         );
         assert!(
             matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
-            "an entry point with no handler must not talk to the engine, only schedule \
+            "an unrecognized invoke must not talk to the engine, only schedule \
              its own notice's expiry through the same choke point every other \
              locally-synthesized notice uses: {effects:?}"
         );
@@ -2652,14 +2784,26 @@ mod tests {
             .expect("the invoke must reach the user through the message surface");
         let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
         assert!(
-            text.contains("picker") && text.contains("files"),
-            "the notice must name what was invoked, got {text:?}"
+            text.contains("picker files"),
+            "an unrecognized invoke must fall back to the usage line, not go quiet, \
+             got {text:?}"
         );
         assert!(m.dirty, "the notice must be painted without another event");
         assert!(
             m.overlays().is_empty(),
             "no overlay exists to open yet: an invoke must not push one"
         );
+    }
+
+    #[test]
+    fn a_registered_verb_with_no_handler_yet_would_name_what_was_invoked() {
+        // no registry entry is currently unhandled (picker answers all
+        // three of its own), so this exercises `feature_invoke_notice`
+        // directly rather than through a real, presently-unreachable
+        // registry gap; it stands ready for the next feature that lands a
+        // registry row before its own update() handler
+        let text = feature_invoke_notice("tree", "open", true);
+        assert_eq!(text, "view: no handler for tree open in this build");
     }
 
     #[test]

@@ -19,6 +19,7 @@ use std::time::Duration;
 use crate::events::UiEvent;
 use crate::model::MessageId;
 use crate::native::mappings::{MappingClaim, MappingSpec};
+use crate::native::picker::{PickerItem, Source};
 
 /// Every input `update()` can react to.
 #[non_exhaustive]
@@ -176,6 +177,28 @@ pub enum Msg {
     /// error.
     ToastExpired {
         id: MessageId,
+    },
+    /// The matcher worker's answer to one `Effect::PickerQuery`, streamed:
+    /// the worker sends this as many times as its nucleo tick loop produces
+    /// a new ranked prefix for a still-running Files scan, not once at the
+    /// end. `generation` must match `PickerState::generation` at the moment
+    /// `update()` applies this or it is dropped as stale, the same contract
+    /// [`Msg::HlProbeReply`] documents for `HlTable::probe_generation` -- a
+    /// reply for a query a keystroke has since superseded must never
+    /// clobber a newer one.
+    PickerResults {
+        generation: u64,
+        items: Vec<PickerItem>,
+    },
+    /// The decoded answer to one `RpcCall::ListBuffers`, resolving
+    /// `Source::Buffers`'s corpus; see
+    /// `docs/picker-buffer-list-wire-capture.md`. `names` is each listed
+    /// buffer's path, empty string standing for nvim's own `[No Name]`
+    /// scratch buffer. Generation-gated on the same terms as
+    /// `PickerResults`.
+    PickerBufferList {
+        generation: u64,
+        names: Vec<String>,
     },
 }
 
@@ -409,6 +432,30 @@ pub enum Effect {
         id: MessageId,
         after: Duration,
     },
+    /// Hands a picker query to the matcher worker off the loop thread; the
+    /// worker, not this arm, owns streaming back `Msg::PickerResults`.
+    /// Issued whenever a picker overlay opens (empty `needle`, seeding the
+    /// worker's corpus for `source`) and on every query edit thereafter.
+    /// `generation` is `PickerState::generation` at the moment `update()`
+    /// emitted this, so a reply the worker is still computing when a later
+    /// keystroke supersedes it can be told apart from a current one.
+    ///
+    /// `resolved` carries a corpus `view-native` cannot gather itself:
+    /// `Source::Buffers`'s listed-buffer names, decoded from
+    /// `Msg::PickerBufferList` (the RPC reply only `view-engine` can issue,
+    /// per the crate boundary -- see `update::update`'s `PickerBufferList`
+    /// arm). `Some` replaces the worker's cached corpus for `source` before
+    /// matching; `None` reuses whatever corpus is already cached for it,
+    /// which is every query after the first for `Source::Files`/
+    /// `Source::LiveGrep` (the worker walks those itself, once, on the
+    /// first query) and every query after the seeding one for
+    /// `Source::Buffers`.
+    PickerQuery {
+        generation: u64,
+        needle: String,
+        source: Source,
+        resolved: Option<Vec<PickerItem>>,
+    },
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
@@ -573,5 +620,15 @@ pub enum RpcCall {
     /// connection.
     RegisterClipboard {
         channel_id: u64,
+    },
+    /// Enumerates listed, loaded buffers for `Source::Buffers`, tagged
+    /// `generation` (`PickerState::generation` at the moment `update()`
+    /// emitted this). Async like `GetDefaultHl`: the reply decodes on the
+    /// reader thread and routes back as `Msg::PickerBufferList`. See
+    /// `docs/picker-buffer-list-wire-capture.md` for the exact
+    /// `nvim_exec_lua` chunk and its `buflisted`-filtered, error-degrades-
+    /// to-empty contract.
+    ListBuffers {
+        generation: u64,
     },
 }
