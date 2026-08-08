@@ -367,11 +367,13 @@ mod tests {
         producer.join().expect("producer thread panicked");
     }
 
-    /// A real, on-disk tree under `CARGO_TARGET_TMPDIR` (cargo's own
-    /// per-test-binary scratch directory, cleaned up by cargo's own target
-    /// hygiene rather than the shared system temp directory) -- large
-    /// enough that a walk cancelled shortly after it starts still has most
-    /// of the tree left unvisited, so the disconfirm below stays accurate
+    /// A real, on-disk tree under the workspace's own `target/tmp` (reached
+    /// via `CARGO_MANIFEST_DIR` rather than the shared system temp
+    /// directory, since `CARGO_TARGET_TMPDIR` is only set for
+    /// integration-test/bench binaries, never for a `#[cfg(test)]` unit
+    /// test inside a lib target -- see `build()` below) -- large enough
+    /// that a walk cancelled shortly after it starts still has most of the
+    /// tree left unvisited, so the disconfirm below stays accurate
     /// regardless of how fast disk I/O is on the host running it. Removed
     /// on drop so a failed run does not leave 20,000 files behind.
     struct CancelTestTree {
