@@ -3,8 +3,12 @@
 use crate::events::{clamp_dim, saturate_u16, UiEvent};
 use crate::grid::GridOp;
 use crate::hl::HlAttr;
-use crate::model::{CmdlineState, Focus, Model, MouseCapture, PopupmenuState, TablineState};
+use crate::model::{
+    CmdlineState, Focus, Model, MouseCapture, OverlayKind, PopupmenuState, TablineState,
+};
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
+use crate::native::geometry::OverlayBox;
+use crate::native::prompt::PromptState;
 
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
@@ -26,19 +30,53 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             {
                 model.dirty = true;
             }
+            // a resolved prompt's overlay follows the same lazy-dismiss
+            // timing as its underlying MessageEntry (see
+            // dismiss_transient_on_keypress): nvim sends no msg_clear on
+            // resolution, and cmdline_hide alone cannot tell "resolved"
+            // apart from "about to re-arm" (both start with the identical
+            // cmdline_hide + flush; the wire only disambiguates once a
+            // later, separate redraw batch either does or doesn't bring a
+            // new cmdline_show), so the overlay closes on the first
+            // keypress observed after the cmdline has actually stayed
+            // closed, exactly when the toast falls back to ordinary
+            // transient rules
+            if !cmdline_open
+                && matches!(
+                    model.top_overlay_mut().map(|ov| &ov.kind),
+                    Some(OverlayKind::Prompt(_))
+                )
+            {
+                model.pop_overlay();
+                model.dirty = true;
+            }
             match model.focus() {
                 Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-                // the key belongs to the overlay on top of the stack, and no
-                // overlay carries a key handler, so consuming it is the whole
-                // of that routing. <Esc> closes exactly that one overlay,
-                // which is why it pops rather than clearing: an overlay
-                // underneath it keeps the keyboard.
-                Focus::Native(_) => {
-                    if notation == "<Esc>" {
-                        model.pop_overlay();
+                Focus::Native(_) => match model.top_overlay_mut().map(|ov| &mut ov.kind) {
+                    // the prompt overlay answers by feeding the engine a
+                    // keystroke -- the engine is blocked in its own input
+                    // loop, not on an RpcRequest, so this is the one Native
+                    // arm that still reaches RpcCall::Input
+                    Some(OverlayKind::Prompt(p)) => {
+                        if p.accepts(&notation) {
+                            vec![Effect::Rpc(RpcCall::Input { notation })]
+                        } else {
+                            Vec::new()
+                        }
                     }
-                    Vec::new()
-                }
+                    // the key belongs to the overlay on top of the stack,
+                    // and no other overlay kind carries a key handler yet,
+                    // so consuming it is the whole of that routing. <Esc>
+                    // closes exactly that one overlay, which is why it pops
+                    // rather than clearing: an overlay underneath it keeps
+                    // the keyboard.
+                    _ => {
+                        if notation == "<Esc>" {
+                            model.pop_overlay();
+                        }
+                        Vec::new()
+                    }
+                },
             }
         }
         Msg::Paste(text) => match model.focus() {
@@ -375,14 +413,22 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             indent,
             level,
         } => {
-            model.engine.cmdline = Some(CmdlineState {
+            let cmdline = CmdlineState {
                 content,
                 pos,
                 firstc,
                 prompt,
                 indent,
                 level,
-            });
+            };
+            // covers both the prompt's first arrival and every re-arm after
+            // an unmatched key: the two are wire-identical, so re-learning
+            // unconditionally on every CmdlineShow is simpler than trying
+            // to tell them apart
+            if let Some(OverlayKind::Prompt(p)) = model.top_overlay_mut().map(|ov| &mut ov.kind) {
+                p.learn_cmdline(&cmdline);
+            }
+            model.engine.cmdline = Some(cmdline);
             Vec::new()
         }
         UiEvent::CmdlinePos { pos, level } => {
@@ -402,6 +448,25 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             replace_last,
         } => {
             model.engine.messages.push(kind, content, replace_last);
+            // one prompt overlay per live question: a re-shown identical
+            // confirm (nvim never sends msg_clear between question and
+            // answer) must not stack a second overlay on top of the one
+            // already routing keys for it
+            let prompt_state = model
+                .engine
+                .messages
+                .entries
+                .last()
+                .and_then(PromptState::from_entry);
+            if let Some(state) = prompt_state {
+                let already_open = matches!(
+                    model.top_overlay_mut().map(|ov| &ov.kind),
+                    Some(OverlayKind::Prompt(_))
+                );
+                if !already_open {
+                    model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+                }
+            }
             Vec::new()
         }
         UiEvent::MsgClear => {

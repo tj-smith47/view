@@ -805,6 +805,9 @@ pub enum OverlayKind {
     /// on top, the keyboard. This is the routing and geometry seam by
     /// itself, with nothing painted into it.
     Bare,
+    /// A modal confirm-class prompt -- nvim blocked in its own input loop,
+    /// waiting for an answer. See [`crate::native::prompt::PromptState`].
+    Prompt(crate::native::prompt::PromptState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

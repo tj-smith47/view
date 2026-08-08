@@ -447,6 +447,7 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
 fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
     match kind {
         OverlayKind::Bare => None,
+        OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         _ => None,
     }
 }
@@ -566,6 +567,49 @@ mod tests {
             surface.layers
         );
         assert_eq!(surface.layers[0].kind, LayerKind::EngineGrid);
+    }
+
+    /// A live confirm-class prompt paints as its own layer, over the grid,
+    /// carrying the question and the choices parsed off the paired
+    /// cmdline_show -- the same event pair captured live in
+    /// docs/prompt-overlay-wire-capture.md.
+    #[test]
+    fn a_confirm_prompt_overlay_paints_a_prompt_layer_with_its_choices() {
+        let mut model = model_with_grid(40, 12);
+        model.term_width = 40;
+        model.term_height = 12;
+
+        apply(
+            &mut model,
+            UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "Save changes?".into())],
+                replace_last: false,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![],
+                pos: 0,
+                firstc: String::new(),
+                prompt: "[Y]es, (N)o: ".into(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+        let prompt_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("a prompt overlay is open, so render() must contribute its layer");
+        let LayerKind::Prompt(view) = &prompt_layer.kind else {
+            unreachable!()
+        };
+        assert_eq!(view.message, "Save changes?");
+        assert_eq!(view.choices, vec!["Yes".to_string(), "No".to_string()]);
     }
 
     #[test]

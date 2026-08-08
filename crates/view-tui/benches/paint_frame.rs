@@ -27,8 +27,15 @@
 //! - `paint_frame_cold/steady_state_crossterm_cold` is that same frame with
 //!   a keystroke interval of idle before each one, which is the state the
 //!   editor actually meets.
+//! - `paint_frame_prompt_overlay_open` is the modal prompt overlay's own
+//!   first frame: the `MsgShow`+`CmdlineShow` pair `update()` turns into a
+//!   pushed `OverlayKind::Prompt`, composited and diffed against an already
+//!   painted grid, the exact transition a `:confirm()` or swapfile ATTENTION
+//!   dialog costs the paint loop. Cold by construction (a fresh model per
+//!   iteration, `KEYSTROKE_GAP`-paced): a prompt opening is a rare, one-shot
+//!   event, never a steady per-frame path, so there is no hot variant.
 //!
-//! All five absorb terminal write syscalls into their backend.
+//! All six absorb terminal write syscalls into their backend.
 
 #![allow(clippy::expect_used)]
 
@@ -38,8 +45,11 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use ratatui::backend::{Backend, TestBackend};
 use ratatui::layout::Rect;
 use std::hint::black_box;
+use view_core::events::UiEvent;
 use view_core::grid::GridOp;
 use view_core::model::Model;
+use view_core::msg::Msg;
+use view_core::update::update;
 use view_tui::paint::{overlay_rows, Damage, Shadow};
 
 /// Idle between frames in the cold variant. The `echo` bench row paces its
@@ -349,12 +359,83 @@ fn bench_paint_frame_cold(c: &mut Criterion) {
     group.finish();
 }
 
+/// A `:confirm()`-shaped modal prompt, opened against an already painted
+/// grid: the `MsgShow` question followed by the `CmdlineShow` choice line,
+/// exactly the two-event sequence `update()`'s `Msg::Redraw` handler turns
+/// into a pushed `OverlayKind::Prompt` (see
+/// `docs/prompt-overlay-wire-capture.md`, section 1).
+fn open_prompt_overlay(model: &mut Model) {
+    let _ = update(
+        model,
+        Msg::Redraw(vec![
+            UiEvent::MsgShow {
+                kind: "confirm".to_string(),
+                content: vec![(16, "Save changes?".to_string())],
+                replace_last: false,
+            },
+            UiEvent::CmdlineShow {
+                content: vec![(0, String::new())],
+                pos: 0,
+                firstc: String::new(),
+                prompt: "[Y]es, (N)o: ".to_string(),
+                indent: 0,
+                level: 1,
+            },
+        ]),
+    );
+}
+
+/// Cold: the modal prompt overlay's own first frame, from a fresh model per
+/// iteration so allocation and cache-cold costs are charged rather than
+/// hidden by a warm working set -- a prompt opening is a one-shot event no
+/// steady-state loop ever repeats back to back.
+fn bench_paint_frame_prompt_overlay_open(c: &mut Criterion) {
+    let mut group = c.benchmark_group("paint_frame_prompt_overlay_open");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(12));
+    group.bench_function("confirm_overlay_first_frame_cold", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                std::thread::sleep(KEYSTROKE_GAP);
+                let mut model = populated_model();
+                let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+                let (mut shadow, prev_overlay) = primed_shadow(&mut backend, &mut model);
+                open_prompt_overlay(&mut model);
+
+                let started = Instant::now();
+                let grid_damage = model.take_paint_damage();
+                let surface = view_surface::render(&model);
+                let cur_overlay = overlay_rows(&surface);
+                let damage = Damage::from_frame(
+                    &grid_damage,
+                    model.chrome_rows(),
+                    &prev_overlay,
+                    &cur_overlay,
+                    false,
+                );
+                emit_frame(
+                    black_box(&mut backend),
+                    black_box(&mut shadow),
+                    &model,
+                    &surface,
+                    &damage,
+                );
+                elapsed += started.elapsed();
+            }
+            elapsed
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_paint_frame_full,
     bench_paint_frame_full_wide,
     bench_paint_frame,
     bench_paint_frame_crossterm,
-    bench_paint_frame_cold
+    bench_paint_frame_cold,
+    bench_paint_frame_prompt_overlay_open
 );
 criterion_main!(benches);
