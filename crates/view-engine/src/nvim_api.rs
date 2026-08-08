@@ -385,7 +385,8 @@ return { loaded = false }";
 /// does interpolate: `path` reaches `vim.cmd.edit` as a literal argument to
 /// an ex command, and an unescaped path containing a space, `%`, `#`, or a
 /// leading `+` would otherwise be parsed as command syntax rather than a
-/// filename.
+/// filename -- see `docs/tree-open-file-wire-capture.md` for the live
+/// capture backing that, including the unescaped negative control.
 const OPEN_FILE_CHUNK: &str = "\
 local path = ...
 vim.cmd.edit(vim.fn.fnameescape(path))";
@@ -403,6 +404,15 @@ vim.cmd.edit(vim.fn.fnameescape(path))";
 /// behavior, confirmed live and documented in the capture above. `wanted` is
 /// resolved from `old_path` before the rename runs, while the file still
 /// exists at that location to resolve a real path for.
+///
+/// Every loaded buffer's own name is canonicalized into `snapshot` before
+/// `vim.fn.rename` runs, for the same reason `wanted` is: `vim.uv.fs_realpath`
+/// only resolves a symlink component while the target still exists on disk
+/// at that path, so a buffer opened through a symlinked ancestor directory
+/// would canonicalize correctly here but fail silently (falling back to the
+/// unresolved `fnamemodify` path, which never matches `wanted`) if computed
+/// after the rename has already moved the file out from under the old
+/// location -- see `docs/tree-rename-wire-capture.md`'s symlink case.
 const RENAME_CHUNK: &str = "\
 local old_path, new_path = ...
 if vim.uv.fs_stat(new_path) then
@@ -412,17 +422,51 @@ local function canon(p)
   return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
 end
 local wanted = canon(old_path)
+local snapshot = {}
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) then
+    snapshot[#snapshot + 1] = { buf = buf, canon = canon(vim.api.nvim_buf_get_name(buf)) }
+  end
+end
 local rc = vim.fn.rename(old_path, new_path)
 if rc ~= 0 then
   return { ok = false }
 end
-for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    vim.api.nvim_buf_set_name(buf, new_path)
+for _, entry in ipairs(snapshot) do
+  if entry.canon == wanted then
+    vim.api.nvim_buf_set_name(entry.buf, new_path)
     break
   end
 end
 return { ok = true }";
+
+/// Asks nvim for typed text via a blocked `vim.fn.input()`, primed with a
+/// `kind = "confirm"` `nvim_echo` so the answer arrives on the wire as the
+/// same `msg_show`/`cmdline_show` pair every other confirm-class prompt
+/// does -- live-verified against the pinned engine, see
+/// `docs/tree-input-prompt-wire-capture.md`. Shared by
+/// [`EngineHandle::tree_create_prompt`] (`default` empty) and
+/// [`EngineHandle::tree_rename_prompt`] (`default` the entry's current
+/// name); the chunk itself does not distinguish the two, only the caller's
+/// arguments do. Returns the typed string bare (an empty string for both an
+/// unanswered `<CR>` and an `<Esc>`, indistinguishable on the wire and
+/// identical in meaning here: nothing to act on).
+const TREE_INPUT_PROMPT_CHUNK: &str = "\
+local prompt, default = ...
+vim.api.nvim_echo({{prompt, 'Question'}}, false, {kind = 'confirm'})
+return vim.fn.input({prompt = prompt, default = default})";
+
+/// Asks nvim to confirm an action via a blocked `vim.fn.confirm(prompt,
+/// \"&Yes\\n&No\")`, reusing nvim's own `[Y]es, (N)o: ` accelerator prompt
+/// -- live-verified to arrive on the wire as the exact same `msg_show`/
+/// `cmdline_show` pair `PromptState`'s existing `Answer::Choices` parsing
+/// already handles, see `docs/tree-input-prompt-wire-capture.md`. Returns
+/// the choice bare, nvim's own documented `confirm()` contract (`:help
+/// confirm()`): `1` for Yes, `2` for No, `0` for a force-closed dialog
+/// (`<Esc>` or an interrupt).
+const TREE_DELETE_CONFIRM_CHUNK: &str = "\
+local prompt = ...
+return vim.fn.confirm(prompt, '&Yes\\n&No')";
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -1153,6 +1197,85 @@ impl EngineHandle {
                 Value::Array(vec![Value::from(old_path), Value::from(new_path)]),
             ],
             generation,
+        )
+    }
+
+    /// Issues [`TREE_INPUT_PROMPT_CHUNK`] with an empty `default`, as an
+    /// async request tagged with `generation`, asking for the name of a new
+    /// entry to create beneath the tree's current directory. Async by
+    /// construction, like [`rename_file`](Self::rename_file): the typed name
+    /// (or `None` for a cancelled prompt) crosses back as
+    /// `Msg::TreeCreatePromptReply` through the connection's pump. See
+    /// `docs/tree-input-prompt-wire-capture.md` for the reply shape
+    /// `crate::handle`'s `decode_prompt_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_create_prompt(
+            "nvim_exec_lua",
+            vec![
+                Value::from(TREE_INPUT_PROMPT_CHUNK),
+                Value::Array(vec![Value::from("New file: "), Value::from("")]),
+            ],
+            generation,
+        )
+    }
+
+    /// Issues [`TREE_INPUT_PROMPT_CHUNK`] with `current_name` as `default`,
+    /// as an async request tagged with `generation`, asking for the tree's
+    /// selected entry's new name. Async by construction, like
+    /// [`tree_create_prompt`](Self::tree_create_prompt): the typed name (or
+    /// `None` for a cancelled prompt) crosses back as
+    /// `Msg::TreeRenamePromptReply` through the connection's pump, alongside
+    /// the `old_path` the reply answers for. See
+    /// `docs/tree-input-prompt-wire-capture.md` for the reply shape
+    /// `crate::handle`'s `decode_prompt_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_rename_prompt(
+            "nvim_exec_lua",
+            vec![
+                Value::from(TREE_INPUT_PROMPT_CHUNK),
+                Value::Array(vec![Value::from("Rename: "), Value::from(current_name)]),
+            ],
+            generation,
+            old_path.to_owned(),
+        )
+    }
+
+    /// Issues [`TREE_DELETE_CONFIRM_CHUNK`] as an async request tagged with
+    /// `generation`, asking the user to confirm deleting `path`. Async by
+    /// construction, like [`tree_rename_prompt`](Self::tree_rename_prompt):
+    /// the choice crosses back as `Msg::TreeDeleteConfirmReply` through the
+    /// connection's pump, alongside the `path` the reply answers for. See
+    /// `docs/tree-input-prompt-wire-capture.md` for the reply shape
+    /// `crate::handle`'s `decode_delete_confirm_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.request_delete_confirm(
+            "nvim_exec_lua",
+            vec![
+                Value::from(TREE_DELETE_CONFIRM_CHUNK),
+                Value::Array(vec![Value::from(format!("Delete {path}?"))]),
+            ],
+            generation,
+            path.to_owned(),
         )
     }
 }

@@ -258,6 +258,60 @@ pub enum Msg {
         generation: u64,
         ok: bool,
     },
+    /// The decoded answer to one `RpcCall::TreeCreatePrompt`: the filename
+    /// text nvim's blocked `vim.fn.input()` collected, or `None` when the
+    /// user cancelled (`<Esc>`) or submitted an empty answer -- the two are
+    /// indistinguishable at the wire (both return `""`, verified live), and
+    /// conveniently both mean "nothing to create" here. `generation` is
+    /// `TreeState::generation` at the moment `update()` issued the prompt;
+    /// `update()` drops a reply whose generation no longer matches the
+    /// tree's current one (the tree was closed and reopened, or rescanned,
+    /// while the prompt was still open), unlike `TreeRenameReply`'s reused
+    /// generation, which names the rename call itself rather than a tree
+    /// state to compare against.
+    TreeCreatePromptReply {
+        generation: u64,
+        name: Option<String>,
+    },
+    /// The decoded answer to one `RpcCall::TreeRenamePrompt`, on the same
+    /// "`None` means cancelled or empty" terms as
+    /// [`Msg::TreeCreatePromptReply`]. `old_path` echoes back the entry the
+    /// prompt was opened for (the reply itself carries no path), so a
+    /// generation match still names the right file to rename even though
+    /// nothing else about the tree's selection can move while the prompt
+    /// holds focus.
+    TreeRenamePromptReply {
+        generation: u64,
+        old_path: String,
+        name: Option<String>,
+    },
+    /// The decoded answer to one `RpcCall::TreeDeleteConfirm`: `confirmed`
+    /// is `true` only for an explicit "Yes" (`vim.fn.confirm`'s first
+    /// choice); `<Esc>`, "No", and any error reply all degrade to `false`,
+    /// the same "safe default over an ambiguous or lost reply" precedent
+    /// every other async reply in this crate follows. `path` echoes back
+    /// the entry the prompt was opened for, on the same terms
+    /// `TreeRenamePromptReply::old_path` does.
+    TreeDeleteConfirmReply {
+        generation: u64,
+        path: String,
+        confirmed: bool,
+    },
+    /// `Effect::TreeCreateFile`'s answer: `ok` is `false` when the
+    /// destination already existed or the create otherwise failed. Either
+    /// way nothing on disk changed that was not already there -- see
+    /// `Effect::TreeCreateFile`'s doc on why `create_new` rather than a
+    /// truncating write.
+    TreeCreateFileResult {
+        generation: u64,
+        ok: bool,
+    },
+    /// Symmetric to [`Msg::TreeCreateFileResult`], for
+    /// `Effect::TreeDeleteFile`.
+    TreeDeleteFileResult {
+        generation: u64,
+        ok: bool,
+    },
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -564,21 +618,41 @@ pub enum Effect {
         generation: u64,
         root: std::path::PathBuf,
     },
-    /// Creates an empty file at `path` on disk. A genuine filesystem effect,
+    /// Tells the tree's scan worker to cancel any filesystem walk still in
+    /// flight, the moment the sidebar closes -- see `Effect::PickerClose`'s
+    /// doc for the identical problem this solves on the other overlay:
+    /// `tree::fs::scan` walks the whole tree in one blocking call with no
+    /// generation check of its own until it returns, so a huge tree closed
+    /// mid-scan would otherwise keep a thread walking it, unobserved, for as
+    /// long as the walk takes. Carries no fields, like `PickerClose`: the
+    /// executor keeps at most one tree scan's cancel flag alive at a time.
+    TreeClose,
+    /// Creates a new, empty file at `path` on disk, refusing to overwrite an
+    /// existing one -- see the executor's own doc for why `create_new`
+    /// rather than a plain truncating write. A genuine filesystem effect,
     /// never RPC: an as-yet-nonexistent path names no buffer for nvim to
     /// own, so there is nothing for the engine to be authoritative over
     /// until the file is opened afterward (an ordinary
-    /// `RpcCall::OpenFile`).
+    /// `RpcCall::OpenFile`). `generation` is `TreeState::generation` at the
+    /// moment `update()` emitted this, carried through to the reply
+    /// (`Msg::TreeCreateFileResult`) on the same terms `RpcCall::RenameFile`
+    /// carries it to `Msg::TreeRenameReply`: not compared against the
+    /// tree's own counters on arrival, since the reply's only job is
+    /// triggering the rescan that follows a successful create.
     TreeCreateFile {
         path: std::path::PathBuf,
+        generation: u64,
     },
     /// Deletes the file at `path` from disk. A genuine filesystem effect
     /// like `TreeCreateFile`, and, symmetrically, never issued for a path
     /// with a loaded buffer still open on it -- that case belongs to nvim
     /// via RPC once a delete-with-open-buffer flow exists, the same
-    /// buffer-identity boundary `RpcCall::RenameFile` draws.
+    /// buffer-identity boundary `RpcCall::RenameFile` draws. `generation`
+    /// carries through to `Msg::TreeDeleteFileResult` on the same terms
+    /// `TreeCreateFile`'s does.
     TreeDeleteFile {
         path: std::path::PathBuf,
+        generation: u64,
     },
 }
 
@@ -799,5 +873,46 @@ pub enum RpcCall {
         old_path: String,
         new_path: String,
         generation: u64,
+    },
+    /// Asks nvim for a new file's name: a blocked `vim.fn.input()`, primed
+    /// with a `kind = "confirm"` `nvim_echo` so it arrives on the wire as
+    /// the same `msg_show`/`cmdline_show` pair every other confirm-class
+    /// prompt does (see `docs/tree-input-prompt-wire-capture.md`) and is
+    /// picked up by the existing `PromptState` overlay machinery without any
+    /// change to how a prompt is opened or painted -- only its answer routes
+    /// somewhere new (`Msg::TreeCreatePromptReply`, via
+    /// [`Waiter::CreatePrompt`](crate) in `view-engine`, rather than back
+    /// into the engine as a keystroke). Async by construction, like
+    /// `RenameFile`: issuing this never blocks the paint loop, however long
+    /// the user takes to answer.
+    TreeCreatePrompt {
+        generation: u64,
+    },
+    /// Asks nvim for a rename target, on the same wire shape and async
+    /// terms as [`RpcCall::TreeCreatePrompt`], pre-filled with
+    /// `current_name` (`vim.fn.input`'s own `default` field) so renaming is
+    /// an edit of the existing name rather than typing it from scratch.
+    /// `old_path` is not sent over the wire at all -- it names nothing
+    /// `vim.fn.input` needs -- but is carried on this call anyway so the
+    /// executor has it to echo back once the reply arrives
+    /// (`Msg::TreeRenamePromptReply::old_path`): the tree's selection cannot
+    /// move while this prompt holds focus, but the reply itself carries only
+    /// the typed name, with no path of its own for `update()` to resolve the
+    /// rename against. Answered by `Msg::TreeRenamePromptReply`.
+    TreeRenamePrompt {
+        generation: u64,
+        old_path: String,
+        current_name: String,
+    },
+    /// Asks nvim to confirm deleting `path` via `vim.fn.confirm(prompt,
+    /// "&Yes\n&No")`, reusing the already-proven `Answer::Choices` parsing
+    /// path `PromptState` handles for `:confirm()` and the swapfile
+    /// ATTENTION dialog -- no new prompt-state code needed for this one, only
+    /// the async plumbing to route its choice back as
+    /// `Msg::TreeDeleteConfirmReply`. Async on the same terms as
+    /// `TreeCreatePrompt`.
+    TreeDeleteConfirm {
+        generation: u64,
+        path: String,
     },
 }

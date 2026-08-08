@@ -111,6 +111,24 @@ pub trait EngineOps {
         new_path: &str,
         generation: u64,
     ) -> Result<(), EngineError>;
+    /// Asks nvim for a new file's name via a blocked `vim.fn.input()`,
+    /// tagged `generation`; never blocks, and never itself returns the
+    /// answer (see `RpcCall::TreeCreatePrompt`, `Msg::TreeCreatePromptReply`).
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError>;
+    /// Asks nvim for a rename target for `old_path`, pre-filled with
+    /// `current_name`, tagged `generation`; never blocks, and never itself
+    /// returns the answer (see `RpcCall::TreeRenamePrompt`,
+    /// `Msg::TreeRenamePromptReply`).
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError>;
+    /// Asks nvim to confirm deleting `path`, tagged `generation`; never
+    /// blocks, and never itself returns the answer (see
+    /// `RpcCall::TreeDeleteConfirm`, `Msg::TreeDeleteConfirmReply`).
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -170,6 +188,20 @@ impl EngineOps for EngineHandle {
         generation: u64,
     ) -> Result<(), EngineError> {
         self.rename_file(old_path, new_path, generation)
+    }
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        self.tree_create_prompt(generation)
+    }
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.tree_rename_prompt(old_path, current_name, generation)
+    }
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.tree_delete_confirm(path, generation)
     }
 }
 
@@ -235,6 +267,20 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     ) -> Result<(), EngineError> {
         (**self).rename_file(old_path, new_path, generation)
     }
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).tree_create_prompt(generation)
+    }
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).tree_rename_prompt(old_path, current_name, generation)
+    }
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).tree_delete_confirm(path, generation)
+    }
 }
 
 /// What the runtime loop does after one effect crosses [`Executor::run`].
@@ -281,6 +327,20 @@ pub struct Executor<E: EngineOps> {
     /// the same way `Osc52Copy`/`ScheduleToastExpiry` do below, not the
     /// must-answer-the-token shape `ClipboardRead`/`Write` need.
     picker: Option<mpsc::Sender<view_native::picker::matcher::WorkerRequest>>,
+    /// The still-running tree scan's cancel flag, if any -- the executor's
+    /// only handle on the worker thread `Effect::TreeScan` spawned, since
+    /// `view_native::tree::fs::scan` is one blocking call with no generation
+    /// check of its own along the way (see that function's own doc).
+    /// `Effect::TreeScan` flips whatever was here before storing its own
+    /// fresh flag (a superseding scan cancels the one it replaces, exactly
+    /// like `TreeState::request_rescan` already discards a superseded
+    /// generation on the `update()` side), and `Effect::TreeClose` flips it
+    /// and clears the slot. A `Mutex` rather than a plain field because
+    /// `run` takes `&self`: every other piece of executor state that a
+    /// worker thread reads back is either `Clone`d out to the thread
+    /// (`toast_timer`) or, like this one, mutated from behind `&self` by
+    /// more than one effect over the executor's lifetime.
+    tree_scan_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -305,6 +365,7 @@ impl<E: EngineOps> Executor<E> {
             osc52: None,
             toast_timer: None,
             picker: None,
+            tree_scan_cancel: std::sync::Mutex::new(None),
         }
     }
 
@@ -391,6 +452,19 @@ impl<E: EngineOps> Executor<E> {
                         new_path,
                         generation,
                     } => self.ops.rename_file(&old_path, &new_path, generation),
+                    RpcCall::TreeCreatePrompt { generation } => {
+                        self.ops.tree_create_prompt(generation)
+                    }
+                    RpcCall::TreeRenamePrompt {
+                        generation,
+                        old_path,
+                        current_name,
+                    } => self
+                        .ops
+                        .tree_rename_prompt(&old_path, &current_name, generation),
+                    RpcCall::TreeDeleteConfirm { generation, path } => {
+                        self.ops.tree_delete_confirm(&path, generation)
+                    }
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -558,12 +632,25 @@ impl<E: EngineOps> Executor<E> {
             // `PickerPreviewFallback` above: `view_native::tree::fs::scan`
             // is a plain synchronous blocking call, so this is the only
             // place it ever runs off the paint loop, reusing the loop's own
-            // message channel to report back.
+            // message channel to report back. A superseding scan cancels
+            // whatever scan preceded it (see `tree_scan_cancel`'s own doc)
+            // before installing its own fresh flag, so a burst of rescans
+            // never leaves more than one walk running at a time.
             Effect::TreeScan { generation, root } => {
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                {
+                    let mut slot = self
+                        .tree_scan_cancel
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(previous) = slot.replace(std::sync::Arc::clone(&cancel)) {
+                        previous.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
-                        let entries = view_native::tree::fs::scan(&root);
+                        let entries = view_native::tree::fs::scan(&root, &cancel);
                         let _ = tx.send(Msg::TreeScanResult {
                             generation,
                             entries,
@@ -587,22 +674,52 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // Flips the still-running scan's cancel flag (if any) and clears
+            // the slot: see `tree_scan_cancel`'s own doc for why this, not a
+            // generation check inside `tree::fs::scan` itself, is what stops
+            // a huge tree's walk once the sidebar that asked for it is
+            // already gone.
+            Effect::TreeClose => {
+                let mut slot = self
+                    .tree_scan_cancel
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(cancel) = slot.take() {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+                Flow::Continue
+            }
             // A genuine filesystem effect, never RPC (see the effect's own
-            // doc): fire-and-forget, off the paint loop like every other
-            // effect here, but with no reply to route back -- the caller
-            // that issued this owns following it with whatever rescan makes
-            // the new file visible.
-            Effect::TreeCreateFile { path } => {
-                std::thread::spawn(move || {
-                    let _ = std::fs::write(&path, "");
-                });
+            // doc): `create_new` refuses to overwrite a destination that
+            // already exists rather than truncating it the way a plain
+            // `std::fs::write` would -- a destination this create targets
+            // may already hold real content a blind truncate would destroy
+            // with no way back. `ok` carries through to
+            // `Msg::TreeCreateFileResult` unconditionally, so the caller
+            // that issued this can rescan on success or notify on refusal.
+            Effect::TreeCreateFile { path, generation } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let ok = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create_new(true)
+                            .open(&path)
+                            .is_ok();
+                        let _ = tx.send(Msg::TreeCreateFileResult { generation, ok });
+                    });
+                }
                 Flow::Continue
             }
             // Symmetric to `TreeCreateFile`.
-            Effect::TreeDeleteFile { path } => {
-                std::thread::spawn(move || {
-                    let _ = std::fs::remove_file(&path);
-                });
+            Effect::TreeDeleteFile { path, generation } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let ok = std::fs::remove_file(&path).is_ok();
+                        let _ = tx.send(Msg::TreeDeleteFileResult { generation, ok });
+                    });
+                }
                 Flow::Continue
             }
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
@@ -1012,6 +1129,22 @@ impl EngineOps for FakeOps {
     ) -> Result<(), EngineError> {
         self.record(format!("rename_file({old_path},{new_path},{generation})"))
     }
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("tree_create_prompt({generation})"))
+    }
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "tree_rename_prompt({old_path},{current_name},{generation})"
+        ))
+    }
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("tree_delete_confirm({path},{generation})"))
+    }
 }
 
 #[cfg(test)]
@@ -1393,23 +1526,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// `Effect::TreeCreateFile` has no reply `Msg`: this proves its worker
-    /// thread actually writes the file to disk rather than merely
-    /// compiling, since nothing on the channel could otherwise tell the
-    /// difference between a wired effect and a silently-dropped one.
+    /// Proves `Executor::run` actually spawns the create worker and reports
+    /// `Msg::TreeCreateFileResult` back over the wired channel with `ok:
+    /// true`, and that the file it created is genuinely empty.
     #[test]
-    fn tree_create_file_effect_writes_an_empty_file_to_disk() {
+    fn tree_create_file_effect_writes_an_empty_file_and_reports_ok() {
         let root = tree_effect_scratch("create");
         let path = root.join("new.txt");
 
         let ops = FakeOps::default();
-        let executor = Executor::new(&ops);
-        let flow = executor.run(Effect::TreeCreateFile { path: path.clone() });
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeCreateFile {
+            path: path.clone(),
+            generation: 11,
+        });
         assert!(matches!(flow, Flow::Continue));
 
-        wait_until("TreeCreateFile's worker thread to write the file", || {
-            path.is_file()
-        });
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeCreateFileResult arrives from the worker thread");
+        assert!(
+            matches!(
+                msg,
+                Msg::TreeCreateFileResult {
+                    generation: 11,
+                    ok: true
+                }
+            ),
+            "expected TreeCreateFileResult{{generation: 11, ok: true}}, got {msg:?}"
+        );
         assert_eq!(
             std::fs::read_to_string(&path).expect("read the created file"),
             ""
@@ -1418,21 +1564,138 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Symmetric to `tree_create_file_effect_writes_an_empty_file_to_disk`.
+    /// `create_new` must refuse to overwrite a destination that already
+    /// holds content, leaving that content untouched and reporting the
+    /// refusal rather than truncating it the way a plain `std::fs::write`
+    /// would. Dropping `create_new` back to a truncating write is what
+    /// this test exists to catch -- the assertion on `existing.txt`'s
+    /// content is what fails then, since the create would otherwise wipe
+    /// it silently.
     #[test]
-    fn tree_delete_file_effect_removes_the_file_from_disk() {
+    fn tree_create_file_effect_refuses_to_overwrite_an_existing_file() {
+        let root = tree_effect_scratch("create-refuse");
+        let path = root.join("existing.txt");
+        std::fs::write(&path, "keep me\n").expect("write existing.txt");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeCreateFile {
+            path: path.clone(),
+            generation: 12,
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeCreateFileResult arrives from the worker thread");
+        assert!(
+            matches!(
+                msg,
+                Msg::TreeCreateFileResult {
+                    generation: 12,
+                    ok: false
+                }
+            ),
+            "expected TreeCreateFileResult{{generation: 12, ok: false}}, got {msg:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read existing.txt"),
+            "keep me\n",
+            "a refused create must leave the existing file's content exactly as it was"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Symmetric to `tree_create_file_effect_writes_an_empty_file_and_reports_ok`.
+    #[test]
+    fn tree_delete_file_effect_removes_the_file_and_reports_ok() {
         let root = tree_effect_scratch("delete");
         let path = root.join("gone.txt");
         std::fs::write(&path, "bye\n").expect("write gone.txt");
 
         let ops = FakeOps::default();
-        let executor = Executor::new(&ops);
-        let flow = executor.run(Effect::TreeDeleteFile { path: path.clone() });
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeDeleteFile {
+            path: path.clone(),
+            generation: 13,
+        });
         assert!(matches!(flow, Flow::Continue));
 
-        wait_until("TreeDeleteFile's worker thread to remove the file", || {
-            !path.exists()
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeDeleteFileResult arrives from the worker thread");
+        assert!(
+            matches!(
+                msg,
+                Msg::TreeDeleteFileResult {
+                    generation: 13,
+                    ok: true
+                }
+            ),
+            "expected TreeDeleteFileResult{{generation: 13, ok: true}}, got {msg:?}"
+        );
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Closing the tree while a scan of a huge directory is still
+    /// walking must flip the cancel flag `Effect::TreeScan` installed,
+    /// stopping the walk short of the full tree -- the same proof
+    /// `tree::fs::scan`'s own `a_cancelled_scan_stops_short_of_the_full_tree`
+    /// makes at the walk layer, but exercised here through the executor's
+    /// actual `Effect` wiring rather than a bare `AtomicBool` the walk is
+    /// handed directly.
+    #[test]
+    fn tree_close_cancels_an_in_flight_scan_before_it_finishes() {
+        let root = tree_effect_scratch("scan-cancel");
+        let dirs = 200;
+        let files_per_dir = 100;
+        for d in 0..dirs {
+            let dir = root.join(format!("d{d}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            for f in 0..files_per_dir {
+                std::fs::write(dir.join(format!("f{f}.txt")), "").expect("write file");
+            }
+        }
+        let total = dirs * (files_per_dir + 1);
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeScan {
+            generation: 21,
+            root: root.clone(),
         });
+        assert!(matches!(flow, Flow::Continue));
+        // no sleep, on the same deterministic terms
+        // `a_cancelled_scan_stops_short_of_the_full_tree` documents: the
+        // walk's very next per-entry check observes whichever of the spawn
+        // or this close ran first
+        let flow = executor.run(Effect::TreeClose);
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeScanResult arrives from the worker thread");
+        match msg {
+            Msg::TreeScanResult {
+                generation,
+                entries,
+            } => {
+                assert_eq!(generation, 21);
+                assert!(
+                    entries.len() < total,
+                    "a scan cancelled by TreeClose must stop short of the full tree \
+                     ({} of {total} entries)",
+                    entries.len()
+                );
+            }
+            other => panic!("expected TreeScanResult, got {other:?}"),
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }

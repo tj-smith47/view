@@ -476,6 +476,27 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn tree_create_prompt(
+            &self,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn tree_rename_prompt(
+            &self,
+            _old_path: &str,
+            _current_name: &str,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn tree_delete_confirm(
+            &self,
+            _path: &str,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
     }
 
     #[test]

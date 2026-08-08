@@ -111,7 +111,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                         "<Esc>" => {
                             model.pop_overlay();
                             model.dirty = true;
-                            Vec::new()
+                            vec![Effect::TreeClose]
                         }
                         "<Down>" => {
                             if let Some(t) = model.tree_mut() {
@@ -154,6 +154,78 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                                 }
                                 None => Vec::new(),
                             }
+                        }
+                        // opens the blocked-engine Prompt overlay through
+                        // the entry's own RpcCall (`vim.fn.input` primed
+                        // with a `kind = "confirm"` `nvim_echo`, see
+                        // `RpcCall::TreeCreatePrompt`'s doc) rather than any
+                        // new local input state: the reply routes back as
+                        // `Msg::TreeCreatePromptReply` and resolves the
+                        // actual file write from there, once nvim has
+                        // answered. Any selection, including none at all
+                        // (an empty tree), can create -- `TreeCreatePromptReply`
+                        // resolves the target directory from whatever is
+                        // selected at reply time (see its arm below), since
+                        // nothing about the tree's selection can move while
+                        // this prompt holds focus.
+                        "a" => {
+                            let Some(t) = model.tree_mut() else {
+                                return Vec::new();
+                            };
+                            let generation = t.generation();
+                            vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
+                        }
+                        // renaming a directory has no backing effect --
+                        // `RpcCall::RenameFile` and the `Effect::Tree*File`
+                        // pair are file-only by their own doc contracts --
+                        // so a directory selection is a silent no-op here
+                        // rather than opening a prompt whose answer nothing
+                        // could act on.
+                        "r" => {
+                            let Some(t) = model.tree_mut() else {
+                                return Vec::new();
+                            };
+                            let Some(entry) = t.selected_entry() else {
+                                return Vec::new();
+                            };
+                            if entry.is_dir {
+                                return Vec::new();
+                            }
+                            let current_name = entry
+                                .path
+                                .file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            let Some(old_path) = t.selected_path() else {
+                                return Vec::new();
+                            };
+                            let generation = t.generation();
+                            vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
+                                generation,
+                                old_path: old_path.to_string_lossy().into_owned(),
+                                current_name,
+                            })]
+                        }
+                        // same file-only restriction as "r", for the same
+                        // reason.
+                        "d" => {
+                            let Some(t) = model.tree_mut() else {
+                                return Vec::new();
+                            };
+                            let Some(entry) = t.selected_entry() else {
+                                return Vec::new();
+                            };
+                            if entry.is_dir {
+                                return Vec::new();
+                            }
+                            let Some(path) = t.selected_path() else {
+                                return Vec::new();
+                            };
+                            let generation = t.generation();
+                            vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
+                                generation,
+                                path: path.to_string_lossy().into_owned(),
+                            })]
                         }
                         _ => Vec::new(),
                     },
@@ -470,6 +542,144 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 root,
             }]
         }
+        // the reply is this prompt's definitive resolution, unlike the
+        // ordinary confirm() dialogs `Msg::Key`'s lazy-dismiss guard exists
+        // for (those have no reply channel of their own to hook into): this
+        // pops the Prompt overlay itself rather than waiting for a keypress
+        // that may never come before the tree needs to repaint the create.
+        Msg::TreeCreatePromptReply { generation, name } => {
+            dismiss_top_prompt(model);
+            model.dirty = true;
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            if generation != t.generation() {
+                return Vec::new();
+            }
+            let Some(name) = name.filter(|n| !n.is_empty()) else {
+                return Vec::new();
+            };
+            // creates inside the selected directory, or alongside the
+            // selected file (its parent), or at the tree's own root when
+            // nothing is selected -- the same "beside what's under the
+            // cursor" placement a file manager's own new-file action uses
+            let target_dir = match t.selected_entry() {
+                Some(entry) if entry.is_dir => t.root().join(&entry.path),
+                Some(entry) => t
+                    .root()
+                    .join(&entry.path)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+                    .unwrap_or_else(|| t.root().to_path_buf()),
+                None => t.root().to_path_buf(),
+            };
+            vec![Effect::TreeCreateFile {
+                path: target_dir.join(name),
+                generation: t.generation(),
+            }]
+        }
+        Msg::TreeRenamePromptReply {
+            generation,
+            old_path,
+            name,
+        } => {
+            dismiss_top_prompt(model);
+            model.dirty = true;
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            if generation != t.generation() {
+                return Vec::new();
+            }
+            let Some(new_name) = name.filter(|n| !n.is_empty()) else {
+                return Vec::new();
+            };
+            let old = std::path::PathBuf::from(&old_path);
+            let Some(parent) = old.parent() else {
+                return Vec::new();
+            };
+            let new_path = parent.join(new_name);
+            vec![Effect::Rpc(RpcCall::RenameFile {
+                old_path,
+                new_path: new_path.to_string_lossy().into_owned(),
+                generation: t.generation(),
+            })]
+        }
+        Msg::TreeDeleteConfirmReply {
+            generation,
+            path,
+            confirmed,
+        } => {
+            dismiss_top_prompt(model);
+            model.dirty = true;
+            if !confirmed {
+                return Vec::new();
+            }
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            if generation != t.generation() {
+                return Vec::new();
+            }
+            vec![Effect::TreeDeleteFile {
+                path: std::path::PathBuf::from(path),
+                generation: t.generation(),
+            }]
+        }
+        // mirrors `Msg::TreeRenameReply`'s own discard-generation, rescan-
+        // on-success shape exactly: `generation` here names the create/
+        // delete call itself, not a tree state to compare against, so a
+        // successful reply always rescans unconditionally.
+        Msg::TreeCreateFileResult { generation: _, ok } => {
+            model.dirty = true;
+            if !ok {
+                return model.engine.record_native_notice(
+                    "view: create failed (already exists?)".to_string(),
+                    false,
+                );
+            }
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let root = t.root().to_path_buf();
+            let rescan_generation = t.request_rescan();
+            vec![Effect::TreeScan {
+                generation: rescan_generation,
+                root,
+            }]
+        }
+        Msg::TreeDeleteFileResult { generation: _, ok } => {
+            model.dirty = true;
+            if !ok {
+                return model
+                    .engine
+                    .record_native_notice("view: delete failed".to_string(), false);
+            }
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let root = t.root().to_path_buf();
+            let rescan_generation = t.request_rescan();
+            vec![Effect::TreeScan {
+                generation: rescan_generation,
+                root,
+            }]
+        }
+    }
+}
+
+/// Pops the Prompt overlay if it is the topmost one -- the shared first
+/// step every tree prompt-reply arm takes, since each of the three
+/// (create/rename/delete) resolves the same way: a definitive async RPC
+/// reply, not the lazy next-keypress dismissal `Msg::Key` uses for the
+/// engine's own confirm() dialogs, which carry no reply of their own to
+/// hook into.
+fn dismiss_top_prompt(model: &mut Model) {
+    if matches!(
+        model.top_overlay_mut().map(|ov| &ov.kind),
+        Some(OverlayKind::Prompt(_))
+    ) {
+        model.pop_overlay();
     }
 }
 
@@ -582,7 +792,7 @@ fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
 fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
     if model.close_tree() {
         model.dirty = true;
-        return Vec::new();
+        return vec![Effect::TreeClose];
     }
     let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
     let scan_generation = state.generation();
@@ -3686,7 +3896,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_toggle_again_closes_the_sidebar_and_issues_no_effect() {
+    fn tree_toggle_again_closes_the_sidebar_and_cancels_its_scan_worker() {
         let mut m = model();
         let _ = update(
             &mut m,
@@ -3707,9 +3917,122 @@ mod tests {
             "a second toggle must close the tree it just opened: {:?}",
             m.overlays()
         );
+        // `Effect::TreeClose` flips whatever scan the executor still has
+        // running (see `Executor::tree_scan_cancel`'s own doc): closing
+        // issues exactly this one effect, not none, so a huge tree closed
+        // mid-scan does not leave its worker thread walking unobserved.
         assert!(
-            effects.is_empty(),
-            "closing needs no worker reply: {effects:?}"
+            matches!(effects.as_slice(), [Effect::TreeClose]),
+            "closing must cancel the scan worker via Effect::TreeClose: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn tree_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_stealing_focus() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "test".into())],
+                replace_last: false,
+            }]),
+        );
+        let prompt_id = match m.focus() {
+            Focus::Native(id) => id,
+            Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        };
+        assert!(matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ));
+
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let (mut saw_scan, mut saw_git_scan) = (false, false);
+        for effect in &effects {
+            match effect {
+                Effect::TreeScan { .. } => saw_scan = true,
+                Effect::TreeGitScan { .. } => saw_git_scan = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_scan && saw_git_scan,
+            "opening beneath the prompt must still issue both scans: {effects:?}"
+        );
+        assert_eq!(
+            m.focus(),
+            Focus::Native(prompt_id),
+            "a tree opening while a blocked prompt is topmost must not \
+             steal its focus"
+        );
+        assert_eq!(
+            m.overlays().len(),
+            2,
+            "the tree must open beneath the prompt, not replace it"
+        );
+        assert!(
+            matches!(m.overlays()[0].kind, OverlayKind::Tree(_)),
+            "the tree must sit beneath the prompt on the stack: {:?}",
+            m.overlays()
+        );
+        assert!(
+            matches!(m.overlays()[1].kind, OverlayKind::Prompt(_)),
+            "the prompt must remain topmost: {:?}",
+            m.overlays()
+        );
+        assert!(
+            m.tree_mut().is_some(),
+            "the tree must still be reachable so a streamed scan reply can \
+             reach it even while the prompt holds focus"
+        );
+    }
+
+    #[test]
+    fn close_tree_releases_its_own_mouse_capture_but_not_a_different_overlays() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let tree_id = match m.overlays().last() {
+            Some(overlay) if matches!(overlay.kind, OverlayKind::Tree(_)) => overlay.id,
+            other => unreachable!("toggle must have opened a Tree overlay: {other:?}"),
+        };
+        m.capture_mouse(MouseCapture::Overlay(tree_id));
+        assert_eq!(m.mouse_capture(), Some(MouseCapture::Overlay(tree_id)));
+
+        assert!(m.close_tree(), "the open tree must be found and closed");
+        assert_eq!(
+            m.mouse_capture(),
+            None,
+            "closing the tree that owns the in-flight gesture must release \
+             it, or a drag whose target just disappeared would keep \
+             routing to an overlay id nothing on the stack holds anymore"
+        );
+
+        // a capture belonging to some other, unrelated overlay id must
+        // survive a tree close that never held it
+        let unrelated_id = OverlayId(9999);
+        m.capture_mouse(MouseCapture::Overlay(unrelated_id));
+        assert!(
+            !m.close_tree(),
+            "no tree is open at this point, so this must report nothing \
+             was found to close"
+        );
+        assert_eq!(
+            m.mouse_capture(),
+            Some(MouseCapture::Overlay(unrelated_id)),
+            "close_tree must never release a capture it does not own"
         );
     }
 

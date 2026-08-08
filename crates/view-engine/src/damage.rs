@@ -339,6 +339,25 @@ struct Route {
     /// there is only ever one selected row to act on), so there is never
     /// more than one outstanding reply to hold.
     deferred_rename: Option<Msg>,
+    /// The `Msg::TreeCreatePromptReply` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_rename`]: the tree
+    /// issues at most one create prompt at a time.
+    deferred_create_prompt: Option<Msg>,
+    /// The `Msg::TreeRenamePromptReply` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_rename`]: the tree
+    /// issues at most one rename prompt at a time, for the same
+    /// one-selected-row reason `deferred_rename` documents.
+    deferred_rename_prompt: Option<Msg>,
+    /// The `Msg::TreeDeleteConfirmReply` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_rename`]: the tree
+    /// issues at most one delete confirmation at a time.
+    deferred_delete_confirm: Option<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -349,6 +368,9 @@ enum Held {
     BufferList,
     Preview,
     Rename,
+    CreatePrompt,
+    RenamePrompt,
+    DeleteConfirm,
 }
 
 impl Route {
@@ -359,6 +381,9 @@ impl Route {
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::Preview => &mut self.deferred_preview,
             Held::Rename => &mut self.deferred_rename,
+            Held::CreatePrompt => &mut self.deferred_create_prompt,
+            Held::RenamePrompt => &mut self.deferred_rename_prompt,
+            Held::DeleteConfirm => &mut self.deferred_delete_confirm,
         }
     }
 
@@ -372,6 +397,9 @@ impl Route {
             Held::BufferList,
             Held::Preview,
             Held::Rename,
+            Held::CreatePrompt,
+            Held::RenamePrompt,
+            Held::DeleteConfirm,
         ] {
             let Some(msg) = self.slot(which).take() else {
                 continue;
@@ -534,6 +562,39 @@ impl PumpShared {
     /// un-triggered rather than merely stale.
     pub(crate) fn route_rename(&self, msg: Msg) {
         self.route_held(msg, Held::Rename);
+    }
+
+    /// Routes a `Msg::TreeCreatePromptReply` without ever dropping it on a
+    /// full sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped reply here leaves the create prompt open with no path
+    /// forward: nothing re-issues the `RpcCall::TreeCreatePrompt` on its
+    /// own, so the user's typed name would simply vanish.
+    pub(crate) fn route_create_prompt(&self, msg: Msg) {
+        self.route_held(msg, Held::CreatePrompt);
+    }
+
+    /// Routes a `Msg::TreeRenamePromptReply` without ever dropping it on a
+    /// full sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped reply here leaves the rename prompt open with no path
+    /// forward, on the same terms as [`route_create_prompt`](Self::route_create_prompt).
+    pub(crate) fn route_rename_prompt(&self, msg: Msg) {
+        self.route_held(msg, Held::RenamePrompt);
+    }
+
+    /// Routes a `Msg::TreeDeleteConfirmReply` without ever dropping it on a
+    /// full sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped reply here is the one this crate cannot afford to lose
+    /// silently: `vim.fn.confirm` has already returned by the time this
+    /// fires, so a lost reply would leave the user's choice permanently
+    /// un-acted-on rather than merely stale.
+    pub(crate) fn route_delete_confirm(&self, msg: Msg) {
+        self.route_held(msg, Held::DeleteConfirm);
     }
 
     fn route_held(&self, msg: Msg, which: Held) {

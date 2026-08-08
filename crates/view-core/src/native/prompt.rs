@@ -40,9 +40,19 @@ enum Answer {
     /// A `:confirm()`-style prompt, or the swapfile ATTENTION dialog, which
     /// captures identically: one key resolves it.
     Choices(Vec<Choice>),
-    /// An `inputlist()`-style prompt: free-text digits echoed back by nvim
-    /// itself on every `cmdline_show`, submitted with `<CR>`.
-    FreeText { typed: String },
+    /// A prompt whose `cmdline_show` carries no bracket/paren accelerator
+    /// list, so its answer is typed text echoed back by nvim itself on every
+    /// `cmdline_show`, submitted with `<CR>`. Two wire-identical shapes share
+    /// this variant: nvim's own `inputlist()` (`digits_only: true` -- only a
+    /// digit, plus the keys its prompt text documents, resolve it) and the
+    /// `nvim_echo(kind = "confirm") + vim.fn.input()` pattern the tree's
+    /// create/rename prompts use (`digits_only: false` -- any single
+    /// printable character is typed text). [`is_inputlist_prompt`]
+    /// distinguishes them by nvim's own fixed `inputlist()` prompt string,
+    /// the only place the two differ on the wire (see
+    /// `docs/tree-input-prompt-wire-capture.md` for the live capture proving
+    /// a plain `input()` carries no such text).
+    FreeText { typed: String, digits_only: bool },
 }
 
 /// One open confirm-class prompt: the question text plus whatever choices
@@ -80,6 +90,7 @@ impl PromptState {
             Some(choices) => Answer::Choices(choices),
             None => Answer::FreeText {
                 typed: cmdline.content.iter().map(|(_, t)| t.as_str()).collect(),
+                digits_only: is_inputlist_prompt(&cmdline.prompt),
             },
         };
     }
@@ -113,12 +124,28 @@ impl PromptState {
                     .iter()
                     .any(|choice| choice.key == c.to_ascii_lowercase())
             }
-            Answer::FreeText { .. } => {
+            Answer::FreeText {
+                digits_only: true, ..
+            } => {
                 matches!(notation, "<CR>" | "<Esc>" | "<BS>" | "q")
                     || notation
                         .chars()
                         .next()
                         .is_some_and(|c| notation.chars().count() == 1 && c.is_ascii_digit())
+            }
+            // an ordinary `input()` prompt (see `Answer::FreeText`'s doc):
+            // `q` is not nvim's documented cancel key here the way it is for
+            // `inputlist()` -- it is an ordinary character a filename can
+            // contain -- so it falls through to the single-printable-char
+            // check like any other letter rather than being special-cased
+            Answer::FreeText {
+                digits_only: false, ..
+            } => {
+                matches!(notation, "<CR>" | "<Esc>" | "<BS>")
+                    || notation
+                        .chars()
+                        .next()
+                        .is_some_and(|c| notation.chars().count() == 1 && !c.is_control())
             }
         }
     }
@@ -143,7 +170,7 @@ impl PromptState {
                     None => view,
                 }
             }
-            Answer::FreeText { typed } => base.with_input(typed.clone()),
+            Answer::FreeText { typed, .. } => base.with_input(typed.clone()),
         }
     }
 }
@@ -179,6 +206,16 @@ fn parse_choices(prompt_text: &str) -> Option<Vec<Choice>> {
         });
     }
     (!choices.is_empty()).then_some(choices)
+}
+
+/// True when a `cmdline_show` prompt string is nvim's own `inputlist()`
+/// prompt, identified by the fixed instructional suffix nvim appends to
+/// every `inputlist()` invocation regardless of the caller's own text.
+/// Anything else sharing the wire shape (the tree's `vim.fn.input()`
+/// prompts, e.g. "New file: ") is a different, non-digit-only free-text
+/// prompt and must not match this.
+fn is_inputlist_prompt(prompt_text: &str) -> bool {
+    prompt_text.contains("Type number and <Enter>")
 }
 
 #[cfg(test)]

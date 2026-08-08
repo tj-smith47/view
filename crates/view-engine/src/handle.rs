@@ -95,6 +95,28 @@ enum Waiter {
     /// reopened is dropped by `update()` rather than triggering a rescan
     /// nothing is listening for.
     Rename { generation: u64 },
+    /// An async tree-sidebar create-file prompt (see
+    /// [`EngineHandle::request_create_prompt`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::TreeCreatePromptReply`, tagged with `generation` so a reply for
+    /// a prompt issued before the tree was closed and reopened is dropped by
+    /// `update()` rather than creating a file nothing asked for anymore.
+    CreatePrompt { generation: u64 },
+    /// An async tree-sidebar rename prompt (see
+    /// [`EngineHandle::request_rename_prompt`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::TreeRenamePromptReply`, tagged with `generation` (the same
+    /// stale-reply guard `CreatePrompt` carries) and `old_path` (echoed back
+    /// since the reply itself carries only the typed name, and the rename
+    /// this eventually issues needs to know what it is renaming from).
+    RenamePrompt { generation: u64, old_path: String },
+    /// An async tree-sidebar delete confirmation (see
+    /// [`EngineHandle::request_delete_confirm`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::TreeDeleteConfirmReply`, tagged with `generation` (the same
+    /// stale-reply guard `CreatePrompt` carries) and `path` (echoed back
+    /// since `vim.fn.confirm`'s reply carries only the chosen button index).
+    DeleteConfirm { generation: u64, path: String },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -424,6 +446,64 @@ impl EngineHandle {
                                     // were before this rename was issued
                                     let ok = error == Value::Nil && decode_rename_reply(&result);
                                     pump.route_rename(Msg::TreeRenameReply { generation, ok });
+                                }
+                            }
+                            Some(Waiter::CreatePrompt { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply (including the user
+                                    // cancelling the prompt, which nvim
+                                    // reports as an empty-string result, not
+                                    // an error) degrades to `None` the same
+                                    // way; either reading means "no file was
+                                    // named" and the executor must not create
+                                    // one
+                                    let name = if error == Value::Nil {
+                                        decode_prompt_reply(&result)
+                                    } else {
+                                        None
+                                    };
+                                    pump.route_create_prompt(Msg::TreeCreatePromptReply {
+                                        generation,
+                                        name,
+                                    });
+                                }
+                            }
+                            Some(Waiter::RenamePrompt {
+                                generation,
+                                old_path,
+                            }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // same degrade as `CreatePrompt`: an
+                                    // error or a cancelled prompt both mean
+                                    // "no new name was given", so the rename
+                                    // this would otherwise issue must not
+                                    // happen
+                                    let name = if error == Value::Nil {
+                                        decode_prompt_reply(&result)
+                                    } else {
+                                        None
+                                    };
+                                    pump.route_rename_prompt(Msg::TreeRenamePromptReply {
+                                        generation,
+                                        old_path,
+                                        name,
+                                    });
+                                }
+                            }
+                            Some(Waiter::DeleteConfirm { generation, path }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "not
+                                    // confirmed", the same safe-default
+                                    // precedent every other async reply here
+                                    // follows: a delete this decoder cannot
+                                    // confirm the user chose must not happen
+                                    let confirmed =
+                                        error == Value::Nil && decode_delete_confirm_reply(&result);
+                                    pump.route_delete_confirm(Msg::TreeDeleteConfirmReply {
+                                        generation,
+                                        path,
+                                        confirmed,
+                                    });
                                 }
                             }
                             None => {}
@@ -858,6 +938,85 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::Rename { generation })
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into the typed name (or `None` on cancel) and routed to the
+    /// connection's pump as `Msg::TreeCreatePromptReply` (see
+    /// [`Waiter::CreatePrompt`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe): the tree overlay's create
+    /// prompt is issued from the runtime loop, which must never block on a
+    /// reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_create_prompt(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::CreatePrompt { generation })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into the typed name (or `None` on cancel) and routed to the
+    /// connection's pump as `Msg::TreeRenamePromptReply` (see
+    /// [`Waiter::RenamePrompt`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe). Takes `old_path` in addition
+    /// to `generation` (the same reason [`request_preview`](Self::request_preview)
+    /// takes `path`): the eventual reply carries only the typed name, and the
+    /// rename this prompt exists to gather input for needs to know what it
+    /// is renaming from.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_rename_prompt(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+        old_path: String,
+    ) -> Result<(), EngineError> {
+        self.request_async(
+            method,
+            params,
+            Waiter::RenamePrompt {
+                generation,
+                old_path,
+            },
+        )
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into a confirmed flag and routed to the connection's pump as
+    /// `Msg::TreeDeleteConfirmReply` (see [`Waiter::DeleteConfirm`]). Async
+    /// on the same terms as [`request_probe`](Self::request_probe). Takes
+    /// `path` in addition to `generation` (the same reason
+    /// [`request_preview`](Self::request_preview) takes `path`): the
+    /// eventual reply carries only the chosen button index, and the delete
+    /// this confirmation exists to gate needs to know which file it applies
+    /// to.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_delete_confirm(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+        path: String,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::DeleteConfirm { generation, path })
+    }
+
     /// Allocates a msgid, registers `waiter`, and enqueues the encoded
     /// request, without a synchronous receiver for anything to block on.
     /// Shared by every async request wrapper; how the eventual `Response` is
@@ -1092,6 +1251,32 @@ fn decode_rename_reply(result: &Value) -> bool {
         .and_then(|pairs| crate::wire::map_find(pairs, "ok"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+/// Decodes a tree create/rename prompt's reply, live-verified against a real
+/// `nvim --clean --headless` (see `docs/tree-input-prompt-wire-capture.md`):
+/// `vim.fn.input` replies with a bare string, not a map -- an empty string
+/// both on an outright `<Esc>` cancel and on the user submitting a blank
+/// answer, neither of which names a file to create or rename to, so both
+/// degrade to `None` the same way a non-string `result` this crate has not
+/// actually seen from the pinned engine does.
+fn decode_prompt_reply(result: &Value) -> Option<String> {
+    result.as_str().filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
+/// Decodes a tree delete confirmation's reply, live-verified against a real
+/// `nvim --clean --headless` (see `docs/tree-input-prompt-wire-capture.md`):
+/// `vim.fn.confirm` replies with the 1-based index of the chosen button, per
+/// `:help confirm()` -- `1` for the first (`&Yes`), `2` for the second
+/// (`&No`), and `0` when the dialog was force-closed (e.g. `<C-c>`) without a
+/// choice. Only an explicit `1` confirms; every other value, including a
+/// non-integer `result` this crate has not actually seen from the pinned
+/// engine, degrades to "not confirmed" -- the same "absent or malformed is
+/// exactly as informative as an explicit false" precedent `decode_rename_reply`
+/// follows, and the safe reading here besides: a delete this decoder cannot
+/// confirm the user chose must not happen.
+fn decode_delete_confirm_reply(result: &Value) -> bool {
+    result.as_i64() == Some(1)
 }
 
 /// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map

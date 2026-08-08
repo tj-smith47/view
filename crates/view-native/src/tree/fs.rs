@@ -11,6 +11,7 @@
 //! repeated scans of an unchanged tree.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use view_core::native::tree::TreeEntry;
 
@@ -21,13 +22,26 @@ use view_core::native::tree::TreeEntry;
 /// error, a broken symlink `ignore` could not stat) is skipped rather than
 /// aborting the whole walk, the same degrade `picker::sources::spawn_file_scan`
 /// uses.
+///
+/// `cancel` is checked ahead of every entry the walk visits, on the same
+/// per-entry grain `picker::sources::spawn_file_scan` checks its own
+/// `cancel` at: a caller flips it and this returns whatever it has
+/// collected so far rather than finishing the walk. This is the executor's
+/// only way to stop a scan of a huge tree once it is already running --
+/// unlike the picker's worker, this runs to completion in one blocking call
+/// with no generation check of its own along the way, so without this flag
+/// closing the sidebar mid-scan would leave the walk running unobserved for
+/// as long as it takes.
 #[must_use]
-pub fn scan(root: &Path) -> Vec<TreeEntry> {
+pub fn scan(root: &Path, cancel: &AtomicBool) -> Vec<TreeEntry> {
     let mut out = Vec::new();
     let walker = ignore::WalkBuilder::new(root)
         .sort_by_file_name(std::ffi::OsStr::cmp)
         .build();
     for entry in walker {
+        if cancel.load(Ordering::Acquire) {
+            break;
+        }
         let Ok(entry) = entry else { continue };
         // depth 0 is root itself (ignore::WalkBuilder always yields it
         // first); everything this scan reports is relative to it, so it
@@ -68,7 +82,7 @@ mod tests {
         std::fs::write(root.join("src/main.rs"), "").expect("write main.rs");
         std::fs::write(root.join("Cargo.toml"), "").expect("write Cargo.toml");
 
-        let entries = scan(&root);
+        let entries = scan(&root, &AtomicBool::new(false));
         assert!(
             entries.iter().all(|e| e.path != std::path::Path::new("")),
             "the root itself must never appear as an entry"
@@ -119,7 +133,7 @@ mod tests {
         std::fs::write(root.join("ignored.txt"), "").expect("write ignored.txt");
         std::fs::write(root.join("kept.txt"), "").expect("write kept.txt");
 
-        let entries = scan(&root);
+        let entries = scan(&root, &AtomicBool::new(false));
         assert!(
             !entries
                 .iter()
@@ -129,6 +143,45 @@ mod tests {
         assert!(entries
             .iter()
             .any(|e| e.path == std::path::Path::new("kept.txt")));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // proves the `cancel` check actually stops the walk early rather than
+    // merely existing unused: disabling it (e.g. removing the `if
+    // cancel.load(..) { break; }` line) makes `scan` run to completion
+    // regardless, and this test then deterministically fails, since
+    // `entries.len()` would equal `total` instead of falling short of it.
+    #[test]
+    fn a_cancelled_scan_stops_short_of_the_full_tree() {
+        let root = scratch("cancel");
+        let dirs = 200;
+        let files_per_dir = 100;
+        for d in 0..dirs {
+            let dir = root.join(format!("d{d}"));
+            std::fs::create_dir_all(&dir).expect("mkdir");
+            for f in 0..files_per_dir {
+                std::fs::write(dir.join(format!("f{f}.txt")), "").expect("write file");
+            }
+        }
+        let total = dirs * (files_per_dir + 1);
+
+        let cancel = std::sync::Arc::new(AtomicBool::new(false));
+        let scan_root = root.clone();
+        let scan_cancel = std::sync::Arc::clone(&cancel);
+        let handle = std::thread::spawn(move || scan(&scan_root, &scan_cancel));
+        // no sleep: flipping the flag immediately, with no coordination
+        // beyond the spawn itself, is what makes this deterministic --
+        // whichever of the walk or this store runs first, the walk's very
+        // next per-entry check sees `true` and stops there
+        cancel.store(true, Ordering::Release);
+        let entries = handle.join().expect("scan thread joins");
+
+        assert!(
+            entries.len() < total,
+            "a cancelled scan must stop short of the full tree ({} of {total} entries)",
+            entries.len()
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }

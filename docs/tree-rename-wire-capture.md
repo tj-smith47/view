@@ -37,13 +37,19 @@ local function canon(p)
   return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
 end
 local wanted = canon(old_path)
+local snapshot = {}
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) then
+    snapshot[#snapshot + 1] = { buf = buf, canon = canon(vim.api.nvim_buf_get_name(buf)) }
+  end
+end
 local rc = vim.fn.rename(old_path, new_path)
 if rc ~= 0 then
   return { ok = false }
 end
-for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
-    vim.api.nvim_buf_set_name(buf, new_path)
+for _, entry in ipairs(snapshot) do
+  if entry.canon == wanted then
+    vim.api.nvim_buf_set_name(entry.buf, new_path)
     break
   end
 end
@@ -53,11 +59,17 @@ return { ok = true }
 `wanted` is resolved from `old_path` before the rename happens, while the
 file still exists to resolve a real path for -- resolving it afterward would
 have `fs_realpath` fail (the file is gone from that location) and fall back
-to `fnamemodify`, which still works, but there is no reason to depend on the
-fallback when the precise path is available a moment earlier. The same
-canonicalizing match `docs/picker-preview-wire-capture.md` uses for buffer
-lookup by path is reused here for the same reason: a symlinked tree root
-would otherwise never byte-match `nvim_buf_get_name`'s resolved name.
+to `fnamemodify`, which never resolves a symlink component, so it would
+never byte-match `wanted` for a buffer reached through a symlinked ancestor
+directory. Every loaded buffer's own canon is captured into `snapshot`
+*before* the rename runs for the identical reason: it is not just `wanted`
+that needs the file to still exist at its old location to resolve correctly,
+the candidate buffers' own names do too. Response shape is unchanged from
+the original single-loop version -- only the ordering of when each
+buffer's canon is computed relative to `vim.fn.rename` changed, so no
+re-capture of the reply cases below was needed. See "4. Rename through a
+symlinked directory" below for the live case this ordering is load-bearing
+for.
 
 ## 1. Rename with a modified, unsaved buffer open
 
@@ -114,6 +126,44 @@ The buffer-retarget loop simply finds nothing to retarget and the plain
 filesystem rename still succeeds -- the common case for a tree entry that
 was never opened.
 
+## 4. Rename through a symlinked directory
+
+A buffer is named, via `nvim_buf_set_name`, for a path under a symlinked
+directory that does not exist yet -- the pinned engine's own path
+resolution eagerly resolves a buffer's name to its realpath the moment
+every path component exists (whether the buffer is created via `:edit` or
+`nvim_buf_set_name`), and that resolution never re-runs afterward, so a
+buffer named while its symlinked parent already exists never actually
+carries an unresolved symlink component for this chunk's ordering to lose.
+Naming the buffer first, then creating the symlink, then renaming is the
+only way to reach the gap live: nvim falls back to storing the literal,
+unresolved path when the eager resolve fails (`ENOENT`, the parent not
+existing yet), and never revisits it once the symlink is created.
+
+```
+before symlink exists: buffer name is literal, unresolved
+symlink created; old path now resolves through it
+chunk result: ok=true
+after rename: buffer name resolves (canonicalized) to the new path
+modified flag: survives
+src exists: false
+dst exists: true
+```
+
+With `wanted` and every candidate buffer's canon captured before
+`vim.fn.rename` runs (the chunk above), the retarget succeeds. Reverting to
+computing each candidate's canon *after* the rename -- the single-loop,
+no-`snapshot` shape this chunk replaced -- reproducibly fails this exact
+case: `fs_realpath` on the buffer's still-literal name can no longer
+resolve the now-renamed-away old path, falls back to `fnamemodify` (which
+never resolves the symlink component), and the fallback string never
+equals `wanted`, silently leaving the buffer orphaned at its old, unresolved
+name. Live-verified both ways in
+`crates/view-engine/tests/rename_modified_buffer.rs`'s
+`a_rename_through_a_symlinked_directory_still_follows_the_open_buffer`: it
+passes against the snapshot-based chunk and fails against the reverted,
+post-rename-canon chunk.
+
 ## Conclusions for the implementation
 
 - `EngineHandle::rename_file(&self, old_path: &str, new_path: &str,
@@ -123,6 +173,11 @@ was never opened.
   `request_preview`'s shape: async, never blocks, decodes on the reader
   thread, routes to `pump` as `Msg::TreeRenameReply { generation, ok }` (new
   `Held::Rename` slot in `damage.rs`, alongside `Held::Preview`).
+- The buffer-retarget loop's candidates must be canonicalized before
+  `vim.fn.rename` runs, never after -- case 4 above is the reproducible,
+  live-verified evidence for that ordering; getting it backward does not
+  error, it silently drops the retarget for any buffer reached through a
+  symlinked ancestor directory.
 - `decode_rename_reply` reads the `ok` key and degrades to `false` for any
   reply shape this crate has not actually observed from the pinned engine
   (a non-map result, a missing key, an error reply), the same "safe default
