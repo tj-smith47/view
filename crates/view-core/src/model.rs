@@ -761,9 +761,13 @@ pub enum Focus {
     Engine,
     /// The native overlay identified by `OverlayId` owns the keyboard: keys
     /// and paste are consumed by that overlay instead of reaching the
-    /// engine, and `<Esc>` closes it, handing focus to whatever overlay was
-    /// under it. Mouse input is the exception, routing by position through
-    /// [`Model::overlay_at`] rather than by focus.
+    /// engine. Closing it is overlay-kind-specific rather than a generic
+    /// `<Esc>` rule: a `Prompt` overlay forwards a key it accepts (its
+    /// choice letters, `<CR>`, `<Esc>`) to the engine instead of closing
+    /// itself, since the engine, not view, owns resolving it; it closes
+    /// later, lazily, on the first key observed once the engine has
+    /// actually hidden its cmdline. Mouse input is the exception, routing
+    /// by position through [`Model::overlay_at`] rather than by focus.
     Native(OverlayId),
 }
 
@@ -801,10 +805,6 @@ pub struct Overlay {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum OverlayKind {
-    /// An overlay with no feature state: it owns its rect and, while it is
-    /// on top, the keyboard. This is the routing and geometry seam by
-    /// itself, with nothing painted into it.
-    Bare,
     /// A modal confirm-class prompt -- nvim blocked in its own input loop,
     /// waiting for an answer. See [`crate::native::prompt::PromptState`].
     Prompt(crate::native::prompt::PromptState),

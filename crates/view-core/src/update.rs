@@ -448,10 +448,19 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             replace_last,
         } => {
             model.engine.messages.push(kind, content, replace_last);
-            // one prompt overlay per live question: a re-shown identical
-            // confirm (nvim never sends msg_clear between question and
-            // answer) must not stack a second overlay on top of the one
-            // already routing keys for it
+            // a confirm-class msg_show while a Prompt overlay is already
+            // open replaces its state wholesale rather than being skipped:
+            // a genuine re-arm of the SAME question (an unmatched key)
+            // never sends a second msg_show at all (see
+            // docs/prompt-overlay-wire-capture.md, section 1), so every
+            // msg_show this branch ever sees while a Prompt overlay is open
+            // names a distinct new question -- routine when nvim's own Lua
+            // resolves one confirm and immediately raises another with no
+            // intervening keystroke, as plugin bootstraps do. Replacing
+            // both the message and the (still-Pending) answer together
+            // keeps them from a prior question's leftovers, so the paired
+            // CmdlineShow that follows learns choices for the same
+            // question this state's message now names.
             let prompt_state = model
                 .engine
                 .messages
@@ -459,12 +468,11 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 .last()
                 .and_then(PromptState::from_entry);
             if let Some(state) = prompt_state {
-                let already_open = matches!(
-                    model.top_overlay_mut().map(|ov| &ov.kind),
-                    Some(OverlayKind::Prompt(_))
-                );
-                if !already_open {
-                    model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+                match model.top_overlay_mut().map(|ov| &mut ov.kind) {
+                    Some(OverlayKind::Prompt(p)) => *p = state,
+                    _ => {
+                        model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+                    }
                 }
             }
             Vec::new()
@@ -544,10 +552,57 @@ mod tests {
         Model::with_term_size(80, 24)
     }
 
-    /// Opens an overlay covering the middle half of the terminal: rows
-    /// 6..18 and columns 20..60 of an 80x24 one.
+    /// A real `OverlayKind::Prompt`, built through the same `MsgShow` path
+    /// production uses. Stands in for "some open overlay" in tests that
+    /// only exercise the overlay stack's own behavior -- routing,
+    /// geometry, focus, stacking -- and do not care about prompt
+    /// semantics: `Prompt` is the only concrete overlay kind there is.
+    fn some_overlay_kind() -> OverlayKind {
+        let mut throwaway = Model::new();
+        let _ = update(
+            &mut throwaway,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "test".into())],
+                replace_last: false,
+            }]),
+        );
+        throwaway
+            .pop_overlay()
+            .expect("MsgShow opens a Prompt overlay")
+            .kind
+    }
+
+    /// Opens a real, live confirm-style Prompt overlay: `learn_cmdline`
+    /// puts it in `Answer::Choices` and `model.engine.cmdline` is set the
+    /// same way a real `cmdline_show` would, together the exact end state
+    /// nvim leaves a `confirm()` dialog in once both halves of its paired
+    /// `msg_show`/`cmdline_show` batch have arrived (see
+    /// docs/prompt-overlay-wire-capture.md section 1). `MsgShow` alone
+    /// leaves `cmdline` at `None`, a state a live dialog is never actually
+    /// in: the lazy-dismiss check at the top of `Msg::Key` treats a Prompt
+    /// overlay open with the cmdline closed as already resolved and
+    /// awaiting its dismissal keystroke, which is correct for that case
+    /// and wrong to build by construction here. This stays a raw stack
+    /// push rather than replaying both events through `update`, so that
+    /// stacking several of these still creates distinct overlays: a
+    /// second `MsgShow` while one is already open replaces it in place
+    /// instead of pushing (see the `MsgShow` handler above). Covers rows
+    /// 6..18 and columns 20..60 of an 80x24 terminal.
     fn open_overlay(model: &mut Model) -> OverlayId {
-        model.push_overlay(OverlayBox::new(50, 50), OverlayKind::Bare)
+        let cmdline = CmdlineState {
+            content: vec![],
+            pos: 0,
+            firstc: String::new(),
+            prompt: "[Y]es, (N)o: ".into(),
+            indent: 0,
+            level: 1,
+        };
+        let mut kind = some_overlay_kind();
+        let OverlayKind::Prompt(p) = &mut kind;
+        p.learn_cmdline(&cmdline);
+        model.engine.cmdline = Some(cmdline);
+        model.push_overlay(OverlayBox::new(50, 50), kind)
     }
 
     /// The ids on the stack, bottom first.
@@ -999,7 +1054,15 @@ mod tests {
     }
 
     #[test]
-    fn key_in_native_focus_is_consumed_and_esc_returns_engine_focus() {
+    fn key_in_native_focus_is_consumed_and_esc_forwards_without_closing() {
+        // a live choice prompt's Esc resolves/aborts nvim's own blocking
+        // confirm() call, so it must reach the engine rather than pop
+        // locally: a local-only pop would desync view's overlay from
+        // nvim's still-blocked prompt, exactly the silent-hang class this
+        // overlay exists to prevent (docs/prompt-overlay-wire-capture.md
+        // section 2). The overlay only closes later, via the lazy-dismiss
+        // keypress that follows nvim's own cmdline_hide -- covered
+        // separately below.
         let mut m = model();
         let id = open_overlay(&mut m);
         let effects = update(
@@ -1010,12 +1073,12 @@ mod tests {
         );
         assert!(
             effects.is_empty(),
-            "native focus consumes keys, never forwards to the engine"
+            "native focus consumes keys that name none of the prompt's choices"
         );
         assert_eq!(
             m.focus(),
             Focus::Native(id),
-            "a non-Esc key must not close the overlay"
+            "a key naming none of the choices must not close the overlay"
         );
 
         let effects = update(
@@ -1025,8 +1088,39 @@ mod tests {
             }),
         );
         assert!(
-            effects.is_empty(),
-            "Esc returns focus without forwarding to the engine"
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+            ),
+            "Esc on a resolved choice prompt must reach the still-blocked engine: {effects:?}"
+        );
+        assert_eq!(
+            m.focus(),
+            Focus::Native(id),
+            "forwarding Esc to the engine does not itself close the overlay"
+        );
+        assert_eq!(m.overlays().len(), 1, "Esc alone pops nothing");
+
+        // nvim resolves its own confirm() call and hides the cmdline; the
+        // overlay's lazy-dismiss timing then closes it on the next key,
+        // exactly like the underlying toast (see the `Msg::Key` handler's
+        // own doc comment)
+        let _ = update(&mut m, Msg::Redraw(vec![UiEvent::CmdlineHide]));
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "j".into(),
+            }),
+        );
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "j"
+            ),
+            "closing the overlay hands focus back to the engine within the \
+             same dispatch, so the dismissing keystroke also reaches it, \
+             the same double duty a keypress already does for dismissing \
+             a transient toast: {effects:?}"
         );
         assert_eq!(
             m.focus(),
@@ -1080,15 +1174,22 @@ mod tests {
                                 notation: "<Esc>".into(),
                             }),
                         );
-                        if depth_before == 0 {
-                            assert!(
-                                matches!(&effects[..], [Effect::Rpc(RpcCall::Input { .. })]),
-                                "Esc with no overlay open belongs to the engine"
-                            );
-                        } else {
-                            assert!(effects.is_empty(), "Esc must not reach the engine");
-                            shadow.pop();
-                        }
+                        // Esc always reaches the engine now: with no
+                        // overlay open it is plain input, and with a
+                        // resolved choice prompt on top (every overlay
+                        // this generator opens is one) forwarding it IS
+                        // the prompt's resolution keystroke -- nvim owns
+                        // closing the overlay later, via the lazy-dismiss
+                        // keypress that follows its own cmdline_hide,
+                        // which this generator never sends. Esc alone
+                        // never pops, so the shadow stack does not either.
+                        assert!(
+                            matches!(
+                                &effects[..],
+                                [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+                            ),
+                            "Esc must always reach the engine: {effects:?}"
+                        );
                     }
                     3 => {
                         let effects = update(
@@ -1184,10 +1285,15 @@ mod tests {
     }
 
     #[test]
-    fn esc_with_two_overlays_stacked_pops_one_and_leaves_the_lower_focused() {
+    fn esc_on_the_top_of_a_stack_forwards_without_touching_what_is_beneath() {
+        // a live choice prompt's Esc forwards to the engine rather than
+        // popping (see key_in_native_focus_is_consumed_and_esc_forwards_
+        // without_closing): stacking a second one behind the top proves
+        // that forwarding leaves the whole stack, not just the top
+        // overlay, untouched.
         let mut m = model();
-        let picker = m.push_overlay(OverlayBox::new(80, 80), OverlayKind::Bare);
-        let prompt = m.push_overlay(OverlayBox::new(40, 20), OverlayKind::Bare);
+        let picker = open_overlay(&mut m);
+        let prompt = open_overlay(&mut m);
         assert_ne!(picker, prompt);
 
         let effects = update(
@@ -1196,13 +1302,23 @@ mod tests {
                 notation: "<Esc>".into(),
             }),
         );
-        assert!(effects.is_empty(), "Esc must not reach the engine");
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"
+            ),
+            "Esc on the top choice prompt must reach the engine: {effects:?}"
+        );
         assert_eq!(
             m.focus(),
-            Focus::Native(picker),
-            "Esc closes the top overlay only; the one beneath it keeps focus"
+            Focus::Native(prompt),
+            "forwarding Esc to the engine does not close the top overlay"
         );
-        assert_eq!(m.overlays().len(), 1, "Esc pops exactly one overlay");
+        assert_eq!(
+            m.overlays().len(),
+            2,
+            "Esc alone pops nothing off the stack"
+        );
     }
 
     #[test]
@@ -1245,8 +1361,8 @@ mod tests {
     fn a_click_lands_on_the_topmost_overlay_covering_it_not_the_one_with_focus() {
         let mut m = full_screen_model();
         // a wide overlay with a narrower one stacked on top of it
-        let lower = m.push_overlay(OverlayBox::new(100, 100), OverlayKind::Bare);
-        let upper = m.push_overlay(OverlayBox::new(50, 50), OverlayKind::Bare);
+        let lower = m.push_overlay(OverlayBox::new(100, 100), some_overlay_kind());
+        let upper = m.push_overlay(OverlayBox::new(50, 50), some_overlay_kind());
         assert_eq!(
             m.overlay_at(12, 40),
             Some(upper),
@@ -1265,7 +1381,7 @@ mod tests {
         let mut m = full_screen_model();
         let sidebar = m.push_overlay(
             OverlayBox::new(30, 100).with_anchor(Anchor::Left),
-            OverlayKind::Bare,
+            some_overlay_kind(),
         );
         assert_eq!(
             m.overlay_at(0, 0),
@@ -1333,17 +1449,18 @@ mod tests {
 
     #[test]
     fn closing_an_overlay_mid_gesture_releases_the_capture_it_held() {
+        // closes the overlay by a direct pop rather than Esc: a live
+        // choice prompt's Esc forwards to the engine instead of popping
+        // (see esc_on_the_top_of_a_stack_forwards_without_touching_what_
+        // is_beneath), which is a separate concern from the one this
+        // test checks -- that a gesture capture does not outlive the
+        // overlay that held it, however the overlay came to close.
         let mut m = full_screen_model();
         open_overlay(&mut m);
         let _ = update(&mut m, mouse("press", 12, 40));
         assert!(m.mouse_capture().is_some());
 
-        let _ = update(
-            &mut m,
-            Msg::Key(Key {
-                notation: "<Esc>".into(),
-            }),
-        );
+        m.pop_overlay();
         assert_eq!(
             m.mouse_capture(),
             None,
@@ -1707,6 +1824,71 @@ mod tests {
         assert!(
             shown(&m).is_empty(),
             "with the prompt closed the question is ordinary transient text"
+        );
+    }
+
+    #[test]
+    fn a_second_distinct_confirm_replaces_the_first_with_no_intervening_keystroke() {
+        // nvim's own Lua can resolve one confirm and immediately raise a
+        // second, distinct one before the overlay ever sees a keystroke --
+        // routine in plugin bootstraps. A genuine re-arm of the SAME
+        // question never sends a second msg_show at all (see
+        // docs/prompt-overlay-wire-capture.md, section 1), so a msg_show
+        // arriving while a Prompt overlay is already open always names a
+        // distinct question, never the open one.
+        let mut m = model();
+        let msg_show = |text: &str| UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, text.into())],
+            replace_last: false,
+        };
+        let cmdline_show = |prompt: &str| UiEvent::CmdlineShow {
+            content: vec![],
+            pos: 0,
+            firstc: String::new(),
+            prompt: prompt.into(),
+            indent: 0,
+            level: 1,
+        };
+        let prompt_view = |m: &Model| match m.overlays().last().map(|ov| &ov.kind) {
+            Some(OverlayKind::Prompt(p)) => Some(p.view()),
+            _ => None,
+        };
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![msg_show("Save changes?"), UiEvent::Flush]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![cmdline_show("[Y]es, (N)o: "), UiEvent::Flush]),
+        );
+        let first = prompt_view(&m).expect("a prompt overlay must open on the first confirm");
+        assert_eq!(first.message, "Save changes?");
+        assert_eq!(first.choices, vec!["Yes".to_string(), "No".to_string()]);
+
+        // #1 resolves and #2 arrives in the same redraw batch, with no
+        // Msg::Key between them -- the shape a Lua-driven bootstrap sends.
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineHide,
+                msg_show("Discard changes?"),
+                cmdline_show("[D]iscard, (C)ancel: "),
+                UiEvent::Flush,
+            ]),
+        );
+
+        let second =
+            prompt_view(&m).expect("the overlay must stay open, now answering the new question");
+        assert_eq!(
+            second.message, "Discard changes?",
+            "the overlay must show #2's message, not #1's stale one"
+        );
+        assert_eq!(
+            second.choices,
+            vec!["Discard".to_string(), "Cancel".to_string()],
+            "and #2's choices, coherent with #2's message"
         );
     }
 

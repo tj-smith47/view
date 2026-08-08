@@ -1,7 +1,7 @@
 # Wire capture: confirm-class prompt overlays
 
 Captured live against the pinned engine per "capture, never recall." Source
-of truth for the modal prompt overlay implementation (Task 8).
+of truth for the modal prompt overlay (`OverlayKind::Prompt`) implementation.
 
 ## Engine identity
 
@@ -110,8 +110,8 @@ the owner was `SIGKILL`'d moments earlier, same host, same hermetic
 `XDG_STATE_HOME`). Nvim silently reclaims the swapfile; no dialog, no
 `W325`, nothing on the wire. This is a genuinely different, more recent
 core behavior than the "ATTENTION always fires on a stale swapfile"
-assumption the brief's own capture instruction was written against --
-reality corrected the plan here, per protocol step 6.
+assumption the original capture instructions were written against --
+reality corrected that assumption here.
 
 **The dialog *is* reachable when the owner is still alive** (or, by the
 same code path, whenever nvim cannot immediately prove the owner dead), and
@@ -190,7 +190,7 @@ distinguish this class and drive `PromptState`'s parser:
 
 ## 5. `return_prompt` no longer exists on this engine
 
-Step 4 names `return_prompt` as a third prompt kind to capture. Driving the
+The capture plan named `return_prompt` as a third prompt kind to capture. Driving the
 classic triggers (`:!echo hi`, and `:for i in range(1,30) | echomsg i |
 endfor`, both of which produce the legacy multi-line hit-enter prompt) with
 `ext_messages` attached produced **no `return_prompt`-kind `msg_show` at
