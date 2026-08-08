@@ -247,10 +247,10 @@ fn content_rows(
 
 /// Splits a picker's interior into two columns separated by one frame-glyph
 /// rule: the results list (left, `body`, unchanged from the no-preview
-/// layout) and the RPC-read buffer preview (right, `view.preview`) -- the
-/// same split-region shape the plan assigned this feature, painted by
-/// reusing [`lay_out`] and [`Line`]'s existing per-row column machinery
-/// rather than inventing a second layout primitive. Both painters
+/// layout) and the RPC-read buffer preview (right, `view.preview`), painted
+/// by reusing [`lay_out`] and [`Line`]'s existing per-row column machinery
+/// (called once per side) rather than inventing a second layout primitive.
+/// Both painters
 /// (`view-tui`'s real terminal backend and `view-oracle`'s rasterizer)
 /// consume this module's [`rows`] for every other overlay already; a picker
 /// preview reaches them the same way, with no separate wiring on either
