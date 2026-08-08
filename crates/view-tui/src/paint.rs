@@ -3878,10 +3878,9 @@ mod tests {
     /// painted cells carry exactly the style its `chrome_group()` mapping
     /// dictates -- read back through `theme.chrome(...)`, never a
     /// hardcoded color, so the assertion survives a colorscheme change --
-    /// and, the load-bearing case this round exists for, that
-    /// `DiagnosticError` and `DiagnosticWarning` resolve to genuinely
-    /// different painted colors rather than both merely differing from
-    /// `Plain`.
+    /// and the load-bearing case: `DiagnosticError` and `DiagnosticWarning`
+    /// must resolve to genuinely different painted colors rather than both
+    /// merely differing from `Plain`.
     #[test]
     fn statusline_roles_resolve_to_their_own_distinct_chrome_colors() {
         let model = model_with_distinctly_colored_chrome();
