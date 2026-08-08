@@ -29,7 +29,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use view_core::model::Model;
-use view_core::msg::{Effect, Key, Msg, RpcCall};
+use view_core::msg::{DeleteConfirmOutcome, Effect, Key, Msg, RpcCall};
 use view_core::native::tree::TreeEntry;
 use view_core::update::update;
 use view_engine::process::{Engine, EngineConfig};
@@ -257,7 +257,7 @@ fn pressing_r_renames_a_file_through_the_real_prompt_and_the_real_rename_reply()
 
     // the real RpcCall::RenameFile, driven through the production
     // EngineHandle wrapper -- proving TreeRenameReply live rather than
-    // constructed by hand, the gap the review named explicitly
+    // synthesized by constructing the Msg variant by hand
     engine
         .handle
         .rename_file(&rename_old, &rename_new, rename_generation)
@@ -330,25 +330,29 @@ fn pressing_d_deletes_a_file_through_the_real_confirm_and_rescans() {
     engine.handle.input("y").unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(5);
-    let (reply_gen, reply_path, confirmed) = wait_for(&rx, deadline, |msg| match msg {
+    let (reply_gen, reply_path, outcome) = wait_for(&rx, deadline, |msg| match msg {
         Msg::TreeDeleteConfirmReply {
             generation,
             path,
-            confirmed,
-        } => Some((*generation, path.clone(), *confirmed)),
+            outcome,
+        } => Some((*generation, path.clone(), *outcome)),
         _ => None,
     })
     .expect("no TreeDeleteConfirmReply within 5s");
     assert_eq!(reply_gen, generation);
     assert_eq!(reply_path, path_str);
-    assert!(confirmed, "answering Yes must confirm the delete");
+    assert_eq!(
+        outcome,
+        DeleteConfirmOutcome::Confirmed,
+        "answering Yes on a file with no loaded buffer must confirm the delete"
+    );
 
     let effects = update(
         &mut model,
         Msg::TreeDeleteConfirmReply {
             generation: reply_gen,
             path: reply_path,
-            confirmed,
+            outcome,
         },
     );
     let (delete_path, delete_generation) = match effects.as_slice() {
@@ -373,6 +377,136 @@ fn pressing_d_deletes_a_file_through_the_real_confirm_and_rescans() {
     assert!(
         matches!(effects.as_slice(), [Effect::TreeScan { .. }]),
         "a successful delete must trigger an unconditional rescan: {effects:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The delete-with-open-buffer proof `TREE_DELETE_CONFIRM_CHUNK`'s
+/// `bufloaded` check exists for: a file with a loaded, unsaved-modified
+/// buffer must never be deleted out from under it, even on an explicit
+/// "Yes" -- the chunk refuses before it ever offers the confirm prompt at
+/// all, so this test sends no answering keystroke and would hang on a
+/// missing reply if that refusal did not happen engine-side.
+#[test]
+fn pressing_d_on_a_file_with_a_loaded_modified_buffer_refuses_the_delete_and_records_a_notice() {
+    let root = scratch_root("delete-buffer-open");
+    let target = root.join("open.txt");
+    std::fs::write(&target, "line one\n").unwrap();
+
+    let mut model = open_tree(&root);
+    let tree = model.tree_mut().expect("tree overlay must be open");
+    let scan_generation = tree.generation();
+    tree.apply_scan(
+        scan_generation,
+        vec![TreeEntry::new(PathBuf::from("open.txt"), false, 0)],
+    );
+
+    let effects = update(
+        &mut model,
+        Msg::Key(Key {
+            notation: "d".into(),
+        }),
+    );
+    let (generation, path_str) = match effects.as_slice() {
+        [Effect::Rpc(RpcCall::TreeDeleteConfirm { generation, path })] => {
+            (*generation, path.clone())
+        }
+        other => {
+            panic!("\"d\" on a selected file must issue exactly one TreeDeleteConfirm: {other:?}")
+        }
+    };
+    assert_eq!(path_str, target.to_string_lossy());
+
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    // load the buffer and dirty it, unsaved -- the exact case the
+    // bufloaded check exists to catch
+    engine
+        .handle
+        .request(
+            "nvim_command",
+            vec![rmpv::Value::from(format!("edit {path_str}"))],
+        )
+        .expect("open buffer");
+    engine
+        .handle
+        .request(
+            "nvim_command",
+            vec![rmpv::Value::from("normal! Gounsaved second line")],
+        )
+        .expect("modify buffer without saving");
+    let before_modified = engine
+        .handle
+        .request("nvim_eval", vec![rmpv::Value::from("&modified")])
+        .expect("read modified flag before delete confirm");
+    assert_eq!(
+        before_modified,
+        rmpv::Value::from(1),
+        "the buffer must genuinely be modified before the refusal this test proves"
+    );
+
+    engine
+        .handle
+        .tree_delete_confirm(&path_str, generation)
+        .expect("issue the real delete confirm RPC");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let (reply_gen, reply_path, outcome) = wait_for(&rx, deadline, |msg| match msg {
+        Msg::TreeDeleteConfirmReply {
+            generation,
+            path,
+            outcome,
+        } => Some((*generation, path.clone(), *outcome)),
+        _ => None,
+    })
+    .expect(
+        "no TreeDeleteConfirmReply within 5s -- the chunk must resolve without \
+         waiting on a confirm answer when it refuses outright",
+    );
+    assert_eq!(reply_gen, generation);
+    assert_eq!(reply_path, path_str);
+    assert_eq!(
+        outcome,
+        DeleteConfirmOutcome::BufferOpen,
+        "a loaded buffer on the target path must refuse the delete outright"
+    );
+
+    let effects = update(
+        &mut model,
+        Msg::TreeDeleteConfirmReply {
+            generation: reply_gen,
+            path: reply_path,
+            outcome,
+        },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+        "a refused delete must surface exactly one notice through the choke \
+         point, no TreeDeleteFile: {effects:?}"
+    );
+    let notice = model
+        .engine
+        .messages
+        .entries
+        .last()
+        .expect("the refusal must reach the message surface");
+    assert_eq!(
+        notice.content,
+        vec![(0, "view: buffer open -- close it first".to_string())]
+    );
+
+    assert!(target.exists(), "the file must survive a refused delete");
+    let after_modified = engine
+        .handle
+        .request("nvim_eval", vec![rmpv::Value::from("&modified")])
+        .expect("read modified flag after the refused delete");
+    assert_eq!(
+        after_modified,
+        rmpv::Value::from(1),
+        "the buffer's unsaved edit must survive a refused delete untouched"
     );
 
     let _ = std::fs::remove_dir_all(&root);

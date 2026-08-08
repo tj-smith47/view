@@ -285,17 +285,13 @@ pub enum Msg {
         old_path: String,
         name: Option<String>,
     },
-    /// The decoded answer to one `RpcCall::TreeDeleteConfirm`: `confirmed`
-    /// is `true` only for an explicit "Yes" (`vim.fn.confirm`'s first
-    /// choice); `<Esc>`, "No", and any error reply all degrade to `false`,
-    /// the same "safe default over an ambiguous or lost reply" precedent
-    /// every other async reply in this crate follows. `path` echoes back
-    /// the entry the prompt was opened for, on the same terms
+    /// The decoded answer to one `RpcCall::TreeDeleteConfirm`. `path` echoes
+    /// back the entry the prompt was opened for, on the same terms
     /// `TreeRenamePromptReply::old_path` does.
     TreeDeleteConfirmReply {
         generation: u64,
         path: String,
-        confirmed: bool,
+        outcome: DeleteConfirmOutcome,
     },
     /// `Effect::TreeCreateFile`'s answer: `ok` is `false` when the
     /// destination already existed or the create otherwise failed. Either
@@ -312,6 +308,26 @@ pub enum Msg {
         generation: u64,
         ok: bool,
     },
+}
+
+/// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
+/// construction so a caller cannot observe "confirmed" and "a loaded buffer
+/// blocked this" at once: the engine-side chunk checks `bufloaded` before it
+/// ever offers `vim.fn.confirm`, so those two states are mutually exclusive
+/// on the wire itself, not just by convention here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteConfirmOutcome {
+    /// The user answered "Yes" (`vim.fn.confirm`'s first choice): the
+    /// delete may proceed.
+    Confirmed,
+    /// `<Esc>`, "No", or an error reply -- all degrade to the same "safe
+    /// default over an ambiguous or lost reply" precedent every other async
+    /// reply in this crate follows.
+    Declined,
+    /// `path` names a file with a loaded buffer still open on it: the
+    /// engine refused to even offer the confirm prompt, since deleting a
+    /// path nvim still owns a buffer for would silently orphan it.
+    BufferOpen,
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -645,11 +661,14 @@ pub enum Effect {
     },
     /// Deletes the file at `path` from disk. A genuine filesystem effect
     /// like `TreeCreateFile`, and, symmetrically, never issued for a path
-    /// with a loaded buffer still open on it -- that case belongs to nvim
-    /// via RPC once a delete-with-open-buffer flow exists, the same
-    /// buffer-identity boundary `RpcCall::RenameFile` draws. `generation`
-    /// carries through to `Msg::TreeDeleteFileResult` on the same terms
-    /// `TreeCreateFile`'s does.
+    /// with a loaded buffer still open on it: `update()` only ever emits
+    /// this from a `DeleteConfirmOutcome::Confirmed` reply, and the engine
+    /// side of that reply (`TREE_DELETE_CONFIRM_CHUNK`) already refused to
+    /// offer the confirm prompt at all when `bufloaded` found one -- the
+    /// same buffer-identity boundary `RpcCall::RenameFile` draws, enforced
+    /// here rather than merely documented. `generation` carries through to
+    /// `Msg::TreeDeleteFileResult` on the same terms `TreeCreateFile`'s
+    /// does.
     TreeDeleteFile {
         path: std::path::PathBuf,
         generation: u64,
@@ -911,6 +930,14 @@ pub enum RpcCall {
     /// the async plumbing to route its choice back as
     /// `Msg::TreeDeleteConfirmReply`. Async on the same terms as
     /// `TreeCreatePrompt`.
+    ///
+    /// Before it ever offers that prompt, the engine-side chunk checks
+    /// whether `path` (canonicalized, the same symlink-safe comparison
+    /// `RENAME_CHUNK` uses) names a loaded buffer, and refuses outright
+    /// (`DeleteConfirmOutcome::BufferOpen`) rather than asking a question
+    /// whose "Yes" would delete a file nvim still owns a buffer for: buffer
+    /// state lives in the engine, not here, so the check belongs where the
+    /// state does.
     TreeDeleteConfirm {
         generation: u64,
         path: String,

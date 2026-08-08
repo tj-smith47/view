@@ -460,13 +460,29 @@ return vim.fn.input({prompt = prompt, default = default})";
 /// \"&Yes\\n&No\")`, reusing nvim's own `[Y]es, (N)o: ` accelerator prompt
 /// -- live-verified to arrive on the wire as the exact same `msg_show`/
 /// `cmdline_show` pair `PromptState`'s existing `Answer::Choices` parsing
-/// already handles, see `docs/tree-input-prompt-wire-capture.md`. Returns
-/// the choice bare, nvim's own documented `confirm()` contract (`:help
-/// confirm()`): `1` for Yes, `2` for No, `0` for a force-closed dialog
-/// (`<Esc>` or an interrupt).
+/// already handles, see `docs/tree-input-prompt-wire-capture.md`.
+///
+/// Before it ever asks that question, the chunk checks `path` (canonicalized
+/// with the same `fs_realpath`-or-`fnamemodify` fallback `RENAME_CHUNK` uses,
+/// so a buffer reached through a symlinked ancestor directory is still
+/// found) against every loaded buffer's own canon name. A match returns
+/// `{ buffer_open = true }` without ever calling `vim.fn.confirm` at all --
+/// there is no point blocking on a question whose "Yes" this chunk is about
+/// to refuse anyway. Otherwise it returns `{ choice = N }`, nvim's own
+/// documented `confirm()` contract (`:help confirm()`): `1` for Yes, `2` for
+/// No, `0` for a force-closed dialog (`<Esc>` or an interrupt).
 const TREE_DELETE_CONFIRM_CHUNK: &str = "\
-local prompt = ...
-return vim.fn.confirm(prompt, '&Yes\\n&No')";
+local prompt, path = ...
+local function canon(p)
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+    return { buffer_open = true }
+  end
+end
+return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -1272,7 +1288,10 @@ impl EngineHandle {
             "nvim_exec_lua",
             vec![
                 Value::from(TREE_DELETE_CONFIRM_CHUNK),
-                Value::Array(vec![Value::from(format!("Delete {path}?"))]),
+                Value::Array(vec![
+                    Value::from(format!("Delete {path}?")),
+                    Value::from(path),
+                ]),
             ],
             generation,
             path.to_owned(),

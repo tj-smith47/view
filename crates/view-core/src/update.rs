@@ -6,7 +6,9 @@ use crate::hl::HlAttr;
 use crate::model::{
     CmdlineState, Focus, Model, MouseCapture, OverlayKind, PopupmenuState, TablineState,
 };
-use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
+use crate::msg::{
+    DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
+};
 use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
@@ -608,23 +610,28 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::TreeDeleteConfirmReply {
             generation,
             path,
-            confirmed,
+            outcome,
         } => {
             dismiss_top_prompt(model);
             model.dirty = true;
-            if !confirmed {
-                return Vec::new();
+            match outcome {
+                DeleteConfirmOutcome::Declined => Vec::new(),
+                DeleteConfirmOutcome::BufferOpen => model
+                    .engine
+                    .record_native_notice("view: buffer open -- close it first".to_string(), false),
+                DeleteConfirmOutcome::Confirmed => {
+                    let Some(t) = model.tree_mut() else {
+                        return Vec::new();
+                    };
+                    if generation != t.generation() {
+                        return Vec::new();
+                    }
+                    vec![Effect::TreeDeleteFile {
+                        path: std::path::PathBuf::from(path),
+                        generation: t.generation(),
+                    }]
+                }
             }
-            let Some(t) = model.tree_mut() else {
-                return Vec::new();
-            };
-            if generation != t.generation() {
-                return Vec::new();
-            }
-            vec![Effect::TreeDeleteFile {
-                path: std::path::PathBuf::from(path),
-                generation: t.generation(),
-            }]
         }
         // mirrors `Msg::TreeRenameReply`'s own discard-generation, rescan-
         // on-success shape exactly: `generation` here names the create/

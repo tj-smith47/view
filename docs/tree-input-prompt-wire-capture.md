@@ -60,7 +60,8 @@ typed) -- nvim does the prefill, not this crate.
 
 ## 3. Delete confirm (`TREE_DELETE_CONFIRM_CHUNK`)
 
-Chunk driven with `"Delete foo.txt?"`, answered `"y"`:
+Chunk driven with the prompt text `"Delete foo.txt?"` against a path with no
+loaded buffer (the bufloaded guard's fall-through case), answered `"y"`:
 
 ```
 DEL_EVENT: MsgShow { kind: "confirm", content: [(16, "Delete foo.txt?")], replace_last: false }
@@ -73,6 +74,16 @@ rendering (`[Y]es, (N)o: `) rather than anything this crate constructs --
 the tree's delete confirm is indistinguishable on the wire from any other
 `confirm()`-class prompt already in the codebase.
 
+This capture predates `TREE_DELETE_CONFIRM_CHUNK`'s `bufloaded` guard and
+still reflects the wire shape exactly: the guard only changes what happens
+*before* `vim.fn.confirm` runs, never what crosses the wire once it does.
+When the guard finds a loaded buffer for the target path, the chunk returns
+`{ buffer_open = true }` and never calls `vim.fn.confirm` at all -- there is
+no `MsgShow`/`CmdlineShow` pair to capture for that path, because nothing
+is put on the wire; the absence of any prompt traffic *is* the live proof,
+exercised in `crates/view-engine/tests/tree_file_ops_live.rs`'s
+`pressing_d_on_a_file_with_a_loaded_modified_buffer_refuses_the_delete_and_records_a_notice`.
+
 ## Conclusions for the implementation
 
 - All three chunks arrive as exactly the `kind = "confirm"` `MsgShow` +
@@ -80,16 +91,18 @@ the tree's delete confirm is indistinguishable on the wire from any other
   check) and `Answer::Choices` parsing were already built to handle --
   no new redraw-event branch is needed for any of the three tree prompts.
 - The *returned value* each blocked call replies with once answered
-  (`vim.fn.input`'s typed string; `vim.fn.confirm`'s 1-based choice index)
-  is not observable through `request_probe`'s fg/bg-shaped decode path
-  used above, and is instead covered where it matters: live, through the
-  real `tree_create_prompt`/`tree_rename_prompt`/`tree_delete_confirm`
+  (`vim.fn.input`'s typed string; `vim.fn.confirm`'s 1-based choice index,
+  or `TREE_DELETE_CONFIRM_CHUNK`'s own `{ buffer_open = true }` short
+  circuit) is not observable through `request_probe`'s fg/bg-shaped decode
+  path used above, and is instead covered where it matters: live, through
+  the real `tree_create_prompt`/`tree_rename_prompt`/`tree_delete_confirm`
   methods and their real `decode_prompt_reply`/`decode_delete_confirm_reply`
   decoders, driven end-to-end from a real keypress through `update()` in
-  `crates/view-engine/tests/tree_file_ops_live.rs` (Task 13 fix round 1,
-  CRITICAL 1).
-- `decode_delete_confirm_reply`'s `result.as_i64() == Some(1)` reading
-  matches `:help confirm()`'s documented contract directly (`1` = first
-  button, `&Yes`); nothing here contradicts or refines that beyond what
-  the doc comment on `decode_delete_confirm_reply` in `handle.rs` already
-  states.
+  `crates/view-engine/tests/tree_file_ops_live.rs`.
+- `decode_delete_confirm_reply` reads `TREE_DELETE_CONFIRM_CHUNK`'s table
+  reply: `buffer_open = true` decodes to `DeleteConfirmOutcome::BufferOpen`
+  before `choice` is even inspected, and otherwise `choice == 1` decodes to
+  `DeleteConfirmOutcome::Confirmed`, matching `:help confirm()`'s documented
+  contract directly (`1` = first button, `&Yes`); every other shape,
+  including one this crate has not actually seen from the pinned engine,
+  degrades to `DeleteConfirmOutcome::Declined`.

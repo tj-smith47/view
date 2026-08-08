@@ -7,7 +7,9 @@ use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
-use view_core::msg::{EngineRequest, Msg, RegisterType, ReplyToken, ReplyValue};
+use view_core::msg::{
+    DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken, ReplyValue,
+};
 use view_core::native::mappings::MappingClaim;
 
 /// Errors produced by [`EngineHandle`] operations.
@@ -492,17 +494,20 @@ impl EngineHandle {
                             }
                             Some(Waiter::DeleteConfirm { generation, path }) => {
                                 if let Some(pump) = &reader_pump {
-                                    // an error reply degrades to "not
-                                    // confirmed", the same safe-default
-                                    // precedent every other async reply here
-                                    // follows: a delete this decoder cannot
-                                    // confirm the user chose must not happen
-                                    let confirmed =
-                                        error == Value::Nil && decode_delete_confirm_reply(&result);
+                                    // an error reply degrades to Declined,
+                                    // the same safe-default precedent every
+                                    // other async reply here follows: a
+                                    // delete this decoder cannot confirm the
+                                    // user chose must not happen
+                                    let outcome = if error == Value::Nil {
+                                        decode_delete_confirm_reply(&result)
+                                    } else {
+                                        DeleteConfirmOutcome::Declined
+                                    };
                                     pump.route_delete_confirm(Msg::TreeDeleteConfirmReply {
                                         generation,
                                         path,
-                                        confirmed,
+                                        outcome,
                                     });
                                 }
                             }
@@ -1266,17 +1271,28 @@ fn decode_prompt_reply(result: &Value) -> Option<String> {
 
 /// Decodes a tree delete confirmation's reply, live-verified against a real
 /// `nvim --clean --headless` (see `docs/tree-input-prompt-wire-capture.md`):
-/// `vim.fn.confirm` replies with the 1-based index of the chosen button, per
-/// `:help confirm()` -- `1` for the first (`&Yes`), `2` for the second
-/// (`&No`), and `0` when the dialog was force-closed (e.g. `<C-c>`) without a
-/// choice. Only an explicit `1` confirms; every other value, including a
-/// non-integer `result` this crate has not actually seen from the pinned
-/// engine, degrades to "not confirmed" -- the same "absent or malformed is
+/// `TREE_DELETE_CONFIRM_CHUNK` returns `{ buffer_open = true }` when it
+/// refused to even offer the prompt, or otherwise `{ choice = N }`, `N`
+/// being `vim.fn.confirm`'s own 1-based button index per `:help confirm()`
+/// -- `1` for the first (`&Yes`), `2` for the second (`&No`), and `0` when
+/// the dialog was force-closed (e.g. `<C-c>`) without a choice. Only an
+/// explicit `choice = 1` confirms; every other shape, including a
+/// non-table `result` this crate has not actually seen from the pinned
+/// engine, degrades to `Declined` -- the same "absent or malformed is
 /// exactly as informative as an explicit false" precedent `decode_rename_reply`
 /// follows, and the safe reading here besides: a delete this decoder cannot
 /// confirm the user chose must not happen.
-fn decode_delete_confirm_reply(result: &Value) -> bool {
-    result.as_i64() == Some(1)
+fn decode_delete_confirm_reply(result: &Value) -> DeleteConfirmOutcome {
+    let Some(map) = result.as_map() else {
+        return DeleteConfirmOutcome::Declined;
+    };
+    if crate::wire::map_find(map, "buffer_open").and_then(Value::as_bool) == Some(true) {
+        return DeleteConfirmOutcome::BufferOpen;
+    }
+    if crate::wire::map_find(map, "choice").and_then(Value::as_i64) == Some(1) {
+        return DeleteConfirmOutcome::Confirmed;
+    }
+    DeleteConfirmOutcome::Declined
 }
 
 /// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map
