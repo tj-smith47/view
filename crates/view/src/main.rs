@@ -422,7 +422,10 @@ fn main() -> Result<()> {
         model,
         engine,
         pump,
-        msg_rx,
+        runtime::MsgChannel {
+            tx: msg_tx.clone(),
+            rx: msg_rx,
+        },
         term_size,
         &mut follow_ups,
         &mut term,

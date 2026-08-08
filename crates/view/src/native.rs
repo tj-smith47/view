@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use view_core::model::Model;
-use view_core::msg::{Effect, EngineRequest, Msg, RpcCall};
+use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
 use view_core::native::registry;
 use view_native::config::NativeConfig;
 use view_native::report::report;
@@ -138,6 +138,14 @@ impl NativeSession {
     /// feature a config can decline the way it declines the picker or
     /// statusline, so this push does not read `self.cfg` or `self.plan` at
     /// all.
+    ///
+    /// `cmdheight=0` registers unconditionally for the same reason, on a
+    /// different fact: `ext_messages` sits in the fixed ext-option set this
+    /// session attached with, not in `self.plan`, so `native.notifications
+    /// = false` cannot un-attach it and messages route to view either way.
+    /// Leaving the user's `cmdheight` alone while every message still
+    /// arrives as a `msg_show` view must render would be the incoherent
+    /// state -- the option follows the attach, not the feature toggle.
     fn take_over(&mut self) -> Vec<Effect> {
         if self.handed_over {
             return Vec::new();
@@ -154,6 +162,10 @@ impl NativeSession {
         )));
         effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
+        }));
+        effects.push(Effect::Rpc(RpcCall::SetOption {
+            name: "cmdheight".to_string(),
+            value: OptionValue::Int(0),
         }));
         crate::vlog::log_with("native", || {
             let taken: Vec<&str> = self.plan.iter().map(|e| e.feature).collect();
@@ -340,6 +352,32 @@ mod tests {
                 Effect::Rpc(RpcCall::RegisterClipboard { channel_id: 9 })
             )),
             "clipboard registration is not registry-gated: it must survive an empty plan, got {effects:?}"
+        );
+    }
+
+    #[test]
+    fn cmdheight_is_forced_to_zero_even_with_the_notifications_feature_off() {
+        let cfg =
+            NativeConfig::from_toml_str("[native]\nnotifications = false\n").expect("valid toml");
+        let mut session = NativeSession {
+            plan: plan(&cfg, registry::features()),
+            cfg,
+            config_path: None,
+            record: None,
+            channel_id: 11,
+            handed_over: false,
+        };
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let cmdheight = effects.iter().find_map(|e| match e {
+            Effect::Rpc(RpcCall::SetOption { name, value }) if name == "cmdheight" => Some(value),
+            _ => None,
+        });
+        assert_eq!(
+            cmdheight,
+            Some(&OptionValue::Int(0)),
+            "cmdheight must be forced to 0 unconditionally -- ext_messages is attach-level, \
+             not gated on native.notifications: {effects:?}"
         );
     }
 

@@ -212,6 +212,13 @@ pub struct Executor<E: EngineOps> {
     /// loop on the thread that owns `Term` (see `Effect::Osc52Copy`'s doc
     /// for why this cannot be a write from the clipboard worker thread).
     osc52: Option<mpsc::Sender<Osc52Job>>,
+    /// The loop's own message channel, cloned into every one-shot toast
+    /// timer thread `Effect::ScheduleToastExpiry` spawns (see `run`'s match
+    /// arm below). `None` degrades a scheduled expiry to a silent no-op --
+    /// the toast then simply outlives its intended timeout instead of the
+    /// executor panicking or blocking, matching every other unwired-channel
+    /// degrade in this type.
+    toast_timer: Option<mpsc::SyncSender<Msg>>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -234,6 +241,7 @@ impl<E: EngineOps> Executor<E> {
             ops,
             clipboard: None,
             osc52: None,
+            toast_timer: None,
         }
     }
 
@@ -250,6 +258,15 @@ impl<E: EngineOps> Executor<E> {
     #[must_use]
     pub fn with_osc52(mut self, tx: mpsc::Sender<Osc52Job>) -> Self {
         self.osc52 = Some(tx);
+        self
+    }
+
+    /// Wires the loop's own message channel; `ScheduleToastExpiry` effects
+    /// spawn a one-shot timer thread against it instead of silently
+    /// no-oping.
+    #[must_use]
+    pub fn with_toast_timer(mut self, tx: mpsc::SyncSender<Msg>) -> Self {
+        self.toast_timer = Some(tx);
         self
     }
 
@@ -387,6 +404,22 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             Effect::Quit { exit_code } => Flow::Quit(exit_code),
+            // one-shot, mirroring `view_tui::terminal::spawn_input_thread`'s
+            // shape: a background thread that owns exactly one send, never
+            // a persistent multi-deadline scheduler. The loop has no
+            // free-running clock of its own (see this module's own doc), so
+            // this thread -- not a paint-time check -- is what wakes it back
+            // up on an otherwise-idle editor.
+            Effect::ScheduleToastExpiry { id, after } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(after);
+                        let _ = tx.send(Msg::ToastExpired { id });
+                    });
+                }
+                Flow::Continue
+            }
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
             _ => Flow::Continue,
         }
@@ -525,6 +558,18 @@ fn wait_for_msg(
 /// last-derived theme for the next startup's cold-start cache; see
 /// `theme_cache` in `main.rs`).
 ///
+/// The message channel's two halves, bundled into one parameter: `rx` is
+/// `run()`'s own blocking receive end, while `tx` is cloned once more into
+/// the toast-expiry timer thread the same way `spawn_input_thread` and
+/// `start_pump` already hold their own clones from before `run()` starts.
+/// A bare tuple would satisfy the same arg-count constraint but loses the
+/// field names at every call site; a struct keeps `tx`/`rx` self-labeling
+/// where `run()`'s doc comment already talks about both by name.
+pub struct MsgChannel {
+    pub tx: mpsc::SyncSender<Msg>,
+    pub rx: mpsc::Receiver<Msg>,
+}
+
 /// Takes ownership of `engine` for the whole call (see the module docs'
 /// ownership chain), plus the already-attached `pump` and the `msg_rx` end
 /// of the channel the caller's input thread and `pump`'s sink both already
@@ -550,11 +595,15 @@ pub fn run(
     mut model: Model,
     mut engine: Engine,
     pump: view_engine::DamagePump,
-    msg_rx: mpsc::Receiver<Msg>,
+    msg_channel: MsgChannel,
     term_size: view_tui::terminal::TermSizeCell,
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
+    let MsgChannel {
+        tx: msg_tx,
+        rx: msg_rx,
+    } = msg_channel;
     let (clipboard_tx, clipboard_rx) = mpsc::channel();
     let (osc52_tx, osc52_rx) = mpsc::channel();
     // kept alive for the session's duration; the worker exits once
@@ -563,7 +612,8 @@ pub fn run(
     let _clipboard_worker = crate::clipboard::spawn(engine.handle.clone(), clipboard_rx)?;
     let executor = Executor::new(engine.handle.clone())
         .with_clipboard(clipboard_tx)
-        .with_osc52(osc52_tx);
+        .with_osc52(osc52_tx)
+        .with_toast_timer(msg_tx);
     let mut write_stall = OutboxStallWatch::default();
 
     loop {

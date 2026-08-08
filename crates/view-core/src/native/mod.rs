@@ -7,4 +7,5 @@ pub mod geometry;
 pub mod mappings;
 pub mod prompt;
 pub mod registry;
+pub mod toast;
 pub mod views;

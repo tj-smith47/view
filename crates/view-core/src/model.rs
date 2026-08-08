@@ -85,6 +85,7 @@ impl Model {
                 mode: ModeState::default(),
                 cmdline: None,
                 messages: Messages::default(),
+                toast_history: crate::native::toast::ToastHistory::new(),
                 tabline: None,
                 popupmenu: None,
                 mouse_on: false,
@@ -323,6 +324,10 @@ pub struct EngineModel {
     pub mode: ModeState,
     pub cmdline: Option<CmdlineState>,
     pub messages: Messages,
+    /// Bounded scrollback of every message routed through
+    /// [`crate::native::toast::route`], newest-first on read; the
+    /// palette's message-history view reads it.
+    pub toast_history: crate::native::toast::ToastHistory,
     pub tabline: Option<TablineState>,
     pub popupmenu: Option<PopupmenuState>,
     /// Whether nvim currently wants terminal mouse reporting on, from the
@@ -442,6 +447,16 @@ pub struct CmdlineState {
     pub level: u64,
 }
 
+/// A locally-assigned identity for one [`MessageEntry`], stamped by
+/// [`Messages::push`] from a monotonic per-session counter. Exists to name
+/// "the same entry, later": `Msg::ToastExpired`'s idle-timeout callback
+/// fires well after the push that scheduled it, by which time
+/// `Messages::push` may have appended or replaced other entries at
+/// arbitrary positions, so the id -- not an index -- is what the expiry
+/// handler matches against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MessageId(u64);
+
 /// One shown message: an echo, an error, a search-count indicator, and
 /// so on.
 #[non_exhaustive]
@@ -461,9 +476,21 @@ pub struct MessageEntry {
     /// that happened. Marked rather than matched on text or kind, so
     /// retracting the condition can never take a real message with it.
     condition: bool,
+    /// This entry's identity; see [`MessageId`]. Never set directly --
+    /// stamped by `Messages::push` from its own counter.
+    id: MessageId,
 }
 
 impl MessageEntry {
+    /// This entry's identity, stamped when it was pushed. `toast`'s
+    /// idle-expiry timer names the entry it was scheduled for by this id,
+    /// since positions in `Messages::entries` shift as later messages
+    /// arrive.
+    #[must_use]
+    pub fn id(&self) -> MessageId {
+        self.id
+    }
+
     /// This entry's content chunks joined into one string, then split into
     /// one entry per physical line. A `msg_show` content chunk can carry an
     /// embedded `\n` for a genuinely multi-line message (a long `emsg`'s
@@ -507,11 +534,20 @@ impl MessageEntry {
     /// whoever raised it, when the condition ends.
     #[must_use]
     pub fn is_persistent(&self) -> bool {
-        self.condition
-            || matches!(
-                self.kind.as_str(),
-                "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
-            )
+        self.condition || Self::is_persistent_kind(&self.kind)
+    }
+
+    /// The kind-only half of [`is_persistent`]: whether `kind` alone (no
+    /// locally-raised condition flag, since none exists yet) names one of
+    /// nvim's error/warning kinds. `toast::route` matches on this directly
+    /// -- it classifies the wire `kind` string before any `MessageEntry`
+    /// exists to ask.
+    #[must_use]
+    pub fn is_persistent_kind(kind: &str) -> bool {
+        matches!(
+            kind,
+            "emsg" | "echoerr" | "wmsg" | "lua_error" | "rpc_error" | "shell_err"
+        )
     }
 
     /// Whether this entry is the question text of a cmdline prompt that is
@@ -554,6 +590,10 @@ pub struct Messages {
     /// new entry as `MessageEntry::shown_at_flush`. See
     /// `dismiss_transient_on_keypress`.
     flush_generation: u64,
+    /// The next [`MessageId`] `push` stamps; bumped on every call, replace
+    /// included, so every pushed entry -- even one that overwrites another
+    /// in place -- gets an identity distinct from what stood there before.
+    next_message_id: u64,
 }
 
 impl Messages {
@@ -570,20 +610,29 @@ impl Messages {
     /// line: overwriting the notice would both drop a condition that is
     /// still true and leave the line nvim meant to replace standing as a
     /// duplicate.
-    pub fn push(&mut self, kind: String, content: Vec<(u64, String)>, replace_last: bool) {
+    pub fn push(
+        &mut self,
+        kind: String,
+        content: Vec<(u64, String)>,
+        replace_last: bool,
+    ) -> MessageId {
+        let id = MessageId(self.next_message_id);
+        self.next_message_id = self.next_message_id.saturating_add(1);
         let entry = MessageEntry {
             kind,
             content,
             shown_at_flush: self.flush_generation,
             condition: false,
+            id,
         };
         if replace_last {
             if let Some(last) = self.entries.iter_mut().rev().find(|e| !e.condition) {
                 *last = entry;
-                return;
+                return id;
             }
         }
         self.entries.push(entry);
+        id
     }
 
     /// Drops every recorded message, per `msg_clear`.

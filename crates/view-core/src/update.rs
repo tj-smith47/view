@@ -9,6 +9,7 @@ use crate::model::{
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::prompt::PromptState;
+use crate::native::toast;
 
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
@@ -211,6 +212,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // otherwise repaint for.
         Msg::ColorSchemeChanged { .. } => {
             model.dirty = true;
+            Vec::new()
+        }
+        Msg::ToastExpired { id } => {
+            // races the same entry being cleared, replaced (which stamps a
+            // fresh id, so this id simply no longer matches anything), or
+            // dismissed by a keypress in the meantime -- losing that race is
+            // "already handled", not an error, so this filters by id rather
+            // than asserting the entry is still present
+            let before = model.engine.messages.entries.len();
+            model.engine.messages.entries.retain(|e| e.id() != id);
+            if model.engine.messages.entries.len() != before {
+                model.dirty = true;
+            }
             Vec::new()
         }
     }
@@ -447,7 +461,17 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             content,
             replace_last,
         } => {
-            model.engine.messages.push(kind, content, replace_last);
+            // computed off the wire `kind` before it moves into `push`,
+            // which owns stamping the id `ScheduleToastExpiry` and the
+            // eventual `Msg::ToastExpired` need to name this exact entry by
+            let route = toast::route(&kind);
+            let id = model.engine.messages.push(kind, content, replace_last);
+            // recorded by id, not `.entries.last()`: `push`'s replace path
+            // can overwrite an entry that sits before a still-open
+            // condition notice, which then occupies the last slot instead
+            if let Some(entry) = model.engine.messages.entries.iter().find(|e| e.id() == id) {
+                model.engine.toast_history.push(entry);
+            }
             // a confirm-class msg_show while a Prompt overlay is already
             // open replaces its state wholesale rather than being skipped:
             // a genuine re-arm of the SAME question (an unmatched key)
@@ -475,7 +499,13 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     }
                 }
             }
-            Vec::new()
+            // only `Route::Transient` ever schedules a timeout (see
+            // `toast::timeout_for`); a prompt/sticky/statusline entry
+            // expires some other way or not at all
+            match toast::timeout_for(route) {
+                Some(after) => vec![Effect::ScheduleToastExpiry { id, after }],
+                None => Vec::new(),
+            }
         }
         UiEvent::MsgClear => {
             model.engine.messages.clear();

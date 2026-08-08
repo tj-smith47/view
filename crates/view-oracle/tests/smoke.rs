@@ -498,6 +498,69 @@ fn view_shows_an_echoed_message() {
     let _ = session.wait();
 }
 
+// A transient toast (Route::Transient in view-core's toast.rs) carries a
+// ScheduleToastExpiry effect that reaps it after TRANSIENT_TOAST_TIMEOUT
+// with no further input at all. The paint loop is otherwise timer-free (it
+// only repaints in response to a Msg), so this is the one falsifiable proof
+// that the timer-thread design actually wakes an idle editor rather than
+// only expiring toasts a later keystroke happens to paint over. EngineSession
+// (the in-process oracle driver used elsewhere in this crate) drops
+// Effect::ScheduleToastExpiry in apply_effects, since it only forwards
+// Effect::Rpc -- only a real pty against the compiled binary, where
+// view::runtime::Executor actually runs the effect, can exercise this.
+#[test]
+fn a_transient_toast_expires_on_its_own_after_the_idle_timeout() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:echo 'sometoken'\r").unwrap();
+    assert!(
+        session.wait_for("sometoken", Duration::from_secs(5)),
+        "screen never showed the echoed transient message; last screen:\n{}",
+        session.screen()
+    );
+
+    // No further input from here on: proves expiry is driven by the
+    // ToastExpired timer, not by some other event's repaint incidentally
+    // dropping the entry.
+    let margin = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4);
+    assert!(
+        session.wait_for_screen(margin, |screen| !screen.contents().contains("sometoken")),
+        "transient toast never expired while the editor sat idle; last screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
+// The falsifiable counterpart to the transient-expiry test above: an emsg
+// carries no ScheduleToastExpiry effect at all (route() sends persistent
+// kinds to Route::Sticky, and timeout_for only returns Some for
+// Route::Transient), so the same idle wait that reaps a transient toast
+// must never touch it.
+#[test]
+fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:echoerr 'errtoken'\r").unwrap();
+    assert!(
+        session.wait_for("errtoken", Duration::from_secs(5)),
+        "screen never showed the echoerr message; last screen:\n{}",
+        session.screen()
+    );
+
+    std::thread::sleep(view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4));
+    let screen = session.screen();
+    assert!(
+        screen.contains("errtoken"),
+        "persistent emsg vanished after an idle wait that should only reap transient toasts; \
+         last screen:\n{screen}"
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
 #[test]
 fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
     let mut session = spawn_view_pty();

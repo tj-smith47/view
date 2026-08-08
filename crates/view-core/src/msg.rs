@@ -14,7 +14,10 @@
 //! };
 //! for eff in update(&mut model, msg) { /* executor, never blocks */ }
 //! ```
+use std::time::Duration;
+
 use crate::events::UiEvent;
+use crate::model::MessageId;
 use crate::native::mappings::{MappingClaim, MappingSpec};
 
 /// Every input `update()` can react to.
@@ -132,6 +135,18 @@ pub enum Msg {
     /// the state already acted upon.
     ColorSchemeChanged {
         name: String,
+    },
+    /// A `Route::Transient` toast's idle timeout elapsed with no other input
+    /// to have dismissed it another way. `id` names the exact
+    /// [`MessageEntry`](crate::model::MessageEntry) `toast::route` scheduled
+    /// this for, since by the time the timer fires `Messages::push` may have
+    /// appended or replaced other entries at arbitrary positions in the log.
+    /// A no-op if that entry is already gone (cleared, replaced, or
+    /// dismissed by a keypress in the meantime) -- expiry always races
+    /// those, and losing the race is exactly "already handled", not an
+    /// error.
+    ToastExpired {
+        id: MessageId,
     },
 }
 
@@ -350,6 +365,20 @@ pub enum Effect {
     },
     Quit {
         exit_code: i32,
+    },
+    /// Arms the idle-expiry timer for one `Route::Transient` toast: after
+    /// `after` elapses with no other effect having cancelled it, the timer
+    /// worker sends `Msg::ToastExpired { id }` back into the loop. One-shot
+    /// per toast, not a persistent multi-deadline scheduler, mirroring
+    /// `view_tui::terminal::spawn_input_thread`'s shape (a background thread
+    /// that owns exactly one send). Chosen over evaluating expiry at paint
+    /// time (shape B in the design note) because the runtime loop has no
+    /// free-running clock: nothing else causes a repaint on an idle editor,
+    /// so a paint-time check would never re-run and the toast would never
+    /// expire.
+    ScheduleToastExpiry {
+        id: MessageId,
+        after: Duration,
     },
 }
 
