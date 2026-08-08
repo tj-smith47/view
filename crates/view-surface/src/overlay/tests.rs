@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;
-use view_core::native::views::PickerView;
+use view_core::native::views::{PickerView, StyleRole};
 
 fn picker() -> LayerKind {
     LayerKind::Picker(
@@ -457,4 +457,63 @@ fn a_control_character_in_a_title_is_blanked_never_set_into_the_edge() {
     let blank_title = LayerKind::Picker(PickerView::new("\u{1}\u{2}"));
     let edge = rows(30, 4, &blank_title, BorderSet::ASCII);
     assert_eq!(line_text(&edge.lines[0]), format!("+{}+", "-".repeat(28)));
+}
+
+/// A cut landing inside a span's own text keeps that span's role on
+/// whatever text survives the cut -- the span is not dropped just because
+/// it did not fit in full.
+#[test]
+fn clip_spans_landing_mid_span_keeps_the_role_on_the_surviving_text() {
+    let spans = vec![
+        Span::new("AB", StyleRole::Mode),
+        Span::new("CD", StyleRole::File),
+    ];
+    let out = clip_spans(spans, 3);
+    assert_eq!(
+        out,
+        vec![
+            Span::new("AB", StyleRole::Mode),
+            Span::new("C", StyleRole::File),
+        ]
+    );
+}
+
+/// Once the cut lands exactly on a span boundary, every span still to come
+/// is dropped entirely rather than emitting a role with no text.
+#[test]
+fn clip_spans_drops_a_span_entirely_once_the_width_is_already_used() {
+    let spans = vec![
+        Span::new("AB", StyleRole::Mode),
+        Span::new("CD", StyleRole::File),
+        Span::new("EF", StyleRole::GitBranch),
+    ];
+    let out = clip_spans(spans, 2);
+    assert_eq!(out, vec![Span::new("AB", StyleRole::Mode)]);
+}
+
+/// Spans that all fit keep their own role and relative order untouched --
+/// clipping to exactly the combined width is a no-op on the span sequence.
+#[test]
+fn clip_spans_preserves_the_role_sequence_when_everything_fits() {
+    let spans = vec![
+        Span::new("AB", StyleRole::Mode),
+        Span::new("CD", StyleRole::DiagnosticError),
+        Span::new("EF", StyleRole::DiagnosticWarning),
+    ];
+    let out = clip_spans(spans.clone(), 6);
+    assert_eq!(out, spans);
+}
+
+/// Padding past the last span's content is always its own trailing
+/// `StyleRole::Plain` span, never merged into whatever role the row's last
+/// real content span carries.
+#[test]
+fn clip_spans_pads_with_a_trailing_plain_span_not_the_last_roles_span() {
+    let spans = vec![Span::new("AB", StyleRole::Mode)];
+    let out = clip_spans(spans, 5);
+    assert_eq!(
+        out,
+        vec![Span::new("AB", StyleRole::Mode), Span::plain("   "),]
+    );
+    assert_eq!(out[1].role, StyleRole::Plain);
 }

@@ -3811,4 +3811,133 @@ mod tests {
             }
         }
     }
+
+    /// A statusline exercising every role the brief's consumer mock-up
+    /// names: mode, file, the modified marker, both diagnostic roles side
+    /// by side, a git branch, and the ruler.
+    fn spanful_statusline() -> LayerKind {
+        LayerKind::Statusline(view_core::native::views::StatuslineView::from_spans(
+            vec![Span::new("-- INSERT --", StyleRole::Mode)],
+            vec![
+                Span::new("paint.rs", StyleRole::File),
+                Span::new(" [+]", StyleRole::Modified),
+                Span::plain("  "),
+                Span::new("\u{25cf} 2", StyleRole::DiagnosticError),
+                Span::plain("  "),
+                Span::new("\u{25b2} 1", StyleRole::DiagnosticWarning),
+                Span::plain("  "),
+                Span::new("main", StyleRole::GitBranch),
+            ],
+            vec![Span::new("42:7", StyleRole::Ruler)],
+        ))
+    }
+
+    /// A model whose live highlight table names every chrome group this
+    /// test covers with its own distinct color -- what an attached
+    /// colorscheme actually does for every builtin group nvim ships (every
+    /// stock colorscheme defines `DiagnosticError` and `DiagnosticWarn`
+    /// separately, per `:h diagnostic-highlights`), not the coarse
+    /// Normal/Emphasis buckets `Theme`'s pre-attach fallback falls back to.
+    fn model_with_distinctly_colored_chrome() -> Model {
+        let mut model = caps_model(true, true, true);
+        for (id, group, color) in [
+            (1_u64, ChromeGroup::ModeMsg, 0x00FF_0000),
+            (2, ChromeGroup::StatusLine, 0x00CC_CCCC),
+            (3, ChromeGroup::WarningMsg, 0x00FF_A500),
+            (4, ChromeGroup::Directory, 0x0000_88FF),
+            (5, ChromeGroup::DiagnosticError, 0x00FF_3333),
+            (6, ChromeGroup::DiagnosticWarn, 0x00FF_CC00),
+        ] {
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlAttrDefine {
+                    id,
+                    fg: Some(color),
+                    bg: None,
+                    bold: false,
+                    italic: false,
+                    underline: false,
+                    reverse: false,
+                },
+            );
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlGroupSet {
+                    name: group.hl_name().to_string(),
+                    hl_id: id,
+                },
+            );
+        }
+        model
+    }
+
+    /// The brief's consumer mock-up requires the statusline's diagnostic
+    /// glyphs, mode text, filename, git branch and ruler to read in
+    /// distinct colors, not collapse to one flat style. Paints a real span
+    /// row through the real terminal compositor and asserts every role's
+    /// painted cells carry exactly the style its `chrome_group()` mapping
+    /// dictates -- read back through `theme.chrome(...)`, never a
+    /// hardcoded color, so the assertion survives a colorscheme change --
+    /// and, the load-bearing case this round exists for, that
+    /// `DiagnosticError` and `DiagnosticWarning` resolve to genuinely
+    /// different painted colors rather than both merely differing from
+    /// `Plain`.
+    #[test]
+    fn statusline_roles_resolve_to_their_own_distinct_chrome_colors() {
+        let model = model_with_distinctly_colored_chrome();
+        let theme = Theme::from_hl(model.engine.hl());
+        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
+        let width = 46_u16;
+        let rect = Rect::new(1, 2, width, 1);
+        let layer = view_surface::overlay::framed(rect, spanful_statusline(), borders);
+        let laid = view_surface::overlay::rows(width, 1, &spanful_statusline(), borders);
+        let buf = paint_layer_alone(&model, layer, width + 4, 4);
+
+        let mut seen: std::collections::HashSet<StyleRole> = std::collections::HashSet::new();
+        let mut diagnostic_error_fg = None;
+        let mut diagnostic_warning_fg = None;
+        let mut col = rect.col;
+        for span in &laid.lines[0] {
+            let span_width = u16::try_from(UnicodeWidthStr::width(span.text.as_str())).unwrap();
+            if let Some(group) = span.role.chrome_group() {
+                let expected = ratatui_style(theme.chrome(group));
+                for c in col..col + span_width {
+                    assert_eq!(
+                        buf[(c, rect.row)].fg,
+                        expected.fg.unwrap(),
+                        "role {:?} at column {c} did not resolve through its own chrome group",
+                        span.role
+                    );
+                }
+                seen.insert(span.role);
+                match span.role {
+                    StyleRole::DiagnosticError => diagnostic_error_fg = Some(expected.fg.unwrap()),
+                    StyleRole::DiagnosticWarning => {
+                        diagnostic_warning_fg = Some(expected.fg.unwrap());
+                    }
+                    _ => {}
+                }
+            }
+            col += span_width;
+        }
+
+        for role in [
+            StyleRole::Mode,
+            StyleRole::File,
+            StyleRole::GitBranch,
+            StyleRole::Ruler,
+            StyleRole::DiagnosticError,
+            StyleRole::DiagnosticWarning,
+        ] {
+            assert!(
+                seen.contains(&role),
+                "role {role:?} never appeared in the laid-out row"
+            );
+        }
+        assert_ne!(
+            diagnostic_error_fg, diagnostic_warning_fg,
+            "DiagnosticError and DiagnosticWarning must resolve to visually distinct \
+             colors, not collapse to one"
+        );
+    }
 }
