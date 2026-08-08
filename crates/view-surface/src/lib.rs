@@ -10,7 +10,9 @@ pub mod overlay;
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
 use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState};
-use view_core::native::views::{PaletteView, PickerView, PromptView, StatuslineView, TreeView};
+use view_core::native::views::{
+    PaletteView, PickerView, PromptView, Span, StatuslineView, TreeView,
+};
 
 use crate::overlay::BorderSet;
 
@@ -91,9 +93,13 @@ pub enum LayerKind {
     /// The visible toast box's physical lines, already selected by
     /// `Messages::visible_lines` (persistent error/warn lines kept, the
     /// most recent transient lines filling what room remains) and split on
-    /// each entry's own embedded line breaks: one row per string, in
+    /// each entry's own embedded line breaks: one row per span-vec, in
     /// display order top to bottom. Present while any message is visible.
-    Messages(Vec<String>),
+    /// Each row is a single [`view_core::native::views::StyleRole::Plain`]
+    /// span (a toast has no per-segment structure to preserve), kept as a
+    /// span-vec rather than a `String` so the layer honestly carries the
+    /// same overlay-row shape every other overlay layer does.
+    Messages(Vec<Vec<Span>>),
     /// The open tabs, present once nvim has sent a `tabline_update`.
     Tabline(TablineState),
     /// The completion popup menu, present while it is open.
@@ -387,10 +393,10 @@ pub fn render(model: &Model) -> Surface {
 /// widest total: summing every line's width together (as if they shared one
 /// row) would size the box far wider than any row it actually paints needs
 /// to be.
-fn messages_width(lines: &[String]) -> u16 {
+fn messages_width(lines: &[Vec<Span>]) -> u16 {
     lines
         .iter()
-        .map(|line| line.width())
+        .map(|spans| spans.iter().map(|s| s.text.width()).sum::<usize>())
         .max()
         .and_then(|w| u16::try_from(w).ok())
         .unwrap_or(u16::MAX)
@@ -1002,9 +1008,13 @@ mod tests {
         else {
             unreachable!("just matched Messages above");
         };
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+            .collect();
         assert_eq!(
-            lines,
-            &vec!["an error".to_string(), "new info".to_string()],
+            texts,
+            vec!["an error".to_string(), "new info".to_string()],
             "the persistent error must survive the overflow; the oldest transient line is evicted instead"
         );
     }

@@ -9,17 +9,18 @@
 //! is not looking at.
 //!
 //! What is this module's: turning one overlay's paint-facing view into the
-//! exact rows that cover its rect. [`rows`] returns them as plain strings,
-//! one per rect row and each exactly as wide as the rect, so the terminal
-//! painter and the oracle's rasterizer draw the same picture from one
-//! layout pass instead of two hand-kept-in-sync ones. Style (color,
-//! reverse, bold) stays with the painter, which is the only layer that
-//! knows the terminal's probed color capability.
+//! exact rows that cover its rect. [`rows`] returns them as styled spans,
+//! one row per rect row and each row's spans exactly as wide as the rect,
+//! so the terminal painter and the oracle's rasterizer draw the same
+//! picture from one layout pass instead of two hand-kept-in-sync ones.
+//! Resolving a span's role to a concrete color stays with the painter,
+//! which is the only layer that knows the terminal's probed color
+//! capability; this module only decides which text carries which role.
 
 use unicode_width::UnicodeWidthChar;
 use view_core::model::Tier;
 use view_core::native::views::{
-    PaletteRow, PaletteView, PickerView, PromptView, StatuslineView, TreeRow, TreeView,
+    PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow, TreeView,
 };
 
 use crate::{Layer, LayerKind, Rect};
@@ -136,11 +137,15 @@ pub fn framed(rect: Rect, kind: LayerKind, borders: BorderSet) -> Layer {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Rows {
-    /// One string per rect row, top to bottom. Each is exactly the rect's
-    /// width in terminal display cells, padded with spaces, so a painter
-    /// can blit a row without measuring it and no cell of the rect keeps
-    /// whatever was underneath.
-    pub lines: Vec<String>,
+    /// One span-vec per rect row, top to bottom. Each row's spans join to
+    /// exactly the rect's width in terminal display cells, padded with a
+    /// trailing plain space span, so a painter can blit a row without
+    /// measuring it and no cell of the rect keeps whatever was underneath.
+    /// A content span carries whatever style role its producer assigned
+    /// (e.g. a statusline's diagnostic glyph); frame chrome built in this
+    /// module (borders, padding, the selection marker) is always a plain
+    /// span. Use [`line_text`] where only the joined text is needed.
+    pub lines: Vec<Vec<Span>>,
     /// Index into `lines` of the row carrying the overlay's selection, or
     /// `None` when nothing is selected. Returned alongside the rows rather
     /// than recomputed by the painter, because it depends on the same
@@ -190,20 +195,21 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     let interior = height - 2;
     let laid = lay_out(&body, text_width, interior, borders);
 
-    let mut lines = Vec::with_capacity(usize::from(height));
-    lines.push(top_edge(width, borders, &body.title));
+    let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
+    lines.push(vec![Span::plain(top_edge(width, borders, &body.title))]);
     let blank = " ".repeat(usize::from(pad));
     for row in 0..interior {
-        let text = laid.lines.get(usize::from(row)).map_or("", String::as_str);
-        let mut line = String::new();
-        line.push(borders.vertical);
-        line.push_str(&blank);
-        line.push_str(text);
-        line.push_str(&blank);
-        line.push(borders.vertical);
+        let content = laid
+            .lines
+            .get(usize::from(row))
+            .cloned()
+            .unwrap_or_default();
+        let mut line: Vec<Span> = vec![Span::plain(format!("{}{blank}", borders.vertical))];
+        line.extend(content);
+        line.push(Span::plain(format!("{blank}{}", borders.vertical)));
         lines.push(line);
     }
-    lines.push(bottom_edge(width, borders));
+    lines.push(vec![Span::plain(bottom_edge(width, borders))]);
     Rows {
         lines,
         selected: laid.selected.map(|r| r.saturating_add(1)),
@@ -267,13 +273,13 @@ fn bottom_edge(width: u16, borders: BorderSet) -> String {
 /// on the interior width the frame leaves.
 enum Line {
     /// One column, flush with the row's left edge.
-    Text(String),
+    Text(Vec<Span>),
     /// Two columns: the first flush left, the second against the right
     /// edge.
-    Split(String, String),
+    Split(Vec<Span>, Vec<Span>),
     /// Three columns: the first flush left, the second centered on the row
     /// itself, the third against the right edge.
-    Spread(String, String, String),
+    Spread(Vec<Span>, Vec<Span>, Vec<Span>),
     /// A horizontal rule spanning the full interior width, drawn from the
     /// frame's own edge glyph. Kept as an intent rather than a built string
     /// because the width it spans is only known once the frame is sized.
@@ -301,7 +307,7 @@ struct Body {
 /// selection instead (centering it, or starting from it) would jump the
 /// list on every cursor move.
 fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
-    let mut lines: Vec<String> = Vec::with_capacity(usize::from(height));
+    let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
     for line in &body.header {
         if lines.len() >= usize::from(height) {
             break;
@@ -326,7 +332,7 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
         lines.push(fit(&marked(item, marker), width, borders));
     }
     while lines.len() < usize::from(height) {
-        lines.push(" ".repeat(usize::from(width)));
+        lines.push(vec![Span::plain(" ".repeat(usize::from(width)))]);
     }
     let selected_row = selected
         .filter(|i| item_rows > 0 && *i >= first)
@@ -355,10 +361,16 @@ fn picker_body(view: &PickerView) -> Body {
     Body {
         title: view.title.clone(),
         header: vec![
-            Line::Text(format!("{PROMPT_MARK} {}", view.query)),
+            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.query))),
             Line::Rule,
         ],
-        items: view.rows.iter().cloned().map(Line::Text).collect(),
+        items: view
+            .rows
+            .iter()
+            .cloned()
+            .map(plain_spans)
+            .map(Line::Text)
+            .collect(),
         selected: view.selected,
     }
 }
@@ -371,6 +383,7 @@ fn tree_body(view: &TreeView) -> Body {
             .rows
             .iter()
             .map(tree_row_text)
+            .map(plain_spans)
             .map(Line::Text)
             .collect(),
         selected: view.selected,
@@ -411,11 +424,17 @@ fn prompt_body(view: &PromptView) -> Body {
         // input line sharing a side of the rule with the choices reads as
         // a second selected row
         header: vec![
-            Line::Text(view.message.clone()),
-            Line::Text(format!("{PROMPT_MARK} {}", view.input)),
+            Line::Text(plain_spans(view.message.clone())),
+            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.input))),
             Line::Rule,
         ],
-        items: view.choices.iter().cloned().map(Line::Text).collect(),
+        items: view
+            .choices
+            .iter()
+            .cloned()
+            .map(plain_spans)
+            .map(Line::Text)
+            .collect(),
         selected: view.selected,
     }
 }
@@ -424,7 +443,7 @@ fn palette_body(view: &PaletteView) -> Body {
     Body {
         title: view.title.clone(),
         header: vec![
-            Line::Text(format!("{PROMPT_MARK} {}", view.query)),
+            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.query))),
             Line::Rule,
         ],
         items: view.rows.iter().map(palette_row_line).collect(),
@@ -436,22 +455,39 @@ fn palette_body(view: &PaletteView) -> Body {
 /// column pushed against the row's right edge when it has one.
 fn palette_row_line(row: &PaletteRow) -> Line {
     match &row.binding {
-        Some(binding) => Line::Split(row.label.clone(), binding.clone()),
-        None => Line::Text(row.label.clone()),
+        Some(binding) => Line::Split(plain_spans(row.label.clone()), plain_spans(binding.clone())),
+        None => Line::Text(plain_spans(row.label.clone())),
     }
 }
 
+/// Wraps plain text as a single [`view_core::native::views::StyleRole::Plain`]
+/// span: the honest representation for a column with no per-segment
+/// structure to preserve (a picker candidate, a tree row, a prompt choice).
+fn plain_spans(text: String) -> Vec<Span> {
+    vec![Span::plain(text)]
+}
+
 /// `line` with `marker` prefixed to its leftmost column, which is the one
-/// flush with the row's left edge in every variant.
+/// flush with the row's left edge in every variant. The marker is always
+/// its own leading plain span rather than merged into the first span's
+/// text, since it is frame chrome (the selection indicator), not part of
+/// whatever role the column's own content carries.
 fn marked(line: &Line, marker: &str) -> Line {
     match line {
-        Line::Text(text) => Line::Text(format!("{marker}{text}")),
-        Line::Split(left, right) => Line::Split(format!("{marker}{left}"), right.clone()),
+        Line::Text(spans) => Line::Text(prefixed(spans, marker)),
+        Line::Split(left, right) => Line::Split(prefixed(left, marker), right.clone()),
         Line::Spread(left, center, right) => {
-            Line::Spread(format!("{marker}{left}"), center.clone(), right.clone())
+            Line::Spread(prefixed(left, marker), center.clone(), right.clone())
         }
         Line::Rule => Line::Rule,
     }
+}
+
+/// `marker` as a leading plain span in front of `spans`.
+fn prefixed(spans: &[Span], marker: &str) -> Vec<Span> {
+    let mut out = vec![Span::plain(marker.to_string())];
+    out.extend(spans.iter().cloned());
+    out
 }
 
 /// Renders `line` as exactly `width` display cells.
@@ -473,36 +509,52 @@ fn marked(line: &Line, marker: &str) -> Line {
 /// it off centre. Columns wider than the row keep a single separating
 /// space and let the clip below truncate, rather than producing a negative
 /// gap.
-fn fit(line: &Line, width: u16, borders: BorderSet) -> String {
+fn fit(line: &Line, width: u16, borders: BorderSet) -> Vec<Span> {
     match line {
-        Line::Text(text) => clip(&sanitized(text), width),
+        Line::Text(spans) => clip_spans(sanitize_spans(spans), width),
         Line::Split(left, right) => {
-            let (left, right) = (sanitized(left), sanitized(right));
-            let gap = gap_before_right(cells(&left), cells(&right), width);
-            clip(
-                &format!("{left}{}{right}", " ".repeat(usize::from(gap))),
-                width,
-            )
+            let (left, right) = (sanitize_spans(left), sanitize_spans(right));
+            let (left_cells, right_cells) = (span_cells(&left), span_cells(&right));
+            let gap = gap_before_right(left_cells, right_cells, width);
+            let mut combined = left;
+            combined.push(Span::plain(" ".repeat(usize::from(gap))));
+            combined.extend(right);
+            clip_spans(combined, width)
         }
         Line::Spread(left, center, right) => {
-            let (left, center, right) = (sanitized(left), sanitized(center), sanitized(right));
-            let start = width.saturating_sub(cells(&center)) / 2;
-            let lead = min_gap(start.saturating_sub(cells(&left)), &center);
-            let placed = cells(&left)
-                .saturating_add(lead)
-                .saturating_add(cells(&center));
-            let gap = gap_before_right(placed, cells(&right), width);
-            clip(
-                &format!(
-                    "{left}{}{center}{}{right}",
-                    " ".repeat(usize::from(lead)),
-                    " ".repeat(usize::from(gap))
-                ),
-                width,
-            )
+            let (left, center, right) = (
+                sanitize_spans(left),
+                sanitize_spans(center),
+                sanitize_spans(right),
+            );
+            let (left_cells, center_cells, right_cells) =
+                (span_cells(&left), span_cells(&center), span_cells(&right));
+            let start = width.saturating_sub(center_cells) / 2;
+            let lead = min_gap(start.saturating_sub(left_cells), center_cells == 0);
+            let placed = left_cells.saturating_add(lead).saturating_add(center_cells);
+            let gap = gap_before_right(placed, right_cells, width);
+            let mut combined = left;
+            combined.push(Span::plain(" ".repeat(usize::from(lead))));
+            combined.extend(center);
+            combined.push(Span::plain(" ".repeat(usize::from(gap))));
+            combined.extend(right);
+            clip_spans(combined, width)
         }
-        Line::Rule => borders.horizontal.to_string().repeat(usize::from(width)),
+        Line::Rule => vec![Span::plain(
+            borders.horizontal.to_string().repeat(usize::from(width)),
+        )],
     }
+}
+
+/// `spans` with every control character in every span's text replaced by a
+/// plain space, so it occupies the one cell a terminal gives it and carries
+/// no meaning of its own. Roles are preserved: sanitizing never reclassifies
+/// a span, only the bytes inside it.
+fn sanitize_spans(spans: &[Span]) -> Vec<Span> {
+    spans
+        .iter()
+        .map(|s| Span::new(sanitized(&s.text), s.role))
+        .collect()
 }
 
 /// `text` with every control character replaced by a plain space, so it
@@ -514,22 +566,56 @@ fn sanitized(text: &str) -> String {
         .collect()
 }
 
-/// `text` truncated or space-padded to exactly `width` display cells.
-fn clip(text: &str, width: u16) -> String {
-    let mut out = String::new();
+/// `spans` truncated or space-padded to exactly `width` display cells,
+/// preserving span (and therefore role) boundaries: a span that survives
+/// the cut keeps its role, a span cut mid-glyph is dropped from the point
+/// of the cut, and any span past the cut is dropped entirely. Padding past
+/// the last span's content is always a trailing plain span, never merged
+/// into whatever role the row's last real content span carries.
+fn clip_spans(spans: Vec<Span>, width: u16) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::new();
     let mut used = 0_u16;
-    for ch in text.chars() {
-        let w = cell_width(ch);
-        if used.saturating_add(w) > width {
+    for span in spans {
+        if used >= width {
             break;
         }
-        out.push(ch);
-        used = used.saturating_add(w);
+        let mut text = String::new();
+        for ch in span.text.chars() {
+            let w = cell_width(ch);
+            if used.saturating_add(w) > width {
+                // this span's own room is exhausted, but a span carries no
+                // meaning that would make a later one unreachable, so the
+                // outer loop still gets a chance to add nothing rather than
+                // stopping the walk early
+                break;
+            }
+            text.push(ch);
+            used = used.saturating_add(w);
+        }
+        if !text.is_empty() {
+            out.push(Span::new(text, span.role));
+        }
     }
-    for _ in used..width {
-        out.push(' ');
+    if used < width {
+        out.push(Span::plain(" ".repeat(usize::from(width - used))));
     }
     out
+}
+
+/// `spans`' text, concatenated in order with no separator: the plain-text
+/// view of a row for a caller that needs its content or width but not its
+/// per-span style, e.g. sizing a layer or a golden that pins text only.
+#[must_use]
+pub fn line_text(spans: &[Span]) -> String {
+    spans.iter().map(|s| s.text.as_str()).collect()
+}
+
+/// `spans`' combined width in terminal display cells.
+fn span_cells(spans: &[Span]) -> u16 {
+    spans
+        .iter()
+        .map(|s| cells(&s.text))
+        .fold(0_u16, |acc, c| acc.saturating_add(c))
 }
 
 /// The run of spaces that pushes a `right`-wide column flush against the
@@ -537,15 +623,15 @@ fn clip(text: &str, width: u16) -> String {
 fn gap_before_right(placed: u16, right: u16, width: u16) -> u16 {
     min_gap(
         width.saturating_sub(right).saturating_sub(placed),
-        if right == 0 { "" } else { " " },
+        right == 0,
     )
 }
 
 /// `gap`, or one cell when the row has no room left and the column that
 /// follows has content: two columns running together read as one word, and
 /// a single space keeps them apart for the truncation that follows.
-fn min_gap(gap: u16, next: &str) -> u16 {
-    if next.is_empty() {
+fn min_gap(gap: u16, next_is_empty: bool) -> u16 {
+    if next_is_empty {
         gap
     } else {
         gap.max(1)

@@ -1838,7 +1838,14 @@ mod tests {
             content: vec![(0, "Save changes?".into())],
             replace_last: false,
         };
-        let shown = |m: &Model| m.engine.messages.visible_lines(4);
+        let shown = |m: &Model| {
+            m.engine
+                .messages
+                .visible_lines(4)
+                .into_iter()
+                .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
+                .collect::<Vec<_>>()
+        };
 
         let _ = update(&mut m, Msg::Redraw(vec![question(), UiEvent::Flush]));
         let _ = update(&mut m, Msg::Redraw(vec![prompt(), UiEvent::Flush]));

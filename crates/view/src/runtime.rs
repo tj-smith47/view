@@ -811,6 +811,19 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
+    /// `Messages::visible_lines` returns one span-row per line; these tests
+    /// only assert on the text a stall notice carries, so this flattens
+    /// each row back to a plain string.
+    fn visible_texts(model: &Model) -> Vec<String> {
+        model
+            .engine
+            .messages
+            .visible_lines(4)
+            .into_iter()
+            .map(|spans| spans.into_iter().map(|s| s.text).collect::<String>())
+            .collect()
+    }
+
     #[test]
     fn input_effect_maps_to_engine_ops_input() {
         let ops = FakeOps::default();
@@ -1544,7 +1557,7 @@ mod tests {
              and the threshold long past, raised no notice"
         );
         assert_eq!(
-            model.engine.messages.visible_lines(4),
+            visible_texts(&model),
             vec![ENGINE_STALLED_NOTICE.to_string()]
         );
 
@@ -1559,7 +1572,7 @@ mod tests {
         // is the one it exists to explain
         assert!(!model.engine.messages.dismiss_transient_on_keypress(false));
         assert_eq!(
-            model.engine.messages.visible_lines(4),
+            visible_texts(&model),
             vec![ENGINE_STALLED_NOTICE.to_string()]
         );
 
@@ -1607,7 +1620,7 @@ mod tests {
             );
         }
         assert_eq!(
-            model.engine.messages.visible_lines(4),
+            visible_texts(&model),
             vec![ENGINE_STALLED_NOTICE.to_string()]
         );
         peer.release();

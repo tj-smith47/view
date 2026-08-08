@@ -7,7 +7,7 @@
 //! segments into the three-zone [`StatuslineView`] `view-surface` already
 //! knows how to lay out and paint.
 
-use crate::native::views::StatuslineView;
+use crate::native::views::{Span, StatuslineView, StyleRole};
 
 /// Which zone of the bar a segment's text lands in once
 /// [`StatuslineState::view`] assembles the row.
@@ -102,71 +102,119 @@ impl StatuslineState {
     /// branch. `view-surface::overlay`'s own character-level `clip()` is
     /// still the last-resort fallback for whatever this leaves too long
     /// (e.g. a single segment's text alone exceeding `width`).
+    ///
+    /// Each segment carries the [`StyleRole`] a painter resolves through
+    /// the active colorscheme -- see `StyleRole::chrome_group` -- rather
+    /// than one flat style for the whole bar, so an error count and a
+    /// warning count read as visibly distinct at a glance instead of both
+    /// landing in plain text.
     #[must_use]
     pub fn view(&self, width: u16) -> StatuslineView {
         let mode = self.mode.clone();
 
         // most to least important, matching the ranking documented above;
         // popping from the end below therefore drops least-important first
-        let mut candidates: Vec<(Zone, String)> = Vec::new();
+        let mut candidates: Vec<(Zone, Vec<Span>)> = Vec::new();
         if !self.ruler.is_empty() {
-            candidates.push((Zone::Right, self.ruler.clone()));
+            candidates.push((
+                Zone::Right,
+                vec![Span::new(self.ruler.clone(), StyleRole::Ruler)],
+            ));
         }
         if !self.search_count.is_empty() {
-            candidates.push((Zone::Right, self.search_count.clone()));
+            candidates.push((
+                Zone::Right,
+                vec![Span::new(self.search_count.clone(), StyleRole::Ruler)],
+            ));
         }
         if !self.file.is_empty() {
-            let marker = if self.modified { " [+]" } else { "" };
-            candidates.push((Zone::Center, format!("{}{marker}", self.file)));
+            let mut spans = vec![Span::new(self.file.clone(), StyleRole::File)];
+            if self.modified {
+                spans.push(Span::new(" [+]", StyleRole::Modified));
+            }
+            candidates.push((Zone::Center, spans));
         }
         if !self.showcmd.is_empty() {
-            candidates.push((Zone::Left, self.showcmd.clone()));
+            candidates.push((Zone::Left, vec![Span::plain(self.showcmd.clone())]));
         }
         if let Some((errors, warnings)) = self.diagnostics {
             if errors > 0 || warnings > 0 {
-                candidates.push((Zone::Center, format!("E:{errors} W:{warnings}")));
+                let mut spans = Vec::new();
+                if errors > 0 {
+                    spans.push(Span::new(
+                        format!("\u{25cf} {errors}"),
+                        StyleRole::DiagnosticError,
+                    ));
+                }
+                if warnings > 0 {
+                    if !spans.is_empty() {
+                        spans.push(Span::plain("  "));
+                    }
+                    spans.push(Span::new(
+                        format!("\u{25b2} {warnings}"),
+                        StyleRole::DiagnosticWarning,
+                    ));
+                }
+                candidates.push((Zone::Center, spans));
             }
         }
         if !self.git_branch.is_empty() {
-            candidates.push((Zone::Center, self.git_branch.clone()));
+            candidates.push((
+                Zone::Center,
+                vec![Span::new(self.git_branch.clone(), StyleRole::GitBranch)],
+            ));
         }
 
         while assembled_len(&mode, &candidates) > usize::from(width) && !candidates.is_empty() {
             candidates.pop();
         }
 
-        let mut left = mode;
-        let mut center_parts = Vec::new();
-        let mut right_parts = Vec::new();
-        for (zone, text) in candidates {
+        let mut left = if mode.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::new(mode, StyleRole::Mode)]
+        };
+        let mut center: Vec<Span> = Vec::new();
+        let mut right: Vec<Span> = Vec::new();
+        for (zone, spans) in candidates {
             match zone {
                 Zone::Left => {
-                    if left.is_empty() {
-                        left = text;
-                    } else {
-                        left = format!("{left} {text}");
+                    if !left.is_empty() {
+                        left.push(Span::plain(" "));
                     }
+                    left.extend(spans);
                 }
-                Zone::Center => center_parts.push(text),
-                Zone::Right => right_parts.push(text),
+                Zone::Center => {
+                    if !center.is_empty() {
+                        center.push(Span::plain("  "));
+                    }
+                    center.extend(spans);
+                }
+                Zone::Right => {
+                    if !right.is_empty() {
+                        right.push(Span::plain("  "));
+                    }
+                    right.extend(spans);
+                }
             }
         }
 
-        StatuslineView::new(left, center_parts.join("  "), right_parts.join("  "))
+        StatuslineView::from_spans(left, center, right)
     }
 }
 
 /// The row's approximate assembled width: `mode` plus every candidate's
-/// text, each with a one-column separator budgeted in. An approximation
-/// (real zone joins use two-column separators in `view`), deliberately
-/// biased toward dropping a hair early rather than late -- `clip()`
-/// downstream is a hard character truncation, and a segment surviving into
-/// that is worse than one dropped a column before it was strictly required.
-fn assembled_len(mode: &str, candidates: &[(Zone, String)]) -> usize {
+/// spans, each group with a one-column separator budgeted in. An
+/// approximation (real zone joins use two-column separators in `view`),
+/// deliberately biased toward dropping a hair early rather than late --
+/// `clip()` downstream is a hard character truncation, and a segment
+/// surviving into that is worse than one dropped a column before it was
+/// strictly required.
+fn assembled_len(mode: &str, candidates: &[(Zone, Vec<Span>)]) -> usize {
     mode.chars().count()
         + candidates
             .iter()
-            .map(|(_, text)| text.chars().count() + 1)
+            .map(|(_, spans)| spans.iter().map(|s| s.text.chars().count()).sum::<usize>() + 1)
             .sum::<usize>()
 }
 
@@ -175,6 +223,14 @@ fn assembled_len(mode: &str, candidates: &[(Zone, String)]) -> usize {
 mod tests {
     use super::*;
 
+    /// A zone's rendered text, ignoring which spans it is built from: most
+    /// of this module's assertions are about which segments survive and in
+    /// what order, not about role assignment, which the dedicated `_roles`
+    /// tests below cover instead.
+    fn text(spans: &[Span]) -> String {
+        spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
     #[test]
     fn recording_a_macro_is_always_visible() {
         // macro recording must stay visible; `msg_showmode`'s content is
@@ -182,7 +238,7 @@ mod tests {
         let mut state = StatuslineState::default();
         state.apply(SegmentUpdate::Mode("recording @q".to_string()));
         let view = state.view(80);
-        assert_eq!(view.left, "recording @q");
+        assert_eq!(text(&view.left), "recording @q");
     }
 
     #[test]
@@ -194,7 +250,7 @@ mod tests {
             "dev/p4-native-features".to_string(),
         ));
         let view = state.view(1);
-        assert_eq!(view.left, "recording @q");
+        assert_eq!(text(&view.left), "recording @q");
     }
 
     #[test]
@@ -202,7 +258,7 @@ mod tests {
         let mut state = StatuslineState::default();
         state.apply(SegmentUpdate::Showcmd("12".to_string()));
         let view = state.view(80);
-        assert_eq!(view.left, "12");
+        assert_eq!(text(&view.left), "12");
     }
 
     #[test]
@@ -211,7 +267,7 @@ mod tests {
         state.apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
         state.apply(SegmentUpdate::Showcmd("12".to_string()));
         let view = state.view(80);
-        assert_eq!(view.left, "-- INSERT -- 12");
+        assert_eq!(text(&view.left), "-- INSERT -- 12");
     }
 
     #[test]
@@ -219,7 +275,7 @@ mod tests {
         let mut state = StatuslineState::default();
         state.apply(SegmentUpdate::Ruler("1,26          All".to_string()));
         let view = state.view(80);
-        assert_eq!(view.right, "1,26          All");
+        assert_eq!(text(&view.right), "1,26          All");
     }
 
     #[test]
@@ -230,7 +286,10 @@ mod tests {
             "/cat            [2/2]".to_string(),
         ));
         let view = state.view(80);
-        assert_eq!(view.right, "1,5           All  /cat            [2/2]");
+        assert_eq!(
+            text(&view.right),
+            "1,5           All  /cat            [2/2]"
+        );
     }
 
     #[test]
@@ -241,7 +300,7 @@ mod tests {
             warnings: 0,
         });
         let view = state.view(80);
-        assert_eq!(view.center, "");
+        assert_eq!(text(&view.center), "");
     }
 
     #[test]
@@ -252,7 +311,58 @@ mod tests {
             warnings: 1,
         });
         let view = state.view(80);
-        assert_eq!(view.center, "E:2 W:1");
+        assert_eq!(text(&view.center), "\u{25cf} 2  \u{25b2} 1");
+    }
+
+    /// The mock-up in the task brief shows the error glyph and the warning
+    /// glyph carrying visibly distinct styling; this is the assertion that
+    /// they actually do, not just that the text reads right.
+    #[test]
+    fn diagnostic_glyphs_carry_distinct_error_and_warning_roles() {
+        let mut state = StatuslineState::default();
+        state.apply(SegmentUpdate::Diagnostics {
+            errors: 2,
+            warnings: 1,
+        });
+        let view = state.view(80);
+        let error = view
+            .center
+            .iter()
+            .find(|s| s.text.contains('2'))
+            .expect("the error count span is present");
+        let warning = view
+            .center
+            .iter()
+            .find(|s| s.text.contains('1'))
+            .expect("the warning count span is present");
+        assert_eq!(error.role, StyleRole::DiagnosticError);
+        assert_eq!(warning.role, StyleRole::DiagnosticWarning);
+        assert_ne!(error.role, warning.role);
+    }
+
+    /// Mode, file, the modified marker, and git branch each resolve to
+    /// their own role rather than one flat style for the whole bar.
+    #[test]
+    fn mode_file_modified_and_branch_carry_their_own_roles() {
+        let mut state = StatuslineState::default();
+        state.apply(SegmentUpdate::Mode("-- INSERT --".to_string()));
+        state.apply(SegmentUpdate::Buffer {
+            name: "statusline.rs".to_string(),
+            modified: true,
+        });
+        state.apply(SegmentUpdate::GitBranch("main".to_string()));
+        let view = state.view(80);
+
+        assert_eq!(view.left, vec![Span::new("-- INSERT --", StyleRole::Mode)]);
+        assert_eq!(
+            view.center,
+            vec![
+                Span::new("statusline.rs", StyleRole::File),
+                Span::new(" [+]", StyleRole::Modified),
+                Span::plain("  "),
+                Span::new("main", StyleRole::GitBranch),
+            ]
+        );
     }
 
     #[test]
@@ -260,7 +370,7 @@ mod tests {
         let mut state = StatuslineState::default();
         state.apply(SegmentUpdate::GitBranch("main".to_string()));
         let view = state.view(80);
-        assert_eq!(view.center, "main");
+        assert_eq!(text(&view.center), "main");
     }
 
     #[test]
@@ -271,7 +381,7 @@ mod tests {
             modified: true,
         });
         let view = state.view(80);
-        assert_eq!(view.center, "statusline.rs [+]");
+        assert_eq!(text(&view.center), "statusline.rs [+]");
     }
 
     #[test]
@@ -282,7 +392,7 @@ mod tests {
             modified: false,
         });
         let view = state.view(80);
-        assert_eq!(view.center, "statusline.rs");
+        assert_eq!(text(&view.center), "statusline.rs");
     }
 
     /// A fully populated bar at 200 columns: every segment present, nothing
@@ -307,11 +417,11 @@ mod tests {
         ));
 
         let view = state.view(200);
-        assert_eq!(view.left, "-- INSERT -- 12");
-        assert_eq!(view.right, "1,26          All  /cat [2/2]");
+        assert_eq!(text(&view.left), "-- INSERT -- 12");
+        assert_eq!(text(&view.right), "1,26          All  /cat [2/2]");
         assert_eq!(
-            view.center,
-            "statusline.rs [+]  E:1 W:2  dev/p4-native-features"
+            text(&view.center),
+            "statusline.rs [+]  \u{25cf} 1  \u{25b2} 2  dev/p4-native-features"
         );
     }
 
@@ -339,9 +449,9 @@ mod tests {
         ));
 
         let view = state.view(64);
-        assert_eq!(view.left, "-- INSERT -- 12");
-        assert_eq!(view.right, "1,26          All  /cat [2/2]");
-        assert_eq!(view.center, "statusline.rs [+]");
+        assert_eq!(text(&view.left), "-- INSERT -- 12");
+        assert_eq!(text(&view.right), "1,26          All  /cat [2/2]");
+        assert_eq!(text(&view.center), "statusline.rs [+]");
     }
 
     /// At the narrowest realistic width, every segment but mode drops --
@@ -366,9 +476,9 @@ mod tests {
         ));
 
         let view = state.view(12);
-        assert_eq!(view.left, "-- INSERT --");
-        assert_eq!(view.center, "");
-        assert_eq!(view.right, "");
+        assert_eq!(text(&view.left), "-- INSERT --");
+        assert_eq!(text(&view.center), "");
+        assert_eq!(text(&view.right), "");
     }
 
     #[test]

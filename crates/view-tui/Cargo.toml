@@ -39,6 +39,13 @@ rustix = { version = "1", default-features = false, features = ["std", "termios"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+# Test-only, for the span-painter parity leg (tests/span_painter_parity.rs):
+# `view-oracle`'s raster is the one other crate that turns a `Surface` into
+# text, and it deliberately stays free of crossterm/ratatui (see its own
+# module docs) so the edge must run the other way -- view-tui depending on
+# it in tests, never the reverse. Dev-only so no shipping binary carries the
+# oracle's differential-testing machinery.
+view-oracle = { version = "0.0.1", path = "../view-oracle" }
 
 [[bench]]
 name = "paint_frame"

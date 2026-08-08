@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
+use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{Layer, LayerKind, Rect, Surface};
 
@@ -587,24 +588,79 @@ fn paint_text_row(
         if col >= area.width {
             break;
         }
-        let ch = sanitized_char(ch);
-        // sanitized_char already replaced every control character with a
-        // plain space, so `width` is `None` here only for the handful of
-        // zero-width combining marks that survive sanitization; `.max(1)`
-        // still advances the column for those rather than looping forever
-        // painting into the same cell
-        let width = ch.width().unwrap_or(1).max(1) as u16;
-        let room = columns_left(buf, area.x.saturating_add(col));
-        let mut encode_buf = [0_u8; 4];
-        let symbol = fitted_symbol(ch.encode_utf8(&mut encode_buf), room);
-        let width = if symbol.len() == 1 { 1 } else { width };
-        let cell = &mut buf[(area.x + col, area.y + row_offset)];
-        cell.set_symbol(symbol);
-        cell.set_style(style);
-        if width == 2 && col + 1 < area.width {
-            buf[(area.x + col + 1, area.y + row_offset)].reset();
+        col = col.saturating_add(paint_char_cell(buf, area, row_offset, col, ch, style));
+    }
+}
+
+/// Places one character at column `col` of row `row_offset` within `area`,
+/// styled `style`, and returns the number of columns it consumed.
+///
+/// The single per-cell placement primitive [`paint_text_row`] (one style for
+/// a whole row) and [`paint_span_row`] (one style per span, continuing the
+/// same column cursor across span boundaries) both build on, so wide-glyph
+/// handling and edge-of-buffer clipping live in exactly one place rather
+/// than as two copies that could drift.
+fn paint_char_cell(
+    buf: &mut Buffer,
+    area: ratatui::layout::Rect,
+    row_offset: u16,
+    col: u16,
+    ch: char,
+    style: Style,
+) -> u16 {
+    let ch = sanitized_char(ch);
+    // sanitized_char already replaced every control character with a
+    // plain space, so `width` is `None` here only for the handful of
+    // zero-width combining marks that survive sanitization; `.max(1)`
+    // still advances the column for those rather than looping forever
+    // painting into the same cell
+    let width = ch.width().unwrap_or(1).max(1) as u16;
+    let room = columns_left(buf, area.x.saturating_add(col));
+    let mut encode_buf = [0_u8; 4];
+    let symbol = fitted_symbol(ch.encode_utf8(&mut encode_buf), room);
+    let width = if symbol.len() == 1 { 1 } else { width };
+    let cell = &mut buf[(area.x + col, area.y + row_offset)];
+    cell.set_symbol(symbol);
+    cell.set_style(style);
+    if width == 2 && col + 1 < area.width {
+        buf[(area.x + col + 1, area.y + row_offset)].reset();
+    }
+    width
+}
+
+/// Writes `spans` into row `row_offset` of `area`, each span styled by
+/// resolving its [`view_core::native::views::StyleRole`] through `resolve`,
+/// continuing the same column cursor across span boundaries so spans
+/// compose into one unbroken row exactly like [`paint_text_row`]'s single
+/// string does.
+///
+/// `resolve` decides the whole story, including what a
+/// [`view_core::native::views::StyleRole::Plain`] span gets (typically the
+/// row's own base style, matching `Plain`'s documented meaning: "whatever
+/// base style the row it sits on already carries") -- this function only
+/// walks spans and places cells.
+fn paint_span_row(
+    spans: &[Span],
+    resolve: impl Fn(StyleRole) -> Style,
+    area: ratatui::layout::Rect,
+    row_offset: u16,
+    buf: &mut Buffer,
+) {
+    if row_offset >= area.height {
+        return;
+    }
+    let mut col = 0_u16;
+    for span in spans {
+        if col >= area.width {
+            break;
         }
-        col = col.saturating_add(width);
+        let style = resolve(span.role);
+        for ch in span.text.chars() {
+            if col >= area.width {
+                break;
+            }
+            col = col.saturating_add(paint_char_cell(buf, area, row_offset, col, ch, style));
+        }
     }
 }
 
@@ -684,7 +740,12 @@ fn paint_cmdline(
 /// when the frontend has no `ext_multigrid` support), which is what a live
 /// repro showed as foreign glyphs bleeding through at a toast row's right
 /// edge.
-fn paint_messages(lines: &[String], theme: &Theme, area: ratatui::layout::Rect, buf: &mut Buffer) {
+fn paint_messages(
+    lines: &[Vec<Span>],
+    theme: &Theme,
+    area: ratatui::layout::Rect,
+    buf: &mut Buffer,
+) {
     if lines.is_empty() {
         return;
     }
@@ -704,11 +765,22 @@ fn paint_messages(lines: &[String], theme: &Theme, area: ratatui::layout::Rect, 
     paint_message_border(area, border_style, buf);
 
     let inner = inset_by_one(area);
-    for (i, line) in lines.iter().enumerate() {
+    // every toast line is a single `StyleRole::Plain` span (see
+    // `LayerKind::Messages`'s doc comment), so this row's own `style` is
+    // the whole story -- `paint_text_row` over the flattened text is the
+    // honest rendering, not a placeholder for per-span resolution nobody
+    // asked for here
+    for (i, spans) in lines.iter().enumerate() {
         let Ok(row) = u16::try_from(i) else {
             break;
         };
-        paint_text_row(line, style, inner, row, buf);
+        paint_text_row(
+            &view_surface::overlay::line_text(spans),
+            style,
+            inner,
+            row,
+            buf,
+        );
     }
 }
 
@@ -959,16 +1031,51 @@ fn paint_native_overlay(
             break;
         }
         let edge_row = laid.framed && (i == 0 || i == last);
-        let style = if edge_row {
-            frame
+        if edge_row {
+            paint_text_row(
+                &view_surface::overlay::line_text(line),
+                frame,
+                area,
+                row,
+                buf,
+            );
         } else if laid.selected == Some(row) {
-            selected
+            // a selected row's whole-row reverse/highlight is a fact about
+            // the row, not about any one span in it, so it stays a single
+            // uniform style even though the row's spans may carry roles of
+            // their own
+            paint_text_row(
+                &view_surface::overlay::line_text(line),
+                selected,
+                area,
+                row,
+                buf,
+            );
         } else {
-            interior
-        };
-        paint_text_row(line, style, area, row, buf);
+            // ordinary content rows resolve style per span -- this is what
+            // lets the statusline's diagnostic glyphs, mode text, git
+            // branch, etc. read in distinct colors instead of collapsing to
+            // one flat style; every other overlay's rows carry only
+            // `StyleRole::Plain` spans, so `resolve` falling back to
+            // `interior` for those keeps their appearance unchanged
+            let resolve = |role: StyleRole| -> Style {
+                if !truecolor {
+                    return interior;
+                }
+                role.chrome_group()
+                    .map_or(interior, |group| ratatui_style(theme.chrome(group)))
+            };
+            paint_span_row(line, resolve, area, row, buf);
+        }
         if laid.framed && !edge_row {
-            paint_frame_cells(line, layer.rect.width, area, row, frame, buf);
+            paint_frame_cells(
+                &view_surface::overlay::line_text(line),
+                layer.rect.width,
+                area,
+                row,
+                frame,
+                buf,
+            );
         }
     }
 }
@@ -3581,7 +3688,7 @@ mod tests {
                 let row = u16::try_from(i).unwrap();
                 assert_eq!(
                     row_text(&buf, 1 + row, 2, 26),
-                    *line,
+                    view_surface::overlay::line_text(line),
                     "tier {:?} row {row}",
                     model.caps.tier
                 );

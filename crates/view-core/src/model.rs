@@ -5,6 +5,7 @@ use crate::grid::{Grid, GridOp};
 use crate::hl::{HlAttr, HlTable, ProbedDefaults};
 use crate::native::geometry::{OverlayBox, OverlayRect};
 use crate::native::mappings::MappingClaim;
+use crate::native::views::Span;
 
 /// The complete application state.
 #[non_exhaustive]
@@ -859,8 +860,13 @@ impl Messages {
     /// visible stack with neither an explicit `msg_clear` nor a replace
     /// ever happening, which is exactly the "persist until dismissed or
     /// replaced" contract broken by a plain recency-only trim.
+    ///
+    /// Each returned line is one span, carrying [`StyleRole::Plain`]
+    /// (`crate::native::views::StyleRole`): a toast has no per-segment
+    /// structure to preserve, so a single honest span is the whole row --
+    /// not a placeholder for styling nobody asked for yet.
     #[must_use]
-    pub fn visible_lines(&self, max_rows: usize) -> Vec<String> {
+    pub fn visible_lines(&self, max_rows: usize) -> Vec<Vec<Span>> {
         let all: Vec<(bool, String)> = self
             .entries
             .iter()
@@ -871,7 +877,7 @@ impl Messages {
             .collect();
         let overflow = all.len().saturating_sub(max_rows);
         if overflow == 0 {
-            return all.into_iter().map(|(_, l)| l).collect();
+            return all.into_iter().map(|(_, l)| vec![Span::plain(l)]).collect();
         }
         let mut remaining = overflow;
         let mut keep = vec![true; all.len()];
@@ -891,7 +897,7 @@ impl Messages {
         }
         all.into_iter()
             .zip(keep)
-            .filter_map(|((_, l), k)| k.then_some(l))
+            .filter_map(|((_, l), k)| k.then_some(vec![Span::plain(l)]))
             .collect()
     }
 }
@@ -1072,6 +1078,16 @@ mod tests {
         messages.entries.into_iter().next().unwrap()
     }
 
+    /// `visible_lines` returns one span-row per line; these tests only care
+    /// about the text each row carries (a toast has no per-segment styling
+    /// to assert on), so this flattens each row back to a plain string.
+    fn texts(lines: &[Vec<Span>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|spans| spans.iter().map(|s| s.text.as_str()).collect())
+            .collect()
+    }
+
     #[test]
     fn message_entry_lines_splits_embedded_newlines_into_separate_physical_lines() {
         let e = entry("echoerr", vec![(0, "first line\nsecond line".into())]);
@@ -1192,7 +1208,7 @@ mod tests {
             false,
         );
         messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
-        assert_eq!(messages.visible_lines(1), vec!["Save changes?"]);
+        assert_eq!(texts(&messages.visible_lines(1)), vec!["Save changes?"]);
     }
 
     #[test]
@@ -1223,7 +1239,7 @@ mod tests {
     fn a_condition_notice_is_raised_once_and_retracted_once() {
         let mut messages = Messages::default();
         assert!(messages.set_native_condition(Some("engine stalled")));
-        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+        assert_eq!(texts(&messages.visible_lines(4)), vec!["engine stalled"]);
         // re-asserting the same condition is not a change, so a caller that
         // asks on every pass never repaints for it
         assert!(!messages.set_native_condition(Some("engine stalled")));
@@ -1239,7 +1255,7 @@ mod tests {
         let mut messages = Messages::default();
         assert!(messages.set_native_condition(Some("first")));
         assert!(messages.set_native_condition(Some("second")));
-        assert_eq!(messages.visible_lines(4), vec!["second"]);
+        assert_eq!(texts(&messages.visible_lines(4)), vec!["second"]);
         assert_eq!(messages.entries.len(), 1);
     }
 
@@ -1251,7 +1267,7 @@ mod tests {
         messages.note_flush();
         messages.note_flush();
         assert!(messages.dismiss_transient_on_keypress(false));
-        assert_eq!(messages.visible_lines(4), vec!["engine stalled"]);
+        assert_eq!(texts(&messages.visible_lines(4)), vec!["engine stalled"]);
     }
 
     #[test]
@@ -1263,7 +1279,10 @@ mod tests {
         messages.push("progress".to_string(), vec![(0, "[1/57]".into())], false);
         assert!(messages.set_native_condition(Some("engine stalled")));
         messages.push("progress".to_string(), vec![(0, "[2/57]".into())], true);
-        assert_eq!(messages.visible_lines(4), vec!["[2/57]", "engine stalled"]);
+        assert_eq!(
+            texts(&messages.visible_lines(4)),
+            vec!["[2/57]", "engine stalled"]
+        );
         assert_eq!(messages.entries.len(), 2);
     }
 
@@ -1272,7 +1291,10 @@ mod tests {
         let mut messages = Messages::default();
         assert!(messages.set_native_condition(Some("engine stalled")));
         messages.push("progress".to_string(), vec![(0, "[1/57]".into())], true);
-        assert_eq!(messages.visible_lines(4), vec!["engine stalled", "[1/57]"]);
+        assert_eq!(
+            texts(&messages.visible_lines(4)),
+            vec!["engine stalled", "[1/57]"]
+        );
     }
 
     #[test]
@@ -1282,7 +1304,7 @@ mod tests {
         assert!(messages.set_native_condition(Some("engine stalled")));
         messages.push("echomsg".to_string(), vec![(0, "info".into())], false);
         assert!(messages.set_native_condition(None));
-        assert_eq!(messages.visible_lines(4), vec!["boom", "info"]);
+        assert_eq!(texts(&messages.visible_lines(4)), vec!["boom", "info"]);
     }
 
     #[test]
@@ -1293,7 +1315,7 @@ mod tests {
             messages.push("echomsg".to_string(), vec![(0, format!("info {i}"))], false);
         }
         assert_eq!(
-            messages.visible_lines(2),
+            texts(&messages.visible_lines(2)),
             vec!["engine stalled", "info 4"],
             "a stall notice must not be evicted by the messages that follow it"
         );
@@ -1304,7 +1326,7 @@ mod tests {
         let mut messages = Messages::default();
         messages.push("echomsg".to_string(), vec![(0, "a".into())], false);
         messages.push("echomsg".to_string(), vec![(0, "b".into())], false);
-        assert_eq!(messages.visible_lines(5), vec!["a", "b"]);
+        assert_eq!(texts(&messages.visible_lines(5)), vec!["a", "b"]);
     }
 
     #[test]
@@ -1316,7 +1338,7 @@ mod tests {
         // box has room for 2 of the 3 lines: the persistent error must
         // never be the one evicted just because other messages arrived
         // after it, so the oldest transient line ("old info") goes instead
-        assert_eq!(messages.visible_lines(2), vec!["error", "new info"]);
+        assert_eq!(texts(&messages.visible_lines(2)), vec!["error", "new info"]);
     }
 
     #[test]
@@ -1332,7 +1354,7 @@ mod tests {
             vec![(0, "second error".into())],
             false,
         );
-        assert_eq!(messages.visible_lines(1), vec!["second error"]);
+        assert_eq!(texts(&messages.visible_lines(1)), vec!["second error"]);
     }
 
     #[test]

@@ -2316,6 +2316,7 @@ dependencies = [
  "rustix",
  "unicode-width",
  "view-core",
+ "view-oracle",
  "view-surface",
 ]
 

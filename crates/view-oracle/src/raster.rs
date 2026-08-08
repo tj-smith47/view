@@ -214,7 +214,7 @@ fn paint_native_overlay(canvas: &mut Canvas<'_>, layer: &Layer) {
             canvas,
             layer.rect.row.saturating_add(r),
             layer.rect.col,
-            line,
+            &view_surface::overlay::line_text(line),
         );
     }
 }
@@ -285,17 +285,21 @@ fn blank_row(canvas: &mut Canvas<'_>, row: u16, col: u16, width: u16) {
 /// has to blank each row (mirroring the real painter's own toast-box clear;
 /// without it a row's cells past a shorter line's text would keep showing
 /// whatever an earlier layer painted there) and write each line.
-fn paint_messages(canvas: &mut Canvas<'_>, layer: &Layer, lines: &[String]) {
+fn paint_messages(
+    canvas: &mut Canvas<'_>,
+    layer: &Layer,
+    lines: &[Vec<view_core::native::views::Span>],
+) {
     for r in 0..layer.rect.height {
         blank_row(canvas, layer.rect.row + r, layer.rect.col, layer.rect.width);
     }
-    for (i, line) in lines.iter().enumerate() {
+    for (i, spans) in lines.iter().enumerate() {
         let Ok(r) = u16::try_from(i) else { break };
         paint_text(
             canvas,
             layer.rect.row.saturating_add(r),
             layer.rect.col,
-            line,
+            &view_surface::overlay::line_text(spans),
         );
     }
 }

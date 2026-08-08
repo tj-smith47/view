@@ -149,6 +149,30 @@ chrome_groups! {
     PmenuSel => "PmenuSel", Emphasis;
     /// The message-log overlay's text.
     MsgArea => "MsgArea", Normal;
+    /// The mode indicator nvim's own message area shows for `-- INSERT --`
+    /// and friends (`:h hl-ModeMsg`). The native statusline's mode segment
+    /// reuses it rather than inventing a statusline-only group, so a
+    /// colorscheme that already themes nvim's mode message gets a matching
+    /// statusline mode segment for free.
+    ModeMsg => "ModeMsg", Emphasis;
+    /// nvim's own warning-message group (`:h hl-WarningMsg`). The native
+    /// statusline's modified-buffer marker reuses it: an unsaved buffer is
+    /// exactly the kind of thing that group already exists to draw the eye
+    /// to.
+    WarningMsg => "WarningMsg", Emphasis;
+    /// nvim's own directory-label group (`:h hl-Directory`). The native
+    /// statusline's git-branch segment reuses it, the closest existing
+    /// builtin to "a short, path-adjacent label", rather than a
+    /// statusline-only group no colorscheme has ever themed.
+    Directory => "Directory", Normal;
+    /// nvim's builtin LSP/diagnostic error group (`:h diagnostic-highlights`).
+    /// The native statusline's error-count glyph resolves through this, the
+    /// same group a colorscheme already uses for diagnostic signs and
+    /// underlines, so the two agree on what "error" looks like.
+    DiagnosticError => "DiagnosticError", Emphasis;
+    /// nvim's builtin LSP/diagnostic warning group (`:h diagnostic-highlights`),
+    /// the warning counterpart of [`ChromeGroup::DiagnosticError`].
+    DiagnosticWarn => "DiagnosticWarn", Emphasis;
 }
 
 /// The active colorscheme's resolved design system: the default/"Normal"

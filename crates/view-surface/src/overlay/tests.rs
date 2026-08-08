@@ -17,7 +17,7 @@ fn picker() -> LayerKind {
 }
 
 fn widths(rows: &Rows) -> Vec<u16> {
-    rows.lines.iter().map(|l| cells(l)).collect()
+    rows.lines.iter().map(|l| cells(&line_text(l))).collect()
 }
 
 /// One row's text with its two edge glyphs and the padding column inside
@@ -52,14 +52,27 @@ fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
     let standard = rows(28, 8, &picker(), BorderSet::PLAIN);
     let basic = rows(28, 8, &picker(), BorderSet::ASCII);
 
-    assert!(full.lines[0].starts_with('╭'), "{}", full.lines[0]);
-    assert!(standard.lines[0].starts_with('┌'), "{}", standard.lines[0]);
-    assert!(basic.lines[0].starts_with('+'), "{}", basic.lines[0]);
+    assert!(
+        line_text(&full.lines[0]).starts_with('╭'),
+        "{:?}",
+        full.lines[0]
+    );
+    assert!(
+        line_text(&standard.lines[0]).starts_with('┌'),
+        "{:?}",
+        standard.lines[0]
+    );
+    assert!(
+        line_text(&basic.lines[0]).starts_with('+'),
+        "{:?}",
+        basic.lines[0]
+    );
 
     // corners aside, full and standard draw the same edges, so a change to
     // the shared glyph moves both tiers and leaves ASCII alone
     assert_eq!(
-        full.lines[1], standard.lines[1],
+        line_text(&full.lines[1]),
+        line_text(&standard.lines[1]),
         "interior rows are identical"
     );
     assert_eq!(
@@ -74,18 +87,27 @@ fn a_tier_swaps_the_border_glyphs_without_moving_any_content() {
             .collect()
     };
     for (a, b) in full.lines.iter().zip(basic.lines.iter()) {
-        assert_eq!(strip(a), strip(b), "content is tier-independent");
+        assert_eq!(
+            strip(&line_text(a)),
+            strip(&line_text(b)),
+            "content is tier-independent"
+        );
     }
 }
 
 #[test]
 fn the_title_is_set_into_the_top_edge_only_while_it_fits() {
     let wide = rows(28, 5, &picker(), BorderSet::ASCII);
-    assert!(wide.lines[0].contains(" Files "), "{}", wide.lines[0]);
+    assert!(
+        line_text(&wide.lines[0]).contains(" Files "),
+        "{:?}",
+        wide.lines[0]
+    );
 
     let narrow = rows(8, 5, &picker(), BorderSet::ASCII);
     assert_eq!(
-        narrow.lines[0], "+------+",
+        line_text(&narrow.lines[0]),
+        "+------+",
         "a top edge too short for the title keeps an unbroken run"
     );
 }
@@ -95,13 +117,14 @@ fn the_selection_marker_and_its_row_index_name_the_same_row() {
     let framed = rows(28, 8, &picker(), BorderSet::ASCII);
     let row = framed.selected.expect("the picker has a selection");
     assert!(
-        framed.lines[usize::from(row)].contains("> src/main.rs"),
+        line_text(&framed.lines[usize::from(row)]).contains("> src/main.rs"),
         "{:?}",
         framed.lines
     );
     for (i, line) in framed.lines.iter().enumerate() {
         if i != usize::from(row) {
-            assert!(!line.contains("> src/"), "only one row is marked: {line}");
+            let text = line_text(line);
+            assert!(!text.contains("> src/"), "only one row is marked: {text}");
         }
     }
 }
@@ -120,13 +143,25 @@ fn a_selection_below_the_window_scrolls_it_into_view_by_the_smallest_step() {
     // interior height 4, of which the prompt line and rule take 2: two item
     // rows are visible at a time
     let top = rows(20, 6, &kind(1), BorderSet::ASCII);
-    assert!(top.lines[3].contains("row-00"), "{:?}", top.lines);
-    assert!(top.lines[4].contains("> row-01"), "{:?}", top.lines);
+    assert!(
+        line_text(&top.lines[3]).contains("row-00"),
+        "{:?}",
+        top.lines
+    );
+    assert!(
+        line_text(&top.lines[4]).contains("> row-01"),
+        "{:?}",
+        top.lines
+    );
 
     let scrolled = rows(20, 6, &kind(7), BorderSet::ASCII);
-    assert!(scrolled.lines[3].contains("row-06"), "{:?}", scrolled.lines);
     assert!(
-        scrolled.lines[4].contains("> row-07"),
+        line_text(&scrolled.lines[3]).contains("row-06"),
+        "{:?}",
+        scrolled.lines
+    );
+    assert!(
+        line_text(&scrolled.lines[4]).contains("> row-07"),
         "the selection sits on the last visible row, not the first: {:?}",
         scrolled.lines
     );
@@ -143,7 +178,10 @@ fn a_selection_past_the_end_of_the_rows_highlights_nothing() {
     let framed = rows(20, 6, &kind, BorderSet::ASCII);
     assert_eq!(framed.selected, None);
     assert!(
-        framed.lines.iter().all(|l| !l.contains("> only")),
+        framed
+            .lines
+            .iter()
+            .all(|l| !line_text(l).contains("> only")),
         "{:?}",
         framed.lines
     );
@@ -165,7 +203,8 @@ fn a_degenerate_rect_yields_no_rows_rather_than_half_a_frame() {
     // one cell on an axis has no distinct edge cells, so content is drawn
     // unframed rather than as stacked corner glyphs
     let thin = rows(6, 1, &picker(), BorderSet::ASCII);
-    assert_eq!(thin.lines, vec!["> mai ".to_string()]);
+    let texts: Vec<String> = thin.lines.iter().map(|l| line_text(l)).collect();
+    assert_eq!(texts, vec!["> mai ".to_string()]);
 }
 
 #[test]
@@ -179,7 +218,8 @@ fn a_wide_glyph_is_counted_in_cells_so_the_right_edge_stays_put() {
     let framed = rows(16, 5, &kind, BorderSet::ASCII);
     assert_eq!(widths(&framed), vec![16; 5], "{:?}", framed.lines);
     for line in &framed.lines {
-        assert!(line.ends_with('|') || line.ends_with('+'), "{line}");
+        let text = line_text(line);
+        assert!(text.ends_with('|') || text.ends_with('+'), "{text}");
     }
 }
 
@@ -191,7 +231,7 @@ fn a_statusline_puts_its_three_segments_left_centered_and_right() {
         "12:4",
     ));
     let framed = rows(40, 3, &kind, BorderSet::ASCII);
-    let row = interior(&framed.lines[1]);
+    let row = interior(&line_text(&framed.lines[1]));
     assert!(row.starts_with("NORMAL"), "{row}");
     assert!(row.trim_end().ends_with("12:4"), "{row}");
     let center_at = row
@@ -216,11 +256,11 @@ fn a_palette_binding_is_pushed_against_the_right_edge_of_its_row() {
             .with_selected(0),
     );
     let framed = rows(30, 6, &kind, BorderSet::ASCII);
-    let row = interior(&framed.lines[3]);
+    let row = interior(&line_text(&framed.lines[3]));
     assert!(row.starts_with("> Find File"), "{row}");
     assert!(row.trim_end().ends_with("<C-p>"), "{row}");
     assert!(
-        !framed.lines[4].contains('<'),
+        !line_text(&framed.lines[4]).contains('<'),
         "an unbound command has no binding column"
     );
 }
@@ -238,13 +278,22 @@ fn a_tree_row_shows_its_depth_and_whether_it_can_be_opened() {
             .with_selected(1),
     );
     let framed = rows(30, 5, &kind, BorderSet::ASCII);
-    assert!(framed.lines[1].contains("  - src"), "{:?}", framed.lines);
     assert!(
-        framed.lines[2].contains(">   " /* marker */) && framed.lines[2].contains("main.rs"),
+        line_text(&framed.lines[1]).contains("  - src"),
         "{:?}",
         framed.lines
     );
-    assert!(framed.lines[3].contains("  + target"), "{:?}", framed.lines);
+    let row2 = line_text(&framed.lines[2]);
+    assert!(
+        row2.contains(">   " /* marker */) && row2.contains("main.rs"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[3]).contains("  + target"),
+        "{:?}",
+        framed.lines
+    );
 }
 
 #[test]
@@ -257,15 +306,31 @@ fn a_prompt_carries_its_question_its_input_and_its_choices() {
             .with_selected(1),
     );
     let framed = rows(34, 7, &kind, BorderSet::ASCII);
-    assert!(framed.lines[1].contains("Overwrite"), "{:?}", framed.lines);
-    assert!(framed.lines[2].contains("> y"), "{:?}", framed.lines);
     assert!(
-        framed.lines[3].contains("---"),
+        line_text(&framed.lines[1]).contains("Overwrite"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[2]).contains("> y"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[3]).contains("---"),
         "the rule separates the typed input from the choices, so the two
          rows carrying the same marker glyph never touch"
     );
-    assert!(framed.lines[4].contains("  Yes"), "{:?}", framed.lines);
-    assert!(framed.lines[5].contains("> No"), "{:?}", framed.lines);
+    assert!(
+        line_text(&framed.lines[4]).contains("  Yes"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[5]).contains("> No"),
+        "{:?}",
+        framed.lines
+    );
     assert_eq!(framed.selected, Some(5));
 }
 
@@ -317,17 +382,17 @@ fn a_control_character_in_a_row_is_blanked_never_read_as_a_column_break() {
         framed
             .lines
             .iter()
-            .all(|l| !l.chars().any(char::is_control)),
+            .all(|l| !line_text(l).chars().any(char::is_control)),
         "no control character survives into a painted row: {:?}",
         framed.lines
     );
     assert!(
-        interior(&framed.lines[3]).starts_with("> src/ main.rs"),
+        interior(&line_text(&framed.lines[3])).starts_with("> src/ main.rs"),
         "one mark must not right-align the tail of the row: {:?}",
         framed.lines[3]
     );
     assert!(
-        interior(&framed.lines[4]).starts_with("  a b c d"),
+        interior(&line_text(&framed.lines[4])).starts_with("  a b c d"),
         "three marks must not fall through to a raw copy: {:?}",
         framed.lines[4]
     );
@@ -353,7 +418,10 @@ fn a_control_character_in_a_statusline_segment_moves_no_column() {
     ));
     let clean = rows(40, 3, &clean, BorderSet::ASCII);
     let dirty = rows(40, 3, &dirty, BorderSet::ASCII);
-    assert_eq!(interior(&clean.lines[1]), interior(&dirty.lines[1]));
+    assert_eq!(
+        interior(&line_text(&clean.lines[1])),
+        interior(&line_text(&dirty.lines[1]))
+    );
 }
 
 /// A title is feature-supplied text like any row is. The `*View` types take
@@ -368,27 +436,25 @@ fn a_control_character_in_a_title_is_blanked_never_set_into_the_edge() {
             .with_selected(0),
     );
     let framed = rows(30, 6, &kind, BorderSet::ASCII);
+    let top = line_text(&framed.lines[0]);
 
     assert!(
-        !framed.lines[0].chars().any(char::is_control),
-        "no control character survives into the top edge: {:?}",
-        framed.lines[0]
+        !top.chars().any(char::is_control),
+        "no control character survives into the top edge: {top:?}"
     );
     assert!(
-        framed.lines[0].contains(" Fi les "),
-        "the title still reads, with the control character reduced to a blank: {:?}",
-        framed.lines[0]
+        top.contains(" Fi les "),
+        "the title still reads, with the control character reduced to a blank: {top:?}"
     );
     assert_eq!(
-        cells(&framed.lines[0]),
+        cells(&top),
         30,
-        "blanking a control character moves no cell: {:?}",
-        framed.lines[0]
+        "blanking a control character moves no cell: {top:?}"
     );
 
     // a title with nothing left after blanking leaves the edge unbroken,
     // rather than punching a hole of blanks into it
     let blank_title = LayerKind::Picker(PickerView::new("\u{1}\u{2}"));
     let edge = rows(30, 4, &blank_title, BorderSet::ASCII);
-    assert_eq!(edge.lines[0], format!("+{}+", "-".repeat(28)));
+    assert_eq!(line_text(&edge.lines[0]), format!("+{}+", "-".repeat(28)));
 }

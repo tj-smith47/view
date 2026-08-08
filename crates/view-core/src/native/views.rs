@@ -13,6 +13,90 @@
 //! no key lookup happens downstream of this. A row that should read
 //! `src/main.rs` arrives as that string.
 
+use crate::theme::ChromeGroup;
+
+/// What a [`Span`]'s text means, resolved to a concrete [`crate::theme::ResolvedStyle`]
+/// through the active colorscheme -- never a raw color chosen here.
+///
+/// The single vocabulary both painters (`view-tui`'s terminal backend and
+/// `view-oracle`'s raster) resolve through [`StyleRole::chrome_group`]: a
+/// role that meant one thing to one painter and something else to the other
+/// is exactly the divergence a differential-tested editor cannot afford, so
+/// there is one mapping function, not two independently maintained copies
+/// of it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum StyleRole {
+    /// Unstyled text: rendered in whatever base style the row it sits on
+    /// already carries (a popup's `Pmenu` colors, the statusline's own
+    /// `StatusLine` colors). Every overlay that has never needed more than
+    /// one style per row -- the picker, the tree, the palette, the prompt,
+    /// the message log -- paints entirely in this role.
+    #[default]
+    Plain,
+    /// The statusline's mode text (`-- INSERT --`, `recording @q`, ...),
+    /// verbatim from `msg_showmode`.
+    Mode,
+    /// The statusline's current-buffer name.
+    File,
+    /// The statusline's unsaved-buffer marker.
+    Modified,
+    /// The statusline's current git branch.
+    GitBranch,
+    /// The statusline's cursor-position/search-count text.
+    Ruler,
+    /// The statusline's error-diagnostic glyph and count.
+    DiagnosticError,
+    /// The statusline's warning-diagnostic glyph and count.
+    DiagnosticWarning,
+}
+
+impl StyleRole {
+    /// The [`ChromeGroup`] this role resolves through, or `None` for
+    /// [`StyleRole::Plain`], which paints in whatever base style its row
+    /// already carries rather than a group of its own.
+    #[must_use]
+    pub const fn chrome_group(self) -> Option<ChromeGroup> {
+        match self {
+            Self::Plain => None,
+            Self::Mode => Some(ChromeGroup::ModeMsg),
+            Self::File | Self::Ruler => Some(ChromeGroup::StatusLine),
+            Self::Modified => Some(ChromeGroup::WarningMsg),
+            Self::GitBranch => Some(ChromeGroup::Directory),
+            Self::DiagnosticError => Some(ChromeGroup::DiagnosticError),
+            Self::DiagnosticWarning => Some(ChromeGroup::DiagnosticWarn),
+        }
+    }
+}
+
+/// One run of text sharing a single [`StyleRole`]: the smallest unit a
+/// painter resolves into styled cells. `view-core` names the role,
+/// `view-surface` places the span in a row, and only a painter turns a role
+/// into a concrete color -- see [`StyleRole::chrome_group`].
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Span {
+    pub text: String,
+    pub role: StyleRole,
+}
+
+impl Span {
+    /// A span carrying `role`.
+    #[must_use]
+    pub fn new(text: impl Into<String>, role: StyleRole) -> Self {
+        Self {
+            text: text.into(),
+            role,
+        }
+    }
+
+    /// An unstyled span: the honest representation for a row whose text has
+    /// never carried more than one style.
+    #[must_use]
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self::new(text, StyleRole::Plain)
+    }
+}
+
 /// A fuzzy picker's frame: the prompt line and the candidate rows under it.
 ///
 /// ```
@@ -163,11 +247,11 @@ impl TreeView {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StatuslineView {
     /// Flush against the row's left edge.
-    pub left: String,
+    pub left: Vec<Span>,
     /// Centered on the row, as far as the left and right segments allow.
-    pub center: String,
+    pub center: Vec<Span>,
     /// Flush against the row's right edge.
-    pub right: String,
+    pub right: Vec<Span>,
     /// The overlay's title, drawn into its top border. Empty for the
     /// ordinary bar, which is identified by its position rather than by a
     /// label.
@@ -175,17 +259,27 @@ pub struct StatuslineView {
 }
 
 impl StatuslineView {
-    /// A bar with the three segments given.
+    /// A bar with the three segments given, each a single unstyled span --
+    /// the honest representation for a caller (a test, a golden) that only
+    /// cares about placement. [`StatuslineState::view`](crate::native::statusline::StatuslineState::view)
+    /// is the one caller that needs real per-segment roles, and builds
+    /// through [`StatuslineView::from_spans`] instead.
     #[must_use]
     pub fn new(
         left: impl Into<String>,
         center: impl Into<String>,
         right: impl Into<String>,
     ) -> Self {
+        Self::from_spans(one_span(left), one_span(center), one_span(right))
+    }
+
+    /// A bar with each zone already broken into its own styled spans.
+    #[must_use]
+    pub fn from_spans(left: Vec<Span>, center: Vec<Span>, right: Vec<Span>) -> Self {
         Self {
-            left: left.into(),
-            center: center.into(),
-            right: right.into(),
+            left,
+            center,
+            right,
             title: String::new(),
         }
     }
@@ -197,6 +291,17 @@ impl StatuslineView {
             title: title.into(),
             ..self
         }
+    }
+}
+
+/// `text` as a zone's whole span list: empty for empty text (an absent
+/// segment contributes nothing to lay out), one plain span otherwise.
+fn one_span(text: impl Into<String>) -> Vec<Span> {
+    let text = text.into();
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![Span::plain(text)]
     }
 }
 
