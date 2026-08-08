@@ -3100,6 +3100,64 @@ mod tests {
         );
     }
 
+    /// A `LiveGrep` query commonly streams several result batches while the
+    /// scan is still running, and a later batch reordering rows without
+    /// changing the *selected* candidate must not re-issue a preview
+    /// request for a path already current or in flight -- two successive
+    /// `PickerResults` batches selecting the same first row must together
+    /// issue exactly one `PreviewBuffer` request, not two. Reverting
+    /// `PickerState::refresh_preview`'s dedupe check makes this fail by
+    /// name (it would then see two).
+    #[test]
+    fn two_result_batches_with_the_same_selection_issue_one_preview_request() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+
+        let first = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![
+                    crate::native::picker::PickerItem::new("a.rs"),
+                    crate::native::picker::PickerItem::new("b.rs"),
+                ],
+            },
+        );
+        assert!(
+            matches!(
+                first.as_slice(),
+                [Effect::Rpc(RpcCall::PreviewBuffer { path, .. })] if path.ends_with("a.rs")
+            ),
+            "the first batch must issue the usual single preview request: {first:?}"
+        );
+
+        // a second, streamed batch: still selecting the first row (`a.rs`),
+        // just a longer result list -- the selection itself never changed
+        let second = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![
+                    crate::native::picker::PickerItem::new("a.rs"),
+                    crate::native::picker::PickerItem::new("b.rs"),
+                    crate::native::picker::PickerItem::new("c.rs"),
+                ],
+            },
+        );
+        assert!(
+            second.is_empty(),
+            "a second batch that keeps the same selection must issue no new \
+             preview request: {second:?}"
+        );
+    }
+
     /// The falsifiable check `PickerState::apply_preview`'s own doc names,
     /// driven through `update()`: a reply tagged with a preview generation
     /// this session has since superseded (a newer selection issued its own
@@ -3129,14 +3187,16 @@ mod tests {
             .expect("picker must be open")
             .preview_generation();
 
-        // a second result set (still one row, so the selection itself does
-        // not move) allocates a fresh preview generation, superseding the
-        // one just captured
+        // a second result set whose first row now names a *different*
+        // candidate (`b.rs`, not `a.rs`) -- the dedupe `refresh_preview`
+        // applies (see its own doc) only skips a request for a path
+        // already current, so a genuinely new selection still allocates a
+        // fresh preview generation, superseding the one just captured
         let _ = update(
             &mut m,
             Msg::PickerResults {
                 generation,
-                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+                items: vec![crate::native::picker::PickerItem::new("b.rs")],
             },
         );
 

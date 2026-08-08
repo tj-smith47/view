@@ -346,10 +346,32 @@ return out";
 /// like every other chunk here: no caller data is interpolated into it --
 /// the candidate path travels as `nvim_exec_lua`'s positional vararg
 /// instead, the same convention `REGISTER_MAPPINGS_CHUNK` uses.
+///
+/// Both sides of the name comparison are canonicalized before comparing: a
+/// candidate path reached through a symlink (the picker's own root, or an
+/// ancestor directory, symlinked) would otherwise never byte-equal
+/// `nvim_buf_get_name`'s resolved name, silently answering `loaded = false`
+/// and falling back to a stale on-disk read for a buffer that is, in fact,
+/// open and modified. `vim.uv.fs_realpath` resolves symlinks for a path
+/// that exists on disk (the common case for a real buffer); a brand-new
+/// unsaved buffer's name may not exist on disk yet, so a failed realpath
+/// falls back to `fnamemodify(..., ':p')`'s plain absolute-path
+/// normalization. The empty-string guard matters specifically because
+/// `fnamemodify('', ':p')` resolves to nvim's own cwd rather than staying
+/// empty, which would otherwise turn nvim's `[No Name]` scratch buffers
+/// into false-positive matches against any candidate path equal to nvim's
+/// cwd.
 const PREVIEW_CHUNK: &str = "\
 local path = ...
+local function canon(p)
+  if p == '' then
+    return p
+  end
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
+  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
     return { loaded = true, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
   end
 end

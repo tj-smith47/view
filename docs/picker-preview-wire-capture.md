@@ -30,13 +30,31 @@ The Lua chunk under test:
 
 ```lua
 local path = ...
+local function canon(p)
+  if p == '' then
+    return p
+  end
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
 for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
+  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
     return { loaded = true, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
   end
 end
 return { loaded = false }
 ```
+
+The comparison canonicalizes both sides (`vim.uv.fs_realpath`, falling back to
+`vim.fn.fnamemodify(p, ':p')` for a path that doesn't exist on disk yet, e.g.
+an unsaved new-file buffer) so a candidate path reached through a symlink
+still matches the buffer opened at its resolved target -- bare string
+equality on `nvim_buf_get_name` would otherwise miss it and wrongly fall back
+to a stale on-disk read. The empty-string guard keeps `[No Name]` scratch
+buffers (whose `nvim_buf_get_name` is `''`) from false-positive-matching any
+candidate path that happens to canonicalize to nvim's cwd, which is what
+`fnamemodify('', ':p')` alone would resolve to. The response shapes below
+(`{loaded, lines}`) are unchanged by this and remain accurate as captured.
 
 ## 1. Baseline: no buffer open for the path
 

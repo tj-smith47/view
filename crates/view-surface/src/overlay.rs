@@ -182,7 +182,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
         return Rows::default();
     }
     if width < 2 || height < 2 {
-        return lay_out(&body, width, height, borders);
+        return content_rows(kind, &body, width, height, borders);
     }
 
     // one blank column inside each vertical edge, dropped entirely when the
@@ -193,7 +193,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
         .saturating_sub(2)
         .saturating_sub(pad.saturating_mul(2));
     let interior = height - 2;
-    let laid = lay_out(&body, text_width, interior, borders);
+    let laid = content_rows(kind, &body, text_width, interior, borders);
 
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
     lines.push(vec![Span::plain(top_edge(width, borders, &body.title))]);
@@ -214,6 +214,94 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
         lines,
         selected: laid.selected.map(|r| r.saturating_add(1)),
         framed: true,
+    }
+}
+
+/// The lowest interior width, in display cells, a picker's preview pane is
+/// worth splitting off a column for. Below this, the results list and a
+/// sliver of preview would both be unreadable, so the picker falls back to
+/// the single results column it had before a preview existed rather than
+/// painting an illegible pane.
+const MIN_PREVIEW_SPLIT_WIDTH: u16 = 20;
+
+/// Cuts `kind`'s interior into exactly `height` rows of exactly `width`
+/// cells, the same total [`rows`] guarantees for its own caller: a picker
+/// carrying preview lines gets a second, right-hand column for them (see
+/// [`picker_split_rows`]); every other layer kind, and a picker with no
+/// preview to show, still goes through the single-column [`lay_out`] this
+/// module always used.
+fn content_rows(
+    kind: &LayerKind,
+    body: &Body,
+    width: u16,
+    height: u16,
+    borders: BorderSet,
+) -> Rows {
+    if let LayerKind::Picker(view) = kind {
+        if !view.preview.is_empty() {
+            return picker_split_rows(view, body, width, height, borders);
+        }
+    }
+    lay_out(body, width, height, borders)
+}
+
+/// Splits a picker's interior into two columns separated by one frame-glyph
+/// rule: the results list (left, `body`, unchanged from the no-preview
+/// layout) and the RPC-read buffer preview (right, `view.preview`) -- the
+/// same split-region shape the plan assigned this feature, painted by
+/// reusing [`lay_out`] and [`Line`]'s existing per-row column machinery
+/// rather than inventing a second layout primitive. Both painters
+/// (`view-tui`'s real terminal backend and `view-oracle`'s rasterizer)
+/// consume this module's [`rows`] for every other overlay already; a picker
+/// preview reaches them the same way, with no separate wiring on either
+/// side.
+///
+/// Falls back to the single-column layout below [`MIN_PREVIEW_SPLIT_WIDTH`]:
+/// a rect too narrow to hold two legible columns shows the results list
+/// alone, the same degrade an unopened preview already produces.
+fn picker_split_rows(
+    view: &PickerView,
+    body: &Body,
+    width: u16,
+    height: u16,
+    borders: BorderSet,
+) -> Rows {
+    if width < MIN_PREVIEW_SPLIT_WIDTH {
+        return lay_out(body, width, height, borders);
+    }
+    // three-fifths to the results list, the rest (less the separator
+    // column) to the preview: the list's rows are what a picker is
+    // navigated by, so it keeps the larger share
+    let list_width = width * 3 / 5;
+    let preview_width = width - list_width - 1;
+
+    let list = lay_out(body, list_width, height, borders);
+    let preview_body = Body {
+        title: String::new(),
+        header: Vec::new(),
+        items: view
+            .preview
+            .iter()
+            .cloned()
+            .map(plain_spans)
+            .map(Line::Text)
+            .collect(),
+        selected: None,
+    };
+    let preview = lay_out(&preview_body, preview_width, height, borders);
+
+    let separator = Span::plain(borders.vertical.to_string());
+    let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
+    for row in 0..usize::from(height) {
+        let mut line = list.lines.get(row).cloned().unwrap_or_default();
+        line.push(separator.clone());
+        line.extend(preview.lines.get(row).cloned().unwrap_or_default());
+        lines.push(line);
+    }
+    Rows {
+        lines,
+        selected: list.selected,
+        framed: false,
     }
 }
 

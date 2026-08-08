@@ -215,12 +215,25 @@ impl PickerState {
     /// Allocates a fresh preview generation for the currently selected
     /// candidate and records it as this session's outstanding preview
     /// request, or does nothing (returning `None`) when there is no
-    /// selection to preview. The caller issues the actual
-    /// `Effect::Rpc(RpcCall::PreviewBuffer)` with the returned pair -- this
-    /// method only allocates the generation, mirroring `PickerState::open`'s
-    /// own "allocate, do not itself emit an effect" contract.
+    /// selection to preview, *or* when `preview_path` already names this
+    /// same candidate. `preview_path` is set the instant a request is
+    /// issued (not only once its reply lands -- see the field's own doc),
+    /// so this one comparison covers both "the preview already shown is
+    /// this path" and "a request for this path is already in flight":
+    /// without it, a streamed result batch that reorders rows without
+    /// changing the selected candidate (a `LiveGrep` query commonly
+    /// resolves several rows to the same file, differing only by line) would
+    /// re-issue a preview request for a path already current, storming the
+    /// RPC channel with redundant reads of a buffer that has not changed.
+    /// The caller issues the actual `Effect::Rpc(RpcCall::PreviewBuffer)`
+    /// with the returned pair -- this method only allocates the generation,
+    /// mirroring `PickerState::open`'s own "allocate, do not itself emit an
+    /// effect" contract.
     pub fn refresh_preview(&mut self) -> Option<(u64, String)> {
         let path = self.selected_path()?;
+        if self.preview_path.as_deref() == Some(path.as_str()) {
+            return None;
+        }
         let generation = next_generation();
         self.preview_generation = generation;
         self.preview_path = Some(path.clone());

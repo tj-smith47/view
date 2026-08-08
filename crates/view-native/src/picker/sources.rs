@@ -102,6 +102,27 @@ pub fn spawn_file_scan(
 /// reason `spawn_file_scan`'s does -- a live-grep query is replaced by
 /// nearly every keystroke, and without this a stale scan over a huge tree
 /// would keep pushing into an injector nothing reads.
+/// Ceiling on the total number of matched lines a single live-grep scan will
+/// push before stopping outright, independent of `cancel`. A query with
+/// almost no discriminating power (a single common letter, an empty needle
+/// mid-composition) run over a large tree has no other bound: unlike
+/// `Files`, where one entry costs one push, a single file here can contribute
+/// arbitrarily many matches, so the per-file `cancel` check in the walk loop
+/// below does nothing to bound a single pathological file, let alone a
+/// pathological *tree*. Chosen generously above what a human picker session
+/// scrolls through -- nucleo's own top-N ranking already narrows what's
+/// shown -- but far below "stream millions of `PickerItem`s that spend
+/// injector-push and channel cost for candidates nothing will ever look at."
+pub const LIVE_GREP_MATCH_LIMIT: usize = 5_000;
+
+/// Ceiling on a single matched line's rendered length, in `char`s.
+/// Minified/generated/binary-ish files can contain a single line many
+/// megabytes long; without this, one match on such a line turns into a
+/// `PickerItem` label large enough to cost real time just laying out and
+/// diffing on every keystroke, long before a human could usefully read that
+/// much text in a picker row.
+pub const LIVE_GREP_LINE_CHAR_LIMIT: usize = 300;
+
 pub fn spawn_live_grep_scan(
     root: PathBuf,
     needle: String,
@@ -113,8 +134,9 @@ pub fn spawn_live_grep_scan(
             return;
         };
         let mut searcher = Searcher::new();
+        let mut matched = 0usize;
         for entry in ignore::WalkBuilder::new(&root).build() {
-            if cancel.load(Ordering::Acquire) {
+            if cancel.load(Ordering::Acquire) || matched >= LIVE_GREP_MATCH_LIMIT {
                 return;
             }
             let Ok(entry) = entry else { continue };
@@ -132,15 +154,36 @@ pub fn spawn_live_grep_scan(
                 &matcher,
                 entry.path(),
                 UTF8(|line_number, line| {
-                    let label = format!("{rel}:{line_number}: {}", line.trim_end_matches('\n'));
+                    let text = truncate_line(line.trim_end_matches('\n'));
+                    let label = format!("{rel}:{line_number}: {text}");
                     injector.push(PickerItem::new(label), |item, cols| {
                         cols[0] = item.label.as_str().into();
                     });
-                    Ok(true)
+                    matched += 1;
+                    // stopping the sink here (rather than only the outer
+                    // walk loop, checked next iteration) means the ceiling
+                    // is exact: the file currently being searched stops
+                    // mid-file the instant the limit is reached, instead of
+                    // finishing out whatever matches remain in it first
+                    Ok(matched < LIVE_GREP_MATCH_LIMIT)
                 }),
             );
         }
     })
+}
+
+/// Truncates `line` to [`LIVE_GREP_LINE_CHAR_LIMIT`] `char`s (not bytes --
+/// `grep-searcher` hands back already UTF-8-decoded text, and slicing by
+/// byte length risks splitting a multi-byte sequence), appending an ellipsis
+/// marker so a truncated label is visibly distinct from a short line that
+/// happens to end mid-word.
+fn truncate_line(line: &str) -> String {
+    if line.chars().count() <= LIVE_GREP_LINE_CHAR_LIMIT {
+        return line.to_string();
+    }
+    let mut truncated: String = line.chars().take(LIVE_GREP_LINE_CHAR_LIMIT).collect();
+    truncated.push('…');
+    truncated
 }
 
 /// Escapes every regex metacharacter in `needle` so `RegexMatcher` treats it
@@ -288,5 +331,79 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A query matching far more lines than [`LIVE_GREP_MATCH_LIMIT`] must
+    /// stop pushing at exactly that many items -- not zero (the cap must not
+    /// silently suppress everything), not "some smaller number" (the walk
+    /// must not stop early on the first file that alone exceeds the limit),
+    /// and not "more than the limit" (the cap must actually bound the sink,
+    /// not just the outer per-file loop).
+    #[test]
+    fn a_scan_past_the_match_limit_stops_at_exactly_the_limit() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-limit-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+
+        // one matching line per row, well past the limit, split across two
+        // files so the outer walk loop's own `matched >= LIMIT` check (not
+        // just the sink's) is exercised too
+        let rows_per_file = LIVE_GREP_MATCH_LIMIT;
+        let mut contents = String::new();
+        for i in 0..rows_per_file {
+            contents.push_str(&format!("needle row {i}\n"));
+        }
+        std::fs::write(root.join("a.txt"), &contents).expect("write first fixture file");
+        std::fs::write(root.join("b.txt"), &contents).expect("write second fixture file");
+
+        let mut nucleo: nucleo::Nucleo<PickerItem> =
+            nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let injector = nucleo.injector();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle =
+            spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
+        handle.join().expect("grep scan thread panicked");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            nucleo.tick(10);
+            if nucleo.snapshot().item_count() as usize >= LIVE_GREP_MATCH_LIMIT
+                || std::time::Instant::now() > deadline
+            {
+                break;
+            }
+        }
+        let count = nucleo.snapshot().item_count() as usize;
+        assert_eq!(
+            count,
+            LIVE_GREP_MATCH_LIMIT,
+            "a scan with {} available matches across two files must stop at \
+             exactly LIVE_GREP_MATCH_LIMIT ({LIVE_GREP_MATCH_LIMIT}), got {count}",
+            rows_per_file * 2,
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn truncate_line_leaves_short_lines_untouched() {
+        assert_eq!(truncate_line("short line"), "short line");
+    }
+
+    #[test]
+    fn truncate_line_caps_long_lines_with_an_ellipsis_marker() {
+        let long_line = "x".repeat(LIVE_GREP_LINE_CHAR_LIMIT + 50);
+        let truncated = truncate_line(&long_line);
+        assert_eq!(truncated.chars().count(), LIVE_GREP_LINE_CHAR_LIMIT + 1);
+        assert!(truncated.ends_with('…'));
     }
 }

@@ -91,6 +91,16 @@ struct Session {
     /// `sources::spawn_file_scan` via `Arc`, so the walker thread observes
     /// the same flag this session's drop sets.
     cancel: Arc<AtomicBool>,
+    /// The still-running background scan/search thread for this session's
+    /// corpus, if any (`None` for `Buffers`, whose corpus arrives
+    /// pre-gathered -- see `seed_or_scan`). `stream_until_preempted` checks
+    /// `is_finished()` on this rather than trusting nucleo's own
+    /// `Status::running` alone: nucleo's tick can legitimately report no
+    /// work pending the instant after a query restarts, before this thread
+    /// has pushed even its first item into the injector, which would
+    /// otherwise make the worker give up and block on the next request
+    /// forever while a real match is still moments away on disk.
+    scan_handle: Option<JoinHandle<()>>,
 }
 
 impl Session {
@@ -104,6 +114,7 @@ impl Session {
             nucleo: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1),
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
+            scan_handle: None,
         }
     }
 }
@@ -162,9 +173,13 @@ fn handle_query(
         return rx.recv();
     };
     seed_or_scan(active, request.resolved, &request.needle);
+    let pattern = match request.source {
+        Source::LiveGrep { .. } => escape_nucleo_atom_syntax(&request.needle),
+        _ => request.needle.clone(),
+    };
     active.nucleo.pattern.reparse(
         0,
-        &request.needle,
+        &pattern,
         CaseMatching::Smart,
         Normalization::Smart,
         false,
@@ -173,6 +188,54 @@ fn handle_query(
         Some(preempting) => Ok(preempting),
         None => rx.recv(),
     }
+}
+
+/// Escapes `needle` so nucleo's own query syntax (`!` negation, `^` prefix
+/// anchor, `$` postfix anchor, `'` substring marker -- see
+/// `nucleo_matcher::pattern::Atom::parse`) never fires for a live-grep
+/// query. `sources::escape_literal` already keeps the needle a literal
+/// substring on the grep side, but nucleo re-parses the same raw needle
+/// independently to rank and highlight the streamed results, so a query
+/// like `!=` silently returned zero results despite real grep matches:
+/// nucleo read the leading `!` as "must not contain `=`" rather than as the
+/// two literal characters a user typed. `Files`/`Buffers` queries are left
+/// unescaped -- their nucleo fuzzy-match syntax is an intentional feature
+/// for those sources, only `LiveGrep`'s literal-text contract needs this.
+///
+/// Escaping is per *word* (nucleo splits a pattern on unescaped spaces the
+/// same way, via its own `pattern_atoms`), since only a word-leading
+/// `!`/`^`/`'` or word-trailing `$` carries special meaning: an interior
+/// `!` in `a!b` is already literal to nucleo and needs no escaping. A
+/// needle that already carries a backslash escape (the user typed `\!`
+/// themselves) is copied through verbatim rather than double-escaped.
+fn escape_nucleo_atom_syntax(needle: &str) -> String {
+    let mut escaped = String::with_capacity(needle.len() + 4);
+    let mut word_start = true;
+    let mut chars = needle.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == ' ' {
+            escaped.push(c);
+            word_start = true;
+            continue;
+        }
+        if c == '\\' {
+            escaped.push(c);
+            if let Some(next) = chars.next() {
+                escaped.push(next);
+            }
+            word_start = false;
+            continue;
+        }
+        if word_start && (c == '!' || c == '^' || c == '\'') {
+            escaped.push('\\');
+        }
+        if c == '$' && matches!(chars.peek(), None | Some(' ')) {
+            escaped.push('\\');
+        }
+        escaped.push(c);
+        word_start = false;
+    }
+    escaped
 }
 
 /// Rebuilds `session` from scratch when `source` no longer matches the
@@ -201,11 +264,12 @@ fn seed_or_scan(active: &mut Session, resolved: Option<Vec<PickerItem>>, needle:
     match &active.source {
         Source::Files { root } => {
             if !active.scan_started.swap(true, Ordering::AcqRel) {
-                let _handle = sources::spawn_file_scan(
+                let handle = sources::spawn_file_scan(
                     root.clone(),
                     active.nucleo.injector(),
                     active.cancel.clone(),
                 );
+                active.scan_handle = Some(handle);
             }
         }
         Source::LiveGrep { root } => restart_live_grep(active, root.clone(), needle),
@@ -233,14 +297,16 @@ fn restart_live_grep(active: &mut Session, root: std::path::PathBuf, needle: &st
     active.cancel = Arc::new(AtomicBool::new(false));
     active.nucleo.restart(true);
     if needle.is_empty() {
+        active.scan_handle = None;
         return;
     }
-    let _handle = sources::spawn_live_grep_scan(
+    let handle = sources::spawn_live_grep_scan(
         root,
         needle.to_string(),
         active.nucleo.injector(),
         active.cancel.clone(),
     );
+    active.scan_handle = Some(handle);
 }
 
 /// Replaces the cached instance's corpus wholesale with `items`, clearing
@@ -275,7 +341,17 @@ fn stream_until_preempted(
         if status.changed {
             send_results(active, generation, tx);
         }
-        if !status.running {
+        // nucleo's own `running` can go false the instant after a restart,
+        // before a freshly spawned scan thread has pushed even its first
+        // item -- there is no more matcher work queued *yet*, but there is
+        // about to be. Trusting `!status.running` alone here would let the
+        // worker fall back to `rx.recv()` with a real on-disk match still
+        // moments away and nothing left to wake this loop up to find it.
+        let scan_finished = active
+            .scan_handle
+            .as_ref()
+            .is_none_or(std::thread::JoinHandle::is_finished);
+        if !status.running && scan_finished {
             return None;
         }
         // a newer query or a close has already arrived: stop ticking the
@@ -752,6 +828,136 @@ mod tests {
             last < 8_000,
             "expected the first query's scan to stop before matching every \
              line in the tree once a new query preempted it, got {last} items"
+        );
+    }
+
+    /// Drains `msg_rx` until a `Msg::PickerResults` with at least one item
+    /// arrives or `deadline` passes, returning the labels found -- shared by
+    /// the two `escape_nucleo_atom_syntax` regression tests below, since
+    /// both need the same "wait for real streamed results, not the first
+    /// (possibly empty) batch" shape `a_full_query_round_trip_streams_a_ranked_result`
+    /// gets away without because its fixture is small enough to settle in
+    /// one tick.
+    fn wait_for_non_empty_results(msg_rx: &mpsc::Receiver<Msg>, deadline: Instant) -> Vec<String> {
+        while Instant::now() < deadline {
+            let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
+                continue;
+            };
+            if let Msg::PickerResults { items, .. } = msg {
+                if !items.is_empty() {
+                    return items.into_iter().map(|item| item.label).collect();
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// Before `handle_query` escaped a `LiveGrep` needle for nucleo,
+    /// `nucleo_matcher::pattern::Atom::parse` read this query's leading `!`
+    /// as its own negation syntax ("must not contain `=`"), so a needle
+    /// that legitimately matched real lines on disk streamed back zero
+    /// results. Reverting `handle_query`'s `Source::LiveGrep` branch to feed
+    /// nucleo the raw needle (instead of `escape_nucleo_atom_syntax`'s
+    /// output) makes this fail by name.
+    #[test]
+    fn a_live_grep_bang_equals_query_still_matches() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-nucleo-bang-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(root.join("fixture.txt"), "let ok = a != b;\n").expect("write test fixture");
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(16);
+        let _worker = spawn(req_rx, msg_tx);
+        req_tx
+            .send(WorkerRequest::Query(MatchRequest {
+                generation: 1,
+                needle: "!=".to_string(),
+                source: Source::LiveGrep { root: root.clone() },
+                resolved: None,
+            }))
+            .expect("worker channel closed");
+
+        let labels = wait_for_non_empty_results(&msg_rx, Instant::now() + Duration::from_secs(10));
+        assert!(
+            labels.iter().any(|label| label.contains("!=")),
+            "expected a result matching the literal `!=` query, got {labels:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The postfix-anchor sibling of the bang-equals regression above:
+    /// nucleo's `Atom::parse` reads a word-trailing `$` as "must end with"
+    /// rather than a literal dollar sign, so a needle ending in `$` matched
+    /// real lines on disk but streamed back zero results before this
+    /// needle was escaped for nucleo. Reverting `handle_query`'s
+    /// `Source::LiveGrep` branch to feed nucleo the raw needle makes this
+    /// fail by name.
+    #[test]
+    fn a_live_grep_trailing_dollar_query_still_matches() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-nucleo-dollar-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(root.join("fixture.txt"), "let price = cost$;\n")
+            .expect("write test fixture");
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(16);
+        let _worker = spawn(req_rx, msg_tx);
+        req_tx
+            .send(WorkerRequest::Query(MatchRequest {
+                generation: 1,
+                needle: "cost$".to_string(),
+                source: Source::LiveGrep { root: root.clone() },
+                resolved: None,
+            }))
+            .expect("worker channel closed");
+
+        let labels = wait_for_non_empty_results(&msg_rx, Instant::now() + Duration::from_secs(10));
+        assert!(
+            labels.iter().any(|label| label.contains("cost$")),
+            "expected a result matching the literal trailing-`$` query, got {labels:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn escape_nucleo_atom_syntax_escapes_word_leading_and_trailing_specials() {
+        assert_eq!(escape_nucleo_atom_syntax("!="), "\\!=");
+        assert_eq!(escape_nucleo_atom_syntax("cost$"), "cost\\$");
+        assert_eq!(escape_nucleo_atom_syntax("^anchor"), "\\^anchor");
+        assert_eq!(escape_nucleo_atom_syntax("'substr"), "\\'substr");
+        assert_eq!(
+            escape_nucleo_atom_syntax("a!b end$ !start"),
+            "a!b end\\$ \\!start",
+            "an interior `!` needs no escaping, only a word-leading one; a \
+             `$` only needs escaping when it trails its word, not when it \
+             leads one"
+        );
+        assert_eq!(
+            escape_nucleo_atom_syntax("plain query"),
+            "plain query",
+            "a needle with no special characters is returned unchanged"
         );
     }
 

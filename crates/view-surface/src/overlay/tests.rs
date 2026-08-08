@@ -517,3 +517,68 @@ fn clip_spans_pads_with_a_trailing_plain_span_not_the_last_roles_span() {
     );
     assert_eq!(out[1].role, StyleRole::Plain);
 }
+
+/// A picker carrying preview lines must paint them: `rows` is the one
+/// layout pass both `view-tui`'s real terminal backend and `view-oracle`'s
+/// rasterizer consume (see this module's doc), so a preview line reaching
+/// the frame here is what "the preview pane is actually painted" means for
+/// both painters at once, with no separate wiring on either side.
+/// Disabling `content_rows`'s preview branch (routing every picker through
+/// plain `lay_out` regardless of `view.preview`) makes this fail by name.
+#[test]
+fn a_pickers_preview_lines_reach_the_painted_frame() {
+    let kind = LayerKind::Picker(
+        PickerView::new("Files")
+            .with_query("mai")
+            .with_rows(vec!["src/main.rs".to_string(), "src/lib.rs".to_string()])
+            .with_selected(0)
+            .with_preview(vec![
+                "fn main() {".to_string(),
+                "    println!(\"hi\");".to_string(),
+            ]),
+    );
+    let framed = rows(50, 8, &kind, BorderSet::ROUNDED);
+
+    let joined: String = framed.lines.iter().map(|l| line_text(l)).collect();
+    assert!(
+        joined.contains("fn main() {"),
+        "preview content must reach a painted row: {:?}",
+        framed.lines
+    );
+    assert!(
+        joined.contains("println!"),
+        "every preview line must reach a painted row, not just the first: {:?}",
+        framed.lines
+    );
+    // the results list is still on-screen beside the preview, not replaced
+    // by it
+    assert!(
+        joined.contains("src/main.rs") && joined.contains("src/lib.rs"),
+        "the preview pane must sit beside the results list, not over it: {:?}",
+        framed.lines
+    );
+    assert_eq!(
+        widths(&framed),
+        vec![50; 8],
+        "the split-column layout keeps the same total-rect contract every \
+         other overlay makes: {:?}",
+        framed.lines
+    );
+}
+
+/// A picker with nothing to preview yet keeps the single-column layout it
+/// always had: no separator rule appears inside the frame, and the results
+/// list uses the full interior width, exactly as it did before a preview
+/// pane existed.
+#[test]
+fn a_picker_with_no_preview_keeps_the_single_column_layout() {
+    let framed = rows(50, 8, &picker(), BorderSet::ROUNDED);
+    for line in &framed.lines {
+        let inside = interior(&line_text(line));
+        assert!(
+            !inside.contains(BorderSet::ROUNDED.vertical),
+            "no interior separator without a preview to split for: {:?}",
+            framed.lines
+        );
+    }
+}
