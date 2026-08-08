@@ -794,8 +794,11 @@ its differential suite. Recorded intent, not v0.1 scope:
    required, oracle-verified).
 3. LSP UI surfaces (diagnostics rendering, hover, signature help) over
    engine-owned LSP state.
-4. Core buffer/editing: last, possibly never — moves only if the oracle can
-   prove parity per permutation and the perf win is measured, not assumed.
+4. Core buffer/editing: last — slated for a dedicated feasibility and
+   effort/maintenance-vs-benefit assessment after v0.2 (user ruling
+   2026-08-08: fresh-eyes evaluation, not foreclosed in advance); moves only
+   if the oracle can prove parity per permutation and the perf win is
+   measured, not assumed.
 
 Each subsystem's gate includes a **corpus manifest committed before
 implementation starts**: the exact input set parity is claimed over (file
