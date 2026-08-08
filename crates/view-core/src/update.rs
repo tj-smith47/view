@@ -353,15 +353,37 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "tree" && verb == "toggle" {
                 return toggle_tree_sidebar(model);
             }
+            if feature == "notifications" && verb == "history" {
+                return open_message_history(model);
+            }
+            // a bare `:View` (both tokens empty) is the discoverability
+            // entry point: nothing was asked for, so nothing was invoked,
+            // but nvim's own command-line completion for `:View` already
+            // lists every registered feature/verb form (see
+            // `nvim_api::register_mappings`), so reopening the command line
+            // pre-seeded with the command name puts that completion one
+            // `<Tab>` away inside the palette itself -- a strictly better
+            // answer than a toast alone to a user wondering what to type.
+            // Every other unmatched (feature, verb) pair -- a typo, a form
+            // this build has registered no handler for -- still only gets
+            // the notice below; reopening the cmdline for those would
+            // replay whatever malformed thing was just typed.
+            if feature.is_empty() && verb.is_empty() {
+                model.dirty = true;
+                let mut effects = model
+                    .engine
+                    .record_native_notice(feature_invoke_notice(&feature, &verb, false), false);
+                effects.push(Effect::Rpc(RpcCall::Input {
+                    notation: format!(":{} ", crate::native::mappings::COMMAND),
+                }));
+                return effects;
+            }
             // no native feature has an overlay to open yet, and returning
             // nothing at all here is indistinguishable to a user from a key
             // that never registered: the entry point is answered with a
             // visible line saying it arrived and this build has nothing
             // behind it, through the same message surface every other
-            // locally-originated notice uses. A bare `:View` reaches here
-            // with two empty strings, which the same sentence would render
-            // as a gap between two spaces, so an invocation this build does
-            // not answer is told what it could have asked for instead.
+            // locally-originated notice uses.
             let known = crate::native::mappings::default_maps()
                 .iter()
                 .any(|spec| spec.feature == feature && spec.verb == verb);
@@ -825,6 +847,31 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
             root: model.cwd.clone(),
         },
     ]
+}
+
+/// Opens the message-history overlay over a snapshot of `ToastHistory`,
+/// centered like a picker. `<leader>fm`/`:View notifications history` is
+/// its only entry point (see `mappings::DEFAULT_MAPS`); there is nothing to
+/// toggle the way the tree sidebar has, since re-invoking it while one is
+/// already open would only ever want a fresher snapshot, not a close --
+/// the same "closing is `<Esc>`'s job, not the invoking key's" split every
+/// other centered overlay here already follows.
+fn open_message_history(model: &mut Model) -> Vec<Effect> {
+    let state = crate::native::palette::MessageHistoryState::snapshot(&model.engine.toast_history);
+    let prompt_is_topmost = matches!(
+        model.overlays().last().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Prompt(_))
+    );
+    if prompt_is_topmost {
+        model.insert_overlay_beneath_top(
+            OverlayBox::new(70, 60),
+            OverlayKind::MessageHistory(state),
+        );
+    } else {
+        model.push_overlay(OverlayBox::new(70, 60), OverlayKind::MessageHistory(state));
+    }
+    model.dirty = true;
+    Vec::new()
 }
 
 /// Routes one mouse event to the surface that owns it: the overlay under
@@ -3756,9 +3803,15 @@ mod tests {
             },
         );
         assert!(
-            matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+            matches!(
+                effects.as_slice(),
+                [Effect::ScheduleToastExpiry { .. }, Effect::Rpc(RpcCall::Input { notation })]
+                    if notation == ":View "
+            ),
             "a bare :View's usage notice must schedule its own expiry the same way \
-             every other locally-synthesized notice does: {effects:?}"
+             every other locally-synthesized notice does, and reopen the cmdline \
+             pre-seeded with the command name so its own completion is one <Tab> \
+             away inside the palette: {effects:?}"
         );
         let entry = m
             .engine
@@ -3778,6 +3831,47 @@ mod tests {
             );
         }
         assert!(m.dirty);
+    }
+
+    #[test]
+    fn a_bare_view_command_reopens_the_cmdline_seeded_with_the_command_name() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: String::new(),
+                verb: String::new(),
+            },
+        );
+        assert!(
+            effects.iter().any(
+                |e| matches!(e, Effect::Rpc(RpcCall::Input { notation }) if notation == ":View ")
+            ),
+            "a bare :View must reopen the cmdline pre-seeded with its own command \
+             name, so :View<Tab> completion is one keystroke away: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn an_unmatched_named_invocation_gets_only_the_notice_not_a_cmdline_reopen() {
+        // only the truly bare (feature="", verb="") case is discoverability;
+        // a typo'd or not-yet-handled named form (e.g. a stale default map)
+        // must not replay itself back into the cmdline, since there is
+        // nothing about it a reopened `:View ` prompt would fix
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "nonexistent".to_string(),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::Input { .. }))),
+            "an unmatched named invocation must not reopen the cmdline: {effects:?}"
+        );
     }
 
     #[test]
@@ -3805,10 +3899,11 @@ mod tests {
         assert!(
             matches!(
                 &effects[..],
-                [Effect::ScheduleToastExpiry { id, after }]
+                [Effect::ScheduleToastExpiry { id, after }, Effect::Rpc(RpcCall::Input { .. })]
                     if *id == entry.id() && *after == crate::native::toast::TRANSIENT_TOAST_TIMEOUT
             ),
-            "expected exactly one ScheduleToastExpiry for {:?} after {:?}, got {effects:?}",
+            "expected a ScheduleToastExpiry for {:?} after {:?}, followed by the bare \
+             invocation's cmdline-reopen effect, got {effects:?}",
             entry.id(),
             crate::native::toast::TRANSIENT_TOAST_TIMEOUT
         );

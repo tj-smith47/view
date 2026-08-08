@@ -51,7 +51,7 @@ pub struct MappingClaim {
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 4] = [
+static DEFAULT_MAPS: [MappingSpec; 5] = [
     MappingSpec {
         feature: "picker",
         lhs: "<leader>ff",
@@ -71,6 +71,11 @@ static DEFAULT_MAPS: [MappingSpec; 4] = [
         feature: "tree",
         lhs: "<leader>e",
         verb: "toggle",
+    },
+    MappingSpec {
+        feature: "notifications",
+        lhs: "<leader>fm",
+        verb: "history",
     },
 ];
 

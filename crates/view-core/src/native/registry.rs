@@ -60,7 +60,7 @@ static FEATURES: [FeatureDesc; 5] = [
         id: "notifications",
         supersedes: Some("nvim-notify / noice messages"),
         off_switch: "native.notifications = false",
-        entry_keys: false,
+        entry_keys: true,
     },
     FeatureDesc {
         id: "palette",

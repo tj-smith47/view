@@ -81,6 +81,14 @@ pub struct Model {
     /// handle). Gates [`Model::statusline_rows`], which in turn gates
     /// whether `view-surface::render` reserves a bottom row for the bar.
     pub statusline_enabled: bool,
+    /// Whether the `palette` native feature is enabled for this session, set
+    /// the same way and at the same place as `statusline_enabled`. Gates
+    /// `view-surface::render`'s choice between the centered floating
+    /// palette and nvim's own bottom-line command line: `false` restores
+    /// the plain bottom-line rendering a user who turned the feature off
+    /// with `native.palette = false` expects, rather than leaving them with
+    /// no cmdline at all.
+    pub palette_enabled: bool,
     /// The working directory a relative [`crate::native::picker::Source`]
     /// resolves against, learned once at startup
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
@@ -119,6 +127,7 @@ impl Model {
             fatal_reason: None,
             claimed_keys: Vec::new(),
             statusline_enabled: false,
+            palette_enabled: false,
             cwd: PathBuf::new(),
         }
     }
@@ -1011,7 +1020,25 @@ pub struct PopupmenuState {
     pub selected: i64,
     pub row: u64,
     pub col: u64,
-    pub grid: u64,
+    pub grid: i64,
+}
+
+impl PopupmenuState {
+    /// Whether this popup is cmdline-sourced (its completion candidates
+    /// come from the command line, e.g. `:set nu<Tab>`) rather than
+    /// buffer-anchored (e.g. insert-mode keyword completion). `grid` is the
+    /// wire's own distinguishing field, captured live in
+    /// `docs/palette-popupmenu-source-wire-capture.md`: `-1` is not a grid
+    /// handle nvim ever assigns to a window, so a cmdline-sourced popup
+    /// sends it as a sentinel; every buffer-anchored popup carries a real,
+    /// non-negative grid handle instead. The command palette renders a
+    /// cmdline-sourced popup's items inline as its own completion rows and
+    /// must never also let it reach the plain `Popupmenu` layer, or the
+    /// same candidates would paint twice in two different places.
+    #[must_use]
+    pub fn is_cmdline_sourced(&self) -> bool {
+        self.grid < 0
+    }
 }
 
 /// Which surface currently owns input focus. Read from
@@ -1093,6 +1120,14 @@ pub enum OverlayKind {
     /// the same "acting on a row closes the picker" shape a picker's own
     /// selection has. See [`crate::native::tree::TreeState`].
     Tree(crate::native::tree::TreeState),
+    /// A `:messages`-style browse of `ToastHistory`'s ring, snapshotted at
+    /// open time. Centered like a picker; carries no navigation state of
+    /// its own beyond the snapshot itself -- no key arm in `Msg::Key`'s
+    /// `Focus::Native` match names this variant, so it falls to that
+    /// match's generic fallback, which closes it on `<Esc>` the same way
+    /// an overlay with no more specific key handling always has. See
+    /// [`crate::native::palette::MessageHistoryState`].
+    MessageHistory(crate::native::palette::MessageHistoryState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

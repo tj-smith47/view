@@ -411,7 +411,12 @@ fn decode_popupmenu_show(args: &[Value]) -> Option<UiEvent> {
         selected: as_i64(selected)?,
         row: as_u64(row)?,
         col: as_u64(col)?,
-        grid: as_u64(grid)?,
+        // as_i64, not as_u64: a cmdline-sourced popup sends -1 here (see
+        // docs/palette-popupmenu-source-wire-capture.md), and as_u64
+        // returns None for a negative wire integer, which would make the
+        // `?` short-circuit the whole event to "unknown" and silently
+        // drop every cmdline-sourced popupmenu_show.
+        grid: as_i64(grid)?,
     })
 }
 
@@ -1003,6 +1008,47 @@ mod tests {
                 UiEvent::PopupmenuSelect { selected: 1 },
                 UiEvent::PopupmenuHide,
             ]
+        );
+    }
+
+    #[test]
+    fn a_cmdline_sourced_popupmenu_grid_sentinel_decodes_instead_of_vanishing() {
+        // live-captured against the pinned engine (see
+        // docs/palette-popupmenu-source-wire-capture.md): a cmdline-sourced
+        // completion (e.g. `:set nu<Tab>`) sends grid: -1, which as_u64
+        // used to turn into a decode failure for the whole event -- so this
+        // pins the fix rather than only the shape.
+        let item = arr(vec![
+            Value::from("number"),
+            Value::from(""),
+            Value::from(""),
+            Value::from(""),
+        ]);
+        let params = vec![arr(vec![
+            Value::from("popupmenu_show"),
+            arr(vec![
+                arr(vec![item]),
+                Value::from(0),
+                Value::from(0),
+                Value::from(4),
+                Value::from(-1),
+            ]),
+        ])];
+        let evs = decode_redraw(&params);
+        assert_eq!(
+            evs,
+            vec![UiEvent::PopupmenuShow {
+                items: vec![PmItem {
+                    word: "number".to_string(),
+                    kind: String::new(),
+                    menu: String::new(),
+                    info: String::new(),
+                }],
+                selected: 0,
+                row: 0,
+                col: 4,
+                grid: -1,
+            }]
         );
     }
 

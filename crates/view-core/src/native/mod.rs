@@ -5,6 +5,7 @@
 
 pub mod geometry;
 pub mod mappings;
+pub mod palette;
 pub mod picker;
 pub mod prompt;
 pub mod registry;

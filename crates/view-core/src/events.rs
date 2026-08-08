@@ -123,13 +123,18 @@ pub enum UiEvent {
     },
     /// The completion popup menu is showing `items` at `(row, col)` on
     /// `grid`, with `selected` the zero-based highlighted index (`-1` for
-    /// none).
+    /// none). `grid` is `-1` for a cmdline-sourced completion (the popup is
+    /// positioned relative to the command line, not any real grid nvim ever
+    /// assigns) and a non-negative real grid handle for a buffer-anchored
+    /// (e.g. insert-mode) completion -- captured live in
+    /// `docs/palette-popupmenu-source-wire-capture.md`, which is why this
+    /// is `i64` rather than `u64`.
     PopupmenuShow {
         items: Vec<PmItem>,
         selected: i64,
         row: u64,
         col: u64,
-        grid: u64,
+        grid: i64,
     },
     /// The popup menu's highlighted item changed without reshowing it.
     PopupmenuSelect { selected: i64 },

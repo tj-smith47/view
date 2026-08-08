@@ -16,6 +16,7 @@ the keys view registers disagree.
 | `<leader>fb` | `picker` | `:View picker buffers` |
 | `<leader>fg` | `picker` | `:View picker grep` |
 | `<leader>e` | `tree` | `:View tree toggle` |
+| `<leader>fm` | `notifications` | `:View notifications history` |
 
 ## Turning them off
 

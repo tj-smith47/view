@@ -117,6 +117,7 @@ impl NativeSession {
             }
         };
         model.statusline_enabled = cfg.enabled("statusline");
+        model.palette_enabled = cfg.enabled("palette");
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's
         // live grid still claims every row `statusline_rows()` now needs to
@@ -508,6 +509,38 @@ mod tests {
                 .any(|e| matches!(e, Effect::Rpc(RpcCall::TryResize { .. }))),
             "a disabled statusline reserves no row and must not resize nvim's \
              already-correct grid, got {effects:?}"
+        );
+    }
+
+    /// The palette's off switch, mirroring the statusline pair above minus
+    /// the resize concern: the palette floats over the grid rather than
+    /// reserving a row from it, so turning it off has nothing to undo on
+    /// nvim's side -- only `Model::palette_enabled` itself changes.
+    #[test]
+    fn load_turns_the_palette_on_by_default_and_off_when_configured() {
+        let mut on = model();
+        let _ = NativeSession::load(None, 7, &mut on);
+        assert!(on.palette_enabled, "an absent config is every feature on");
+
+        let dir =
+            std::env::temp_dir().join(format!("view-native-palette-toggle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let path = dir.join("view.toml");
+        std::fs::write(
+            &path,
+            "[native]
+palette = false
+",
+        )
+        .expect("a temp config must be writable");
+
+        let mut off = model();
+        let _ = NativeSession::load(Some(path), 7, &mut off);
+        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
+
+        assert!(
+            !off.palette_enabled,
+            "the config explicitly disabled the feature"
         );
     }
 }

@@ -38,7 +38,11 @@ const LINE_V: char = '│';
 /// The character a prompt line opens with, on every tier: one ASCII cell,
 /// so the line reads the same whether or not the terminal renders
 /// box-drawing glyphs.
-const PROMPT_MARK: char = '>';
+///
+/// `pub(crate)` so `lib.rs`'s palette cursor placement can measure the same
+/// glyph this module paints with, instead of a second literal that could
+/// drift from it.
+pub(crate) const PROMPT_MARK: char = '>';
 
 /// The six glyphs an overlay's frame is drawn from.
 ///
@@ -216,6 +220,24 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
         selected: laid.selected.map(|r| r.saturating_add(1)),
         framed: true,
     }
+}
+
+/// Where a rect's first content cell lands relative to the rect's own
+/// origin, once [`rows`] has framed it: the row past the top border, and
+/// the column past the left border plus the same one-cell pad `rows` grants
+/// interior text at `width >= 6`.
+///
+/// `rows` computes this arithmetic to lay text out; a cursor that needs to
+/// land on a specific character of that text (the palette's query line) has
+/// to land in the same place `rows` painted it, so this is exposed rather
+/// than re-derived a second time from the same two size thresholds.
+#[must_use]
+pub(crate) fn interior_origin(width: u16, height: u16) -> (u16, u16) {
+    if width < 2 || height < 2 {
+        return (0, 0);
+    }
+    let pad = u16::from(width >= 6);
+    (1, 1 + pad)
 }
 
 /// The lowest interior width, in display cells, a picker's preview pane is

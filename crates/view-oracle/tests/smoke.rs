@@ -201,6 +201,35 @@ fn build_view_pty_with_content(
     }
 }
 
+/// Like [`spawn_view_pty`], but isolates only the `XDG_*_HOME` env vars
+/// (`common::isolate_xdg_first_launch`) instead of also writing a
+/// `view.toml` that disables every registered feature
+/// (`common::isolate_xdg`, what every other helper in this file uses).
+///
+/// `NativeConfig::load`'s documented contract is that an absent config file
+/// means every feature defaults on; `isolate_xdg`'s deliberately-written
+/// all-off `view.toml` (a baseline predating any native feature, kept as
+/// the default so unrelated smoke tests are not coupled to a feature's
+/// rendering) would falsify a test whose subject is specifically a
+/// default-on feature. Follows the same precedent as
+/// `statusline_macro_recording.rs`'s `statusline_session`.
+fn spawn_view_pty_first_launch() -> ViewPtySession {
+    let paths = common::ScratchPaths::new("smoke");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
+
+    let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
+
+    let mut session = ViewPtySession {
+        session,
+        paths,
+        _isolation: shared_isolation(),
+    };
+    let _ = session.wait_for("~", Duration::from_secs(5));
+    session
+}
+
 /// Like [`spawn_view_pty_raw`] but takes NO isolation read lock, for a timing
 /// test that already holds the exclusive write guard from
 /// `pty_isolation_exclusive`; taking read on that same thread deadlocks.
@@ -571,8 +600,8 @@ fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
 // by the same ScheduleToastExpiry/toast-timer machinery. The other half --
 // that the entry also lands in ToastHistory -- is proven at the unit level
 // in view-core's update.rs, where ToastHistory's contents are directly
-// inspectable; there is no UI surface yet (T14's future :messages view) to
-// assert that over a pty's screen.
+// inspectable; this pty test stays scoped to the live-process expiry
+// timing alone rather than also driving the message-history overlay.
 #[test]
 fn a_native_notice_expires_on_its_own_after_the_idle_timeout_same_as_a_wire_toast() {
     let mut session = spawn_view_pty();
@@ -601,13 +630,25 @@ fn a_native_notice_expires_on_its_own_after_the_idle_timeout_same_as_a_wire_toas
 }
 
 #[test]
-fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
-    let mut session = spawn_view_pty();
+fn view_shows_the_cmdline_prefix_inside_the_command_palette_while_typing_a_command() {
+    // the command palette (native.palette) paints `:`'s typed line as a
+    // centered floating box rather than the grid's bottom row, so this
+    // checks for the palette's own header format -- its `PROMPT_MARK`
+    // glyph, a space, then the query -- wherever on screen the box actually
+    // lands, rather than a fixed-cell assertion at the old bottom row.
+    //
+    // `spawn_view_pty_first_launch`, not `spawn_view_pty`: every other
+    // helper in this file isolates under a `view.toml` that disables every
+    // registered feature, palette included, as this file's deliberate
+    // pre-native-features baseline. A default-on feature's own rendering
+    // test needs the config-absent default that baseline exists to opt
+    // everything else out of.
+    let mut session = spawn_view_pty_first_launch();
 
     session.send(b"\x1b:").unwrap();
     assert!(
-        session.wait_for_cell(23, 0, ":", Duration::from_secs(5)),
-        "cmdline row never showed its \":\" prefix; last screen:\n{}",
+        session.wait_for("> :", Duration::from_secs(5)),
+        "the command palette never showed its \"> :\" query prefix; last screen:\n{}",
         session.screen()
     );
 
