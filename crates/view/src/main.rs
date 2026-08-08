@@ -375,12 +375,25 @@ fn main() -> Result<()> {
         Vec::new()
     };
 
-    let executor = runtime::Executor::new(engine.handle.clone());
+    // `.with_toast_timer` wired on this executor too, not only the one
+    // `runtime::run` builds later: `drained.toast_effects` (buffered while
+    // no executor existed at all, in `drain_pre_attach`) and `load`'s own
+    // broken-config notice below both need a real toast-expiry timer the
+    // moment they run, which is here -- strictly before `runtime::run`'s
+    // loop -- not deferred any further than "the first executor that
+    // exists."
+    let executor = runtime::Executor::new(engine.handle.clone()).with_toast_timer(msg_tx.clone());
+    for eff in drained.toast_effects {
+        let _ = executor.run(eff);
+    }
     // built before the cutover, not after: a config that sources quickly has
     // already fired `VimEnter` into the presink by now, and that message is
     // what triggers this session's takeover and key registration
-    let mut native =
+    let (mut native, load_effects) =
         native::NativeSession::load(config_path.clone(), engine.api_info.channel_id, &mut model);
+    for eff in load_effects {
+        let _ = executor.run(eff);
+    }
     // built alongside it, for the same reason: a config that sets a
     // colorscheme has already fired the bridge's own autocmd by now
     let mut theme_bridge = bridge::ThemeBridge::new(config_path.as_deref());

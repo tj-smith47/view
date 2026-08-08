@@ -405,6 +405,60 @@ impl EngineModel {
         self.hl = hl;
         self.hl.mark_dirty();
     }
+
+    /// The one place a [`MessageEntry`] is created that also classifies it
+    /// (`native::toast::route`), records it to scrollback
+    /// (`toast_history`), and schedules its transient-toast expiry.
+    /// `Messages::push` alone only stamps an id; a caller that reaches past
+    /// this method straight to `messages.push` produces an entry with no
+    /// history record and no expiry -- invisible to a future `:messages`
+    /// view and, for a transient kind, stuck on screen forever on an idle
+    /// editor, the exact bug `native::toast`'s timer design exists to
+    /// close. [`UiEvent::MsgShow`](crate::events::UiEvent::MsgShow)
+    /// (wire-decoded) and [`Self::record_native_notice`]
+    /// (locally-synthesized) are its only two callers, matching
+    /// [`MessageEntry::kind`]'s own "off the wire, or synthesized locally"
+    /// split.
+    pub fn record_message(
+        &mut self,
+        kind: String,
+        content: Vec<(u64, String)>,
+        replace_last: bool,
+    ) -> Vec<crate::msg::Effect> {
+        let route = crate::native::toast::route(&kind);
+        let id = self.messages.push(kind, content, replace_last);
+        // recorded by id, not `.entries.last()`: `push`'s replace path can
+        // overwrite an entry that sits before a still-open condition
+        // notice, which then occupies the last slot instead
+        if let Some(entry) = self.messages.entries.iter().find(|e| e.id() == id) {
+            self.toast_history.push(entry);
+        }
+        // only `Route::Transient` ever schedules a timeout (see
+        // `toast::timeout_for`); a prompt/sticky/statusline entry expires
+        // some other way or not at all
+        match crate::native::toast::timeout_for(route) {
+            Some(after) => vec![crate::msg::Effect::ScheduleToastExpiry { id, after }],
+            None => Vec::new(),
+        }
+    }
+
+    /// A locally-synthesized notice -- never from nvim's own `msg_show` --
+    /// through the same [`Self::record_message`] every wire-decoded message
+    /// goes through, so a native notice gets the same scrollback/expiry
+    /// treatment a wire one does. [`Messages::push_native`] itself stays
+    /// crate-private: `Messages::set_native_condition` is its one remaining
+    /// caller, where persistence comes from the condition flag it sets
+    /// after pushing rather than from `route()`'s kind-based
+    /// classification this method's callers want -- a call site anywhere
+    /// outside this module reaches a native notice through this method or
+    /// not at all.
+    pub fn record_native_notice(
+        &mut self,
+        text: String,
+        replace_last: bool,
+    ) -> Vec<crate::msg::Effect> {
+        self.record_message("native".to_string(), vec![(0, text)], replace_last)
+    }
 }
 
 /// nvim mode state: the cursor/highlight property table from the last
@@ -648,7 +702,19 @@ impl Messages {
     /// `replace_last` behaves exactly as it does for `push`: pass `true` to
     /// update an in-place running count instead of stacking a new entry per
     /// occurrence.
-    pub fn push_native(&mut self, text: String, replace_last: bool) {
+    ///
+    /// Crate-private on purpose: this only stamps and stores the entry, with
+    /// none of `route`/`toast_history`/expiry-scheduling that every other
+    /// native notice needs -- correct here solely because
+    /// [`Self::set_native_condition`], the one remaining caller, decides
+    /// persistence itself via the `condition` flag it sets right after this
+    /// call, rather than through `route()`'s kind-based classification. A
+    /// one-shot notice wants that classification, so it goes through
+    /// [`crate::model::EngineModel::record_native_notice`] instead, which
+    /// this method is not reachable around: there is no `pub` path to a
+    /// `kind == "native"` entry from outside this module other than through
+    /// it.
+    pub(crate) fn push_native(&mut self, text: String, replace_last: bool) {
         self.push("native".to_string(), vec![(0, text)], replace_last);
     }
 

@@ -25,7 +25,7 @@ use std::time::Instant;
 
 use view_core::events::UiEvent;
 use view_core::model::Model;
-use view_core::msg::{Key, Msg};
+use view_core::msg::{Effect, Key, Msg};
 use view_engine::handle::EngineError;
 use view_engine::process::{Engine, EngineConfig};
 use view_tui::terminal::Term;
@@ -255,6 +255,16 @@ pub struct DrainedInput {
     pub resize: Option<(u16, u16)>,
     /// Buffered keystrokes, oldest first.
     pub keys: Vec<Key>,
+    /// `Effect::ScheduleToastExpiry` owed by every native notice this
+    /// window's key-ring overflow pushed (via
+    /// `EngineModel::record_native_notice`), buffered rather than run: no
+    /// executor exists yet at the point this window drains (`main.rs`
+    /// builds one strictly after `drain_pre_attach` returns), so there is
+    /// nothing to hand the effect to. The caller runs these once its own
+    /// executor exists -- see `main.rs`'s cutover setup -- which still
+    /// starts the toast's clock before `runtime::run`'s loop does anything
+    /// else, never silently drops it.
+    pub toast_effects: Vec<Effect>,
 }
 
 /// Drains `msg_rx` until [`attach_in_background`]'s `Msg::EngineReady`
@@ -297,18 +307,19 @@ fn drain_pre_attach_with(
     let mut ring = KeyRing::new(KEY_RING_CAPACITY);
     let mut resize = None;
     let mut dropped: u32 = 0;
+    let mut toast_effects = Vec::new();
     loop {
         match msg_rx.recv() {
             Ok(Msg::Key(key)) => {
                 if ring.push(key) {
                     dropped = dropped.saturating_add(1);
                     let plural = if dropped == 1 { "" } else { "s" };
-                    model.engine.messages.push_native(
+                    toast_effects.extend(model.engine.record_native_notice(
                         format!(
                             "view: startup key buffer full, dropped {dropped} keystroke{plural}"
                         ),
                         dropped > 1,
-                    );
+                    ));
                     repaint(model);
                 }
             }
@@ -338,6 +349,7 @@ fn drain_pre_attach_with(
     DrainedInput {
         resize,
         keys: ring.drain(),
+        toast_effects,
     }
 }
 

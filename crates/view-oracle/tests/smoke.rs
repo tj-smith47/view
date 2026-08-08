@@ -561,6 +561,46 @@ fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
     let _ = session.wait();
 }
 
+// The choke-point-unification counterpart to the wire-sourced test above.
+// `:View` with no args reaches `Msg::FeatureInvoke { feature: "", verb: "" }`
+// (see native/mappings.rs's Lua-side registration: `opts.fargs[1] or ''`),
+// which the fix-round-1 review found bypassed classification/expiry/history
+// entirely -- a push_native-originated notice sat on screen forever on an
+// idle editor, unlike a wire-decoded one. This proves the live-process half
+// of the fix: the same idle wait that reaps a wire-sourced transient toast
+// also reaps a locally-synthesized one, driven by the same
+// ScheduleToastExpiry/toast-timer machinery. The other half -- that the
+// entry also lands in ToastHistory -- is proven at the unit level in
+// view-core's update.rs, where ToastHistory's contents are directly
+// inspectable; there is no UI surface yet (T14's future :messages view) to
+// assert that over a pty's screen.
+#[test]
+fn a_native_notice_expires_on_its_own_after_the_idle_timeout_same_as_a_wire_toast() {
+    let mut session = spawn_view_pty();
+
+    session.send(b"\x1b:View\r").unwrap();
+    assert!(
+        session.wait_for("needs a feature and a verb", Duration::from_secs(5)),
+        "screen never showed the native invoke notice; last screen:\n{}",
+        session.screen()
+    );
+
+    // No further input from here on: proves expiry is driven by the
+    // ToastExpired timer, not by some other event's repaint incidentally
+    // dropping the entry.
+    let margin = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(4);
+    assert!(
+        session.wait_for_screen(margin, |screen| {
+            !screen.contents().contains("needs a feature and a verb")
+        }),
+        "native notice never expired while the editor sat idle; last screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
+}
+
 #[test]
 fn view_shows_the_cmdline_prefix_on_the_bottom_row_while_typing_a_command() {
     let mut session = spawn_view_pty();

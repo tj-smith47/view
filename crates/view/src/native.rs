@@ -88,28 +88,44 @@ impl NativeSession {
     /// not decline to open a file over a typo in an optional table -- but the
     /// user is told, because a silently ignored `picker = false` is a feature
     /// they turned off still taking their keys.
-    pub(crate) fn load(config_path: Option<PathBuf>, channel_id: u64, model: &mut Model) -> Self {
+    ///
+    /// Returns whatever effect the broken-config notice owes the engine
+    /// alongside the built session, rather than pushing it and discarding
+    /// the return the way a bare `push_native` call would: a broken config
+    /// is discovered before `runtime::run`'s loop exists to run an effect
+    /// through, so the caller (`main.rs`) is the one that knows whether
+    /// that is "immediately, through the pre-cutover executor" or, for an
+    /// even earlier failure, "once an executor exists at all" -- this
+    /// method has no opinion on which and must not silently drop the
+    /// effect deciding it does not apply yet.
+    pub(crate) fn load(
+        config_path: Option<PathBuf>,
+        channel_id: u64,
+        model: &mut Model,
+    ) -> (Self, Vec<Effect>) {
+        let mut effects = Vec::new();
         let cfg = match NativeConfig::load(config_path.as_deref()) {
             Ok(cfg) => cfg,
             Err(err) => {
                 crate::vlog::log_with("native", || format!("config unreadable: {err}"));
-                model.engine.messages.push_native(
+                model.dirty = true;
+                effects = model.engine.record_native_notice(
                     format!("view: {err}; every native feature stays on this session"),
                     false,
                 );
-                model.dirty = true;
                 NativeConfig::all_enabled()
             }
         };
         let plan = plan(&cfg, registry::features());
-        Self {
+        let session = Self {
             cfg,
             plan,
             config_path,
             record: paths::state_dir().map(|dir| paths::first_run_record(&dir)),
             channel_id,
             handed_over: false,
-        }
+        };
+        (session, effects)
     }
 
     /// Carries out `stage` against `model`, returning whatever it owes the
@@ -119,10 +135,7 @@ impl NativeSession {
         match stage {
             Stage::None => Vec::new(),
             Stage::VimEnter => self.take_over(),
-            Stage::Claims => {
-                self.announce(model);
-                Vec::new()
-            }
+            Stage::Claims => self.announce(model),
         }
     }
 
@@ -182,10 +195,10 @@ impl NativeSession {
     /// worst that costs is repeating it next launch, and staying silent
     /// instead would trade a repeated notice for a user who is never told
     /// what took their key.
-    fn announce(&self, model: &mut Model) {
+    fn announce(&self, model: &mut Model) -> Vec<Effect> {
         let handovers = report(&self.plan, model.claimed_keys(), registry::features());
         if handovers.is_empty() {
-            return;
+            return Vec::new();
         }
         let notices = match &self.record {
             Some(record) => match toast::first_run(&handovers, self.config_path.as_deref(), record)
@@ -204,10 +217,12 @@ impl NativeSession {
                 handovers.iter().map(|h| h.notice()).collect()
             }
         };
+        let mut effects = Vec::new();
         for notice in notices {
-            model.engine.messages.push_native(notice, false);
             model.dirty = true;
+            effects.extend(model.engine.record_native_notice(notice, false));
         }
+        effects
     }
 }
 
@@ -395,8 +410,13 @@ mod tests {
         m.record_claimed_keys(claimed.clone());
         let effects = session.follow_up(&mut m, Stage::Claims);
         assert!(
-            effects.is_empty(),
-            "a notice talks to the user, not to nvim"
+            !effects.is_empty()
+                && effects
+                    .iter()
+                    .all(|e| matches!(e, Effect::ScheduleToastExpiry { .. })),
+            "every notice this stage pushes must talk to the user through the same \
+             choke point every other locally-synthesized notice uses (never straight \
+             to nvim), got {effects:?}"
         );
         let first = shown(&m);
         assert!(

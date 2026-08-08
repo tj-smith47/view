@@ -196,9 +196,8 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             } else {
                 format!("view: {}", crate::native::mappings::render_usage())
             };
-            model.engine.messages.push_native(notice, false);
             model.dirty = true;
-            Vec::new()
+            model.engine.record_native_notice(notice, false)
         }
         Msg::MappingsClaimed { claimed } => {
             model.record_claimed_keys(claimed);
@@ -2604,8 +2603,10 @@ mod tests {
             },
         );
         assert!(
-            effects.is_empty(),
-            "an entry point with no handler must not talk to the engine: {effects:?}"
+            matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+            "an entry point with no handler must not talk to the engine, only schedule \
+             its own notice's expiry through the same choke point every other \
+             locally-synthesized notice uses: {effects:?}"
         );
         let entry = m
             .engine
@@ -2635,7 +2636,11 @@ mod tests {
                 verb: String::new(),
             },
         );
-        assert!(effects.is_empty(), "{effects:?}");
+        assert!(
+            matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+            "a bare :View's usage notice must schedule its own expiry the same way \
+             every other locally-synthesized notice does: {effects:?}"
+        );
         let entry = m
             .engine
             .messages
@@ -2654,6 +2659,51 @@ mod tests {
             );
         }
         assert!(m.dirty);
+    }
+
+    #[test]
+    fn a_native_invoke_notice_is_wired_through_the_same_choke_point_as_a_wire_toast() {
+        // this is the regression the fix-round-1 review named: a
+        // push_native-originated entry must schedule the identical
+        // ScheduleToastExpiry effect and land in ToastHistory that a
+        // wire-decoded UiEvent::MsgShow transient toast gets, or an idle
+        // editor keeps the notice on screen forever and it's invisible to
+        // a future :messages view
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: String::new(),
+                verb: String::new(),
+            },
+        );
+        let entry = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the invoke notice must reach the message surface");
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::ScheduleToastExpiry { id, after }]
+                    if *id == entry.id() && *after == crate::native::toast::TRANSIENT_TOAST_TIMEOUT
+            ),
+            "expected exactly one ScheduleToastExpiry for {:?} after {:?}, got {effects:?}",
+            entry.id(),
+            crate::native::toast::TRANSIENT_TOAST_TIMEOUT
+        );
+        let recorded = m
+            .engine
+            .toast_history
+            .entries()
+            .next()
+            .expect("the invoke notice must land in scrollback history, not just on screen");
+        assert_eq!(
+            recorded.id(),
+            entry.id(),
+            "history must record the same entry that's on screen, not a stale one"
+        );
     }
 
     #[test]
