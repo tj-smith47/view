@@ -509,17 +509,29 @@ pub fn run_output_path(
                     ),
                 });
             };
-            // small grace so the R record (written by a different thread
-            // than the T) is guaranteed to have crossed the pipe before
-            // the pairing scan below
-            std::thread::sleep(Duration::from_millis(1));
-            let window = pipe.drain();
-            all_records.extend(window.iter().copied());
-            let Some(parsed) = all_records
-                .iter()
-                .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
-                .min_by_key(|r| r.nanos)
-            else {
+            // grace so the R record (written by a different thread than
+            // the T) has crossed the pipe before the pairing scan below.
+            // A bounded rescan loop, not one fixed sleep: under host load
+            // the parser thread's pipe write can trail the observed T by
+            // more than any single grace this pacing could afford, and a
+            // scan that ran exactly once then turned a late write into a
+            // whole-run desync abort -- reproduced at 1 ms on this class
+            // at 1-min loads as low as 0.6, on a tree with no view change
+            let pairing_deadline = Instant::now() + Duration::from_millis(50);
+            let parsed = loop {
+                std::thread::sleep(Duration::from_millis(1));
+                let window = pipe.drain();
+                all_records.extend(window.iter().copied());
+                let hit = all_records
+                    .iter()
+                    .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
+                    .min_by_key(|r| r.nanos)
+                    .copied();
+                if hit.is_some() || Instant::now() >= pairing_deadline {
+                    break hit;
+                }
+            };
+            let Some(parsed) = parsed else {
                 return Err(BenchError::Desync {
                     context: "a paint arrived with no parsed redraw between the keypress \
                               and the terminal write"

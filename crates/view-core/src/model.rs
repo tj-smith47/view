@@ -1205,7 +1205,7 @@ impl TermCaps {
 
 /// Coarse terminal capability tier.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tier {
     Full,
     Standard,

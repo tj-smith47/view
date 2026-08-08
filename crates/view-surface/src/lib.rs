@@ -5,7 +5,10 @@
 //! data, no drawing here; `view-tui` is the only crate that turns a
 //! `Surface` into pixels.
 
+pub mod cache;
 pub mod overlay;
+
+pub use cache::SurfaceCache;
 
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};

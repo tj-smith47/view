@@ -199,6 +199,10 @@ pub struct Shadow {
     runs: Vec<(u16, u16)>,
     /// Scratch sub-buffers, one per run, likewise kept across frames.
     staged: Vec<StagedRun>,
+    /// Frames composed, so the debug-build equivalence guard can name the
+    /// frame a divergence appeared on.
+    #[cfg(debug_assertions)]
+    frames: u64,
 }
 
 /// One repainted row run lifted out of the shadow's buffers, so the diff
@@ -310,6 +314,43 @@ impl Shadow {
         composite_into(&mut self.back, model, surface, &repaint);
         self.carried = damage.clone();
         self.painted = repaint;
+        #[cfg(debug_assertions)]
+        self.assert_matches_full_recomposite(model, surface);
+    }
+
+    /// Asserts the frame just composed is cell-for-cell what a full
+    /// recomposite of the same `surface` into a fresh buffer produces,
+    /// naming the frame and the first divergent cell.
+    ///
+    /// Debug builds only, on every frame: a damage set that misses a
+    /// changed row leaves the terminal showing something the model no
+    /// longer says, and nothing else fails loudly when that happens -- the
+    /// stale row looks exactly like an untouched one. Together with the
+    /// surface-level guard in `view_surface::cache` (cached surface ==
+    /// from-scratch render), this composes into "the painted frame equals a
+    /// from-scratch rebuild of the same `Model`": that guard proves the
+    /// surface, this one proves the cells painted from it. The release
+    /// path is the same clipped composite with only the check compiled
+    /// out, never a separate code path.
+    #[cfg(debug_assertions)]
+    fn assert_matches_full_recomposite(&mut self, model: &Model, surface: &Surface) {
+        self.frames = self.frames.wrapping_add(1);
+        let mut fresh = Buffer::empty(self.back.area);
+        composite_into(&mut fresh, model, surface, &Damage::full());
+        let width = usize::from(self.back.area.width.max(1));
+        for (i, (got, want)) in self.back.content.iter().zip(&fresh.content).enumerate() {
+            if got != want {
+                let row = i / width;
+                let col = i % width;
+                debug_assert!(
+                    false,
+                    "damage-clipped composite diverged from a full recomposite at \
+                     frame {}, cell ({row},{col}): {got:?} != {want:?}",
+                    self.frames
+                );
+                return;
+            }
+        }
     }
 
     /// Writes the cells that differ between what the terminal shows and the
@@ -2802,6 +2843,51 @@ mod tests {
         assert_eq!(
             chosen, expected,
             "emit_updates diverged from the whole-buffer diff after: {label}"
+        );
+    }
+
+    /// The compose-time equivalence guard must be seen to catch: a damage
+    /// set that misses a changed row is exactly the silent-drift failure
+    /// the guard exists for, and a guard that has never fired proves
+    /// nothing. Drives the shadow through a correct frame, then a frame
+    /// whose damage deliberately omits the row an edit changed, and
+    /// expects the debug assert naming the frame and cell. The third
+    /// compose is the one that can under-repaint: the shadow re-repaints
+    /// the previous frame's rows on top of the given damage, so the empty
+    /// set only becomes a miss once the carried set is empty too.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "diverged from a full recomposite")]
+    fn an_under_reported_damage_trips_the_composite_equivalence_guard() {
+        let mut model = Model::new();
+        model.engine.apply_grid(GridOp::Resize {
+            width: 20,
+            height: 6,
+        });
+        let mut shadow = Shadow::new();
+        let _ = shadow.resize(ratatui::layout::Rect::new(0, 0, 20, 6));
+        put(&mut model, 2, 0, &["A"]);
+        let surface = view_surface::render(&model);
+        shadow.compose(&model, &surface, &Damage::full());
+        shadow.commit();
+        shadow.compose(
+            &model,
+            &surface,
+            &Damage {
+                full: false,
+                rows: Vec::new(),
+            },
+        );
+        shadow.commit();
+        put(&mut model, 3, 0, &["B"]);
+        let surface = view_surface::render(&model);
+        shadow.compose(
+            &model,
+            &surface,
+            &Damage {
+                full: false,
+                rows: Vec::new(),
+            },
         );
     }
 

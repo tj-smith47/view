@@ -327,6 +327,14 @@ fn run_tokens(
     let _ = engine.quiesce(silence, deadline)?;
     let _ = reference.quiesce(silence, deadline)?;
 
+    // warm the session's cached renderer before the script runs: the
+    // post-settle captures below then decide reuse-versus-rebuild against a
+    // frame that predates the entry's edits, so every entry exercises the
+    // production frame-to-frame render path (and, in debug builds, its
+    // equivalence guard) across a real model change instead of only
+    // capturing from a cold cache
+    let _ = engine.surface();
+
     let (engine_keys, reference_keys) =
         match tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
             Some(pos) => {

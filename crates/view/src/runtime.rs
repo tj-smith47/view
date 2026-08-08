@@ -1016,6 +1016,11 @@ pub fn run(
         .with_toast_timer(msg_tx)
         .with_picker(picker_tx);
     let mut write_stall = OutboxStallWatch::default();
+    // frame-to-frame surface reuse; the paint site below is this loop's
+    // only consumer, so the cache's previous-frame invariant holds by
+    // construction (startup's pre-attach paints predate the loop and go
+    // through their own full render)
+    let mut surface_cache = view_surface::SurfaceCache::new();
 
     loop {
         // drained at the top of every pass rather than right after the
@@ -1067,9 +1072,9 @@ pub fn run(
         // each processed wakeup paints here on the next pass, immediately,
         // with no post-redraw silence timeout and no input-drain budget.
         if model.dirty {
-            let surface = view_surface::render(&model);
+            let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
-            term.draw_surface(&model, &surface, &damage)?; // terminal I/O errors abort; engine errors never do
+            term.draw_surface(&model, surface, &damage)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
         #[cfg(unix)]

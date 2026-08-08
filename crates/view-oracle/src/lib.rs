@@ -135,6 +135,13 @@ pub enum OracleError {
 /// capture).
 pub struct Session {
     model: Model,
+    /// Frame-to-frame surface reuse, the same path the production runtime
+    /// loop renders through, so every capture exercises (and, in debug
+    /// builds, self-checks) the cached renderer rather than a
+    /// test-only full rebuild. `RefCell` because every capture method
+    /// takes `&self` -- the cache is this session's private frame history,
+    /// not observable state -- and the borrow never escapes a capture call.
+    cache: std::cell::RefCell<view_surface::SurfaceCache>,
 }
 
 impl Session {
@@ -145,6 +152,7 @@ impl Session {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             model: Model::with_term_size(cols, rows),
+            cache: std::cell::RefCell::new(view_surface::SurfaceCache::new()),
         }
     }
 
@@ -158,10 +166,12 @@ impl Session {
         let _ = update(&mut self.model, msg);
     }
 
-    /// Captures the current [`Surface`] (leg (b): deterministic capture).
+    /// Captures the current [`Surface`] (leg (b): deterministic capture),
+    /// through the same cached renderer the production runtime loop paints
+    /// from, so successive captures exercise its frame-to-frame reuse.
     #[must_use]
     pub fn surface(&self) -> Surface {
-        view_surface::render(&self.model)
+        self.cache.borrow_mut().render(&self.model).clone()
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
@@ -181,6 +191,9 @@ pub struct EngineSession {
     /// This session's half of the shared quiesce protocol's state (see
     /// [`crate::settle`]).
     markers: settle::QuiesceMarkers,
+    /// Frame-to-frame surface reuse; see [`Session`]'s same-named field
+    /// for why it exists and why it is a `RefCell`.
+    cache: std::cell::RefCell<view_surface::SurfaceCache>,
 }
 
 impl EngineSession {
@@ -238,6 +251,7 @@ impl EngineSession {
             engine,
             pump,
             markers: settle::QuiesceMarkers::default(),
+            cache: std::cell::RefCell::new(view_surface::SurfaceCache::new()),
         })
     }
 
@@ -381,10 +395,12 @@ impl EngineSession {
     }
 
     /// Captures the current [`Surface`] (leg (b): deterministic capture, at
-    /// the engine-attached tier).
+    /// the engine-attached tier), through the same cached renderer the
+    /// production runtime loop paints from, so successive captures across a
+    /// corpus entry's settle points exercise its frame-to-frame reuse.
     #[must_use]
     pub fn surface(&self) -> Surface {
-        view_surface::render(&self.model)
+        self.cache.borrow_mut().render(&self.model).clone()
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].

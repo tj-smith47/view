@@ -185,15 +185,20 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1719342968313597
-why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. What remains is per-hop wake cost on view's own path: collapsing the runtime-loop-to-writer-thread hop into an inline write took this from 1.3538, and folding the input thread into the runtime poll loop then collapsed the key-decoded->loop-wake segment (52.4 -> 13.9 us p50, 95.9 -> 28.4 us p99) while moving this ratio only 1.215 -> 1.173 and 1.234 -> 1.193 across two same-session A/B pairs (2026-08-08; the pre-change binary re-measured above this accepted value that session, so the paired delta is the trustworthy read). The input side is now within a few us of the pty floor; the residual sits in the rpc-written->redraw-parsed and paint segments, which incremental rendering targets next."
+why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. Both ratified levers have now landed and been measured paired. (1) Folding the input thread into the runtime poll loop collapsed the key-decoded->loop-wake segment (52.4 -> 13.9 us p50, 95.9 -> 28.4 us p99) while moving this ratio only 1.215 -> 1.173 and 1.234 -> 1.193 across two same-session A/B pairs (2026-08-08). (2) Incremental surface rendering behind the shadow-equivalence guard moved this cell within session noise in both directions (1.170 -> 1.172 and 1.159 -> 1.180 across two same-session pairs, 2026-08-08) -- the minimal fixture's per-frame surface is two layers, so there was almost no memory for the cache to stop touching, while the same change put echo/heavy inside its budget both rounds. The input side is within a few us of the pty floor and the paint side's surface rebuild is now reused; the remaining residual is dominated by the rpc-written->redraw-parsed segment (~357 us p50 of a ~610 us round trip), which no view-side input or paint lever addresses. Stands at the ratified value for user re-adjudication."
 
-[[shortfall]]
-scenario = "echo"
-fixture = "heavy"
-metric = "ratio_p50"
-class = "dev-linux"
-accepted = 1.1837936337116466
-why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large. The input-thread/runtime-loop unification measured 1.148 -> 1.125 same-session (2026-08-08), inside the accepted value but still outside the 1.1 budget, so the entry stands at the ratified value pending re-adjudication."
+# echo.heavy ratio_p50 dev-linux is no longer listed: incremental surface
+# rendering measured the cell inside the 1.1 budget in two same-session
+# paired rounds (1.101 -> 1.081 and 1.111 -> 1.083, 2026-08-08, median of
+# 3 trials each, per-leg 1-min loads 0.46-1.60 start / 0.24-0.60 end), a
+# consistent -0.02..-0.03 paired delta where the minimal fixture moved
+# within noise -- the heavy fixture's larger chrome state is exactly the
+# memory the surface cache stops re-cloning per frame. The prior accepted
+# value was 1.1838 (ratified 2026-08-03); the same-day pre-change reads
+# were already 1.101-1.125, so part of the clearance is a quieter session
+# -- if a later gate run on this shared class lands back outside 1.1,
+# that is a new finding to re-adjudicate, not a license to relist this
+# entry unexamined.
 
 [[shortfall]]
 scenario = "first_paint"

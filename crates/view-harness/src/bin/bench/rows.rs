@@ -158,9 +158,12 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
         "scroll" => {
             let mut pair = paired_specs(&world, fixture, bins)?;
             for spec in [&mut pair.view, &mut pair.nvim] {
+                // the scratch file's pinned position is the LAST argument
+                // on both sides (view's spec leads with --nvim-bin, which
+                // `first()` would misread as the file to overwrite)
                 let file = spec
                     .args
-                    .first()
+                    .last()
                     .map(PathBuf::from)
                     .context("scroll spec has no file argument")?;
                 std::fs::write(&file, scroll::fixture_content())
