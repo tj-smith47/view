@@ -270,9 +270,10 @@ pub struct DrainedInput {
 /// Drains `msg_rx` until [`attach_in_background`]'s `Msg::EngineReady`
 /// marker arrives, buffering every `Msg::Key` seen in the meantime into a
 /// bounded ring of [`KEY_RING_CAPACITY`] (oldest dropped first once full,
-/// each drop repainting an updated toast through the normal
-/// `view_core::model::Messages` overlay via `Messages::push_native` --
-/// never silent), and tracking the latest `Msg::Resized` seen, if any.
+/// each drop repainting an updated toast through
+/// `EngineModel::record_native_notice` -- the same classify/history/expiry
+/// choke point every other locally-synthesized notice goes through, never
+/// silent), and tracking the latest `Msg::Resized` seen, if any.
 ///
 /// No other message kind can reach `msg_rx` before `EngineReady` -- see
 /// [`attach_in_background`]'s doc comment for the ordering argument. A
@@ -690,6 +691,34 @@ mod tests {
         // the oldest ("0") was evicted to make room for the (KEY_RING_CAPACITY)-th key
         assert_eq!(drained.keys[0].notation, "1");
         assert_eq!(*repaints.borrow(), 1);
+
+        // the overflow notice is pushed through EngineModel::record_native_notice
+        // (never a raw Messages::push), so it must carry the same
+        // ScheduleToastExpiry and scrollback-history treatment any other
+        // locally-synthesized notice gets -- the drain runs before any
+        // Executor exists to run that effect against, so it must come back
+        // to the caller rather than being silently dropped
+        let entry = model
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the overflow notice must be pushed to the message surface");
+        assert!(
+            matches!(
+                drained.toast_effects.as_slice(),
+                [Effect::ScheduleToastExpiry { id, after }]
+                    if *id == entry.id() && *after == view_core::native::toast::TRANSIENT_TOAST_TIMEOUT
+            ),
+            "the drain must hand back exactly one ScheduleToastExpiry for the overflow \
+             notice, to be run once the caller's own executor exists: {:?}",
+            drained.toast_effects
+        );
+        assert_eq!(
+            model.engine.toast_history.entries().next().map(|e| e.id()),
+            Some(entry.id()),
+            "the overflow notice must land in scrollback history too, not just on screen"
+        );
     }
 
     /// Drives the literal production `run_cutover` -- not a hand-recreated

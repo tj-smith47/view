@@ -1076,18 +1076,15 @@ mod tests {
         // z-order: EngineGrid, then Shell, then Messages -- a pre-attach
         // overflow toast (recorded as a "native"-kind entry, see
         // EngineModel::record_native_notice) must land on top of the shell
-        // placeholder, never be hidden underneath it. Pushed here through
-        // the plain `Messages::push` fixture, not `record_native_notice`
-        // itself: this test only wants a native-kind entry in
-        // `engine.messages` to check paint z-order, not to exercise
-        // routing/expiry, and `push_native` is crate-private to view-core.
+        // placeholder, never be hidden underneath it. Built through
+        // record_native_notice, the same choke point production code uses,
+        // rather than a raw Messages::push -- there is no bypass entry
+        // point left for a fixture to reach past classification through.
         let mut model = Model::with_term_size(80, 24);
         model.content_painted = false;
-        model.engine.messages.push(
-            "native".to_string(),
-            vec![(0, "dropped a key".to_string())],
-            false,
-        );
+        let _ = model
+            .engine
+            .record_native_notice("dropped a key".to_string(), false);
         let surface = render(&model);
 
         let shell_idx = surface

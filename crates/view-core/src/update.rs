@@ -9,7 +9,6 @@ use crate::model::{
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::prompt::PromptState;
-use crate::native::toast;
 
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
@@ -460,17 +459,10 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             content,
             replace_last,
         } => {
-            // computed off the wire `kind` before it moves into `push`,
-            // which owns stamping the id `ScheduleToastExpiry` and the
-            // eventual `Msg::ToastExpired` need to name this exact entry by
-            let route = toast::route(&kind);
-            let id = model.engine.messages.push(kind, content, replace_last);
-            // recorded by id, not `.entries.last()`: `push`'s replace path
-            // can overwrite an entry that sits before a still-open
-            // condition notice, which then occupies the last slot instead
-            if let Some(entry) = model.engine.messages.entries.iter().find(|e| e.id() == id) {
-                model.engine.toast_history.push(entry);
-            }
+            // classification, push, history, and expiry-scheduling all
+            // happen inside record_message -- the wire event owns no copy
+            // of that sequence, only the three fields the choke point needs
+            let effects = model.engine.record_message(kind, content, replace_last);
             // a confirm-class msg_show while a Prompt overlay is already
             // open replaces its state wholesale rather than being skipped:
             // a genuine re-arm of the SAME question (an unmatched key)
@@ -498,13 +490,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                     }
                 }
             }
-            // only `Route::Transient` ever schedules a timeout (see
-            // `toast::timeout_for`); a prompt/sticky/statusline entry
-            // expires some other way or not at all
-            match toast::timeout_for(route) {
-                Some(after) => vec![Effect::ScheduleToastExpiry { id, after }],
-                None => Vec::new(),
-            }
+            effects
         }
         UiEvent::MsgClear => {
             model.engine.messages.clear();
@@ -2663,8 +2649,8 @@ mod tests {
 
     #[test]
     fn a_native_invoke_notice_is_wired_through_the_same_choke_point_as_a_wire_toast() {
-        // this is the regression the fix-round-1 review named: a
-        // push_native-originated entry must schedule the identical
+        // a native notice must flow through the same classify/expire/history
+        // path a wire toast does: it must schedule the identical
         // ScheduleToastExpiry effect and land in ToastHistory that a
         // wire-decoded UiEvent::MsgShow transient toast gets, or an idle
         // editor keeps the notice on screen forever and it's invisible to

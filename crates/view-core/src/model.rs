@@ -651,12 +651,12 @@ pub struct Messages {
 }
 
 impl Messages {
-    /// Records one `msg_show`: `kind`/`content` as decoded off the wire (or
-    /// synthesized locally, see `push_native`), stamped with the current
-    /// flush generation. `replace_last` overwrites the most recent entry
-    /// instead of appending, matching nvim's progress-indicator convention
-    /// (e.g. successive search-match counts share one line); with no prior
-    /// entry to replace, it appends instead.
+    /// Stamps and appends one entry: `kind`/`content` as decoded off the
+    /// wire or synthesized locally, no classification, no history record,
+    /// no expiry. `replace_last` overwrites the most recent entry instead
+    /// of appending, matching nvim's progress-indicator convention (e.g.
+    /// successive search-match counts share one line); with no prior entry
+    /// to replace, it appends instead.
     ///
     /// "Most recent" means the most recent entry nvim itself produced. A
     /// raised condition notice (see `set_native_condition`) sits at the
@@ -664,7 +664,14 @@ impl Messages {
     /// line: overwriting the notice would both drop a condition that is
     /// still true and leave the line nvim meant to replace standing as a
     /// duplicate.
-    pub fn push(
+    ///
+    /// Crate-private on purpose: this is the raw primitive
+    /// [`EngineModel::record_message`] is built from, not an entry point of
+    /// its own. `EngineModel::record_message`/`record_native_notice` and
+    /// `Messages::push_native`/`set_native_condition` are the only callers,
+    /// all inside this crate -- nothing outside it can reach a `MessageEntry`
+    /// without also going through classification.
+    pub(crate) fn push(
         &mut self,
         kind: String,
         content: Vec<(u64, String)>,

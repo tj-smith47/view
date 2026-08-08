@@ -563,15 +563,14 @@ fn a_persistent_emsg_survives_the_same_idle_wait_a_transient_toast_does_not() {
 
 // The choke-point-unification counterpart to the wire-sourced test above.
 // `:View` with no args reaches `Msg::FeatureInvoke { feature: "", verb: "" }`
-// (see native/mappings.rs's Lua-side registration: `opts.fargs[1] or ''`),
-// which the fix-round-1 review found bypassed classification/expiry/history
-// entirely -- a push_native-originated notice sat on screen forever on an
-// idle editor, unlike a wire-decoded one. This proves the live-process half
-// of the fix: the same idle wait that reaps a wire-sourced transient toast
-// also reaps a locally-synthesized one, driven by the same
-// ScheduleToastExpiry/toast-timer machinery. The other half -- that the
-// entry also lands in ToastHistory -- is proven at the unit level in
-// view-core's update.rs, where ToastHistory's contents are directly
+// (see native/mappings.rs's Lua-side registration: `opts.fargs[1] or ''`).
+// A native notice must flow through the same classify/expire/history path a
+// wire toast does, or it sits on screen forever on an idle editor -- this
+// proves the live-process half of that: the same idle wait that reaps a
+// wire-sourced transient toast also reaps a locally-synthesized one, driven
+// by the same ScheduleToastExpiry/toast-timer machinery. The other half --
+// that the entry also lands in ToastHistory -- is proven at the unit level
+// in view-core's update.rs, where ToastHistory's contents are directly
 // inspectable; there is no UI surface yet (T14's future :messages view) to
 // assert that over a pty's screen.
 #[test]
@@ -1328,6 +1327,62 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         "view did not exit cleanly after a >64-key pre-attach flood"
     );
 
+    let _ = std::fs::remove_file(&wrapper);
+}
+
+/// The deferred-scheduling half of the pre-attach seam: a key-ring
+/// overflow before any `Executor` exists still owes its notice the same
+/// idle expiry a wire-sourced toast gets, once one exists to run the
+/// buffered effect against. A native notice must flow through the same
+/// classify/expire/history path regardless of when in startup it was
+/// created; a split here is invisible on an idle editor exactly the way a
+/// missing choke point anywhere else is.
+#[cfg(unix)]
+#[test]
+fn a_pre_attach_key_overflow_notice_expires_after_attach_the_same_idle_wait_a_wire_toast_does() {
+    let wrapper = write_delayed_nvim_wrapper(800);
+    let mut session =
+        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+
+    assert_shell_frame_precedes_attach(&mut session);
+
+    // over KEY_RING_CAPACITY (64), sent with no throttling, comfortably
+    // inside the wrapper's 800ms delay: every one of these lands before
+    // main.rs's pre-loop Executor is constructed, so the notice's
+    // ScheduleToastExpiry effect can only reach DrainedInput::toast_effects,
+    // never run immediately -- this is what exercises the deferred half of
+    // the seam rather than the ordinary in-loop path the other toast-expiry
+    // tests already cover
+    for _ in 0..100 {
+        session.send(b"x").unwrap();
+    }
+
+    assert!(
+        session.wait_for("startup key buffer full", Duration::from_secs(2)),
+        "the pre-attach overflow notice never reached the screen; last screen:\n{}",
+        session.screen()
+    );
+
+    assert!(
+        session.wait_for(&ENGINE_CONTENT_MARKER.to_string(), Duration::from_secs(15)),
+        "the engine never attached after the pre-attach flood; last screen:\n{}",
+        session.screen()
+    );
+
+    // no further input from here on: the notice's expiry must be driven by
+    // the ToastExpired timer the replayed effect scheduled at attach time,
+    // not by some other event's repaint incidentally dropping the entry
+    let margin = view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(6);
+    assert!(
+        session.wait_for_screen(margin, |screen| {
+            !screen.contents().contains("startup key buffer full")
+        }),
+        "the pre-attach overflow notice never expired after attach; last screen:\n{}",
+        session.screen()
+    );
+
+    session.send(b"\x1b:q!\r").unwrap();
+    let _ = session.wait();
     let _ = std::fs::remove_file(&wrapper);
 }
 
