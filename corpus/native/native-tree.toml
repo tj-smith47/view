@@ -1,0 +1,7 @@
+# Non-interference proof for the tree feature: see native-picker.toml's
+# header for the shared driver and assertion this file feeds.
+schema = 1
+name = "native-tree"
+input = "\\e"
+engine_pin = "v0.12.4"
+ext_set = "default"

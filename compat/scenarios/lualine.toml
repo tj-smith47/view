@@ -1,43 +1,74 @@
 # The heavy fixture's own smoke scenario: lualine is ui-owning (occupies
 # the statusline, a surface `view` renders natively) and is the
 # illustrative case the probe-channel design itself was written against.
+#
+# The discriminator across states is column 85 of the statusline row:
+# lualine paints its own powerline section-separator glyph there, and
+# `laststatus = 0` (the one row in view-native's takeover table) blanks
+# nvim's own status row whenever the native statusline wins, so that
+# glyph's presence or absence is a fact the two plugin-present states
+# cannot share.
 schema = 1
 plugin = "lualine"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
-  # A cold plugin cache install runs asynchronously and can still hold
-  # input focus in lazy.nvim's own install window well after `view` itself
-  # is up; wait_for_probe (not a one-shot probe) polls until the plugin
-  # actually finishes loading before any editing keystroke is sent, so this
-  # scenario is correct whether it lands on a warm or a cold cache.
+  # Generous timeout: the first heavy scenario to run on a cold shared
+  # cache pays for the full plugin clone before any plugin can load.
   { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
-  # lualine can finish loading while lazy.nvim's install window still holds
-  # input focus (it stays open until every plugin is in and LazyDone has
-  # fired), so the load probe alone is not a safe gate for the keystroke
-  # below -- it must also wait for the install window to actually close.
+  # A cold install leaves lazy.nvim's own window holding input focus until
+  # the fixture's LazyDone autocmd closes it; a keystroke sent before that
+  # lands in the install window instead of the buffer.
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
   { send = "ihello<Esc>" },
   # a translation regression in <Esc> handling would otherwise still pass
   # this scenario: with no real key press sent, mode() stays "i" while
   # every substring assertion below keeps passing against the literal text
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
-  # noice's startup health notifications overlay the upper grid rows
-  # (including buffer line 1, where this text renders) for the first few
-  # seconds after launch; the timeout must outlast their dismissal.
+  # noice's startup health notifications overlay the upper grid rows for
+  # the first few seconds after launch; the timeout must outlast their
+  # dismissal.
   { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
-  # lualine loading (the probe below) is not the same fact as lualine
-  # rendering: a plugin that loaded but crashed before drawing, or whose
-  # statusline is empty/garbled, would still pass a load-only check. These
-  # two cells were read live off this fixture's own rendered 100x30 screen
-  # (COMPAT_COLS x COMPAT_ROWS) at its default theme: column 1 of the
-  # bottom row holds the start of the "NORMAL" mode component, and column
-  # 85 holds one of lualine's own powerline section-separator glyphs --
-  # neither appears in view's own plain default statusline, so together
-  # they pin lualine's actual rendered output, not just its loaded state.
-  { wait_for_cell = { row = 29, col = 1, expected = "N" }, timeout_ms = 5000 },
+  # laststatus = 0 removes nvim's own status row from the grid nvim draws,
+  # and view resizes nvim's attached grid one row shorter at load so its
+  # own statusline can take the vacated physical row back rather than the
+  # buffer growing into it -- row 29 stays the statusline row either way.
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+]
+
+[[states]]
+name = "deferred"
+native = { statusline = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = "ihello<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for = "hello", timeout_ms = 15000 },
+  { assert_absent = "E5108" },
+  # native.statusline = false hands laststatus back, so lualine's own
+  # setup() (it reasserts the option on ColorScheme/OptionSet, see
+  # view-native's supersede module) keeps the row and paints its own
+  # separator glyph into it.
   { wait_for_cell = { row = 29, col = 85, expected = "" }, timeout_ms = 5000 },
   { probe = "luaeval('package.loaded.lualine ~= nil')", expect = "true" },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  { send = "ihello<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for = "hello", timeout_ms = 15000 },
+  { assert_absent = "E5108" },
+  # No lualine anywhere in this fixture, so nothing could paint the
+  # powerline glyph even if the native statusline were somehow off; the
+  # meaningful fact this state alone can prove is that the native
+  # statusline still draws with zero plugins present at all.
+  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
 ]

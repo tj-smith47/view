@@ -21,6 +21,7 @@
 //! spawn/drain/quiesce/compare engine the plain corpus run above uses, so
 //! all three modes see identical parity semantics.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -38,9 +39,9 @@ use view_harness::page;
 use view_harness::results::{
     load_results, write_results, ResultsFile, ScenarioResult, ScenarioStatus,
 };
-use view_harness::scenario::{self, ScenarioFile};
+use view_harness::scenario::{self, ScenarioFile, ScenarioStateEntry};
 use view_oracle::compat::{
-    reset_hermetic_home, CompatSession, ErrorBaseline, PluginClass, ScenarioState,
+    reset_hermetic_home, state_name, CompatSession, ErrorBaseline, PluginClass,
 };
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
@@ -914,7 +915,8 @@ enum FixtureResolution {
     Skipped { notice: String },
 }
 
-/// Resolves `scenario`'s `fixture` field (or its absence) into a
+/// Resolves an effective `fixture` name (a state's own override, or the
+/// scenario's default, or `None` for a fixture-less scenario) into a
 /// [`FixtureResolution`]: XDG homes to spawn `view` against, plus a
 /// [`ScenarioScratch`] guard that cleans up every scratch path this
 /// function created once the caller's session finishes and the guard
@@ -942,7 +944,11 @@ enum FixtureResolution {
 /// hermetic config dir, `$VIEW_DAILY_CONFIG` names a directory with no
 /// `init.lua`/`init.vim`, or (fixture-less, non-Unix host) the isolated
 /// config symlink cannot be created.
-fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureResolution> {
+fn resolve_fixture(
+    fixture: Option<&str>,
+    cold_bootstrap: bool,
+    sock_path: &Path,
+) -> Result<FixtureResolution> {
     let scratch_id = format!(
         "{}-{}",
         std::process::id(),
@@ -954,7 +960,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
     let xdg_state_home = hermetic_dir.join("xdg_state_home");
     let xdg_cache_home = hermetic_dir.join("xdg_cache_home");
 
-    match &scenario.fixture {
+    match fixture {
         Some(name) => {
             let fixture_dir = fixtures_root().join(name);
             let init_lua = fixture_dir.join("nvim").join("init.lua");
@@ -968,7 +974,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
             let xdg_data_home = if lockfile_path.exists() {
                 let bytes = std::fs::read(&lockfile_path)
                     .with_context(|| format!("reading {}", lockfile_path.display()))?;
-                let key = if scenario.cold_bootstrap {
+                let key = if cold_bootstrap {
                     format!("cold-{scratch_id}")
                 } else {
                     lockfile_cache_key(&bytes)
@@ -977,7 +983,7 @@ fn resolve_fixture(scenario: &ScenarioFile, sock_path: &Path) -> Result<FixtureR
             } else {
                 hermetic_dir.join("xdg_data_home")
             };
-            let cold_cache_dir = scenario.cold_bootstrap.then(|| xdg_data_home.clone());
+            let cold_cache_dir = cold_bootstrap.then(|| xdg_data_home.clone());
 
             let xdg_config_home = hermetic_dir.join("xdg_config_home");
             copy_dir_recursive(&fixture_dir, &xdg_config_home)
@@ -1084,26 +1090,24 @@ fn class_str(class: PluginClass) -> &'static str {
     }
 }
 
-fn state_str(state: ScenarioState) -> &'static str {
-    match state {
-        ScenarioState::Present => "present",
-    }
-}
-
 /// Best-effort plugin commit lookup from a named fixture's `lazy-lock.json`,
 /// for [`ScenarioResult::plugin_version`]'s row in the design spec's own
 /// compat-evidence schema ("plugin, version, engine pin, ..."). Tries
-/// `scenario.plugin` as a literal lockfile key first (a plugin spec'd
-/// without lazy.nvim's default `<repo>.nvim` naming), then with a `.nvim`
+/// `plugin` as a literal lockfile key first (a plugin spec'd without
+/// lazy.nvim's default `<repo>.nvim` naming), then with a `.nvim`
 /// suffix (lazy.nvim's own default when a spec sets no custom `name`),
 /// then with a `.lua` suffix (the other repo-naming convention in the
 /// committed `heavy` fixture: `nvim-tree.lua`). Returns `None`
 /// (never an error) for a fixture-less scenario, a fixture with no
 /// lockfile, or a plugin name the lockfile does not contain -- a missing
 /// version is a gap in the report, not a reason to fail the scenario that
-/// already passed or failed on its own merits.
-fn resolve_plugin_version(scenario: &ScenarioFile) -> Option<String> {
-    let name = scenario.fixture.as_ref()?;
+/// already passed or failed on its own merits. Takes the *effective*
+/// fixture (a state's own override, if any, else the scenario's default),
+/// since a `native-only` state's plugin-free fixture legitimately has no
+/// entry for `plugin` and must report that gap rather than the base
+/// fixture's unrelated version.
+fn resolve_plugin_version(plugin: &str, fixture: Option<&str>) -> Option<String> {
+    let name = fixture?;
     let lockfile_path = fixtures_root()
         .join(name)
         .join("nvim")
@@ -1115,44 +1119,56 @@ fn resolve_plugin_version(scenario: &ScenarioFile) -> Option<String> {
     // the common repo-naming suffixes) so that a lockfile holding more than
     // one candidate key for a plugin resolves by intent, not map iteration
     // order
-    let suffixed_nvim = format!("{}.nvim", scenario.plugin);
-    let suffixed_lua = format!("{}.lua", scenario.plugin);
-    let key = [scenario.plugin.as_str(), &suffixed_nvim, &suffixed_lua]
+    let suffixed_nvim = format!("{plugin}.nvim");
+    let suffixed_lua = format!("{plugin}.lua");
+    let key = [plugin, &suffixed_nvim, &suffixed_lua]
         .into_iter()
         .find(|candidate| obj.contains_key(*candidate))?;
     let commit = obj.get(key)?.get("commit")?.as_str()?;
     Some(commit.get(..7).unwrap_or(commit).to_string())
 }
 
-/// Builds a [`ScenarioResult`] for a scenario that never spawned a session
-/// (SKIPPED) or whose session failed before or during a step
-/// (`failing_step`/`detail` set; `failing_step == Some(scenario.steps.len())`
+/// Builds a [`ScenarioResult`] for one `(scenario, state)` pair that never
+/// spawned a session (SKIPPED) or whose session failed before or during a
+/// step (`failing_step`/`detail` set; `failing_step == Some(state.steps.len())`
 /// means the implicit zero-error epilogue is what failed, not a scripted
 /// step). Shared by every non-OK exit path in [`run_scenario`] and
 /// [`compat_command`]'s own top-level `Err` catch, so the report row shape
 /// is defined exactly once.
-fn scenario_result(
-    scenario_path: &Path,
-    scenario: &ScenarioFile,
-    pin: &str,
+/// The "what happened" half of a [`ScenarioResult`], grouped into one type
+/// so [`scenario_result`] takes a single outcome value instead of four
+/// separate trailing parameters that only ever travel together (clippy's
+/// `too_many_arguments` floor is 7; identity -- which scenario, which
+/// state, which pin -- and outcome are the two things a call site actually
+/// reasons about separately, so the split follows that seam).
+struct ScenarioOutcome {
     status: ScenarioStatus,
     failing_step: Option<usize>,
     detail: Option<String>,
     elapsed_ms: u128,
+}
+
+fn scenario_result(
+    scenario_path: &Path,
+    scenario: &ScenarioFile,
+    state: &ScenarioStateEntry,
+    pin: &str,
+    outcome: ScenarioOutcome,
 ) -> ScenarioResult {
+    let effective_fixture = state.fixture.as_deref().or(scenario.fixture.as_deref());
     ScenarioResult {
         scenario_path: scenario_path.display().to_string(),
         plugin: scenario.plugin.clone(),
-        plugin_version: resolve_plugin_version(scenario),
+        plugin_version: resolve_plugin_version(&scenario.plugin, effective_fixture),
         class: class_str(scenario.class).to_string(),
-        fixture: scenario.fixture.clone(),
-        state: state_str(scenario.state).to_string(),
+        fixture: effective_fixture.map(str::to_string),
+        state: state_name(state.name).to_string(),
         engine_pin: pin.to_string(),
-        status,
-        failing_step,
-        steps_total: scenario.steps.len(),
-        detail,
-        elapsed_ms,
+        status: outcome.status,
+        failing_step: outcome.failing_step,
+        steps_total: state.steps.len(),
+        detail: outcome.detail,
+        elapsed_ms: outcome.elapsed_ms,
         date: today_date_string(),
     }
 }
@@ -1175,22 +1191,42 @@ struct ViewBin<'a>(&'a Path);
 #[derive(Debug, Clone, Copy)]
 struct NvimBin<'a>(&'a Path);
 
-/// Drives one scenario end to end: resolves its fixture, spawns `view`
-/// against it, opens the probe channel, runs every step in order, then the
-/// implicit zero-error epilogue, and always attempts a clean `:qa!` shutdown
-/// regardless of outcome. Never propagates a step/probe failure as an `Err`
-/// -- those become a [`ScenarioStatus::Failed`] result, the same tolerance
-/// `run_tokens`'s own callers apply to a corpus entry's failure, so one
-/// scenario's wedge cannot abort the whole compat run. Only a resolution
-/// failure that means no session could even be attempted (a missing
-/// fixture, an unreadable lockfile) surfaces as `Err`.
+/// Renders `native` as the `[native]` table body of a `view.toml`: an empty
+/// map renders as a bare `[native]` header, matching `NativeConfig`'s own
+/// "absent/empty table means every feature stays on" default, so a
+/// `superseded` state's `native = {}` and a `native-only` state that omits
+/// `native` entirely both materialize into the same all-enabled config the
+/// real shipping default resolves to.
+fn render_native_toml(native: &BTreeMap<String, bool>) -> String {
+    let mut out = String::from("[native]\n");
+    for (key, value) in native {
+        out.push_str(&format!("{key} = {value}\n"));
+    }
+    out
+}
+
+/// Drives one `(scenario, state)` pair end to end: resolves the state's
+/// effective fixture, materializes its `[native]` table into a hermetic
+/// `view.toml` and spawns `view --config <that path>` against it (the same
+/// real shipping config flag a user invokes, not a test-only backdoor),
+/// opens the probe channel, runs every step in order, then the implicit
+/// zero-error epilogue, and always
+/// attempts a clean `:qa!` shutdown regardless of outcome. Never propagates
+/// a step/probe failure as an `Err` -- those become a
+/// [`ScenarioStatus::Failed`] result, the same tolerance `run_tokens`'s own
+/// callers apply to a corpus entry's failure, so one state's wedge cannot
+/// abort the whole compat run. Only a resolution failure that means no
+/// session could even be attempted (a missing fixture, an unreadable
+/// lockfile, an unwritable hermetic config dir) surfaces as `Err`.
 ///
 /// # Errors
 ///
-/// Returns an error if `scenario`'s fixture cannot be resolved.
+/// Returns an error if the state's effective fixture cannot be resolved, or
+/// its materialized `view.toml` cannot be written.
 fn run_scenario(
     scenario_path: &Path,
     scenario: &ScenarioFile,
+    state: &ScenarioStateEntry,
     pin: &str,
     view_bin: ViewBin<'_>,
     nvim_bin: NvimBin<'_>,
@@ -1204,20 +1240,32 @@ fn run_scenario(
         SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
     ));
 
-    let ready = match resolve_fixture(scenario, &sock_path)? {
+    let effective_fixture = state.fixture.as_deref().or(scenario.fixture.as_deref());
+    let ready = match resolve_fixture(effective_fixture, scenario.cold_bootstrap, &sock_path)? {
         FixtureResolution::Ready(ready) => ready,
         FixtureResolution::Skipped { notice } => {
             return Ok(scenario_result(
                 scenario_path,
                 scenario,
+                state,
                 pin,
-                ScenarioStatus::Skipped,
-                None,
-                Some(notice),
-                0,
+                ScenarioOutcome {
+                    status: ScenarioStatus::Skipped,
+                    failing_step: None,
+                    detail: Some(notice),
+                    elapsed_ms: 0,
+                },
             ));
         }
     };
+
+    let view_config_path = ready.xdg_config_home.join("view").join("view.toml");
+    if let Some(parent) = view_config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&view_config_path, render_native_toml(&state.native))
+        .with_context(|| format!("writing {}", view_config_path.display()))?;
 
     let mut cmd = CommandBuilder::new(view_bin);
     cmd.env("XDG_CONFIG_HOME", &ready.xdg_config_home);
@@ -1225,6 +1273,15 @@ fn run_scenario(
     cmd.env("XDG_STATE_HOME", &ready.xdg_state_home);
     cmd.env("XDG_CACHE_HOME", &ready.xdg_cache_home);
     cmd.env("VIEW_COMPAT_SOCK", &sock_path);
+    cmd.arg("--config");
+    cmd.arg(&view_config_path);
+    // view's own process cwd seeds `model.cwd` (see main.rs), which the
+    // native tree sidebar opens rooted on; nvim, spawned as its child,
+    // inherits the same cwd for its own ambient directory. Pinning both to
+    // the fixture's nvim config dir here is what actually makes a
+    // scenario's rendered file listing hermetic -- a bare `:cd` in a
+    // scenario's own steps only ever moved nvim's side of that pair.
+    cmd.cwd(ready.xdg_config_home.join("nvim"));
 
     let mut session = match CompatSession::spawn_configured(
         cmd,
@@ -1238,11 +1295,14 @@ fn run_scenario(
             return Ok(scenario_result(
                 scenario_path,
                 scenario,
+                state,
                 pin,
-                ScenarioStatus::Failed,
-                None,
-                Some(err.to_string()),
-                start.elapsed().as_millis(),
+                ScenarioOutcome {
+                    status: ScenarioStatus::Failed,
+                    failing_step: None,
+                    detail: Some(err.to_string()),
+                    elapsed_ms: start.elapsed().as_millis(),
+                },
             ));
         }
     };
@@ -1283,18 +1343,21 @@ fn run_scenario(
             return Ok(scenario_result(
                 scenario_path,
                 scenario,
+                state,
                 pin,
-                ScenarioStatus::Failed,
-                None,
-                Some(err.to_string()),
-                start.elapsed().as_millis(),
+                ScenarioOutcome {
+                    status: ScenarioStatus::Failed,
+                    failing_step: None,
+                    detail: Some(err.to_string()),
+                    elapsed_ms: start.elapsed().as_millis(),
+                },
             ));
         }
     };
 
     let mut failing_step = None;
     let mut detail = None;
-    for (index, step) in scenario.steps.iter().enumerate() {
+    for (index, step) in state.steps.iter().enumerate() {
         if let Err(err) = session.drive_step(step) {
             failing_step = Some(index);
             detail = Some(err.to_string());
@@ -1303,7 +1366,7 @@ fn run_scenario(
     }
     if failing_step.is_none() {
         if let Err(err) = session.zero_error_check_since(&baseline) {
-            failing_step = Some(scenario.steps.len());
+            failing_step = Some(state.steps.len());
             detail = Some(err.to_string());
         }
     }
@@ -1339,11 +1402,14 @@ fn run_scenario(
     Ok(scenario_result(
         scenario_path,
         scenario,
+        state,
         pin,
-        status,
-        failing_step,
-        detail,
-        start.elapsed().as_millis(),
+        ScenarioOutcome {
+            status,
+            failing_step,
+            detail,
+            elapsed_ms: start.elapsed().as_millis(),
+        },
     ))
 }
 
@@ -1450,29 +1516,35 @@ fn compat_command(path: &Path) -> Result<()> {
     let mut results = ResultsFile::default();
     let mut any_failed = false;
     for (scenario_path, scenario) in &scenarios {
-        let result = match run_scenario(
-            scenario_path,
-            scenario,
-            &pin,
-            ViewBin(&view_bin),
-            NvimBin(&nvim_bin),
-        ) {
-            Ok(result) => result,
-            Err(err) => scenario_result(
+        for state in &scenario.states {
+            let result = match run_scenario(
                 scenario_path,
                 scenario,
+                state,
                 &pin,
-                ScenarioStatus::Failed,
-                None,
-                Some(err.to_string()),
-                0,
-            ),
-        };
-        print_scenario_result(&result);
-        if result.status == ScenarioStatus::Failed {
-            any_failed = true;
+                ViewBin(&view_bin),
+                NvimBin(&nvim_bin),
+            ) {
+                Ok(result) => result,
+                Err(err) => scenario_result(
+                    scenario_path,
+                    scenario,
+                    state,
+                    &pin,
+                    ScenarioOutcome {
+                        status: ScenarioStatus::Failed,
+                        failing_step: None,
+                        detail: Some(err.to_string()),
+                        elapsed_ms: 0,
+                    },
+                ),
+            };
+            print_scenario_result(&result);
+            if result.status == ScenarioStatus::Failed {
+                any_failed = true;
+            }
+            results.results.push(result);
         }
-        results.results.push(result);
     }
 
     write_results(
@@ -1522,7 +1594,12 @@ fn page_command() -> Result<()> {
 mod tests {
     // the env-mutation sites below are the ones ENV_MUTATION_LOCK exists to
     // bound; each holds the guard across its own restore
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::disallowed_methods,
+        clippy::panic
+    )]
     use super::*;
 
     /// Reference values independently computed via Python's
@@ -1550,15 +1627,7 @@ mod tests {
     /// does pin.
     #[test]
     fn plugin_version_resolves_lua_suffixed_lockfile_key() {
-        let scenario = ScenarioFile {
-            plugin: "nvim-tree".to_string(),
-            class: PluginClass::UiOwning,
-            fixture: Some("heavy".to_string()),
-            state: ScenarioState::Present,
-            cold_bootstrap: false,
-            steps: Vec::new(),
-        };
-        let version = resolve_plugin_version(&scenario);
+        let version = resolve_plugin_version("nvim-tree", Some("heavy"));
         assert_eq!(
             version.as_deref(),
             Some("4213bd6"),
@@ -1658,20 +1727,12 @@ mod tests {
         let _daily_env = EnvRestore::set("VIEW_DAILY_CONFIG", &daily_dir);
         let _data_home_env = EnvRestore::set("XDG_DATA_HOME", &ambient_data);
 
-        let scenario = ScenarioFile {
-            plugin: "daily".to_string(),
-            class: PluginClass::UiOwning,
-            fixture: None,
-            state: ScenarioState::Present,
-            cold_bootstrap: false,
-            steps: Vec::new(),
-        };
         let sock_path = std::env::temp_dir().join(format!(
             "view-harness-oracle-daily-sock-{}",
             std::process::id()
         ));
         let resolution =
-            resolve_fixture(&scenario, &sock_path).expect("resolve_fixture must not error");
+            resolve_fixture(None, false, &sock_path).expect("resolve_fixture must not error");
         let ready = match resolution {
             FixtureResolution::Ready(ready) => Some(ready),
             FixtureResolution::Skipped { .. } => None,
@@ -2153,5 +2214,33 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every scenario file this repo commits, `broken/`'s deliberately-red
+    /// entry included (excluded from `collect_scenarios`'s own walk, but
+    /// still required to be well-formed TOML against the current schema),
+    /// must parse -- a schema change that silently breaks a committed
+    /// scenario should fail this test, not first surface as a mysterious
+    /// `task compat` error against a file nobody suspected.
+    #[test]
+    fn every_committed_scenario_file_parses() {
+        let scenarios_dir = workspace_root().join("compat").join("scenarios");
+        let mut checked = 0usize;
+        for dir in [scenarios_dir.clone(), scenarios_dir.join("broken")] {
+            for entry in
+                std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("reading {}: {e}", dir.display()))
+            {
+                let path = entry.expect("dir entry").path();
+                if path.extension().is_some_and(|ext| ext == "toml") {
+                    scenario::load_file(&path)
+                        .unwrap_or_else(|e| panic!("{} failed to parse: {e}", path.display()));
+                    checked += 1;
+                }
+            }
+        }
+        assert!(
+            checked >= 17,
+            "expected at least 17 committed scenario files, checked {checked}"
+        );
     }
 }

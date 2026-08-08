@@ -1,13 +1,21 @@
 # fidget is ui-owning: it draws LSP progress as floating text in the
-# bottom-right corner of the grid. No LSP server runs in this fixture, so
-# the progress event is scripted through fidget's own public progress API
-# (a synthetic handle standing in for an LSP client), which renders through
-# the exact same notification pipeline a real server's $/progress would.
+# bottom-right corner of the grid. No entry in the `[native]` registry
+# supersedes LSP progress (confirmed against view-native's supersede
+# module and the mapping table: neither carries a row for it), so toggling
+# every native feature off changes nothing this scenario can observe -- the
+# superseded and deferred states below run the identical assertions on
+# purpose, and that equality is itself the fact being proven, not an
+# oversight. No LSP server runs in this fixture, so the progress event is
+# scripted through fidget's own public progress API (a synthetic handle
+# standing in for an LSP client), which renders through the exact same
+# notification pipeline a real server's $/progress would.
 schema = 1
 plugin = "fidget"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
@@ -24,4 +32,29 @@ steps = [
   # Completing the handle lets the progress float decay normally instead
   # of leaving a perpetual spinner behind for the epilogue probes.
   { send = ":lua _G.compat_fidget:finish()<CR>" },
+]
+
+[[states]]
+name = "deferred"
+native = { picker = false, tree = false, statusline = false, notifications = false, palette = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.fidget ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua _G.compat_fidget = require('fidget.progress').handle.create({ title = 'compat-sync', message = 'fidget-compat-marker', lsp_client = { name = 'compatlsp' } })<CR>" },
+  { wait_for = "fidget-compat-marker", timeout_ms = 15000 },
+  { send = ":lua _G.compat_fidget:finish()<CR>" },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  # No plugin and no LSP client exist in this fixture, so there is no
+  # progress surface -- native or plugin-owned -- for this state to
+  # render at all; the honest assertion is that the session stays healthy
+  # with nothing to show, not a substitute rendering that does not exist.
+  { send = "ihello<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for = "hello", timeout_ms = 15000 },
+  { assert_absent = "E5108" },
 ]

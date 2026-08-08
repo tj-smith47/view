@@ -1,0 +1,8 @@
+# Non-interference proof for the notifications (message-history) feature:
+# see native-picker.toml's header for the shared driver and assertion this
+# file feeds.
+schema = 1
+name = "native-notifications"
+input = "\\fm"
+engine_pin = "v0.12.4"
+ext_set = "default"

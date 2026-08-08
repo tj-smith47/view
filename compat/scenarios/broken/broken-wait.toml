@@ -10,7 +10,9 @@ schema = 1
 plugin = "smoke"
 class = "semantic"
 fixture = "minimal"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   { send = "ihello<Esc>" },
   { wait_for = "this text is never actually typed anywhere", timeout_ms = 1000 },

@@ -7,7 +7,9 @@ schema = 1
 plugin = "smoke"
 class = "semantic"
 fixture = "minimal"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   { send = "ihello from compat<Esc>" },
   # a translation regression in <Esc> handling would otherwise still pass

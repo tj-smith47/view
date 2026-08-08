@@ -1,14 +1,23 @@
 # nvim-notify is ui-owning: it replaces vim.notify's echo-area output with
-# floating notification windows it draws itself. The marker call goes
-# through require('notify') directly rather than vim.notify because noice
-# (also in this fixture) wraps vim.notify with its own router -- the direct
-# call pins nvim-notify's own rendering and history, present or not,
+# floating notification windows it draws itself. `notifications` carries no
+# takeover row (see view-native's supersede module: the takeover table has
+# exactly one row and it is statusline's), and `cmdheight` stays 0 in every
+# state regardless -- `ext_messages` attaches at the session level, not per
+# feature (see `NativeSession::take_over`'s own doc). vim.notify routing is
+# therefore identical in every state below; the one fact `<leader>fm`
+# discriminates is whether it opens view's own message-history overlay
+# (titled "Messages") or, unclaimed, does nothing at all. The marker call
+# goes through require('notify') directly rather than vim.notify because
+# noice (also in this fixture) wraps vim.notify with its own router -- the
+# direct call pins nvim-notify's own rendering and history, present or not,
 # independent of noice's routing table.
 schema = 1
 plugin = "nvim-notify"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
@@ -25,4 +34,36 @@ steps = [
   # The float times out and disappears; the message persisting in
   # nvim-notify's own history API is the durable plugin-specific fact.
   { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 5000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "deferred"
+native = { notifications = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.notify ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua require('notify')('notify-compat-marker')<CR>" },
+  { wait_for = "notify-compat-marker", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, n in ipairs(require(\"notify\").history()) do if table.concat(n.message, \"\\n\"):find(\"notify%-compat%-marker\") then return \"in-history\" end end return \"absent\" end)()')", expect = "in-history", timeout_ms = 10000 },
+  # native.notifications = false hands `<leader>fm` back unclaimed; the
+  # fixture never binds it either, so the send below is a genuine no-op --
+  # the assert below is the negative half of the pair the superseded
+  # state's own "Messages" appearance proves the positive half of.
+  { send = "\\fm" },
+  { assert_absent = "Messages" },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  { send = "\\fm" },
+  # The minimal fixture has no plugin to intercept vim.notify at all, so
+  # this is the one state that shows view's own history overlay with
+  # nothing routed through a plugin first.
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "<Esc>" },
 ]

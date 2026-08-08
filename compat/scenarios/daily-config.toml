@@ -17,7 +17,9 @@
 schema = 1
 plugin = "daily-config"
 class = "semantic"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   # a daily config's startup screen is unknown ground: a dashboard, a file
   # tree, or notification popups can own the window the editor opens into,

@@ -1,0 +1,11 @@
+# Non-interference proof for the picker feature: `crates/view-harness/tests/native_interference.rs`
+# drives this file's `input` (the picker's "files" entry key) through a real
+# session and asserts the engine's own state (buffer, cursor, mode,
+# registers, marks) is byte-identical before the key opens the picker and
+# after `<Esc>` closes it -- opening a native overlay must never leave a
+# mark behind, move the cursor, or touch a register.
+schema = 1
+name = "native-picker"
+input = "\\ff"
+engine_pin = "v0.12.4"
+ext_set = "default"

@@ -8,7 +8,9 @@ schema = 1
 plugin = "clipboard-precedence"
 class = "semantic"
 fixture = "clipboard-precedence"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   # a bounded retry, not a single probe: the exec_lua chunk that would
   # overwrite g:clipboard (if the precedence check ever regressed) only

@@ -1,13 +1,19 @@
 # neo-tree is ui-owning: it draws a file-explorer sidebar as a regular
-# window in the grid. The scenario cd's into the hermetic fixture config
-# dir first so the sidebar's rendered content is fully deterministic --
-# that directory holds exactly init.lua and lazy-lock.json regardless of
-# which machine or working directory the harness itself was started from.
+# window in the grid. `tree` is a mapping-only supersession (see
+# view-native's supersede module: the takeover table has one row and it is
+# not this one) -- opening `:Neotree<CR>` directly always works in every
+# state, so the fact each state actually discriminates on is `<leader>e`:
+# whether that key opens view's own sidebar or falls through to whatever
+# (nothing, in this fixture) the plugin left it bound to. `neo-tree` never
+# appears in `nvim_list_wins()` when view's own sidebar is what opened,
+# because that sidebar is drawn client-side, not as an nvim window.
 schema = 1
 plugin = "neo-tree"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
@@ -16,26 +22,36 @@ steps = [
   # the fixture's LazyDone autocmd closes it; a keystroke sent before that
   # lands in the install window instead of the buffer.
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
-  # $XDG_CONFIG_HOME is expanded by nvim itself, so this resolves to the
-  # per-run hermetic copy of the fixture, never a real user directory.
-  # :silent, because a bare :cd echoes the new directory and view renders
-  # that message as its ext_messages toast overlay -- right-anchored,
-  # sized by the (host-dependent) scratch path, observed occluding the
-  # sidebar name column to within one cell of the text the wait below
-  # asserts on. Nothing in this scenario ever clears the message (view's
-  # toast persists until a message-clearing event arrives), so the only
-  # deterministic screen is the one where the echo never happens.
-  # :silent means this step produces no screen delta for drive_step's
-  # default delivery check to observe, so it carries its own confirm_probe
-  # instead: lazy-lock.json lives only in the fixture directory this cd
-  # targets, so a relative filereadable() only reports true once the cd has
-  # actually landed there.
-  { send = ":silent cd $XDG_CONFIG_HOME/nvim<CR>", confirm_probe = "luaeval('vim.fn.filereadable(\"lazy-lock.json\") == 1')", confirm_expect = "true" },
+  # Backslash is nvim's default leader; the fixture leaves it unchanged.
+  { send = "\\e" },
+  # lazy-lock.json lives only in the fixture directory the harness now
+  # launches view from (see oracle.rs's `cmd.cwd`), so this pins the
+  # native sidebar actually rendering that directory's listing.
+  { wait_for = "lazy-lock.json", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]
+
+[[states]]
+name = "deferred"
+native = { tree = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded[\"neo-tree\"] ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  # native.tree = false hands `<leader>e` back unclaimed; the fixture never
+  # binds it either, so the plugin returns through its own command instead,
+  # exactly as a user who turned the takeover off would still invoke it.
   { send = ":Neotree<CR>" },
-  # lazy-lock.json appears nowhere on screen except as a sidebar entry, so
-  # this pins neo-tree actually rendering the directory listing, not just
-  # a window existing. Timeout covers noice's startup health notifications,
-  # which overlay the upper grid rows for the first few seconds.
   { wait_for = "lazy-lock.json", timeout_ms = 15000 },
   { probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"neo-tree\" then return \"open\" end end return \"closed\" end)()')", expect = "open" },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  { send = "\\e" },
+  # The minimal fixture ships only init.lua -- no lazy-lock.json, no
+  # plugins -- so its own name is the one marker this state can assert
+  # that isn't shared with the plugin-present states above.
+  { wait_for = "init.lua", timeout_ms = 15000 },
 ]

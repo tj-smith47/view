@@ -15,14 +15,21 @@
 //! the same reason `corpus`'s loader pins one: a schema bump implies a
 //! shape change this loader has not been taught to read.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 use thiserror::Error;
 use view_oracle::compat::{
-    resolve_send_keys, CompatError, PluginClass, ScenarioState, SendConfirm, Step,
+    parse_state_name, resolve_send_keys, state_name, CompatError, PluginClass, ScenarioState,
+    SendConfirm, Step,
 };
+
+/// The three state names a [`PluginClass::UiOwning`] scenario must declare
+/// between them (order fixed for a stable, reviewable error message; not a
+/// requirement on the file's own `[[states]]` ordering).
+const REQUIRED_UI_OWNING_STATES: [&str; 3] = ["superseded", "deferred", "native-only"];
 
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -46,20 +53,37 @@ struct RawScenario {
     plugin: String,
     class: String,
     fixture: Option<String>,
-    state: String,
     #[serde(default)]
     cold_bootstrap: bool,
+    states: Vec<RawState>,
+}
+
+/// One `[[states]]` entry's wire shape: the reconciliation state's own name
+/// (`"present"` / `"superseded"` / `"deferred"` / `"native-only"`), the
+/// `[native]` table this state's materialized `view.toml` carries (empty --
+/// every feature on -- when the entry omits `native` entirely, matching
+/// `NativeConfig`'s own "absent table means every feature stays on"
+/// default), an optional per-state fixture override (a `native-only` state
+/// commonly swaps to a plugin-free fixture), and this state's own steps.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawState {
+    name: String,
+    #[serde(default)]
+    native: BTreeMap<String, bool>,
+    fixture: Option<String>,
     steps: Vec<RawStep>,
 }
 
 /// One step's wire shape. Exactly one of `send` / `wait_for` /
-/// `wait_for_cell` / `assert_absent` / `probe` must be set -- [`validate_step`]
-/// enforces that, since `serde`'s own `deny_unknown_fields` only catches a
-/// field name it has never heard of, not a legal field used on the wrong
-/// variant (e.g. `expect` with no `probe`, or two action fields at once).
-/// `confirm_probe`/`confirm_expect` are `send`'s own pair, named apart from
-/// `probe`/`expect` so a step can never be ambiguous between "this step is
-/// a probe" and "this send step also carries a confirmation probe".
+/// `wait_for_cell` / `assert_absent` / `assert_cell_not` / `probe` must be
+/// set -- [`validate_step`] enforces that, since `serde`'s own
+/// `deny_unknown_fields` only catches a field name it has never heard of,
+/// not a legal field used on the wrong variant (e.g. `expect` with no
+/// `probe`, or two action fields at once). `confirm_probe`/`confirm_expect`
+/// are `send`'s own pair, named apart from `probe`/`expect` so a step can
+/// never be ambiguous between "this step is a probe" and "this send step
+/// also carries a confirmation probe".
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawStep {
@@ -67,6 +91,7 @@ struct RawStep {
     wait_for: Option<String>,
     wait_for_cell: Option<RawCellTarget>,
     assert_absent: Option<String>,
+    assert_cell_not: Option<RawCellNotTarget>,
     probe: Option<String>,
     wait_for_probe: Option<String>,
     expect: Option<String>,
@@ -84,11 +109,23 @@ struct RawCellTarget {
     expected: String,
 }
 
+/// `assert_cell_not`'s inline-table shape: `{ row = 29, col = 85, glyph = "" }`.
+/// A distinct shape from [`RawCellTarget`] (`glyph` rather than `expected`)
+/// so a step reads as the negative assertion it is rather than a
+/// same-named field silently meaning "must equal" in one step and "must not
+/// equal" in the other.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawCellNotTarget {
+    row: u16,
+    col: u16,
+    glyph: String,
+}
+
 /// One validated, defaults-applied scenario, ready for the `compat`
-/// subcommand to drive: everything [`view_oracle::compat::CompatSession`]
-/// needs (`class`/`state`/`steps` already `view-oracle` types) plus the
-/// bookkeeping fields (`plugin`, `fixture`, `cold_bootstrap`) the runner's
-/// own fixture resolution and report line need.
+/// subcommand to drive: the bookkeeping fields (`plugin`, `fixture`,
+/// `cold_bootstrap`) the runner's own fixture resolution and report line
+/// need, plus every state this scenario declares.
 #[derive(Debug, Clone)]
 pub struct ScenarioFile {
     pub plugin: String,
@@ -97,13 +134,26 @@ pub struct ScenarioFile {
     /// fixture-less scenario (the maintainer's `$VIEW_DAILY_CONFIG`, whose
     /// `init.lua` the harness does not own and so cannot rely on carrying
     /// its own `serverstart` call -- see `CompatSession::prime_probe_channel`).
+    /// A state's own [`ScenarioStateEntry::fixture`] overrides this default
+    /// when set.
     pub fixture: Option<String>,
-    pub state: ScenarioState,
     /// Forces the heavy fixture's plugin cache to a run-unique, guaranteed-
     /// empty key instead of its normal lockfile-hash key, so this scenario
     /// always drives a full network bootstrap rather than ever reusing a
     /// prior warm cache. `false` for every ordinary scenario.
     pub cold_bootstrap: bool,
+    pub states: Vec<ScenarioStateEntry>,
+}
+
+/// One validated `[[states]]` entry: everything [`view_oracle::compat::CompatSession`]
+/// needs to drive this state (`name`/`steps` already `view-oracle` types)
+/// plus the `native`/`fixture` overrides the runner materializes into a
+/// hermetic `view.toml` and spawns `view --config` against.
+#[derive(Debug, Clone)]
+pub struct ScenarioStateEntry {
+    pub name: ScenarioState,
+    pub native: BTreeMap<String, bool>,
+    pub fixture: Option<String>,
     pub steps: Vec<Step>,
 }
 
@@ -129,16 +179,32 @@ pub enum ScenarioError {
     /// config-reconciliation classes.
     #[error("unknown class {0:?} (expected one of \"semantic\", \"ui-adjacent\", \"ui-owning\")")]
     UnknownClass(String),
-    /// `state` named a value other than `"present"`. The design spec's
-    /// other two states (superseded, native-without-plugin) need
-    /// supersession machinery the engine does not have yet -- see
-    /// [`ScenarioState`]'s own doc comment.
-    #[error("unsupported state {0:?} (only \"present\" is currently recognized)")]
+    /// A `[[states]]` entry's `name` did not match one of the four
+    /// recognized reconciliation states -- see [`parse_state_name`].
+    #[error("unsupported state {0:?} (expected one of \"present\", \"superseded\", \"deferred\", \"native-only\")")]
     UnsupportedState(String),
+    /// A scenario declared zero `[[states]]` entries: there is nothing for
+    /// the runner to drive.
+    #[error("scenario declares no [[states]] entries")]
+    NoStates,
+    /// Two `[[states]]` entries in the same file named the same state,
+    /// leaving the runner unable to tell which one a report line describes.
+    #[error("state {name:?} is declared more than once")]
+    DuplicateStateName { name: String },
+    /// A `ui-owning` scenario (one whose plugin the engine can supersede,
+    /// and that is not exempted by `cold_bootstrap`) declared fewer than
+    /// the three states [`REQUIRED_UI_OWNING_STATES`] names: a ui-owning
+    /// plugin's coverage is incomplete until superseded/deferred/native-only
+    /// are all asserted.
+    #[error(
+        "ui-owning scenario is missing required states: {missing:?} \
+         (needs superseded, deferred, native-only)"
+    )]
+    IncompleteUiOwningStates { missing: Vec<String> },
     /// A step set zero, or more than one, of its mutually exclusive action
     /// fields (`send` / `wait_for` / `wait_for_cell` / `assert_absent` /
-    /// `probe` / `wait_for_probe`).
-    #[error("step {index} must set exactly one of send/wait_for/wait_for_cell/assert_absent/probe/wait_for_probe, found {found}")]
+    /// `assert_cell_not` / `probe` / `wait_for_probe`).
+    #[error("step {index} must set exactly one of send/wait_for/wait_for_cell/assert_absent/assert_cell_not/probe/wait_for_probe, found {found}")]
     AmbiguousStep { index: usize, found: usize },
     /// A `probe`/`wait_for_probe` step is missing its required `expect`
     /// field.
@@ -232,6 +298,7 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
         raw.wait_for.is_some(),
         raw.wait_for_cell.is_some(),
         raw.assert_absent.is_some(),
+        raw.assert_cell_not.is_some(),
         raw.probe.is_some(),
         raw.wait_for_probe.is_some(),
     ]
@@ -288,6 +355,13 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
     if let Some(needle) = raw.assert_absent {
         return Ok(Step::AssertAbsent(needle));
     }
+    if let Some(cell) = raw.assert_cell_not {
+        return Ok(Step::AssertCellNot {
+            row: cell.row,
+            col: cell.col,
+            glyph: cell.glyph,
+        });
+    }
     if let Some(expr) = raw.probe {
         let Some(expect) = raw.expect else {
             return Err(ScenarioError::ProbeMissingExpect { index });
@@ -305,10 +379,10 @@ fn validate_step(raw: RawStep, index: usize) -> Result<Step, ScenarioError> {
         });
     }
     // action_count == 1 already ruled out every other combination, so
-    // exactly one of the six arms above always matches; unreachable is not
+    // exactly one of the seven arms above always matches; unreachable is not
     // available in lib code (workspace lints deny it), but this arm can
-    // never actually run since the six `is_some()` checks above are the
-    // same six options this if-chain now walks in the same order.
+    // never actually run since the seven `is_some()` checks above are the
+    // same seven options this if-chain now walks in the same order.
     Err(ScenarioError::AmbiguousStep { index, found: 0 })
 }
 
@@ -322,10 +396,61 @@ fn validate_class(raw: &str) -> Result<PluginClass, ScenarioError> {
 }
 
 fn validate_state(raw: &str) -> Result<ScenarioState, ScenarioError> {
-    match raw {
-        "present" => Ok(ScenarioState::Present),
-        other => Err(ScenarioError::UnsupportedState(other.to_string())),
+    parse_state_name(raw).ok_or_else(|| ScenarioError::UnsupportedState(raw.to_string()))
+}
+
+/// Validates one `[[states]]` entry's raw shape into its typed form,
+/// including every step it carries.
+fn validate_state_entry(raw: RawState) -> Result<ScenarioStateEntry, ScenarioError> {
+    let name = validate_state(&raw.name)?;
+    let steps = raw
+        .steps
+        .into_iter()
+        .enumerate()
+        .map(|(index, step)| validate_step(step, index))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(ScenarioStateEntry {
+        name,
+        native: raw.native,
+        fixture: raw.fixture,
+        steps,
+    })
+}
+
+/// Checks the scenario-wide invariants over the full `states` list that no
+/// single entry's own validation can see: at least one state exists, no two
+/// states share a name, and a `ui-owning` scenario (unless exempted by
+/// `cold_bootstrap`, whose network-bound bootstrap cost is already paid once
+/// and should not triple for orthogonal supersession-state coverage)
+/// declares all of [`REQUIRED_UI_OWNING_STATES`].
+fn validate_state_completeness(
+    class: PluginClass,
+    cold_bootstrap: bool,
+    states: &[ScenarioStateEntry],
+) -> Result<(), ScenarioError> {
+    if states.is_empty() {
+        return Err(ScenarioError::NoStates);
     }
+    let mut seen: BTreeSet<&'static str> = BTreeSet::new();
+    for state in states {
+        let name = state_name(state.name);
+        if !seen.insert(name) {
+            return Err(ScenarioError::DuplicateStateName {
+                name: name.to_string(),
+            });
+        }
+    }
+    if class == PluginClass::UiOwning && !cold_bootstrap {
+        let missing: Vec<String> = REQUIRED_UI_OWNING_STATES
+            .iter()
+            .filter(|required| !seen.contains(*required))
+            .map(|s| (*s).to_string())
+            .collect();
+        if !missing.is_empty() {
+            return Err(ScenarioError::IncompleteUiOwningStates { missing });
+        }
+    }
+    Ok(())
 }
 
 /// Parses and validates one scenario from its raw TOML text.
@@ -335,29 +460,29 @@ fn validate_state(raw: &str) -> Result<ScenarioState, ScenarioError> {
 /// Returns [`ScenarioError::Toml`] on malformed TOML or an unrecognized
 /// field, [`ScenarioError::UnsupportedSchema`] if `schema` is not
 /// [`SUPPORTED_SCHEMA`], [`ScenarioError::UnknownClass`]/[`ScenarioError::UnsupportedState`]
-/// if `class`/`state` do not name a recognized value, or any of the
-/// per-step errors [`validate_step`] can raise.
+/// if `class`/a state's `name` do not name a recognized value,
+/// [`ScenarioError::NoStates`]/[`ScenarioError::DuplicateStateName`]/[`ScenarioError::IncompleteUiOwningStates`]
+/// if the `states` list itself is invalid, or any of the per-step errors
+/// [`validate_step`] can raise.
 pub fn parse(raw_toml: &str) -> Result<ScenarioFile, ScenarioError> {
     let raw: RawScenario = toml::from_str(raw_toml)?;
     if raw.schema != SUPPORTED_SCHEMA {
         return Err(ScenarioError::UnsupportedSchema(raw.schema));
     }
     let class = validate_class(&raw.class)?;
-    let state = validate_state(&raw.state)?;
-    let steps = raw
-        .steps
+    let states = raw
+        .states
         .into_iter()
-        .enumerate()
-        .map(|(index, step)| validate_step(step, index))
+        .map(validate_state_entry)
         .collect::<Result<Vec<_>, _>>()?;
+    validate_state_completeness(class, raw.cold_bootstrap, &states)?;
 
     Ok(ScenarioFile {
         plugin: raw.plugin,
         class,
         fixture: raw.fixture,
-        state,
         cold_bootstrap: raw.cold_bootstrap,
-        steps,
+        states,
     })
 }
 
@@ -383,9 +508,11 @@ mod tests {
     const VALID: &str = r#"
 schema = 1
 plugin = "lualine"
-class = "ui-owning"
+class = "semantic"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   { send = "ihello<Esc>" },
   { wait_for = "hello", timeout_ms = 5000 },
@@ -394,32 +521,59 @@ steps = [
 ]
 "#;
 
+    /// A minimal `ui-owning` scenario declaring all three required states,
+    /// for the completeness-enforcement tests below.
+    const VALID_UI_OWNING: &str = r#"
+schema = 1
+plugin = "lualine"
+class = "ui-owning"
+
+[[states]]
+name = "superseded"
+native = {}
+steps = [ { wait_for_cell = { row = 29, col = 1, expected = "N" } } ]
+
+[[states]]
+name = "deferred"
+native = { statusline = false }
+steps = [ { wait_for_cell = { row = 29, col = 85, expected = "" } } ]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = []
+"#;
+
     #[test]
     fn valid_scenario_parses() {
         let scenario = parse(VALID).expect("VALID must parse as a scenario");
         assert_eq!(scenario.plugin, "lualine");
-        assert_eq!(scenario.class, PluginClass::UiOwning);
+        assert_eq!(scenario.class, PluginClass::Semantic);
         assert_eq!(scenario.fixture.as_deref(), Some("heavy"));
-        assert_eq!(scenario.state, ScenarioState::Present);
         assert!(!scenario.cold_bootstrap);
-        assert_eq!(scenario.steps.len(), 4);
+        assert_eq!(scenario.states.len(), 1);
+        assert_eq!(scenario.states[0].name, ScenarioState::Present);
+        assert_eq!(scenario.states[0].steps.len(), 4);
         assert_eq!(
-            scenario.steps[0],
+            scenario.states[0].steps[0],
             Step::Send {
                 keys: "ihello<Esc>".to_string(),
                 confirm: None,
             }
         );
         assert_eq!(
-            scenario.steps[1],
+            scenario.states[0].steps[1],
             Step::WaitFor {
                 needle: "hello".to_string(),
                 timeout: Duration::from_millis(5000),
             }
         );
-        assert_eq!(scenario.steps[2], Step::AssertAbsent("E5108".to_string()));
         assert_eq!(
-            scenario.steps[3],
+            scenario.states[0].steps[2],
+            Step::AssertAbsent("E5108".to_string())
+        );
+        assert_eq!(
+            scenario.states[0].steps[3],
             Step::Probe {
                 expr: "luaeval('lualine ~= nil')".to_string(),
                 expect: "true".to_string(),
@@ -442,7 +596,7 @@ steps = [
         );
         let scenario = parse(&toml).expect("wait_for_cell step must parse");
         assert_eq!(
-            scenario.steps[2],
+            scenario.states[0].steps[2],
             Step::WaitForCell {
                 row: 23,
                 col: 0,
@@ -453,11 +607,28 @@ steps = [
     }
 
     #[test]
+    fn assert_cell_not_step_parses() {
+        let toml = VALID.replace(
+            "{ assert_absent = \"E5108\" },",
+            "{ assert_cell_not = { row = 29, col = 85, glyph = \"\" } },",
+        );
+        let scenario = parse(&toml).expect("assert_cell_not step must parse");
+        assert_eq!(
+            scenario.states[0].steps[2],
+            Step::AssertCellNot {
+                row: 29,
+                col: 85,
+                glyph: String::new(),
+            }
+        );
+    }
+
+    #[test]
     fn wait_for_step_without_timeout_ms_gets_the_default() {
         let toml = VALID.replace(", timeout_ms = 5000", "");
         let scenario = parse(&toml).expect("must parse without an explicit timeout_ms");
         assert_eq!(
-            scenario.steps[1],
+            scenario.states[0].steps[1],
             Step::WaitFor {
                 needle: "hello".to_string(),
                 timeout: Duration::from_millis(DEFAULT_STEP_TIMEOUT_MS),
@@ -487,7 +658,7 @@ steps = [
 
     #[test]
     fn unknown_class_is_rejected() {
-        let toml = VALID.replace(r#"class = "ui-owning""#, r#"class = "bogus""#);
+        let toml = VALID.replace(r#"class = "semantic""#, r#"class = "bogus""#);
         let err = parse(&toml).expect_err("an unrecognized class must be a hard error");
         assert!(
             matches!(err, ScenarioError::UnknownClass(ref s) if s == "bogus"),
@@ -497,12 +668,74 @@ steps = [
 
     #[test]
     fn unknown_state_is_rejected() {
-        let toml = VALID.replace(r#"state = "present""#, r#"state = "superseded""#);
-        let err = parse(&toml).expect_err("an unrecognized state must be a hard error");
+        let toml = VALID.replace(r#"name = "present""#, r#"name = "nonexistent""#);
+        let err = parse(&toml).expect_err("an unrecognized state name must be a hard error");
         assert!(
-            matches!(err, ScenarioError::UnsupportedState(ref s) if s == "superseded"),
-            "expected UnsupportedState(\"superseded\"), got {err:?}"
+            matches!(err, ScenarioError::UnsupportedState(ref s) if s == "nonexistent"),
+            "expected UnsupportedState(\"nonexistent\"), got {err:?}"
         );
+    }
+
+    #[test]
+    fn a_scenario_with_no_states_is_rejected() {
+        let toml = r#"
+schema = 1
+plugin = "lualine"
+class = "semantic"
+states = []
+"#;
+        let err =
+            parse(toml).expect_err("a scenario with no [[states]] entries must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::NoStates),
+            "expected NoStates, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn two_states_sharing_a_name_are_rejected() {
+        let toml = format!(
+            "{}\n[[states]]\nname = \"present\"\nsteps = []\n",
+            VALID.trim_end()
+        );
+        let err = parse(&toml).expect_err("two states sharing a name must be a hard error");
+        assert!(
+            matches!(err, ScenarioError::DuplicateStateName { ref name } if name == "present"),
+            "expected DuplicateStateName{{\"present\"}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_ui_owning_scenario_with_all_three_required_states_parses() {
+        let scenario =
+            parse(VALID_UI_OWNING).expect("a ui-owning scenario with 3 states must parse");
+        assert_eq!(scenario.states.len(), 3);
+    }
+
+    #[test]
+    fn a_ui_owning_scenario_missing_a_required_state_is_rejected() {
+        // Drop the "native-only" state, leaving only superseded/deferred --
+        // the completeness check this whole schema exists to enforce.
+        let (two_state_toml, _) = VALID_UI_OWNING
+            .split_once("\n[[states]]\nname = \"native-only\"")
+            .expect("VALID_UI_OWNING must contain a native-only state to split off");
+        let err = parse(two_state_toml)
+            .expect_err("a ui-owning scenario declaring fewer than 3 states must be a hard error");
+        assert!(
+            matches!(
+                err,
+                ScenarioError::IncompleteUiOwningStates { ref missing }
+                    if missing == &vec!["native-only".to_string()]
+            ),
+            "expected IncompleteUiOwningStates{{[\"native-only\"]}}, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_semantic_scenario_with_one_state_is_not_held_to_the_ui_owning_completeness_bar() {
+        // VALID itself is class = "semantic" with exactly one state; it must
+        // not be rejected for lacking superseded/deferred/native-only.
+        parse(VALID).expect("a semantic scenario needs only >= 1 state, not all 3 named ones");
     }
 
     #[test]
@@ -577,7 +810,7 @@ steps = [
         );
         let scenario = parse(&toml).expect("a send step using only supported notation must parse");
         assert_eq!(
-            scenario.steps[0],
+            scenario.states[0].steps[0],
             Step::Send {
                 keys: "ihello<Esc><C-w>".to_string(),
                 confirm: None,
@@ -604,7 +837,9 @@ steps = [
         let toml = r#"
 schema = 1
 class = "semantic"
-state = "present"
+
+[[states]]
+name = "present"
 steps = []
 "#;
         let err = parse(toml).expect_err("a missing required field (plugin) must be a hard error");
@@ -622,7 +857,7 @@ steps = []
         );
         let scenario = parse(&toml).expect("a send step with a paired confirm probe must parse");
         assert_eq!(
-            scenario.steps[0],
+            scenario.states[0].steps[0],
             Step::Send {
                 keys: "ihello<Esc>".to_string(),
                 confirm: Some(SendConfirm {
@@ -698,7 +933,7 @@ steps = []
         );
         let scenario = parse(&toml).expect("a :silent send step with a confirm_probe must parse");
         assert_eq!(
-            scenario.steps[0],
+            scenario.states[0].steps[0],
             Step::Send {
                 keys: ":silent cd /tmp<CR>".to_string(),
                 confirm: Some(SendConfirm {

@@ -1,14 +1,22 @@
 # dressing is ui-owning: it replaces vim.ui.input's blocking command-line
-# prompt with a floating input window it draws itself. The prompt string
-# doubles as the grid marker: dressing renders it as the float's border
-# title. Without the plugin the same call would fall back to nvim's native
-# blocking input() prompt, which never draws a DressingInput window -- the
-# filetype probe is what makes this row dressing-specific.
+# prompt with a floating input window it draws itself. No entry in the
+# `[native]` registry supersedes `vim.ui.input` (confirmed against
+# view-native's supersede module and the mapping table: neither carries a
+# row for it), so toggling every native feature off changes nothing this
+# scenario can observe -- the superseded and deferred states below run the
+# identical assertions on purpose, and that equality is itself the fact
+# being proven, not an oversight. The prompt string doubles as the grid
+# marker: dressing renders it as the float's border title, and without the
+# plugin the same call falls back to nvim's own blocking `input()`, whose
+# prompt still lands on screen because `ext_cmdline` -- unlike a
+# `[native]` feature -- attaches at session level regardless.
 schema = 1
 plugin = "dressing"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.
@@ -30,4 +38,33 @@ steps = [
   { send = "<Esc>" },
   { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
   { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]
+
+[[states]]
+name = "deferred"
+native = { picker = false, tree = false, statusline = false, notifications = false, palette = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.dressing ~= nil')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  { wait_for = "dressing-prompt", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "open", timeout_ms = 10000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"DressingInput\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 5000 },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  { send = ":lua vim.ui.input({ prompt = 'dressing-prompt' }, function() end)<CR>" },
+  # Without dressing, vim.ui.input falls back to nvim's own blocking
+  # input(), captured through ext_cmdline the same way a `:` command is;
+  # the prompt text still reaches the screen through that path.
+  { wait_for = "dressing-prompt", timeout_ms = 15000 },
+  { send = "<Esc>" },
+  { wait_for_probe = "mode()", expect = "n", timeout_ms = 10000 },
 ]

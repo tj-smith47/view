@@ -9,7 +9,9 @@ schema = 1
 plugin = "which-key"
 class = "ui-adjacent"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "present"
 steps = [
   # Generous timeout: the first heavy scenario to run on a cold shared
   # cache pays for the full plugin clone before any plugin can load.

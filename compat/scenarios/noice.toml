@@ -6,11 +6,21 @@
 # this scenario asserts on the part of noice that still owns UI there: its
 # message router, which intercepts vim.notify and both records the message
 # in noice's own history and displays it through the nvim-notify backend.
+#
+# `notifications` carries no takeover row (view-native's supersede module
+# has exactly one row and it is statusline's), and `cmdheight` stays 0 in
+# every state regardless -- `ext_messages` attaches at the session level,
+# not per feature. noice's own routing is therefore identical in every
+# state below; the one fact `<leader>fm` discriminates is whether it opens
+# view's own message-history overlay (titled "Messages") or, unclaimed,
+# does nothing.
 schema = 1
 plugin = "noice"
 class = "ui-owning"
 fixture = "heavy"
-state = "present"
+
+[[states]]
+name = "superseded"
 steps = [
   # noice defers its real setup until after VimEnter, so package.loaded
   # alone is not proof the router is running; is_running() only reports
@@ -30,4 +40,36 @@ steps = [
   # not by itself prove noice routed it; the message sitting in noice's
   # own manager history is the noice-specific fact.
   { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },
+  { send = "\\fm" },
+  { wait_for = "Messages", timeout_ms = 5000 },
+  { send = "<Esc>" },
+]
+
+[[states]]
+name = "deferred"
+native = { notifications = false }
+steps = [
+  { wait_for_probe = "luaeval('package.loaded.noice ~= nil and require(\"noice.config\").is_running()')", expect = "true", timeout_ms = 180000 },
+  { wait_for_probe = "luaeval('(function() for _, w in ipairs(vim.api.nvim_list_wins()) do if vim.bo[vim.api.nvim_win_get_buf(w)].filetype == \"lazy\" then return \"open\" end end return \"closed\" end)()')", expect = "closed", timeout_ms = 180000 },
+  { send = ":lua vim.notify('noice-compat-marker')<CR>" },
+  { wait_for = "noice-compat-marker", timeout_ms = 15000 },
+  { wait_for_probe = "luaeval('(function() local ok, m = pcall(require, \"noice.message.manager\") if not ok then return \"no-mod\" end local msgs = m.get({ event = \"notify\" }, { history = true }) for _, msg in ipairs(msgs) do if tostring(msg:content()):find(\"noice%-compat%-marker\") then return \"routed\" end end return \"absent:\" .. #msgs end)()')", expect = "routed", timeout_ms = 10000 },
+  # native.notifications = false hands `<leader>fm` back unclaimed; the
+  # fixture never binds it either, so the send below is a genuine no-op --
+  # the negative half of the pair the superseded state's own "Messages"
+  # appearance proves the positive half of.
+  { send = "\\fm" },
+  { assert_absent = "Messages" },
+]
+
+[[states]]
+name = "native-only"
+fixture = "minimal"
+steps = [
+  { send = "\\fm" },
+  # The minimal fixture has no plugin to route vim.notify through at all,
+  # so this is the one state that shows view's own history overlay with
+  # nothing routed through a plugin first.
+  { wait_for = "Messages", timeout_ms = 15000 },
+  { send = "<Esc>" },
 ]

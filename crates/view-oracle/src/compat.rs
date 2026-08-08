@@ -115,10 +115,11 @@ const SEND_CONFIRM_DEADLINE: Duration = Duration::from_millis(1_000);
 const SEND_CONFIRM_POLL: Duration = Duration::from_millis(200);
 
 /// Which of the design spec's three config-reconciliation classes a
-/// scenario's plugin belongs to. Purely descriptive at this schema layer --
-/// no class-specific driving logic exists yet -- but recorded per scenario
-/// since the compat-evidence page's own row schema reports it, and a future
-/// coverage model (top-N by class) groups by it.
+/// scenario's plugin belongs to. Recorded per scenario since the
+/// compat-evidence page's own row schema reports it, and a future coverage
+/// model (top-N by class) groups by it; [`Self::UiOwning`] additionally
+/// drives the loader's own three-state completeness check (see
+/// [`ScenarioState`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginClass {
     /// No UI ownership (treesitter, LSP servers, cmp sources, surround,
@@ -134,16 +135,56 @@ pub enum PluginClass {
     UiOwning,
 }
 
-/// A scenario's `state` field. Only [`Self::Present`] is accepted today:
-/// the design spec names three config-reconciliation states (superseded,
-/// deferred, native-without-plugin), but the supersession machinery the
-/// other two need does not exist in the engine yet -- a scenario naming
-/// them today would silently assert against a mechanism that is not built,
-/// so the schema loader rejects them outright rather than accept and no-op.
+/// One state named by a scenario's `[[states]]` entry (the design spec's
+/// config-reconciliation states). A semantic/ui-adjacent scenario, whose
+/// plugin coexists untouched
+/// regardless of `[native]`, has exactly one entry ([`Self::Present`]); a
+/// ui-owning scenario's plugin occupies a surface the engine can supersede,
+/// so its coverage is only complete once all three reconciliation states are
+/// asserted -- [`view_harness::scenario`]'s loader enforces that completeness
+/// at load time, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScenarioState {
-    /// The plugin is present and loaded; no supersession assertion is made.
+    /// The plugin is present and loaded; no supersession assertion is made
+    /// (a semantic/ui-adjacent scenario's sole state).
     Present,
+    /// `[native]` leaves the feature on (its default): the engine takes the
+    /// surface over and the plugin's own rendering of it must not appear.
+    Superseded,
+    /// `[native]` turns the corresponding feature off with the plugin still
+    /// present: the plugin's own rendering returns.
+    Deferred,
+    /// No plugin loaded at all (a fixture with none installed): proves the
+    /// engine's native surface stands on its own, not merely "not
+    /// overridden by a plugin that happens to also be absent".
+    NativeOnly,
+}
+
+/// The set of TOML state names the loader recognizes, paired with
+/// [`state_name`] so a scenario file's `states[].name` and the loader's own
+/// error/report text never drift into two independently-maintained spellings
+/// of the same four states.
+#[must_use]
+pub fn parse_state_name(s: &str) -> Option<ScenarioState> {
+    match s {
+        "present" => Some(ScenarioState::Present),
+        "superseded" => Some(ScenarioState::Superseded),
+        "deferred" => Some(ScenarioState::Deferred),
+        "native-only" => Some(ScenarioState::NativeOnly),
+        _ => None,
+    }
+}
+
+/// The TOML spelling a [`ScenarioState`] round-trips through -- the inverse
+/// of [`parse_state_name`].
+#[must_use]
+pub fn state_name(state: ScenarioState) -> &'static str {
+    match state {
+        ScenarioState::Present => "present",
+        ScenarioState::Superseded => "superseded",
+        ScenarioState::Deferred => "deferred",
+        ScenarioState::NativeOnly => "native-only",
+    }
 }
 
 /// One scripted action a scenario drives, in order. Each variant maps to
@@ -185,6 +226,13 @@ pub enum Step {
     /// screen content -- the inverse of `wait_for`, for asserting an error
     /// marker never appeared.
     AssertAbsent(String),
+    /// Fails the scenario if the single cell at `(row, col)` holds exactly
+    /// `glyph` right now -- a one-shot check, the discriminating negative
+    /// [`Step::WaitForCell`] cannot express on its own: a superseded state's
+    /// only proof that the plugin's own rendering lost the surface is a cell
+    /// the plugin would have painted staying absent, not a cell the engine
+    /// paints appearing (both states can share the latter).
+    AssertCellNot { row: u16, col: u16, glyph: String },
     /// Evaluates `expr` over the probe channel once and fails the scenario
     /// unless the (trimmed) result equals `expect` exactly. A single check,
     /// not a wait: use [`Step::WaitForProbe`] for an expression whose value
@@ -249,6 +297,10 @@ pub enum CompatError {
     /// An `assert_absent` step's forbidden needle was present on screen.
     #[error("assert_absent violated: {needle:?} is present on screen")]
     ForbiddenTextPresent { needle: String },
+    /// An `assert_cell_not` step's forbidden cell held exactly the glyph it
+    /// must not.
+    #[error("assert_cell_not violated: ({row},{col}) == {glyph:?}")]
+    ForbiddenCellPresent { row: u16, col: u16, glyph: String },
     /// A `probe` step's expression evaluated to a value other than what was
     /// expected.
     #[error("probe {expr:?} returned {actual:?}, expected {expected:?}")]
@@ -713,6 +765,22 @@ impl CompatSession {
                     Ok(())
                 }
             }
+            Step::AssertCellNot { row, col, glyph } => {
+                let matches = self.pty.with_screen(|screen| {
+                    screen
+                        .cell(*row, *col)
+                        .is_some_and(|c| c.contents() == *glyph)
+                });
+                if matches {
+                    Err(CompatError::ForbiddenCellPresent {
+                        row: *row,
+                        col: *col,
+                        glyph: glyph.clone(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
             Step::Probe { expr, expect } => {
                 let actual = self.probe(expr)?;
                 if &actual == expect {
@@ -1152,6 +1220,23 @@ mod tests {
     use super::*;
 
     use crate::testenv;
+
+    #[test]
+    fn state_name_and_parse_state_name_round_trip_every_variant() {
+        for state in [
+            ScenarioState::Present,
+            ScenarioState::Superseded,
+            ScenarioState::Deferred,
+            ScenarioState::NativeOnly,
+        ] {
+            assert_eq!(parse_state_name(state_name(state)), Some(state));
+        }
+    }
+
+    #[test]
+    fn parse_state_name_rejects_an_unrecognized_spelling() {
+        assert_eq!(parse_state_name("bogus"), None);
+    }
 
     #[test]
     fn error_marker_finds_an_e_numbered_line() {
