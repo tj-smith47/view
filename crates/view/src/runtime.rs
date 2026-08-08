@@ -318,8 +318,11 @@ pub struct Executor<E: EngineOps> {
     /// arm below). `None` degrades a scheduled expiry to a silent no-op --
     /// the toast then simply outlives its intended timeout instead of the
     /// executor panicking or blocking, matching every other unwired-channel
-    /// degrade in this type.
-    toast_timer: Option<mpsc::SyncSender<Msg>>,
+    /// degrade in this type. A [`crate::wake::LoopSender`] rather than a
+    /// bare `SyncSender`: the unix loop sleeps in an fd poll a bare send
+    /// cannot interrupt, so every producer here must carry the wake signal
+    /// with it.
+    toast_timer: Option<crate::wake::LoopSender>,
     /// The matcher worker's query channel (`view_native::picker::matcher::spawn`),
     /// or `None` when no worker is wired -- every test `Executor` built via
     /// plain `new`. `PickerQuery` carries no `ReplyToken` (see that
@@ -389,7 +392,7 @@ impl<E: EngineOps> Executor<E> {
     /// spawn a one-shot timer thread against it instead of silently
     /// no-oping.
     #[must_use]
-    pub fn with_toast_timer(mut self, tx: mpsc::SyncSender<Msg>) -> Self {
+    pub fn with_toast_timer(mut self, tx: crate::wake::LoopSender) -> Self {
         self.toast_timer = Some(tx);
         self
     }
@@ -562,8 +565,7 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             Effect::Quit { exit_code } => Flow::Quit(exit_code),
-            // one-shot, mirroring `view_tui::terminal::spawn_input_thread`'s
-            // shape: a background thread that owns exactly one send, never
+            // one-shot: a background thread that owns exactly one send, never
             // a persistent multi-deadline scheduler. The loop has no
             // free-running clock of its own (see this module's own doc), so
             // this thread -- not a paint-time check -- is what wakes it back
@@ -840,6 +842,7 @@ fn note_write_stall(
 /// cannot know yet, and for the wedged case the wakeup is the point: a
 /// wedged engine emits no redraws, so an operator who types once and then
 /// waits would otherwise be told nothing at all.
+#[cfg(any(not(unix), test))]
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
     watch: &OutboxStallWatch,
@@ -854,6 +857,84 @@ fn wait_for_msg(
     }
 }
 
+/// The terminal-input handle [`run`] polls and drains inline: the pollable
+/// handle `view-tui` exposes on unix, and nothing at all elsewhere (the
+/// non-unix loop still receives input from the dedicated thread through
+/// the message channel). An alias rather than a `#[cfg]`-gated parameter
+/// so `main.rs` has one call shape per function instead of a duplicated
+/// call per platform.
+#[cfg(unix)]
+pub type TermInput<'a> = &'a mut view_tui::input::InputSource;
+#[cfg(not(unix))]
+pub type TermInput<'a> = &'a mut ();
+
+/// The two input-side handles [`run`] owns alongside the message channel:
+/// the resize cell every frame consults and the platform's terminal-input
+/// handle. One parameter rather than two because they are two views of the
+/// same terminal input stream, and passing them together keeps `run`'s
+/// signature at the arity the caller can still read.
+pub struct InputHandles<'a> {
+    pub term_size: view_tui::terminal::TermSizeCell,
+    pub input: TermInput<'a>,
+}
+
+/// [`wait_for_msg`]'s unix counterpart: sleeps in the fd readiness poll
+/// over the terminal fd, the SIGWINCH pipe, and the wake pipe, so a
+/// keystroke wakes this thread directly and is decoded inline in
+/// `view-tui` -- the cross-thread hop the input thread used to charge
+/// every key is gone by construction. Channel messages win ties: a wake
+/// for one was signaled before the poll returned, and terminal events are
+/// staged into `pending` so the loop still paints between messages during
+/// a burst exactly as it did when each arrived as its own `recv` wakeup.
+///
+/// The rearm ordering is the lost-wakeup guard: [`LoopWaker::clear`]
+/// runs *before* the final queue re-check, so a send consumed by an
+/// earlier check can never leave a stale byte, and a send landing after
+/// the re-check writes a fresh byte the poll sees. `None` means the stall
+/// deadline elapsed, exactly as in [`wait_for_msg`].
+///
+/// [`LoopWaker::clear`]: crate::wake::LoopWaker::clear
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` if the readiness poll itself
+/// fails; the caller aborts the session the way it does for any other
+/// terminal I/O failure.
+#[cfg(unix)]
+#[allow(clippy::type_complexity)]
+fn wait_for_msg_unified(
+    msg_rx: &mpsc::Receiver<Msg>,
+    watch: &OutboxStallWatch,
+    input: &mut view_tui::input::InputSource,
+    waker: &crate::wake::LoopWaker,
+    term_size: &view_tui::terminal::TermSizeCell,
+    pending: &mut std::collections::VecDeque<Msg>,
+) -> std::io::Result<Option<Result<Msg, mpsc::RecvError>>> {
+    loop {
+        if let Some(msg) = pending.pop_front() {
+            return Ok(Some(Ok(msg)));
+        }
+        match msg_rx.try_recv() {
+            Ok(msg) => return Ok(Some(Ok(msg))),
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        waker.clear();
+        match msg_rx.try_recv() {
+            Ok(msg) => return Ok(Some(Ok(msg))),
+            Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+        let ready = crate::wake::poll_readiness(input, waker, watch.poll_deadline())?;
+        if ready.timed_out {
+            return Ok(None);
+        }
+        if ready.input {
+            input.drain(term_size, |msg| pending.push_back(msg));
+        }
+    }
+}
+
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
 /// terminal I/O error occurs, returning the final `Model` alongside the
 /// process exit code on the former (the caller persists the model's
@@ -862,25 +943,25 @@ fn wait_for_msg(
 ///
 /// The message channel's two halves, bundled into one parameter: `rx` is
 /// `run()`'s own blocking receive end, while `tx` is cloned once more into
-/// the toast-expiry timer thread the same way `spawn_input_thread` and
-/// `start_pump` already hold their own clones from before `run()` starts.
+/// the toast-expiry timer thread the same way `start_pump`'s sink already
+/// holds its own clone from before `run()` starts.
 /// A bare tuple would satisfy the same arg-count constraint but loses the
 /// field names at every call site; a struct keeps `tx`/`rx` self-labeling
 /// where `run()`'s doc comment already talks about both by name.
 pub struct MsgChannel {
-    pub tx: mpsc::SyncSender<Msg>,
+    pub tx: crate::wake::LoopSender,
     pub rx: mpsc::Receiver<Msg>,
 }
 
 /// Takes ownership of `engine` for the whole call (see the module docs'
 /// ownership chain), plus the already-attached `pump` and the `msg_rx` end
-/// of the channel the caller's input thread and `pump`'s sink both already
-/// feed. Both are built by `startup` rather than here: the input thread
-/// starts (and `msg_tx`/`msg_rx` are created) right after the very first
-/// shell frame paints, well before this function is ever called, so a key
-/// typed while the engine is still attaching is never lost to a
-/// not-yet-existing channel -- see `startup::drain_pre_attach` for the
-/// buffering that covers exactly that window. The executor drives
+/// of the channel `pump`'s sink and every other producer already feed.
+/// Both are built by `startup` rather than here: input capture goes live
+/// (and `msg_tx`/`msg_rx` are created) right after the very first shell
+/// frame paints, well before this function is ever called, so a key typed
+/// while the engine is still attaching is never lost -- see
+/// `startup::drain_pre_attach` for the buffering that covers exactly that
+/// window. The executor drives
 /// `engine.handle` through [`EngineOps`]. There is no periodic timer in the
 /// loop body: painting fires immediately when `update()` marks
 /// `model.dirty`, and the loop blocks in [`wait_for_msg`], which a redraw,
@@ -893,12 +974,13 @@ pub struct MsgChannel {
 /// Returns the underlying `std::io::Error` if a terminal paint fails (the
 /// `Model` is dropped on this path along with everything else on the
 /// stack; an aborted session has no last-good theme worth persisting).
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn run(
     mut model: Model,
     mut engine: Engine,
     pump: view_engine::DamagePump,
     msg_channel: MsgChannel,
-    term_size: view_tui::terminal::TermSizeCell,
+    inputs: InputHandles<'_>,
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
@@ -906,6 +988,16 @@ pub fn run(
         tx: msg_tx,
         rx: msg_rx,
     } = msg_channel;
+    let InputHandles { term_size, input } = inputs;
+    // taken before `msg_tx` moves into the executor: the wait below rearms
+    // this exact waker, and a loop polling fds with no waker wired would
+    // sleep through every channel send
+    #[cfg(unix)]
+    let waker = msg_tx.waker().cloned().ok_or_else(|| {
+        anyhow::anyhow!("the unix runtime loop requires a wake-wired message sender")
+    })?;
+    #[cfg(unix)]
+    let mut pending = std::collections::VecDeque::new();
     let (clipboard_tx, clipboard_rx) = mpsc::channel();
     let (osc52_tx, osc52_rx) = mpsc::channel();
     // kept alive for the session's duration; the worker exits once
@@ -937,7 +1029,7 @@ pub fn run(
                 &view_native::clipboard::lines_to_text(&job.lines, job.regtype),
             )?;
         }
-        // a resize the input thread has already seen describes the terminal
+        // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
         // Msg::Resized: folding it in here means no frame is ever painted
         // at a shape the terminal has left. Costs one relaxed load per pass
@@ -979,7 +1071,18 @@ pub fn run(
             term.draw_surface(&model, &surface, &damage)?; // terminal I/O errors abort; engine errors never do
             model.dirty = false;
         }
-        let Some(received) = wait_for_msg(&msg_rx, &write_stall) else {
+        #[cfg(unix)]
+        let received = wait_for_msg_unified(
+            &msg_rx,
+            &write_stall,
+            input,
+            &waker,
+            &term_size,
+            &mut pending,
+        )?;
+        #[cfg(not(unix))]
+        let received = wait_for_msg(&msg_rx, &write_stall);
+        let Some(received) = received else {
             // the wait expired against the stall watch's own deadline
             // rather than delivering anything: go around and re-read the
             // write side, which is the whole reason the deadline was armed
@@ -1448,7 +1551,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeScan {
             generation: 9,
             root: root.clone(),
@@ -1500,7 +1603,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeGitScan {
             generation: 5,
             root: root.clone(),
@@ -1536,7 +1639,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeCreateFile {
             path: path.clone(),
             generation: 11,
@@ -1579,7 +1682,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeCreateFile {
             path: path.clone(),
             generation: 12,
@@ -1617,7 +1720,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeDeleteFile {
             path: path.clone(),
             generation: 13,
@@ -1665,7 +1768,7 @@ mod tests {
 
         let ops = FakeOps::default();
         let (tx, rx) = mpsc::sync_channel(4);
-        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
         let flow = executor.run(Effect::TreeScan {
             generation: 21,
             root: root.clone(),
@@ -2024,7 +2127,7 @@ mod tests {
     /// `startup::KEY_RING_CAPACITY`) while nothing is consuming it yet
     /// (`runtime::run`'s loop starts only after cutover). 2 keys already
     /// resting in the
-    /// channel stand in for whatever the input thread queued in the narrow
+    /// channel stand in for whatever other producers queued in the narrow
     /// gap between attach completing and cutover actually running; 64 more
     /// (the ring's full capacity) is what a maximally-full pre-attach buffer
     /// replays. 66 sends against a capacity-64 channel with zero consumer

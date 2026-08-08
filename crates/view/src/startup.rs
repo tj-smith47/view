@@ -20,7 +20,7 @@
 //! sends) is resolved once a consumer of `msg_tx` is guaranteed to exist.
 
 use std::collections::VecDeque;
-use std::sync::mpsc::{Receiver, SyncSender};
+use std::sync::mpsc::Receiver;
 use std::time::Instant;
 
 use view_core::events::UiEvent;
@@ -228,7 +228,7 @@ pub fn attach_in_background(
     width: u16,
     height: u16,
     residue: Vec<u8>,
-    msg_tx: SyncSender<Msg>,
+    msg_tx: crate::wake::LoopSender,
 ) -> Receiver<Result<Engine, AttachFailure>> {
     let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
@@ -286,36 +286,160 @@ pub struct DrainedInput {
 /// accumulation logic itself (the part [`Msg`] kind does what, and which
 /// one wins on conflict) is testable without a live [`Term`], which
 /// `cargo test` cannot construct outside a real tty.
+#[cfg_attr(not(unix), allow(unused_variables))]
 pub fn drain_pre_attach(
     msg_rx: &Receiver<Msg>,
+    msg_tx: &crate::wake::LoopSender,
     model: &mut Model,
     term: &mut Term,
+    input: crate::runtime::TermInput<'_>,
+    term_size: &view_tui::terminal::TermSizeCell,
 ) -> DrainedInput {
-    drain_pre_attach_with(msg_rx, model, |model| {
+    let repaint = |model: &mut Model| {
         let surface = view_surface::render(model);
         let _ = term.draw_surface(model, &surface, &view_core::grid::GridDamage::full());
-    })
+    };
+    #[cfg(unix)]
+    {
+        drain_pre_attach_polled(msg_rx, msg_tx, model, input, term_size, repaint)
+    }
+    #[cfg(not(unix))]
+    {
+        drain_pre_attach_with(msg_rx, model, repaint)
+    }
+}
+
+/// The unix pre-attach wait: the same fd readiness poll the runtime loop
+/// sleeps in, over the terminal handle and the wake pipe, with every ready
+/// terminal event decoded inline (`view-tui`'s drain) and absorbed through
+/// the same [`PreAttach`] accumulator the channel-driven wait uses --
+/// pre-attach keys still land in the bounded ring, oldest evicted first,
+/// and are replayed in order at cutover. `Msg::EngineReady` still arrives
+/// through the channel from the attach thread, whose wake-wired send is
+/// what interrupts the poll.
+///
+/// A failing poll degrades to the channel-only blocking wait: attach
+/// completion still terminates the window (the attach thread's send is
+/// unconditional), at the cost of any keys typed during it -- the same
+/// loss profile the input-thread design had when its thread died.
+#[cfg(unix)]
+fn drain_pre_attach_polled(
+    msg_rx: &Receiver<Msg>,
+    msg_tx: &crate::wake::LoopSender,
+    model: &mut Model,
+    input: &mut view_tui::input::InputSource,
+    term_size: &view_tui::terminal::TermSizeCell,
+    mut repaint: impl FnMut(&mut Model),
+) -> DrainedInput {
+    use std::sync::mpsc::TryRecvError;
+
+    let Some(waker) = msg_tx.waker() else {
+        // no waker wired means no poll to interrupt: the blocking
+        // channel wait is the only correct wait left
+        return drain_pre_attach_with(msg_rx, model, repaint);
+    };
+    let mut state = PreAttach::new();
+    'window: loop {
+        loop {
+            match msg_rx.try_recv() {
+                Ok(msg) => {
+                    if state.absorb(msg, model, &mut repaint) {
+                        break 'window;
+                    }
+                }
+                Err(TryRecvError::Disconnected) => break 'window,
+                Err(TryRecvError::Empty) => break,
+            }
+        }
+        waker.clear();
+        // re-checked after the rearm, mirroring the runtime loop's own
+        // lost-wakeup guard (see `runtime`'s unified wait)
+        match msg_rx.try_recv() {
+            Ok(msg) => {
+                if state.absorb(msg, model, &mut repaint) {
+                    break 'window;
+                }
+                continue 'window;
+            }
+            Err(TryRecvError::Disconnected) => break 'window,
+            Err(TryRecvError::Empty) => {}
+        }
+        match crate::wake::poll_readiness(input, waker, None) {
+            Ok(ready) => {
+                if ready.input {
+                    let mut events = Vec::new();
+                    input.drain(term_size, |msg| events.push(msg));
+                    for msg in events {
+                        if state.absorb(msg, model, &mut repaint) {
+                            break 'window;
+                        }
+                    }
+                }
+            }
+            Err(_) => loop {
+                match msg_rx.recv() {
+                    Ok(msg) => {
+                        if state.absorb(msg, model, &mut repaint) {
+                            break 'window;
+                        }
+                    }
+                    Err(_) => break 'window,
+                }
+            },
+        }
+    }
+    state.finish()
 }
 
 /// The accumulation logic behind [`drain_pre_attach`], generic over the
 /// overflow repaint so tests can supply a no-op (or call-counting) closure
-/// instead of a real [`Term`].
+/// instead of a real [`Term`]. Also the whole wait off unix, where input
+/// arrives through the channel from the dedicated input thread.
 fn drain_pre_attach_with(
     msg_rx: &Receiver<Msg>,
     model: &mut Model,
     mut repaint: impl FnMut(&mut Model),
 ) -> DrainedInput {
-    let mut ring = KeyRing::new(KEY_RING_CAPACITY);
-    let mut resize = None;
-    let mut dropped: u32 = 0;
-    let mut toast_effects = Vec::new();
-    loop {
-        match msg_rx.recv() {
-            Ok(Msg::Key(key)) => {
-                if ring.push(key) {
-                    dropped = dropped.saturating_add(1);
+    let mut state = PreAttach::new();
+    // a recv error means every producer is gone: nothing left to wait for
+    while let Ok(msg) = msg_rx.recv() {
+        if state.absorb(msg, model, &mut repaint) {
+            break;
+        }
+    }
+    state.finish()
+}
+
+/// The pre-attach window's accumulator, shared by the channel-driven and
+/// poll-driven waits so the two cannot drift in what a message does to the
+/// buffered state.
+struct PreAttach {
+    ring: KeyRing,
+    resize: Option<(u16, u16)>,
+    dropped: u32,
+    toast_effects: Vec<Effect>,
+}
+
+impl PreAttach {
+    fn new() -> Self {
+        Self {
+            ring: KeyRing::new(KEY_RING_CAPACITY),
+            resize: None,
+            dropped: 0,
+            toast_effects: Vec::new(),
+        }
+    }
+
+    /// Folds one message into the window's state, returning `true` when
+    /// the window is over (`Msg::EngineReady` observed).
+    fn absorb(&mut self, msg: Msg, model: &mut Model, mut repaint: impl FnMut(&mut Model)) -> bool {
+        match msg {
+            Msg::Key(key) => {
+                if self.ring.push(key) {
+                    self.dropped = self.dropped.saturating_add(1);
+                    let dropped = self.dropped;
                     let plural = if dropped == 1 { "" } else { "s" };
-                    toast_effects.extend(model.engine.record_native_notice(
+                    self.toast_effects.extend(model.engine.record_native_notice(
                         format!(
                             "view: startup key buffer full, dropped {dropped} keystroke{plural}"
                         ),
@@ -323,34 +447,36 @@ fn drain_pre_attach_with(
                     ));
                     repaint(model);
                 }
+                false
             }
-            Ok(Msg::Resized { width, height }) => {
+            Msg::Resized { width, height } => {
                 // applied to the model here, not only carried to the
                 // cutover: the overflow repaint above paints from the
                 // model's terminal size, so a resize that arrives during
                 // the attach window would otherwise leave every repaint
                 // for the rest of that window addressing rows and columns
                 // the terminal no longer has. Still carried, because the
-                // cutover owes nvim its own `TryResize` and this loop has
+                // cutover owes nvim its own `TryResize` and this window has
                 // no engine to send one to.
                 model.term_width = width;
                 model.term_height = height;
-                resize = Some((width, height));
+                self.resize = Some((width, height));
+                false
             }
-            Ok(Msg::EngineReady) => break,
+            Msg::EngineReady => true,
             // structurally unreachable before EngineReady (see
             // attach_in_background's doc comment); kept for the same
             // defensive-totality reason update()'s own no-op arms are
-            Ok(_) => {}
-            // the input thread and the attach thread are both gone: nothing
-            // left to wait for
-            Err(_) => break,
+            _ => false,
         }
     }
-    DrainedInput {
-        resize,
-        keys: ring.drain(),
-        toast_effects,
+
+    fn finish(mut self) -> DrainedInput {
+        DrainedInput {
+            resize: self.resize,
+            keys: self.ring.drain(),
+            toast_effects: self.toast_effects,
+        }
     }
 }
 
@@ -392,11 +518,13 @@ pub(crate) enum CutoverOutcome {
 /// Order matches arrival: presink messages and pending damage were both
 /// staged before this call ever ran (see
 /// `view_engine::damage::PumpShared::attach_sink`'s doc comment), so they
-/// resolve first; every key still sitting in `msg_tx` after this call
-/// returns was typed by the input thread after `drain_pre_attach` observed
-/// `Msg::EngineReady`, which is after every key in `keys` was already
-/// buffered, so applying `keys` here, before `msg_tx` is read again by
-/// `runtime::run`'s loop, reproduces arrival order exactly. The resize (if
+/// resolve first; every key not yet delivered when this call runs (queued
+/// in `msg_tx` by the non-unix input thread, or still in the kernel's tty
+/// queue for the unix inline drain) was typed after `drain_pre_attach`
+/// observed `Msg::EngineReady`, which is after every key in `keys` was
+/// already buffered, so applying `keys` here, before either source is
+/// read again by `runtime::run`'s loop, reproduces arrival order
+/// exactly. The resize (if
 /// any) is applied before the keys typed at that size, so nvim sees the
 /// final pre-attach terminal size first. A presink `Msg::EngineStopped` is
 /// translated to `Msg::EngineDown` exactly like `runtime::run`'s own loop

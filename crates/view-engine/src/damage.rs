@@ -56,8 +56,10 @@
 //! staged with nothing to wake the consumer for it.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, PoisonError};
+
+use view_core::sink::MsgSink;
 
 use view_core::events::UiEvent;
 use view_core::msg::Msg;
@@ -298,7 +300,7 @@ impl DamageBuffer {
 /// was.
 #[derive(Default)]
 struct Route {
-    sink: Option<SyncSender<Msg>>,
+    sink: Option<Arc<dyn MsgSink + Send + Sync>>,
     presink: VecDeque<Msg>,
     /// The newest `Msg::HlProbeReply` an attached-but-full sink refused,
     /// held for the next routing attempt to retry.
@@ -633,9 +635,8 @@ impl PumpShared {
     /// is made -- the runtime loop that eventually reads it can start well
     /// after this call returns -- so a send performed here has no bound on
     /// how long it can block: an unconsumed channel already holding other
-    /// traffic (this project's input thread also sends into the same
-    /// channel, blocking, from a separate thread) can fill up and wedge both
-    /// senders permanently. Returning the staged state instead lets the
+    /// traffic (other producer threads send into the same channel,
+    /// blocking) can fill up and wedge both senders permanently. Returning the staged state instead lets the
     /// caller resolve it through its own dispatch path once it knows a
     /// consumer exists, exactly the way [`DamagePump::take_damage`]'s
     /// `Msg::RedrawReady` catch-up is resolved by `runtime::run`'s loop.
@@ -646,11 +647,11 @@ impl PumpShared {
     /// real consumer is guaranteed to already be draining it.
     pub(crate) fn attach_sink(
         self: &Arc<Self>,
-        sink: SyncSender<Msg>,
+        sink: impl MsgSink + Send + Sync + 'static,
     ) -> (DamagePump, SinkCutover) {
         let presink = {
             let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
-            route.sink = Some(sink);
+            route.sink = Some(Arc::new(sink));
             route.presink.drain(..).collect()
         };
         let redraw_pending = {

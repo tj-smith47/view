@@ -25,7 +25,7 @@ use crate::native::picker::{PickerItem, Source};
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Msg {
-    /// Already-encoded nvim notation from the input thread.
+    /// Already-encoded nvim notation from the terminal input reader.
     Key(Key),
     /// One compacted damage batch, drained by the loop.
     Redraw(Vec<UiEvent>),
@@ -58,10 +58,10 @@ pub enum Msg {
         width: u16,
         height: u16,
     },
-    /// A terminal bracketed-paste payload, decoded by the input thread from
+    /// A terminal bracketed-paste payload, decoded by the input reader from
     /// crossterm's `Event::Paste`.
     Paste(String),
-    /// A terminal mouse event, decoded by the input thread from crossterm's
+    /// A terminal mouse event, decoded by the input reader from crossterm's
     /// `Event::Mouse` into nvim's button/action/modifier vocabulary.
     Mouse(MouseInput),
     /// The async reply to an `nvim_get_hl(0, {name = "Normal"})` probe
@@ -336,7 +336,7 @@ pub enum DeleteConfirmOutcome {
 /// `"left"`/`"right"` for the wheel, and ignored for `"move"`; `modifier` is
 /// a string of single-char modifier prefixes (`"C-"`, `"S-"`, `"M-"`, in
 /// that order, matching `view_tui::keys::encode_key`'s convention).
-/// `row`/`col` are the raw terminal cell position the input thread
+/// `row`/`col` are the raw terminal cell position the input reader
 /// observed, zero-based; `update()` is what maps them into engine grid
 /// coordinates, since only it has the chrome-reservation state to do so.
 #[derive(Debug, Clone)]
@@ -549,9 +549,8 @@ pub enum Effect {
     /// Arms the idle-expiry timer for one `Route::Transient` toast: after
     /// `after` elapses with no other effect having cancelled it, the timer
     /// worker sends `Msg::ToastExpired { id }` back into the loop. One-shot
-    /// per toast, not a persistent multi-deadline scheduler, mirroring
-    /// `view_tui::terminal::spawn_input_thread`'s shape (a background thread
-    /// that owns exactly one send). Chosen over evaluating expiry at paint
+    /// per toast (a background thread that owns exactly one send), not a
+    /// persistent multi-deadline scheduler. Chosen over evaluating expiry at paint
     /// time (shape B in the design note) because the runtime loop has no
     /// free-running clock: nothing else causes a repaint on an idle editor,
     /// so a paint-time check would never re-run and the toast would never

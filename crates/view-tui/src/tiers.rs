@@ -206,7 +206,8 @@ fn parse_ascii_u32(digits: &[u8]) -> Option<u32> {
 /// A background thread doing an ordinary blocking `read()` would still be
 /// parked in that syscall after the probe's deadline on a terminal that
 /// never replies, and would go on to race whatever reads stdin next (the
-/// real input thread [`spawn_input_thread`](crate::terminal::spawn_input_thread)
+/// real input reader (the runtime loop's inline drain on unix, the
+/// dedicated input thread elsewhere)
 /// starts once `Term::init` returns) for the first bytes that terminal ever
 /// sends, silently stealing a keystroke. Reading synchronously on the
 /// calling thread with `VMIN=0`/`VTIME=0` means every read call returns

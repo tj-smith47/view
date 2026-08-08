@@ -10,6 +10,7 @@ mod runtime;
 mod startup;
 mod theme_cache;
 mod vlog;
+mod wake;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -329,16 +330,39 @@ fn main() -> Result<()> {
     startup::paint_shell_frame(&mut term, &model, process_start)
         .context("failed to paint the startup shell frame")?;
 
-    // created here, not inside runtime::run: the input thread has to start
-    // capturing keystrokes immediately after the shell paints, well before
-    // the engine exists to send them to, or anything typed during attach
-    // would be lost to a not-yet-existing channel
-    let (msg_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
+    // created here, not inside runtime::run: input capture has to be live
+    // immediately after the shell paints, well before the engine exists,
+    // or anything typed during attach would be lost. On unix that means
+    // opening the pollable input handle (keys wait in the kernel's tty
+    // queue until the pre-attach wait drains them inline); off unix it
+    // means starting the input thread against a channel that exists.
+    let (raw_tx, msg_rx) = mpsc::sync_channel(startup::MSG_CHANNEL_CAPACITY);
     let term_size = view_tui::terminal::TermSizeCell::default();
-    view_tui::terminal::spawn_input_thread(msg_tx.clone(), term_size.clone());
+    #[cfg(unix)]
+    let mut input_source = view_tui::input::InputSource::open()
+        .context("failed to open the pollable terminal input handle")?;
+    #[cfg(not(unix))]
+    let mut input_source = ();
+    #[cfg(unix)]
+    let msg_tx = wake::LoopSender::with_waker(
+        raw_tx,
+        wake::LoopWaker::new().context("failed to create the runtime loop's wake pipe")?,
+    );
+    #[cfg(not(unix))]
+    let msg_tx = {
+        view_tui::terminal::spawn_input_thread(raw_tx.clone(), term_size.clone());
+        wake::LoopSender::new(raw_tx)
+    };
 
     let engine_rx = startup::attach_in_background(cfg, width, height, residue, msg_tx.clone());
-    let drained = startup::drain_pre_attach(&msg_rx, &mut model, &mut term);
+    let drained = startup::drain_pre_attach(
+        &msg_rx,
+        &msg_tx,
+        &mut model,
+        &mut term,
+        &mut input_source,
+        &term_size,
+    );
     let attach_result = engine_rx
         .recv()
         .context("engine attach thread ended without a result")?;
@@ -442,7 +466,10 @@ fn main() -> Result<()> {
             tx: msg_tx.clone(),
             rx: msg_rx,
         },
-        term_size,
+        runtime::InputHandles {
+            term_size,
+            input: &mut input_source,
+        },
         &mut follow_ups,
         &mut term,
     )?;

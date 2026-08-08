@@ -13,10 +13,10 @@ use rmpv::Value;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use view_core::msg::{ExitInfo, Msg};
+use view_core::msg::ExitInfo;
+use view_core::sink::MsgSink;
 
 /// Configuration for spawning an embedded Neovim process.
 ///
@@ -522,7 +522,10 @@ impl Engine {
     /// caller resolves the returned state through its own dispatch path
     /// once a consumer is guaranteed (see `view`'s `startup::run_cutover`).
     #[must_use]
-    pub fn start_pump(&mut self, sink: SyncSender<Msg>) -> (DamagePump, SinkCutover) {
+    pub fn start_pump(
+        &mut self,
+        sink: impl MsgSink + Send + Sync + 'static,
+    ) -> (DamagePump, SinkCutover) {
         self.pump.attach_sink(sink)
     }
 

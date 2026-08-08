@@ -41,6 +41,19 @@ view-native = { version = "0.0.1", path = "../view-native" }
 view-surface = { version = "0.0.1", path = "../view-surface" }
 view-tui = { version = "0.0.1", path = "../view-tui" }
 
+# The runtime loop's readiness poll and its wake pipe (src/wake.rs): the
+# loop sleeps in poll(2) over the terminal fd view-tui exposes plus a
+# crate-owned pipe every message producer signals. Already resolved
+# transitively via crossterm's unix backend (which this bin crate is
+# forbidden from depending on directly), so this adds a direct edge to an
+# already-vetted crate rather than a new dependency surface.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "event",
+    "pipe",
+] }
+
 [dev-dependencies]
 # The same view-engine, with the constructor that builds a connection over
 # an arbitrary reader/writer pair rather than a spawned nvim (see that

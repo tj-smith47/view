@@ -15,7 +15,7 @@
 //! different picker verb, or a different `Files` root.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvError, SyncSender};
+use std::sync::mpsc::{Receiver, RecvError};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
@@ -24,6 +24,7 @@ use nucleo::{Config, Nucleo};
 
 use view_core::msg::Msg;
 use view_core::native::picker::{PickerItem, Source};
+use view_core::sink::MsgSink;
 
 use crate::picker::sources;
 
@@ -73,7 +74,7 @@ pub enum WorkerRequest {
 /// uses). Long-lived rather than per-session, so a `Files` scan already
 /// walked survives a picker close/reopen instead of re-walking the tree on
 /// every open.
-pub fn spawn(rx: Receiver<WorkerRequest>, tx: SyncSender<Msg>) -> JoinHandle<()> {
+pub fn spawn<S: MsgSink + Send + 'static>(rx: Receiver<WorkerRequest>, tx: S) -> JoinHandle<()> {
     std::thread::spawn(move || run(&rx, &tx))
 }
 
@@ -141,7 +142,7 @@ fn close_session(session: &mut Option<Session>) {
     *session = None;
 }
 
-fn run(rx: &Receiver<WorkerRequest>, tx: &SyncSender<Msg>) {
+fn run<S: MsgSink>(rx: &Receiver<WorkerRequest>, tx: &S) {
     let mut session: Option<Session> = None;
     let mut next = rx.recv();
     while let Ok(request) = next {
@@ -160,11 +161,11 @@ fn run(rx: &Receiver<WorkerRequest>, tx: &SyncSender<Msg>) {
 /// query, or a close -- either stops `stream_until_preempted`'s tick loop
 /// the same way), or whatever `rx.recv()` yields once this one finishes
 /// cleanly instead.
-fn handle_query(
+fn handle_query<S: MsgSink>(
     session: &mut Option<Session>,
     request: MatchRequest,
     rx: &Receiver<WorkerRequest>,
-    tx: &SyncSender<Msg>,
+    tx: &S,
 ) -> Result<WorkerRequest, RecvError> {
     ensure_session(session, &request.source);
     let Some(active) = session.as_mut() else {
@@ -330,11 +331,11 @@ fn seed_resolved(active: &mut Session, items: Vec<PickerItem>) {
 /// before the scan thread exits: nucleo's `tick` matches whatever the
 /// injector has produced so far, and its snapshot reflects that partial
 /// corpus, not the finished one.
-fn stream_until_preempted(
+fn stream_until_preempted<S: MsgSink>(
     active: &mut Session,
     generation: u64,
     rx: &Receiver<WorkerRequest>,
-    tx: &SyncSender<Msg>,
+    tx: &S,
 ) -> Option<WorkerRequest> {
     loop {
         let status = active.nucleo.tick(TICK_BUDGET_MS);
@@ -370,7 +371,7 @@ fn stream_until_preempted(
 /// receiver (the runtime loop exiting) is not an error here: the worker
 /// notices on its next `rx.recv()`, the same as every other unwired-channel
 /// degrade in this workspace.
-fn send_results(active: &mut Session, generation: u64, tx: &SyncSender<Msg>) {
+fn send_results<S: MsgSink>(active: &mut Session, generation: u64, tx: &S) {
     let items = build_results(active);
     let _ = tx.send(Msg::PickerResults { generation, items });
 }

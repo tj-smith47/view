@@ -371,13 +371,19 @@ fn settle_deadline(fixture: &str) -> Duration {
 /// config swapped in below `view`, would measure a plugin-free editor
 /// against baselines recorded with the fixture's full plugin set, report it
 /// as a large improvement, and gate green.
+///
+/// `--nvim-bin` must precede the scratch-file positional: view's CLI
+/// forwards every token after the first positional to nvim verbatim
+/// (`trailing_var_arg`), so the reverse order hands `--nvim-bin <path>` to
+/// nvim itself, which exits on the unknown flag and fails every cell at
+/// engine attach.
 fn view_spec_from(side: SideSetup, bins: EditorBins<'_>) -> SpawnSpec {
     SpawnSpec {
         program: bins.view.to_path_buf(),
         args: vec![
-            side.scratch_file.into_os_string(),
             OsString::from("--nvim-bin"),
             bins.nvim.as_os_str().to_os_string(),
+            side.scratch_file.into_os_string(),
         ],
         env: side.env,
         cwd: Some(side.cwd),
@@ -432,9 +438,9 @@ const FIRST_PAINT_MARKER_LINES: usize = 60;
 fn plant_first_paint_marker(spec: &SpawnSpec) -> Result<()> {
     let target = spec
         .args
-        .first()
+        .last()
         .map(PathBuf::from)
-        .context("a paired spawn spec must open the scratch file as its first argument")?;
+        .context("a paired spawn spec must open the scratch file as its last argument")?;
     let body = std::iter::repeat_n(FIRST_PAINT_MARKER, FIRST_PAINT_MARKER_LINES)
         .collect::<Vec<_>>()
         .join("\n");
@@ -1452,18 +1458,20 @@ mod tests {
     }
 
     #[test]
-    fn both_sides_of_a_pair_open_the_scratch_file_as_their_first_argument() {
+    fn both_sides_of_a_pair_open_the_scratch_file_as_their_last_argument() {
         // what plant_first_paint_marker writes through: if either side's
-        // first argument stopped being the opened file, the marker would
+        // last argument stopped being the opened file, the marker would
         // land somewhere the editor never shows and every first_paint
-        // sample would time out instead of measuring
+        // sample would time out instead of measuring. Last rather than
+        // first because the view side's own flags must precede the
+        // positional -- everything after it is forwarded to nvim verbatim
         let (_world, pair) = paired_specs_for_test();
         for spec in [&pair.view, &pair.nvim] {
-            let first = spec.args.first().map(PathBuf::from);
+            let last = spec.args.last().map(PathBuf::from);
             assert_eq!(
-                first.as_ref().and_then(|p| p.file_name()),
+                last.as_ref().and_then(|p| p.file_name()),
                 Some(std::ffi::OsStr::new("scratch.txt")),
-                "expected the scratch file first, got {:?}",
+                "expected the scratch file last, got {:?}",
                 spec.args
             );
         }
@@ -1473,7 +1481,8 @@ mod tests {
     fn planting_the_marker_writes_it_as_the_buffers_first_line() {
         let (_world, pair) = paired_specs_for_test();
         plant_first_paint_marker(&pair.view).unwrap();
-        let planted = std::fs::read_to_string(PathBuf::from(&pair.view.args[0])).unwrap();
+        let scratch = pair.view.args.last().unwrap();
+        let planted = std::fs::read_to_string(PathBuf::from(scratch)).unwrap();
         assert_eq!(planted.lines().next(), Some(FIRST_PAINT_MARKER));
     }
 

@@ -4,19 +4,19 @@
 //! `view -> crossterm` and `view -> ratatui`: only `view-tui` may touch the
 //! terminal).
 
-use crate::keys::encode_key;
-use crate::mouse::encode_mouse;
 use crate::paint::{overlay_rows, Damage, Shadow};
 use crate::tiers;
-use crossterm::event::{DisableMouseCapture, EnableMouseCapture, Event};
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::backend::Backend;
 use std::cell::RefCell;
 use std::io::Write;
 use std::rc::Rc;
+#[cfg(not(unix))]
 use std::sync::mpsc::SyncSender;
 use view_core::grid::GridDamage;
 use view_core::model::{Model, TermCaps, Tier};
-use view_core::msg::{Key, Msg};
+#[cfg(not(unix))]
+use view_core::msg::Msg;
 use view_surface::{CursorShape, Surface};
 
 /// Owns raw mode and the alternate screen for the lifetime of the value,
@@ -549,7 +549,7 @@ impl Term {
     }
 }
 
-/// The terminal size as the input thread last observed it, readable by the
+/// The terminal size as the input reader last observed it, readable by the
 /// paint loop.
 ///
 /// Not a second source of truth for the size -- [`Model`] stays that -- but
@@ -595,41 +595,25 @@ impl TermSizeCell {
 
 /// Spawns a dedicated thread that blocks on `crossterm::event::read()` and
 /// forwards every key, resize, paste, or mouse event to `tx` as a core
-/// [`Msg`], translating key events via [`encode_key`] and mouse events via
-/// [`encode_mouse`]. Events with no nvim equivalent (key releases, keys
-/// with no notation) are dropped rather than forwarded. Exits once
-/// `crossterm::event::read()` errors or `tx`'s receiver is gone.
+/// [`Msg`] (see [`crate::input::event_to_msg`] for the translation both
+/// platforms share). Exits once `crossterm::event::read()` errors or `tx`'s
+/// receiver is gone.
 ///
-/// Blocking on a dedicated thread rather than polling on the runtime loop's
-/// own thread is what lets the loop's `recv()` wake immediately on a
-/// keystroke: a poll-based drain needs a timeout to bound how long it can go
-/// without checking input, which is exactly the structural latency this
-/// design removes. A blocking `send` (not `try_send`) is deliberate: a
-/// dropped keystroke is never an acceptable loss the way a coalescible
-/// redraw token is, so this thread blocks rather than discards when the
-/// channel is momentarily full.
+/// The non-unix input path only: on unix the runtime loop polls the
+/// terminal fd itself and decodes inline through [`crate::input`], which
+/// deletes this thread's cross-thread wake from the keystroke path. Off
+/// unix there is no portable readiness poll over both the console and a
+/// wake pipe, so the blocking-thread shape stays: it is what lets the
+/// loop's `recv()` wake immediately on a keystroke without a timeout-based
+/// drain. A blocking `send` (not `try_send`) is deliberate: a dropped
+/// keystroke is never an acceptable loss the way a coalescible redraw
+/// token is, so this thread blocks rather than discards when the channel
+/// is momentarily full.
+#[cfg(not(unix))]
 pub fn spawn_input_thread(tx: SyncSender<Msg>, size: TermSizeCell) {
     std::thread::spawn(move || {
         while let Ok(event) = crossterm::event::read() {
-            let msg = match event {
-                Event::Key(k) => {
-                    #[cfg(feature = "bench-taps")]
-                    crate::tap::tap(crate::tap::TAG_KEY_READ);
-                    encode_key(&k).map(|notation| Msg::Key(Key { notation }))
-                }
-                Event::Resize(width, height) => {
-                    // published before the message is queued: the message
-                    // may sit behind a burst of keys or redraw tokens, and
-                    // every frame painted in the meantime would otherwise
-                    // address the terminal's previous shape
-                    size.publish(width, height);
-                    Some(Msg::Resized { width, height })
-                }
-                Event::Paste(text) => Some(Msg::Paste(text)),
-                Event::Mouse(m) => Some(Msg::Mouse(encode_mouse(&m))),
-                _ => None,
-            };
-            if let Some(msg) = msg {
+            if let Some(msg) = crate::input::event_to_msg(event, &size) {
                 if tx.send(msg).is_err() {
                     break;
                 }

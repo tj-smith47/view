@@ -185,7 +185,7 @@ fixture = "minimal"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1719342968313597
-why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. What remains is per-hop wake cost on view's own path: collapsing the runtime-loop-to-writer-thread hop into an inline write took this from 1.3538, and the paint path's hops have not been attacked yet."
+why = "view's own overhead, not the UI protocol's. Four explanations have been falsified by measurement: a thread-hop floor, the pty transport, the instrumentation itself, and being an out-of-process UI at all. The last was settled by the echo_control row, where nvim's own remote UI costs 1.038 against bare nvim on this class. What remains is per-hop wake cost on view's own path: collapsing the runtime-loop-to-writer-thread hop into an inline write took this from 1.3538, and folding the input thread into the runtime poll loop then collapsed the key-decoded->loop-wake segment (52.4 -> 13.9 us p50, 95.9 -> 28.4 us p99) while moving this ratio only 1.215 -> 1.173 and 1.234 -> 1.193 across two same-session A/B pairs (2026-08-08; the pre-change binary re-measured above this accepted value that session, so the paired delta is the trustworthy read). The input side is now within a few us of the pty floor; the residual sits in the rpc-written->redraw-parsed and paint segments, which incremental rendering targets next."
 
 [[shortfall]]
 scenario = "echo"
@@ -193,7 +193,7 @@ fixture = "heavy"
 metric = "ratio_p50"
 class = "dev-linux"
 accepted = 1.1837936337116466
-why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large."
+why = "same residual as echo.minimal on this class. The inline-write change moved it less here (1.2441 -> 1.1838) than on the minimal fixture, which is what a fixed per-keystroke saving does to a round trip whose absolute cost is twice as large. The input-thread/runtime-loop unification measured 1.148 -> 1.125 same-session (2026-08-08), inside the accepted value but still outside the 1.1 budget, so the entry stands at the ratified value pending re-adjudication."
 
 [[shortfall]]
 scenario = "first_paint"
