@@ -50,8 +50,9 @@ impl PaletteState {
     #[must_use]
     pub fn query(&self) -> String {
         format!(
-            "{}{}",
+            "{}{}{}",
             self.cmdline.firstc,
+            self.cmdline.prompt,
             typed_text(&self.cmdline.content)
         )
     }
@@ -199,6 +200,26 @@ mod tests {
     fn a_typed_command_keeps_its_firstc_prefix_in_the_query() {
         let state = PaletteState::new(cmdline(":", "set nu"), None);
         assert_eq!(state.view().query, ":set nu");
+    }
+
+    /// A `:call input("New file: ")`-style prompt carries its label in
+    /// `cmdline.prompt`, not `firstc` (which is empty for this shape) --
+    /// `query` must show it, matching the prefix width
+    /// `cmdline_cursor_col` (in `view-surface`) already counts against.
+    #[test]
+    fn a_prompt_labeled_cmdline_shows_its_label_before_the_typed_text() {
+        let state = PaletteState::new(
+            CmdlineState {
+                content: vec![(0, "foo".to_string())],
+                pos: 3,
+                firstc: String::new(),
+                prompt: "New file: ".to_string(),
+                indent: 0,
+                level: 1,
+            },
+            None,
+        );
+        assert_eq!(state.view().query, "New file: foo");
     }
 
     #[test]

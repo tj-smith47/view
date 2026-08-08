@@ -240,6 +240,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                     _ => {
                         if notation == "<Esc>" {
                             model.pop_overlay();
+                            model.dirty = true;
                         }
                         Vec::new()
                     }
@@ -4239,6 +4240,71 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::TreeGitScan { .. })),
             "no tree is open, so a focus callback must issue no tree              effect: {focus_effects:?}"
+        );
+    }
+
+    #[test]
+    fn notifications_history_invoke_opens_a_message_history_overlay_and_marks_dirty() {
+        let mut m = model();
+        m.dirty = false;
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "notifications".to_string(),
+                verb: "history".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                m.overlays().last().map(|o| &o.kind),
+                Some(OverlayKind::MessageHistory(_))
+            ),
+            "invoking notifications/history must open a MessageHistory overlay: {:?}",
+            m.overlays()
+        );
+        assert!(
+            m.dirty,
+            "opening the message history must mark the model dirty for a repaint"
+        );
+    }
+
+    /// The generic `Focus::Native` `<Esc>` fallback pops whatever overlay is
+    /// on top without a per-kind arm of its own -- MessageHistory is the
+    /// first real inhabitant of that path. A pop that does not mark
+    /// `dirty` leaves the paint loop's `if model.dirty` gate (see
+    /// `view`'s runtime loop) never repainting the frame the overlay just
+    /// vacated, so the stale frame stays on screen until some unrelated
+    /// event happens to set `dirty` again.
+    #[test]
+    fn esc_through_the_generic_native_fallback_closes_message_history_and_marks_dirty() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "notifications".to_string(),
+                verb: "history".to_string(),
+            },
+        );
+        assert!(matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::MessageHistory(_))
+        ));
+        m.dirty = false;
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "<Esc>".into(),
+            }),
+        );
+        assert!(
+            m.overlays().is_empty(),
+            "<Esc> through the generic fallback must close the MessageHistory overlay: {:?}",
+            m.overlays()
+        );
+        assert!(
+            m.dirty,
+            "closing the overlay must mark the model dirty for a repaint"
         );
     }
 }

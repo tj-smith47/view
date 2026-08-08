@@ -219,12 +219,13 @@ fn spawn_view_pty_first_launch() -> ViewPtySession {
     cmd.arg(&paths.scratch);
     common::isolate_xdg_first_launch(&mut cmd, &paths.isolated_home);
 
+    let isolation = shared_isolation();
     let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
 
     let mut session = ViewPtySession {
         session,
         paths,
-        _isolation: shared_isolation(),
+        _isolation: isolation,
     };
     let _ = session.wait_for("~", Duration::from_secs(5));
     session

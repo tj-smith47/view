@@ -10,7 +10,7 @@ pub mod overlay;
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
 use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState};
-use view_core::native::geometry::{Anchor, OverlayBox};
+use view_core::native::geometry::OverlayBox;
 use view_core::native::palette::PaletteState;
 use view_core::native::views::{
     PaletteView, PickerView, PromptView, Span, StatuslineView, TreeView,
@@ -289,7 +289,7 @@ pub fn render(model: &Model) -> Surface {
                 .filter(|pm| pm.is_cmdline_sourced())
                 .cloned();
             let state = PaletteState::new(cmdline.clone(), completion);
-            let rect = palette_box().rect(model.term_width, model.term_height);
+            let rect = palette_rect(model, offset);
             layers.push(overlay::framed(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),
                 LayerKind::Palette(state.view()),
@@ -381,19 +381,27 @@ pub fn render(model: &Model) -> Surface {
             && engine.cmdline.is_some()
             && pm.is_cmdline_sourced();
         if !consumed_by_palette {
-            let row = saturate_u16(pm.row);
-            let col = saturate_u16(pm.col);
-            let width = popupmenu_width(&pm.items).min(grid_w).max(1);
-            let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
-            layers.push(overlay_layer(
-                row,
-                col,
-                width,
-                height,
-                (grid_w, grid_h),
-                offset,
-                LayerKind::Popupmenu(pm.clone()),
-            ));
+            if pm.is_cmdline_sourced() {
+                if let Some(layer) =
+                    cmdline_popupmenu_layer(model, grid_h, offset, engine.cmdline.as_ref(), pm)
+                {
+                    layers.push(layer);
+                }
+            } else {
+                let row = saturate_u16(pm.row);
+                let col = saturate_u16(pm.col);
+                let width = popupmenu_width(&pm.items).min(grid_w).max(1);
+                let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
+                layers.push(overlay_layer(
+                    row,
+                    col,
+                    width,
+                    height,
+                    (grid_w, grid_h),
+                    offset,
+                    LayerKind::Popupmenu(pm.clone()),
+                ));
+            }
         }
     }
     if model.statusline_rows() > 0 {
@@ -468,7 +476,71 @@ fn popupmenu_width(items: &[PmItem]) -> u16 {
 /// written `OverlayBox::new(..)` calls are two chances for that number to
 /// drift apart the next time either one is edited.
 fn palette_box() -> OverlayBox {
-    OverlayBox::new(70, 50).with_anchor(Anchor::Top)
+    OverlayBox::new(70, 50)
+}
+
+/// [`palette_box`] resolved against the terminal, then shifted down by
+/// `offset` (the reserved chrome rows): resolving against a terminal
+/// already shrunk by `offset` before centering, rather than centering
+/// against the full terminal and adding `offset` on top, keeps the box
+/// clear of the tabline row instead of centering through it. [`render`]
+/// (which paints the box) and [`palette_cursor`] (which places the caret
+/// inside it) both resolve through this one function, so the two can never
+/// disagree about where the box actually is.
+fn palette_rect(model: &Model, offset: u16) -> Rect {
+    let rect = palette_box().rect(model.term_width, model.term_height.saturating_sub(offset));
+    Rect::new(
+        rect.row.saturating_add(offset),
+        rect.col,
+        rect.width,
+        rect.height,
+    )
+}
+
+/// Where a cmdline-sourced popupmenu (`pm.grid < 0`) paints when the
+/// palette is off and nothing else already absorbed its rows.
+///
+/// Per the live wire capture
+/// (`docs/palette-popupmenu-source-wire-capture.md`), `pm.row`/`pm.col` are
+/// cmdline-relative, not grid coordinates: `row` counts lines below the
+/// cmdline's own row, `col` counts cells into the typed content only (not
+/// `firstc`/`prompt`). Routing them through [`overlay_layer`]'s grid-space
+/// clamp-then-offset would misread them as an absolute grid position, which
+/// is exactly the bug this fixes -- so this builds the terminal-absolute
+/// rect directly instead. The raw (non-palette) `Cmdline` layer this menu
+/// completes always paints on the grid's own last row, leaving no room to
+/// grow downward, so a `row` that would run past the bottom of the terminal
+/// flips to grow upward from the cmdline instead -- the same flip any popup
+/// placement makes when its preferred side does not fit. `None` when the
+/// popupmenu claims a cmdline source but no cmdline is actually open:
+/// fabricating a position for that combination would show content nothing
+/// else claims to be showing.
+fn cmdline_popupmenu_layer(
+    model: &Model,
+    grid_h: u16,
+    offset: u16,
+    cmdline: Option<&CmdlineState>,
+    pm: &PopupmenuState,
+) -> Option<Layer> {
+    let cmdline = cmdline?;
+    let prefix_cols = cmdline.firstc.chars().count() + cmdline.prompt.chars().count();
+    let cmdline_row = grid_h.saturating_sub(1).saturating_add(offset);
+    let width = popupmenu_width(&pm.items).min(model.term_width).max(1);
+    let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
+    let row_offset = saturate_u16(pm.row);
+    let below = cmdline_row.saturating_add(1).saturating_add(row_offset);
+    let row = if below.saturating_add(height) <= model.term_height {
+        below
+    } else {
+        cmdline_row
+            .saturating_sub(height)
+            .saturating_sub(row_offset)
+    };
+    let col = u16::try_from(prefix_cols)
+        .unwrap_or(u16::MAX)
+        .saturating_add(saturate_u16(pm.col));
+    let rect = Rect::new(row, col, width, height).clamp_to(model.term_width, model.term_height);
+    Some(Layer::unframed(rect, LayerKind::Popupmenu(pm.clone())))
 }
 
 /// Builds one grid-space overlay [`Layer`]: `row`/`col`/`width`/`height`
@@ -590,21 +662,24 @@ fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
         model.overlays().last().map(|open| &open.kind),
         Some(OverlayKind::Prompt(_))
     );
-    let (row, col) = if let Some(cmdline) = &model.engine.cmdline {
-        if !prompt_open && model.palette_enabled {
-            palette_cursor(model, cmdline)
+    // each branch below already resolves in, and adds `offset` in, exactly
+    // the coordinate space its own source rect came from -- a shared tail
+    // add here double-counts `offset` for the palette branch, whose rect
+    // (via `palette_rect`) is offset-inclusive already.
+    let (row, col) = if prompt_open {
+        prompt_cursor(model)
+    } else if let Some(cmdline) = &model.engine.cmdline {
+        if model.palette_enabled {
+            palette_cursor(model, offset, cmdline)
         } else {
             let col = cmdline_cursor_col(cmdline).min(width.saturating_sub(1));
-            (height.saturating_sub(1), col)
+            (height.saturating_sub(1).saturating_add(offset), col)
         }
     } else {
-        model.engine.grid().cursor()
+        let (row, col) = model.engine.grid().cursor();
+        (row.saturating_add(offset), col)
     };
-    Some(CursorSpec {
-        row: row.saturating_add(offset),
-        col,
-        shape,
-    })
+    Some(CursorSpec { row, col, shape })
 }
 
 /// The palette's own cursor position: past its box's frame and pad (see
@@ -613,9 +688,11 @@ fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
 /// palette's header row always draws before the query, then
 /// [`cmdline_cursor_col`] cells further in -- the same column the raw
 /// bottom-line cmdline placed its cursor at, measured from the palette
-/// box's own origin instead of the grid's.
-fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
-    let rect = palette_box().rect(model.term_width, model.term_height);
+/// box's own origin instead of the grid's. Resolves through [`palette_rect`],
+/// the same call [`render`] paints the box through, so the caret can never
+/// land somewhere the box itself was not drawn.
+fn palette_cursor(model: &Model, offset: u16, cmdline: &CmdlineState) -> (u16, u16) {
+    let rect = palette_rect(model, offset);
     let (row_off, col_off) = overlay::interior_origin(rect.width, rect.height);
     let prefix_cols =
         u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
@@ -625,6 +702,44 @@ fn palette_cursor(model: &Model, cmdline: &CmdlineState) -> (u16, u16) {
         .saturating_add(col_off)
         .saturating_add(prefix_cols)
         .saturating_add(cmdline_cursor_col(cmdline))
+        .min(rect.col.saturating_add(rect.width).saturating_sub(1));
+    (row, col)
+}
+
+/// The confirm-prompt's own cursor position: on the second header row
+/// [`overlay::prompt_body`] always draws before its choice list (the
+/// message line first, then `"> "` plus the answer typed so far), past the
+/// end of what has been typed -- correct because [`PromptState::accepts`]
+/// never permits mid-string editing, only append/backspace/submit/cancel,
+/// so the caret is always at the end of `input`. Resolves through
+/// [`Model::overlay_rect`], the same rect [`native_layer`] already paints
+/// the Prompt overlay's own box at (offset-unaware, like every other native
+/// overlay today) -- matching that painted position takes priority over
+/// also closing the box's own separate chrome-offset gap, which is not this
+/// fix's scope. Falls back to the raw grid cursor if the stack's top is
+/// not actually a Prompt, which the caller's own `prompt_open` check
+/// already rules out; the fallback exists only so this function has no
+/// panicking path.
+fn prompt_cursor(model: &Model) -> (u16, u16) {
+    let fallback = model.engine.grid().cursor();
+    let Some(overlay) = model.overlays().last() else {
+        return fallback;
+    };
+    let OverlayKind::Prompt(state) = &overlay.kind else {
+        return fallback;
+    };
+    let view = state.view();
+    let rect = model.overlay_rect(overlay);
+    let (row_off, col_off) = overlay::interior_origin(rect.width, rect.height);
+    let prefix_cols =
+        u16::try_from(format!("{} ", overlay::PROMPT_MARK).chars().count()).unwrap_or(2);
+    let input_len = u16::try_from(view.input.chars().count()).unwrap_or(u16::MAX);
+    let row = rect.row.saturating_add(row_off).saturating_add(1);
+    let col = rect
+        .col
+        .saturating_add(col_off)
+        .saturating_add(prefix_cols)
+        .saturating_add(input_len)
         .min(rect.col.saturating_add(rect.width).saturating_sub(1));
     (row, col)
 }
@@ -1294,6 +1409,55 @@ mod tests {
         assert_eq!(palette.query, ":set nu");
     }
 
+    /// `PaletteState::query` must show `cmdline.prompt` (e.g. `:call
+    /// input("New file: ")`'s label), not just `firstc` plus the typed
+    /// text -- and the cursor, already prompt-aware via
+    /// `cmdline_cursor_col`, must land past that same label rather than the
+    /// two disagreeing about how wide the prefix is.
+    #[test]
+    fn a_prompt_labeled_cmdline_shows_its_label_in_the_palette_and_the_cursor_lands_past_it() {
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model.palette_enabled = true;
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "foo".to_string())],
+                pos: 3,
+                firstc: String::new(),
+                prompt: "New file: ".to_string(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+
+        let palette = surface
+            .layers
+            .iter()
+            .find_map(|l| match &l.kind {
+                LayerKind::Palette(view) => Some(view),
+                _ => None,
+            })
+            .expect("palette layer must be present");
+        assert_eq!(
+            palette.query, "New file: foo",
+            "the prompt label must show in the palette, not just factor into the cursor math"
+        );
+
+        // palette_box() on an 80x24 terminal with no chrome offset centers
+        // to row 6, col 12 (see
+        // the_palette_cursor_lands_inside_its_own_box_not_on_the_grids_bottom_row).
+        // interior_origin adds (1, 2). The "> " prefix is 2 cells, then
+        // cmdline_cursor_col counts the full 10-char "New file: " prompt
+        // plus pos=3.
+        let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
+        assert_eq!(cursor.row, 6 + 1);
+        assert_eq!(cursor.col, 12 + 2 + 2 + 10 + 3);
+    }
+
     #[test]
     fn a_prompt_overlay_suppresses_both_the_raw_cmdline_and_the_palette_layer() {
         // drives the same MsgShow(confirm) + CmdlineShow pair
@@ -1348,6 +1512,92 @@ mod tests {
                 .iter()
                 .any(|l| matches!(l.kind, LayerKind::Palette(_))),
             "a Prompt on top must suppress the palette layer -- the Prompt already shows the input line itself"
+        );
+
+        // OverlayBox::new(60, 40), centered, on an 80x24 terminal with no
+        // chrome offset: width = 80*60/100 = 48, height = 24*40/100 = 9,
+        // row = (24 - 9) / 2 = 7, col = (80 - 48) / 2 = 16.
+        // interior_origin for a 48x9 rect is (1, 2). The input line is the
+        // *second* header row (message first, then "> " + input), so one
+        // more row past interior_origin; the confirm prompt's typed answer
+        // is empty, so the "> " prefix (2 cells) is the whole offset.
+        let cursor = surface
+            .cursor
+            .expect("a cmdline is open behind the prompt, cursor must be Some");
+        assert_eq!(
+            cursor.row,
+            7 + 1 + 1,
+            "the cursor must target the prompt's own input row, not the grid's stale bottom row"
+        );
+        assert_eq!(cursor.col, 16 + 2 + 2);
+    }
+
+    /// Per the wire capture, a cmdline-sourced popupmenu's `row`/`col` are
+    /// relative to the cmdline, not the grid -- and with the palette off,
+    /// the raw Cmdline layer always paints on the grid's own last row, so
+    /// the popup must anchor near that row (flipping to grow upward, since
+    /// nothing fits below the terminal's last row) rather than the wire
+    /// values being read as grid-absolute coordinates.
+    #[test]
+    fn a_cmdline_sourced_popupmenu_positions_relative_to_the_bottom_cmdline_row_when_the_palette_is_off(
+    ) {
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model.palette_enabled = false;
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "set nu".to_string())],
+                pos: 6,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::PopupmenuShow {
+                items: vec![view_core::events::PmItem {
+                    word: "number".into(),
+                    ..Default::default()
+                }],
+                selected: 0,
+                row: 0,
+                col: 4,
+                grid: -1,
+            },
+        );
+
+        let surface = render(&model);
+
+        assert!(
+            surface
+                .layers
+                .iter()
+                .any(|l| matches!(l.kind, LayerKind::Cmdline(_))),
+            "the palette is off, so the raw bottom-line Cmdline layer must still paint"
+        );
+        let popup = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Popupmenu(_)))
+            .expect(
+                "a cmdline-sourced popupmenu must still paint its own layer while the palette \
+                 is off",
+            );
+
+        // the cmdline sits on the grid's last row (23 on a 24-row grid with
+        // no chrome offset); nothing fits below it, so the popup flips to
+        // grow upward from there. `col`, per the wire-capture doc, is
+        // measured from the start of the typed content -- firstc (1 cell,
+        // ":") plus pm.col (4).
+        assert_eq!(popup.rect.row, 22);
+        assert_eq!(popup.rect.col, 5);
+        assert!(
+            popup.rect.row + popup.rect.height <= 24,
+            "the popup must stay on screen, not paint past the bottom of the terminal"
         );
     }
 
@@ -1479,17 +1729,79 @@ mod tests {
 
         let surface = render(&model);
 
-        // palette_box() is OverlayBox::new(70, 50) anchored Top on an
-        // 80x24 terminal: width = 80*70/100 = 56, height = 24*50/100 = 12,
-        // row = 0 (Top-anchored), col = (80 - 56) / 2 = 12. interior_origin
-        // for a 56x12 rect is (1, 2) (border row, border + one pad column).
-        // The header line is "> hello" -- prefix "> " is 2 cells, then
+        // palette_box() is OverlayBox::new(70, 50), centered, on an 80x24
+        // terminal with no chrome offset: width = 80*70/100 = 56,
+        // height = 24*50/100 = 12, row = (24 - 12) / 2 = 6,
+        // col = (80 - 56) / 2 = 12. interior_origin for a 56x12 rect is
+        // (1, 2) (border row, border + one pad column). The header line is
+        // "> hello" -- prefix "> " is 2 cells, then
         // cmdline_cursor_col(":", "", pos=5) = 6.
         let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
         assert_eq!(
-            cursor.row, 1,
+            cursor.row,
+            6 + 1,
             "cursor must sit on the palette's header row, not the grid's bottom row"
         );
         assert_eq!(cursor.col, 12 + 2 + 2 + 6);
+    }
+
+    /// Both the box paint call and the cursor resolve through the same
+    /// [`palette_rect`], so a tabline's reserved chrome row cannot make them
+    /// disagree the way they used to when the cursor added `offset` a
+    /// second time on top of an already offset-shifted box.
+    #[test]
+    fn a_reserved_chrome_row_shifts_the_palette_box_and_its_cursor_by_the_same_amount() {
+        let mut model = model_with_grid(80, 24);
+        model.term_width = 80;
+        model.term_height = 24;
+        model.palette_enabled = true;
+        apply(
+            &mut model,
+            UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "a".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            },
+        );
+        apply(
+            &mut model,
+            UiEvent::CmdlineShow {
+                content: vec![(0, "hello".to_string())],
+                pos: 5,
+                firstc: ":".to_string(),
+                prompt: String::new(),
+                indent: 0,
+                level: 1,
+            },
+        );
+
+        let surface = render(&model);
+
+        let palette_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Palette(_)))
+            .expect("palette layer present");
+        // one row reserved for the tabline: the box's terminal-relative
+        // height budget shrinks to 23 rows before centering, then the
+        // whole box shifts down by that one reserved row --
+        // row = (23 - 11) / 2 + 1 = 7.
+        assert_eq!(palette_layer.rect.row, 7);
+
+        let cursor = surface.cursor.expect("cmdline open, cursor must be Some");
+        assert_eq!(
+            cursor.row,
+            palette_layer.rect.row + 1,
+            "cursor must land on the palette's header row, in the same \
+             chrome-shifted coordinate space as the box it sits inside"
+        );
     }
 }
