@@ -608,6 +608,7 @@ separate processes with view interposed on every keystroke and frame.
 | Session DVR | Visual scrub/replay of what the screen showed, branch from any point, exportable replay file — over the same keystream+frame recording the oracle uses |
 | Key introspector | `:View keys`: which mapping fired, whose it was, what it displaced — live, over the key-claim reporting layer (§5.3) |
 | Image viewing | kitty graphics protocol on the `full` tier (§7), half-block cell fallback below, painted as a native overlay; extends to picker preview and tree hover; the engine keeps the buffer, view supersedes only the paint |
+| Media playback (ruled 2026-08-07) | `view file.mp4` / audio: seamless full-terminal handoff to a detected system `mpv` (terminal video output, audio native to mpv; doctor-guided when absent, never bundled), view resumes on exit; composited in-pane playback arrives with the workspace arc (§15.1) |
 
 `ext_messages` routing — owning messages means owning *dialogs* (it forces
 `cmdheight=0`; the engine's message area ceases to exist):
@@ -801,6 +802,29 @@ implementation starts**: the exact input set parity is claimed over (file
 set, grammar/LSP versions, locales, encodings, terminal sizes). "Parity
 proven" means proven over that manifest — no manifest, no strangling.
 
+### 15.1 Terminal workspace arc (v0.2, ruled 2026-08-07)
+
+The identity extension past v0.1: "use it for anything you can view" —
+files, another machine's tree, pictures, websites, videos — bridging a bare
+server and a minimal desktop experience from one terminal binary. Larger
+lifts explicitly deferred out of v0.1 by the user (2026-08-07); the v0.1
+graphics substrate (§9 image viewing) and media handoff are their seeds.
+
+- **Pane compositor**: generalize the single-grid-plus-overlays surface to N
+  tiled content surfaces (engine grid, browser, media, image, remote tree)
+  with a tiling layout tree; the overlay class persists alongside, per
+  element non-negotiable (notifications), default, or configurable.
+- **Browser pane**: CDP-driven **system** Chromium (`chromiumoxide`) —
+  screencast frames painted through the §9 graphics substrate, input
+  forwarded via the CDP Input domain, qutebrowser-style modal bindings with
+  injected-JS link hints owned by view (theme- and keymap-coherent). The
+  browser is detected, never bundled; `doctor` guides when absent.
+- **In-pane media**: mpv composited into a pane (IPC or libmpv), replacing
+  the v0.1 full-terminal handoff shape.
+- **Servo watch**: the long-term in-process replacement for the CDP path
+  once its embedding API stabilizes and open-web compat suffices;
+  controlled-content surfaces (docs/HTML preview) may adopt it earlier.
+
 ## 16. Release & distribution
 
 - Released by **anodizer** as a tested pair: view binary + pinned nvim per
@@ -828,9 +852,14 @@ P2  Elm core + Surface + input/focus + tiers + ext_cmdline/messages/tabline
 P3  Oracle + compat suite + bench harness + CI gates              ← the moat
 P4  Native features: picker, tree, statusline, toasts, palette + theming
 P5  AI: ACP client, agent panel, context providers, diff review
+P5.5 Invented capabilities (§9, ruled v0.1 core): supervision, remote
+    editing, session DVR, key introspector, image viewing, media handoff —
+    plans authored at the P4 exit, supervision + remote sequenced first
 P6  Polish: multigrid attach + panes, config surface, doctor, docs, tier
     goldens, Windows tier-1 promotion (ConPTY-gated, winserver-validated)
                                                                   ← v0.1
+P7  Workspace arc (§15.1, v0.2): pane compositor, browser pane via CDP,
+    in-pane media
 ```
 
 Every phase ends with: `/verify` clean, its §3.1 budgets measured, its oracle/
@@ -853,6 +882,8 @@ copyable ones (polish).
 | Engine distribution | Bundled pinned pair + override | System nvim default: compat claims float against unknown versions |
 | Native-vs-plugin overlap default | Native wins, per-feature opt-out, runtime supersession only (§5.5) | Defer-to-plugins default (reviewer-recommended): maximally unsurprising, but ships the product hidden — the migration audience would never see what view is |
 | First-release scope (ruled 2026-08-05) | Five invented capabilities (§9: supervision, remote editing, session DVR, key introspector, image viewing) ship in v0.1 as core features alongside AI | Post-v0.1 rollout: differentiation would rest on refined plugin equivalents alone, which reads as repackaged nvim rather than a new category |
+| v0.1 media playback shape (ruled 2026-08-07) | Full-terminal handoff to detected system mpv; doctor-guided | Composited in-pane playback: requires the workspace-arc pane compositor, deferred to v0.2 with it |
+| Browser pane engine (§15.1, v0.2) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
 
 ## 19. Risks
 
