@@ -225,12 +225,37 @@ impl Model {
     /// id it was assigned. The id is the model's to hand out, never the
     /// caller's to choose, so no two open overlays can share one.
     pub fn push_overlay(&mut self, geometry: OverlayBox, kind: OverlayKind) -> OverlayId {
+        let id = self.next_id();
+        self.overlays.push(Overlay { id, geometry, kind });
+        id
+    }
+
+    /// Opens `kind` at `geometry` directly beneath the current topmost
+    /// overlay, leaving focus untouched, for a feature that must not steal
+    /// focus from whatever already holds it -- a picker opening while a
+    /// blocked-engine `Prompt` is topmost is the one caller today (see
+    /// [`OverlayKind::Picker`]'s doc on the stacking rule). Falls back to
+    /// the ordinary top-of-stack position when nothing is open yet, since
+    /// there is no "beneath" to insert under.
+    pub fn insert_overlay_beneath_top(
+        &mut self,
+        geometry: OverlayBox,
+        kind: OverlayKind,
+    ) -> OverlayId {
+        let id = self.next_id();
+        let index = self.overlays.len().saturating_sub(1);
+        self.overlays.insert(index, Overlay { id, geometry, kind });
+        id
+    }
+
+    /// Hands out the next unique overlay id; see [`Model::push_overlay`]'s
+    /// doc on why callers never choose their own.
+    fn next_id(&mut self) -> OverlayId {
         let id = OverlayId(self.next_overlay_id);
         // saturating rather than wrapping: a wrapped counter would reissue
         // an id a live overlay already holds, and no session can open
         // u64::MAX overlays to reach the saturation point
         self.next_overlay_id = self.next_overlay_id.saturating_add(1);
-        self.overlays.push(Overlay { id, geometry, kind });
         id
     }
 
@@ -1013,8 +1038,12 @@ pub enum OverlayKind {
     /// a picker never blocks nvim, so it can sit under a prompt on the
     /// stack: opening a confirm dialog while a picker is open pushes the
     /// prompt on top without closing the picker underneath, and
-    /// [`Model::focus`] resolves to the prompt until it closes. See
-    /// [`crate::native::picker::PickerState`].
+    /// [`Model::focus`] resolves to the prompt until it closes. The same
+    /// rule holds from the other direction too: a `FeatureInvoke` opening a
+    /// picker while a blocked-engine `Prompt` is already topmost inserts it
+    /// beneath the prompt instead of stealing focus (via
+    /// [`Model::insert_overlay_beneath_top`]), rather than pushing on top
+    /// of it. See [`crate::native::picker::PickerState`].
     Picker(crate::native::picker::PickerState),
 }
 

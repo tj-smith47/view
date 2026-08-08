@@ -21,6 +21,9 @@
 //! `matcher::seed_or_scan`).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 
 use nucleo::Injector;
 use view_core::native::picker::PickerItem;
@@ -33,9 +36,24 @@ use view_core::native::picker::PickerItem;
 /// could not stat) is skipped rather than aborting the whole walk: one
 /// unreadable subtree should not hide every other file the picker could
 /// otherwise offer.
-pub fn spawn_file_scan(root: PathBuf, injector: Injector<PickerItem>) {
+///
+/// `cancel` is checked ahead of every entry the walk visits: a caller flips
+/// it to stop the walk before it reaches the end of a possibly huge tree,
+/// e.g. when the `Session` that owns this scan is replaced or torn down
+/// (see `matcher::Session`'s `Drop`) -- without this, closing the picker or
+/// switching sources mid-scan would leave a thread walking a million-entry
+/// tree to completion in the background, pushing into an injector nothing
+/// reads.
+pub fn spawn_file_scan(
+    root: PathBuf,
+    injector: Injector<PickerItem>,
+    cancel: Arc<AtomicBool>,
+) -> JoinHandle<()> {
     std::thread::spawn(move || {
         for entry in ignore::WalkBuilder::new(&root).build() {
+            if cancel.load(Ordering::Acquire) {
+                return;
+            }
             let Ok(entry) = entry else { continue };
             let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
             if !is_file {
@@ -51,5 +69,5 @@ pub fn spawn_file_scan(root: PathBuf, injector: Injector<PickerItem>) {
                 cols[0] = item.label.as_str().into();
             });
         }
-    });
+    })
 }

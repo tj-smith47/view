@@ -364,7 +364,20 @@ fn open_picker(model: &mut Model, source: crate::native::picker::Source) -> Vec<
     let needs_buffer_list = matches!(source, crate::native::picker::Source::Buffers);
     let state = crate::native::picker::PickerState::open(source.clone());
     let generation = state.generation();
-    model.push_overlay(OverlayBox::new(70, 60), OverlayKind::Picker(state));
+    // a blocked-engine Prompt must keep focus: a FeatureInvoke racing its
+    // opening must not steal it out from under the answer nvim is still
+    // waiting on, so this takes the stacking rule OverlayKind::Picker's doc
+    // states for the reverse order (a Prompt arriving over an open picker)
+    // and applies it here too, inserting beneath instead of on top
+    let prompt_is_topmost = matches!(
+        model.overlays().last().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Prompt(_))
+    );
+    if prompt_is_topmost {
+        model.insert_overlay_beneath_top(OverlayBox::new(70, 60), OverlayKind::Picker(state));
+    } else {
+        model.push_overlay(OverlayBox::new(70, 60), OverlayKind::Picker(state));
+    }
     model.dirty = true;
     if needs_buffer_list {
         vec![Effect::Rpc(RpcCall::ListBuffers { generation })]
@@ -2804,6 +2817,152 @@ mod tests {
         // registry row before its own update() handler
         let text = feature_invoke_notice("tree", "open", true);
         assert_eq!(text, "view: no handler for tree open in this build");
+    }
+
+    #[test]
+    fn a_feature_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::MsgShow {
+                kind: "confirm".into(),
+                content: vec![(0, "test".into())],
+                replace_last: false,
+            }]),
+        );
+        let prompt_id = match m.focus() {
+            Focus::Native(id) => id,
+            Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+        };
+        assert!(matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ));
+
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::PickerQuery { .. }]),
+            "opening beneath the prompt must still issue the picker's first \
+             query: {effects:?}"
+        );
+        assert_eq!(
+            m.focus(),
+            Focus::Native(prompt_id),
+            "a picker opening while a blocked prompt is topmost must not \
+             steal its focus"
+        );
+        assert_eq!(
+            m.overlays().len(),
+            2,
+            "the picker must open beneath the prompt, not replace it"
+        );
+        assert!(
+            matches!(m.overlays()[0].kind, OverlayKind::Picker(_)),
+            "the picker must sit beneath the prompt on the stack: {:?}",
+            m.overlays()
+        );
+        assert!(
+            matches!(m.overlays()[1].kind, OverlayKind::Prompt(_)),
+            "the prompt must remain topmost: {:?}",
+            m.overlays()
+        );
+        assert!(
+            m.picker_mut().is_some(),
+            "the picker must still be reachable so a streamed reply can \
+             reach it even while the prompt holds focus"
+        );
+    }
+
+    #[test]
+    fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let picker_id = match m.focus() {
+            Focus::Native(id) => id,
+            Focus::Engine => unreachable!("FeatureInvoke picker files must open a Picker overlay"),
+        };
+
+        // the same real msg_show + cmdline_show pairing
+        // a_confirm_questions_toast_lives_exactly_as_long_as_the_prompt_does
+        // captured against the pinned engine
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::MsgShow {
+                    kind: "confirm".into(),
+                    content: vec![(0, "Save changes?".into())],
+                    replace_last: false,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![
+                UiEvent::CmdlineShow {
+                    content: vec![],
+                    pos: 0,
+                    firstc: String::new(),
+                    prompt: "[Y]es, (N)o: ".into(),
+                    indent: 0,
+                    level: 1,
+                },
+                UiEvent::Flush,
+            ]),
+        );
+
+        let prompt_id = match m.focus() {
+            Focus::Native(id) => id,
+            Focus::Engine => unreachable!("MsgShow must open a Prompt overlay over the picker"),
+        };
+        assert_ne!(
+            prompt_id, picker_id,
+            "the prompt must be a distinct, new overlay"
+        );
+        assert_eq!(
+            m.overlays().len(),
+            2,
+            "the prompt must stack over the picker, not replace it"
+        );
+        assert!(
+            matches!(m.overlays()[0].kind, OverlayKind::Picker(_)),
+            "the picker must remain underneath the prompt: {:?}",
+            m.overlays()
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Redraw(vec![UiEvent::CmdlineHide, UiEvent::Flush]),
+        );
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "y".into(),
+            }),
+        );
+
+        assert_eq!(
+            m.focus(),
+            Focus::Native(picker_id),
+            "resolving the prompt must return focus to the picker underneath it"
+        );
+        assert_eq!(
+            m.overlays().len(),
+            1,
+            "the resolved prompt must be gone from the stack"
+        );
     }
 
     #[test]

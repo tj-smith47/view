@@ -67,6 +67,13 @@ struct Session {
     /// Set once a `Files` scan thread for `source` has started, so a second
     /// query against the same root does not spawn a second walker.
     scan_started: AtomicBool,
+    /// Flipped by this session's own `Drop` to stop a `Files` scan thread
+    /// still walking when the session is replaced or torn down, so an
+    /// abandoned scan does not keep consuming disk and CPU pushing into an
+    /// injector nothing reads anymore. Shared with
+    /// `sources::spawn_file_scan` via `Arc`, so the walker thread observes
+    /// the same flag this session's drop sets.
+    cancel: Arc<AtomicBool>,
 }
 
 impl Session {
@@ -79,7 +86,19 @@ impl Session {
             // nothing for the callback to signal.
             nucleo: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), None, 1),
             scan_started: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
+    }
+}
+
+impl Drop for Session {
+    /// Signals rather than joins: a slow-to-notice walker thread (blocked
+    /// in a disk syscall) must never stall the matcher worker's own
+    /// responsiveness while it waits for the signal to be noticed, so this
+    /// only sets the flag and returns, leaving the walker thread to exit on
+    /// its own time.
+    fn drop(&mut self) {
+        self.cancel.store(true, Ordering::Release);
     }
 }
 
@@ -130,7 +149,11 @@ fn seed_or_scan(active: &mut Session, resolved: Option<Vec<PickerItem>>) {
     }
     if let Source::Files { root } = &active.source {
         if !active.scan_started.swap(true, Ordering::AcqRel) {
-            sources::spawn_file_scan(root.clone(), active.nucleo.injector());
+            let _handle = sources::spawn_file_scan(
+                root.clone(),
+                active.nucleo.injector(),
+                active.cancel.clone(),
+            );
         }
     }
 }
@@ -342,6 +365,123 @@ mod tests {
              scan thread exited"
         );
         producer.join().expect("producer thread panicked");
+    }
+
+    /// A real, on-disk tree under `CARGO_TARGET_TMPDIR` (cargo's own
+    /// per-test-binary scratch directory, cleaned up by cargo's own target
+    /// hygiene rather than the shared system temp directory) -- large
+    /// enough that a walk cancelled shortly after it starts still has most
+    /// of the tree left unvisited, so the disconfirm below stays accurate
+    /// regardless of how fast disk I/O is on the host running it. Removed
+    /// on drop so a failed run does not leave 20,000 files behind.
+    struct CancelTestTree {
+        root: std::path::PathBuf,
+        total: u32,
+    }
+
+    impl CancelTestTree {
+        fn build() -> Self {
+            let nonce = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            );
+            // `CARGO_TARGET_TMPDIR` is integration-test-only (cargo never
+            // populates it for a `#[cfg(test)]` unit test inside a lib
+            // target), so this reaches the workspace's own `target/`
+            // through `CARGO_MANIFEST_DIR` instead -- always set at compile
+            // time, for every target, including under `cargo clippy`
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!("picker-cancel-{nonce}"));
+            let dirs = 200u32;
+            let files_per_dir = 100u32;
+            let mut total = 0u32;
+            for d in 0..dirs {
+                let dir = root.join(format!("d{d}"));
+                std::fs::create_dir_all(&dir).expect("create synthetic cancel-test dir");
+                for f in 0..files_per_dir {
+                    std::fs::write(dir.join(format!("f{f}.rs")), [])
+                        .expect("create synthetic cancel-test file");
+                    total += 1;
+                }
+            }
+            Self { root, total }
+        }
+    }
+
+    impl Drop for CancelTestTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// A falsifiable cancellation check: starts a real `Files` scan,
+    /// replaces its session the way `run()` does on every request whose
+    /// source no longer matches the cached one, and proves the old
+    /// session's walker thread actually stopped rather than running on in
+    /// the background pushing into an injector nothing reads anymore.
+    /// Deterministic rather than a sleep-and-hope: `Injector::injected_items`
+    /// only ever equals `tree.total` once the walk has visited every entry,
+    /// so an observed count strictly below it, once the count has stopped
+    /// growing, can only mean the walk exited early -- disabling the
+    /// `cancel` check in `sources::spawn_file_scan` makes this fail by
+    /// name, since the old session's walker would then run to completion
+    /// and settle at exactly `tree.total`.
+    #[test]
+    fn replacing_a_session_cancels_its_files_scan_in_flight() {
+        let tree = CancelTestTree::build();
+        let mut session: Option<Session> = None;
+        ensure_session(
+            &mut session,
+            &Source::Files {
+                root: tree.root.clone(),
+            },
+        );
+        let active = session
+            .as_mut()
+            .expect("ensure_session always populates session");
+        let injector = active.nucleo.injector();
+        seed_or_scan(active, None);
+
+        let start_deadline = Instant::now() + Duration::from_secs(10);
+        while injector.injected_items() == 0 {
+            assert!(
+                Instant::now() < start_deadline,
+                "the scan never produced a single item"
+            );
+        }
+
+        // the shape `run()` takes on every request whose source no longer
+        // matches the cached one: replaces the session outright, which must
+        // drop -- and so cancel -- the old one's still-running Files scan
+        ensure_session(&mut session, &Source::Buffers);
+
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = injector.injected_items();
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let now = injector.injected_items();
+            if now == last {
+                break;
+            }
+            last = now;
+            assert!(
+                Instant::now() < settle_deadline,
+                "the injected item count never stopped growing after the \
+                 session was replaced"
+            );
+        }
+        assert!(
+            last < tree.total,
+            "expected the old session's scan to stop before walking the \
+             whole {}-entry tree once its session was replaced, got {last} \
+             items",
+            tree.total
+        );
     }
 
     /// Spec 3.1's picker-match row (keystroke -> first results painted,
