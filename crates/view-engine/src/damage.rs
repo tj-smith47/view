@@ -323,6 +323,14 @@ struct Route {
     /// latest generation's answer can still be the one a live picker is
     /// waiting on.
     deferred_buffer_list: Option<Msg>,
+    /// The newest `Msg::PickerPreviewReply` an attached-but-full sink
+    /// refused, held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_buffer_list`]: only
+    /// the latest preview generation's answer is still the one a live
+    /// picker is waiting on, and an older held reply is superseded rather
+    /// than kept.
+    deferred_preview: Option<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -331,6 +339,7 @@ enum Held {
     Probe,
     Claims,
     BufferList,
+    Preview,
 }
 
 impl Route {
@@ -339,6 +348,7 @@ impl Route {
             Held::Probe => &mut self.deferred_probe,
             Held::Claims => &mut self.deferred_claims,
             Held::BufferList => &mut self.deferred_buffer_list,
+            Held::Preview => &mut self.deferred_preview,
         }
     }
 
@@ -346,7 +356,7 @@ impl Route {
     /// still full. Independent of whatever the caller is routing: these
     /// landing or not says nothing about that send.
     fn retry_deferred(&mut self) {
-        for which in [Held::Probe, Held::Claims, Held::BufferList] {
+        for which in [Held::Probe, Held::Claims, Held::BufferList, Held::Preview] {
             let Some(msg) = self.slot(which).take() else {
                 continue;
             };
@@ -482,6 +492,19 @@ impl PumpShared {
     /// "lost".
     pub(crate) fn route_buffer_list(&self, msg: Msg) {
         self.route_held(msg, Held::BufferList);
+    }
+
+    /// Routes a `Msg::PickerPreviewReply` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped preview reply is silent for the rest of that picker
+    /// session: nothing re-issues `RpcCall::PreviewBuffer` on its own, so a
+    /// refused reply that was simply discarded would leave the preview pane
+    /// showing stale or empty content with no way for the user to tell
+    /// "genuinely empty" apart from "lost".
+    pub(crate) fn route_preview(&self, msg: Msg) {
+        self.route_held(msg, Held::Preview);
     }
 
     fn route_held(&self, msg: Msg, which: Held) {

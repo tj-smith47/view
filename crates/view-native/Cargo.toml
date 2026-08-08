@@ -18,6 +18,12 @@ nucleo = "0.5.0"
 # way `rg`/fd do (it is ripgrep's own walker crate), confined to this crate
 # on the same terms as `nucleo`.
 ignore = "0.4.33"
+# The picker's live-grep source: ripgrep's own constituent crates for
+# searching file contents, in-process rather than shelling out to `rg`
+# (spec §18 -- see crates/view-native/src/picker/sources.rs), confined to
+# this crate on the same terms as `nucleo`/`ignore`.
+grep-searcher = "0.1.17"
+grep-regex = "0.1.14"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "0.8"

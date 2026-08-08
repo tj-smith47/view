@@ -276,11 +276,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             Vec::new()
         }
         Msg::PickerResults { generation, items } => {
-            if let Some(p) = model.picker_mut() {
-                p.apply_results(generation, items);
-                model.dirty = true;
-            }
-            Vec::new()
+            let Some(p) = model.picker_mut() else {
+                return Vec::new();
+            };
+            p.apply_results(generation, items);
+            let effects = picker_preview_request(p);
+            model.dirty = true;
+            effects
         }
         // not matched here: the engine's Lua reply lists every listed
         // buffer unconditionally, with no needle to filter by, so the
@@ -327,6 +329,43 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+        // nvim owns all buffer text (see the crate's hard rule): a `loaded:
+        // true` reply is applied straight to the preview pane, but `loaded:
+        // false` means there is no buffer to read from at all, and the only
+        // remaining source of truth is disk -- handed off to
+        // `Effect::PickerPreviewFallback` rather than treated as "nothing to
+        // preview", so a path with no open buffer still gets a preview.
+        Msg::PickerPreviewReply {
+            generation,
+            path,
+            loaded,
+            lines,
+        } => {
+            let Some(p) = model.picker_mut() else {
+                return Vec::new();
+            };
+            if p.preview_generation() != generation {
+                return Vec::new();
+            }
+            if loaded {
+                p.apply_preview(generation, lines);
+                model.dirty = true;
+                Vec::new()
+            } else {
+                vec![Effect::PickerPreviewFallback { generation, path }]
+            }
+        }
+        Msg::PickerPreviewFile { generation, lines } => {
+            let Some(p) = model.picker_mut() else {
+                return Vec::new();
+            };
+            if p.preview_generation() != generation {
+                return Vec::new();
+            }
+            p.apply_preview(generation, lines.unwrap_or_default());
+            model.dirty = true;
+            Vec::new()
+        }
     }
 }
 
@@ -339,6 +378,20 @@ fn feature_invoke_notice(feature: &str, verb: &str, known: bool) -> String {
         format!("view: no handler for {feature} {verb} in this build")
     } else {
         format!("view: {}", crate::native::mappings::render_usage())
+    }
+}
+
+/// Issues an `Effect::Rpc(RpcCall::PreviewBuffer)` for `state`'s current
+/// selection, or no effect at all when there is nothing to preview (an
+/// empty result set, or an unnamed `Buffers` scratch entry -- see
+/// `PickerState::selected_path`'s doc). Shared by every arm that can move
+/// the selection: today that is only `Msg::PickerResults` (no arrow-key/
+/// Enter navigation exists yet), but the seam is named rather than inlined
+/// so a future navigation arm reuses it instead of re-deriving the request.
+fn picker_preview_request(state: &mut crate::native::picker::PickerState) -> Vec<Effect> {
+    match state.refresh_preview() {
+        Some((generation, path)) => vec![Effect::Rpc(RpcCall::PreviewBuffer { path, generation })],
+        None => Vec::new(),
     }
 }
 
@@ -357,7 +410,9 @@ fn picker_source_for_verb(
             root: cwd.to_path_buf(),
         }),
         "buffers" => Some(Source::Buffers),
-        "grep" => Some(Source::LiveGrep),
+        "grep" => Some(Source::LiveGrep {
+            root: cwd.to_path_buf(),
+        }),
         _ => None,
     }
 }
@@ -3007,6 +3062,251 @@ mod tests {
             matches!(effects.as_slice(), [Effect::PickerClose]),
             "closing the picker via Esc must emit exactly Effect::PickerClose: \
              {effects:?}"
+        );
+    }
+
+    /// A candidate landing in `Msg::PickerResults` must itself trigger a
+    /// preview request for the now-selected row -- there is no separate
+    /// navigation message yet, so `PickerResults` is the only place a
+    /// selection is ever established. Disabling `picker_preview_request`'s
+    /// call in that arm makes this fail by name.
+    #[test]
+    fn picker_results_issues_a_preview_request_for_the_selected_candidate() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+
+        let effects = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::Rpc(RpcCall::PreviewBuffer { path, .. })] if path.ends_with("a.rs")
+            ),
+            "a fresh result set must issue exactly one PreviewBuffer request for \
+             the selected candidate: {effects:?}"
+        );
+    }
+
+    /// The falsifiable check `PickerState::apply_preview`'s own doc names,
+    /// driven through `update()`: a reply tagged with a preview generation
+    /// this session has since superseded (a newer selection issued its own
+    /// preview request before the old one answered) must be dropped, not
+    /// merged -- a naive always-apply handler passes every other preview
+    /// test and only this one catches it.
+    #[test]
+    fn a_preview_reply_for_a_stale_generation_is_dropped() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        let stale_generation = m
+            .picker_mut()
+            .expect("picker must be open")
+            .preview_generation();
+
+        // a second result set (still one row, so the selection itself does
+        // not move) allocates a fresh preview generation, superseding the
+        // one just captured
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::PickerPreviewReply {
+                generation: stale_generation,
+                path: "/tmp/a.rs".to_string(),
+                loaded: true,
+                lines: vec!["stale content".to_string()],
+            },
+        );
+
+        assert!(
+            m.picker_mut()
+                .expect("picker must still be open")
+                .view()
+                .preview
+                .is_empty(),
+            "a reply tagged with a superseded preview generation must never reach \
+             the pane"
+        );
+    }
+
+    /// `loaded: true` is applied straight to the preview pane, with no disk
+    /// fallback issued -- the RPC answer already carries nvim's own
+    /// authoritative content, modified-but-unsaved or not (see
+    /// `docs/picker-preview-wire-capture.md` case 3).
+    #[test]
+    fn a_loaded_preview_reply_applies_its_lines_and_issues_no_fallback() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        let preview_generation = m
+            .picker_mut()
+            .expect("picker must be open")
+            .preview_generation();
+
+        let effects = update(
+            &mut m,
+            Msg::PickerPreviewReply {
+                generation: preview_generation,
+                path: "/tmp/a.rs".to_string(),
+                loaded: true,
+                lines: vec![
+                    "modified line one".to_string(),
+                    "modified line two".to_string(),
+                ],
+            },
+        );
+
+        assert!(
+            effects.is_empty(),
+            "a loaded reply must not also issue a disk-fallback effect: {effects:?}"
+        );
+        assert_eq!(
+            m.picker_mut()
+                .expect("picker must still be open")
+                .view()
+                .preview,
+            vec![
+                "modified line one".to_string(),
+                "modified line two".to_string()
+            ]
+        );
+    }
+
+    /// `loaded: false` means nvim has no buffer open for the candidate; the
+    /// only remaining source of truth is disk, handed off to
+    /// `Effect::PickerPreviewFallback` rather than treated as "nothing to
+    /// preview" (see `update`'s `Msg::PickerPreviewReply` arm doc).
+    #[test]
+    fn an_unloaded_preview_reply_issues_a_disk_fallback_effect() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        let preview_generation = m
+            .picker_mut()
+            .expect("picker must be open")
+            .preview_generation();
+
+        let effects = update(
+            &mut m,
+            Msg::PickerPreviewReply {
+                generation: preview_generation,
+                path: "/tmp/a.rs".to_string(),
+                loaded: false,
+                lines: Vec::new(),
+            },
+        );
+
+        assert!(
+            matches!(
+                effects.as_slice(),
+                [Effect::PickerPreviewFallback { generation, path }]
+                    if *generation == preview_generation && path == "/tmp/a.rs"
+            ),
+            "loaded: false must hand off to the disk-fallback effect, echoing the \
+             same generation and path: {effects:?}"
+        );
+    }
+
+    /// `Msg::PickerPreviewFile` is the disk-fallback read's own answer,
+    /// gated on the same preview generation as an RPC reply -- a stale
+    /// fallback landing after a newer selection's own request is issued
+    /// must be dropped on the identical terms.
+    #[test]
+    fn a_picker_preview_file_reply_applies_disk_fallback_lines() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "picker".to_string(),
+                verb: "files".to_string(),
+            },
+        );
+        let generation = m.picker_mut().expect("picker must be open").generation();
+        let _ = update(
+            &mut m,
+            Msg::PickerResults {
+                generation,
+                items: vec![crate::native::picker::PickerItem::new("a.rs")],
+            },
+        );
+        let preview_generation = m
+            .picker_mut()
+            .expect("picker must be open")
+            .preview_generation();
+
+        let effects = update(
+            &mut m,
+            Msg::PickerPreviewFile {
+                generation: preview_generation,
+                lines: Some(vec!["disk line one".to_string()]),
+            },
+        );
+
+        assert!(effects.is_empty());
+        assert_eq!(
+            m.picker_mut()
+                .expect("picker must still be open")
+                .view()
+                .preview,
+            vec!["disk line one".to_string()]
         );
     }
 

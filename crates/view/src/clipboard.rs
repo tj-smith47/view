@@ -458,6 +458,13 @@ mod tests {
         fn list_buffers(&self, _generation: u64) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn preview_buffer(
+            &self,
+            _path: &str,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
     }
 
     #[test]

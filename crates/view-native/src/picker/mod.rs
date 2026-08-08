@@ -4,4 +4,5 @@
 //! is a background thread and the `nucleo`/`ignore` handles it drives.
 
 pub mod matcher;
+pub mod preview;
 mod sources;

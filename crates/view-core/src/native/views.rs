@@ -132,6 +132,10 @@ pub struct PickerView {
     /// nothing rather than being clamped onto a row the feature did not
     /// choose.
     pub selected: Option<usize>,
+    /// The preview pane's lines for the currently selected candidate, empty
+    /// until a preview reply (RPC or disk-fallback) has landed for it -- see
+    /// `docs/picker-preview-wire-capture.md`.
+    pub preview: Vec<String>,
 }
 
 impl PickerView {
@@ -180,6 +184,15 @@ impl PickerView {
     pub fn with_selected(self, index: usize) -> Self {
         Self {
             selected: Some(index),
+            ..self
+        }
+    }
+
+    /// The same view with `lines` shown in the preview pane.
+    #[must_use]
+    pub fn with_preview(self, lines: Vec<String>) -> Self {
+        Self {
+            preview: lines,
             ..self
         }
     }

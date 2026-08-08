@@ -80,6 +80,14 @@ enum Waiter {
     /// query has since superseded can be dropped by `update()` instead of
     /// clobbering it.
     BufferList { generation: u64 },
+    /// An async picker-preview lookup for a candidate path (see
+    /// [`EngineHandle::request_preview`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::PickerPreviewReply`, tagged with `generation` (dropped by
+    /// `update()` if a later query has since superseded it) and `path`
+    /// (echoed back since the reply itself carries no path -- the picker's
+    /// selection may have moved on by the time this lands).
+    Preview { generation: u64, path: String },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -371,6 +379,27 @@ impl EngineHandle {
                                     pump.route_buffer_list(Msg::PickerBufferList {
                                         generation,
                                         names,
+                                    });
+                                }
+                            }
+                            Some(Waiter::Preview { generation, path }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "no buffer
+                                    // loaded" (loaded: false), the same
+                                    // "safe default over a stuck generation"
+                                    // precedent decode_buffer_list_reply and
+                                    // decode_hl_probe_reply already follow --
+                                    // see docs/picker-preview-wire-capture.md
+                                    let (loaded, lines) = if error == Value::Nil {
+                                        decode_preview_reply(&result)
+                                    } else {
+                                        (false, Vec::new())
+                                    };
+                                    pump.route_preview(Msg::PickerPreviewReply {
+                                        generation,
+                                        path,
+                                        loaded,
+                                        lines,
                                     });
                                 }
                             }
@@ -761,6 +790,30 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::BufferList { generation })
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into the picker preview pane's text for `path` and routed to the
+    /// connection's pump as `Msg::PickerPreviewReply` (see
+    /// [`Waiter::Preview`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe). Takes `path` in addition to
+    /// `generation` (unlike [`request_buffer_list`](Self::request_buffer_list)):
+    /// the eventual reply carries no path of its own, so the waiter must
+    /// hold it to echo back.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_preview(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+        path: String,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::Preview { generation, path })
+    }
+
     /// Allocates a msgid, registers `waiter`, and enqueues the encoded
     /// request, without a synchronous receiver for anything to block on.
     /// Shared by every async request wrapper; how the eventual `Response` is
@@ -948,6 +1001,35 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
             Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
         })
         .collect()
+}
+
+/// Decodes a picker-preview reply's `loaded`/`lines` keys, live-verified
+/// against a real `nvim --clean --headless` (see
+/// `docs/picker-preview-wire-capture.md`): `loaded: false` carries no
+/// `lines` key at all, so `lines` is read only once `loaded` is confirmed
+/// `true`, and a non-map/malformed `result` this crate has not actually seen
+/// from the pinned engine degrades to `(false, [])` -- the same "absent or
+/// malformed is exactly as informative as an explicit false" precedent
+/// `decode_hl_probe_reply` follows.
+fn decode_preview_reply(result: &Value) -> (bool, Vec<String>) {
+    let Some(pairs) = result.as_map() else {
+        return (false, Vec::new());
+    };
+    let loaded = crate::wire::map_find(pairs, "loaded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !loaded {
+        return (false, Vec::new());
+    }
+    let lines = crate::wire::map_find(pairs, "lines")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    (true, lines)
 }
 
 /// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map
@@ -1381,6 +1463,48 @@ mod tests {
 
         let future = h.request("nvim_eval", vec![]);
         assert!(matches!(future, Err(EngineError::Closed)));
+    }
+
+    #[test]
+    fn decode_preview_reply_loaded_false_carries_no_lines() {
+        // wire-verified, docs/picker-preview-wire-capture.md case 1/4:
+        // {'loaded': False} with no 'lines' key at all
+        let result = Value::Map(vec![(Value::from("loaded"), Value::from(false))]);
+        assert_eq!(decode_preview_reply(&result), (false, Vec::new()));
+    }
+
+    #[test]
+    fn decode_preview_reply_loaded_true_decodes_modified_buffer_lines() {
+        // wire-verified, docs/picker-preview-wire-capture.md case 3 (the
+        // load-bearing one): a modified-but-unsaved buffer's in-memory
+        // content, not the still-unmodified file on disk
+        let result = Value::Map(vec![
+            (Value::from("loaded"), Value::from(true)),
+            (
+                Value::from("lines"),
+                Value::Array(vec![
+                    Value::from("modified line one"),
+                    Value::from("modified line two"),
+                    Value::from("modified line three"),
+                ]),
+            ),
+        ]);
+        assert_eq!(
+            decode_preview_reply(&result),
+            (
+                true,
+                vec![
+                    "modified line one".to_string(),
+                    "modified line two".to_string(),
+                    "modified line three".to_string(),
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn decode_preview_reply_non_map_result_decodes_to_not_loaded() {
+        assert_eq!(decode_preview_reply(&Value::Nil), (false, Vec::new()));
     }
 
     #[test]

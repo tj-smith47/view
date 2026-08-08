@@ -94,6 +94,10 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the list (see
     /// `Msg::PickerBufferList`).
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
+    /// Resolves the picker preview pane's text for `path`, tagged
+    /// `generation`; never blocks, and never itself returns the answer (see
+    /// `Msg::PickerPreviewReply`).
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -139,6 +143,9 @@ impl EngineOps for EngineHandle {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.list_buffers(generation)
+    }
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.preview_buffer(path, generation)
     }
 }
 
@@ -189,6 +196,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         (**self).list_buffers(generation)
+    }
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).preview_buffer(path, generation)
     }
 }
 
@@ -337,6 +347,9 @@ impl<E: EngineOps> Executor<E> {
                         self.ops.register_clipboard(channel_id)
                     }
                     RpcCall::ListBuffers { generation } => self.ops.list_buffers(generation),
+                    RpcCall::PreviewBuffer { path, generation } => {
+                        self.ops.preview_buffer(&path, generation)
+                    }
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -479,6 +492,24 @@ impl<E: EngineOps> Executor<E> {
             Effect::PickerClose => {
                 if let Some(tx) = &self.picker {
                     let _ = tx.send(view_native::picker::matcher::WorkerRequest::Close);
+                }
+                Flow::Continue
+            }
+            // `Msg::PickerPreviewReply` already reported `loaded: false`:
+            // nvim has no buffer open for `path`, so this is a plain
+            // `std::fs` read, off the paint loop, reusing the loop's own
+            // message channel the same way `ScheduleToastExpiry` does --
+            // `view-native` never opens an RPC connection, and this is the
+            // one place allowed to depend on both `view-engine` and
+            // `view-native` (see `docs/picker-preview-wire-capture.md`).
+            Effect::PickerPreviewFallback { generation, path } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let lines =
+                            view_native::picker::preview::read_file(std::path::Path::new(&path));
+                        let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
+                    });
                 }
                 Flow::Continue
             }
@@ -874,6 +905,9 @@ impl EngineOps for FakeOps {
     }
     fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("list_buffers({generation})"))
+    }
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("preview_buffer({path},{generation})"))
     }
 }
 

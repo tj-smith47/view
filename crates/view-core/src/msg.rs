@@ -200,6 +200,32 @@ pub enum Msg {
         generation: u64,
         names: Vec<String>,
     },
+    /// The decoded answer to one `RpcCall::PreviewBuffer`, resolving the
+    /// preview pane's text for the picker's selected candidate; see
+    /// `docs/picker-preview-wire-capture.md`. `path` echoes back the path
+    /// the request was issued for (the selection may have moved on by the
+    /// time this lands, and the applier needs to know which candidate this
+    /// answers, not only which generation). `loaded` is `false` exactly
+    /// when nvim has no buffer open for `path` -- `lines` is empty in that
+    /// case, and the applier's next step is `Effect::PickerPreviewFallback`,
+    /// never this reply's own empty `lines` misread as "an empty file".
+    /// Generation-gated on the same terms as `PickerResults`.
+    PickerPreviewReply {
+        generation: u64,
+        path: String,
+        loaded: bool,
+        lines: Vec<String>,
+    },
+    /// The disk-fallback read `Effect::PickerPreviewFallback` requested,
+    /// for a candidate `PickerPreviewReply` reported `loaded: false` for.
+    /// `lines` is `None` for a path that does not exist or could not be
+    /// read as UTF-8 -- the preview pane shows nothing rather than a
+    /// misleading placeholder for either. Generation-gated on the same
+    /// terms as `PickerResults`.
+    PickerPreviewFile {
+        generation: u64,
+        lines: Option<Vec<String>>,
+    },
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -446,10 +472,13 @@ pub enum Effect {
     /// per the crate boundary -- see `update::update`'s `PickerBufferList`
     /// arm). `Some` replaces the worker's cached corpus for `source` before
     /// matching; `None` reuses whatever corpus is already cached for it,
-    /// which is every query after the first for `Source::Files`/
-    /// `Source::LiveGrep` (the worker walks those itself, once, on the
-    /// first query) and every query after the seeding one for
-    /// `Source::Buffers`.
+    /// which is every query after the first for `Source::Files` (the worker
+    /// walks the tree itself, once, on the first query) and every query
+    /// after the seeding one for `Source::Buffers`. `Source::LiveGrep` never
+    /// takes this path: the query text is the search pattern itself, not a
+    /// fuzzy filter over a static corpus, so the worker re-walks and
+    /// re-searches on every distinct query rather than caching a corpus to
+    /// filter.
     PickerQuery {
         generation: u64,
         needle: String,
@@ -469,6 +498,19 @@ pub enum Effect {
     /// Carries no fields: the worker keeps at most one session alive at a
     /// time, so "close it" needs no source or generation to disambiguate.
     PickerClose,
+    /// Reads `path` from disk off the paint loop, for a preview candidate
+    /// `Msg::PickerPreviewReply` reported `loaded: false` for -- nvim has no
+    /// buffer open for it, so there is no RPC content to read instead. The
+    /// read itself is plain `std::fs` I/O in `view-native`
+    /// (`view_native::picker::preview::read_file`), never RPC: only
+    /// `view-engine` speaks RPC, and this path exists precisely because RPC
+    /// already answered "nothing to read here." `generation` is
+    /// `PickerState::generation` at the moment `update()` emitted this, the
+    /// same contract every other picker generation carries.
+    PickerPreviewFallback {
+        generation: u64,
+        path: String,
+    },
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
@@ -642,6 +684,19 @@ pub enum RpcCall {
     /// `nvim_exec_lua` chunk and its `buflisted`-filtered, error-degrades-
     /// to-empty contract.
     ListBuffers {
+        generation: u64,
+    },
+    /// Looks up `path`'s content through any loaded nvim buffer, for the
+    /// picker preview pane, tagged `generation` (`PickerState::generation`
+    /// at the moment `update()` emitted this). Async like `ListBuffers`:
+    /// the reply decodes on the reader thread and routes back as
+    /// `Msg::PickerPreviewReply`. See `docs/picker-preview-wire-capture.md`
+    /// for the exact `nvim_exec_lua` chunk and its `loaded`-flagged,
+    /// error-degrades-to-`loaded: false` contract -- nvim owns all buffer
+    /// text, so a modified-but-unsaved buffer must answer with its
+    /// modified content, never the still-unmodified file on disk.
+    PreviewBuffer {
+        path: String,
         generation: u64,
     },
 }

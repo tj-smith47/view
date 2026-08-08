@@ -161,7 +161,7 @@ fn handle_query(
         // exists only so the match stays total for the borrow checker.
         return rx.recv();
     };
-    seed_or_scan(active, request.resolved);
+    seed_or_scan(active, request.resolved, &request.needle);
     active.nucleo.pattern.reparse(
         0,
         &request.needle,
@@ -187,22 +187,60 @@ fn ensure_session(session: &mut Option<Session>, source: &Source) {
 
 /// Applies this request's corpus update: a `Buffers` seed (pre-gathered by
 /// `view-engine`, since only it can speak RPC -- see `Effect::PickerQuery`'s
-/// `resolved` field doc) replaces the cached corpus outright, while a
-/// `Files` source starts its background walk at most once per session.
-fn seed_or_scan(active: &mut Session, resolved: Option<Vec<PickerItem>>) {
+/// `resolved` field doc) replaces the cached corpus outright; a `Files`
+/// source starts its background walk at most once per session; a
+/// `LiveGrep` source re-walks and re-searches on every call, cancelling
+/// whatever scan it started for the previous query (see
+/// [`restart_live_grep`] -- `Effect::PickerQuery`'s doc names this as the
+/// one source that never reuses a cached corpus).
+fn seed_or_scan(active: &mut Session, resolved: Option<Vec<PickerItem>>, needle: &str) {
     if let Some(items) = resolved {
         seed_resolved(active, items);
         return;
     }
-    if let Source::Files { root } = &active.source {
-        if !active.scan_started.swap(true, Ordering::AcqRel) {
-            let _handle = sources::spawn_file_scan(
-                root.clone(),
-                active.nucleo.injector(),
-                active.cancel.clone(),
-            );
+    match &active.source {
+        Source::Files { root } => {
+            if !active.scan_started.swap(true, Ordering::AcqRel) {
+                let _handle = sources::spawn_file_scan(
+                    root.clone(),
+                    active.nucleo.injector(),
+                    active.cancel.clone(),
+                );
+            }
         }
+        Source::LiveGrep { root } => restart_live_grep(active, root.clone(), needle),
+        // `Buffers`, and any future `Source` variant `view-core` adds: this
+        // module never gets ahead of that enum (it is `#[non_exhaustive]`
+        // for exactly this reason) -- a genuinely new source's own scan is
+        // added here explicitly, never inferred from a wildcard arm.
+        _ => {}
     }
+}
+
+/// Cancels whatever `LiveGrep` scan is still populating `active`'s injector
+/// for a prior query (this session's `cancel` flag is swapped for a fresh
+/// one rather than reused, since a `LiveGrep` session's scan restarts on
+/// every query -- unlike `Files`, whose single-scan-per-session shape lets
+/// `Session::new`'s original flag live for the session's whole lifetime),
+/// clears the matcher's snapshot, and starts a new scan for `needle`
+/// against `root`. An empty `needle` starts no scan at all: searching every
+/// line of every file for nothing is not a query, it is the entire
+/// worktree's content, which is neither what a user typing a live-grep
+/// query wants to see first nor a payload worth pushing through the
+/// injector.
+fn restart_live_grep(active: &mut Session, root: std::path::PathBuf, needle: &str) {
+    active.cancel.store(true, Ordering::Release);
+    active.cancel = Arc::new(AtomicBool::new(false));
+    active.nucleo.restart(true);
+    if needle.is_empty() {
+        return;
+    }
+    let _handle = sources::spawn_live_grep_scan(
+        root,
+        needle.to_string(),
+        active.nucleo.injector(),
+        active.cancel.clone(),
+    );
 }
 
 /// Replaces the cached instance's corpus wholesale with `items`, clearing
@@ -495,7 +533,7 @@ mod tests {
             .as_mut()
             .expect("ensure_session always populates session");
         let injector = active.nucleo.injector();
-        seed_or_scan(active, None);
+        seed_or_scan(active, None, "");
 
         let start_deadline = Instant::now() + Duration::from_secs(10);
         while injector.injected_items() == 0 {
@@ -562,7 +600,7 @@ mod tests {
             .as_mut()
             .expect("ensure_session always populates session");
         let injector = active.nucleo.injector();
-        seed_or_scan(active, None);
+        seed_or_scan(active, None, "");
 
         let start_deadline = Instant::now() + Duration::from_secs(10);
         while injector.injected_items() == 0 {
@@ -601,6 +639,119 @@ mod tests {
             "expected the scan to stop before walking the whole \
              {}-entry tree once the picker was closed, got {last} items",
             tree.total
+        );
+    }
+
+    /// A real, on-disk tree whose every file's content matches the same
+    /// needle (`"target"`), so a `LiveGrep` scan against it has plenty of
+    /// matching lines still left to find when a follow-up query preempts it
+    /// -- the content analogue of `CancelTestTree`'s "large enough that a
+    /// cancel lands mid-walk" property, needed because `LiveGrep`'s scan
+    /// must actually be reading and matching file content, not merely
+    /// enumerating paths, for a cancellation mid-scan to be meaningful.
+    struct GrepCancelTestTree {
+        root: std::path::PathBuf,
+    }
+
+    impl GrepCancelTestTree {
+        fn build() -> Self {
+            let nonce = format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or_default()
+            );
+            let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/tmp")
+                .join(format!("picker-grep-cancel-{nonce}"));
+            for d in 0..200u32 {
+                let dir = root.join(format!("d{d}"));
+                std::fs::create_dir_all(&dir).expect("create synthetic grep-cancel dir");
+                for f in 0..20u32 {
+                    let body = "one target line\nanother target line\nno match here\n";
+                    std::fs::write(dir.join(format!("f{f}.rs")), body)
+                        .expect("create synthetic grep-cancel file");
+                }
+            }
+            Self { root }
+        }
+    }
+
+    impl Drop for GrepCancelTestTree {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    /// The same falsifiable cancellation shape
+    /// `replacing_a_session_cancels_its_files_scan_in_flight` proves for
+    /// `Files`, for `LiveGrep`'s own per-query restart instead of a
+    /// session-replacement teardown: a second query against the *same*
+    /// `LiveGrep` session must stop the first query's still-running scan,
+    /// not let it keep pushing matches for a needle the picker no longer
+    /// shows. Disabling the `cancel` check in `sources::spawn_live_grep_scan`
+    /// makes this fail by name, the same way disabling it in
+    /// `spawn_file_scan` makes the `Files` cancellation test fail.
+    #[test]
+    fn a_new_live_grep_query_cancels_the_previous_scan_in_flight() {
+        let tree = GrepCancelTestTree::build();
+        let mut session: Option<Session> = None;
+        ensure_session(
+            &mut session,
+            &Source::LiveGrep {
+                root: tree.root.clone(),
+            },
+        );
+        let active = session
+            .as_mut()
+            .expect("ensure_session always populates session");
+        seed_or_scan(active, None, "target");
+        // obtained AFTER the scan starts, not before: `Nucleo::restart`
+        // (which `seed_or_scan`'s `LiveGrep` arm calls on every query, see
+        // `restart_live_grep`) disconnects any injector handle acquired
+        // ahead of it from the instance the new scan actually pushes into
+        // -- `seed_resolved`'s own restart-then-`injector()` order is the
+        // same precedent.
+        let injector = active.nucleo.injector();
+
+        let start_deadline = Instant::now() + Duration::from_secs(10);
+        while injector.injected_items() == 0 {
+            assert!(
+                Instant::now() < start_deadline,
+                "the grep scan never produced a single match"
+            );
+        }
+
+        // the shape `run()` takes on every subsequent query against a
+        // session whose source is unchanged: `seed_or_scan` itself must
+        // cancel the previous query's scan before starting the new one
+        seed_or_scan(active, None, "no-such-needle-anywhere");
+
+        let settle_deadline = Instant::now() + Duration::from_secs(5);
+        let mut last = injector.injected_items();
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            let now = injector.injected_items();
+            if now == last {
+                break;
+            }
+            last = now;
+            assert!(
+                Instant::now() < settle_deadline,
+                "the injected item count never stopped growing after the \
+                 query changed"
+            );
+        }
+        // 200 dirs * 20 files * 2 matching lines each = 8,000 possible
+        // matches for "target"; the second query's needle matches nothing,
+        // so any growth past this point can only be the stale first scan
+        // still running
+        assert!(
+            last < 8_000,
+            "expected the first query's scan to stop before matching every \
+             line in the tree once a new query preempted it, got {last} items"
         );
     }
 

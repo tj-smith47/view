@@ -38,11 +38,7 @@ fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
-/// What a picker session searches. `LiveGrep` is declared here so
-/// `PickerState::open` is total over the picker's whole feature surface, but
-/// no worker matches against it yet: a session opened with it emits queries
-/// the matcher currently answers with an empty result set, never with a
-/// compile error or a panic.
+/// What a picker session searches.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
@@ -53,8 +49,12 @@ pub enum Source {
     /// `buflisted`), resolved from engine state -- see
     /// `docs/picker-buffer-list-wire-capture.md`.
     Buffers,
-    /// A live `ripgrep`-style content search, not yet matched by any worker.
-    LiveGrep,
+    /// A live `ripgrep`-style content search under `root`: the query text is
+    /// the search pattern itself, matched against file content in-process
+    /// (`view_native::picker::sources::spawn_live_grep_scan`), not a fuzzy
+    /// filter over a pre-walked corpus -- see [`Source::LiveGrep`]'s
+    /// re-scan-per-query contract documented on `Effect::PickerQuery`.
+    LiveGrep { root: PathBuf },
 }
 
 /// One candidate the matcher scored: its display text and the byte ranges
@@ -94,6 +94,23 @@ pub struct PickerState {
     generation: u64,
     items: Vec<PickerItem>,
     selected: usize,
+    /// The generation stamped on the most recent preview request this
+    /// session issued (RPC or disk-fallback) -- a fresh preview counter
+    /// rather than reusing `generation`, since a query result landing does
+    /// not by itself mean the previously requested preview is stale (the
+    /// selected candidate can be unchanged across a result set that only
+    /// reordered other rows). `0` before any preview has ever been
+    /// requested, the same reserved sentinel `next_generation`'s doc names.
+    preview_generation: u64,
+    /// The candidate path the current `preview_lines` belongs to, or the
+    /// path most recently requested while a reply is still in flight.
+    preview_path: Option<String>,
+    /// The preview pane's last-known-good content. Left in place across a
+    /// selection change until the new selection's own reply lands, rather
+    /// than cleared immediately: a picker with a fast typist and a slow
+    /// preview round trip should never flash an empty pane between every
+    /// keystroke.
+    preview_lines: Vec<String>,
 }
 
 impl PickerState {
@@ -110,6 +127,9 @@ impl PickerState {
             generation: next_generation(),
             items: Vec::new(),
             selected: 0,
+            preview_generation: 0,
+            preview_path: None,
+            preview_lines: Vec::new(),
         }
     }
 
@@ -164,6 +184,72 @@ impl PickerState {
         }
     }
 
+    /// The full path a preview should be issued for, resolved from the
+    /// currently selected candidate and this session's source. `None` for
+    /// an empty result set, or for a `Buffers` selection with no real name
+    /// (nvim's own unnamed scratch buffer, displayed as `[No Name]` -- see
+    /// `docs/picker-buffer-list-wire-capture.md`): there is nothing on disk
+    /// or in a named buffer to preview for either.
+    #[must_use]
+    pub fn selected_path(&self) -> Option<String> {
+        let item = self.items.get(self.selected)?;
+        match &self.source {
+            Source::Files { root } => Some(join_display(root, &item.label)),
+            Source::Buffers => {
+                if item.label == "[No Name]" {
+                    None
+                } else {
+                    Some(item.label.clone())
+                }
+            }
+            // a live-grep row's label is "{relative path}:{line}: {text}"
+            // (see `view_native::picker::sources::spawn_live_grep_scan`);
+            // the path is everything before the first ':'.
+            Source::LiveGrep { root } => {
+                let rel = item.label.split(':').next()?;
+                Some(join_display(root, rel))
+            }
+        }
+    }
+
+    /// Allocates a fresh preview generation for the currently selected
+    /// candidate and records it as this session's outstanding preview
+    /// request, or does nothing (returning `None`) when there is no
+    /// selection to preview. The caller issues the actual
+    /// `Effect::Rpc(RpcCall::PreviewBuffer)` with the returned pair -- this
+    /// method only allocates the generation, mirroring `PickerState::open`'s
+    /// own "allocate, do not itself emit an effect" contract.
+    pub fn refresh_preview(&mut self) -> Option<(u64, String)> {
+        let path = self.selected_path()?;
+        let generation = next_generation();
+        self.preview_generation = generation;
+        self.preview_path = Some(path.clone());
+        Some((generation, path))
+    }
+
+    /// This session's outstanding preview generation, for a caller (the
+    /// disk-fallback path) that needs to re-tag a follow-up request with the
+    /// same generation an RPC reply already carried, rather than allocating
+    /// a new one that would make the fallback its own, separately-gated
+    /// request.
+    #[must_use]
+    pub fn preview_generation(&self) -> u64 {
+        self.preview_generation
+    }
+
+    /// Applies a preview reply (from RPC or disk-fallback) if `generation`
+    /// still matches the outstanding request, the same stale-drop contract
+    /// [`PickerState::apply_results`] documents for `PickerState::generation`.
+    /// A dropped reply leaves `preview_lines` exactly as it was -- the last
+    /// known content for whatever the previous selection was stays visible
+    /// rather than being cleared by an answer that no longer applies.
+    pub fn apply_preview(&mut self, generation: u64, lines: Vec<String>) {
+        if generation != self.preview_generation {
+            return;
+        }
+        self.preview_lines = lines;
+    }
+
     /// This session's paint-facing projection: the query line, the
     /// candidate rows with their matched substrings carrying
     /// [`StyleRole::Match`], and which row is highlighted.
@@ -172,17 +258,31 @@ impl PickerState {
         let title = match &self.source {
             Source::Files { .. } => "Files",
             Source::Buffers => "Buffers",
-            Source::LiveGrep => "Live Grep",
+            Source::LiveGrep { .. } => "Live Grep",
         };
         let rows = self.items.iter().map(item_spans).collect();
         let mut view = PickerView::new(title)
             .with_query(self.query.clone())
-            .with_span_rows(rows);
+            .with_span_rows(rows)
+            .with_preview(self.preview_lines.clone());
         if !self.items.is_empty() {
             view = view.with_selected(self.selected);
         }
         view
     }
+}
+
+/// Joins `root` and `rel` as a path and renders it back to a `String` for
+/// the RPC/disk-read call sites that need one -- `PathBuf` itself never
+/// crosses into `Msg`/`Effect` (they carry plain `String`s, the same choice
+/// every other picker field here makes), and `to_string_lossy` is
+/// acceptable here for the same reason it is in
+/// `view_native::picker::sources::spawn_file_scan`: a path with invalid
+/// UTF-8 is vanishingly rare on the platforms this project targets, and a
+/// lossily-rendered preview path degrades to "wrong preview" rather than a
+/// panic.
+fn join_display(root: &std::path::Path, rel: &str) -> String {
+    root.join(rel).to_string_lossy().into_owned()
 }
 
 /// A single non-`<`-prefixed character, or `None` for an empty string, a

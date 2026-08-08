@@ -337,6 +337,24 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return out";
 
+/// Resolves the picker preview pane's text for a candidate path, verified
+/// live against the pinned engine -- see
+/// `docs/picker-preview-wire-capture.md` for the captured reply shapes
+/// (`loaded`/`lines`) this chunk's `nvim_buf_is_loaded`/name-match lookup
+/// produces, and the load-bearing case (a modified-but-unsaved buffer
+/// answers with its modified content, never the file on disk). Constant,
+/// like every other chunk here: no caller data is interpolated into it --
+/// the candidate path travels as `nvim_exec_lua`'s positional vararg
+/// instead, the same convention `REGISTER_MAPPINGS_CHUNK` uses.
+const PREVIEW_CHUNK: &str = "\
+local path = ...
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and vim.api.nvim_buf_get_name(buf) == path then
+    return { loaded = true, lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false) }
+  end
+end
+return { loaded = false }";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -990,6 +1008,34 @@ impl EngineHandle {
             "nvim_exec_lua",
             vec![Value::from(BUFFER_LIST_CHUNK)],
             generation,
+        )
+    }
+
+    /// Issues [`PREVIEW_CHUNK`] as an async request tagged with `generation`,
+    /// resolving the picker preview pane's text for `path`. Async by
+    /// construction, like [`list_buffers`](Self::list_buffers): this issues
+    /// the request through [`EngineHandle::request_preview`] and returns
+    /// immediately; the answer crosses back as `Msg::PickerPreviewReply`
+    /// through the connection's pump. `path` also travels with the waiter
+    /// (unlike `list_buffers`, whose reply needs no echo) so the eventual
+    /// reply can name which candidate it answers, since the picker's
+    /// selection may have moved on by the time it lands. See
+    /// `docs/picker-preview-wire-capture.md` for the reply shapes
+    /// `crate::handle`'s `decode_preview_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.request_preview(
+            "nvim_exec_lua",
+            vec![
+                Value::from(PREVIEW_CHUNK),
+                Value::Array(vec![Value::from(path)]),
+            ],
+            generation,
+            path.to_owned(),
         )
     }
 }

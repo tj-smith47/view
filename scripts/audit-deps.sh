@@ -51,15 +51,19 @@ done
 for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness; do
   check_absent "$crate" arboard
 done
-# nucleo (the picker's matcher engine, spec §18) and ignore (the Files
-# source's .gitignore-respecting walker) are confined to view-native's own
-# matcher worker thread (crates/view-native/src/picker/matcher.rs and
-# sources.rs) on the same terms as arboard above: view-core stays free of a
-# matching-library dependency (its PickerState only ever asks the worker,
-# never matches itself), and no other crate needs either.
+# nucleo (the picker's matcher engine, spec §18), ignore (the Files
+# source's .gitignore-respecting walker), and grep-searcher/grep-regex (the
+# live-grep source's in-process search, ripgrep's own constituent crates)
+# are confined to view-native's own matcher worker thread
+# (crates/view-native/src/picker/matcher.rs and sources.rs) on the same
+# terms as arboard above: view-core stays free of a matching-library
+# dependency (its PickerState only ever asks the worker, never matches
+# itself), and no other crate needs any of them.
 for crate in view-core view-engine view-surface view-ai view-tui view-oracle view-bench view view-harness; do
   check_absent "$crate" nucleo
   check_absent "$crate" ignore
+  check_absent "$crate" grep-searcher
+  check_absent "$crate" grep-regex
 done
 # serde + toml exist for the theme cache file, the corpus loader, and the
 # [native] table of view.toml, confined to the crates that own a file
@@ -143,6 +147,12 @@ check_transitive_reach toml view view-harness view-native
 check_transitive_reach crossterm view-tui view
 check_transitive_reach ratatui view-tui view
 check_transitive_reach arboard view
+# grep-searcher/grep-regex back the live-grep source's in-process search
+# (see the nucleo/ignore confinement loop above); view depends on
+# view-native (the Executor glue crate), so the resolved graph legitimately
+# reaches them through that sanctioned edge.
+check_transitive_reach grep-searcher view-native view
+check_transitive_reach grep-regex view-native view
 check_transitive_reach tokio
 check_transitive_reach async-std
 check_transitive_reach smol
