@@ -469,6 +469,7 @@ fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
+        OverlayKind::Tree(state) => Some(LayerKind::Tree(state.view())),
         _ => None,
     }
 }
@@ -601,6 +602,38 @@ mod tests {
         };
         assert_eq!(view.message, "Save changes?");
         assert_eq!(view.choices, vec!["Yes".to_string(), "No".to_string()]);
+    }
+
+    /// An open tree sidebar paints its own layer, carrying the rows
+    /// `TreeState::view` built -- the `layer_kind` mapping this test
+    /// exists to prove, since a tree overlay with no entry here would
+    /// compile clean (`OverlayKind` is `#[non_exhaustive]`, so the mapping
+    /// match's wildcard arm swallows an unmapped variant silently) and
+    /// simply never paint.
+    #[test]
+    fn an_open_tree_overlay_paints_a_tree_layer_with_its_title() {
+        use view_core::native::geometry::{Anchor, OverlayBox};
+        use view_core::native::tree::TreeState;
+
+        let mut model = model_with_grid(40, 12);
+        model.term_width = 40;
+        model.term_height = 12;
+        let tree = TreeState::open(std::path::PathBuf::from("/tmp/example"));
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+            OverlayKind::Tree(tree),
+        );
+
+        let surface = render(&model);
+        let tree_layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Tree(_)))
+            .expect("a tree overlay is open, so render() must contribute its layer");
+        let LayerKind::Tree(view) = &tree_layer.kind else {
+            unreachable!()
+        };
+        assert!(!view.title.is_empty(), "a tree layer must carry a title");
     }
 
     #[test]

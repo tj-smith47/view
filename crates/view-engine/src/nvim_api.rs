@@ -377,6 +377,53 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
+/// Opens `path` as `:edit` would, taking it as its single positional
+/// vararg. Constant, like every other chunk here: no caller data is
+/// interpolated into the source itself.
+///
+/// `vim.fn.fnameescape` guards the one caller-controlled value the chunk
+/// does interpolate: `path` reaches `vim.cmd.edit` as a literal argument to
+/// an ex command, and an unescaped path containing a space, `%`, `#`, or a
+/// leading `+` would otherwise be parsed as command syntax rather than a
+/// filename.
+const OPEN_FILE_CHUNK: &str = "\
+local path = ...
+vim.cmd.edit(vim.fn.fnameescape(path))";
+
+/// Renames a file on disk and, when a buffer is open for the old path,
+/// retargets that buffer onto the new one in the same call -- verified live
+/// against the pinned engine, see `docs/tree-rename-wire-capture.md` for the
+/// captured cases this chunk's collision guard and buffer-retarget logic
+/// both depend on. Constant, like every other chunk here: both paths travel
+/// as `nvim_exec_lua`'s positional varargs, never interpolated into the
+/// source.
+///
+/// Refuses to overwrite an existing destination (`ok = false`, both files
+/// untouched) rather than reproducing `vim.fn.rename`'s own silent-overwrite
+/// behavior, confirmed live and documented in the capture above. `wanted` is
+/// resolved from `old_path` before the rename runs, while the file still
+/// exists at that location to resolve a real path for.
+const RENAME_CHUNK: &str = "\
+local old_path, new_path = ...
+if vim.uv.fs_stat(new_path) then
+  return { ok = false }
+end
+local function canon(p)
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(old_path)
+local rc = vim.fn.rename(old_path, new_path)
+if rc ~= 0 then
+  return { ok = false }
+end
+for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(buf) and canon(vim.api.nvim_buf_get_name(buf)) == wanted then
+    vim.api.nvim_buf_set_name(buf, new_path)
+    break
+  end
+end
+return { ok = true }";
+
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
 /// request the identical set nvim sees from the real paint loop, rather
@@ -1058,6 +1105,54 @@ impl EngineHandle {
             ],
             generation,
             path.to_owned(),
+        )
+    }
+
+    /// Opens `path` via [`OPEN_FILE_CHUNK`], reusing an already-loaded
+    /// buffer for it the same way `:edit` would rather than duplicating it.
+    /// Fire-and-forget: the tree overlay that issued this closes on the
+    /// same keypress, so nothing waits on a reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(OPEN_FILE_CHUNK),
+                Value::Array(vec![Value::from(path)]),
+            ],
+        )
+    }
+
+    /// Issues [`RENAME_CHUNK`] as an async request tagged with `generation`,
+    /// renaming `old_path` to `new_path` and retargeting any open buffer
+    /// along with it. Async by construction, like
+    /// [`preview_buffer`](Self::preview_buffer): this issues the request
+    /// through [`EngineHandle::request_rename`] and returns immediately; the
+    /// answer crosses back as `Msg::TreeRenameReply` through the
+    /// connection's pump. See `docs/tree-rename-wire-capture.md` for the
+    /// reply shape `crate::handle`'s `decode_rename_reply` decodes.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_rename(
+            "nvim_exec_lua",
+            vec![
+                Value::from(RENAME_CHUNK),
+                Value::Array(vec![Value::from(old_path), Value::from(new_path)]),
+            ],
+            generation,
         )
     }
 }

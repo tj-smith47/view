@@ -88,6 +88,13 @@ enum Waiter {
     /// (echoed back since the reply itself carries no path -- the picker's
     /// selection may have moved on by the time this lands).
     Preview { generation: u64, path: String },
+    /// An async file-tree rename (see [`EngineHandle::rename_file`]):
+    /// nothing is blocked on this `msgid`, so its `Response` is decoded and
+    /// routed to `pump` as `Msg::TreeRenameReply`, tagged with `generation`
+    /// so a reply from a rename issued before the tree was closed and
+    /// reopened is dropped by `update()` rather than triggering a rescan
+    /// nothing is listening for.
+    Rename { generation: u64 },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -401,6 +408,22 @@ impl EngineHandle {
                                         loaded,
                                         lines,
                                     });
+                                }
+                            }
+                            Some(Waiter::Rename { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply (including the chunk's
+                                    // own explicit refusal to overwrite an
+                                    // existing destination -- see
+                                    // docs/tree-rename-wire-capture.md)
+                                    // degrades to ok: false, the same "safe
+                                    // default over a stuck generation"
+                                    // precedent every other async reply here
+                                    // follows; either way the file and its
+                                    // buffer, if any, are exactly where they
+                                    // were before this rename was issued
+                                    let ok = error == Value::Nil && decode_rename_reply(&result);
+                                    pump.route_rename(Msg::TreeRenameReply { generation, ok });
                                 }
                             }
                             None => {}
@@ -814,6 +837,27 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::Preview { generation, path })
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into a rename's success flag and routed to the connection's pump as
+    /// `Msg::TreeRenameReply` (see [`Waiter::Rename`]). Async on the same
+    /// terms as [`request_probe`](Self::request_probe): the tree overlay's
+    /// rename is issued from the runtime loop, which must never block on a
+    /// reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_rename(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::Rename { generation })
+    }
+
     /// Allocates a msgid, registers `waiter`, and enqueues the encoded
     /// request, without a synchronous receiver for anything to block on.
     /// Shared by every async request wrapper; how the eventual `Response` is
@@ -1030,6 +1074,24 @@ fn decode_preview_reply(result: &Value) -> (bool, Vec<String>) {
         })
         .unwrap_or_default();
     (true, lines)
+}
+
+/// Decodes a rename reply's `ok` key, live-verified against a real `nvim
+/// --clean --headless` (see `docs/tree-rename-wire-capture.md`): the chunk
+/// returns `{ ok = true }` on a successful `vim.fn.rename` plus buffer
+/// retarget, and `{ ok = false }` when it refused to overwrite an existing
+/// destination. A non-map/malformed `result` this crate has not actually
+/// seen from the pinned engine degrades to `false` -- the same "absent or
+/// malformed is exactly as informative as an explicit false" precedent
+/// `decode_hl_probe_reply` follows, and the safe reading here besides: a
+/// rename this decoder cannot confirm succeeded must not trigger the rescan
+/// that assumes it did.
+fn decode_rename_reply(result: &Value) -> bool {
+    result
+        .as_map()
+        .and_then(|pairs| crate::wire::map_find(pairs, "ok"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Decodes an `nvim_get_hl(0, {name = "Normal"})` reply's `fg`/`bg` map

@@ -226,6 +226,38 @@ pub enum Msg {
         generation: u64,
         lines: Option<Vec<String>>,
     },
+    /// The `ignore`-walked filesystem scan's answer for one
+    /// `Effect::TreeScan`, tagged `generation`
+    /// (`TreeState::generation` at the moment `update()` emitted the
+    /// request). Generation-gated on the same terms as `PickerResults`:
+    /// `TreeState::apply_scan` drops a reply for any generation but its
+    /// own.
+    TreeScanResult {
+        generation: u64,
+        entries: Vec<crate::native::tree::TreeEntry>,
+    },
+    /// `git status --porcelain=v2`'s answer for one `Effect::TreeGitScan`,
+    /// tagged `generation` (`TreeState::git_generation` at the moment
+    /// `update()` emitted the request). An empty `status` is not an
+    /// error -- it is what a clean tree, or a tree with `git` absent from
+    /// `PATH`, both report, and `TreeState::apply_git` renders either
+    /// undecorated. Generation-gated on the same terms as `PickerResults`.
+    TreeGitResult {
+        generation: u64,
+        status: Vec<crate::native::tree::GitEntry>,
+    },
+    /// The decoded answer to one `RpcCall::RenameFile`, tagged `generation`
+    /// (`TreeState::generation` at the moment `update()` emitted the
+    /// rename, reused rather than a fresh generation since the reply's
+    /// only job is triggering the rescan that follows a successful
+    /// rename -- see `RpcCall::RenameFile`'s doc). `ok` is `false` when the
+    /// destination already existed or the rename otherwise failed; either
+    /// way the buffer this rename targeted, if any, is left exactly where
+    /// it was, so a failed rename never orphans it.
+    TreeRenameReply {
+        generation: u64,
+        ok: bool,
+    },
 }
 
 /// One decoded mouse event in nvim `nvim_input_mouse` vocabulary: `button`
@@ -511,6 +543,43 @@ pub enum Effect {
         generation: u64,
         path: String,
     },
+    /// Hands an `ignore`-walked filesystem scan of `root` to a worker off
+    /// the loop thread; the worker, not this arm, owns streaming back
+    /// `Msg::TreeScanResult`. Issued once when a tree overlay opens and
+    /// again whenever `TreeState::request_rescan` allocates a fresh
+    /// generation (today, only after a successful rename -- see
+    /// `RpcCall::RenameFile`'s doc on why that reply cannot rely on the
+    /// autocmd bridge's ordinary write callbacks to trigger it).
+    TreeScan {
+        generation: u64,
+        root: std::path::PathBuf,
+    },
+    /// Hands a `git status --porcelain=v2` refresh of `root` to a worker off
+    /// the loop thread; the worker, not this arm, owns answering
+    /// `Msg::TreeGitResult`. Issued when a tree overlay opens and again on
+    /// every autocmd bridge write/focus callback while it stays open --
+    /// never on a timer, so a tree left open and idle issues no background
+    /// git traffic at all.
+    TreeGitScan {
+        generation: u64,
+        root: std::path::PathBuf,
+    },
+    /// Creates an empty file at `path` on disk. A genuine filesystem effect,
+    /// never RPC: an as-yet-nonexistent path names no buffer for nvim to
+    /// own, so there is nothing for the engine to be authoritative over
+    /// until the file is opened afterward (an ordinary
+    /// `RpcCall::OpenFile`).
+    TreeCreateFile {
+        path: std::path::PathBuf,
+    },
+    /// Deletes the file at `path` from disk. A genuine filesystem effect
+    /// like `TreeCreateFile`, and, symmetrically, never issued for a path
+    /// with a loaded buffer still open on it -- that case belongs to nvim
+    /// via RPC once a delete-with-open-buffer flow exists, the same
+    /// buffer-identity boundary `RpcCall::RenameFile` draws.
+    TreeDeleteFile {
+        path: std::path::PathBuf,
+    },
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
@@ -697,6 +766,38 @@ pub enum RpcCall {
     /// modified content, never the still-unmodified file on disk.
     PreviewBuffer {
         path: String,
+        generation: u64,
+    },
+    /// Opens `path` as nvim would for `:edit`: an existing buffer for it is
+    /// reused rather than duplicated, and a path with no buffer yet gets
+    /// one, either way leaving nvim as the sole owner of the resulting
+    /// buffer's identity and text. Fire-and-forget: the tree overlay closes
+    /// on the same keypress that issues this, so nothing here needs a
+    /// reply to act on.
+    OpenFile {
+        path: String,
+    },
+    /// Renames the file at `old_path` to `new_path` and, when a buffer is
+    /// open for `old_path`, retargets that buffer onto the new path in the
+    /// same call rather than leaving it pointing at a path that no longer
+    /// exists. Tagged `generation` (`TreeState::generation` at the moment
+    /// `update()` emitted this), answered by `Msg::TreeRenameReply`.
+    ///
+    /// Renaming a file with an open, modified buffer is exactly the case
+    /// that must not orphan it: a plain `std::fs::rename` off the loop
+    /// (rejected) moves the file nvim's in-memory buffer still names the
+    /// old, now-nonexistent path under, so the next `:w` from that buffer
+    /// would recreate the file at the old path instead of saving to the
+    /// new one, silently splitting the file in two. See
+    /// `docs/tree-rename-wire-capture.md` for the live capture proving
+    /// `nvim_buf_set_name` retargets the buffer while preserving its
+    /// modified flag and unsaved content verbatim, and for why the rename
+    /// chunk itself refuses to overwrite an existing destination rather
+    /// than silently replacing it (`vim.fn.rename`'s own behavior,
+    /// confirmed live, if left unguarded).
+    RenameFile {
+        old_path: String,
+        new_path: String,
         generation: u64,
     },
 }

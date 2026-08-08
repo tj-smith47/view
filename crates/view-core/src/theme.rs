@@ -180,6 +180,17 @@ chrome_groups! {
     /// themes incremental search gets a matching picker highlight for free
     /// instead of an unthemed picker-only group.
     IncSearch => "IncSearch", Emphasis;
+    /// nvim's builtin added-diff-line group (`:h hl-DiffAdd`). The file
+    /// tree's [`crate::native::views::StyleRole::GitAdded`] resolves through
+    /// this, the same group a colorscheme already uses for an added diff
+    /// hunk, so an added or copied entry's glyph matches it.
+    DiffAdd => "DiffAdd", Emphasis;
+    /// nvim's builtin changed-diff-line group (`:h hl-DiffChange`), the
+    /// modified counterpart of [`ChromeGroup::DiffAdd`].
+    DiffChange => "DiffChange", Emphasis;
+    /// nvim's builtin deleted-diff-line group (`:h hl-DiffDelete`), the
+    /// deleted counterpart of [`ChromeGroup::DiffAdd`].
+    DiffDelete => "DiffDelete", Emphasis;
 }
 
 /// The active colorscheme's resolved design system: the default/"Normal"

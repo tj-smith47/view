@@ -47,10 +47,11 @@ pub struct MappingClaim {
     pub had_user_mapping: bool,
 }
 
-// Telescope's default keys deliberately, spelled the way a switching user
-// already has them in muscle memory; a claim over a user's own `<leader>f`
-// prefix is reported rather than avoided by picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 3] = [
+// Telescope's and neo-tree's default keys deliberately, spelled the way a
+// switching user already has them in muscle memory; a claim over a user's
+// own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
+// picking keys nobody uses.
+static DEFAULT_MAPS: [MappingSpec; 4] = [
     MappingSpec {
         feature: "picker",
         lhs: "<leader>ff",
@@ -65,6 +66,11 @@ static DEFAULT_MAPS: [MappingSpec; 3] = [
         feature: "picker",
         lhs: "<leader>fg",
         verb: "grep",
+    },
+    MappingSpec {
+        feature: "tree",
+        lhs: "<leader>e",
+        verb: "toggle",
     },
 ];
 

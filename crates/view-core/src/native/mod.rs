@@ -10,4 +10,5 @@ pub mod prompt;
 pub mod registry;
 pub mod statusline;
 pub mod toast;
+pub mod tree;
 pub mod views;

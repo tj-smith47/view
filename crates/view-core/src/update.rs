@@ -7,7 +7,7 @@ use crate::model::{
     CmdlineState, Focus, Model, MouseCapture, OverlayKind, PopupmenuState, TablineState,
 };
 use crate::msg::{Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall};
-use crate::native::geometry::OverlayBox;
+use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 
@@ -102,6 +102,61 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                             resolved: None,
                         }]
                     }
+                    // discards the payload deliberately: every branch below
+                    // reaches the tree through `model.tree_mut()` fresh
+                    // instead, since a bound `&mut TreeState` here would
+                    // keep `model` borrowed across the `model.pop_overlay()`
+                    // and `model.close_tree()` calls the <CR>/<Esc> arms need
+                    Some(OverlayKind::Tree(_)) => match notation.as_str() {
+                        "<Esc>" => {
+                            model.pop_overlay();
+                            model.dirty = true;
+                            Vec::new()
+                        }
+                        "<Down>" => {
+                            if let Some(t) = model.tree_mut() {
+                                t.move_selection(1);
+                            }
+                            model.dirty = true;
+                            Vec::new()
+                        }
+                        "<Up>" => {
+                            if let Some(t) = model.tree_mut() {
+                                t.move_selection(-1);
+                            }
+                            model.dirty = true;
+                            Vec::new()
+                        }
+                        // a directory toggles in place; a leaf's path is
+                        // opened through RPC (nvim owns the buffer this
+                        // creates) and the sidebar closes on the same
+                        // keypress, matching a picker selection's own
+                        // close-on-open behavior
+                        "<CR>" => {
+                            let to_open = model.tree_mut().and_then(|t| {
+                                let entry = t.selected_entry()?;
+                                if entry.is_dir {
+                                    if let Some(idx) = t.view().selected {
+                                        t.toggle_expand(idx);
+                                    }
+                                    None
+                                } else {
+                                    t.selected_path()
+                                }
+                            });
+                            model.dirty = true;
+                            match to_open {
+                                Some(path) => {
+                                    model.pop_overlay();
+                                    vec![Effect::Rpc(RpcCall::OpenFile {
+                                        path: path.to_string_lossy().into_owned(),
+                                    })]
+                                }
+                                None => Vec::new(),
+                            }
+                        }
+                        _ => Vec::new(),
+                    },
                     // the key belongs to the overlay on top of the stack,
                     // and no other overlay kind carries a key handler yet,
                     // so consuming it is the whole of that routing. <Esc>
@@ -221,6 +276,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                     return open_picker(model, source);
                 }
             }
+            if feature == "tree" && verb == "toggle" {
+                return toggle_tree_sidebar(model);
+            }
             // no native feature has an overlay to open yet, and returning
             // nothing at all here is indistinguishable to a user from a key
             // that never registered: the entry point is answered with a
@@ -265,7 +323,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 .statusline
                 .apply(SegmentUpdate::GitBranch(branch));
             model.dirty = true;
-            Vec::new()
+            tree_git_refresh_effect(model)
         }
         Msg::BufferChanged { name, modified } => {
             model
@@ -273,7 +331,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 .statusline
                 .apply(SegmentUpdate::Buffer { name, modified });
             model.dirty = true;
-            Vec::new()
+            tree_git_refresh_effect(model)
         }
         Msg::PickerResults { generation, items } => {
             let Some(p) = model.picker_mut() else {
@@ -366,6 +424,52 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             Vec::new()
         }
+        Msg::TreeScanResult {
+            generation,
+            entries,
+        } => {
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            t.apply_scan(generation, entries);
+            model.dirty = true;
+            Vec::new()
+        }
+        Msg::TreeGitResult { generation, status } => {
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            t.apply_git(generation, status);
+            model.dirty = true;
+            Vec::new()
+        }
+        // a refused rename (`ok: false`) has nothing else to try -- see
+        // `RpcCall::RenameFile`'s doc -- so it surfaces as a notice and
+        // leaves the tree exactly as it was before the rename was issued;
+        // a successful one requires an explicit rescan since
+        // `nvim_buf_set_name` fires no autocmd the bridge could pick up on
+        // its own (see docs/tree-rename-wire-capture.md). `generation` here
+        // is not compared against the tree's own counters: it names the
+        // rename request itself (see `Waiter::Rename`), not a scan or a
+        // git refresh, so a successful reply always rescans unconditionally.
+        Msg::TreeRenameReply { generation: _, ok } => {
+            model.dirty = true;
+            if !ok {
+                return model.engine.record_native_notice(
+                    "view: rename failed (destination exists?)".to_string(),
+                    false,
+                );
+            }
+            let Some(t) = model.tree_mut() else {
+                return Vec::new();
+            };
+            let root = t.root().to_path_buf();
+            let rescan_generation = t.request_rescan();
+            vec![Effect::TreeScan {
+                generation: rescan_generation,
+                root,
+            }]
+        }
     }
 }
 
@@ -450,6 +554,60 @@ fn open_picker(model: &mut Model, source: crate::native::picker::Source) -> Vec<
             resolved: None,
         }]
     }
+}
+
+/// Opens the file tree sidebar over `model.cwd`, or closes it if one is
+/// already open -- the toggle semantic `<leader>e` carries over from
+/// neo-tree's own binding. Reachable only while the engine holds focus
+/// (`Msg::FeatureInvoke` is nvim's own `rpcnotify`, which a native overlay's
+/// focus would intercept before it ever reaches nvim's mapping, see
+/// `Msg::Key`'s `Focus::Native` arm), so an already-open tree can only be
+/// found here in the corner case of a stray re-invocation; the ordinary
+/// close path is `<Esc>` from inside the tree's own key arm.
+/// Reissues `Effect::TreeGitScan` for the open tree, if one is, on a
+/// bridge write/focus callback -- see `TreeState`'s own doc on why a git
+/// refresh is timed off these callbacks rather than the scan, and why the
+/// two carry independent generations. A no-op (empty effect list) when no
+/// tree is open, which is the common case: these callbacks fire on every
+/// buffer write and focus change regardless of the sidebar's state.
+fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
+    let Some(tree) = model.tree_mut() else {
+        return Vec::new();
+    };
+    let root = tree.root().to_path_buf();
+    let generation = tree.request_git_refresh();
+    vec![Effect::TreeGitScan { generation, root }]
+}
+
+fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
+    if model.close_tree() {
+        model.dirty = true;
+        return Vec::new();
+    }
+    let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
+    let scan_generation = state.generation();
+    let git_generation = state.request_git_refresh();
+    let prompt_is_topmost = matches!(
+        model.overlays().last().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Prompt(_))
+    );
+    let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Left);
+    if prompt_is_topmost {
+        model.insert_overlay_beneath_top(geometry, OverlayKind::Tree(state));
+    } else {
+        model.push_overlay(geometry, OverlayKind::Tree(state));
+    }
+    model.dirty = true;
+    vec![
+        Effect::TreeScan {
+            generation: scan_generation,
+            root: model.cwd.clone(),
+        },
+        Effect::TreeGitScan {
+            generation: git_generation,
+            root: model.cwd.clone(),
+        },
+    ]
 }
 
 /// Routes one mouse event to the surface that owns it: the overlay under
@@ -792,7 +950,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::events::UiEvent;
     use crate::model::{OverlayId, OverlayKind};
@@ -3488,6 +3646,174 @@ mod tests {
             m.claimed_keys(),
             claimed.as_slice(),
             "the report has no other source for what the keys took"
+        );
+    }
+
+    #[test]
+    fn tree_toggle_opens_a_sidebar_and_issues_both_the_scan_and_the_git_scan() {
+        let mut m = model();
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        assert!(
+            matches!(
+                m.overlays().last().map(|o| &o.kind),
+                Some(OverlayKind::Tree(_))
+            ),
+            "toggling tree must open a Tree overlay: {:?}",
+            m.overlays()
+        );
+        let (mut saw_scan, mut saw_git_scan) = (false, false);
+        for effect in &effects {
+            match effect {
+                Effect::TreeScan { .. } => saw_scan = true,
+                Effect::TreeGitScan { .. } => saw_git_scan = true,
+                _ => {}
+            }
+        }
+        assert!(
+            saw_scan,
+            "opening a tree must issue its filesystem scan: {effects:?}"
+        );
+        assert!(
+            saw_git_scan,
+            "opening a tree must issue its git-status refresh too: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn tree_toggle_again_closes_the_sidebar_and_issues_no_effect() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let effects = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        assert!(
+            m.overlays().is_empty(),
+            "a second toggle must close the tree it just opened: {:?}",
+            m.overlays()
+        );
+        assert!(
+            effects.is_empty(),
+            "closing needs no worker reply: {effects:?}"
+        );
+    }
+
+    /// The falsifiable check for the bridge write/focus wiring this
+    /// module's `tree_git_refresh_effect` exists to satisfy: with a tree
+    /// open, a `BufferChanged` (a write callback) must reissue
+    /// `Effect::TreeGitScan` against a fresh generation, not merely the
+    /// once-at-open refresh `toggle_tree_sidebar` already issues.
+    #[test]
+    fn a_buffer_write_callback_with_a_tree_open_reissues_the_git_scan() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let opened_at = m
+            .tree_mut()
+            .expect("tree must be open after toggling it")
+            .git_generation();
+
+        let effects = update(
+            &mut m,
+            Msg::BufferChanged {
+                name: "a.txt".to_string(),
+                modified: false,
+            },
+        );
+        let generation = match effects.as_slice() {
+            [Effect::TreeGitScan { generation, .. }] => *generation,
+            other => panic!(
+                "a buffer-write callback with a tree open must reissue exactly                  one TreeGitScan, got {other:?}"
+            ),
+        };
+        assert_ne!(
+            generation, opened_at,
+            "the reissued refresh must carry a fresh generation, not the              one the tree opened with"
+        );
+        assert_eq!(
+            m.tree_mut().expect("tree still open").git_generation(),
+            generation,
+            "TreeState's own git_generation must track the effect it just issued"
+        );
+    }
+
+    /// Same proof as the write-callback test above, for the focus-side
+    /// trigger (`GitBranchChanged`, fired on `BufEnter`/`DirChanged`/
+    /// `FocusGained`).
+    #[test]
+    fn a_focus_callback_with_a_tree_open_reissues_the_git_scan() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let effects = update(
+            &mut m,
+            Msg::GitBranchChanged {
+                branch: "main".to_string(),
+            },
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::TreeGitScan { .. }]),
+            "a focus callback with a tree open must reissue exactly one              TreeGitScan: {effects:?}"
+        );
+    }
+
+    /// The other half of the falsifiable check: with no tree open at all,
+    /// the same callbacks that must trigger a refresh while one is open
+    /// must issue no tree effect whatsoever -- every buffer write and
+    /// focus change in an ordinary editing session hits these arms, so a
+    /// no-tree no-op is the common case, not a corner one.
+    #[test]
+    fn bridge_callbacks_with_no_tree_open_issue_no_tree_effect() {
+        let mut m = model();
+        let write_effects = update(
+            &mut m,
+            Msg::BufferChanged {
+                name: "a.txt".to_string(),
+                modified: true,
+            },
+        );
+        assert!(
+            !write_effects
+                .iter()
+                .any(|e| matches!(e, Effect::TreeGitScan { .. })),
+            "no tree is open, so a write callback must issue no tree              effect: {write_effects:?}"
+        );
+        let focus_effects = update(
+            &mut m,
+            Msg::GitBranchChanged {
+                branch: "main".to_string(),
+            },
+        );
+        assert!(
+            !focus_effects
+                .iter()
+                .any(|e| matches!(e, Effect::TreeGitScan { .. })),
+            "no tree is open, so a focus callback must issue no tree              effect: {focus_effects:?}"
         );
     }
 }

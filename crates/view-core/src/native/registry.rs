@@ -48,7 +48,7 @@ static FEATURES: [FeatureDesc; 5] = [
         id: "tree",
         supersedes: Some("neo-tree / netrw"),
         off_switch: "native.tree = false",
-        entry_keys: false,
+        entry_keys: true,
     },
     FeatureDesc {
         id: "statusline",

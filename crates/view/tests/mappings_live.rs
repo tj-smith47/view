@@ -244,7 +244,7 @@ fn an_enabled_features_key_is_claimed_over_the_users_and_reported_with_its_off_s
 #[test]
 fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let session = Session::start("disabled");
-    let cfg = NativeConfig::from_toml_str("[native]\npicker = false\n").unwrap();
+    let cfg = NativeConfig::from_toml_str("[native]\npicker = false\ntree = false\n").unwrap();
 
     let registered = session.register(&cfg);
     assert!(
@@ -278,7 +278,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
 #[test]
 fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     let session = Session::start("command");
-    let cfg = NativeConfig::from_toml_str("[native]\npicker = false\n").unwrap();
+    let cfg = NativeConfig::from_toml_str("[native]\npicker = false\ntree = false\n").unwrap();
     session.register(&cfg);
     assert!(session.claims().is_empty());
 

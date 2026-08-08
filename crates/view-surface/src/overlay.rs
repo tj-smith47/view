@@ -20,7 +20,8 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::Tier;
 use view_core::native::views::{
-    PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow, TreeView,
+    GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow,
+    TreeView,
 };
 
 use crate::{Layer, LayerKind, Rect};
@@ -464,24 +465,41 @@ fn tree_body(view: &TreeView) -> Body {
         items: view
             .rows
             .iter()
-            .map(tree_row_text)
-            .map(plain_spans)
+            .map(tree_row_spans)
             .map(Line::Text)
             .collect(),
         selected: view.selected,
     }
 }
 
-/// One tree row's text: indentation for its depth, then an expand marker
-/// that distinguishes an open directory from a shut one and from a leaf.
-fn tree_row_text(row: &TreeRow) -> String {
+/// One tree row's spans: indentation and an expand marker that
+/// distinguishes an open directory from a shut one and from a leaf (plain
+/// text), then the entry's git decoration glyph in its own
+/// [`GitMark::style_role`]-tagged span when it carries one, then the label
+/// itself (plain text). A row with no [`TreeRow::status`] -- the common
+/// case, and the only possible one with `git` absent from `PATH` -- carries
+/// no glyph span at all rather than a blank placeholder one, so an
+/// undecorated tree costs nothing over this row's single-span rendering
+/// before git decorations existed.
+fn tree_row_spans(row: &TreeRow) -> Vec<Span> {
     let indent = "  ".repeat(usize::from(row.depth));
     let marker = match row.expanded {
         Some(true) => "- ",
         Some(false) => "+ ",
         None => "  ",
     };
-    format!("{indent}{marker}{}", row.label)
+    let mut spans = vec![Span::plain(format!("{indent}{marker}"))];
+    if let Some(mark) = row.status {
+        spans.push(tree_git_glyph_span(mark));
+    }
+    spans.push(Span::plain(row.label.clone()));
+    spans
+}
+
+/// The single styled glyph a decorated tree row's [`GitMark`] paints before
+/// its label -- see [`GitMark::glyph`] and [`GitMark::style_role`].
+fn tree_git_glyph_span(mark: GitMark) -> Span {
+    Span::new(format!("{} ", mark.glyph()), mark.style_role())
 }
 
 fn statusline_body(view: &StatuslineView) -> Body {

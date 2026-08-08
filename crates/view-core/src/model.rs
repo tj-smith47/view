@@ -221,6 +221,43 @@ impl Model {
             })
     }
 
+    /// The open tree's state, wherever it sits in the stack -- not only
+    /// when it is topmost, for the same reason [`Model::picker_mut`] looks
+    /// past the top: a scan or git-status reply must still be able to reach
+    /// the tree while a prompt opened over it holds focus.
+    #[must_use]
+    pub fn tree_mut(&mut self) -> Option<&mut crate::native::tree::TreeState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::Tree(t) => Some(t),
+                _ => None,
+            })
+    }
+
+    /// Closes the tree overlay, wherever it sits in the stack, and reports
+    /// whether one was found to close. Removed by kind rather than only
+    /// when topmost, so a toggle key reaches it even in the corner case
+    /// where a prompt has landed above it in the meantime (see
+    /// [`OverlayKind::Tree`]'s stacking doc); [`Model::pop_overlay`] alone
+    /// would close the wrong overlay in that case.
+    pub fn close_tree(&mut self) -> bool {
+        let Some(pos) = self
+            .overlays
+            .iter()
+            .position(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        else {
+            return false;
+        };
+        let removed = self.overlays.remove(pos);
+        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
+            if removed.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        true
+    }
+
     /// Opens `kind` at `geometry` as the new topmost overlay, returning the
     /// id it was assigned. The id is the model's to hand out, never the
     /// caller's to choose, so no two open overlays can share one.
@@ -1045,6 +1082,17 @@ pub enum OverlayKind {
     /// [`Model::insert_overlay_beneath_top`]), rather than pushing on top
     /// of it. See [`crate::native::picker::PickerState`].
     Picker(crate::native::picker::PickerState),
+    /// The file tree sidebar, anchored flush left and full height rather
+    /// than centered like a picker or prompt (see
+    /// [`crate::native::geometry::Anchor::Left`]). Pushed on top like a
+    /// picker, with the identical beneath-a-blocked-prompt fallback: `view`
+    /// has no simultaneous multi-pane focus model, only a single topmost
+    /// focus target, so a tree open beside an active engine buffer is one
+    /// stack entry the same way a picker is, not a second pane. Opening a
+    /// file from the tree issues `RpcCall::OpenFile` and pops this overlay,
+    /// the same "acting on a row closes the picker" shape a picker's own
+    /// selection has. See [`crate::native::tree::TreeState`].
+    Tree(crate::native::tree::TreeState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

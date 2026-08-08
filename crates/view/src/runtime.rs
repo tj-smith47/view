@@ -98,6 +98,19 @@ pub trait EngineOps {
     /// `generation`; never blocks, and never itself returns the answer (see
     /// `Msg::PickerPreviewReply`).
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
+    /// Opens `path` as `:edit` would, reusing an already-loaded buffer
+    /// rather than duplicating it; fire-and-forget, no reply (see
+    /// `RpcCall::OpenFile`).
+    fn open_file(&self, path: &str) -> Result<(), EngineError>;
+    /// Renames `old_path` to `new_path`, retargeting any open buffer along
+    /// with it, tagged `generation`; never blocks, and never itself returns
+    /// the answer (see `RpcCall::RenameFile`, `Msg::TreeRenameReply`).
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -146,6 +159,17 @@ impl EngineOps for EngineHandle {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.preview_buffer(path, generation)
+    }
+    fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        self.open_file(path)
+    }
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.rename_file(old_path, new_path, generation)
     }
 }
 
@@ -199,6 +223,17 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).preview_buffer(path, generation)
+    }
+    fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        (**self).open_file(path)
+    }
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).rename_file(old_path, new_path, generation)
     }
 }
 
@@ -350,6 +385,12 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::PreviewBuffer { path, generation } => {
                         self.ops.preview_buffer(&path, generation)
                     }
+                    RpcCall::OpenFile { path } => self.ops.open_file(&path),
+                    RpcCall::RenameFile {
+                        old_path,
+                        new_path,
+                        generation,
+                    } => self.ops.rename_file(&old_path, &new_path, generation),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile
                     _ => return Flow::Continue,
@@ -511,6 +552,57 @@ impl<E: EngineOps> Executor<E> {
                         let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
                     });
                 }
+                Flow::Continue
+            }
+            // One-shot thread per request, exactly like
+            // `PickerPreviewFallback` above: `view_native::tree::fs::scan`
+            // is a plain synchronous blocking call, so this is the only
+            // place it ever runs off the paint loop, reusing the loop's own
+            // message channel to report back.
+            Effect::TreeScan { generation, root } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let entries = view_native::tree::fs::scan(&root);
+                        let _ = tx.send(Msg::TreeScanResult {
+                            generation,
+                            entries,
+                        });
+                    });
+                }
+                Flow::Continue
+            }
+            // Same one-shot-thread shape as `TreeScan`, calling
+            // `view_native::tree::git::status` instead -- a plain,
+            // synchronous, blocking `git status --porcelain=v2` shell-out
+            // that never touches RPC (see that module's own doc for why
+            // `git` absent from `PATH` degrades there, not here).
+            Effect::TreeGitScan { generation, root } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    std::thread::spawn(move || {
+                        let status = view_native::tree::git::status(&root);
+                        let _ = tx.send(Msg::TreeGitResult { generation, status });
+                    });
+                }
+                Flow::Continue
+            }
+            // A genuine filesystem effect, never RPC (see the effect's own
+            // doc): fire-and-forget, off the paint loop like every other
+            // effect here, but with no reply to route back -- the caller
+            // that issued this owns following it with whatever rescan makes
+            // the new file visible.
+            Effect::TreeCreateFile { path } => {
+                std::thread::spawn(move || {
+                    let _ = std::fs::write(&path, "");
+                });
+                Flow::Continue
+            }
+            // Symmetric to `TreeCreateFile`.
+            Effect::TreeDeleteFile { path } => {
+                std::thread::spawn(move || {
+                    let _ = std::fs::remove_file(&path);
+                });
                 Flow::Continue
             }
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
@@ -909,11 +1001,22 @@ impl EngineOps for FakeOps {
     fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("preview_buffer({path},{generation})"))
     }
+    fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        self.record(format!("open_file({path})"))
+    }
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!("rename_file({old_path},{new_path},{generation})"))
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
 
     /// `Messages::visible_lines` returns one span-row per line; these tests
@@ -1136,6 +1239,202 @@ mod tests {
         let executor = Executor::new(&ops);
         let flow = executor.run(Effect::Rpc(RpcCall::GetDefaultHl { generation: 1 }));
         assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    #[test]
+    fn open_file_effect_maps_to_engine_ops_open_file() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::OpenFile {
+            path: "src/main.rs".into(),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "open_file(src/main.rs)");
+    }
+
+    #[test]
+    fn open_file_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::OpenFile {
+            path: "src/main.rs".into(),
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    #[test]
+    fn rename_file_effect_maps_to_engine_ops_rename_file() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::RenameFile {
+            old_path: "a.txt".into(),
+            new_path: "b.txt".into(),
+            generation: 3,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "rename_file(a.txt,b.txt,3)");
+    }
+
+    #[test]
+    fn rename_file_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::RenameFile {
+            old_path: "a.txt".into(),
+            new_path: "b.txt".into(),
+            generation: 3,
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    /// A scratch root under `target/tmp`, unique per test process and
+    /// nonce, for the tree-effect worker-thread tests below to scan or
+    /// git-status for real.
+    fn tree_effect_scratch(nonce: &str) -> std::path::PathBuf {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!(
+                "runtime-tree-effect-{}-{nonce}",
+                std::process::id()
+            ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("create scratch root");
+        root
+    }
+
+    /// Proves `Executor::run` actually spawns `view_native::tree::fs::scan`
+    /// on a worker thread and reports back over the wired channel -- the
+    /// production wiring `FakeOps`-only tests above cannot reach, since
+    /// they never install a `toast_timer`.
+    #[test]
+    fn tree_scan_effect_replies_with_a_real_filesystem_listing() {
+        let root = tree_effect_scratch("scan");
+        std::fs::write(root.join("a.txt"), "").expect("write a.txt");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeScan {
+            generation: 9,
+            root: root.clone(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeScanResult arrives from the worker thread");
+        match msg {
+            Msg::TreeScanResult {
+                generation,
+                entries,
+            } => {
+                assert_eq!(generation, 9);
+                assert!(
+                    entries
+                        .iter()
+                        .any(|e| e.path == std::path::Path::new("a.txt")),
+                    "scan must report the file this test wrote: {entries:?}"
+                );
+            }
+            other => panic!("expected TreeScanResult, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Same proof as `tree_scan_effect_replies_with_a_real_filesystem_listing`,
+    /// for the `git status --porcelain=v2` worker instead.
+    #[test]
+    fn tree_git_scan_effect_replies_with_a_real_git_status() {
+        let root = tree_effect_scratch("git-scan");
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .status()
+                .expect("git is on PATH for this test's own setup");
+            assert!(status.success(), "git {args:?} failed in {root:?}");
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "test"]);
+        std::fs::write(root.join("a.txt"), "one\n").expect("write a.txt");
+        git(&["add", "a.txt"]);
+        git(&["commit", "-q", "-m", "init"]);
+        std::fs::write(root.join("a.txt"), "two\n").expect("modify a.txt");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(tx);
+        let flow = executor.run(Effect::TreeGitScan {
+            generation: 5,
+            root: root.clone(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("TreeGitResult arrives from the worker thread");
+        match msg {
+            Msg::TreeGitResult { generation, status } => {
+                assert_eq!(generation, 5);
+                assert!(
+                    status
+                        .iter()
+                        .any(|e| e.path == std::path::Path::new("a.txt")),
+                    "git status must report the file this test modified: {status:?}"
+                );
+            }
+            other => panic!("expected TreeGitResult, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `Effect::TreeCreateFile` has no reply `Msg`: this proves its worker
+    /// thread actually writes the file to disk rather than merely
+    /// compiling, since nothing on the channel could otherwise tell the
+    /// difference between a wired effect and a silently-dropped one.
+    #[test]
+    fn tree_create_file_effect_writes_an_empty_file_to_disk() {
+        let root = tree_effect_scratch("create");
+        let path = root.join("new.txt");
+
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::TreeCreateFile { path: path.clone() });
+        assert!(matches!(flow, Flow::Continue));
+
+        wait_until("TreeCreateFile's worker thread to write the file", || {
+            path.is_file()
+        });
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("read the created file"),
+            ""
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Symmetric to `tree_create_file_effect_writes_an_empty_file_to_disk`.
+    #[test]
+    fn tree_delete_file_effect_removes_the_file_from_disk() {
+        let root = tree_effect_scratch("delete");
+        let path = root.join("gone.txt");
+        std::fs::write(&path, "bye\n").expect("write gone.txt");
+
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::TreeDeleteFile { path: path.clone() });
+        assert!(matches!(flow, Flow::Continue));
+
+        wait_until("TreeDeleteFile's worker thread to remove the file", || {
+            !path.exists()
+        });
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -15,6 +15,7 @@ the keys view registers disagree.
 | `<leader>ff` | `picker` | `:View picker files` |
 | `<leader>fb` | `picker` | `:View picker buffers` |
 | `<leader>fg` | `picker` | `:View picker grep` |
+| `<leader>e` | `tree` | `:View tree toggle` |
 
 ## Turning them off
 
@@ -39,6 +40,7 @@ always reachable even with no keys at all:
 ```vim
 :View picker files
 :View picker grep
+:View tree toggle
 ```
 
 It completes both arguments against every entry point this build has.

@@ -297,6 +297,33 @@ fn a_tree_row_shows_its_depth_and_whether_it_can_be_opened() {
 }
 
 #[test]
+fn a_git_decorated_tree_row_carries_a_styled_glyph_span_before_its_label() {
+    use view_core::native::views::{GitMark, TreeRow};
+    let spans = tree_row_spans(&TreeRow::leaf(0, "a.txt").with_status(Some(GitMark::Modified)));
+    let glyph = spans
+        .iter()
+        .find(|s| s.role == StyleRole::GitModified)
+        .unwrap_or_else(|| panic!("no GitModified-styled span in {spans:?}"));
+    assert_eq!(glyph.text.trim(), "M");
+    assert!(
+        spans
+            .iter()
+            .any(|s| s.role == StyleRole::Plain && s.text == "a.txt"),
+        "the label itself must stay in the plain role: {spans:?}"
+    );
+}
+
+#[test]
+fn an_undecorated_tree_row_carries_only_plain_spans() {
+    use view_core::native::views::TreeRow;
+    let spans = tree_row_spans(&TreeRow::leaf(0, "a.txt"));
+    assert!(
+        spans.iter().all(|s| s.role == StyleRole::Plain),
+        "a row with no git status must add no styled span: {spans:?}"
+    );
+}
+
+#[test]
 fn a_prompt_carries_its_question_its_input_and_its_choices() {
     use view_core::native::views::PromptView;
     let kind = LayerKind::Prompt(

@@ -30,8 +30,10 @@ pub enum StyleRole {
     /// Unstyled text: rendered in whatever base style the row it sits on
     /// already carries (a popup's `Pmenu` colors, the statusline's own
     /// `StatusLine` colors). Every overlay that has never needed more than
-    /// one style per row -- the picker, the tree, the palette, the prompt,
-    /// the message log -- paints entirely in this role.
+    /// one style per row -- the picker, the palette, the prompt, the
+    /// message log -- paints entirely in this role; a tree row does too
+    /// unless it carries a [`GitMark`], which adds one glyph span in a
+    /// `Git*` role of its own.
     #[default]
     Plain,
     /// The statusline's mode text (`-- INSERT --`, `recording @q`, ...),
@@ -53,6 +55,14 @@ pub enum StyleRole {
     /// scored as part of the fuzzy match, so the user sees which characters
     /// of a long path or buffer name actually satisfied their query.
     Match,
+    /// A tree row's git decoration for a modified or renamed entry.
+    GitModified,
+    /// A tree row's git decoration for a newly added or copied entry.
+    GitAdded,
+    /// A tree row's git decoration for a deleted or conflicted entry.
+    GitDeleted,
+    /// A tree row's git decoration for an untracked entry.
+    GitUntracked,
 }
 
 impl StyleRole {
@@ -70,6 +80,10 @@ impl StyleRole {
             Self::DiagnosticError => Some(ChromeGroup::DiagnosticError),
             Self::DiagnosticWarning => Some(ChromeGroup::DiagnosticWarn),
             Self::Match => Some(ChromeGroup::IncSearch),
+            Self::GitModified => Some(ChromeGroup::DiffChange),
+            Self::GitAdded => Some(ChromeGroup::DiffAdd),
+            Self::GitDeleted => Some(ChromeGroup::DiffDelete),
+            Self::GitUntracked => Some(ChromeGroup::Directory),
         }
     }
 }
@@ -198,6 +212,52 @@ impl PickerView {
     }
 }
 
+/// One file tree row's git-status decoration, resolved from a `git status
+/// --porcelain=v2` line's two-character `XY` code down to the single glyph
+/// and [`StyleRole`] a row can carry -- see `view_native::tree::git`'s doc
+/// for exactly how a code collapses to one of these.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GitMark {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    Conflicted,
+    Untracked,
+}
+
+impl GitMark {
+    /// The single glyph painted before a decorated row's label.
+    #[must_use]
+    pub const fn glyph(self) -> char {
+        match self {
+            Self::Modified => 'M',
+            Self::Added => 'A',
+            Self::Deleted => 'D',
+            Self::Renamed => 'R',
+            Self::Copied => 'C',
+            Self::Conflicted => 'U',
+            Self::Untracked => '?',
+        }
+    }
+
+    /// The [`StyleRole`] a row carrying this mark paints its glyph in.
+    /// `Renamed` reads as a modification and `Copied`/`Conflicted` read as
+    /// added/deleted respectively, rather than growing a chrome group and
+    /// style role each rare git state would only ever reach alone.
+    #[must_use]
+    pub const fn style_role(self) -> StyleRole {
+        match self {
+            Self::Added | Self::Copied => StyleRole::GitAdded,
+            Self::Modified | Self::Renamed => StyleRole::GitModified,
+            Self::Deleted | Self::Conflicted => StyleRole::GitDeleted,
+            Self::Untracked => StyleRole::GitUntracked,
+        }
+    }
+}
+
 /// One row of a [`TreeView`]: how deep it sits, what it is called, and
 /// whether it is a directory that is open or shut.
 #[non_exhaustive]
@@ -212,6 +272,10 @@ pub struct TreeRow {
     /// `Some(true)` for an expanded directory, `Some(false)` for a
     /// collapsed one, `None` for a leaf that cannot be expanded at all.
     pub expanded: Option<bool>,
+    /// The entry's git decoration, or `None` when it carries no status (the
+    /// common case, and the only possible case with `git` absent from
+    /// `PATH` -- see [`GitMark`]'s doc). Absence is not an error.
+    pub status: Option<GitMark>,
 }
 
 impl TreeRow {
@@ -222,6 +286,7 @@ impl TreeRow {
             depth,
             label: label.into(),
             expanded: None,
+            status: None,
         }
     }
 
@@ -232,7 +297,14 @@ impl TreeRow {
             depth,
             label: label.into(),
             expanded: Some(expanded),
+            status: None,
         }
+    }
+
+    /// The same row carrying `status`'s git decoration, or none.
+    #[must_use]
+    pub fn with_status(self, status: Option<GitMark>) -> Self {
+        Self { status, ..self }
     }
 }
 
@@ -529,6 +601,22 @@ mod tests {
         assert_eq!(TreeRow::dir(1, "target", false).expanded, Some(false));
         assert_eq!(TreeRow::leaf(1, "main.rs").expanded, None);
         assert_eq!(TreeRow::leaf(3, "deep.rs").depth, 3);
+        assert_eq!(dir.status, None, "an undecorated row carries no mark");
+    }
+
+    #[test]
+    fn a_git_mark_resolves_to_one_style_role_and_one_glyph() {
+        assert_eq!(GitMark::Modified.glyph(), 'M');
+        assert_eq!(GitMark::Modified.style_role(), StyleRole::GitModified);
+        assert_eq!(GitMark::Renamed.style_role(), StyleRole::GitModified);
+        assert_eq!(GitMark::Added.style_role(), StyleRole::GitAdded);
+        assert_eq!(GitMark::Copied.style_role(), StyleRole::GitAdded);
+        assert_eq!(GitMark::Deleted.style_role(), StyleRole::GitDeleted);
+        assert_eq!(GitMark::Conflicted.style_role(), StyleRole::GitDeleted);
+        assert_eq!(GitMark::Untracked.style_role(), StyleRole::GitUntracked);
+
+        let decorated = TreeRow::leaf(0, "main.rs").with_status(Some(GitMark::Added));
+        assert_eq!(decorated.status, Some(GitMark::Added));
     }
 
     #[test]

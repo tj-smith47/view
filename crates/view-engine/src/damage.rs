@@ -331,6 +331,14 @@ struct Route {
     /// picker is waiting on, and an older held reply is superseded rather
     /// than kept.
     deferred_preview: Option<Msg>,
+    /// The `Msg::TreeRenameReply` an attached-but-full sink refused, held
+    /// for the next routing attempt to retry.
+    ///
+    /// One slot: the tree issues at most one rename at a time (a second
+    /// rename cannot be started while the first is still in flight, since
+    /// there is only ever one selected row to act on), so there is never
+    /// more than one outstanding reply to hold.
+    deferred_rename: Option<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -340,6 +348,7 @@ enum Held {
     Claims,
     BufferList,
     Preview,
+    Rename,
 }
 
 impl Route {
@@ -349,6 +358,7 @@ impl Route {
             Held::Claims => &mut self.deferred_claims,
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::Preview => &mut self.deferred_preview,
+            Held::Rename => &mut self.deferred_rename,
         }
     }
 
@@ -356,7 +366,13 @@ impl Route {
     /// still full. Independent of whatever the caller is routing: these
     /// landing or not says nothing about that send.
     fn retry_deferred(&mut self) {
-        for which in [Held::Probe, Held::Claims, Held::BufferList, Held::Preview] {
+        for which in [
+            Held::Probe,
+            Held::Claims,
+            Held::BufferList,
+            Held::Preview,
+            Held::Rename,
+        ] {
             let Some(msg) = self.slot(which).take() else {
                 continue;
             };
@@ -505,6 +521,19 @@ impl PumpShared {
     /// "genuinely empty" apart from "lost".
     pub(crate) fn route_preview(&self, msg: Msg) {
         self.route_held(msg, Held::Preview);
+    }
+
+    /// Routes a `Msg::TreeRenameReply` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped rename reply is the one this crate cannot afford to lose
+    /// silently: the on-disk rename has already happened by the time this
+    /// fires, so a lost reply would leave the tree's rescan (and, on
+    /// failure, the notice telling the user why nothing moved) permanently
+    /// un-triggered rather than merely stale.
+    pub(crate) fn route_rename(&self, msg: Msg) {
+        self.route_held(msg, Held::Rename);
     }
 
     fn route_held(&self, msg: Msg, which: Held) {
