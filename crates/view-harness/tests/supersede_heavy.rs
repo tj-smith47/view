@@ -131,10 +131,8 @@ fn session(config: &Path, scratch: &Path) -> Engine {
     .unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel::<Msg>(64);
     let (_pump, _cutover) = engine.start_pump(tx);
-    // the receiver is drained for the engine's lifetime rather than
-    // dropped: an attached sink whose other end is gone is fatal to the
-    // reader thread, and a full one stalls the traffic this session's
-    // probes ride behind
+    // drained for the engine's lifetime rather than dropped, per
+    // `Engine::start_pump`'s contract
     std::thread::spawn(move || while rx.recv().is_ok() {});
     engine.handle.ui_attach(100, 30).unwrap();
     engine

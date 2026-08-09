@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use view_core::native::registry;
 
 /// A resolved on/off answer for every feature in the registry.
@@ -27,10 +27,15 @@ pub struct NativeConfig {
 ///
 /// The flip side of ignoring them is that a table nothing reads yet parses
 /// exactly like a table nobody will ever read, so the shipped example is
-/// what tells a user which is which; `TABLES` in this module's tests pins
-/// that listing and fails the moment a table gains a loader without the
-/// example following.
-#[derive(Debug, Default, Deserialize)]
+/// what tells a user which is which. This struct is the machine-readable
+/// half of that: `loaded_tables` in the tests renders it and takes the key
+/// set, so adding a field here *is* the event the example pin fires on.
+///
+/// `Serialize` is derived for exactly that reason and for no runtime
+/// purpose. Round-tripping a `Default` through `toml::Value` is the only
+/// way this crate can enumerate its own table names without a second list
+/// beside the struct, free to drift from it.
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ViewFile {
     #[serde(default)]
     native: BTreeMap<String, bool>,
@@ -167,42 +172,35 @@ mod tests {
     /// first.
     const EXAMPLE_TOML: &str = include_str!("../../../view.toml.example");
 
-    /// One top-level table `view.toml` is specified to carry, and whether
-    /// this build has a loader for it.
+    /// Every top-level table spec section 11 specifies `view.toml` to carry,
+    /// in the order `view.toml.example` shows them.
     ///
-    /// [`ViewFile`] ignores unknown tables by design, so a table nothing
-    /// reads yet parses exactly like a table nobody will ever read.
-    /// Enumerating them here is what makes the example grow: a loaded table
-    /// owes a live block, an unloaded one owes a commented block saying so,
-    /// and flipping `loaded` when a loader lands fails until the example's
-    /// block is uncommented.
-    struct ConfigTable {
-        /// The table's name as `view.toml` spells it, without brackets.
-        name: &'static str,
-        /// Whether a loader in this build reads the table.
-        loaded: bool,
-    }
+    /// Hand-written, and unavoidably so: it is a transcription of the spec,
+    /// which no build artifact carries. What is *not* hand-written is which
+    /// of them this build reads -- see [`loaded_tables`].
+    static SPECIFIED_TABLES: [&str; 4] = ["native", "ui", "engine", "ai"];
 
-    /// Every top-level table of `view.toml`, in the order the example lists
-    /// them.
-    static TABLES: [ConfigTable; 4] = [
-        ConfigTable {
-            name: "ui",
-            loaded: false,
-        },
-        ConfigTable {
-            name: "engine",
-            loaded: false,
-        },
-        ConfigTable {
-            name: "native",
-            loaded: true,
-        },
-        ConfigTable {
-            name: "ai",
-            loaded: false,
-        },
-    ];
+    /// Every top-level table **this crate's** loader reads, taken from
+    /// [`ViewFile`]'s own rendered shape rather than restated.
+    ///
+    /// Derived, so that adding a field to `ViewFile` is itself the event
+    /// that makes `every_specified_table_is_documented_in_the_example` demand
+    /// a live block in the example. A hand-maintained flag beside the struct
+    /// would only fire when somebody remembered to flip it, which is not a
+    /// forcing function at all.
+    ///
+    /// The reach is this crate and no further. A `[ui]` or `[ai]` table read
+    /// by another crate's own struct is invisible from here, because nothing
+    /// in the workspace enumerates config loaders across crate boundaries;
+    /// such a loader landing without its example block going live is caught
+    /// by review, not by this test.
+    fn loaded_tables() -> BTreeSet<String> {
+        toml::Value::try_from(ViewFile::default())
+            .expect("the loader's own shape must render as TOML")
+            .as_table()
+            .map(|table| table.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 
     /// Every `[table]` header in `EXAMPLE_TOML`, as `(name, commented)`.
     /// Lines are trimmed of an optional leading `#` so a documented-only
@@ -235,39 +233,91 @@ mod tests {
     #[test]
     fn every_specified_table_is_documented_in_the_example() {
         let headers = example_headers();
-        for table in &TABLES {
+        let loaded = loaded_tables();
+        for name in SPECIFIED_TABLES {
+            let reads_it = loaded.contains(name);
             // one comparison for both failure modes: `None` is a table the
             // example never mentions, `Some(other)` is one whose block is
             // live when this build cannot read it, or commented out when it
             // can
             let commented = headers
                 .iter()
-                .find(|(name, _)| name == table.name)
+                .find(|(header, _)| header == name)
                 .map(|(_, commented)| *commented);
             assert_eq!(
                 commented,
-                Some(!table.loaded),
-                "[{}] is {} by this build, so view.toml.example owes it a {} block",
-                table.name,
-                if table.loaded { "read" } else { "not read" },
-                if table.loaded {
-                    "live"
-                } else {
-                    "commented-out"
-                }
+                Some(!reads_it),
+                "[{name}] is {} by this build, so view.toml.example owes it a {} block",
+                if reads_it { "read" } else { "not read" },
+                if reads_it { "live" } else { "commented-out" }
             );
         }
     }
 
     #[test]
     fn the_example_documents_no_table_this_build_has_never_heard_of() {
-        let known: BTreeSet<&str> = TABLES.iter().map(|t| t.name).collect();
+        let known: BTreeSet<&str> = SPECIFIED_TABLES.into_iter().collect();
         for (name, _) in example_headers() {
             assert!(
                 known.contains(name.as_str()),
                 "view.toml.example shows [{name}], which is in no specified table"
             );
         }
+    }
+
+    #[test]
+    fn every_table_this_crate_reads_is_a_specified_one() {
+        // the other direction of the derive: a field added to `ViewFile`
+        // under a name spec section 11 never specified is a loader for a
+        // table no user was ever told about
+        let specified: BTreeSet<&str> = SPECIFIED_TABLES.into_iter().collect();
+        for name in loaded_tables() {
+            assert!(
+                specified.contains(name.as_str()),
+                "this crate reads [{name}], which spec section 11 does not specify"
+            );
+        }
+    }
+
+    #[test]
+    fn the_readmes_primary_instruction_actually_turns_the_feature_off() {
+        // README's "copy the example, change `picker = true` to
+        // `picker = false`", followed literally. The example's own parse is
+        // pinned above; what is pinned here is that the edit a user is told
+        // to make has the effect they were promised
+        let edited = EXAMPLE_TOML.replace("picker = true", "picker = false");
+        assert_ne!(edited, EXAMPLE_TOML, "the example must still ship the key");
+        let cfg = NativeConfig::from_toml_str(&edited).expect("the edited example must parse");
+        assert!(!cfg.enabled("picker"));
+        for f in registry::features().iter().filter(|f| f.id != "picker") {
+            assert!(cfg.enabled(f.id), "{} must stay on", f.id);
+        }
+    }
+
+    #[test]
+    fn the_dotted_off_switch_is_a_whole_config_on_its_own() {
+        // README's alternative for a file written from scratch, and the
+        // exact string the registry's `off_switch` hands to a notice
+        let cfg = NativeConfig::from_toml_str("native.picker = false\n")
+            .expect("the dotted form must be a legal config by itself");
+        assert!(!cfg.enabled("picker"));
+        assert!(cfg.enabled("tree"));
+    }
+
+    #[test]
+    fn appending_the_dotted_form_under_the_example_table_is_refused() {
+        // the shape the README must never recommend: appended after the
+        // example's `[native]` header, the dotted key nests as
+        // `native.native.picker`, whose value is a table where the loader
+        // needs a bool. Refusing is what keeps a user from reading it as
+        // "done" while `native.rs` falls back to all-enabled for the session
+        let appended = format!("{EXAMPLE_TOML}\nnative.picker = false\n");
+        let err = NativeConfig::from_toml_str(&appended)
+            .expect_err("a nested [native] table is not a feature switch");
+        assert!(
+            matches!(err, NativeConfigError::Toml(_)),
+            "expected a TOML type error, got: {err:?}"
+        );
     }
 
     #[test]

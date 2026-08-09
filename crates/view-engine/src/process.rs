@@ -521,6 +521,16 @@ impl Engine {
     /// all -- see [`PumpShared::attach_sink`]'s doc comment for why. The
     /// caller resolves the returned state through its own dispatch path
     /// once a consumer is guaranteed (see `view`'s `startup::run_cutover`).
+    ///
+    /// The caller owes `sink` a consumer for the engine's whole lifetime,
+    /// and a draining one: an undeliverable `Msg::EngineRequest` is fatal to
+    /// the reader thread, which stops reading the wire (see [`damage`]'s
+    /// module doc), and a sink whose receiver is merely full stalls every
+    /// message queued behind it. Dropping the receiver -- the shape a test
+    /// falls into by binding it as `_rx` -- is therefore not a way to ignore
+    /// the traffic; it is a way to lose the session.
+    ///
+    /// [`damage`]: crate::damage
     #[must_use]
     pub fn start_pump(
         &mut self,

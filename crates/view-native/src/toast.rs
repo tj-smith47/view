@@ -488,21 +488,20 @@ mod tests {
 
     #[test]
     fn a_v1_record_written_by_an_earlier_build_still_silences_its_surfaces() {
-        // a literal rather than a record this build wrote: every other test
-        // here round-trips through the current serializer, which would keep
-        // passing if the on-disk shape changed under a `SCHEMA_VERSION` that
-        // did not
+        // every byte a literal, including the record keys: derive any half
+        // of this blob from the code under test and a spelling change
+        // regenerates the "old" file and passes, while the records already
+        // on disk -- the only ones this pin exists for -- go stale unseen.
+        // `handovers()` is a supersession of `statusline` plus a claimed
+        // `<leader>ff`, so these are exactly the two keys a v1 build wrote
+        const V1_RECORD: &str = "schema_version = 1\n\n\
+             [announced]\n\
+             \"/cfg/view.toml\" = [\"picker:key:<leader>ff\", \"statusline\"]\n";
+
         let dir = scratch("v1-compat");
         let record = dir.join("native-first-run.toml");
         let report = handovers();
-        let keys: Vec<String> = report.iter().map(Handover::record_key).collect();
-        let rendered = keys
-            .iter()
-            .map(|k| format!("\"{k}\""))
-            .collect::<Vec<_>>()
-            .join(", ");
-        let v1 = format!("schema_version = 1\n\n[announced]\n\"/cfg/view.toml\" = [{rendered}]\n");
-        std::fs::write(&record, &v1).expect("the record must be writable");
+        std::fs::write(&record, V1_RECORD).expect("the record must be writable");
 
         let notices = first_run(&report, Some(Path::new("/cfg/view.toml")), &record)
             .expect("a v1 record must be readable by this build");
@@ -513,7 +512,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(&record).expect("the record must be readable"),
-            v1,
+            V1_RECORD,
             "a run with nothing to announce must not rewrite the record"
         );
         std::fs::remove_dir_all(&dir).ok();

@@ -78,10 +78,8 @@ fn session(dir: &Path) -> Engine {
     .unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
-    // the receiver is drained for the engine's lifetime rather than
-    // dropped: an attached sink whose other end is gone is fatal to the
-    // reader thread, and a full one stalls the traffic every probe below
-    // rides behind
+    // drained for the engine's lifetime rather than dropped, per
+    // `Engine::start_pump`'s contract
     std::thread::spawn(move || while rx.recv().is_ok() {});
     engine.handle.ui_attach(80, 24).unwrap();
     engine
@@ -170,6 +168,15 @@ fn every_held_option_is_global_scoped() {
                 entry.rpc
             )
         };
+        // the name is interpolated into a single-quoted vimscript literal
+        // below, where a `'` would close the string and the rest would be
+        // evaluated as script. nvim's own option names are lowercase ASCII,
+        // so the charset is asserted rather than escaped: a row that
+        // violates it fails here loudly instead of running as an expression
+        assert!(
+            name.bytes().all(|b| b.is_ascii_lowercase()),
+            "a takeover option name must be lowercase ASCII, got `{name}`"
+        );
         let scope = engine
             .handle
             .eval_str(&format!(
