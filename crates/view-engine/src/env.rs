@@ -490,6 +490,17 @@ fn prepare_home_dir(path: &Path) -> io::Result<()> {
         }
         return Err(home_refusal(path, Path::new(&name)));
     }
+    // An embedded Neovim creates `$HOME/.local/state/nvim/swap` on demand
+    // when it opens its first buffer, and two children starting together
+    // both find it missing and both mkdir it: the loser's mkdir returns
+    // EEXIST, which nvim reports as E303 and then refuses the buffer, so a
+    // concurrent spawn fails for a reason that has nothing to do with what
+    // it was doing. `create_dir_all` is idempotent under the same race, so
+    // creating the directory retires it rather than leaving the outcome to
+    // whichever child wins. After the scan above, never before it: a
+    // planted non-directory `.local` must be diagnosed by the refusal that
+    // names it, not by a raw ENOTDIR from this line.
+    std::fs::create_dir_all(path.join(".local").join("state").join("nvim").join("swap"))?;
     Ok(())
 }
 
