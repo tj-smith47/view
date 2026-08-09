@@ -207,9 +207,9 @@ if [ -d scripts ]; then
   fi
 fi
 if [ -f README.md ]; then
-  targets="README.md"
-  [ -d docs ] && targets="$targets docs"
-  if grep -rn -- '—' $targets; then
+  doc_targets=(README.md)
+  [ -d docs ] && doc_targets+=(docs)
+  if grep -rn -- '—' "${doc_targets[@]}"; then
     echo "STYLE FAIL: emdash in user docs"; fail=1
   fi
   # narrative markers, unanchored (README/docs prose carries no comment
@@ -217,8 +217,7 @@ if [ -f README.md ]; then
   # source-side ban in check_content: a doc legitimately cites a spec
   # section (e.g. docs/statusline-wire-capture.md's "spec §9"), where
   # source code never has occasion to.
-  # shellcheck disable=SC2086
-  check_narrative_markers "" $targets || fail=1
+  check_narrative_markers "" "${doc_targets[@]}" || fail=1
 else
   echo "STYLE FAIL: README.md missing"; fail=1
 fi
