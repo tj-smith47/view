@@ -23,20 +23,21 @@ Recorded baselines on a shared Linux dev host:
 
 | What | view | bare Neovim | |
 |---|---|---|---|
-| UI shell painted, engine still loading (p99) | **4.1 ms** | n/a | budget 50 ms |
+| UI shell painted, engine still loading (p99) | **3.8-4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
-| Sustained scroll, 100k lines (p99 staleness) | 1.40 ms | n/a | budget 16 ms |
+| Sustained scroll, 100k lines, no plugins (p99 staleness) | 1.07 ms | n/a | budget 16 ms |
+| Sustained scroll, 100k lines, 14-plugin lazy.nvim stack (p99 staleness) | 1.23 ms | n/a | budget 16 ms |
 | Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
 
 The first row is unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
-shows nothing until your config finishes loading. The 4.1 ms figure is
-identical on a bare config and on the 14-plugin stack, because none of your
-config has run yet at that point.
+shows nothing until your config finishes loading. The 3.8-4.1 ms range is
+nearly identical on a bare config (4.1 ms) and on the 14-plugin stack
+(3.8 ms), because none of your config has run yet at that point.
 
 The no-plugins memory row is view's own process only: the embedded Neovim
 engine is a separate process this budget deliberately excludes, so the
@@ -116,6 +117,12 @@ the keystroke from the thread that reads the terminal to the thread that
 owns editor state, which has to happen because view must decide whether a
 key belongs to Neovim or to view's own UI. No other stage on either path
 exceeds 21 µs.
+
+*Measured 2026-08-03 (`df411f19`). The largest item above, the
+49.1 µs p50 key-decoded->loop-wake hop, has since collapsed to 13.9 µs
+p50 with the input-thread/runtime-loop unification (spec:97-99's
+2026-08-09 adjudication) -- this decomposition's ~644 µs total predates
+that change and reads high.*
 
 ## How budgets are enforced
 

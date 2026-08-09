@@ -43,7 +43,7 @@ the editor rather than a bolt-on.
   suite drives pinned real-world plugin stacks (telescope, lualine, noice,
   nvim-cmp, treesitter, mini.nvim, and more) through a real pty.
 - **Fast where you feel it.** view paints a usable shell in ~4 ms and first
-  content 1.7 to 5x sooner than bare Neovim, at 4.96 MB resident for view's
+  content 2.1 to 5.2x sooner than bare Neovim, at 4.96 MB resident for view's
   own process (the embedded Neovim engine runs separately and is not
   included). Every claim is measured, paired, and regression-gated in CI.
   See [Performance](#performance).
@@ -72,8 +72,8 @@ That architecture is why none of view's surfaces can be a repackaged plugin:
 the render path, input handling, the native UI, and the AI integration are
 all view's own code. It is also where the speed comes from. A distro waits
 for your config before it can draw anything; view's shell is on screen in
-about 4 ms while your config is still loading, and that number is the same
-whether your setup has zero plugins or forty.
+about 4 ms while your config is still loading (3.8 to 4.1 ms across
+fixtures), regardless of whether your setup has zero plugins or forty.
 
 ## Performance
 
@@ -84,7 +84,7 @@ run, same host, same config, samples interleaved. Reproduce with
 
 | | view | bare Neovim |
 |---|---|---|
-| Shell painted, config still loading (p99) | **4.1 ms** | n/a |
+| Shell painted, config still loading (p99) | **3.8-4.1 ms** | n/a |
 | First paint, cold, no plugins (p99) | **25.2 ms** | 130.3 ms |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **79.3 ms** | 164.3 ms |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
