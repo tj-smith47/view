@@ -89,19 +89,29 @@ pub fn spawn_file_scan(
 /// find, not a pattern they composed, so `.`/`*`/`(` in it must match
 /// themselves.
 ///
-/// A matched line's label is `"{relative path}:{line number}: {line
-/// text}"`; the matcher worker's own nucleo pass re-derives the highlighted
-/// match span from this label against `needle`, the same pipeline
+/// A matched line's `label` is `"{relative path}:{line number}: {line
+/// text}"`, built via `PickerItem::grep_match`, which also records the path
+/// and line as data and the byte offset the matched text begins at. The
+/// matcher column pushed into `injector` is the matched *text alone*, not
+/// the whole label: nucleo would otherwise happily attribute a match to a
+/// byte inside the `path:line: ` prefix, highlighting part of the file name
+/// or line number instead of the text a user actually searched for. The
+/// matcher worker's own nucleo pass re-derives the highlighted match span
+/// from that column against `needle` and shifts it back by
+/// `PickerItem::match_start` before storing it, the same pipeline
 /// `build_results` already runs for `Files`/`Buffers`, so this scan does not
 /// compute or push its own indices.
 ///
 /// `cancel` is checked ahead of every file the walk visits (a coarser grain
 /// than `spawn_file_scan`'s per-entry check: a single file's content search
 /// runs to completion once started, so a query superseded mid-file finishes
-/// that one file's matches before the next check notices), for the same
-/// reason `spawn_file_scan`'s does -- a live-grep query is replaced by
-/// nearly every keystroke, and without this a stale scan over a huge tree
-/// would keep pushing into an injector nothing reads.
+/// that one file's matches before the next check notices) and again inside
+/// the search sink itself on every matched line, so a query superseded
+/// mid-file stops within that file rather than running it to completion --
+/// for the same reason `spawn_file_scan`'s per-entry check exists: a
+/// live-grep query is replaced by nearly every keystroke, and without this
+/// a stale scan over a huge tree (or one huge file) would keep pushing into
+/// an injector nothing reads.
 /// Ceiling on the total number of matched lines a single live-grep scan will
 /// push before stopping outright, independent of `cancel`. A query with
 /// almost no discriminating power (a single common letter, an empty needle
@@ -155,17 +165,24 @@ pub fn spawn_live_grep_scan(
                 entry.path(),
                 UTF8(|line_number, line| {
                     let text = truncate_line(line.trim_end_matches('\n'));
-                    let label = format!("{rel}:{line_number}: {text}");
-                    injector.push(PickerItem::new(label), |item, cols| {
-                        cols[0] = item.label.as_str().into();
+                    let item = PickerItem::grep_match(rel.clone(), line_number, &text);
+                    let match_start = item.match_start;
+                    injector.push(item, |item, cols| {
+                        cols[0] = item.label[match_start..].into();
                     });
                     matched += 1;
                     // stopping the sink here (rather than only the outer
                     // walk loop, checked next iteration) means the ceiling
                     // is exact: the file currently being searched stops
                     // mid-file the instant the limit is reached, instead of
-                    // finishing out whatever matches remain in it first
-                    Ok(matched < LIVE_GREP_MATCH_LIMIT)
+                    // finishing out whatever matches remain in it first.
+                    // The cancel check alongside it means a query
+                    // superseded mid-file (ledger: a scan that ignored
+                    // `cancel` here ran a huge single file to completion
+                    // after the query that started it no longer existed)
+                    // also stops within the file currently being searched,
+                    // not just between files.
+                    Ok(matched < LIVE_GREP_MATCH_LIMIT && !cancel.load(Ordering::Acquire))
                 }),
             );
         }
@@ -277,8 +294,9 @@ mod tests {
     /// A small on-disk tree with one matching line and one non-matching
     /// line, proving the scan's label shape end to end: relative path,
     /// 1-based line number, and the matched line's own text, exactly
-    /// `"{path}:{line}: {text}"` -- the format `PickerState::selected_path`
-    /// parses back out for `Source::LiveGrep`.
+    /// `"{path}:{line}: {text}"` -- the display shape `PickerItem::grep_match`
+    /// builds, with `path`/`line` also carried as their own fields for
+    /// `Source::LiveGrep` preview.
     #[test]
     fn a_matching_line_is_pushed_as_path_colon_line_colon_text() {
         let nonce = format!(
@@ -389,6 +407,88 @@ mod tests {
             "a scan with {} available matches across two files must stop at \
              exactly LIVE_GREP_MATCH_LIMIT ({LIVE_GREP_MATCH_LIMIT}), got {count}",
             rows_per_file * 2,
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The cancel flag must be checked inside a single file's search, not
+    /// only between files: before this, the sink closure passed to
+    /// `Searcher::search_path` never consulted `cancel` at all, so a query
+    /// superseded mid-file kept searching that one file to completion in
+    /// the background no matter how large it was -- the outer walk loop's
+    /// own per-file check does nothing for a scan that never leaves its
+    /// first file. Deterministic rather than a sleep-and-hope, the same
+    /// shape `matcher`'s own `replacing_a_session_cancels_its_files_scan_in_flight`
+    /// uses: waits for real progress, flips `cancel`, then waits for the
+    /// injected count to stop growing and asserts it settled below every
+    /// matching line the file actually holds.
+    #[test]
+    fn a_cancelled_scan_stops_inside_a_single_file_not_only_between_files() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-cancel-mid-file-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+
+        // one file, far more matching lines than the scan could plausibly
+        // finish pushing before the polling loop below observes progress
+        // and flips cancel -- large enough that "the whole file" and
+        // "cancelled mid-file" read as unambiguously different outcomes
+        let total_rows = 500_000usize;
+        let mut contents = String::with_capacity(total_rows * 16);
+        for i in 0..total_rows {
+            contents.push_str(&format!("needle row {i}\n"));
+        }
+        std::fs::write(root.join("huge.txt"), &contents).expect("write huge fixture file");
+
+        let nucleo: nucleo::Nucleo<PickerItem> =
+            nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let injector = nucleo.injector();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_live_grep_scan(
+            root.clone(),
+            "needle".to_string(),
+            injector.clone(),
+            cancel.clone(),
+        );
+
+        let start_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while injector.injected_items() == 0 {
+            assert!(
+                std::time::Instant::now() < start_deadline,
+                "the scan never produced a single match"
+            );
+        }
+        cancel.store(true, Ordering::Release);
+
+        let settle_deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut last = injector.injected_items();
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            let now = injector.injected_items();
+            if now == last {
+                break;
+            }
+            last = now;
+            assert!(
+                std::time::Instant::now() < settle_deadline,
+                "the injected item count never stopped growing after cancel was set"
+            );
+        }
+        handle.join().expect("grep scan thread panicked");
+
+        assert!(
+            last < total_rows as u32,
+            "expected the scan to stop before matching every line in a single \
+             {total_rows}-line file once cancelled, got {last} items"
         );
 
         let _ = std::fs::remove_dir_all(&root);

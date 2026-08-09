@@ -64,13 +64,29 @@ pub enum Source {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PickerItem {
     /// The text matched against and displayed: a path relative to
-    /// `Source::Files`'s root, or a buffer name (`[No Name]` for an unnamed
-    /// buffer -- see the wire-capture doc's conclusions).
+    /// `Source::Files`'s root, a buffer name (`[No Name]` for an unnamed
+    /// buffer -- see the wire-capture doc's conclusions), or for a
+    /// `LiveGrep` match, `"{path}:{line}: {text}"` -- see [`Self::grep_match`].
     pub label: String,
     /// Byte offsets into `label` the match touched. Empty for an item that
     /// has not been scored against a query yet (the unfiltered corpus, or a
     /// pre-resolved `Buffers` seed before its first pattern reparse).
     pub indices: Vec<u32>,
+    /// Byte offset into `label` where the substring nucleo actually matches
+    /// against begins. `0` for every item except a [`Self::grep_match`]
+    /// one, whose `label` carries a `path:line: ` prefix ahead of the
+    /// matched text; the matcher worker shifts nucleo's own offsets by this
+    /// amount before storing them in `indices`, so a match can never be
+    /// attributed to a byte inside that prefix.
+    pub match_start: usize,
+    /// The file this candidate previews to and jumps to on selection,
+    /// resolved once here rather than re-derived from `label` at selection
+    /// time. `None` for a source with no file of its own (an unnamed
+    /// `Buffers` entry).
+    pub path: Option<String>,
+    /// The 1-based line number `path` should open at, alongside `path`.
+    /// `None` for a source with no line concept (`Files`, `Buffers`).
+    pub line: Option<u64>,
 }
 
 impl PickerItem {
@@ -79,7 +95,34 @@ impl PickerItem {
     pub fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
+            ..Self::default()
+        }
+    }
+
+    /// A live-grep match at `path`:`line`, whose matched text is `text`.
+    ///
+    /// `path` and `line` are stored as data rather than re-derived by
+    /// splitting `label` on `:` at selection time: a `label` here is
+    /// `"{path}:{line}: {text}"`, and a `path` that itself contains `:`
+    /// (a Windows drive letter, or simply a colon in a filename) made the
+    /// naive `label.split(':').next()` split resolve to the wrong file --
+    /// see `PickerState::selected_path`'s own doc for the bug this closed.
+    ///
+    /// `match_start` is set to the byte offset where `text` begins within
+    /// `label`, so the matcher worker's own offset-shift keeps every
+    /// highlighted match inside `text`, never inside the `path:line: `
+    /// prefix ahead of it.
+    #[must_use]
+    pub fn grep_match(path: impl Into<String>, line: u64, text: &str) -> Self {
+        let path = path.into();
+        let label = format!("{path}:{line}: {text}");
+        let match_start = label.len() - text.len();
+        Self {
+            label,
             indices: Vec::new(),
+            match_start,
+            path: Some(path),
+            line: Some(line),
         }
     }
 }
@@ -202,13 +245,11 @@ impl PickerState {
                     Some(item.label.clone())
                 }
             }
-            // a live-grep row's label is "{relative path}:{line}: {text}"
-            // (see `view_native::picker::sources::spawn_live_grep_scan`);
-            // the path is everything before the first ':'.
-            Source::LiveGrep { root } => {
-                let rel = item.label.split(':').next()?;
-                Some(join_display(root, rel))
-            }
+            // `item.path` is set at push time by `PickerItem::grep_match`,
+            // not re-derived by splitting `label` on `:` -- a relative path
+            // containing its own `:` made that split resolve to the wrong
+            // file (see `PickerItem::grep_match`'s doc).
+            Source::LiveGrep { root } => item.path.as_deref().map(|rel| join_display(root, rel)),
         }
     }
 
@@ -456,6 +497,7 @@ mod tests {
         let item = PickerItem {
             label: "main.rs".to_string(),
             indices: vec![0, 1, 5],
+            ..PickerItem::default()
         };
         state.apply_results(gen, vec![item]);
         let rows = state.view().rows;
@@ -494,5 +536,25 @@ mod tests {
         let a = PickerState::open(Source::Buffers);
         let b = PickerState::open(Source::Buffers);
         assert_ne!(a.generation(), b.generation());
+    }
+
+    #[test]
+    fn selected_path_for_live_grep_uses_the_stored_path_not_a_label_split() {
+        // a relative path containing its own ':' -- the old
+        // `item.label.split(':').next()` resolved this to "src/mod"
+        // instead of the real file, previewing (or opening) the wrong path
+        // entirely
+        let mut state = PickerState::open(Source::LiveGrep {
+            root: PathBuf::from("/repo"),
+        });
+        let gen = state.generation();
+        let item = PickerItem::grep_match("src/mod:weird.rs", 3, "let x = 1;");
+        state.apply_results(gen, vec![item]);
+        assert_eq!(
+            state.selected_path().as_deref(),
+            Some("/repo/src/mod:weird.rs"),
+            "a live-grep path containing ':' must resolve to the real file, \
+             not the text before the first ':' in the display label"
+        );
     }
 }

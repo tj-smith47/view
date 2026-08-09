@@ -384,6 +384,14 @@ fn send_results<S: MsgSink>(active: &mut Session, generation: u64, tx: &S) {
 /// and returns the ranked `Vec<PickerItem>` without touching `tx` -- kept
 /// separate so this module's streaming test can drive it directly against a
 /// synthetic corpus.
+///
+/// Nucleo's own indices are relative to the matcher column that was pushed
+/// (`matched.matcher_columns[0]`), not necessarily `item.label` verbatim: a
+/// `LiveGrep` item's column is only `label[item.match_start..]` (see
+/// `sources::spawn_live_grep_scan`), so those offsets are shifted back by
+/// `item.match_start` before landing in `indices` -- without the shift, a
+/// match inside a grep row's matched text would be reported (and later
+/// painted) as if it fell inside the `path:line: ` prefix ahead of it.
 fn build_results(active: &mut Session) -> Vec<PickerItem> {
     let snapshot = active.nucleo.snapshot();
     let take = snapshot.matched_item_count().min(STREAM_ROWS);
@@ -399,7 +407,12 @@ fn build_results(active: &mut Session) -> Vec<PickerItem> {
             &mut char_indices,
         );
         let mut item = matched.data.clone();
-        item.indices = char_to_byte_offsets(&item.label, &char_indices);
+        let matched_text = &item.label[item.match_start..];
+        let shift = item.match_start as u32;
+        item.indices = char_to_byte_offsets(matched_text, &char_indices)
+            .into_iter()
+            .map(|offset| offset + shift)
+            .collect();
         items.push(item);
     }
     items
@@ -834,24 +847,41 @@ mod tests {
     }
 
     /// Drains `msg_rx` until a `Msg::PickerResults` with at least one item
-    /// arrives or `deadline` passes, returning the labels found -- shared by
-    /// the two `escape_nucleo_atom_syntax` regression tests below, since
-    /// both need the same "wait for real streamed results, not the first
+    /// arrives within `budget`, returning the labels found -- shared by the
+    /// two `escape_nucleo_atom_syntax` regression tests below, since both
+    /// need the same "wait for real streamed results, not the first
     /// (possibly empty) batch" shape `a_full_query_round_trip_streams_a_ranked_result`
     /// gets away without because its fixture is small enough to settle in
     /// one tick.
-    fn wait_for_non_empty_results(msg_rx: &mpsc::Receiver<Msg>, deadline: Instant) -> Vec<String> {
+    ///
+    /// Panics rather than returning an empty `Vec` once `budget` runs out:
+    /// a silent empty return read identically to "the query genuinely
+    /// matched nothing", which is exactly the ambiguity a flaky run of
+    /// either caller left no way to tell apart. The panic names the elapsed
+    /// wait and the last (possibly empty) batch actually seen, so a caller
+    /// with results that just never grew non-empty reads differently from
+    /// one where nothing arrived on the channel at all.
+    fn wait_for_non_empty_results(msg_rx: &mpsc::Receiver<Msg>, budget: Duration) -> Vec<String> {
+        let start = Instant::now();
+        let deadline = start + budget;
+        let mut last_batch: Option<Vec<String>> = None;
         while Instant::now() < deadline {
             let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
                 continue;
             };
             if let Msg::PickerResults { items, .. } = msg {
-                if !items.is_empty() {
-                    return items.into_iter().map(|item| item.label).collect();
+                let labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
+                if !labels.is_empty() {
+                    return labels;
                 }
+                last_batch = Some(labels);
             }
         }
-        Vec::new()
+        panic!(
+            "wait_for_non_empty_results timed out after {:?} waiting for a non-empty \
+             Msg::PickerResults; last batch seen: {last_batch:?}",
+            start.elapsed()
+        );
     }
 
     /// Before `handle_query` escaped a `LiveGrep` needle for nucleo,
@@ -889,7 +919,7 @@ mod tests {
             }))
             .expect("worker channel closed");
 
-        let labels = wait_for_non_empty_results(&msg_rx, Instant::now() + Duration::from_secs(10));
+        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(30));
         assert!(
             labels.iter().any(|label| label.contains("!=")),
             "expected a result matching the literal `!=` query, got {labels:?}"
@@ -934,11 +964,85 @@ mod tests {
             }))
             .expect("worker channel closed");
 
-        let labels = wait_for_non_empty_results(&msg_rx, Instant::now() + Duration::from_secs(10));
+        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(30));
         assert!(
             labels.iter().any(|label| label.contains("cost$")),
             "expected a result matching the literal trailing-`$` query, got {labels:?}"
         );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The highlight-attribution half of the colon-path fix (ledger 141 +
+    /// 143): the fixture's directory name itself contains the query text,
+    /// so before `spawn_live_grep_scan` restricted the matcher column to
+    /// `label[match_start..]` and `build_results` shifted the returned
+    /// offsets back by `match_start`, nucleo could attribute a match to
+    /// characters inside the `path:line: ` prefix (here, "needle" inside
+    /// "needle-dir") as readily as inside the matched text itself. Every
+    /// index a real streamed result carries must land at or past its own
+    /// `match_start` -- i.e. inside the matched text, never the prefix.
+    #[test]
+    fn a_live_grep_matchs_highlight_never_lands_inside_the_path_prefix() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-prefix-highlight-{nonce}"));
+        std::fs::create_dir_all(root.join("needle-dir")).expect("create test root");
+        std::fs::write(
+            root.join("needle-dir").join("f.txt"),
+            "this line has needle in it\n",
+        )
+        .expect("write test fixture");
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(16);
+        let _worker = spawn(req_rx, msg_tx);
+        req_tx
+            .send(WorkerRequest::Query(MatchRequest {
+                generation: 1,
+                needle: "needle".to_string(),
+                source: Source::LiveGrep { root: root.clone() },
+                resolved: None,
+            }))
+            .expect("worker channel closed");
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut items = Vec::new();
+        while Instant::now() < deadline {
+            let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
+                continue;
+            };
+            if let Msg::PickerResults { items: batch, .. } = msg {
+                if !batch.is_empty() {
+                    items = batch;
+                    break;
+                }
+            }
+        }
+        assert!(
+            !items.is_empty(),
+            "expected at least one streamed result within 30s"
+        );
+        for item in &items {
+            for &idx in &item.indices {
+                assert!(
+                    idx as usize >= item.match_start,
+                    "match index {idx} landed inside the {:?} prefix \
+                     (match_start={}) of label {:?}",
+                    &item.label[..item.match_start],
+                    item.match_start,
+                    item.label
+                );
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&root);
     }
