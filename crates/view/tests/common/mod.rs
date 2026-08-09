@@ -24,7 +24,7 @@ use view_test_support::ScratchDir;
 /// wrote out by hand (their own `env::temp_dir()`-plus-pid-nonce, or their
 /// own copy of this exact `ScratchDir` write) before this existed.
 pub fn fixture(label: &str, contents: &str) -> ScratchDir {
-    let dir = ScratchDir::new(label);
+    let dir = ScratchDir::new(label).unwrap();
     std::fs::write(dir.join("init.lua"), contents).unwrap();
     dir
 }

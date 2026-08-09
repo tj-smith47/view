@@ -403,7 +403,7 @@ mod tests {
         // copy: the read path under test is `load`, and pointing it at a
         // scratch file keeps the assertion independent of where the example
         // sits relative to this crate
-        let dir = view_test_support::ScratchDir::new("native-example");
+        let dir = view_test_support::ScratchDir::new("native-example").unwrap();
         let path = dir.join("view.toml");
         std::fs::write(&path, EXAMPLE_TOML).expect("the example must be writable");
         let loaded = NativeConfig::load(Some(&path));
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn an_unparseable_file_is_reported_with_its_path() {
-        let dir = view_test_support::ScratchDir::new("native-broken");
+        let dir = view_test_support::ScratchDir::new("native-broken").unwrap();
         let path = dir.join("view.toml");
         std::fs::write(&path, "[native\npicker = false\n").expect("a temp config must be writable");
         let err = NativeConfig::load(Some(&path)).expect_err("a broken config must not resolve");

@@ -26,7 +26,7 @@ use view_test_support::ScratchDir;
 /// `--clean` with), while a global variable nobody but this file's
 /// `init.lua` sets can only exist because that file ran.
 fn config_home(name: &str) -> ScratchDir {
-    let dir = ScratchDir::new(&format!("cli-live-{name}"));
+    let dir = ScratchDir::new(&format!("cli-live-{name}")).unwrap();
     std::fs::create_dir_all(dir.join("nvim")).unwrap();
     std::fs::write(
         dir.join("nvim").join("init.lua"),
@@ -129,7 +129,7 @@ fn piped_stdin_lands_in_the_first_buffer_via_the_relay_fd() {
     // dup2s onto the child's fd 3 is any readable descriptor, and a file
     // exercises the identical dup2 path `ls | view -` would without this
     // crate depending on a pipe-construction crate just for a test.
-    let dir = ScratchDir::new("cli-live-stdin-relay");
+    let dir = ScratchDir::new("cli-live-stdin-relay").unwrap();
     let content = dir.join("stdin.txt");
     std::fs::write(
         &content,

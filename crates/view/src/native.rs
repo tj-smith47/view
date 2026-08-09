@@ -288,7 +288,7 @@ mod tests {
     /// of the path: dropping it removes the directory the path points
     /// into.
     fn scratch(name: &str) -> (view_test_support::ScratchDir, PathBuf) {
-        let dir = view_test_support::ScratchDir::new(&format!("native-{name}"));
+        let dir = view_test_support::ScratchDir::new(&format!("native-{name}")).unwrap();
         let record = dir.join("first-run.toml");
         (dir, record)
     }
@@ -487,7 +487,7 @@ mod tests {
     /// row a user never asked to give up.
     #[test]
     fn load_skips_the_resize_when_the_config_turns_the_statusline_off() {
-        let dir = view_test_support::ScratchDir::new("native-statusline-resize");
+        let dir = view_test_support::ScratchDir::new("native-statusline-resize").unwrap();
         let path = dir.join("view.toml");
         std::fs::write(&path, "[native]\nstatusline = false\n")
             .expect("a temp config must be writable");
@@ -518,7 +518,7 @@ mod tests {
         let _ = NativeSession::load(None, 7, &mut on);
         assert!(on.palette_enabled, "an absent config is every feature on");
 
-        let dir = view_test_support::ScratchDir::new("native-palette-toggle");
+        let dir = view_test_support::ScratchDir::new("native-palette-toggle").unwrap();
         let path = dir.join("view.toml");
         std::fs::write(
             &path,

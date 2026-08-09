@@ -85,6 +85,23 @@ for crate in view-core view-engine view-surface view-ai view-tui view-oracle vie
   check_absent "$crate" toml
 done
 
+# view-test-support (the ScratchDir fixture, see its own module doc) is
+# dev-only by charter: it exists to be pulled in as a [dev-dependencies]
+# entry by any crate's own tests, never as a normal dependency of anything
+# that ships. check_absent's presence-only test can't express that -- it
+# would also reject the legitimate dev-dependency edges view-native and
+# view already declare -- so this reads cargo metadata's per-dependency
+# `kind` field directly (null for a normal edge, "dev"/"build" otherwise)
+# instead.
+check_dev_only() { # usage: check_dev_only <crate>
+  if jq -e --arg d "$1" \
+    '.packages[].dependencies[] | select(.name == $d and .kind != "dev")' \
+    <<<"$meta" >/dev/null; then
+    echo "AUDIT FAIL: $1 must only appear as a dev-dependency, never a normal or build one"; fail=1
+  fi
+}
+check_dev_only view-test-support
+
 # view-harness is bin-only (the corpus loader + oracle/bench runner CLIs);
 # the dependency graph only ever points into it (view-harness ->
 # view-oracle, view-harness -> view-bench -- the bench bin drives

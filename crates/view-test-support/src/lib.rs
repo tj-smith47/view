@@ -47,25 +47,19 @@ impl ScratchDir {
     /// multiple integration test binaries as separate processes) sharing
     /// the same temp root.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if the directory cannot be created: this crate is never a
-    /// normal (non-dev) dependency of anything that ships (see the module
-    /// doc), and a fixture that cannot create its own scratch space cannot
-    /// run the test it backs either way -- the same tradeoff this repo's
-    /// convention already grants a `#[cfg(test)] mod tests` block, applied
-    /// here to the one call site that needs it instead of the whole crate.
-    #[must_use]
-    // silenced, not fixed: this is the one panic the # Panics section above
-    // documents and justifies
-    #[allow(clippy::panic)]
-    pub fn new(label: &str) -> Self {
+    /// Returns the underlying [`std::io::Error`] if the directory cannot be
+    /// created. This crate carries the workspace's panic-free lint set like
+    /// every other lib crate -- there is no dev-only carve-out for it, test
+    /// code included -- so the caller, not this constructor, decides how a
+    /// setup failure surfaces (typically `.expect(...)` at the test's own
+    /// `#[cfg(test)]` boundary, where that lint is already relaxed).
+    pub fn new(label: &str) -> std::io::Result<Self> {
         let path = std::env::temp_dir().join(format!("view-{label}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
-        if let Err(e) = std::fs::create_dir_all(&path) {
-            panic!("ScratchDir::new({label:?}): {path:?}: {e}");
-        }
-        Self { path }
+        std::fs::create_dir_all(&path)?;
+        Ok(Self { path })
     }
 
     /// The directory's path, for a call site that wants it explicitly
@@ -103,7 +97,7 @@ mod tests {
 
     #[test]
     fn new_creates_an_existing_empty_directory() {
-        let dir = ScratchDir::new("new-creates");
+        let dir = ScratchDir::new("new-creates").unwrap();
         assert!(dir.path().is_dir());
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
     }
@@ -111,7 +105,7 @@ mod tests {
     #[test]
     fn drop_removes_the_directory() {
         let path = {
-            let dir = ScratchDir::new("drop-removes");
+            let dir = ScratchDir::new("drop-removes").unwrap();
             dir.path().to_owned()
         };
         assert!(!path.exists(), "the directory must not survive the guard");
@@ -120,7 +114,7 @@ mod tests {
     #[test]
     fn drop_removes_the_directory_even_after_a_write() {
         let path = {
-            let dir = ScratchDir::new("drop-removes-with-content");
+            let dir = ScratchDir::new("drop-removes-with-content").unwrap();
             std::fs::write(dir.join("file.txt"), b"x").unwrap();
             dir.path().to_owned()
         };
@@ -129,7 +123,7 @@ mod tests {
 
     #[test]
     fn deref_reaches_path_methods_directly() {
-        let dir = ScratchDir::new("deref");
+        let dir = ScratchDir::new("deref").unwrap();
         // exercises Deref<Target = Path>: join() is a Path method, not one
         // ScratchDir redeclares
         let file = dir.join("nested.txt");
@@ -143,11 +137,33 @@ mod tests {
         std::fs::create_dir_all(&leaked).unwrap();
         std::fs::write(leaked.join("leftover.txt"), b"stale").unwrap();
 
-        let dir = ScratchDir::new(label);
+        let dir = ScratchDir::new(label).unwrap();
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,
             "a leaked directory from an earlier run must not leak its contents into this run"
         );
+    }
+
+    #[test]
+    fn new_reports_the_underlying_error_rather_than_panicking() {
+        // the exact path new() would create already exists as a regular
+        // file: remove_dir_all can't clear a non-directory (its error is
+        // swallowed by design, same as a genuinely-absent prior run), so
+        // the following create_dir_all is the one that must fail -- this
+        // proves the failure comes back as Err rather than a panic, the
+        // behavior the Result-returning signature exists to prove
+        let label = "new-reports-error";
+        let path = std::env::temp_dir().join(format!("view-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::write(&path, b"not a directory").unwrap();
+
+        let result = ScratchDir::new(label);
+
+        assert!(
+            result.is_err(),
+            "a file occupying the target path must surface as an error, not a panic"
+        );
+        std::fs::remove_file(&path).unwrap();
     }
 }

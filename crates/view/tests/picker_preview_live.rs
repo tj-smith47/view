@@ -38,7 +38,7 @@ impl Session {
     /// incidental state a swapfile has no bearing on for a test that
     /// never crashes nvim and never needs recovery.
     fn start(name: &str) -> Self {
-        let dir = ScratchDir::new(&format!("picker-preview-live-{name}"));
+        let dir = ScratchDir::new(&format!("picker-preview-live-{name}")).unwrap();
         let cfg = EngineConfig::isolated().with_arg("-n");
         let (engine, _pump, rx) = common::spawn_with_pump(cfg, 64);
         Self { engine, rx, dir }
