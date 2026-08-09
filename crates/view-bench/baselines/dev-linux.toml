@@ -4,13 +4,13 @@ machine_class = "dev-linux"
 
 [echo.heavy]
 paired_delta_p99_ms = 0.78042
-ratio_p50 = 1.1807273852850309
-ratio_p99 = 1.0103236390160557
+ratio_p50 = 1.116
+ratio_p99 = 0.9807912230196847
 view_p99_ms = 1.325479
 
 [echo.minimal]
 paired_delta_p99_ms = 0.29498299999999994
-ratio_p50 = 1.1719342968313597
+ratio_p50 = 1.1301046068104472
 ratio_p99 = 1.0916525318862538
 view_p99_ms = 0.726575
 
@@ -28,7 +28,7 @@ control_ratio_p99 = 1.035776855693868
 
 [first_paint.heavy]
 marker_cold_ms = 79.267231
-marker_ratio_p50 = 0.4309602847125922
+marker_ratio_p50 = 0.33810757954483467
 marker_ratio_p99 = 0.48231109573135145
 shell_visible_cold_ms = 3.788316
 
@@ -40,30 +40,30 @@ shell_visible_cold_ms = 4.094983
 
 [flood.minimal]
 cadence_p99_ms = 14.565679999999999
-cadence_p99_ratio = 1.003763376690218
-pace_ratio = 1.002778277451919
+cadence_p99_ratio = 0.9792970117228196
+pace_ratio = 1.000040416926719
 
 [input_path.minimal]
-key_to_rpc_p99_us = 80.682
+key_to_rpc_p99_us = 50.831
 
 [memory.minimal]
-pss_mb = 3.3017578125
+pss_mb = 4.9305
 
 [output_path.minimal]
 p99_ms = 0.081796
 
 [picker.minimal]
 first_page_p50_ms = 2.449141
-first_page_p99_ms = 5.2978060000000005
-match_paint_p50_ms = 3.332884
-match_paint_p99_ms = 5.082826000000001
+first_page_p99_ms = 4.961949000000001
+match_paint_p50_ms = 2.831874
+match_paint_p99_ms = 4.703527
 
 [scroll.heavy]
-ratio_p50 = 1.990667812724753
-ratio_p99 = 1.858985915274381
+ratio_p50 = 1.8909534928734097
+ratio_p99 = 1.738200252853949
 staleness_p99_ms = 1.2338850000000001
 
 [scroll.minimal]
-ratio_p50 = 1.7777551352351824
-ratio_p99 = 1.6910065990909606
+ratio_p50 = 1.604844360957922
+ratio_p99 = 1.50580910298798
 staleness_p99_ms = 1.069328
