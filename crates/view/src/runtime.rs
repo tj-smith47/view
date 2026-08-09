@@ -27,6 +27,7 @@ use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{
     Effect, ExitInfo, Msg, OptionValue, RegisterType, ReplyToken, ReplyValue, RpcCall,
+    OSC52_MAX_PAYLOAD_BYTES,
 };
 use view_core::native::mappings::MappingSpec;
 use view_core::update::update;
@@ -1030,10 +1031,28 @@ pub fn run(
         // call this loop makes (resize, below, and the main queue) instead
         // of one per call site
         while let Ok(job) = osc52_rx.try_recv() {
-            term.write_osc52(
-                job.register,
-                &view_native::clipboard::lines_to_text(&job.lines, job.regtype),
-            )?;
+            let text = view_native::clipboard::lines_to_text(&job.lines, job.regtype);
+            // base64 expands 3 raw bytes to 4 encoded ones; this is the
+            // size the terminal actually receives and the bound
+            // `OSC52_MAX_PAYLOAD_BYTES` states in `Osc52Copy`'s own doc
+            let encoded_len = text.len().div_ceil(3) * 4;
+            if encoded_len > OSC52_MAX_PAYLOAD_BYTES {
+                crate::vlog::log_with("osc52", || {
+                    format!(
+                        "skipped a {encoded_len}-byte payload over the \
+                         {OSC52_MAX_PAYLOAD_BYTES}-byte cap"
+                    )
+                });
+                continue;
+            }
+            // fire-and-forget per `Effect::Osc52Copy`'s doc: nothing on the
+            // wire is blocked on this escape, so a transient stdout error
+            // here must not tear the session down the way a frame-paint
+            // failure does (`draw_surface`'s `?` below, which the terminal's
+            // own real content depends on)
+            if let Err(err) = term.write_osc52(job.register, &text) {
+                crate::vlog::log_with("osc52", || format!("write failed: {err}"));
+            }
         }
         // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
@@ -1074,7 +1093,7 @@ pub fn run(
         if model.dirty {
             let surface = surface_cache.render(&model);
             let damage = model.take_paint_damage();
-            term.draw_surface(&model, surface, &damage)?; // terminal I/O errors abort; engine errors never do
+            term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             model.dirty = false;
         }
         #[cfg(unix)]

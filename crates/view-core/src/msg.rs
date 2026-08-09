@@ -487,6 +487,20 @@ pub enum ReplyValue {
     },
 }
 
+/// The largest base64-encoded [`Effect::Osc52Copy`] payload the runtime
+/// loop will write to the terminal. A yank has no upper bound of its own
+/// (`"+yG` on a large file yanks the whole buffer), while OSC 52 is
+/// synchronous on the loop thread and unbounded terminal emulators exist
+/// that buffer the entire escape before acting on it -- so an oversized
+/// copy is skipped rather than base64'd and written, trading a silent
+/// remote-clipboard miss (the local system clipboard write from the
+/// companion `ClipboardWrite` effect still succeeds) for a bounded worst
+/// case on the paint thread. 100 KiB of encoded bytes is roughly 75 KiB of
+/// yanked text, generous for the terminal-copy use case OSC 52 exists for
+/// and small enough that the write stays well under a frame budget on any
+/// terminal that does act on it synchronously.
+pub const OSC52_MAX_PAYLOAD_BYTES: usize = 100 * 1024;
+
 /// Everything `update()` can ask the loop's executor to carry out. The
 /// executor never blocks; every effect crosses a channel or is fired and
 /// forgotten.
@@ -533,7 +547,11 @@ pub enum Effect {
     /// buffered frame flush. Carries no `ReplyToken`: unlike
     /// `ClipboardRead`/`ClipboardWrite`, nothing on the wire is blocked on
     /// this, so a terminal that ignores or strips OSC 52 costs nothing
-    /// beyond the escape sequence itself. `regtype` is the same one
+    /// beyond the escape sequence itself -- which is also why the runtime
+    /// loop's own drain site treats both a transient stdout error and a
+    /// payload over [`OSC52_MAX_PAYLOAD_BYTES`] as skip-and-log rather than
+    /// a session-ending failure: this effect is fire-and-forget end to end,
+    /// never just at the wire-reply layer. `regtype` is the same one
     /// `ClipboardWrite` carries for this copy: the remote clipboard this
     /// escape targets must see the identical linewise/charwise text shape
     /// the local system clipboard just got, not a charwise-only rendering

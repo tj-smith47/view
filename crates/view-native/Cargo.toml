@@ -28,3 +28,11 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2.0.18"
 toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
+
+[dev-dependencies]
+# The shared temp-dir fixture guard (see its own crate doc): a leaf crate
+# with no dependency edge into core <- surface <- {native, ai}, reachable
+# from this crate's tests without going through view-core (which stays
+# I/O-free) or the view bin crate (which this crate does not, and must
+# never, depend on).
+view-test-support = { version = "0.0.1", path = "../view-test-support" }

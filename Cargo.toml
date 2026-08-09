@@ -11,6 +11,7 @@ members = [
     "crates/view-oracle",
     "crates/view-bench",
     "crates/view-harness",
+    "crates/view-test-support",
 ]
 
 [workspace.package]

@@ -44,7 +44,14 @@ impl From<TierArg> for Tier {
 }
 
 #[derive(Parser)]
-#[command(name = "view", about = "A modern terminal editor powered by Neovim")]
+#[command(
+    name = "view",
+    about = "A modern terminal editor powered by Neovim",
+    after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, ...) \
+                  must appear before the first argument meant for nvim: once a token does \
+                  not match one of view's flags, every remaining token -- including a later \
+                  view flag -- is forwarded to nvim verbatim."
+)]
 struct Cli {
     /// Path to the nvim binary (defaults to PATH lookup)
     #[arg(long)]
@@ -125,8 +132,11 @@ fn print_clipboard(register: char) -> Result<()> {
 }
 
 /// The engine config `cli` asks for: the ordinary spawn, every passthrough
-/// argument forwarded verbatim, and `--clean`/`--appname`/the stdin relay
-/// layered on top of it.
+/// argument forwarded verbatim, and `--clean`/`--appname` layered on top of
+/// it. A pure constructor of `cli` alone -- it dups no file descriptor and
+/// touches no process state, unlike [`maybe_relay_stdin`], which a caller
+/// composes on afterward when the stdin relay is wanted (see `main`'s own
+/// call site).
 ///
 /// A function rather than a few lines inside `main` so the constructor it
 /// starts from is assertable. This is the editor a user's own session runs
@@ -153,7 +163,7 @@ fn engine_config(cli: &Cli) -> EngineConfig {
     for arg in &cli.passthrough {
         cfg = cfg.with_arg(arg.clone());
     }
-    maybe_relay_stdin(cfg, &cli.passthrough)
+    cfg
 }
 
 /// Arms `cfg`'s stdin relay when `passthrough` names `-` and the process's
@@ -259,7 +269,7 @@ fn main() -> Result<()> {
         return print_clipboard(register);
     }
     deny_unsupported_stdin_relay(&cli.passthrough)?;
-    let cfg = engine_config(&cli);
+    let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
 
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;
@@ -511,7 +521,23 @@ fn report_fatal_reason(model: &Model) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use clap::CommandFactory;
     use std::ffi::OsString;
+
+    // The ordering rule lives only in `passthrough`'s own field doc, which
+    // nothing renders to a user typing `--help`; a rule a user cannot see
+    // until they hit it (`view notes.md --tier basic` reaching nvim as a
+    // literal `--tier basic` and erroring inside it) is not documented in
+    // any way that helps them, so this pins the rendered `--help` output
+    // actually carries it.
+    #[test]
+    fn rendered_help_states_the_flags_before_passthrough_ordering_rule() {
+        let help = Cli::command().render_long_help().to_string();
+        assert!(
+            help.contains("before the first argument meant for nvim"),
+            "the rendered --help must state the ordering rule, got:\n{help}"
+        );
+    }
 
     #[test]
     fn the_editor_spawns_the_users_own_environment_not_a_hermetic_one() {
@@ -709,7 +735,8 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_bare_dash_reaches_the_engine_and_arms_the_stdin_relay() {
-        let cfg = engine_config(&Cli::parse_from(["view", "-"]));
+        let cli = Cli::parse_from(["view", "-"]);
+        let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
         assert_eq!(cfg.extra_args, vec![OsString::from("-")]);
         assert!(
             cfg.stdin_relay_requested(),

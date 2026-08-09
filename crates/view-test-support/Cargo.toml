@@ -1,0 +1,18 @@
+[package]
+name = "view-test-support"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+# A leaf crate on purpose: zero dependencies of its own, so pulling it in as
+# a [dev-dependencies] entry never widens what any consumer's *production*
+# build links (see scripts/audit-deps.sh, which enumerates the workspace's
+# real dependency direction and knows nothing about this crate at all,
+# because it introduces no edge into that graph either way). It exists only
+# to be depended on, by any crate whose own tests need it -- see
+# src/lib.rs's module doc for why that reach is otherwise blocked.
+[dependencies]

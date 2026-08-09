@@ -18,3 +18,19 @@ steps = [
   # has no other on-screen signal to wait on first
   { wait_for_probe = "g:clipboard.name", expect = "user-provider", timeout_ms = 5000 },
 ]
+
+[[states]]
+name = "native-only"
+# the minimal fixture's init.lua never sets g:clipboard at all -- the
+# fixture this scenario's top-level `present` state uses always has one, so
+# only a second fixture proves the opposite direction of the precedence
+# check the black-box way (config sourcing, VimEnter, exec_lua chunk) rather
+# than vacuously passing were registration ever dropped. `native-only` is
+# the loader's own name for exactly this shape (see `ScenarioState`'s doc):
+# no plugin present at all, proving the native side stands on its own
+# rather than merely going unoverridden by a plugin that also happens to
+# be absent.
+fixture = "minimal"
+steps = [
+  { wait_for_probe = "g:clipboard.name", expect = "view", timeout_ms = 5000 },
+]

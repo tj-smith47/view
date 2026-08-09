@@ -62,17 +62,25 @@ pub enum ClipboardJobKind {
 /// `read_lines` branches on -- against a fake that does not depend on a
 /// host display, rather than only against the reply-exactly-once contract
 /// `spawn`'s own tests can prove without one.
+///
+/// The error carries `arboard`'s own message rather than collapsing to
+/// `()`: both branches that see it (`read_lines`, `write_system`) treat a
+/// failure the same way regardless of cause (fall back to the shadow, or
+/// drop the write), but a run under `VIEW_LOG` needs the real reason --
+/// "no display" and "clipboard holds non-text content" look identical to
+/// this worker and identical to `()`, but are two different bugs to a user
+/// debugging why `"+p` came back empty.
 trait ClipboardBackend {
-    fn get_text(&mut self) -> Result<String, ()>;
-    fn set_text(&mut self, text: String) -> Result<(), ()>;
+    fn get_text(&mut self) -> Result<String, String>;
+    fn set_text(&mut self, text: String) -> Result<(), String>;
 }
 
 impl ClipboardBackend for arboard::Clipboard {
-    fn get_text(&mut self) -> Result<String, ()> {
-        self.get_text().map_err(|_| ())
+    fn get_text(&mut self) -> Result<String, String> {
+        self.get_text().map_err(|err| err.to_string())
     }
-    fn set_text(&mut self, text: String) -> Result<(), ()> {
-        self.set_text(text).map_err(|_| ())
+    fn set_text(&mut self, text: String) -> Result<(), String> {
+        self.set_text(text).map_err(|err| err.to_string())
     }
 }
 
@@ -187,7 +195,10 @@ fn read_lines<C: ClipboardBackend>(
     match ensure_clip(clip, connect) {
         Some(clip) => match clip.get_text() {
             Ok(text) => text_to_lines(&text),
-            Err(()) => (Vec::new(), RegisterType::Charwise),
+            Err(err) => {
+                crate::vlog::log_with("clipboard", || format!("read failed: {err}"));
+                (Vec::new(), RegisterType::Charwise)
+            }
         },
         None => shadow
             .get(&register)
@@ -207,7 +218,9 @@ fn write_system<C: ClipboardBackend>(
     text: &str,
 ) {
     if let Some(clip) = ensure_clip(clip, connect) {
-        let _ = clip.set_text(text.to_owned());
+        if let Err(err) = clip.set_text(text.to_owned()) {
+            crate::vlog::log_with("clipboard", || format!("write failed: {err}"));
+        }
     }
 }
 
@@ -245,14 +258,16 @@ mod tests {
     }
 
     impl ClipboardBackend for FakeClipboard {
-        fn get_text(&mut self) -> Result<String, ()> {
+        fn get_text(&mut self) -> Result<String, String> {
             if self.fail_get {
-                Err(())
+                Err("fake read failure".to_owned())
             } else {
-                self.text.clone().ok_or(())
+                self.text
+                    .clone()
+                    .ok_or_else(|| "fake clipboard is empty".to_owned())
             }
         }
-        fn set_text(&mut self, text: String) -> Result<(), ()> {
+        fn set_text(&mut self, text: String) -> Result<(), String> {
             self.text = Some(text);
             Ok(())
         }

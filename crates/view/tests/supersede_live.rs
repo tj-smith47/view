@@ -10,7 +10,7 @@
 //! fixture config, over the exact `RpcCall` a plan produces.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use view_core::msg::RpcCall;
 use view_core::native::registry;
@@ -18,6 +18,7 @@ use view_engine::handle::EngineHandle;
 use view_engine::process::{Engine, EngineConfig};
 use view_native::config::NativeConfig;
 use view_native::supersede::{plan, Supersession};
+use view_test_support::ScratchDir;
 
 /// The fixture's own statusline setting: a plain nvim default is already
 /// `2`, so a takeover to `0` would still read as a change if the config had
@@ -27,11 +28,8 @@ const FIXTURE_LASTSTATUS: &str = "3";
 
 /// A fixture config directory holding an `init.lua` that claims the
 /// statusline, the way a user running lualine does.
-fn fixture(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("view-supersede-live-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
+fn fixture(name: &str) -> ScratchDir {
+    let dir = ScratchDir::new(&format!("supersede-live-{name}"));
     std::fs::write(
         dir.join("init.lua"),
         format!("vim.opt.laststatus = {FIXTURE_LASTSTATUS}\n"),
@@ -141,7 +139,6 @@ fn an_enabled_statusline_takes_laststatus_over_without_touching_the_config() {
     );
 
     let after = snapshot(&dir);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         before, after,
         "supersession is runtime only: the user's config may not change"
@@ -190,7 +187,6 @@ fn every_held_option_is_global_scoped() {
             entry.feature
         );
     }
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -213,7 +209,6 @@ fn a_disabled_statusline_leaves_the_users_own_setting_alone() {
         "a disabled feature must leave the user's own setting exactly as their config set it"
     );
     let after = snapshot(&dir);
-    std::fs::remove_dir_all(&dir).ok();
     assert_eq!(before, after);
 }
 
@@ -246,5 +241,4 @@ fn the_takeover_reverses_when_the_feature_is_turned_off() {
         FIXTURE_LASTSTATUS,
         "the registry's own off switch must restore the user's setting"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }

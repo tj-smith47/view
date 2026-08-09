@@ -284,12 +284,13 @@ mod tests {
     }
 
     /// A scratch record path for one test, named for it so two tests never
-    /// read each other's record.
-    fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("view-native-{name}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("the scratch directory must be creatable");
-        dir.join("first-run.toml")
+    /// read each other's record. The returned guard must outlive every use
+    /// of the path: dropping it removes the directory the path points
+    /// into.
+    fn scratch(name: &str) -> (view_test_support::ScratchDir, PathBuf) {
+        let dir = view_test_support::ScratchDir::new(&format!("native-{name}"));
+        let record = dir.join("first-run.toml");
+        (dir, record)
     }
 
     /// Everything the message surface is currently showing, as one string.
@@ -414,7 +415,7 @@ mod tests {
 
     #[test]
     fn a_claimed_key_is_announced_with_the_switch_that_returns_it() {
-        let record = scratch("claimed");
+        let (_dir, record) = scratch("claimed");
         let claimed = vec![MappingClaim {
             feature: "picker".to_string(),
             lhs: "<leader>ff".to_string(),
@@ -486,18 +487,13 @@ mod tests {
     /// row a user never asked to give up.
     #[test]
     fn load_skips_the_resize_when_the_config_turns_the_statusline_off() {
-        let dir = std::env::temp_dir().join(format!(
-            "view-native-statusline-resize-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let dir = view_test_support::ScratchDir::new("native-statusline-resize");
         let path = dir.join("view.toml");
         std::fs::write(&path, "[native]\nstatusline = false\n")
             .expect("a temp config must be writable");
 
         let mut m = model();
         let (_session, effects) = NativeSession::load(Some(path), 7, &mut m);
-        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
 
         assert!(
             !m.statusline_enabled,
@@ -522,9 +518,7 @@ mod tests {
         let _ = NativeSession::load(None, 7, &mut on);
         assert!(on.palette_enabled, "an absent config is every feature on");
 
-        let dir =
-            std::env::temp_dir().join(format!("view-native-palette-toggle-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let dir = view_test_support::ScratchDir::new("native-palette-toggle");
         let path = dir.join("view.toml");
         std::fs::write(
             &path,
@@ -536,7 +530,6 @@ palette = false
 
         let mut off = model();
         let _ = NativeSession::load(Some(path), 7, &mut off);
-        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
 
         assert!(
             !off.palette_enabled,

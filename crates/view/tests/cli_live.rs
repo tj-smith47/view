@@ -12,9 +12,8 @@
 //!   `stdin_fd`, the mechanism `ui_attach_with_stdin_relay` arms.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
-
 use view_engine::process::{Engine, EngineConfig};
+use view_test_support::ScratchDir;
 
 /// A fixture `nvim/init.lua` under its own `XDG_CONFIG_HOME`, so a run that
 /// does not pass `--clean` sources it as an ordinary user config would, and
@@ -26,9 +25,8 @@ use view_engine::process::{Engine, EngineConfig};
 /// same value an earlier draft of this fixture tried to distinguish
 /// `--clean` with), while a global variable nobody but this file's
 /// `init.lua` sets can only exist because that file ran.
-fn config_home(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("view-cli-live-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
+fn config_home(name: &str) -> ScratchDir {
+    let dir = ScratchDir::new(&format!("cli-live-{name}"));
     std::fs::create_dir_all(dir.join("nvim")).unwrap();
     std::fs::write(
         dir.join("nvim").join("init.lua"),
@@ -68,7 +66,6 @@ fn without_clean_the_fixture_config_is_sourced() {
         "1",
         "the fixture's own init.lua never took effect, so --clean's test below proves nothing"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]
@@ -85,21 +82,16 @@ fn clean_suppresses_the_users_own_config() {
         "--clean must suppress the fixture's init.lua, and nothing else \
          could have set g:view_config_probe"
     );
-    std::fs::remove_dir_all(&dir).ok();
 }
 
-#[test]
-fn clean_never_carries_isolateds_extra_n_or_hermetic_environment() {
-    let dir = config_home("clean-shape");
-    let cfg = clean_cfg(&dir);
-    assert_eq!(
-        cfg.extra_args,
-        vec![std::ffi::OsString::from("--clean")],
-        "the --clean CLI flag must append exactly one engine argument, \
-         never isolated()'s additional -n"
-    );
-    std::fs::remove_dir_all(&dir).ok();
-}
+// `clean_never_carries_isolateds_extra_n_or_hermetic_environment` used to
+// live here, re-spelling `main::engine_config`'s `--clean` shape against a
+// test-local `clean_cfg` helper this file cannot assert is what production
+// actually builds (an integration test cannot link against `main.rs`'s
+// private items). `main.rs`'s own
+// `clean_appends_only_the_clean_flag_never_isolateds_extra_n_or_hermetic_env`
+// asserts the identical shape against the real `engine_config`, so this
+// duplicate closed rather than moved.
 
 #[test]
 fn cq_propagates_as_the_childs_own_exit_code() {
@@ -137,10 +129,8 @@ fn piped_stdin_lands_in_the_first_buffer_via_the_relay_fd() {
     // dup2s onto the child's fd 3 is any readable descriptor, and a file
     // exercises the identical dup2 path `ls | view -` would without this
     // crate depending on a pipe-construction crate just for a test.
-    let content = std::env::temp_dir().join(format!(
-        "view-cli-live-stdin-relay-{}.txt",
-        std::process::id()
-    ));
+    let dir = ScratchDir::new("cli-live-stdin-relay");
+    let content = dir.join("stdin.txt");
     std::fs::write(
         &content,
         "hello from the pipe
@@ -162,5 +152,4 @@ fn piped_stdin_lands_in_the_first_buffer_via_the_relay_fd() {
          own ui-startup-stdin documents stdin_fd behaving"
     );
     let _ = engine.wait_exit();
-    std::fs::remove_file(&content).ok();
 }

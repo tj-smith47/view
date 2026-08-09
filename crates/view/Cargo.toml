@@ -65,3 +65,7 @@ rustix = { version = "1", default-features = false, features = [
 view-engine = { version = "0.0.1", path = "../view-engine", features = [
     "test-support",
 ] }
+# The shared temp-dir fixture guard (see its own crate doc): used by both
+# this crate's own unit tests (src/native.rs) and its integration tests
+# (tests/cli_live.rs, tests/supersede_live.rs).
+view-test-support = { version = "0.0.1", path = "../view-test-support" }

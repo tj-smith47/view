@@ -2341,6 +2341,7 @@ dependencies = [
  "view-engine",
  "view-native",
  "view-surface",
+ "view-test-support",
  "view-tui",
 ]
 
@@ -2412,6 +2413,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "view-core",
+ "view-test-support",
 ]
 
 [[package]]
@@ -2435,6 +2437,10 @@ dependencies = [
  "unicode-width",
  "view-core",
 ]
+
+[[package]]
+name = "view-test-support"
+version = "0.0.1"
 
 [[package]]
 name = "view-tui"
