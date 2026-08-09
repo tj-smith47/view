@@ -36,24 +36,31 @@ pub enum ToastError {
     /// The record's directory could not be created.
     #[error("could not create the state directory {path}: {source}")]
     CreateDir {
+        /// The directory that could not be created, as it is displayed.
         path: String,
+        /// The underlying filesystem error.
         source: std::io::Error,
     },
     /// The record exists but could not be read.
     #[error("could not read the first-run record {path}: {source}")]
     Read {
+        /// The record path that failed to read, as it is displayed.
         path: String,
+        /// The underlying filesystem error.
         source: std::io::Error,
     },
     /// The record could not be written back.
     #[error("could not write the first-run record {path}: {source}")]
     Write {
+        /// The record path that failed to write, as it is displayed.
         path: String,
+        /// The underlying filesystem error.
         source: std::io::Error,
     },
     /// The record could not be rendered as TOML.
     #[error("could not serialize the first-run record: {source}")]
     Serialize {
+        /// The underlying TOML serialization error.
         #[from]
         source: toml::ser::Error,
     },
@@ -66,7 +73,8 @@ struct Record {
     /// Written by every build, read to decide whether this build
     /// understands the file at all.
     schema_version: u32,
-    /// Config path to the record keys already announced under it (see
+    /// Config path (encoded by [`config_key`]) to the record keys already
+    /// announced under it (see
     /// [`Handover::record_key`]). A `BTreeMap` of sorted `Vec`s rather than
     /// hash-ordered containers so the file is stable across writes: a record
     /// that reshuffles itself every launch is unreadable as a diff and
@@ -108,7 +116,7 @@ pub fn first_run(
     }
     current.schema_version = SCHEMA_VERSION;
 
-    let key = config_path.map_or_else(String::new, |p| p.display().to_string());
+    let key = config_path.map_or_else(String::new, config_key);
     let announced = current.announced.entry(key).or_default();
 
     let mut notices = Vec::new();
@@ -127,6 +135,52 @@ pub fn first_run(
 
     write_record(record, &current)?;
     Ok(notices)
+}
+
+/// The record key for a config path: its own bytes, with `%` and every byte
+/// that is not part of valid UTF-8 written as `%XX`.
+///
+/// `Path::display` is lossy -- every byte it cannot decode becomes U+FFFD --
+/// so two different configs under two different undecodable paths collapse
+/// onto one key, and the second one silently inherits the silence the first
+/// one earned. A user whose paths are all UTF-8 never meets that, but the
+/// map has to be injective for the ones whose paths are not. Escaping rather
+/// than hex or base64 over the whole path keeps an ordinary key readable in
+/// the file, which is the reason the record is TOML at all.
+///
+/// `%` is escaped too, and has to be: without it a path spelling the literal
+/// text `%C3` and a path holding the undecodable byte `0xC3` produce the
+/// same key. The cost is that a config path containing a `%` re-announces
+/// once, against records written before this encoding existed.
+fn config_key(path: &Path) -> String {
+    let mut rest = path.as_os_str().as_encoded_bytes();
+    let mut out = String::with_capacity(rest.len());
+    while !rest.is_empty() {
+        let (decoded, undecodable) = match std::str::from_utf8(rest) {
+            Ok(text) => (text, 0),
+            Err(e) => (
+                // everything below `valid_up_to` is valid UTF-8 by
+                // construction, so the fallback arm is unreachable
+                std::str::from_utf8(&rest[..e.valid_up_to()]).unwrap_or(""),
+                // a `None` error length means the input ran out mid-sequence,
+                // so every byte from here on is unrepresentable
+                e.error_len().unwrap_or(rest.len() - e.valid_up_to()),
+            ),
+        };
+        for ch in decoded.chars() {
+            if ch == '%' {
+                out.push_str("%25");
+            } else {
+                out.push(ch);
+            }
+        }
+        rest = &rest[decoded.len()..];
+        for byte in &rest[..undecodable] {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+        rest = &rest[undecodable..];
+    }
+    out
 }
 
 /// The record at `path`, or a fresh one when it is absent or unreadable as
@@ -383,6 +437,85 @@ mod tests {
 
         assert!(!notices.is_empty());
         assert!(record.exists(), "the record must exist after a first run");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_ordinary_config_path_is_its_own_record_key() {
+        assert_eq!(config_key(Path::new("/cfg/view.toml")), "/cfg/view.toml");
+        assert_eq!(
+            config_key(Path::new("/cfg/ünïcode.toml")),
+            "/cfg/ünïcode.toml"
+        );
+        assert_eq!(
+            config_key(Path::new("/cfg/50%/view.toml")),
+            "/cfg/50%25/view.toml"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn two_undecodable_config_paths_do_not_share_one_record_key() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // `Path::display` renders both of these as `/cfg/\u{fffd}/view.toml`,
+        // so keying on it would let the second config inherit the silence the
+        // first one earned
+        let first = PathBuf::from(OsStr::from_bytes(b"/cfg/\xff/view.toml"));
+        let second = PathBuf::from(OsStr::from_bytes(b"/cfg/\xfe/view.toml"));
+        assert_eq!(
+            first.display().to_string(),
+            second.display().to_string(),
+            "this test is meaningless unless display() really does collide"
+        );
+        assert_ne!(config_key(&first), config_key(&second));
+
+        let dir = scratch("undecodable");
+        let record = dir.join("native-first-run.toml");
+        let report = handovers();
+        let announced =
+            first_run(&report, Some(&first), &record).expect("the first config must record");
+        let other =
+            first_run(&report, Some(&second), &record).expect("the second config must record");
+        assert!(!announced.is_empty());
+        assert_eq!(
+            announced, other,
+            "a second config under a different undecodable path introduces itself on its own terms"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_v1_record_written_by_an_earlier_build_still_silences_its_surfaces() {
+        // a literal rather than a record this build wrote: every other test
+        // here round-trips through the current serializer, which would keep
+        // passing if the on-disk shape changed under a `SCHEMA_VERSION` that
+        // did not
+        let dir = scratch("v1-compat");
+        let record = dir.join("native-first-run.toml");
+        let report = handovers();
+        let keys: Vec<String> = report.iter().map(Handover::record_key).collect();
+        let rendered = keys
+            .iter()
+            .map(|k| format!("\"{k}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let v1 = format!("schema_version = 1\n\n[announced]\n\"/cfg/view.toml\" = [{rendered}]\n");
+        std::fs::write(&record, &v1).expect("the record must be writable");
+
+        let notices = first_run(&report, Some(Path::new("/cfg/view.toml")), &record)
+            .expect("a v1 record must be readable by this build");
+
+        assert!(
+            notices.is_empty(),
+            "every surface a v1 record already announced must stay quiet, got {notices:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&record).expect("the record must be readable"),
+            v1,
+            "a run with nothing to announce must not rewrite the record"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

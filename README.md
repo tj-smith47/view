@@ -49,7 +49,11 @@ the editor rather than a bolt-on.
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
   file tree, notifications, command palette) share one design system. Prefer
   the plugin you already use? It still loads, and a single config key hands
-  the surface back to it.
+  the surface back to it: put the line `native.picker = false` in
+  `~/.config/view/view.toml` (start from the shipped
+  [`view.toml.example`](view.toml.example), which lists every key) and
+  restart. view never edits your config, so that one line is the whole
+  reversal.
 - **Honest about the gaps.** The benchmark table below includes the rows
   where view is currently *slower* than Neovim, and the build fails if any
   of them quietly regress further.

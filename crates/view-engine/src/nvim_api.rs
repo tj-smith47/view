@@ -71,6 +71,15 @@ const FEED_KEYS_CHUNK: &str =
 /// which matters because `SafeState` fires every time nvim waits for input.
 /// The guard's own write cannot re-enter it for the same
 /// no-nesting reason it exists.
+///
+/// Global options only. Both the set and the re-assert pass an empty `{}`
+/// opts table, which `nvim_set_option_value` and `nvim_get_option_value`
+/// read as the current window and buffer, so a window- or buffer-local
+/// option would be held only wherever the callback happened to run and left
+/// to the plugin everywhere else. Every caller reaches this through
+/// `view_native`'s takeover table, whose `option` field states the same
+/// precondition and whose rows are checked against a live nvim's
+/// `nvim_get_option_info2` scope.
 const HOLD_OPTION_CHUNK: &str = "\
 local name, value = ...
 vim.api.nvim_set_option_value(name, value, {})

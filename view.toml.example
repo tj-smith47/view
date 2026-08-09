@@ -13,3 +13,22 @@ tree = true
 statusline = true
 notifications = true
 palette = true
+
+# The tables below are commented out because THIS BUILD DOES NOT READ THEM
+# yet. Uncommenting one is harmless -- view ignores tables it has no loader
+# for -- but it will not change anything either. They are listed so the
+# shape they will take is no surprise, and each one goes live here in the
+# same change that gives it a loader.
+#
+# [ui]
+# tier = "auto"              # auto | full | standard | basic
+# theme = "auto"             # auto = derive from nvim colorscheme
+#
+# [engine]
+# nvim_bin = "bundled"       # "bundled" | absolute path
+# appname = ""               # NVIM_APPNAME passthrough for isolated profiles
+# single_grid = false
+#
+# [ai]
+# enabled = true
+# agent = "claude-code"      # ACP agent id or ["cmd", "args..."]

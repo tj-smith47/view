@@ -76,8 +76,13 @@ fn session(dir: &Path) -> Engine {
             .with_arg(dir.join("init.lua")),
     )
     .unwrap();
-    let (tx, _rx) = std::sync::mpsc::sync_channel(64);
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
     let (_pump, _cutover) = engine.start_pump(tx);
+    // the receiver is drained for the engine's lifetime rather than
+    // dropped: an attached sink whose other end is gone is fatal to the
+    // reader thread, and a full one stalls the traffic every probe below
+    // rides behind
+    std::thread::spawn(move || while rx.recv().is_ok() {});
     engine.handle.ui_attach(80, 24).unwrap();
     engine
 }
@@ -120,12 +125,65 @@ fn an_enabled_statusline_takes_laststatus_over_without_touching_the_config() {
         "0",
         "an enabled statusline must own the status line in the live session"
     );
+
+    // the guard's OptionSet arm, on the write nvim does report: a plain
+    // `:set` of the held option, undone before anything else runs. The
+    // heavy fixture covers the arm the plugin trips (a write from inside
+    // another autocommand, which fires no OptionSet at all), but that file
+    // is `#[ignore]`d behind the compat plugin cache -- so without this the
+    // whole guard is unexercised in `task ci`
+    engine
+        .handle
+        .eval_str("execute('set laststatus=2')")
+        .unwrap();
+    assert_eq!(
+        engine.handle.eval_str("&laststatus").unwrap(),
+        "0",
+        "the takeover must survive a plain :set of the option it holds"
+    );
+
     let after = snapshot(&dir);
     std::fs::remove_dir_all(&dir).ok();
     assert_eq!(
         before, after,
         "supersession is runtime only: the user's config may not change"
     );
+}
+
+#[test]
+fn every_held_option_is_global_scoped() {
+    // the takeover chunk sets and re-asserts with an empty `{}` opts table,
+    // which nvim reads as the current window and buffer. A window- or
+    // buffer-local option named in the table would therefore be held in one
+    // window and left to the plugin in every other, with nothing failing --
+    // so the precondition is asked of a real nvim rather than restated in a
+    // second list here that could drift from what the options really are
+    let dir = fixture("scope");
+    let engine = session(&dir);
+    let plan = plan(&NativeConfig::all_enabled(), registry::features());
+    assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
+
+    for entry in &plan {
+        let RpcCall::HoldOption { name, .. } = &entry.rpc else {
+            panic!(
+                "a plan entry must ride a durable option call, got {:?}",
+                entry.rpc
+            )
+        };
+        let scope = engine
+            .handle
+            .eval_str(&format!(
+                "luaeval('vim.api.nvim_get_option_info2(_A, {{}}).scope', '{name}')"
+            ))
+            .unwrap();
+        assert_eq!(
+            scope, "global",
+            "{}'s takeover holds `{name}`, which nvim scopes as `{scope}`: only a global \
+             option can be held through an empty opts table",
+            entry.feature
+        );
+    }
+    std::fs::remove_dir_all(&dir).ok();
 }
 
 #[test]

@@ -24,6 +24,12 @@ pub struct NativeConfig {
 /// ignored rather than rejected: `[ui]`, `[engine]` and `[ai]` belong to
 /// other subsystems, and a loader that failed on a sibling's table would
 /// make every new table a breaking change here.
+///
+/// The flip side of ignoring them is that a table nothing reads yet parses
+/// exactly like a table nobody will ever read, so the shipped example is
+/// what tells a user which is which; `TABLES` in this module's tests pins
+/// that listing and fails the moment a table gains a loader without the
+/// example following.
 #[derive(Debug, Default, Deserialize)]
 struct ViewFile {
     #[serde(default)]
@@ -150,35 +156,117 @@ pub enum NativeConfigError {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::collections::BTreeSet;
+
     use super::*;
 
-    /// The shipped example config, read from the workspace root.
-    fn example_toml() -> String {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../view.toml.example");
-        std::fs::read_to_string(path).expect("view.toml.example must be readable")
+    /// The shipped example config, embedded at compile time rather than read
+    /// through a `../..` walk from `CARGO_MANIFEST_DIR`: a moved or renamed
+    /// example is then a build failure at the one site that names it,
+    /// instead of a runtime read error in whichever test happened to run
+    /// first.
+    const EXAMPLE_TOML: &str = include_str!("../../../view.toml.example");
+
+    /// One top-level table `view.toml` is specified to carry, and whether
+    /// this build has a loader for it.
+    ///
+    /// [`ViewFile`] ignores unknown tables by design, so a table nothing
+    /// reads yet parses exactly like a table nobody will ever read.
+    /// Enumerating them here is what makes the example grow: a loaded table
+    /// owes a live block, an unloaded one owes a commented block saying so,
+    /// and flipping `loaded` when a loader lands fails until the example's
+    /// block is uncommented.
+    struct ConfigTable {
+        /// The table's name as `view.toml` spells it, without brackets.
+        name: &'static str,
+        /// Whether a loader in this build reads the table.
+        loaded: bool,
+    }
+
+    /// Every top-level table of `view.toml`, in the order the example lists
+    /// them.
+    static TABLES: [ConfigTable; 4] = [
+        ConfigTable {
+            name: "ui",
+            loaded: false,
+        },
+        ConfigTable {
+            name: "engine",
+            loaded: false,
+        },
+        ConfigTable {
+            name: "native",
+            loaded: true,
+        },
+        ConfigTable {
+            name: "ai",
+            loaded: false,
+        },
+    ];
+
+    /// Every `[table]` header in `EXAMPLE_TOML`, as `(name, commented)`.
+    /// Lines are trimmed of an optional leading `#` so a documented-only
+    /// table and a live one are found by the same pass.
+    fn example_headers() -> Vec<(String, bool)> {
+        EXAMPLE_TOML
+            .lines()
+            .filter_map(|line| {
+                let trimmed = line.trim();
+                let (body, commented) = trimmed
+                    .strip_prefix('#')
+                    .map_or((trimmed, false), |rest| (rest.trim(), true));
+                let name = body.strip_prefix('[')?.strip_suffix(']')?;
+                Some((name.to_string(), commented))
+            })
+            .collect()
     }
 
     #[test]
-    fn every_registry_feature_is_keyed_in_the_example_config() {
-        let example = example_toml();
-        let file: ViewFile = toml::from_str(&example).expect("view.toml.example must parse");
-        let missing: Vec<&str> = registry::features()
-            .iter()
-            .map(|f| f.id)
-            .filter(|id| !file.native.contains_key(*id))
-            .collect();
-        assert!(
-            missing.is_empty(),
-            "view.toml.example has no [native] key for: {missing:?}"
+    fn the_example_config_keys_are_exactly_the_registry_ids() {
+        let file: ViewFile = toml::from_str(EXAMPLE_TOML).expect("view.toml.example must parse");
+        let in_example: BTreeSet<&str> = file.native.keys().map(String::as_str).collect();
+        let in_registry: BTreeSet<&str> = registry::features().iter().map(|f| f.id).collect();
+        assert_eq!(
+            in_example, in_registry,
+            "the example's [native] keys and the registry's ids must be the same set"
         );
     }
 
     #[test]
-    fn every_example_key_is_a_registry_feature() {
-        let cfg = NativeConfig::from_toml_str(&example_toml())
-            .expect("view.toml.example must name only real features");
-        for f in registry::features() {
-            assert!(cfg.enabled(f.id), "{} must be enabled by the example", f.id);
+    fn every_specified_table_is_documented_in_the_example() {
+        let headers = example_headers();
+        for table in &TABLES {
+            // one comparison for both failure modes: `None` is a table the
+            // example never mentions, `Some(other)` is one whose block is
+            // live when this build cannot read it, or commented out when it
+            // can
+            let commented = headers
+                .iter()
+                .find(|(name, _)| name == table.name)
+                .map(|(_, commented)| *commented);
+            assert_eq!(
+                commented,
+                Some(!table.loaded),
+                "[{}] is {} by this build, so view.toml.example owes it a {} block",
+                table.name,
+                if table.loaded { "read" } else { "not read" },
+                if table.loaded {
+                    "live"
+                } else {
+                    "commented-out"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn the_example_documents_no_table_this_build_has_never_heard_of() {
+        let known: BTreeSet<&str> = TABLES.iter().map(|t| t.name).collect();
+        for (name, _) in example_headers() {
+            assert!(
+                known.contains(name.as_str()),
+                "view.toml.example shows [{name}], which is in no specified table"
+            );
         }
     }
 
@@ -253,9 +341,20 @@ mod tests {
 
     #[test]
     fn the_example_config_loads_from_disk() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../view.toml.example");
-        let cfg = NativeConfig::load(Some(&path)).expect("the example must load");
-        assert_eq!(cfg, NativeConfig::all_enabled());
+        // written out and read back rather than loaded from the workspace
+        // copy: the read path under test is `load`, and pointing it at a
+        // scratch file keeps the assertion independent of where the example
+        // sits relative to this crate
+        let dir = std::env::temp_dir().join(format!("view-native-example-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("a temp dir must be creatable");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, EXAMPLE_TOML).expect("the example must be writable");
+        let loaded = NativeConfig::load(Some(&path));
+        std::fs::remove_dir_all(&dir).expect("the temp dir must be removable");
+        assert_eq!(
+            loaded.expect("the example must load"),
+            NativeConfig::all_enabled()
+        );
     }
 
     #[test]
@@ -266,7 +365,7 @@ mod tests {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
         let err = NativeConfig::load(Some(dir)).expect_err("a directory is not a config file");
         assert!(
-            format!("{err}").contains("view-native"),
+            format!("{err}").contains(&dir.display().to_string()),
             "the error must name the path it failed on, got: {err}"
         );
     }

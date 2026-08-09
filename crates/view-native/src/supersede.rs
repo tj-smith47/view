@@ -49,6 +49,43 @@ pub struct Supersession {
     pub supersedes: Option<&'static str>,
 }
 
+/// A takeover's value as a `static` table can spell it.
+///
+/// [`OptionValue::Str`] owns a `String`, which no `const` expression can
+/// build, so a `static` table typed on `OptionValue` can hold numbers and
+/// booleans and silently cannot hold the string options -- `statusline`,
+/// `winbar`, `tabline` -- that the next surfaces to change hands are made
+/// of. A borrowed spell of the same three-variant domain keeps the table
+/// writable for all of them; [`takeover_call`] is the one place it becomes
+/// the owned value the wire takes.
+// the variants the shipped table happens not to use yet are the point: this
+// mirrors nvim's closed option value domain, so a boolean or string row is
+// writable the day a surface needs one rather than a change of this type
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptionValueSpec {
+    /// A number option, e.g. `laststatus`.
+    Int(i64),
+    /// A boolean option, e.g. `ruler`.
+    Bool(bool),
+    /// A string option, e.g. `statusline`.
+    Str(&'static str),
+}
+
+impl OptionValueSpec {
+    /// This spec as the wire value an [`RpcCall`] carries. Total by
+    /// construction over both closed enums, so a fourth option type added to
+    /// either is a compile error here rather than a takeover that quietly
+    /// sets nothing.
+    fn value(self) -> OptionValue {
+        match self {
+            Self::Int(n) => OptionValue::Int(n),
+            Self::Bool(b) => OptionValue::Bool(b),
+            Self::Str(s) => OptionValue::Str(s.to_string()),
+        }
+    }
+}
+
 /// One row of the takeover table: the feature that owns it, and the option
 /// its takeover sets on the live session.
 struct Takeover {
@@ -62,9 +99,18 @@ struct Takeover {
     /// guard a takeover installs is keyed on the option name alone, so a
     /// second row naming it replaces the first row's guard whatever feature
     /// wrote it (`no_two_takeover_rows_claim_one_option`).
+    ///
+    /// Global-scoped only. The takeover chunk sets and re-asserts the option
+    /// with an empty `{}` opts table, which `nvim_set_option_value` reads as
+    /// the current window and buffer, so a window- or buffer-local option
+    /// named here would be held for whichever window happened to be current
+    /// when the plan was applied and left to the plugin everywhere else --
+    /// with nothing failing. `every_held_option_is_global_scoped` in
+    /// `supersede_live` asks a real nvim, so a row naming a local option
+    /// fails rather than half-applying.
     option: &'static str,
     /// The value that hands the surface to view.
-    value: OptionValue,
+    value: OptionValueSpec,
 }
 
 /// Renders one row as the call that performs it: always
@@ -82,7 +128,7 @@ struct Takeover {
 fn takeover_call(row: &Takeover) -> RpcCall {
     RpcCall::HoldOption {
         name: row.option.to_string(),
-        value: row.value.clone(),
+        value: row.value.value(),
     }
 }
 
@@ -98,7 +144,7 @@ fn takeover_call(row: &Takeover) -> RpcCall {
 static TAKEOVERS: [Takeover; 1] = [Takeover {
     feature: "statusline",
     option: "laststatus",
-    value: OptionValue::Int(0),
+    value: OptionValueSpec::Int(0),
 }];
 
 /// The supersession plan for `cfg`: one entry per enabled feature in
@@ -253,12 +299,12 @@ mod tests {
             Takeover {
                 feature: "statusline",
                 option: "laststatus",
-                value: OptionValue::Int(0),
+                value: OptionValueSpec::Int(0),
             },
             Takeover {
                 feature: "notifications",
                 option: "laststatus",
-                value: OptionValue::Int(3),
+                value: OptionValueSpec::Int(3),
             },
         ];
         assert_eq!(
@@ -276,12 +322,12 @@ mod tests {
             Takeover {
                 feature: "statusline",
                 option: "laststatus",
-                value: OptionValue::Int(0),
+                value: OptionValueSpec::Int(0),
             },
             Takeover {
                 feature: "statusline",
                 option: "ruler",
-                value: OptionValue::Bool(false),
+                value: OptionValueSpec::Bool(false),
             },
         ];
         let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
@@ -305,17 +351,52 @@ mod tests {
     }
 
     #[test]
+    fn a_string_valued_row_is_writable_in_the_table_and_reaches_the_plan_owned() {
+        // the shape a `static [Takeover]` typed on OptionValue could not
+        // hold at all: `statusline` is a string option, and the next
+        // surfaces to change hands (winbar, tabline) are string options too
+        let table = [
+            Takeover {
+                feature: "statusline",
+                option: "statusline",
+                value: OptionValueSpec::Str("%f"),
+            },
+            Takeover {
+                feature: "statusline",
+                option: "ruler",
+                value: OptionValueSpec::Bool(false),
+            },
+        ];
+        let entries = plan_from(&NativeConfig::all_enabled(), registry::features(), &table);
+        let calls: Vec<&RpcCall> = entries.iter().map(|entry| &entry.rpc).collect();
+        assert_eq!(
+            calls,
+            vec![
+                &RpcCall::HoldOption {
+                    name: "statusline".to_string(),
+                    value: OptionValue::Str("%f".to_string()),
+                },
+                &RpcCall::HoldOption {
+                    name: "ruler".to_string(),
+                    value: OptionValue::Bool(false),
+                },
+            ],
+            "every option type must survive the table-to-wire conversion intact"
+        );
+    }
+
+    #[test]
     fn a_disabled_feature_supersedes_nothing_however_many_rows_it_has() {
         let table = [
             Takeover {
                 feature: "statusline",
                 option: "laststatus",
-                value: OptionValue::Int(0),
+                value: OptionValueSpec::Int(0),
             },
             Takeover {
                 feature: "statusline",
                 option: "ruler",
-                value: OptionValue::Bool(false),
+                value: OptionValueSpec::Bool(false),
             },
         ];
         let cfg = NativeConfig::from_toml_str("[native]\nstatusline = false\n")
