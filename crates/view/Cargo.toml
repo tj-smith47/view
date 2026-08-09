@@ -48,16 +48,22 @@ view-tui = { version = "0.0.1", path = "../view-tui" }
 # forbidden from depending on directly), so this adds a direct edge to an
 # already-vetted crate rather than a new dependency surface.
 [target.'cfg(unix)'.dependencies]
-# "fs" is needed unconditionally because the apple fallback in src/wake.rs
-# sets O_NONBLOCK via rustix::fs::fcntl_setfl/OFlags -- macOS lacks the
-# atomic pipe2-equivalent `pipe_with` the non-apple path uses, so it falls
-# back to a plain pipe() plus per-fd fcntl calls (see that module's docs).
 rustix = { version = "1", default-features = false, features = [
     "std",
     "event",
     "pipe",
-    "fs",
 ] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# The apple fallback in src/wake.rs sets O_NONBLOCK via
+# rustix::fs::fcntl_setfl/OFlags -- macOS lacks the atomic pipe2-equivalent
+# `pipe_with` the non-apple path above uses, so it falls back to a plain
+# pipe() plus per-fd fcntl calls (see that module's docs). This is an
+# additional feature edge on the same rustix dependency declared under
+# cfg(unix): cargo unions the two tables' features for apple targets
+# (which satisfy both cfg predicates), so non-apple unix builds never pull
+# in the fs module this needs.
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 # The same view-engine, with the constructor that builds a connection over

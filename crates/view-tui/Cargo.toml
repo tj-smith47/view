@@ -35,18 +35,23 @@ unicode-width = "0.2.2"
 # feature set crossterm itself enables), so this adds no new dependency
 # surface, just a direct edge to an already-vetted crate.
 [target.'cfg(unix)'.dependencies]
-# "fs" is needed unconditionally (not just for the bench-taps feature above)
-# because the apple winch-pipe fallback in src/input.rs sets O_NONBLOCK via
-# rustix::fs::fcntl_setfl/OFlags -- macOS lacks the atomic pipe2-equivalent
-# `pipe_with` the non-apple path uses, so it falls back to a plain pipe()
-# plus per-fd fcntl calls.
-rustix = { version = "1", default-features = false, features = ["std", "termios", "pipe", "fs"] }
+rustix = { version = "1", default-features = false, features = ["std", "termios", "pipe"] }
 # The SIGWINCH self-pipe behind `input::InputSource` (see that module's
 # docs): a resize is a signal, not a tty byte, so the runtime loop's fd
 # readiness poll needs a crate-registered pipe to wake on one. Already
 # resolved transitively via crossterm's own unix event backend, same as
 # rustix above.
 signal-hook = { version = "0.3", default-features = false }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+# The apple winch-pipe fallback in src/input.rs sets O_NONBLOCK via
+# rustix::fs::fcntl_setfl/OFlags -- macOS lacks the atomic pipe2-equivalent
+# `pipe_with` the non-apple path above uses, so it falls back to a plain
+# pipe() plus per-fd fcntl calls. This is an additional feature edge on the
+# same rustix dependency declared under cfg(unix): cargo unions the two
+# tables' features for apple targets (which satisfy both cfg predicates),
+# so non-apple unix builds never pull in the fs module this needs.
+rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
