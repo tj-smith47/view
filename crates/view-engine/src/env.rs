@@ -861,6 +861,41 @@ mod tests {
         prepare_home_dir(&dir).unwrap();
     }
 
+    /// An embedded Neovim mkdirs its swap directory on first buffer open,
+    /// so two children starting together race for it and the loser's
+    /// EEXIST surfaces as E303 with the buffer refused. Preparation owns
+    /// the directory instead, which is only a fix while it holds for a
+    /// home in every starting state -- absent, freshly made, and already
+    /// carrying the state a previous child left.
+    #[test]
+    fn the_swap_directory_exists_before_any_child_can_race_for_it() {
+        let swap = Path::new(".local/state/nvim/swap");
+        let dir = scratch("home-swap-race");
+
+        prepare_home_dir(&dir).unwrap();
+        assert!(
+            dir.join(swap).is_dir(),
+            "a fresh home left {} to whichever child mkdirs it first",
+            swap.display()
+        );
+
+        // idempotent over the state it just wrote, since every spawn
+        // re-prepares the one home the whole workspace shares
+        prepare_home_dir(&dir).unwrap();
+        assert!(dir.join(swap).is_dir());
+
+        // and over a home a child already wrote its own state into,
+        // where `.local/state/nvim` exists but the swap directory does not
+        let used = scratch("home-swap-race-used");
+        std::fs::create_dir_all(used.join(".local/state/nvim")).unwrap();
+        std::fs::write(used.join(".local/state/nvim/log"), b"startup").unwrap();
+        prepare_home_dir(&used).unwrap();
+        assert!(
+            used.join(swap).is_dir(),
+            "a home carrying a previous child's state still races for the swap directory"
+        );
+    }
+
     /// A home an unvetted child contaminated must come back to the state
     /// every spawn accepts, and resetting an already-absent home is the
     /// restored state, not an error.

@@ -31,6 +31,26 @@ const PTY_FLOOR_WARMUP: usize = 50;
 /// because everything it reports flows through the taps.
 const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 
+/// Share of a row's keystrokes that may answer from view's own chrome
+/// before the engine's redraw is parsed, above which the output-path row
+/// is no longer measuring the thing it names.
+///
+/// The row's interval opens at the keystroke's parsed redraw, so a paint
+/// that lands before that redraw is outside the boundary by construction
+/// and is counted rather than timed. That accounting is honest only while
+/// such paints are rare: a view that answered every keystroke from its
+/// own chrome would still produce a clean percentile here, measured over
+/// the engine round trips the user never waited for.
+///
+/// One paint per 3300 keystrokes in each of three full dev-linux matrix
+/// runs is the measured rate, so this share sits ~33x above what a
+/// healthy build produces and ~100x below the per-keystroke regime it
+/// exists to catch. A share rather than a count, because `--samples` and
+/// `--trials` are operator-set and a count would silently change meaning
+/// with them; and floored at one event, so that no run length can be
+/// short enough for a single stray paint to fail it.
+const UNEXPLAINED_PAINT_SHARE: f64 = 0.01;
+
 /// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
 /// descriptor before exec'ing the real binary. The pty spawn path closes
 /// every inherited fd above stdio in the child, so the descriptor
@@ -110,12 +130,28 @@ pub(crate) fn run_taps_row(
             segment.label, segment.p50_us, segment.p99_us, segment.samples
         );
     }
+    let keystrokes = protocol.trials * (protocol.warmup + protocol.samples);
     if outcome.unexplained_paints > 0 {
         println!(
-            "      paints with no redraw behind them: {} across all samples (view answered the \
-             keystroke from its own chrome before the engine's redraw was parsed); report-only, \
-             outside this row's boundary",
-            outcome.unexplained_paints
+            "      paints with no redraw behind them: {} of {keystrokes} keystrokes (view \
+             answered the keystroke from its own chrome before the engine's redraw was parsed); \
+             outside this row's boundary, bar {}",
+            outcome.unexplained_paints,
+            unexplained_paint_bound(keystrokes)
+        );
+    }
+    if let Some(reason) = unexplained_paint_refusal(outcome.unexplained_paints, keystrokes) {
+        if controlled {
+            bail!(
+                "{reason}; the row's interval opens at the parsed redraw, so these keystrokes \
+                 were answered outside the boundary this class gates and the percentile no \
+                 longer describes what the user waited for"
+            );
+        }
+        println!(
+            "      UNEXPLAINED PAINTS PAST BAR [{scenario}.{fixture}]: {reason}; recorded and \
+             printed only -- this row's metric is a tail statistic, which never gates on a \
+             shared class"
         );
     }
     report_overhead(&outcome.overhead, outcome.overhead_pace);
@@ -195,6 +231,32 @@ fn overhead_refusal(overhead: &view_bench::sampling::Distribution) -> Option<Str
         format!(
             "measured tap overhead p99 {:.3}us exceeds the {TAP_OVERHEAD_BAR_US}us bar",
             overhead.p99()
+        )
+    })
+}
+
+/// The most unexplained paints `keystrokes` samples may carry before the
+/// output-path row stops describing its own boundary, per
+/// [`UNEXPLAINED_PAINT_SHARE`].
+fn unexplained_paint_bound(keystrokes: usize) -> usize {
+    #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+    let share = (UNEXPLAINED_PAINT_SHARE * keystrokes as f64) as usize;
+    share.max(1)
+}
+
+/// Why the counted chrome paints disqualify the output-path row, when
+/// they do.
+///
+/// The reason states the finding alone; each caller appends the
+/// consequence, which depends on whether the row's percentile gates on
+/// this class (see [`UNEXPLAINED_PAINT_SHARE`]).
+fn unexplained_paint_refusal(unexplained: usize, keystrokes: usize) -> Option<String> {
+    let bound = unexplained_paint_bound(keystrokes);
+    (unexplained > bound).then(|| {
+        format!(
+            "{unexplained} of {keystrokes} keystrokes were answered by a paint with no redraw \
+             behind it, past the {bound} this row admits ({:.0}% of its samples)",
+            UNEXPLAINED_PAINT_SHARE * 100.0
         )
     })
 }
@@ -321,6 +383,43 @@ mod tests {
         assert!(
             reason.contains("17.500us") && reason.contains("5us bar"),
             "the reason must carry the measured value and the bar it broke, got: {reason}"
+        );
+    }
+
+    /// The measured rate on a healthy build -- one chrome paint per full
+    /// default run -- must never refuse, or the bar would fail the thing
+    /// it was derived from.
+    #[test]
+    fn the_observed_chrome_paint_rate_is_admitted_at_every_run_length() {
+        let default_run = Protocol::default();
+        let keystrokes = default_run.trials * (default_run.warmup + default_run.samples);
+        assert_eq!(keystrokes, 3300);
+        assert_eq!(unexplained_paint_refusal(1, keystrokes), None);
+        assert_eq!(unexplained_paint_bound(keystrokes), 33);
+
+        // a run too short for one percent to reach a whole event still
+        // admits the single stray paint the rate produces
+        assert_eq!(unexplained_paint_bound(30), 1);
+        assert_eq!(unexplained_paint_refusal(1, 30), None);
+    }
+
+    /// A view answering keystrokes from its own chrome is what the bar
+    /// exists to catch, and the reason must carry the evidence.
+    #[test]
+    fn painting_every_keystroke_from_chrome_is_refused_with_its_own_numbers() {
+        let reason = unexplained_paint_refusal(3300, 3300)
+            .expect("a paint for every keystroke must disqualify the row");
+        assert!(
+            reason.contains("3300 of 3300") && reason.contains("past the 33"),
+            "the reason must carry the count, the run length and the bound, got: {reason}"
+        );
+        assert!(
+            unexplained_paint_refusal(34, 3300).is_some(),
+            "one past the bound must refuse; the bound is inclusive"
+        );
+        assert!(
+            unexplained_paint_refusal(2, 30).is_some(),
+            "a short run refuses at two, the first count its floor does not admit"
         );
     }
 }

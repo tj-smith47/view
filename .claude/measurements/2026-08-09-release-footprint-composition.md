@@ -41,23 +41,45 @@ save".
 | `.eh_frame` | 498 044 | 294 624 | -40.8% |
 | `.gcc_except_table` | 267 372 | 113 760 | -57.4% |
 | `.data.rel.ro` | 320 424 | 198 920 | -37.9% |
-| idle PSS | 5 139 kB | 4 987 kB | -3.0% |
-| idle PSS, `view r--p` | 1 036 kB | 884 kB | -14.7% |
-| idle PSS, `view r-xp` | 2 428 kB | 2 424 kB | -0.2% |
+| idle PSS, loaded pair (5.89 / 4.11) | 5 139 kB | 4 987 kB | -3.0% |
+| idle PSS, quiet pair (0.17 / 0.33) | 5 185 kB | 4 851 kB | -6.4% |
+| idle PSS `view r--p`, quiet pair | 1 084 kB | 792 kB | -26.9% |
+| idle PSS `view r-xp`, quiet pair | 2 428 kB | 2 360 kB | -2.8% |
 
 The binary-size decomposition, from four builds of the same source: cargo
 defaults 8 772 728; defaults + `strip = "symbols"` 6 360 544; defaults +
 `strip = "none"` 12 771 208; the shipped profile 5 022 304. So strip
 carries -2 412 184 of the total and lto + codegen-units the remaining
--1 338 240.
+-1 338 240. Reproduce with `git show 8a92ab4:Cargo.toml > Cargo.toml` for
+the first three legs -- `--config profile.release.*` overrides do not
+reproduce cargo's default profile and give a different quartet.
 
-The row that matters for the footprint gate is the last one. Resident
-executable pages did not move even though `.text` lost 13%, because the
-kernel faults binary pages in around each touched address (fault-around),
-so residency is set by how scattered the executed code is rather than by
-how much code exists. A size diet is therefore a weak lever on PSS; the
-lever that would move that row is code layout (hot/cold splitting, PGO or
-BOLT-style reordering), which nothing in this tree does today.
+Which binary each number describes, since two differ by a commit. Every
+size, section and probe figure above is the binary built at 03bdf04, the
+commit that added the profile: 5 022 304 bytes. The recorded bench matrix
+ran later, against the binary built at f7cff8c, which added one
+`create_dir_all` call to the hermetic-home preparation and is 5 023 072
+bytes -- 768 bytes larger, 0.015%. The gap is disclosed rather than
+reconciled because nothing here turns on it: it is 0.015% of the file,
+below the granularity of every attribution in the tables, and the call it
+carries runs in the harness before a spawn, not on any measured path.
+
+Two pairings are given because probes taken at different loads are not
+interchangeable, and reporting one of them alone overstates its precision:
+two post-diet probes 90 minutes apart differ by 136 kB between themselves
+(4 987 at load 4.11, 4 851 at load 0.33). The diet's idle-PSS win is
+therefore between -152 and -334 kB, 3% to 6%, against a file that lost
+42.8%.
+
+The row that matters for the footprint gate is the executable one. It
+moved -2.8% at best while `.text` lost 13.0%, because the kernel faults
+binary pages in around each touched address (fault-around), so residency
+is set by how scattered the executed code is rather than by how much code
+exists. The read-only data mapping, where a page becomes resident for one
+touched constant, is where nearly all of the win landed (-26.9%). A size
+diet is therefore a weak lever on resident code; the lever that would move
+that row is code layout (hot/cold splitting, PGO or BOLT-style
+reordering), which nothing in this tree does today.
 
 ## Per-crate `.text`
 
@@ -197,13 +219,54 @@ Private_Dirty:      4952 kB
 20 libc.so.6 r-xp
 ```
 
-Both readings were taken at elevated host load and are still within 1 kB
-of the quiet-host reading this probe reproduces (the 2026-08-09 T16 probe
-at load 0.17 read Pss 5185 kB and `view r-xp` 2428 kB on the pre-diet
-binary). PSS is a page-accounting quantity, not a latency one, and does
-not respond to ambient load the way the tail statistics in the matrix do.
+After, on a quiet host and matched to the conditions of the pre-diet
+reading this document compares against (binary 5 023 072 bytes -- the
+f7cff8c build the matrix ran, see the size disclosure above -- host load
+0.33):
+
+```
+Rss:                6872 kB
+Pss:                4851 kB
+Shared_Clean:       2056 kB
+Private_Clean:      2952 kB
+Private_Dirty:      1864 kB
+-- PSS by mapping+permission (kB) --
+2360 view r-xp
+1196 [anon]
+792 view r--p
+380 [heap]
+41 other (each < 16 kB)
+36 [stack]
+21 libc.so.6 r--p
+20 libc.so.6 r-xp
+-- ELF section sizes (bytes) --
+3528862 .text
+```
+
+That leg was taken with an absolute binary path, which is also what
+exercises the probe's own argument handling: a `./`-prefixed relative
+spawn had made an absolute argument unrunnable.
+
+Both loaded readings were taken at elevated host load. Against the quiet-host
+reading this probe reproduces -- the 2026-08-09 T16 probe at load 0.17,
+which read Pss 5185 kB and `view r-xp` 2428 kB on the pre-diet binary --
+the pre-diet leg above agrees exactly on the resident executable mapping
+(2428 kB, the row the diet was aimed at), on `[anon]` (1176 kB) and on
+`[heap]` (376 kB), and reads 46 kB lower in total Pss (5139 vs 5185,
+-0.9%). Almost all of the difference is one row: `view r--p` reads 1036 kB
+here against T16's 1084 kB, with `[stack]` making up 4 kB of the other
+direction (36 vs 32). Read-only binary pages become resident when a code
+path touches the constant beside them, so that row varies run to run with
+what the startup happened to execute, which is the same mechanism this
+document's `.text` finding rests on. Two consequences: the executable
+residency attributed here is stable across a 34x load range, and total
+Pss is comparable across runs to about a percent, not exactly.
 
 The harness's `memory.minimal` row measures a different quantity from
 this probe: post-workload with ten buffers, not idle. It read 5.210 MB
-pre-diet and 4.986 MB on the dieted binary in the recorded matrix run, a
-delta of -0.224 MB against the idle probe's -0.152 MB.
+pre-diet, and a logged 8-leg replicate campaign on the dieted binary at
+1-min loads 0.21-2.90 medians 4.962 MB (kept legs 4.870 4.894 4.944 4.956
+4.968 4.968 5.019 5.093), a delta of -0.248 MB. That sits inside the
+-0.152 to -0.334 MB the two idle-probe pairings bracket, so both
+instruments agree on the size of the win and on how imprecisely either one
+alone states it.

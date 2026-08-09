@@ -4,7 +4,7 @@ machine_class = "dev-linux"
 
 [echo.heavy]
 paired_delta_p99_ms = 0.78042
-ratio_p50 = 1.116
+ratio_p50 = 1.097
 ratio_p99 = 0.9807912230196847
 view_p99_ms = 1.325479
 
@@ -44,10 +44,10 @@ cadence_p99_ratio = 0.9792970117228196
 pace_ratio = 1.000040416926719
 
 [input_path.minimal]
-key_to_rpc_p99_us = 50.831
+key_to_rpc_p99_us = 59.332
 
 [memory.minimal]
-pss_mb = 4.9305
+pss_mb = 4.962
 
 [output_path.minimal]
 p99_ms = 0.081796

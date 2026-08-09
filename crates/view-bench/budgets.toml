@@ -240,18 +240,26 @@ why = "the same cell and the same event as the marker_cold_ms shortfall above, e
 # entry accepted 112.647 against the 100.0 bound and named its own
 # retirement condition -- "the entry stays until a measurement reads inside
 # 100" -- while attributing the gap to a hypervisor-side level shift no view
-# work could reach. Seven measurements on 2026-08-09 read 49.674, 50.077,
-# 50.192, 50.831, 51.362, 53.257 and 54.530 (five scoped replicates at 1-min
-# host loads 0.48-1.03, plus the full-matrix record and gate runs), which is
-# not merely inside 100: it is 37% under the 80.682 the entry called the
-# clean campaign level. The attribution the entry carried is therefore
-# falsified rather than satisfied -- the input path got faster on this host,
-# it did not go back to how it was -- and the code that did it is the
-# input-thread/runtime-loop unification, whose paired A/B collapsed the
-# key-decoded->loop-wake segment. The recorded baseline moved 80.682 ->
-# 50.831 in the same campaign, by hand-edit, because the replicate median
-# sits below what the class's published 1.15 spread lets --record write in
-# one draw.
+# work could reach. Every measurement taken on 2026-08-09 is inside 100, so
+# the condition is met many times over: 49.674, 51.362 and 72.311 from three
+# full-matrix runs, 50.077 50.192 50.831 53.257 54.530 from one scoped
+# replicate campaign at 1-min loads 0.48-1.03, and 57.413 57.883 58.451
+# 60.212 60.245 60.779 from a second logged campaign at loads 0.23-1.59.
+# The code that moved the level is the input-thread/runtime-loop
+# unification, whose paired A/B collapsed the key-decoded->loop-wake
+# segment.
+#
+# The entry's level-shift attribution is confirmed rather than falsified,
+# and that is the part worth carrying forward: the two scoped campaigns are
+# tight internally (4.5us and 3.4us spreads) and 16% apart from each other,
+# hours apart, on the same binary, so this host holds a level for a session
+# and picks a different one later. A single campaign's median is therefore
+# a reading of this afternoon, not of view. The recorded baseline moved
+# 80.682 -> 59.332 by hand-edit, taking the median of the logged campaign,
+# because a replicate median below the class's published 1.15 spread is not
+# something --record will write in one draw. Only the retirement of the
+# accepted shortfall rests on all of this, and that rests on the bound of
+# 100 alone, which no reading in either campaign approaches.
 
 # echo.minimal view_p99_ms is not listed: the 2026-08-02 quiet-host
 # re-record measured 5.244 against the 8 ms bar, so the prior 8.290

@@ -47,6 +47,12 @@ done
 [ -x "$binary" ] || { echo "PSS PROBE FAIL: $binary is not an executable" >&2; exit 1; }
 [ -f "$open_file" ] || { echo "PSS PROBE FAIL: $open_file not found" >&2; exit 1; }
 
+# Resolved once, so that the spawn below names the same file the header
+# reported whatever shape the argument arrived in: a bare `view` must not
+# reach `$PATH`, and an absolute path must not be prefixed into a relative
+# one that resolves nowhere.
+binary="$(cd "$(dirname "$binary")" && pwd)/$(basename "$binary")"
+
 echo "== idle view PSS probe, $(date -u +%Y-%m-%dT%H:%M:%SZ) =="
 uptime
 git log --oneline -1 || true
@@ -108,7 +114,7 @@ while True:
         break
 PY
 
-python3 "$driver" "$pid_file" "$cols" "$rows" "./$binary" --clean "$open_file" >/dev/null 2>&1 &
+python3 "$driver" "$pid_file" "$cols" "$rows" "$binary" --clean "$open_file" >/dev/null 2>&1 &
 driver_pid=$!
 
 # The driver writes the pid only after its fork returns, so the file appears
