@@ -35,6 +35,14 @@ pub struct NativeConfig {
 /// purpose. Round-tripping a `Default` through `toml::Value` is the only
 /// way this crate can enumerate its own table names without a second list
 /// beside the struct, free to drift from it.
+///
+/// A field naming a `[table]` this loader reads must stay non-`Option` --
+/// a `#[serde(default)]` concrete value, as `native` already is -- for the
+/// derived pin to see it at all. `toml`'s serializer emits no key for a
+/// `None`, so an `Option`-typed table would round-trip through
+/// `toml::Value::try_from(ViewFile::default())` as an absent key: present in
+/// the struct, invisible to `loaded_tables`, and free to drift from
+/// `EXAMPLE_TOML` without either direction of this file's tests noticing.
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct ViewFile {
     #[serde(default)]
