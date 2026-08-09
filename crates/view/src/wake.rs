@@ -41,6 +41,42 @@ struct WakerShared {
     write: OwnedFd,
 }
 
+/// Creates the wake pipe's two ends with `O_CLOEXEC`/`O_NONBLOCK` already
+/// set on both, matching `pipe2`'s atomic guarantee.
+#[cfg(all(unix, not(target_vendor = "apple")))]
+fn new_wake_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    Ok(rustix::pipe::pipe_with(
+        rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
+    )?)
+}
+
+// macOS has no atomic pipe2-equivalent syscall, so rustix compiles
+// `pipe_with`/`PipeFlags` out entirely on apple targets (see rustix's
+// `pipe.rs`: both are `#[cfg(not(apple))]`). The fallback below sets the
+// same two flags non-atomically, one `fcntl` call per fd, after a plain
+// `pipe()`. That gap between creation and flagging is safe because a
+// `LoopWaker` is always constructed before any subprocess is spawned and
+// before any other thread exists -- there is no fork/exec in the
+// program's lifetime yet that could inherit these fds un-flagged.
+#[cfg(target_vendor = "apple")]
+fn new_wake_pipe() -> std::io::Result<(OwnedFd, OwnedFd)> {
+    let (read, write) = rustix::pipe::pipe()?;
+    set_cloexec_nonblock(&read)?;
+    set_cloexec_nonblock(&write)?;
+    Ok((read, write))
+}
+
+#[cfg(target_vendor = "apple")]
+fn set_cloexec_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
+    let mut fd_flags = rustix::io::fcntl_getfd(fd)?;
+    fd_flags.insert(rustix::io::FdFlags::CLOEXEC);
+    rustix::io::fcntl_setfd(fd, fd_flags)?;
+
+    let mut status_flags = rustix::fs::fcntl_getfl(fd)?;
+    status_flags.insert(rustix::fs::OFlags::NONBLOCK);
+    Ok(rustix::fs::fcntl_setfl(fd, status_flags)?)
+}
+
 #[cfg(unix)]
 impl LoopWaker {
     /// Creates the wake pipe, both ends non-blocking: the write side must
@@ -53,9 +89,7 @@ impl LoopWaker {
     /// Returns the underlying `std::io::Error` if the pipe cannot be
     /// created.
     pub fn new() -> std::io::Result<Self> {
-        let (read, write) = rustix::pipe::pipe_with(
-            rustix::pipe::PipeFlags::CLOEXEC | rustix::pipe::PipeFlags::NONBLOCK,
-        )?;
+        let (read, write) = new_wake_pipe()?;
         Ok(Self(Arc::new(WakerShared {
             pending: AtomicBool::new(false),
             read,
