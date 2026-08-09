@@ -26,7 +26,7 @@ Recorded baselines on a shared Linux dev host:
 | UI shell painted, engine still loading (p99) | **4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms | **5x faster** |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **120.5 ms** | 199.8 ms | **1.7x faster** |
-| Resident memory (PSS) | **3.4 MB** | n/a | budget was 150 MB |
+| Resident memory (PSS), view process only | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.12 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.90 ms | 0.81 ms | ~1.12x slower |
 | Sustained scroll, 100k lines (p99 staleness) | 1.40 ms | n/a | budget 16 ms |
@@ -37,6 +37,10 @@ even started the Neovim child, so bare Neovim has no comparable event. It
 shows nothing until your config finishes loading. The 4.1 ms figure is
 identical on a bare config and on the 14-plugin stack, because none of your
 config has run yet at that point.
+
+The memory row is view's own process only: the embedded Neovim engine is a
+separate process this budget deliberately excludes, so the bare-Neovim
+column reads `n/a` rather than a real comparison.
 
 ## The typing gap
 

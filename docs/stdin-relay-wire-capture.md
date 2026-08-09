@@ -1,7 +1,7 @@
 # Wire capture: `stdin_fd` / `ui-startup-stdin` contract
 
 Captured live against the pinned engine per "capture, never recall." Source
-of truth for the CLI's stdin relay (`ls | view -`, Task 7).
+of truth for the CLI's stdin relay (`ls | view -`).
 
 ## Engine identity
 

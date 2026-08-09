@@ -64,17 +64,18 @@ are each their own bracketed event name at the top level of a redraw batch
 carried inside a `msg_show` tuple. A `route(kind: &str)` fed only from
 `UiEvent::MsgShow`'s `kind` field can therefore never receive `"msg_showmode"`,
 `"msg_showcmd"`, or `"msg_ruler"` as input: those three match arms in the
-brief's table are dead code under T9's `msg_show`-only wiring, by construction
-of the wire protocol, not a bug in the table. They stay in `route()` verbatim
-(the brief's exact match, byte-for-byte, per "the table IS the implementation"
-and because T10 -- which does decode these sibling events -- depends on
-`route()`'s exact name/signature to classify them once it starts feeding them
-through). The three arms become live once T10 threads
-`UiEvent::MsgShowmode`/`MsgShowcmd`/`MsgRuler` variants through the same
-`route()` call by construction (kind string literal match, no protocol
-translation needed) -- T9 does not add those `UiEvent` variants or decode
-those wire events at all, since nothing routes through them yet (no
-statusline surface exists to consume `Route::Statusline`).
+brief's table are dead code under today's `msg_show`-only wiring, by
+construction of the wire protocol, not a bug in the table. They stay in
+`route()` verbatim (the brief's exact match, byte-for-byte, per "the table IS
+the implementation" and because the call site that decodes these sibling
+events depends on `route()`'s exact name/signature to classify them once it
+starts feeding them through). The three arms become live once that call
+site threads `UiEvent::MsgShowmode`/`MsgShowcmd`/`MsgRuler` variants through
+the same `route()` call by construction (kind string literal match, no
+protocol translation needed) -- today's wiring does not add those
+`UiEvent` variants or decode those wire events at all, since nothing routes
+through them yet (no statusline surface exists to consume
+`Route::Statusline`).
 
 ## Finding: `search_count` is a genuine `msg_show` kind
 
@@ -105,10 +106,11 @@ pipeline today, unlike the three top-level events above.
 
 - `route(kind: &str)` is implemented as the brief's exact match, unmodified.
   Four of its six textual arms (`msg_showmode`, `msg_showcmd`, `msg_ruler`)
-  are unreachable through T9's `UiEvent::MsgShow`-only call site and will
-  only become live when T10 adds the corresponding `UiEvent` variants and
-  feeds their content through the same function -- documented here, not
-  worked around, since `route()`'s job is to be the one routing table for
-  every kind string this or a future call site can produce.
+  are unreachable through today's `UiEvent::MsgShow`-only call site and will
+  only become live when a future call site adds the corresponding
+  `UiEvent` variants and feeds their content through the same function --
+  documented here, not worked around, since `route()`'s job is to be the
+  one routing table for every kind string this or a future call site can
+  produce.
 - `search_count` and `search_cmd` are real, reachable `msg_show` kinds today
-  and route through T9's call site exactly like any other kind string.
+  and route through today's call site exactly like any other kind string.

@@ -1,7 +1,7 @@
 # Wire capture: `g:clipboard` provider contract
 
 Captured live against the pinned engine per "capture, never recall." Source
-of truth for the clipboard provider implementation (Task 6).
+of truth for the clipboard provider implementation.
 
 ## Engine identity
 

@@ -1,7 +1,7 @@
 # Wire capture: `ext_popupmenu`'s cmdline-sourced vs buffer-sourced distinction
 
 Captured live against the pinned engine per "capture, never recall." Source
-of truth for the command palette's completion routing (T14): which field on
+of truth for the command palette's completion routing: which field on
 `popupmenu_show` tells a cmdline-sourced completion (belongs inside the
 palette) apart from an insert-mode buffer completion (belongs in its own
 popup at the cursor, never inside the palette).

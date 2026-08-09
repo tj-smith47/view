@@ -73,8 +73,8 @@ picker built without it would surface `:help`/quickfix/terminal scratch
 buffers a user never asked to jump to, exactly what `:ls` (and every
 Telescope-style buffer picker) also excludes by default. The order returned
 is buffer-number order (`nvim_list_bufs`'s own order), not MRU -- the picker
-does not attempt recency ranking in T11; nucleo's match score is the only
-ordering signal.
+does not attempt recency ranking; nucleo's match score is the only ordering
+signal.
 
 ## 3. Error shape: malformed Lua
 

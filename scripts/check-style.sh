@@ -1,6 +1,56 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Session-narrative, spec-task-tag, and SDD-ledger-row markers, shared
+# between source comments (anchored on the language's own comment prefix,
+# `anchor` = "(prefix).*") and doc prose (`anchor` = "", matching anywhere
+# in the line -- README/docs/*.md have no comment prefix to anchor on, and
+# a stray "Task 6" or "ledger 133" in prose is exactly as much a drift risk
+# as the same citation inside a comment).
+check_narrative_markers() {
+  local anchor="$1"
+  shift
+  local targets=("$@")
+  local fail=0
+  if grep -rnE "${anchor}\\b(Phase|Task|Wave|Cycle|Session) [0-9]" "${targets[@]}"; then
+    echo "STYLE FAIL: session-narrative comment marker"; fail=1
+  fi
+  # "step" checked separately, case-insensitively: this tree has committed
+  # lowercase "step N" narrative references a case-sensitive check missed,
+  # and unlike "task"/"session" (which read as ordinary lowercase words in
+  # unrelated prose), "step" has no such legitimate lowercase reading that a
+  # case-insensitive match would false-positive on in this tree today.
+  if grep -rniE "${anchor}\\bstep [0-9]" "${targets[@]}"; then
+    echo "STYLE FAIL: session-narrative comment marker (step)"; fail=1
+  fi
+  # spec-task tags (T4/T5/T6): a comment/doc must state what the code does,
+  # never which spec task produced it. Two shapes: a slash-joined sequence
+  # (T4/T5/T6, T10/T11), which has no legitimate non-task-tag reading
+  # anywhere in Rust syntax or prose, and a single tag standing alone
+  # surrounded by whitespace ("the T4 brief", "done in T7."). Not a blanket
+  # \bT[0-9]+\b ban, which would flag far more. Backtick-wrapped type
+  # parameters never match (a backtick, not whitespace, precedes the T); a
+  # bare prose mention of a T1-style name still trips the standalone
+  # pattern, so backtick type params in rustdoc/prose stay clear of it.
+  if grep -rnE "${anchor}\\bT[0-9]+/T[0-9]+" "${targets[@]}"; then
+    echo "STYLE FAIL: spec-task tag sequence in comment"; fail=1
+  fi
+  if grep -rnE "${anchor}[[:space:]]T[0-9]+[.,:]?([[:space:]]|\$)" "${targets[@]}"; then
+    echo "STYLE FAIL: spec-task tag in comment"; fail=1
+  fi
+  # SDD-internal ledger-row citation ("ledger 133", "ledger:164"): the exit
+  # drain's own numbered deferred-item list, not a fact about the code. Not
+  # a blanket \bledger\b ban -- "ledger" is also this tree's own accounting
+  # term (the macOS phys_footprint ledger, the harness's shortfall/budget
+  # ledger), which a bare word match would flag on every legitimate use;
+  # requiring a directly adjacent number is what isolates the citation
+  # shape from those, and today's tree has zero adjacent-number hits.
+  if grep -rniE "${anchor}\\bledger[[:space:]]*:?[[:space:]]*[0-9]+" "${targets[@]}"; then
+    echo "STYLE FAIL: SDD ledger-row reference in comment"; fail=1
+  fi
+  return $fail
+}
+
 # All content-pattern checks against source comments/prose. Parameterized on
 # a target path, a language's own line-comment marker(s) (Rust/TOML: '//' or
 # '#'; Lua: '--'), and file-type include globs, so the same narrative-marker
@@ -15,17 +65,7 @@ check_content() {
   shift 2
   local includes=("$@")
   local fail=0
-  if grep -rnE "(${comment_prefix}).*\\b(Phase|Task|Wave|Cycle|Session) [0-9]" "$target" "${includes[@]}"; then
-    echo "STYLE FAIL: session-narrative comment marker"; fail=1
-  fi
-  # "step" checked separately, case-insensitively: this tree has committed
-  # lowercase "step N" narrative references a case-sensitive check missed,
-  # and unlike "task"/"session" (which read as ordinary lowercase words in
-  # unrelated prose), "step" has no such legitimate lowercase reading that a
-  # case-insensitive match would false-positive on in this tree today.
-  if grep -rniE "(${comment_prefix}).*\\bstep [0-9]" "$target" "${includes[@]}"; then
-    echo "STYLE FAIL: session-narrative comment marker (step)"; fail=1
-  fi
+  check_narrative_markers "(${comment_prefix}).*" "$target" "${includes[@]}" || fail=1
   if grep -rn '§' "$target" "${includes[@]}"; then
     echo "STYLE FAIL: section-symbol reference in code"; fail=1
   fi
@@ -98,21 +138,6 @@ check_content() {
   # tree today.
   if grep -rnE "\b[CIM][0-9]+\`?'s?\b" "$target" "${includes[@]}"; then
     echo "STYLE FAIL: review-finding tag in comment"; fail=1
-  fi
-  # spec-task tags (T4/T5/T6): a comment must state what the code does,
-  # never which spec task produced it. Two shapes: a slash-joined sequence
-  # (T4/T5/T6, T10/T11), which has no legitimate non-task-tag reading
-  # anywhere in Rust syntax or prose, and a single tag standing alone in a
-  # comment surrounded by whitespace ("the T4 brief", "done in T7."). Not a
-  # blanket \bT[0-9]+\b ban, which would flag far more. Backtick-wrapped
-  # type parameters never match (a backtick, not whitespace, precedes the
-  # T); a BARE prose mention of a T1-style name in a comment still trips
-  # the standalone pattern, so backtick type params in rustdoc prose.
-  if grep -rnE "(${comment_prefix}).*\\bT[0-9]+/T[0-9]+" "$target" "${includes[@]}"; then
-    echo "STYLE FAIL: spec-task tag sequence in comment"; fail=1
-  fi
-  if grep -rnE "(${comment_prefix}).*[[:space:]]T[0-9]+[.,:]?([[:space:]]|$)" "$target" "${includes[@]}"; then
-    echo "STYLE FAIL: spec-task tag in comment"; fail=1
   fi
   # TDD/session-narrative markers one synonym past the existing "this task"/
   # "the red/green test" check: "the RED/GREEN half" (a paired-test label),
@@ -187,6 +212,13 @@ if [ -f README.md ]; then
   if grep -rn -- '—' $targets; then
     echo "STYLE FAIL: emdash in user docs"; fail=1
   fi
+  # narrative markers, unanchored (README/docs prose carries no comment
+  # prefix to anchor on). `§` is deliberately not run here, unlike the
+  # source-side ban in check_content: a doc legitimately cites a spec
+  # section (e.g. docs/statusline-wire-capture.md's "spec §9"), where
+  # source code never has occasion to.
+  # shellcheck disable=SC2086
+  check_narrative_markers "" $targets || fail=1
 else
   echo "STYLE FAIL: README.md missing"; fail=1
 fi

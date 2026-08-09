@@ -126,14 +126,15 @@ payload -- the statusline does not need a distinct operator-pending branch.
 ['msg_ruler', [[[1, '1,5           All', 63]]]]
 ```
 
-`laststatus=0` (required by T2's supersession plan, already implemented in
-`view-native::supersede`) makes nvim emit `msg_ruler` on every cursor move
+`laststatus=0` (required by the option-supersession design, already
+implemented in `view-native::supersede`) makes nvim emit `msg_ruler` on
+every cursor move
 exactly as the brief assumes -- no additional engine configuration needed.
 
 ## Finding: `search_count` is a real, reachable `msg_show` kind, captured live
 
-T9's wire-capture doc could not trigger `search_count` (a `:put` quoting
-failure). This session avoided that by populating the buffer with
+The prior wire-capture pass could not trigger `search_count` (a `:put`
+quoting failure). This session avoided that by populating the buffer with
 `i...<Esc>` insert instead of `:put`:
 
 ```
@@ -148,7 +149,7 @@ failure). This session avoided that by populating the buffer with
 `search_count`'s content is plain text (`/cat [N/M]` or `/cat W [N/M]` when
 the search wrapped) already routed through `Route::Statusline` in
 `toast.rs`'s `route()`. It arrives through the existing `UiEvent::MsgShow`
-path (T9's decoder), not a new event -- `StatuslineState` consumes it via the
+path (today's decoder), not a new event -- `StatuslineState` consumes it via the
 same `MsgShow{kind: "search_count", ..}` case, no new `UiEvent` variant.
 
 ## Conclusion for the implementation

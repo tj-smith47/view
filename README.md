@@ -43,9 +43,10 @@ the editor rather than a bolt-on.
   suite drives pinned real-world plugin stacks (telescope, lualine, noice,
   nvim-cmp, treesitter, mini.nvim, and more) through a real pty.
 - **Fast where you feel it.** view paints a usable shell in ~4 ms and first
-  content 1.7 to 5x sooner than bare Neovim, at 3.4 MB resident. Every claim
-  is measured, paired, and regression-gated in CI. See
-  [Performance](#performance).
+  content 1.7 to 5x sooner than bare Neovim, at 4.96 MB resident for view's
+  own process (the embedded Neovim engine runs separately and is not
+  included). Every claim is measured, paired, and regression-gated in CI.
+  See [Performance](#performance).
 - **Modern out of the box.** The surfaces view owns (statusline, picker,
   file tree, notifications, command palette) share one design system. Prefer
   the plugin you already use? It still loads, and a single config key hands
@@ -86,10 +87,12 @@ run, same host, same config, samples interleaved. Reproduce with
 | Shell painted, config still loading (p99) | **4.1 ms** | n/a |
 | First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **120.5 ms** | 199.8 ms |
-| Resident memory (PSS) | **3.4 MB** | n/a |
+| Resident memory (PSS), view process only | **4.96 MB** | n/a |
 | Keystroke to cell change, steady typing (p99) | 0.90 ms | **0.81 ms** |
 
-Cold start and memory are big wins. Typing and sustained scrolling are
+Cold start is a big win. Memory has no bare-Neovim comparison yet (the row
+above is view's own process; the embedded Neovim engine is a separate
+process this budget excludes). Typing and sustained scrolling are
 currently a bit slower than bare Neovim (about 17% and 2x, on paths that
 are sub-millisecond either way, so neither is something you can feel). We
 are actively closing those gaps rather than explaining them away: profiling
