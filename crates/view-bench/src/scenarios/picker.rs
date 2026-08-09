@@ -358,6 +358,14 @@ fn settled_count_token(session: &mut BenchSession, token: &str) -> Option<usize>
     let before = count_token(session, token);
     std::thread::sleep(TORN_FRAME_SETTLE);
     let after = count_token(session, token);
+    debounced(before, after)
+}
+
+/// A read is trustworthy only once it stops moving across the settle
+/// window: two chunks of the same torn frame read equal on both sides,
+/// while a still-arriving redraw (or a genuine transition to a higher
+/// count) reads differently and is reported as not yet settled.
+fn debounced(before: usize, after: usize) -> Option<usize> {
     (before == after).then_some(after)
 }
 
@@ -616,5 +624,33 @@ fn observe_streaming(
             });
         }
         std::thread::yield_now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::debounced;
+
+    // Two reads of the same torn frame must not register as growth --
+    // a slow/chunked pty read is indistinguishable at the byte level
+    // from the walk actually producing new results unless the debounce
+    // itself is pinned.
+    #[test]
+    fn an_unchanged_read_across_the_settle_window_is_trusted() {
+        assert_eq!(debounced(3, 3), Some(3));
+    }
+
+    // A read that is still moving across the settle window (the redraw
+    // is mid-flight) must not be trusted yet.
+    #[test]
+    fn a_read_that_moved_across_the_settle_window_is_not_trusted() {
+        assert_eq!(debounced(3, 5), None);
+    }
+
+    // The debounce has no direction bias: a read that appears to shrink
+    // (e.g. an intermediate partial redraw) is equally untrusted.
+    #[test]
+    fn a_read_that_shrank_across_the_settle_window_is_not_trusted() {
+        assert_eq!(debounced(5, 3), None);
     }
 }
