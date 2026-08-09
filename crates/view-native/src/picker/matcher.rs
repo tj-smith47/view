@@ -973,9 +973,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The highlight-attribution half of the colon-path fix (ledger 141 +
-    /// 143): the fixture's directory name itself contains the query text,
-    /// so before `spawn_live_grep_scan` restricted the matcher column to
+    /// The highlight-attribution half of the colon-path fix: the fixture's
+    /// directory name itself contains the query text, so before
+    /// `spawn_live_grep_scan` restricted the matcher column to
     /// `label[match_start..]` and `build_results` shifted the returned
     /// offsets back by `match_start`, nucleo could attribute a match to
     /// characters inside the `path:line: ` prefix (here, "needle" inside
@@ -983,7 +983,7 @@ mod tests {
     /// index a real streamed result carries must land at or past its own
     /// `match_start` -- i.e. inside the matched text, never the prefix.
     #[test]
-    fn a_live_grep_matchs_highlight_never_lands_inside_the_path_prefix() {
+    fn a_live_grep_match_highlight_never_lands_inside_the_path_prefix() {
         let nonce = format!(
             "{}-{}",
             std::process::id(),

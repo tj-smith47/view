@@ -176,12 +176,11 @@ pub fn spawn_live_grep_scan(
                     // is exact: the file currently being searched stops
                     // mid-file the instant the limit is reached, instead of
                     // finishing out whatever matches remain in it first.
-                    // The cancel check alongside it means a query
-                    // superseded mid-file (ledger: a scan that ignored
-                    // `cancel` here ran a huge single file to completion
-                    // after the query that started it no longer existed)
-                    // also stops within the file currently being searched,
-                    // not just between files.
+                    // The cancel check alongside it means a query superseded
+                    // mid-file also stops within the file currently being
+                    // searched, not just between files -- without it, a scan
+                    // could run a huge single file to completion after the
+                    // query that started it no longer existed.
                     Ok(matched < LIVE_GREP_MATCH_LIMIT && !cancel.load(Ordering::Acquire))
                 }),
             );
@@ -346,6 +345,68 @@ mod tests {
             items,
             vec!["needle.txt:2: a needle sits here".to_string()],
             "expected exactly one match at line 2, formatted as path:line: text, got {items:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `PickerItem::path`/`line` are read nowhere in production yet (the
+    /// `<CR>`-open flow still resolves the selection through
+    /// `PickerState::selected_path`, not these fields directly), so nothing
+    /// else in this suite pins their values -- only the display label's
+    /// shape. This proves the fields themselves carry the right data end to
+    /// end from a live scan, independent of the label they were built
+    /// alongside.
+    #[test]
+    fn a_matching_lines_item_carries_its_path_and_line_as_real_fields() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-fields-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(
+            root.join("needle.txt"),
+            "no match on this line\na needle sits here\n",
+        )
+        .expect("write test file");
+
+        let mut nucleo: nucleo::Nucleo<PickerItem> =
+            nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let injector = nucleo.injector();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle =
+            spawn_live_grep_scan(root.clone(), "needle".to_string(), injector, cancel.clone());
+        handle.join().expect("grep scan thread panicked");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            nucleo.tick(10);
+            if nucleo.snapshot().item_count() >= 1 || std::time::Instant::now() > deadline {
+                break;
+            }
+        }
+        let snapshot = nucleo.snapshot();
+        let items: Vec<PickerItem> = (0..snapshot.item_count())
+            .filter_map(|i| snapshot.get_item(i))
+            .map(|item| item.data.clone())
+            .collect();
+        assert_eq!(items.len(), 1, "expected exactly one match, got {items:?}");
+        assert_eq!(
+            items[0].path.as_deref(),
+            Some("needle.txt"),
+            "PickerItem::path must carry the match's relative path, not just its label"
+        );
+        assert_eq!(
+            items[0].line,
+            Some(2),
+            "PickerItem::line must carry the match's 1-based line number, not just its label"
         );
 
         let _ = std::fs::remove_dir_all(&root);

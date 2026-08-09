@@ -546,16 +546,34 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             Vec::new()
         }
-        Msg::TreeGitResult { generation, status } => {
+        Msg::TreeGitResult {
+            generation,
+            status,
+            timed_out,
+        } => {
             let Some(t) = model.tree_mut() else {
                 return Vec::new();
             };
             let reissue = t.apply_git(generation, status);
             model.dirty = true;
-            if reissue {
-                return tree_git_refresh_effect(model);
+            let mut effects = if reissue {
+                tree_git_refresh_effect(model)
+            } else {
+                Vec::new()
+            };
+            // apply_git above already cleared TreeState's in-flight flag
+            // unconditionally, so a wedged git that hit its own deadline
+            // never permanently suppresses a later refresh -- this notice
+            // is purely informational, telling the user the decorations
+            // they see may be stale rather than leaving them to wonder why
+            // nothing updated.
+            if timed_out {
+                effects.extend(model.engine.record_native_notice(
+                    "view: git status timed out; tree decorations may be stale".to_string(),
+                    false,
+                ));
             }
-            Vec::new()
+            effects
         }
         // a refused rename (`ok: false`) has nothing else to try -- see
         // `RpcCall::RenameFile`'s doc -- so it surfaces as a notice and
@@ -4215,6 +4233,7 @@ mod tests {
             Msg::TreeGitResult {
                 generation: opened_at,
                 status: Vec::new(),
+                timed_out: false,
             },
         );
 
@@ -4265,6 +4284,7 @@ mod tests {
             Msg::TreeGitResult {
                 generation: opened_at,
                 status: Vec::new(),
+                timed_out: false,
             },
         );
 
@@ -4280,7 +4300,7 @@ mod tests {
         );
     }
 
-    /// The coalescing proof ledger 153 exists to add: a write callback that
+    /// The coalescing falsification test: a write callback that
     /// arrives while the open-time refresh is still in flight must issue no
     /// second `Effect::TreeGitScan` -- coalescing it instead of spawning a
     /// concurrent `git status` process for a reply the tree could only ever
@@ -4326,6 +4346,7 @@ mod tests {
             Msg::TreeGitResult {
                 generation: in_flight,
                 status: Vec::new(),
+                timed_out: false,
             },
         );
         let reissued_generation = match reissued.as_slice() {
@@ -4339,6 +4360,75 @@ mod tests {
             reissued_generation, in_flight,
             "the re-armed scan must carry a generation later than the one \
              it coalesced into"
+        );
+    }
+
+    /// The falsifiable check for the IMPORTANT liveness fix: a `git status`
+    /// that hits its own bound and reports `timed_out: true` must not
+    /// permanently wedge `git_refresh_in_flight`. `apply_git` clears the
+    /// flag on every reply regardless of `timed_out`, so a later write
+    /// callback must still be able to issue a fresh `Effect::TreeGitScan` --
+    /// proving the pre-fix failure mode (one hung `git status` freezing the
+    /// sidebar's decorations for the rest of the session) cannot recur. The
+    /// timed-out reply itself must also surface a notice, so the user learns
+    /// the decorations they see may be stale instead of silently seeing
+    /// nothing update.
+    #[test]
+    fn a_timed_out_git_reply_does_not_permanently_suppress_future_refreshes() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let opened_at = m
+            .tree_mut()
+            .expect("tree must be open after toggling it")
+            .git_generation();
+        let notices_before = m.engine.messages.entries.len();
+
+        let effects = update(
+            &mut m,
+            Msg::TreeGitResult {
+                generation: opened_at,
+                status: Vec::new(),
+                timed_out: true,
+            },
+        );
+        assert!(
+            m.engine.messages.entries.len() > notices_before,
+            "a timed-out git status must surface a notice, not silently \
+             drop the failure"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ScheduleToastExpiry { .. })),
+            "the notice must actually be recorded as a message, not merely \
+             counted: {effects:?}"
+        );
+
+        // The real proof the in-flight flag was cleared: `apply_git` (which
+        // the handler above called unconditionally) is the only place that
+        // clears it, and `request_git_refresh` returns `None` -- coalescing
+        // rather than issuing a scan -- for as long as it stays set. A write
+        // callback that still gets a fresh `TreeGitScan` here is only
+        // possible if the timed-out reply left the flag clear, exactly like
+        // an ordinary one would have.
+        let reissue = update(
+            &mut m,
+            Msg::BufferChanged {
+                name: "a.txt".to_string(),
+                modified: false,
+            },
+        );
+        assert!(
+            matches!(reissue.as_slice(), [Effect::TreeGitScan { .. }]),
+            "a write callback after a timed-out git reply must still be \
+             able to issue a fresh TreeGitScan, proving the hang did not \
+             permanently suppress future refreshes: {reissue:?}"
         );
     }
 

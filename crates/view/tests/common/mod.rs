@@ -49,9 +49,8 @@ pub fn spawn_with_pump(
 /// the engine's lifetime, for a caller that has no need to inspect what the
 /// pump delivers, only that it never backs up -- `Engine::start_pump`'s own
 /// contract requires the sink stay drained, and an undropped, undrained
-/// receiver stalls the reader thread (the defect ledger 22/26 fixed once
-/// already; this is the shape that keeps a future live test from
-/// reintroducing it).
+/// receiver stalls the reader thread. This is the shape that keeps a future
+/// live test from reintroducing that stall.
 pub fn spawn_with_drained_pump(cfg: EngineConfig) -> Engine {
     let mut engine = Engine::spawn(cfg).unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(64);

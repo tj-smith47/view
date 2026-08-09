@@ -242,9 +242,16 @@ pub enum Msg {
     /// error -- it is what a clean tree, or a tree with `git` absent from
     /// `PATH`, both report, and `TreeState::apply_git` renders either
     /// undecorated. Generation-gated on the same terms as `PickerResults`.
+    ///
+    /// `timed_out` tells apart the two ways `status` can be empty: `false`
+    /// covers the ordinary cases above, `true` means the subprocess itself
+    /// was killed for outliving its own bounded wait (a wedged `git`, not a
+    /// clean or git-less tree) -- `update()` surfaces that case as a notice
+    /// rather than rendering it identically to "nothing to decorate".
     TreeGitResult {
         generation: u64,
         status: Vec<crate::native::tree::GitEntry>,
+        timed_out: bool,
     },
     /// The decoded answer to one `RpcCall::RenameFile`, tagged `generation`
     /// (`TreeState::generation` at the moment `update()` emitted the

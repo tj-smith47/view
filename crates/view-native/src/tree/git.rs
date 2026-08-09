@@ -26,17 +26,45 @@
 //! [`GitMark::Conflicted`] regardless of their own `XY`, since porcelain v2
 //! reserves that line type for the conflict states themselves.
 
+use std::io::Read;
 use std::path::Path;
+use std::process::{Child, Command};
+use std::time::{Duration, Instant};
 
 use view_core::native::tree::GitEntry;
 use view_core::native::views::GitMark;
 
+/// How long a `git status` child is given before this module gives up on it
+/// and reports a timeout rather than blocking forever. Matches
+/// `view-oracle::compat::PROBE_TIMEOUT`, the repo's existing precedent for
+/// bounding a child process -- reimplemented locally rather than imported,
+/// since `view-native` cannot depend on `view-oracle` (dependency direction:
+/// `core <- surface <- {native, ai}`). A wedged `git` (a stale index lock, a
+/// network-backed credential helper hanging, ...) must still surface as a
+/// bounded failure: `TreeState::apply_git` is the only clearer of
+/// `git_refresh_in_flight`, so a `status` call that never returns would
+/// otherwise freeze the sidebar's git decorations for the rest of the
+/// session.
+const GIT_STATUS_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Refreshes `root`'s git status. An empty result is not an error: it is
 /// what a clean tree, a tree outside any repository, and a tree with `git`
 /// absent from `PATH` all report identically -- see this module's own doc.
+/// A wedged `git` also degrades to empty here; a caller that must tell that
+/// case apart from the others wants [`status_bounded`] instead.
 #[must_use]
 pub fn status(root: &Path) -> Vec<GitEntry> {
-    run_git_status(root, None)
+    status_bounded(root).0
+}
+
+/// [`status`], plus a second element that is `true` when the `git` child
+/// was killed for outliving [`GIT_STATUS_TIMEOUT`] rather than exiting on
+/// its own -- the one case among this module's empty-result degrades that a
+/// caller may want to surface to the user instead of rendering identically
+/// to "nothing to decorate".
+#[must_use]
+pub fn status_bounded(root: &Path) -> (Vec<GitEntry>, bool) {
+    run_git_status(root, None, GIT_STATUS_TIMEOUT)
 }
 
 /// `status`'s implementation, taking an optional `PATH` override so a test
@@ -47,38 +75,101 @@ pub fn status(root: &Path) -> Vec<GitEntry> {
 /// identically to it genuinely being uninstalled, without the process-wide
 /// side effect that would otherwise demand the re-exec isolation
 /// `view_engine::process`'s fd-3 regression test needs for a truly
-/// process-global resource.
-fn run_git_status(root: &Path, path_override: Option<&str>) -> Vec<GitEntry> {
-    let mut cmd = std::process::Command::new("git");
-    cmd.current_dir(root).args([
-        "-c",
-        "core.quotePath=false",
-        "status",
-        "--porcelain=v2",
-        "--untracked-files=all",
-        // scopes the report to `root` itself: without this, a `root` that
-        // is not a repository's own top level (a subdirectory tree, or --
-        // the case this module's own tests caught -- a scratch directory
-        // that resolves upward to an unrelated enclosing repository) gets
-        // back the WHOLE repository's status, with paths climbing back out
-        // of `root` via `../` that can never match a `TreeEntry` this tree
-        // ever lists
-        "--",
-        ".",
-    ]);
+/// process-global resource. `timeout` is injected (rather than always
+/// [`GIT_STATUS_TIMEOUT`]) so a test can prove the bound itself without
+/// waiting out the real production deadline.
+fn run_git_status(
+    root: &Path,
+    path_override: Option<&str>,
+    timeout: Duration,
+) -> (Vec<GitEntry>, bool) {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .args([
+            "-c",
+            "core.quotePath=false",
+            "status",
+            "--porcelain=v2",
+            "--untracked-files=all",
+            // scopes the report to `root` itself: without this, a `root` that
+            // is not a repository's own top level (a subdirectory tree, or --
+            // the case this module's own tests caught -- a scratch directory
+            // that resolves upward to an unrelated enclosing repository) gets
+            // back the WHOLE repository's status, with paths climbing back out
+            // of `root` via `../` that can never match a `TreeEntry` this tree
+            // ever lists
+            "--",
+            ".",
+        ]);
     if let Some(path) = path_override {
         cmd.env("PATH", path);
     }
-    let Ok(output) = cmd.output() else {
-        return Vec::new();
+    let Ok(child) = cmd.spawn() else {
+        return (Vec::new(), false);
+    };
+    let Some(output) = wait_with_timeout(child, timeout) else {
+        return (Vec::new(), true);
     };
     if !output.status.success() {
-        return Vec::new();
+        return (Vec::new(), false);
     }
     let Ok(text) = String::from_utf8(output.stdout) else {
-        return Vec::new();
+        return (Vec::new(), false);
     };
-    parse_porcelain_v2(&text)
+    (parse_porcelain_v2(&text), false)
+}
+
+/// Runs `child` to completion, polling rather than blocking, killing (and
+/// reaping, so it cannot become a zombie) it if `timeout` elapses first.
+/// Mirrors `view-oracle::compat::wait_with_timeout`'s own shape -- see that
+/// function's doc for why `stdout`/`stderr` are drained on background
+/// threads from the moment `child` is handed in, rather than read
+/// synchronously after it exits.
+fn wait_with_timeout(mut child: Child, timeout: Duration) -> Option<std::process::Output> {
+    let stdout_reader = child.stdout.take().map(spawn_pipe_drain);
+    let stderr_reader = child.stderr.take().map(spawn_pipe_drain);
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break Some(status);
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+
+    // joined only after the child has already exited or been killed, so
+    // each reader thread is already at (or immediately reaches) EOF rather
+    // than blocking this call past its own deadline
+    let stdout = stdout_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+    let stderr = stderr_reader
+        .and_then(|h| h.join().ok())
+        .unwrap_or_default();
+
+    status.map(|status| std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Spawns a background thread that reads `pipe` to EOF and returns its full
+/// contents, the concurrent counterpart [`wait_with_timeout`]'s own doc
+/// comment explains the need for.
+fn spawn_pipe_drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = pipe.read_to_end(&mut buf);
+        buf
+    })
 }
 
 fn parse_porcelain_v2(text: &str) -> Vec<GitEntry> {
@@ -270,14 +361,78 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "init"]);
         std::fs::write(root.join("a.txt"), "two\n").expect("modify a.txt");
 
-        let entries = run_git_status(&root, Some(""));
+        let (entries, timed_out) = run_git_status(&root, Some(""), GIT_STATUS_TIMEOUT);
         assert!(
             entries.is_empty(),
             "with git absent from PATH the tree must report no \
              decorations, not an error: {entries:?}"
         );
+        assert!(
+            !timed_out,
+            "git absent from PATH is a spawn failure, not a timeout"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The falsifiable check the IMPORTANT fix exists to satisfy: a `git`
+    /// that never exits must not hang this module forever, or the sidebar's
+    /// git decorations freeze for the rest of the session (`apply_git` is
+    /// the only clearer of `git_refresh_in_flight`). A fake `git` on a
+    /// scratch `PATH` that sleeps well past a short injected timeout proves
+    /// the call returns `(empty, true)` in bounded wall-clock time rather
+    /// than blocking for the sleep's full duration.
+    // The fake `git` this test spawns is a `#!/bin/sh` script and the
+    // permission bits it sets are POSIX-only; a wedged-child bound is not a
+    // platform-specific property, but this particular way of simulating one
+    // is, so this test is unix-only rather than the fix itself.
+    #[cfg(unix)]
+    #[test]
+    fn a_wedged_git_is_killed_at_its_deadline_not_awaited_forever() {
+        let root = scratch("wedged-git");
+        std::fs::create_dir_all(&root).expect("create root");
+        let bin_dir = scratch("wedged-git-bin");
+        let fake_git = bin_dir.join("git");
+        // `exec sleep 5`, not a bare `sleep 5`: without `exec`, `sh` forks a
+        // child to run `sleep` and stays around as its parent, so killing
+        // the pid this test's `Command` actually holds (`sh`'s) leaves the
+        // grandchild `sleep` running and still holding the stdout pipe
+        // open, which would then block `spawn_pipe_drain`'s read until the
+        // full 5s sleep elapses regardless of the kill. `exec` replaces
+        // `sh`'s own process image with `sleep`'s, so the pid this test
+        // kills and the pid actually sleeping are one and the same.
+        std::fs::write(&fake_git, "#!/bin/sh\nexec sleep 5\n").expect("write fake git");
+        let mut perms = std::fs::metadata(&fake_git)
+            .expect("stat fake git")
+            .permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+        std::fs::set_permissions(&fake_git, perms).expect("chmod fake git");
+
+        // `bin_dir` is prepended to the real `PATH`, not substituted for
+        // it: the script's own `sleep` (and the `/bin/sh` interpreter its
+        // shebang names) must still resolve normally, while `bin_dir`
+        // sitting first guarantees the fake `git` shadows any real one.
+        let real_path = std::env::var("PATH").unwrap_or_default();
+        let path_override = format!(
+            "{}:{real_path}",
+            bin_dir.to_str().expect("utf8 scratch path")
+        );
+
+        let started = std::time::Instant::now();
+        let (entries, timed_out) =
+            run_git_status(&root, Some(&path_override), Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(entries.is_empty(), "a killed child reports no decorations");
+        assert!(timed_out, "outliving the deadline must report timed_out");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the wedged child must be killed near its 200ms deadline, not \
+             awaited for its full 5s sleep: took {elapsed:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&bin_dir);
     }
 
     #[test]

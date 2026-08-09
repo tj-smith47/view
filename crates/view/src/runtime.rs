@@ -712,16 +712,27 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             // Same one-shot-thread shape as `TreeScan`, calling
-            // `view_native::tree::git::status` instead -- a plain,
+            // `view_native::tree::git::status_bounded` instead -- a
             // synchronous, blocking `git status --porcelain=v2` shell-out
             // that never touches RPC (see that module's own doc for why
-            // `git` absent from `PATH` degrades there, not here).
+            // `git` absent from `PATH` degrades there, not here), bounded
+            // internally so this spawned thread -- and therefore this
+            // `tx.send` -- is guaranteed to complete even against a wedged
+            // `git` child. This thread is the whole reason the block above
+            // is safe off the paint loop: `Executor::run` itself returns
+            // immediately with `Flow::Continue`, so a slow (or now, a
+            // bounded-and-killed) `git` only delays this background send,
+            // never a frame.
             Effect::TreeGitScan { generation, root } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
                     std::thread::spawn(move || {
-                        let status = view_native::tree::git::status(&root);
-                        let _ = tx.send(Msg::TreeGitResult { generation, status });
+                        let (status, timed_out) = view_native::tree::git::status_bounded(&root);
+                        let _ = tx.send(Msg::TreeGitResult {
+                            generation,
+                            status,
+                            timed_out,
+                        });
                     });
                 }
                 Flow::Continue
@@ -1745,13 +1756,21 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("TreeGitResult arrives from the worker thread");
         match msg {
-            Msg::TreeGitResult { generation, status } => {
+            Msg::TreeGitResult {
+                generation,
+                status,
+                timed_out,
+            } => {
                 assert_eq!(generation, 5);
                 assert!(
                     status
                         .iter()
                         .any(|e| e.path == std::path::Path::new("a.txt")),
                     "git status must report the file this test modified: {status:?}"
+                );
+                assert!(
+                    !timed_out,
+                    "a real, fast git status must not report a timeout"
                 );
             }
             other => panic!("expected TreeGitResult, got {other:?}"),
