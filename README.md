@@ -87,12 +87,18 @@ run, same host, same config, samples interleaved. Reproduce with
 | Shell painted, config still loading (p99) | **4.1 ms** | n/a |
 | First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **120.5 ms** | 199.8 ms |
-| Resident memory (PSS), view process only | **4.96 MB** | n/a |
+| Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a |
 | Keystroke to cell change, steady typing (p99) | 0.90 ms | **0.81 ms** |
 
-Cold start is a big win. Memory has no bare-Neovim comparison yet (the row
-above is view's own process; the embedded Neovim engine is a separate
-process this budget excludes). Typing and sustained scrolling are
+Cold start is a big win. The no-plugins memory row above is view's own
+process only (the embedded Neovim engine is a separate process this budget
+excludes) and has no bare-Neovim comparison. Under the 14-plugin lazy.nvim
+stack, a diagnostic (not CI-gated) reading does have one: bare Neovim's
+whole process is 4.39 MB, view's own process is 5.00 MB, and view's own
+process plus its embedded Neovim engine child -- the honest comparison,
+since view can never be smaller than the Neovim it embeds -- is 27.96 MB,
+about 6.4x bare Neovim. See [Performance](#performance) for the full
+equivalence matrix. Typing and sustained scrolling are
 currently a bit slower than bare Neovim (about 17% and 2x, on paths that
 are sub-millisecond either way, so neither is something you can feel). We
 are actively closing those gaps rather than explaining them away: profiling

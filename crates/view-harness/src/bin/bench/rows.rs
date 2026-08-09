@@ -307,6 +307,82 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             );
             let mut metrics = CellMetrics::new();
             metrics.insert(outcome.metric.to_string(), outcome.gated_mb);
+
+            // The equivalence-matrix resource leg (ledger E2) rides on the
+            // diagnostic-only memory/heavy cell (see DIAGNOSTIC_MATRIX):
+            // the gated memory/minimal cell above stays exactly as
+            // recorded, unchanged in spawn count or timing, and these two
+            // extra readings never enter `metrics` -- the CLI already
+            // refuses --record/--gate on a diagnostic cell, and staying
+            // out of CellMetrics keeps that true independent of that
+            // refusal too, with no RECORDED_METRICS/budgets.toml entry
+            // owed for names nothing ever writes to a baseline.
+            if fixture == "heavy" {
+                let nvim_bin = bins.nvim.as_path();
+                let nvim_side = world.side(fixture, "nvim")?;
+                for (index, name) in memory::workload_files().iter().enumerate() {
+                    std::fs::write(
+                        nvim_side.cwd.join(name),
+                        memory::workload_content(index + 1),
+                    )
+                    .with_context(|| format!("writing nvim-side workload buffer {name}"))?;
+                }
+                let nvim_spec = nvim_spec_from(nvim_side, nvim_bin);
+                let nvim_outcome = memory::run_nvim(NvimSpec(&nvim_spec), protocol)
+                    .with_context(|| format!("memory/{fixture} bare-nvim run failed"))?;
+                println!(
+                    "{}",
+                    report::absolute_cell(
+                        scenario,
+                        fixture,
+                        &format!("{}_nvim", outcome.metric),
+                        report::AbsoluteStats {
+                            p50: nvim_outcome.distribution.p50(),
+                            p99: nvim_outcome.gated_mb,
+                            max: nvim_outcome.distribution.max(),
+                            unit: "MB",
+                            samples: nvim_outcome.distribution.len(),
+                            warmup: protocol.warmup,
+                        }
+                    )
+                );
+
+                let tree_side = world.side(fixture, "view-tree")?;
+                for (index, name) in memory::workload_files().iter().enumerate() {
+                    std::fs::write(
+                        tree_side.cwd.join(name),
+                        memory::workload_content(index + 1),
+                    )
+                    .with_context(|| format!("writing view-tree workload buffer {name}"))?;
+                }
+                let tree_spec = view_spec_from(tree_side, bins.view_bins());
+                let tree_outcome = memory::run_view_tree(ViewSpec(&tree_spec), protocol)
+                    .with_context(|| format!("memory/{fixture} view-tree run failed"))?;
+                println!(
+                    "{}",
+                    report::absolute_cell(
+                        scenario,
+                        fixture,
+                        &format!("{}_view_tree", outcome.metric),
+                        report::AbsoluteStats {
+                            p50: tree_outcome.distribution.p50(),
+                            p99: tree_outcome.gated_mb,
+                            max: tree_outcome.distribution.max(),
+                            unit: "MB",
+                            samples: tree_outcome.distribution.len(),
+                            warmup: protocol.warmup,
+                        }
+                    )
+                );
+                println!(
+                    "      equivalence matrix: bare nvim {:.2}MB | view (own process) {:.2}MB | \
+                     view tree (own process + embedded nvim engine) {:.2}MB -- view's own-process \
+                     number excludes its engine child, so it is not comparable to nvim's \
+                     whole-process number; the tree number is the honest apples-to-apples \
+                     comparison against bare nvim's whole-process number.",
+                    nvim_outcome.gated_mb, outcome.gated_mb, tree_outcome.gated_mb
+                );
+            }
             Ok(metrics)
         }
         "flood" => {

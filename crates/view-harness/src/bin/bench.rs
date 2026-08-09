@@ -74,7 +74,21 @@ const MATRIX: &[(&str, &str)] = &[
 /// decomposition rather than the row it exists to explain, and the
 /// decomposition runs the instrumented build, whose numbers are not the
 /// quantity any recorded bar was taken from.
-const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[("echo_path", "minimal"), ("echo_path", "heavy")];
+///
+/// `memory/heavy` is the equivalence-matrix resource leg (spec 3.4,
+/// ledger E2): it decomposes the gated `memory/minimal` row's own-process
+/// number into a three-way reading (bare nvim, view's own process, view's
+/// process plus its embedded nvim engine child) under the 14-plugin
+/// fixture the gated row does not measure. Diagnostic rather than a new
+/// gated cell because arming a new bar across every baseline class is a
+/// separate, cross-platform undertaking (see ledger E4 on `picker`); this
+/// leg's own value is the recorded evidence its report captures, not a
+/// new budget.
+const DIAGNOSTIC_MATRIX: &[(&str, &str)] = &[
+    ("echo_path", "minimal"),
+    ("echo_path", "heavy"),
+    ("memory", "heavy"),
+];
 
 /// What one matrix row handed back: the metrics it stands behind, and the
 /// reason it withheld its number when it did.

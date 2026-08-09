@@ -26,7 +26,7 @@ Recorded baselines on a shared Linux dev host:
 | UI shell painted, engine still loading (p99) | **4.1 ms** | n/a | budget 50 ms |
 | First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms | **5x faster** |
 | First paint, cold, 14-plugin lazy.nvim stack (p99) | **120.5 ms** | 199.8 ms | **1.7x faster** |
-| Resident memory (PSS), view process only | **4.96 MB** | n/a | budget was 150 MB |
+| Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
 | Redraw parsed to terminal write (p99) | **0.12 ms** | n/a | budget 1 ms |
 | Keystroke to cell change, steady typing (p99) | 0.90 ms | 0.81 ms | ~1.12x slower |
 | Sustained scroll, 100k lines (p99 staleness) | 1.40 ms | n/a | budget 16 ms |
@@ -38,9 +38,34 @@ shows nothing until your config finishes loading. The 4.1 ms figure is
 identical on a bare config and on the 14-plugin stack, because none of your
 config has run yet at that point.
 
-The memory row is view's own process only: the embedded Neovim engine is a
-separate process this budget deliberately excludes, so the bare-Neovim
-column reads `n/a` rather than a real comparison.
+The no-plugins memory row is view's own process only: the embedded Neovim
+engine is a separate process this budget deliberately excludes, so the
+bare-Neovim column reads `n/a` rather than a real comparison.
+
+### Memory equivalence, 14-plugin lazy.nvim stack
+
+view embeds Neovim, so it can never be smaller than the Neovim it embeds --
+no claim here says otherwise. Under the committed 14-plugin lazy.nvim
+fixture, the same standard workload, recorded diagnostically (`task bench
+-- --scenario memory --fixture heavy`, not CI-gated):
+
+| reading | PSS |
+|---|---|
+| bare Neovim, whole process | 4.39 MB |
+| view, own process only (excludes its Neovim child) | 5.00 MB |
+| view, own process + embedded Neovim engine child (tree) | **27.96 MB** |
+
+The first two rows are not a fair comparison: view's own-process number
+deliberately excludes the Neovim child it spawns, the same exclusion the
+no-plugins row above documents. The tree row is the honest one, summing
+view's process and its embedded engine's, and it is what a bare-Neovim
+comparison must be read against: view's real footprint here is about 6.4x
+bare Neovim's. Neither side changes much between this reading and the
+no-plugins one for view's own-process number (4.96 MB vs 5.00 MB) because
+lazy.nvim defers most of the 14 plugins until their trigger event fires,
+and the standard workload (opening and paging through plain text buffers)
+never fires one -- this reading is each side settled after that workload,
+not a ceiling on what a plugin stack can cost once its triggers do fire.
 
 ## The typing gap
 

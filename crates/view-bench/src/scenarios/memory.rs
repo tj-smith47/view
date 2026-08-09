@@ -5,12 +5,19 @@
 //! per-task footprint ledger on macOS. A proportional/footprint measure
 //! rather than peak RSS, and the view process only: the embedded nvim is
 //! a separate process the view-side budget deliberately excludes.
+//!
+//! [`run_nvim`] and [`run_view_tree`] extend the same workload to the
+//! equivalence-matrix resource leg (spec 3.4, ledger E2): a bare-nvim
+//! reading and a view-tree reading (view's own process plus the embedded
+//! nvim engine child it spawns, summed) so a caller can state an honest
+//! apples-to-apples comparison instead of pairing view's own-process
+//! number against nvim's whole-process one.
 
 use std::time::{Duration, Instant};
 
 use crate::sampling::Distribution;
 use crate::scenarios::Protocol;
-use crate::session::{BenchSession, SettleBound, ViewSpec};
+use crate::session::{BenchSession, NvimSpec, SettleBound, SpawnSpec, ViewSpec};
 use crate::BenchError;
 
 /// Buffers the standard workload opens.
@@ -151,6 +158,94 @@ fn read_platform_memory_mb(_pid: u32) -> Result<f64, BenchError> {
     })
 }
 
+/// Reads `pid`'s memory metric plus every process it directly spawned,
+/// summed -- the honest apples-to-apples reading against a bare editor's
+/// own whole-process number, unlike [`read_memory_mb`], which by policy
+/// (see the module doc) excludes the embedded nvim engine child view
+/// spawns as a separate process.
+///
+/// Only direct children are walked: view spawns nvim directly and nothing
+/// else, so one level covers the whole tree view is responsible for.
+#[cfg(target_os = "linux")]
+fn read_tree_memory_mb(pid: u32) -> Result<f64, BenchError> {
+    let mut total = read_platform_memory_mb(pid)?;
+    for child in direct_children(pid)? {
+        total += read_platform_memory_mb(child)?;
+    }
+    require_positive_mb(total, pid)
+}
+
+/// Direct child pids of `pid`, read from the kernel's own child-tracking
+/// files. Not a `/proc`-wide scan matching on `PPid`: that walk is racy
+/// against processes exiting mid-scan and reads every process on the host
+/// to find one relationship this file states directly.
+///
+/// The children file is per-thread, not per-process: a fork/exec attributes
+/// the child to the specific thread that called it, so
+/// `/proc/<pid>/task/<pid>/children` alone only sees children forked from
+/// the main thread and silently misses one forked from any other thread in
+/// a multi-threaded process (view's engine spawn is not guaranteed to run
+/// on the main thread). Every thread under `/proc/<pid>/task/` is read and
+/// the results unioned so a worker-thread spawn is not a silent
+/// under-count. A thread that exits between listing and reading its
+/// children file is skipped rather than failing the whole read: threads
+/// come and go independently of the children relationship being measured.
+#[cfg(target_os = "linux")]
+fn direct_children(pid: u32) -> Result<Vec<u32>, BenchError> {
+    let task_dir = format!("/proc/{pid}/task");
+    let entries = std::fs::read_dir(&task_dir).map_err(|source| BenchError::Desync {
+        context: format!("reading {task_dir}: {source}"),
+    })?;
+    let mut children = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|source| BenchError::Desync {
+            context: format!("reading an entry of {task_dir}: {source}"),
+        })?;
+        let path = entry.path().join("children");
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(BenchError::Desync {
+                    context: format!("reading {}: {source}", path.display()),
+                })
+            }
+        };
+        for token in text.split_whitespace() {
+            let child = token.parse::<u32>().map_err(|source| BenchError::Desync {
+                context: format!(
+                    "unparseable child pid {token:?} in {}: {source}",
+                    path.display()
+                ),
+            })?;
+            children.push(child);
+        }
+    }
+    children.sort_unstable();
+    children.dedup();
+    Ok(children)
+}
+
+/// macOS exposes no equivalent of Linux's child-tracking file without the
+/// `proc_listchildpids` buffer-sizing dance libproc does not simplify, so
+/// the tree reading on this platform is the single-process reading: a
+/// documented under-measurement, not a silent one. A caller comparing this
+/// against a Linux tree reading must know this floor omits whatever the
+/// embedded engine child costs.
+#[cfg(target_os = "macos")]
+fn read_tree_memory_mb(pid: u32) -> Result<f64, BenchError> {
+    read_memory_mb(pid)
+}
+
+/// See [`read_platform_memory_mb`]'s fallback: no tree reading is defined
+/// where no single-process reading is either.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn read_tree_memory_mb(_pid: u32) -> Result<f64, BenchError> {
+    Err(BenchError::Desync {
+        context: "no tree memory metric is defined for this platform".to_string(),
+    })
+}
+
 /// The memory run's outcome.
 #[derive(Debug)]
 pub struct MemoryOutcome {
@@ -177,12 +272,56 @@ pub struct MemoryOutcome {
 /// per-process reading cannot be taken.
 pub fn run(view_spec: ViewSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome, BenchError> {
     let ViewSpec(view) = view_spec;
+    run_with_reader(view, protocol, read_memory_mb)
+}
+
+/// Same workload and sampling as [`run`], reading view's memory plus its
+/// embedded nvim engine child's, summed -- the equivalence-matrix leg's
+/// apples-to-apples reading against [`run_nvim`]'s whole-process number.
+/// See [`read_tree_memory_mb`] for what each platform actually sums.
+///
+/// # Errors
+///
+/// Same as [`run`].
+pub fn run_view_tree(
+    view_spec: ViewSpec<'_>,
+    protocol: &Protocol,
+) -> Result<MemoryOutcome, BenchError> {
+    let ViewSpec(view) = view_spec;
+    run_with_reader(view, protocol, read_tree_memory_mb)
+}
+
+/// Same workload and sampling as [`run`], against a bare nvim spawn
+/// instead of view -- the equivalence-matrix leg's baseline reading. Bare
+/// nvim spawns no child of its own, so its whole-process reading already
+/// is its "tree" reading; there is no separate `run_nvim_tree`.
+///
+/// # Errors
+///
+/// Same as [`run`].
+pub fn run_nvim(nvim_spec: NvimSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome, BenchError> {
+    let NvimSpec(nvim) = nvim_spec;
+    run_with_reader(nvim, protocol, read_memory_mb)
+}
+
+/// Shared driver behind [`run`], [`run_view_tree`] and [`run_nvim`]:
+/// spawn `spec`, drive the standard 10-buffer workload to settle, then
+/// sample `reader(pid)` `protocol.warmup + protocol.samples` times. The
+/// three public entry points differ only in which spec they spawn and
+/// which reader they sample with, so the spawn/workload/settle/sample
+/// sequence -- the part a transposed argument or a skipped settle wait
+/// would silently corrupt -- exists exactly once.
+fn run_with_reader(
+    spec: &SpawnSpec,
+    protocol: &Protocol,
+    reader: fn(u32) -> Result<f64, BenchError>,
+) -> Result<MemoryOutcome, BenchError> {
     let Some(metric) = METRIC else {
         return Err(BenchError::Desync {
             context: "no memory metric is defined for this platform".to_string(),
         });
     };
-    let mut session = BenchSession::spawn(view)?;
+    let mut session = BenchSession::spawn(spec)?;
     if !session.settle(SettleBound {
         quiet: Duration::from_secs(2),
         deadline: Duration::from_secs(60),
@@ -196,7 +335,7 @@ pub fn run(view_spec: ViewSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome
     }
     let Some(pid) = session.pid() else {
         return Err(BenchError::Desync {
-            context: "platform exposed no pid for the view process".to_string(),
+            context: "platform exposed no pid for the measured process".to_string(),
         });
     };
 
@@ -224,7 +363,7 @@ pub fn run(view_spec: ViewSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome
     let mut raw_mb = Vec::with_capacity(total);
     let pace = Duration::from_millis(2);
     for _ in 0..total {
-        raw_mb.push(read_memory_mb(pid)?);
+        raw_mb.push(reader(pid)?);
         let next = Instant::now() + pace;
         while Instant::now() < next {
             std::thread::yield_now();
@@ -278,6 +417,58 @@ mod tests {
     #[test]
     fn a_positive_reading_passes_the_floor_unchanged() {
         assert!((require_positive_mb(3.5, 1).unwrap() - 3.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn direct_children_includes_a_freshly_spawned_child() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawning a throwaway child process for the test");
+        let child_pid = child.id();
+        let children = direct_children(std::process::id())
+            .expect("reading this test process's own children file");
+        assert!(
+            children.contains(&child_pid),
+            "expected spawned child {child_pid} among direct children {children:?}"
+        );
+        child.kill().expect("killing the throwaway child");
+        let _ = child.wait();
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn tree_memory_of_a_spawned_child_at_least_matches_the_parents_own_reading() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("5")
+            .spawn()
+            .expect("spawning a throwaway child process for the test");
+        // let the child fault in its own pages so its PSS reading is non-trivial
+        std::thread::sleep(Duration::from_millis(100));
+        let own = read_platform_memory_mb(std::process::id())
+            .expect("reading this test process's own PSS");
+        let tree =
+            read_tree_memory_mb(std::process::id()).expect("reading this test process's tree PSS");
+        assert!(
+            tree >= own,
+            "a tree reading with a live child must be at least the parent's own reading: \
+             own={own} tree={tree}"
+        );
+        child.kill().expect("killing the throwaway child");
+        let _ = child.wait();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn tree_memory_falls_back_to_the_single_process_reading() {
+        let own = read_memory_mb(std::process::id()).unwrap();
+        let tree = read_tree_memory_mb(std::process::id()).unwrap();
+        assert!(
+            (tree - own).abs() < f64::EPSILON,
+            "macOS has no child-tracking reader, so tree must equal own exactly: \
+             own={own} tree={tree}"
+        );
     }
 
     #[test]
