@@ -10,7 +10,9 @@ spec; on conflict the spec wins and the plan gets fixed.
 | P2 Elm core + Surface + tiers + ext layers | `2026-07-18-p2-elm-runtime.md` | Complete (adversarially reviewed, 3 rounds) |
 | P3 Oracle + compat suite + bench CI gates | `2026-07-18-p3-oracle-bench-gates.md` (charter: `2026-07-18-p3-p6-charters.md`) | Complete (merged at `4b44791`) |
 | P4 Native features + theming | `2026-07-26-p4-native-features.md` (charter: `2026-07-18-p3-p6-charters.md`) | Reviewed (both adversarial rounds folded at `47e14bf`) |
-| P5 AI (ACP client, panel, diff review) | charter: `2026-07-18-p3-p6-charters.md`; full plan at P4 completion (verify ACP spec first via context7/docs) | Chartered |
+| P5 AI (ACP client, panel, diff review) | `2026-08-09-p5-ai.md` (charter: `2026-07-18-p3-p6-charters.md`; ACP v1 verified against live spec at plan time) | Drafted (adversarially reviewed, 3 rounds) |
+| P5.5 Invented capabilities — engine supervision | `2026-08-09-p5_5-supervision.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed) |
+| P5.5 Invented capabilities — remote editing (incl. speculative echo) | `2026-08-09-p5_5-remote.md` (charter: spec §9, §5.6, §17 phase table) | Drafted (adversarially reviewed, 3 rounds) |
 | P6 Polish, multigrid, doctor, Windows tier-1 | charter: `2026-07-18-p3-p6-charters.md`; full plan at P5 completion | Chartered |
 
 Policy: each pending plan is written when its phase starts, against the real
