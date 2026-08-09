@@ -341,24 +341,34 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
     // the title needs a horizontal glyph on each side of it to read as set
     // into the edge rather than as replacing it
     if label_cells > 0 && label_cells.saturating_add(2) <= span {
-        let trailing = span - label_cells - 1;
+        let mut lead = String::new();
+        lead.push(borders.top_left);
+        lead.push(borders.horizontal);
+        let mut tail = String::new();
+        push_run(&mut tail, borders.horizontal, span - label_cells - 1);
+        tail.push(borders.top_right);
         vec![
-            Span::plain(format!("{}{}", borders.top_left, borders.horizontal)),
+            Span::plain(lead),
             Span::new(label, StyleRole::Title),
-            Span::plain(format!(
-                "{}{}",
-                borders.horizontal.to_string().repeat(usize::from(trailing)),
-                borders.top_right
-            )),
+            Span::plain(tail),
         ]
     } else {
-        vec![Span::plain(format!(
-            "{}{}{}",
-            borders.top_left,
-            borders.horizontal.to_string().repeat(usize::from(span)),
-            borders.top_right
-        ))]
+        let mut edge = String::new();
+        edge.push(borders.top_left);
+        push_run(&mut edge, borders.horizontal, span);
+        edge.push(borders.top_right);
+        vec![Span::plain(edge)]
     }
+}
+
+/// Appends `n` cells of `glyph` to `out`.
+///
+/// Grows one buffer rather than building an intermediate one: this runs
+/// once per framed overlay per frame, on the layout pass the paint path
+/// calls, and `char::to_string().repeat(n)` allocates a throwaway string
+/// for every run it produces.
+fn push_run(out: &mut String, glyph: char, n: u16) {
+    out.extend(std::iter::repeat_n(glyph, usize::from(n)));
 }
 
 /// The frame's bottom row: two corners and an unbroken horizontal run.
@@ -671,9 +681,11 @@ fn fit(line: &Line, width: u16, borders: BorderSet) -> Vec<Span> {
             combined.extend(right);
             clip_spans(combined, width)
         }
-        Line::Rule => vec![Span::plain(
-            borders.horizontal.to_string().repeat(usize::from(width)),
-        )],
+        Line::Rule => {
+            let mut rule = String::new();
+            push_run(&mut rule, borders.horizontal, width);
+            vec![Span::plain(rule)]
+        }
     }
 }
 

@@ -132,10 +132,10 @@ vim.api.nvim_create_autocmd('SafeState', {
 ///
 /// Normal mode is the whole scope, matching
 /// [`MappingSpec`](view_core::native::mappings::MappingSpec)'s own
-/// normal-mode-only contract: the snapshot reads `'n'` maps and every key is
-/// set with `vim.keymap.set('n', ...)`. A spec carries no mode to vary that
-/// by, so the two `'n'` literals here are the scope, not a default some
-/// caller may override.
+/// normal-mode-only contract: the snapshot reads `'n'` maps, globally and
+/// per loaded buffer, and every key is set with `vim.keymap.set('n', ...)`.
+/// A spec carries no mode to vary that by, so all three `'n'` literals in
+/// the chunk below are the scope, not a default some caller may override.
 ///
 /// The command registers unconditionally, outside the spec loop: a user who
 /// turned every default key off, or every feature, still has a way in.

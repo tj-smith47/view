@@ -401,12 +401,20 @@ fn a_layers_charset_is_derived_from_its_kind_and_tier() {
     }
 }
 
-/// `is_native_overlay` and the layout pass must name the same set: a kind
-/// the predicate frames but `rows` has no body for would paint an empty
-/// box, and one the predicate leaves unframed but `rows` does lay out would
-/// paint nothing at all.
+/// A spot check, not the drift guard. The guard against
+/// `is_native_overlay` and `body` naming different sets is that both are
+/// matched exhaustively over `LayerKind` with no wildcard arm, so a variant
+/// added to one without the other does not compile -- that is enforcement
+/// this test could not add, since it can only ever sample the variants
+/// someone remembered to list here.
+///
+/// What it does buy: a reading of both rules against each other on real
+/// values, so an arm moved to the wrong side (still exhaustive, still
+/// compiling, now wrong) is caught. Three of eleven variants -- the two
+/// non-overlay kinds constructible without `view-core`'s `#[non_exhaustive]`
+/// wire-state structs, plus one overlay.
 #[test]
-fn the_framing_predicate_and_the_layout_pass_name_the_same_kinds() {
+fn the_framing_predicate_and_the_layout_pass_agree_on_the_kinds_sampled_here() {
     for kind in [picker(), LayerKind::EngineGrid, LayerKind::Shell] {
         let laid = rows(20, 6, &kind, BorderSet::ASCII);
         assert_eq!(

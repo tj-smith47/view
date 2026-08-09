@@ -155,24 +155,35 @@ chrome_groups! {
     /// colorscheme that already themes nvim's mode message gets a matching
     /// statusline mode segment for free.
     ModeMsg => "ModeMsg", Emphasis;
-    /// nvim's own warning-message group (`:h hl-WarningMsg`). The native
-    /// statusline's modified-buffer marker reuses it: an unsaved buffer is
-    /// exactly the kind of thing that group already exists to draw the eye
-    /// to.
+    /// nvim's own warning-message group (`:h hl-WarningMsg`). Two native
+    /// statusline segments reuse it: the modified-buffer marker (an unsaved
+    /// buffer is exactly the kind of thing that group already exists to
+    /// draw the eye to) and the warning-diagnostic count, via
+    /// [`crate::native::views::StyleRole::DiagnosticWarning`]. They share a
+    /// group because nvim broadcasts no finer warning group than this one
+    /// -- see [`ChromeGroup::ErrorMsg`] for why that constraint decides
+    /// these mappings.
     WarningMsg => "WarningMsg", Emphasis;
     /// nvim's own directory-label group (`:h hl-Directory`). The native
     /// statusline's git-branch segment reuses it, the closest existing
     /// builtin to "a short, path-adjacent label", rather than a
     /// statusline-only group no colorscheme has ever themed.
     Directory => "Directory", Normal;
-    /// nvim's builtin LSP/diagnostic error group (`:h diagnostic-highlights`).
-    /// The native statusline's error-count glyph resolves through this, the
-    /// same group a colorscheme already uses for diagnostic signs and
-    /// underlines, so the two agree on what "error" looks like.
-    DiagnosticError => "DiagnosticError", Emphasis;
-    /// nvim's builtin LSP/diagnostic warning group (`:h diagnostic-highlights`),
-    /// the warning counterpart of [`ChromeGroup::DiagnosticError`].
-    DiagnosticWarn => "DiagnosticWarn", Emphasis;
+    /// nvim's own error-message group (`:h hl-ErrorMsg`). The native
+    /// statusline's error-count glyph resolves through this.
+    ///
+    /// `DiagnosticError`/`DiagnosticWarn` would read as the better fit and
+    /// were what this resolved through until 2026-08-09, but they are not
+    /// groups nvim can deliver: `hl_group_set` broadcasts the builtin
+    /// highlight table only, and the diagnostic groups are defined in Lua
+    /// (`vim.diagnostic`), outside it. Measured against the pinned engine
+    /// -- a `--clean` `nvim_ui_attach` broadcasts 75 names, and neither
+    /// diagnostic group is among them (`ErrorMsg` and `WarningMsg` both
+    /// are), so those two slots sat on their declared fallback for the life
+    /// of every session and no colorscheme could ever move them.
+    /// [`every_group_is_one_nvim_broadcasts`] is the pin that keeps a group
+    /// nvim never names from being declared here again.
+    ErrorMsg => "ErrorMsg", Emphasis;
     /// nvim's builtin incremental-search group (`:h hl-IncSearch`). The
     /// picker's [`crate::native::views::StyleRole::Match`] resolves through
     /// this: a matched substring inside a candidate row is exactly what
@@ -445,6 +456,129 @@ mod tests {
                 slot,
                 "{} indexes a slot other than its own position in ALL",
                 group.hl_name()
+            );
+        }
+    }
+
+    /// Every name nvim's `hl_group_set` event carries on a `--clean`
+    /// `nvim_ui_attach`, captured live against the pinned engine (v0.12.4)
+    /// by attaching a raw msgpack-RPC UI and reading the batch that precedes
+    /// the first `flush`.
+    ///
+    /// This is nvim's builtin highlight table and nothing else. A group
+    /// defined in Lua -- every `Diagnostic*` group, every LSP semantic-token
+    /// group, anything a plugin defines -- is absent from it no matter how
+    /// thoroughly a colorscheme themes that group, because the UI protocol
+    /// only ever announces the builtins.
+    ///
+    /// Recorded rather than queried at test time so the pin fails on a
+    /// deliberate reading of what changed, not on whichever nvim happens to
+    /// be on a contributor's `PATH`. An engine-pin bump that adds or drops
+    /// a builtin makes [`every_group_is_one_nvim_broadcasts`] fail, which is
+    /// the intended prompt to re-capture this list.
+    const BROADCAST: [&str; 75] = [
+        "ColorColumn",
+        "Conceal",
+        "CurSearch",
+        "Cursor",
+        "CursorColumn",
+        "CursorLine",
+        "CursorLineFold",
+        "CursorLineNr",
+        "CursorLineSign",
+        "DiffAdd",
+        "DiffChange",
+        "DiffDelete",
+        "DiffText",
+        "DiffTextAdd",
+        "Directory",
+        "EndOfBuffer",
+        "ErrorMsg",
+        "FloatBorder",
+        "FloatFooter",
+        "FloatTitle",
+        "FoldColumn",
+        "Folded",
+        "IncSearch",
+        "LineNr",
+        "LineNrAbove",
+        "LineNrBelow",
+        "ModeMsg",
+        "MoreMsg",
+        "MsgArea",
+        "MsgSeparator",
+        "NonText",
+        "NormalFloat",
+        "NormalNC",
+        "OkMsg",
+        "Pmenu",
+        "PmenuBorder",
+        "PmenuExtra",
+        "PmenuExtraSel",
+        "PmenuKind",
+        "PmenuKindSel",
+        "PmenuMatch",
+        "PmenuMatchSel",
+        "PmenuSbar",
+        "PmenuSel",
+        "PmenuThumb",
+        "PreInsert",
+        "Question",
+        "QuickFixLine",
+        "Search",
+        "SignColumn",
+        "SpecialKey",
+        "SpellBad",
+        "SpellCap",
+        "SpellLocal",
+        "SpellRare",
+        "StatusLine",
+        "StatusLineNC",
+        "StatusLineTerm",
+        "StatusLineTermNC",
+        "StderrMsg",
+        "StdoutMsg",
+        "TabLine",
+        "TabLineFill",
+        "TabLineSel",
+        "TermCursor",
+        "Title",
+        "VertSplit",
+        "Visual",
+        "VisualNC",
+        "WarningMsg",
+        "Whitespace",
+        "WildMenu",
+        "WinBar",
+        "WinBarNC",
+        "WinSeparator",
+    ];
+
+    /// A `ChromeGroup` naming a group nvim never broadcasts can never be
+    /// resolved from the live table: `Theme::from_hl` finds no id for it,
+    /// every session paints it with its declared fallback, and no
+    /// colorscheme the user installs can move it. Nothing fails -- the
+    /// group simply looks hardcoded forever, which is the exact opposite of
+    /// this type's contract.
+    ///
+    /// That is not hypothetical. `DiagnosticError` and `DiagnosticWarn`
+    /// were declared here and shipped in precisely that state until
+    /// 2026-08-09; the statusline's diagnostic counts resolved through them
+    /// and never took a colorscheme's colors. This test is what makes the
+    /// mistake loud, and it is the reason those two roles now resolve
+    /// through [`ChromeGroup::ErrorMsg`] and [`ChromeGroup::WarningMsg`].
+    #[test]
+    fn every_group_is_one_nvim_broadcasts() {
+        let broadcast: std::collections::HashSet<&str> = BROADCAST.into_iter().collect();
+        for group in ChromeGroup::ALL {
+            assert!(
+                broadcast.contains(group.hl_name()),
+                "{} is not in nvim's builtin highlight table, so hl_group_set never \
+                 names it and this group can only ever hold its {:?} fallback -- pick \
+                 the closest builtin nvim does broadcast, or re-capture BROADCAST if \
+                 the engine pin added it",
+                group.hl_name(),
+                group.fallback()
             );
         }
     }

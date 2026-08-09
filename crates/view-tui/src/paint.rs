@@ -1067,17 +1067,21 @@ fn paint_native_overlay(
     } else {
         Style::default()
     };
-    // the title's foreground is the colorscheme's own float-title color,
-    // but its background stays the overlay's, so the top edge still reads
-    // as one continuous run rather than a differently-lit patch. Bold in
-    // every case, including the no-truecolor path, where an attribute is
-    // the only way a title can outrank the frame at all
+    // the title takes its group's whole resolved style -- italic, underline
+    // and reverse included, the same way a content row's roles do at the
+    // per-span resolve below -- with two deliberate overrides. The bg stays
+    // the overlay's, so the top edge reads as one continuous run rather
+    // than a differently-lit patch mid-border. Bold is OR-ed in rather than
+    // read, because it is what separates the title from the frame on the
+    // no-truecolor path, where an attribute is the only distinction a
+    // terminal can carry at all.
     let title = if truecolor {
+        let group = theme.chrome(ChromeGroup::FloatTitle);
         ratatui_style(ResolvedStyle {
-            fg: theme.chrome(ChromeGroup::FloatTitle).fg.or(base.fg),
+            fg: group.fg.or(base.fg),
             bg: base.bg,
             bold: true,
-            ..ResolvedStyle::default()
+            ..group
         })
     } else {
         Style::default().add_modifier(Modifier::BOLD)
@@ -3959,11 +3963,16 @@ mod tests {
     }
 
     /// A model whose live highlight table names every chrome group this
-    /// test covers with its own distinct color -- what an attached
-    /// colorscheme actually does for every builtin group nvim ships (every
-    /// stock colorscheme defines `DiagnosticError` and `DiagnosticWarn`
-    /// separately, per `:h diagnostic-highlights`), not the coarse
-    /// Normal/Emphasis buckets `Theme`'s pre-attach fallback falls back to.
+    /// test covers with its own distinct color, the way an attached
+    /// colorscheme does -- not the coarse Normal/Emphasis buckets `Theme`'s
+    /// pre-attach fallback resolves to.
+    ///
+    /// Every group here is one nvim actually broadcasts through
+    /// `hl_group_set`, which is the only way a color reaches this table at
+    /// all; `view_core::theme`'s `every_group_is_one_nvim_broadcasts` pins
+    /// that set. A group named here that nvim never announces would be
+    /// defined by this fixture and by nothing else, so the test would pass
+    /// over a mapping no real session can reach.
     fn model_with_distinctly_colored_chrome() -> Model {
         let mut model = caps_model(true, true, true);
         for (id, group, color) in [
@@ -3971,8 +3980,7 @@ mod tests {
             (2, ChromeGroup::StatusLine, 0x00CC_CCCC),
             (3, ChromeGroup::WarningMsg, 0x00FF_A500),
             (4, ChromeGroup::Directory, 0x0000_88FF),
-            (5, ChromeGroup::DiagnosticError, 0x00FF_3333),
-            (6, ChromeGroup::DiagnosticWarn, 0x00FF_CC00),
+            (5, ChromeGroup::ErrorMsg, 0x00FF_3333),
         ] {
             apply(
                 &mut model,
@@ -4006,7 +4014,10 @@ mod tests {
     /// hardcoded color, so the assertion survives a colorscheme change --
     /// and the load-bearing case: `DiagnosticError` and `DiagnosticWarning`
     /// must resolve to genuinely different painted colors rather than both
-    /// merely differing from `Plain`.
+    /// merely differing from `Plain`. They reach that through `ErrorMsg`
+    /// and `WarningMsg` -- the closest builtins nvim actually broadcasts,
+    /// since the `Diagnostic*` groups they read like are Lua-defined and
+    /// never announced (`view_core::theme::ChromeGroup::ErrorMsg`).
     #[test]
     fn statusline_roles_resolve_to_their_own_distinct_chrome_colors() {
         let model = model_with_distinctly_colored_chrome();
@@ -4064,6 +4075,23 @@ mod tests {
             "DiagnosticError and DiagnosticWarning must resolve to visually distinct \
              colors, not collapse to one"
         );
+        // both colors came off the live table, not off a fallback: a role
+        // mapped to a group nvim never broadcasts would still satisfy the
+        // assertion above (two fallbacks can differ), which is exactly how
+        // the Diagnostic* mapping shipped unnoticed
+        let theme = Theme::from_hl(model.engine.hl());
+        for group in [ChromeGroup::ErrorMsg, ChromeGroup::WarningMsg] {
+            assert_eq!(
+                theme.chrome(group).fg,
+                Some(match group {
+                    ChromeGroup::ErrorMsg => 0x00FF_3333,
+                    _ => 0x00FF_A500,
+                }),
+                "{} resolved from its fallback rather than the colorscheme's own \
+                 highlight, so this test would pass over an unreachable mapping",
+                group.hl_name()
+            );
+        }
     }
 
     /// The title set into an overlay's top border reads as a label, not as
@@ -4071,66 +4099,101 @@ mod tests {
     /// while the horizontal runs on either side of it keep the frame's
     /// deliberately dimmed one. Painting the row in a single style is what
     /// made the one word naming the overlay its least legible text.
+    /// Run over the same capability permutations as
+    /// `a_native_overlay_paints_exactly_the_rows_the_layout_pass_produced`,
+    /// because the bold is not decoration on the no-truecolor path: it is
+    /// the whole distinction. That branch sends no color at all, so a
+    /// terminal that never proved 24-bit color would show a title
+    /// indistinguishable from the border without it.
     #[test]
     fn an_overlay_title_paints_brighter_and_bolder_than_the_frame_around_it() {
-        let mut model = caps_model(true, true, true);
-        apply(
-            &mut model,
-            view_core::events::UiEvent::HlAttrDefine {
-                id: 9,
-                fg: Some(0x00FF_EE00),
-                bg: None,
-                bold: false,
-                italic: false,
-                underline: false,
-                reverse: false,
-            },
-        );
-        apply(
-            &mut model,
-            view_core::events::UiEvent::HlGroupSet {
-                name: ChromeGroup::FloatTitle.hl_name().to_string(),
-                hl_id: 9,
-            },
-        );
-        let theme = Theme::from_hl(model.engine.hl());
-        let rect = Rect::new(1, 2, 24, 7);
-        let layer = Layer::new(rect, native_picker(), model.caps.tier);
-        let buf = paint_layer_alone(&model, layer, 30, 10);
+        for (sync, truecolor, kitty) in [
+            (true, true, true),
+            (false, true, false),
+            (false, false, false),
+        ] {
+            let mut model = caps_model(sync, truecolor, kitty);
+            // italic and underline are set on the group deliberately: the
+            // title must carry its group's whole resolved style the way a
+            // content row's roles do, not just the foreground
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlAttrDefine {
+                    id: 9,
+                    fg: Some(0x00FF_EE00),
+                    bg: None,
+                    bold: false,
+                    italic: true,
+                    underline: true,
+                    reverse: false,
+                },
+            );
+            apply(
+                &mut model,
+                view_core::events::UiEvent::HlGroupSet {
+                    name: ChromeGroup::FloatTitle.hl_name().to_string(),
+                    hl_id: 9,
+                },
+            );
+            let theme = Theme::from_hl(model.engine.hl());
+            let rect = Rect::new(1, 2, 24, 7);
+            let layer = Layer::new(rect, native_picker(), model.caps.tier);
+            let buf = paint_layer_alone(&model, layer, 30, 10);
 
-        // the top edge is `<corner><rule> Files <rule...><corner>`, so the
-        // title's own cells start two columns into the rect
-        let title_col = rect.col + 3;
-        let title_cell = &buf[(title_col, rect.row)];
-        assert_eq!(
-            title_cell.symbol(),
-            "F",
-            "the assertion must be reading the title's own cells"
-        );
-        assert_eq!(
-            title_cell.fg,
-            ratatui_style(ResolvedStyle {
-                fg: theme.chrome(ChromeGroup::FloatTitle).fg,
-                ..ResolvedStyle::default()
-            })
-            .fg
-            .unwrap(),
-            "the title resolves through FloatTitle, not through the border color"
-        );
-        assert!(
-            title_cell.modifier.contains(Modifier::BOLD),
-            "the title is bold, which is the only distinction a terminal with no \
-             color can carry"
-        );
+            // the top edge is `<corner><rule> Files <rule...><corner>` on
+            // every tier, so the title's own glyphs start three columns
+            // into the rect whichever charset drew it
+            let title_cell = &buf[(rect.col + 3, rect.row)];
+            let edge_cell = &buf[(rect.col, rect.row)];
+            let at = format!("truecolor={truecolor}");
+            assert_eq!(
+                title_cell.symbol(),
+                "F",
+                "the assertion must be reading the title's own cells ({at})"
+            );
+            assert!(
+                title_cell.modifier.contains(Modifier::BOLD),
+                "the title is bold on every tier: with no color established it is \
+                 the only distinction a terminal can carry ({at})"
+            );
+            assert!(
+                !edge_cell.modifier.contains(Modifier::BOLD),
+                "only the title is bold, not the run of border it sits in ({at})"
+            );
 
-        let edge_cell = &buf[(rect.col, rect.row)];
-        assert_ne!(
-            edge_cell.fg, title_cell.fg,
-            "the corner keeps the frame's dimmed color; a shared style is the defect"
-        );
-        assert!(
-            !edge_cell.modifier.contains(Modifier::BOLD),
-            "only the title is bold, not the run of border it sits in"
-        );
+            if truecolor {
+                assert_eq!(
+                    title_cell.fg,
+                    rgb(theme.chrome(ChromeGroup::FloatTitle).fg.unwrap()),
+                    "the title resolves through FloatTitle, not the border color"
+                );
+                assert_ne!(
+                    edge_cell.fg, title_cell.fg,
+                    "the corner keeps the frame's dimmed color; a shared style is \
+                     the defect"
+                );
+                assert!(
+                    title_cell.modifier.contains(Modifier::ITALIC)
+                        && title_cell.modifier.contains(Modifier::UNDERLINED),
+                    "the group's own attributes reach the title, not only its fg"
+                );
+                assert!(
+                    !edge_cell.modifier.contains(Modifier::ITALIC),
+                    "the frame keeps its own style; the title's attributes are the \
+                     title's"
+                );
+            } else {
+                assert_eq!(
+                    title_cell.fg,
+                    Color::Reset,
+                    "no color capability was proved, so none is sent for the title"
+                );
+                assert_eq!(
+                    edge_cell.fg,
+                    Color::Reset,
+                    "nor for the frame it has to stand out from"
+                );
+            }
+        }
     }
 }

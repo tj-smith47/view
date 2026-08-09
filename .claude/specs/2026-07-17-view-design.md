@@ -505,7 +505,16 @@ Applies on `full` and `standard`; `basic` (no color derivation) skips it.
 — corner glyphs are font coverage, not a terminal capability; `basic` falls
 back to ASCII `+ - |`. Border fg is `accent` blended 50% toward the
 surface's bg (`FloatBorder` when the scheme defines it). A float's title
-renders inside the top border run, space-padded, `accent` fg. Panels keep
+renders inside the top border run, space-padded, in **`FloatTitle` fg,
+bold** — amended from `accent` fg at the P4 exit drain (2026-08-09,
+coordinator ruling, reported to the user): the `accent` vocabulary below is
+unimplemented tree-wide, `hl-FloatTitle` is nvim's own builtin for exactly
+this element, and a switching user's colorscheme already drives it, so
+parity with the editor being migrated from beat a role no code resolves.
+The fg comes from that group over the surface's own bg, so the top edge
+still reads as one continuous run; bold applies on every tier, since on a
+terminal with no color an attribute is the only way a title can outrank the
+border it sits in. Panels keep
 at least one row / two cols of padding inside the border; content never
 touches a border cell. Selection bars span the full inner width on
 `surface.sel` with a `▌` accent marker in the left padding column.
@@ -886,6 +895,7 @@ copyable ones (polish).
 | Native-vs-plugin overlap default | Native wins, per-feature opt-out, runtime supersession only (§5.5) | Defer-to-plugins default (reviewer-recommended): maximally unsurprising, but ships the product hidden — the migration audience would never see what view is |
 | First-release scope (ruled 2026-08-05) | Five invented capabilities (§9: supervision, remote editing, session DVR, key introspector, image viewing) ship in v0.1 as core features alongside AI | Post-v0.1 rollout: differentiation would rest on refined plugin equivalents alone, which reads as repackaged nvim rather than a new category |
 | v0.1 media playback shape (ruled 2026-08-07) | Full-terminal handoff to detected system mpv; doctor-guided | Composited in-pane playback: requires the workspace-arc pane compositor, deferred to v0.2 with it |
+| Float title style (§7.1, ruled 2026-08-09 at the P4 exit drain) | `ChromeGroup::FloatTitle` (nvim's builtin `hl-FloatTitle`) fg over the surface's own bg, bold on every tier | §7.1's original `accent` fg: the accent role vocabulary is unimplemented tree-wide (no code resolves `Function`/`Statement` into a role), so it would have shipped as a hardcoded style nvim has no way to reach — the opposite of the migration audience's expectation that their colorscheme drives view's chrome. Coordinator ruling, reported to the user; §7.1 is itself still pending user ratification |
 | Browser pane engine (§15.1, v0.2) | CDP-driven system Chromium via `chromiumoxide`: screencast frames through the native graphics substrate; view owns bindings, hints, theme; browser detected, never bundled | Carbonyl/Carboxyl child process: stalled-upstream Chromium fork, supply-chain risk, UX never view's. Servo embedding: watched as the long-term in-process fit — API unstable and open-web compat incomplete as of 2026-08. Handrolled engine: never |
 
 ## 19. Risks
