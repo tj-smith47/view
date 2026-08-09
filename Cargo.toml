@@ -19,6 +19,28 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/tj-smith47/view"
 
+# The release binary is a measured artifact, not just a shipped one: the
+# bench matrix times this build and the footprint row gates on its resident
+# pages, so the profile that produces it is part of the measurement's
+# definition and belongs in the tree beside the budgets rather than in
+# whatever flags a release happens to be cut with.
+#
+# Cross-crate inlining is what the whole-program view buys, and it is only
+# reachable with one codegen unit per crate: sixteen units let LLVM optimise
+# each shard well and the seams between them not at all, which on a binary
+# whose hot paths cross crate boundaries (grid apply -> surface render ->
+# paint) leaves the exact calls that matter behind a boundary. The cost is
+# link time, paid once per release build and never by a user.
+#
+# `strip` removes the symbol table, which is file size rather than resident
+# footprint -- nothing maps .symtab at run time. It is here for the download
+# and for honest `ls -l` reporting, and the per-dependency composition
+# snapshot is taken from an unstripped build for that reason.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 
