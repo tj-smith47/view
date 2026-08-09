@@ -110,6 +110,14 @@ pub(crate) fn run_taps_row(
             segment.label, segment.p50_us, segment.p99_us, segment.samples
         );
     }
+    if outcome.unexplained_paints > 0 {
+        println!(
+            "      paints with no redraw behind them: {} across all samples (view answered the \
+             keystroke from its own chrome before the engine's redraw was parsed); report-only, \
+             outside this row's boundary",
+            outcome.unexplained_paints
+        );
+    }
     report_overhead(&outcome.overhead, outcome.overhead_pace);
     if let Some(reason) = overhead_refusal(&outcome.overhead) {
         if controlled {

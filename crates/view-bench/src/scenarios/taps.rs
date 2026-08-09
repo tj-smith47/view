@@ -296,6 +296,16 @@ pub struct TapsOutcome {
     /// unusual pace is a host whose pipe behaves differently from the one
     /// the base pace was tuned on, and that is worth seeing in the row.
     pub overhead_pace: Duration,
+    /// Terminal writes that landed after a keypress and before the redraw
+    /// answering it, summed over every sample of every trial. Zero for a
+    /// row whose boundary cannot produce them.
+    ///
+    /// Report-only. The row measures redraw-parsed to terminal-write, and
+    /// a paint with no redraw behind it is outside that interval by
+    /// construction; the count is here so a change in how often view
+    /// paints on its own shows up in the row instead of being absorbed
+    /// silently by the pairing.
+    pub unexplained_paints: usize,
 }
 
 /// One observed sub-interval of a taps row.
@@ -459,60 +469,58 @@ pub fn run_input_path(
         segments: summarize_segments(&INPUT_LABELS, &pools),
         overhead,
         overhead_pace,
+        // the input row closes at the RPC write, before any paint
+        unexplained_paints: 0,
     })
 }
 
-/// One step of pairing a keypress's terminal-write tap with the parsed
-/// redraw that explains it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PairingVerdict {
-    /// The earliest `R` at or after the keypress and at or before the
-    /// candidate paint: the frame under measurement.
-    Paired(TapRecord),
-    /// The candidate paint is positively explained by an unclaimed `R`
-    /// that predates the keypress (a straggler frame from before the
-    /// sample), and a later `T` exists to take its place as the next
-    /// candidate.
-    Stray(TapRecord),
-    /// Nothing decidable yet; the explaining `R` (or a later `T`) may
-    /// still be crossing the pipe. A paint with no explaining redraw at
-    /// all stays here and lets the sample-timeout abort stand: skipping
-    /// it would hide exactly the paints-without-redraw product fault the
-    /// desync check exists to catch.
-    Pending,
+/// The frame a keypress at `t0` produced: the earliest parsed redraw at or
+/// after the keypress, paired with the earliest terminal write at or after
+/// that redraw.
+///
+/// Anchored on the redraw rather than on the paint, because a paint is not
+/// evidence that the measured frame has begun. view repaints for reasons
+/// the engine knows nothing about -- its own chrome answers the keystroke
+/// before the engine's redraw arrives -- and such a paint lands after the
+/// keypress and before the redraw it does not carry. Selecting the first
+/// paint after the keypress and then trying to explain it backwards makes
+/// every one of those a special case; selecting the redraw first makes
+/// them structurally uninteresting, since a paint before the redraw can
+/// never be at or after it.
+///
+/// Returns `None` while either half is still missing, which is what the
+/// sample timeout is measured against: no redraw at all after a keypress
+/// is the desync this row aborts on.
+fn measured_frame(records: &[TapRecord], t0: i64) -> Option<(TapRecord, TapRecord)> {
+    // earliest by timestamp, not by arrival: `R` is stamped by the engine
+    // and `T` by the tui, so two records can reach the pipe in the
+    // opposite order from the one their clocks record
+    let parsed = records
+        .iter()
+        .filter(|r| r.tag == b'R' && r.nanos >= t0)
+        .min_by_key(|r| r.nanos)
+        .copied()?;
+    let paint = records
+        .iter()
+        .filter(|r| r.tag == b'T' && r.nanos >= parsed.nanos)
+        .min_by_key(|r| r.nanos)
+        .copied()?;
+    Some((parsed, paint))
 }
 
-/// Decides, from the records seen so far, whether `paint` is explained by
-/// a parsed redraw at or after `t0`, is a straggler positively explained
-/// by an unclaimed redraw in `(since, t0)` and superseded by a later
-/// paint, or cannot be judged yet. `since` is the previous measured
-/// frame's paint timestamp: without that floor, every already-claimed `R`
-/// from earlier samples in the accumulated record log would count as an
-/// explanation and the straggler check could never refuse anything.
-fn pair_paint(records: &[TapRecord], since: i64, t0: i64, paint: TapRecord) -> PairingVerdict {
-    let explained = records
+/// How many terminal writes landed after the keypress but before the
+/// redraw that answers it -- paints view produced without an engine redraw
+/// behind them.
+///
+/// Not a measurement fault and not gated: it is the count of frames the
+/// row's boundary deliberately steps over, reported so that a change in
+/// how often view paints on its own is visible in the row rather than
+/// silently absorbed by the pairing.
+fn paints_before_redraw(records: &[TapRecord], t0: i64, parsed: i64) -> usize {
+    records
         .iter()
-        .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
-        .min_by_key(|r| r.nanos)
-        .copied();
-    if let Some(hit) = explained {
-        return PairingVerdict::Paired(hit);
-    }
-    let straggler_explained = records
-        .iter()
-        .any(|r| r.tag == b'R' && r.nanos > since && r.nanos < t0);
-    if !straggler_explained {
-        return PairingVerdict::Pending;
-    }
-    let later = records
-        .iter()
-        .filter(|r| r.tag == b'T' && r.nanos > paint.nanos)
-        .min_by_key(|r| r.nanos)
-        .copied();
-    match later {
-        Some(next) => PairingVerdict::Stray(next),
-        None => PairingVerdict::Pending,
-    }
+        .filter(|r| r.tag == b'T' && r.nanos >= t0 && r.nanos < parsed)
+        .count()
 }
 
 /// Measures the redraw-parsed-to-terminal-write path: per keypress, the
@@ -521,8 +529,9 @@ fn pair_paint(records: &[TapRecord], since: i64, t0: i64, paint: TapRecord) -> P
 ///
 /// # Errors
 ///
-/// Returns [`BenchError::Desync`] on tap loss, a paint with no parsed
-/// redraw to explain it, or session failures.
+/// Returns [`BenchError::Desync`] on tap loss, a keypress that produced no
+/// parsed redraw, a parsed redraw that produced no terminal write, or
+/// session failures.
 pub fn run_output_path(
     spec: &SpawnSpec,
     pipe: &TapPipe,
@@ -541,10 +550,7 @@ pub fn run_output_path(
         "flush-start->term-written",
     ];
     let mut pools: Vec<Vec<f64>> = vec![Vec::new(); labels.len()];
-    // the straggler floor for the first sample: redraws older than the
-    // prepared, settled session belong to setup frames, not to a burst
-    // this loop produced
-    let mut last_paint_nanos = monotonic_nanos();
+    let mut chrome_paints = 0;
     for _ in 0..protocol.trials {
         let mut deltas_ms = Vec::with_capacity(protocol.warmup + protocol.samples);
         for index in 0..(protocol.warmup + protocol.samples) {
@@ -555,61 +561,49 @@ pub fn run_output_path(
             all_records.extend(pipe.drain());
             let t0 = monotonic_nanos();
             session.send(b"x")?;
-            let Some(paint) =
-                pipe.wait_for(protocol.sample_timeout, |r| r.tag == b'T' && r.nanos >= t0)
+            // Wait on the redraw first, then on the paint that carries it.
+            // Both waits are separate sample timeouts because they fail
+            // for different reasons: no redraw at all after a keypress is
+            // the engine (or the key) never answering, while a redraw with
+            // no paint behind it is the paint loop stalling.
+            let Some(seen_parsed) =
+                pipe.wait_for(protocol.sample_timeout, |r| r.tag == b'R' && r.nanos >= t0)
             else {
                 return Err(BenchError::Desync {
                     context: format!(
-                        "no terminal-write tap within {:?} of a keypress; screen:\n{}",
+                        "no parsed-redraw tap within {:?} of a keypress; screen:\n{}",
                         protocol.sample_timeout,
                         session.screen_text()
                     ),
                 });
             };
-            // grace so the R record (written by a different thread than
-            // the T) has crossed the pipe before the pairing scan below.
-            // A bounded rescan loop, not one fixed sleep: under host load
-            // the parser thread's pipe write can trail the observed T by
-            // more than any single grace this pacing could afford, and a
-            // scan that ran exactly once then turned a late write into a
-            // whole-run desync abort -- reproduced at 1 ms on this class
-            // at 1-min loads as low as 0.66, on a tree with no view change
-            let sample_deadline = Instant::now() + protocol.sample_timeout;
-            let mut paint = paint;
-            let mut pairing_deadline = Instant::now() + Duration::from_millis(50);
-            let parsed = loop {
-                std::thread::sleep(Duration::from_millis(1));
-                let window = pipe.drain();
-                all_records.extend(window.iter().copied());
-                match pair_paint(&all_records, last_paint_nanos, t0, paint) {
-                    PairingVerdict::Paired(hit) => break Some(hit),
-                    // a paint positively explained by an unclaimed redraw
-                    // from before the keypress is a straggler frame (the
-                    // insert-mode reset burst can cross the settle under
-                    // host load), not the frame under measurement: only
-                    // after the R grace has expired may it be skipped for
-                    // the next paint, because R records cross the pipe on
-                    // a different thread and can trail the T they explain
-                    PairingVerdict::Stray(next) if Instant::now() >= pairing_deadline => {
-                        paint = next;
-                        pairing_deadline = Instant::now() + Duration::from_millis(50);
-                    }
-                    PairingVerdict::Stray(_) | PairingVerdict::Pending => {
-                        if Instant::now() >= pairing_deadline && Instant::now() >= sample_deadline {
-                            break None;
-                        }
-                    }
-                }
-            };
-            let Some(parsed) = parsed else {
+            if pipe
+                .wait_for(protocol.sample_timeout, |r| {
+                    r.tag == b'T' && r.nanos >= seen_parsed.nanos
+                })
+                .is_none()
+            {
                 return Err(BenchError::Desync {
-                    context: "a paint arrived with no parsed redraw between the keypress \
-                              and the terminal write, and no later paint paired within \
-                              the sample timeout"
+                    context: format!(
+                        "a redraw was parsed but no terminal write followed within {:?}; \
+                         screen:\n{}",
+                        protocol.sample_timeout,
+                        session.screen_text()
+                    ),
+                });
+            }
+            // drained only now, so both halves are chosen over one record
+            // set: an `R` stamped earlier than `seen_parsed` may still have
+            // been crossing the pipe while the wait above returned
+            all_records.extend(pipe.drain());
+            let Some((parsed, paint)) = measured_frame(&all_records, t0) else {
+                return Err(BenchError::Desync {
+                    context: "the redraw and paint that ended the sample waits were not in \
+                              the drained record set"
                         .to_string(),
                 });
             };
-            last_paint_nanos = paint.nanos;
+            chrome_paints += paints_before_redraw(&all_records, t0, parsed.nanos);
             #[allow(clippy::cast_precision_loss)]
             deltas_ms.push((paint.nanos - parsed.nanos) as f64 / 1_000_000.0);
             if index >= protocol.warmup {
@@ -645,6 +639,7 @@ pub fn run_output_path(
         segments: summarize_segments(&labels, &pools),
         overhead,
         overhead_pace,
+        unexplained_paints: chrome_paints,
     })
 }
 
@@ -1239,20 +1234,33 @@ mod tests {
     }
 
     #[test]
-    fn pair_paint_takes_the_earliest_explaining_redraw() {
+    fn measured_frame_takes_the_earliest_redraw_and_the_paint_that_carries_it() {
         let records = [tap(b'R', 1, 110), tap(b'R', 2, 130), tap(b'T', 1, 150)];
         assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 1, 150)),
-            PairingVerdict::Paired(tap(b'R', 1, 110))
+            measured_frame(&records, 100),
+            Some((tap(b'R', 1, 110), tap(b'T', 1, 150)))
         );
     }
 
     #[test]
-    fn pair_paint_skips_a_straggler_paint_whose_redraw_predates_the_keypress() {
-        // the straggler's own R sits in (since=20, t0=100), so the T at
-        // 120 is a frame from before the sample; the paint at 200 with R
-        // at 180 is the keypress's frame and must pair once offered as
-        // the candidate
+    fn measured_frame_ignores_a_paint_that_lands_before_the_keypress_redraw() {
+        // the live shape on dev-linux: view's own chrome answers the
+        // keystroke at 120, before the engine's redraw at 180 is even
+        // parsed. The measured frame is the 180/200 pair; a boundary that
+        // anchored on the first paint after the keypress would have to
+        // explain 120 backwards and has nothing to explain it with
+        let records = [tap(b'T', 1, 120), tap(b'R', 2, 180), tap(b'T', 2, 200)];
+        assert_eq!(
+            measured_frame(&records, 100),
+            Some((tap(b'R', 2, 180), tap(b'T', 2, 200)))
+        );
+        assert_eq!(paints_before_redraw(&records, 100, 180), 1);
+    }
+
+    #[test]
+    fn measured_frame_ignores_records_from_before_the_keypress() {
+        // the settle burst's redraw at 40 belongs to session setup, and
+        // the paint at 120 that carries it is not this sample's frame
         let records = [
             tap(b'R', 1, 40),
             tap(b'T', 1, 120),
@@ -1260,53 +1268,32 @@ mod tests {
             tap(b'T', 2, 200),
         ];
         assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
-            PairingVerdict::Stray(tap(b'T', 2, 200))
-        );
-        assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 2, 200)),
-            PairingVerdict::Paired(tap(b'R', 2, 180))
+            measured_frame(&records, 100),
+            Some((tap(b'R', 2, 180), tap(b'T', 2, 200)))
         );
     }
 
     #[test]
-    fn pair_paint_refuses_stray_for_a_paint_with_no_explaining_redraw_at_all() {
-        // same shape as the straggler case minus its pre-keypress R: a
-        // paint nothing explains must not be skipped even though a later
-        // paired T exists, because that is the paints-without-redraw
-        // product fault the desync abort exists to catch
-        let records = [tap(b'T', 1, 120), tap(b'R', 2, 180), tap(b'T', 2, 200)];
+    fn measured_frame_is_none_until_both_halves_have_arrived() {
+        assert_eq!(measured_frame(&[tap(b'T', 1, 120)], 100), None);
+        assert_eq!(measured_frame(&[tap(b'R', 1, 110)], 100), None);
+        // a paint that predates the redraw does not close the frame
         assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
-            PairingVerdict::Pending
+            measured_frame(&[tap(b'T', 1, 105), tap(b'R', 1, 110)], 100),
+            None
         );
     }
 
     #[test]
-    fn pair_paint_refuses_stray_when_the_only_earlier_redraw_is_already_claimed() {
-        // the R at 10 sits at or before the previous measured frame's
-        // paint (since=20), so it explained an earlier sample, not this
-        // candidate; counting it would make the straggler check vacuous
-        // against the accumulated record log
+    fn paints_before_redraw_counts_only_the_gap_between_keypress_and_redraw() {
         let records = [
-            tap(b'R', 1, 10),
-            tap(b'T', 1, 120),
-            tap(b'R', 2, 180),
-            tap(b'T', 2, 200),
+            tap(b'T', 1, 50),
+            tap(b'T', 2, 120),
+            tap(b'T', 3, 130),
+            tap(b'R', 1, 180),
+            tap(b'T', 4, 200),
         ];
-        assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
-            PairingVerdict::Pending
-        );
-    }
-
-    #[test]
-    fn pair_paint_stays_pending_until_a_redraw_or_a_later_paint_arrives() {
-        let records = [tap(b'R', 1, 40), tap(b'T', 1, 120)];
-        assert_eq!(
-            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
-            PairingVerdict::Pending
-        );
+        assert_eq!(paints_before_redraw(&records, 100, 180), 2);
     }
 
     #[test]
