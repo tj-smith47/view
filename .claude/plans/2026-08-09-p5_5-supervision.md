@@ -73,6 +73,28 @@ original draft:
 
 Status remains DRAFT pending re-review.
 
+**Round 2 fixes** (landing-order amendment, requested by P5.5-media's
+plan): `HeartbeatWatch` gains `pause()`/`resume()` — media's Task 3
+(`.claude/plans/2026-08-09-p5_5-media.md`, "Landing-order dependency on
+P1 supervision") suspends this plan's prober around its `mpv`
+full-terminal handoff and cannot begin implementation until this
+contract lands here. The contract is media's own round-3/round-4
+settled design, reproduced here verbatim rather than re-derived:
+`pause()` stops the prober thread's `tick()` from issuing any *new*
+probe; `resume()` resets only `sent_at`, never `sent_generation` or
+`acked_generation`, so the counters are monotonic-forward across a
+pause/resume cycle. Combined with `record_ack`'s existing `max(current,
+incoming)` fold, a stale ack from a probe already in flight when
+`pause()` fires (bounded by `HEARTBEAT_WEDGE_THRESHOLD /
+HEARTBEAT_PROBE_INTERVAL`, ~4-5 at this plan's constants, since ticks
+are not ack-gated) can raise `acked_generation` to at most that
+pre-pause value — always strictly less than any post-resume
+`sent_generation` — so it cannot mask a genuine post-resume hang. New
+`HeartbeatWatch` struct field (`paused: AtomicBool`), two new API
+methods, a `tick()` doc clause, and a new Task 1 step (implement
+pause/resume with a stale-ack-after-resume test) added below. No
+existing Task 1 method signature or verdict logic changes.
+
 ## Global Constraints
 
 Hard rules, embedded verbatim. Every task's requirements implicitly include
@@ -498,6 +520,7 @@ pub struct HeartbeatWatch {
     sent_generation: AtomicU64,
     sent_at: AtomicU64,      // epoch millis
     acked_generation: u64,
+    paused: AtomicBool,      // gates the prober thread's tick(), see pause()/resume()
 }
 
 impl Default for HeartbeatWatch {
@@ -510,7 +533,9 @@ impl HeartbeatWatch {
     /// Called by the prober thread each tick: bumps `sent_generation`,
     /// stamps `sent_at`, and issues the probe via
     /// [`EngineHandle::request_heartbeat`]. The one send this design
-    /// performs; never called from the paint loop.
+    /// performs; never called from the paint loop. No-ops (returns
+    /// `Ok(())` without sending) while [`pause`](Self::pause) is in
+    /// effect.
     pub fn tick(&self, handle: &EngineHandle) -> Result<(), EngineError>;
 
     /// Called from the runtime loop's Msg dispatch on
@@ -530,6 +555,29 @@ impl HeartbeatWatch {
     /// the connection is doing.
     #[must_use]
     pub fn observe(&self, connection_closed: bool) -> Liveness { /* ... */ }
+
+    /// Stops the prober thread's [`tick`](Self::tick) from issuing any
+    /// *new* probe (checks the `paused` flag before sending). Does NOT
+    /// guarantee no reply arrives afterward: probes already dispatched by
+    /// prior ticks (bounded by `HEARTBEAT_WEDGE_THRESHOLD /
+    /// HEARTBEAT_PROBE_INTERVAL`, ~4-5 at this module's constants, since
+    /// ticks are not ack-gated) are still in flight and the connection's
+    /// peer still answers them. Never rewinds `sent_generation`. First
+    /// consumer: P5.5-media's terminal handoff, which pauses this watch
+    /// for the duration of a blocking child-process call.
+    pub fn pause(&self);
+
+    /// Clears the paused flag and resets `sent_at` to now. Deliberately
+    /// does NOT reset `sent_generation` or `acked_generation` — both are
+    /// left exactly where `pause()` found them, so the pair is
+    /// monotonic-forward across a pause/resume cycle. Because
+    /// `record_ack`'s fold is `max(current, incoming)`, a stale ack for a
+    /// probe sent before `pause()` can raise `acked_generation` to at
+    /// most that pre-pause value — strictly less than any
+    /// `sent_generation` a post-resume tick produces — so it can never
+    /// satisfy a post-resume `Wedged` check and mask a genuine subsequent
+    /// hang; the late reply folds in harmlessly instead.
+    pub fn resume(&mut self);
 }
 ```
 
@@ -563,10 +611,21 @@ regardless of elapsed time or ack state.
   `note_engine_liveness`'s `observe` call into `runtime.rs`, sibling to
   `note_write_stall` at `runtime.rs:1127`, never merged into it (open
   question 2, decided above).
-- [ ] **Step 6: Disconfirm.** Tick the watch against a fake handle whose
+- [ ] **Step 6: `pause()`/`resume()` for the media landing-order
+  amendment.** Implement the `paused` flag and the two methods per their
+  doc comments above. Test: (a) tick the watch once, `pause()`, `resume()`,
+  then deliver that first tick's `record_ack` late (after `resume()`) —
+  assert `observe` still reports `Alive` (the stale ack is harmless); (b)
+  from that same post-resume point, advance the fake clock past
+  `HEARTBEAT_WEDGE_THRESHOLD` without ever acking a post-resume tick —
+  assert `observe` now reports `Wedged` (a genuine post-resume hang is
+  still caught despite the earlier stale ack). Both cases must pass
+  together — proving the fold masks the stale ack without also masking a
+  real one is the point of the test, not either half alone.
+- [ ] **Step 7: Disconfirm.** Tick the watch against a fake handle whose
   replies never route back to `record_ack`; `task test` shows the wedged
   path firing; restore the healthy fake (replies routed); passes.
-- [ ] **Step 7:** `task perf-audit` on `taps` and `echo` scenarios; confirm
+- [ ] **Step 8:** `task perf-audit` on `taps` and `echo` scenarios; confirm
   the added atomics reads and the one new Msg-dispatch arm cost nothing
   measurable against the 5 µs p99 tap bar (state the actual delta in the
   commit, per the perf contract). Commit: `feat(supervision): read-side
