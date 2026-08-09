@@ -24,13 +24,13 @@ Recorded baselines on a shared Linux dev host:
 | What | view | bare Neovim | |
 |---|---|---|---|
 | UI shell painted, engine still loading (p99) | **4.1 ms** | n/a | budget 50 ms |
-| First paint, cold, no plugins (p99) | **26.5 ms** | 131.4 ms | **5x faster** |
-| First paint, cold, 14-plugin lazy.nvim stack (p99) | **120.5 ms** | 199.8 ms | **1.7x faster** |
+| First paint, cold, no plugins (p99) | **25.2 ms** | 130.3 ms | **5.2x faster** |
+| First paint, cold, 14-plugin lazy.nvim stack (p99) | **79.3 ms** | 164.3 ms | **2.1x faster** |
 | Resident memory (PSS), view process only, no plugins | **4.96 MB** | n/a | budget was 150 MB |
-| Redraw parsed to terminal write (p99) | **0.12 ms** | n/a | budget 1 ms |
-| Keystroke to cell change, steady typing (p99) | 0.90 ms | 0.81 ms | ~1.12x slower |
+| Redraw parsed to terminal write (p99) | **0.08 ms** | n/a | budget 1 ms |
+| Keystroke to cell change, steady typing (p99) | 0.73 ms | 0.67 ms | ~1.09x slower |
 | Sustained scroll, 100k lines (p99 staleness) | 1.40 ms | n/a | budget 16 ms |
-| Sustained scroll, versus Neovim | | | ~1.8 to 2.0x slower |
+| Sustained scroll, versus Neovim | | | ~1.6 to 1.9x slower |
 
 The first row is unpaired on purpose: view paints its shell before it has
 even started the Neovim child, so bare Neovim has no comparable event. It
@@ -69,8 +69,8 @@ not a ceiling on what a plugin stack can cost once its triggers do fire.
 
 ## The typing gap
 
-Steady typing is currently about 17% slower than bare Neovim, and sustained
-scrolling about 2x. Both are sub-millisecond and far inside their budgets,
+Steady typing is currently about 13% slower than bare Neovim, and sustained
+scrolling about 1.6 to 1.9x. Both are sub-millisecond and far inside their budgets,
 so neither is perceptible. The goal is to beat Neovim, though, not to tie
 it, so the gap gets tracked down rather than shrugged off.
 
