@@ -66,6 +66,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 )
             {
                 model.pop_overlay();
+                // without this the closed picker stays on screen until some
+                // unrelated event repaints: the paint loop's `if model.dirty`
+                // gate is the only repaint trigger, and popping an overlay
+                // produces no engine redraw to trip it
+                model.dirty = true;
                 // tells the matcher worker to drop its live Session so a
                 // Files scan still walking a huge tree does not keep
                 // running unobserved -- see Effect::PickerClose's doc; the
@@ -3473,6 +3478,9 @@ mod tests {
             "FeatureInvoke picker/files must open a Picker overlay on top"
         );
 
+        // cleared so the dirty assertion below can only be satisfied by the
+        // close arm itself, not by the open that preceded it
+        m.dirty = false;
         let effects = update(
             &mut m,
             Msg::Key(Key {
@@ -3486,6 +3494,11 @@ mod tests {
             "closing the picker via Esc must emit exactly Effect::PickerClose: \
              {effects:?}"
         );
+        // the paint loop repaints only when dirty, and a pop produces no
+        // engine redraw: without this the closed picker stays on screen
+        // until some unrelated event repaints (observed as a bench desync
+        // whose failure screen still showed the popped overlay)
+        assert!(m.dirty, "closing the picker must mark the model dirty");
     }
 
     /// A candidate landing in `Msg::PickerResults` must itself trigger a

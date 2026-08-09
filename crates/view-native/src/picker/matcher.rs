@@ -71,9 +71,10 @@ pub enum WorkerRequest {
 /// Spawns the matcher worker: one thread for the process's lifetime, torn
 /// down only when `rx` disconnects (the runtime's `Executor` drops its
 /// sender at process exit, the same shutdown shape `view::clipboard::spawn`
-/// uses). Long-lived rather than per-session, so a `Files` scan already
-/// walked survives a picker close/reopen instead of re-walking the tree on
-/// every open.
+/// uses). Long-lived rather than per-session so queries against an open
+/// picker reuse one `Session`; a close still tears the session down and a
+/// reopen re-walks the tree (see [`WorkerRequest::Close`]), so a stale
+/// corpus can never outlive the overlay that gathered it.
 pub fn spawn<S: MsgSink + Send + 'static>(rx: Receiver<WorkerRequest>, tx: S) -> JoinHandle<()> {
     std::thread::spawn(move || run(&rx, &tx))
 }

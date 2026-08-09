@@ -14,6 +14,7 @@ pub mod echo_control;
 pub mod first_paint;
 pub mod flood;
 pub mod memory;
+pub mod picker;
 pub mod scroll;
 // The tap channel is FIFO + raw-CLOCK_MONOTONIC based (see taps.rs); neither
 // exists on Windows, so the module and the rows built on it are unix-only and

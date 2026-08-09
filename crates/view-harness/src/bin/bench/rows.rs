@@ -356,6 +356,58 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             );
             Ok(metrics)
         }
+        "picker" => {
+            let roots = picker::ensure_corpora(&corpus_root())
+                .context("generating the picker corpora (see the error for the disk bound)")?;
+            let side = world.side(fixture, "view")?;
+            let view_spec = view_spec_from(side, bins.view_bins());
+            let outcome = picker::run(
+                ViewSpec(&view_spec),
+                &roots,
+                protocol,
+                settle_deadline(fixture),
+            )
+            .with_context(|| format!("picker/{fixture} run failed"))?;
+            for (phase, trials, warmup) in [
+                ("match-paint", &outcome.match_trials, protocol.warmup),
+                ("first-page", &outcome.scan_trials, picker::SCAN_WARMUP),
+            ] {
+                for trial in trials {
+                    println!(
+                        "{}",
+                        report::absolute_cell(
+                            scenario,
+                            fixture,
+                            phase,
+                            report::AbsoluteStats {
+                                p50: trial.p50(),
+                                p99: trial.p99(),
+                                max: trial.max(),
+                                unit: "ms",
+                                samples: trial.len(),
+                                warmup,
+                            }
+                        )
+                    );
+                }
+            }
+            println!(
+                "      streaming observed: trial {} probe rows {} -> {} with no input in between",
+                outcome.streaming.trial, outcome.streaming.first_seen, outcome.streaming.grew_to
+            );
+            let trials = outcome.match_trials.len();
+            let mut metrics = CellMetrics::new();
+            for (metric, value) in [
+                ("match_paint_p50_ms", outcome.gated_match_paint_p50_ms),
+                ("match_paint_p99_ms", outcome.gated_match_paint_p99_ms),
+                ("first_page_p50_ms", outcome.gated_first_page_p50_ms),
+                ("first_page_p99_ms", outcome.gated_first_page_p99_ms),
+            ] {
+                println!("{}", report::aggregate_line(metric, value, trials));
+                metrics.insert(metric.to_string(), value);
+            }
+            Ok(metrics)
+        }
         other => bail!(
             "unknown scenario {other:?}; known: {}",
             known_scenarios().join(", ")

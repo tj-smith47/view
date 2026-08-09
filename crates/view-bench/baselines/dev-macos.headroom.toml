@@ -24,6 +24,14 @@ machine_class = "dev-macos"
 # generalized from characterized one fixture under sustained load, not the
 # host. Absence routes echo to the compiled default, which is the honest
 # statement of what this class resolves.
+#
+# Ruled correct 2026-08-08 (see
+# .claude/measurements/2026-08-08-measurement-layer-rulings.md section 4):
+# the compiled 1.25 covers this class's own clean echo draws (worst
+# 1.2513 against the 1.114 replicate median), and on a shared class the
+# only consumer of an echo factor is the shortfall ceiling, so any
+# honestly-sized tighter factor could only false-fail honest draws.
+# Absence stands as the ruling, not as unfinished work.
 
 # 8 interleaved report-only replicates per scroll fixture plus 4 later
 # minimal-only replicates, 2026-08-03, real mbp hardware, one unchanged
@@ -46,4 +54,13 @@ machine_class = "dev-macos"
 # Scoped to scroll, not scroll.heavy: headroom_for looks up the bare
 # scenario name only (baselines.rs:304-309), so this key governs both
 # scroll fixtures; both were characterized above.
+#
+# The minimal ceiling this factor produces (2.3816 x 1.024 = 2.4387) sits
+# 0.03% above the worst included quiet draw (2.438): a knife-edge that is a
+# property of the recorded value being itself a high-band draw, not of the
+# factor being wrong (ruling of 2026-08-08, see
+# .claude/measurements/2026-08-08-measurement-layer-rulings.md section 3).
+# A gate draw above the ceiling is new evidence: rerun quiet, and if quiet
+# draws repeat above it, re-characterize from the new campaign -- never
+# nudge this number without replicates.
 "scroll.ratio_p50" = 1.024

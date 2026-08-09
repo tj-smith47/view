@@ -153,6 +153,26 @@ metric = "phys_footprint_mb"
 max = 150.0
 classes = ["dev-macos"]
 
+# Both picker rows bound the tail (p99) of the row's own statistic, so the
+# spec bar holds at the worst measured open/keystroke rather than at a
+# median a bad tail could hide behind. The scan row's other half --
+# streaming, never scan-then-show -- is not a number and has no entry: the
+# scenario itself refuses to produce first_page metrics at all unless it
+# observed a held query's painted result set grow while the walk was still
+# running, so a scan-then-show regression fails the row before any budget
+# is consulted.
+[[budget]]
+spec_row = "Picker match: keystroke -> first results painted, 100k resident entries"
+scenario = "picker"
+metric = "match_paint_p99_ms"
+max = 16.0
+
+[[budget]]
+spec_row = "Picker scan: 1M-file tree"
+scenario = "picker"
+metric = "first_page_p99_ms"
+max = 100.0
+
 # Metrics measured outside their budget today.
 #
 # A shortfall is how an unmet budget is allowed to exist: it must be written

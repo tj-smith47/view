@@ -45,6 +45,8 @@ pub enum BenchError {
     },
     #[error("pty session error: {0}")]
     Session(#[from] view_oracle::OracleError),
+    #[error("picker corpus setup at {path}: {context}")]
+    CorpusSetup { path: String, context: String },
     #[error("measurement desync (a harness fault, not a latency reading): {context}")]
     Desync { context: String },
     #[error(

@@ -30,7 +30,7 @@ use clap::Parser;
 use view_bench::report;
 #[cfg(unix)]
 use view_bench::scenarios::echo_control;
-use view_bench::scenarios::{echo, first_paint, flood, memory, scroll, Protocol};
+use view_bench::scenarios::{echo, first_paint, flood, memory, picker, scroll, Protocol};
 
 // The internal-boundary and echo_path rows run through the unix-only tap
 // channel; their driver code lives in a cfg-gated child module so it is
@@ -65,6 +65,7 @@ const MATRIX: &[(&str, &str)] = &[
     ("flood", "minimal"),
     ("input_path", "minimal"),
     ("output_path", "minimal"),
+    ("picker", "minimal"),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
@@ -140,6 +141,15 @@ static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// system temp dir is documented on [`view_harness::fixture::scratch_root`].
 fn scratch_root() -> PathBuf {
     view_harness::fixture::scratch_root("bench-scratch")
+}
+
+/// Parent of the generated picker corpora. Sibling to the per-run scratch
+/// rather than inside it: the corpora cost minutes and a million inodes
+/// to build, so they persist across runs (stamped, see
+/// `picker::ensure_corpora`) instead of being torn down with each run's
+/// hermetic worlds.
+fn corpus_root() -> PathBuf {
+    view_harness::fixture::scratch_root("bench-corpus")
 }
 
 #[derive(Parser)]

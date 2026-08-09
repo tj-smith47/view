@@ -52,6 +52,12 @@ pss_mb = 3.3017578125
 [output_path.minimal]
 p99_ms = 0.081796
 
+[picker.minimal]
+first_page_p50_ms = 2.449141
+first_page_p99_ms = 5.2978060000000005
+match_paint_p50_ms = 3.332884
+match_paint_p99_ms = 5.082826000000001
+
 [scroll.heavy]
 ratio_p50 = 1.990667812724753
 ratio_p99 = 1.858985915274381

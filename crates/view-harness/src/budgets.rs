@@ -825,6 +825,79 @@ max = 8.0
         assert!(found[0].verdict.is_failure());
     }
 
+    /// The picker rows' arming guarantee: a row whose very first recording
+    /// lands outside its spec budget must fail the gate, not ratchet at the
+    /// recorded value and stay green forever. The ratchet cannot catch this
+    /// case by construction -- recorded equals measured on a first record --
+    /// so the budget gate is the only thing standing between "40 ms recorded"
+    /// and "2.5x over the 16 ms bar, never reported". Checked against the
+    /// shipped budgets.toml so the test binds the real picker bounds, with
+    /// the recorded baseline holding exactly the measured values.
+    #[test]
+    fn a_first_picker_recording_over_budget_fails_despite_a_green_ratchet() {
+        let path = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("budgets.toml");
+        let file = load(&path).expect("the shipped budgets.toml must load");
+        let over = &[
+            ("match_paint_p99_ms", 40.0),
+            ("match_paint_p50_ms", 30.0),
+            ("first_page_p99_ms", 250.0),
+            ("first_page_p50_ms", 200.0),
+        ];
+        let measured = measured_cell("picker", "minimal", over);
+        // recorded == measured: the state a first --record leaves behind,
+        // which every recorded-bar comparison passes by construction
+        let baseline = baseline_with("picker", "minimal", Some(&metrics(over)));
+        let findings = super::check_cell(
+            &file,
+            &measured,
+            &baseline,
+            "controlled-linux",
+            &crate::baselines::HeadroomTable::new(),
+        );
+        let failed: Vec<&str> = findings
+            .iter()
+            .filter(|finding| finding.verdict.is_failure())
+            .map(|finding| finding.metric.as_str())
+            .collect();
+        assert_eq!(
+            failed,
+            vec!["first_page_p99_ms", "match_paint_p99_ms"],
+            "both picker spec bounds must fail a first recording outside them"
+        );
+        for finding in &findings {
+            assert_eq!(finding.verdict, Verdict::New, "{finding:?}");
+        }
+    }
+
+    /// Inside the bounds, the same first-recording shape passes: the picker
+    /// budgets bind the spec numbers (16 ms match, 100 ms first page), not
+    /// whatever the first record happened to say.
+    #[test]
+    fn a_first_picker_recording_inside_budget_passes() {
+        let path = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("budgets.toml");
+        let file = load(&path).expect("the shipped budgets.toml must load");
+        let inside = &[("match_paint_p99_ms", 15.9), ("first_page_p99_ms", 99.9)];
+        let measured = measured_cell("picker", "minimal", inside);
+        let baseline = baseline_with("picker", "minimal", Some(&metrics(inside)));
+        let findings = super::check_cell(
+            &file,
+            &measured,
+            &baseline,
+            "controlled-linux",
+            &crate::baselines::HeadroomTable::new(),
+        );
+        assert_eq!(findings.len(), 2);
+        for finding in &findings {
+            assert_eq!(finding.verdict, Verdict::Inside, "{finding:?}");
+        }
+    }
+
     /// The row this mechanism exists for, in its real proportions:
     /// `first_paint.minimal` `marker_cold_ms` on dev-linux records 25.151 ms
     /// against a 30 ms bound while the class's sidecar puts that statistic's

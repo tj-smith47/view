@@ -462,6 +462,45 @@ pub fn run_input_path(
     })
 }
 
+/// One step of pairing a keypress's terminal-write tap with the parsed
+/// redraw that explains it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PairingVerdict {
+    /// The earliest `R` at or after the keypress and at or before the
+    /// candidate paint: the frame under measurement.
+    Paired(TapRecord),
+    /// No `R` explains the candidate paint but a later `T` exists: the
+    /// candidate was a straggler frame from before the keypress, and the
+    /// later paint is the next candidate.
+    Stray(TapRecord),
+    /// Nothing decidable yet; the explaining `R` (or a later `T`) may
+    /// still be crossing the pipe.
+    Pending,
+}
+
+/// Decides, from the records seen so far, whether `paint` is explained by
+/// a parsed redraw at or after `t0`, is a straggler superseded by a later
+/// paint, or cannot be judged yet.
+fn pair_paint(records: &[TapRecord], t0: i64, paint: TapRecord) -> PairingVerdict {
+    let explained = records
+        .iter()
+        .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
+        .min_by_key(|r| r.nanos)
+        .copied();
+    if let Some(hit) = explained {
+        return PairingVerdict::Paired(hit);
+    }
+    let later = records
+        .iter()
+        .filter(|r| r.tag == b'T' && r.nanos > paint.nanos)
+        .min_by_key(|r| r.nanos)
+        .copied();
+    match later {
+        Some(next) => PairingVerdict::Stray(next),
+        None => PairingVerdict::Pending,
+    }
+}
+
 /// Measures the redraw-parsed-to-terminal-write path: per keypress, the
 /// earliest `R` tap after the key is paired with the first `T` tap that
 /// follows it (the paint that made the redraw visible).
@@ -516,25 +555,39 @@ pub fn run_output_path(
             // more than any single grace this pacing could afford, and a
             // scan that ran exactly once then turned a late write into a
             // whole-run desync abort -- reproduced at 1 ms on this class
-            // at 1-min loads as low as 0.6, on a tree with no view change
-            let pairing_deadline = Instant::now() + Duration::from_millis(50);
+            // at 1-min loads as low as 0.66, on a tree with no view change
+            let sample_deadline = Instant::now() + protocol.sample_timeout;
+            let mut paint = paint;
+            let mut pairing_deadline = Instant::now() + Duration::from_millis(50);
             let parsed = loop {
                 std::thread::sleep(Duration::from_millis(1));
                 let window = pipe.drain();
                 all_records.extend(window.iter().copied());
-                let hit = all_records
-                    .iter()
-                    .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
-                    .min_by_key(|r| r.nanos)
-                    .copied();
-                if hit.is_some() || Instant::now() >= pairing_deadline {
-                    break hit;
+                match pair_paint(&all_records, t0, paint) {
+                    PairingVerdict::Paired(hit) => break Some(hit),
+                    // a paint whose parsed redraw predates the keypress is a
+                    // straggler from before this sample (the insert-mode
+                    // reset burst can cross the settle under host load), not
+                    // the frame under measurement: only after the R grace
+                    // has expired may it be skipped for the next paint,
+                    // because R records cross the pipe on a different thread
+                    // and can trail the T they explain
+                    PairingVerdict::Stray(next) if Instant::now() >= pairing_deadline => {
+                        paint = next;
+                        pairing_deadline = Instant::now() + Duration::from_millis(50);
+                    }
+                    PairingVerdict::Stray(_) | PairingVerdict::Pending => {
+                        if Instant::now() >= pairing_deadline && Instant::now() >= sample_deadline {
+                            break None;
+                        }
+                    }
                 }
             };
             let Some(parsed) = parsed else {
                 return Err(BenchError::Desync {
                     context: "a paint arrived with no parsed redraw between the keypress \
-                              and the terminal write"
+                              and the terminal write, and no later paint paired within \
+                              the sample timeout"
                         .to_string(),
                 });
             };
@@ -1160,6 +1213,49 @@ mod tests {
         assert_eq!(parse_record("W 42"), None);
         assert_eq!(parse_record("W 42 9 extra"), None);
         assert_eq!(parse_record(""), None);
+    }
+
+    fn tap(tag: u8, seq: u64, nanos: i64) -> TapRecord {
+        TapRecord { tag, seq, nanos }
+    }
+
+    #[test]
+    fn pair_paint_takes_the_earliest_explaining_redraw() {
+        let records = [tap(b'R', 1, 110), tap(b'R', 2, 130), tap(b'T', 1, 150)];
+        assert_eq!(
+            pair_paint(&records, 100, tap(b'T', 1, 150)),
+            PairingVerdict::Paired(tap(b'R', 1, 110))
+        );
+    }
+
+    #[test]
+    fn pair_paint_skips_a_straggler_paint_whose_redraw_predates_the_keypress() {
+        // the straggler's own R sits before t0=100, so the T at 120 is a
+        // frame from before the sample; the paint at 200 with R at 180 is
+        // the keypress's frame and must pair once offered as the candidate
+        let records = [
+            tap(b'R', 1, 40),
+            tap(b'T', 1, 120),
+            tap(b'R', 2, 180),
+            tap(b'T', 2, 200),
+        ];
+        assert_eq!(
+            pair_paint(&records, 100, tap(b'T', 1, 120)),
+            PairingVerdict::Stray(tap(b'T', 2, 200))
+        );
+        assert_eq!(
+            pair_paint(&records, 100, tap(b'T', 2, 200)),
+            PairingVerdict::Paired(tap(b'R', 2, 180))
+        );
+    }
+
+    #[test]
+    fn pair_paint_stays_pending_until_a_redraw_or_a_later_paint_arrives() {
+        let records = [tap(b'R', 1, 40), tap(b'T', 1, 120)];
+        assert_eq!(
+            pair_paint(&records, 100, tap(b'T', 1, 120)),
+            PairingVerdict::Pending
+        );
     }
 
     #[test]
