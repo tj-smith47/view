@@ -469,19 +469,27 @@ enum PairingVerdict {
     /// The earliest `R` at or after the keypress and at or before the
     /// candidate paint: the frame under measurement.
     Paired(TapRecord),
-    /// No `R` explains the candidate paint but a later `T` exists: the
-    /// candidate was a straggler frame from before the keypress, and the
-    /// later paint is the next candidate.
+    /// The candidate paint is positively explained by an unclaimed `R`
+    /// that predates the keypress (a straggler frame from before the
+    /// sample), and a later `T` exists to take its place as the next
+    /// candidate.
     Stray(TapRecord),
     /// Nothing decidable yet; the explaining `R` (or a later `T`) may
-    /// still be crossing the pipe.
+    /// still be crossing the pipe. A paint with no explaining redraw at
+    /// all stays here and lets the sample-timeout abort stand: skipping
+    /// it would hide exactly the paints-without-redraw product fault the
+    /// desync check exists to catch.
     Pending,
 }
 
 /// Decides, from the records seen so far, whether `paint` is explained by
-/// a parsed redraw at or after `t0`, is a straggler superseded by a later
-/// paint, or cannot be judged yet.
-fn pair_paint(records: &[TapRecord], t0: i64, paint: TapRecord) -> PairingVerdict {
+/// a parsed redraw at or after `t0`, is a straggler positively explained
+/// by an unclaimed redraw in `(since, t0)` and superseded by a later
+/// paint, or cannot be judged yet. `since` is the previous measured
+/// frame's paint timestamp: without that floor, every already-claimed `R`
+/// from earlier samples in the accumulated record log would count as an
+/// explanation and the straggler check could never refuse anything.
+fn pair_paint(records: &[TapRecord], since: i64, t0: i64, paint: TapRecord) -> PairingVerdict {
     let explained = records
         .iter()
         .filter(|r| r.tag == b'R' && r.nanos >= t0 && r.nanos <= paint.nanos)
@@ -489,6 +497,12 @@ fn pair_paint(records: &[TapRecord], t0: i64, paint: TapRecord) -> PairingVerdic
         .copied();
     if let Some(hit) = explained {
         return PairingVerdict::Paired(hit);
+    }
+    let straggler_explained = records
+        .iter()
+        .any(|r| r.tag == b'R' && r.nanos > since && r.nanos < t0);
+    if !straggler_explained {
+        return PairingVerdict::Pending;
     }
     let later = records
         .iter()
@@ -527,6 +541,10 @@ pub fn run_output_path(
         "flush-start->term-written",
     ];
     let mut pools: Vec<Vec<f64>> = vec![Vec::new(); labels.len()];
+    // the straggler floor for the first sample: redraws older than the
+    // prepared, settled session belong to setup frames, not to a burst
+    // this loop produced
+    let mut last_paint_nanos = monotonic_nanos();
     for _ in 0..protocol.trials {
         let mut deltas_ms = Vec::with_capacity(protocol.warmup + protocol.samples);
         for index in 0..(protocol.warmup + protocol.samples) {
@@ -563,15 +581,15 @@ pub fn run_output_path(
                 std::thread::sleep(Duration::from_millis(1));
                 let window = pipe.drain();
                 all_records.extend(window.iter().copied());
-                match pair_paint(&all_records, t0, paint) {
+                match pair_paint(&all_records, last_paint_nanos, t0, paint) {
                     PairingVerdict::Paired(hit) => break Some(hit),
-                    // a paint whose parsed redraw predates the keypress is a
-                    // straggler from before this sample (the insert-mode
-                    // reset burst can cross the settle under host load), not
-                    // the frame under measurement: only after the R grace
-                    // has expired may it be skipped for the next paint,
-                    // because R records cross the pipe on a different thread
-                    // and can trail the T they explain
+                    // a paint positively explained by an unclaimed redraw
+                    // from before the keypress is a straggler frame (the
+                    // insert-mode reset burst can cross the settle under
+                    // host load), not the frame under measurement: only
+                    // after the R grace has expired may it be skipped for
+                    // the next paint, because R records cross the pipe on
+                    // a different thread and can trail the T they explain
                     PairingVerdict::Stray(next) if Instant::now() >= pairing_deadline => {
                         paint = next;
                         pairing_deadline = Instant::now() + Duration::from_millis(50);
@@ -591,6 +609,7 @@ pub fn run_output_path(
                         .to_string(),
                 });
             };
+            last_paint_nanos = paint.nanos;
             #[allow(clippy::cast_precision_loss)]
             deltas_ms.push((paint.nanos - parsed.nanos) as f64 / 1_000_000.0);
             if index >= protocol.warmup {
@@ -1223,16 +1242,17 @@ mod tests {
     fn pair_paint_takes_the_earliest_explaining_redraw() {
         let records = [tap(b'R', 1, 110), tap(b'R', 2, 130), tap(b'T', 1, 150)];
         assert_eq!(
-            pair_paint(&records, 100, tap(b'T', 1, 150)),
+            pair_paint(&records, 20, 100, tap(b'T', 1, 150)),
             PairingVerdict::Paired(tap(b'R', 1, 110))
         );
     }
 
     #[test]
     fn pair_paint_skips_a_straggler_paint_whose_redraw_predates_the_keypress() {
-        // the straggler's own R sits before t0=100, so the T at 120 is a
-        // frame from before the sample; the paint at 200 with R at 180 is
-        // the keypress's frame and must pair once offered as the candidate
+        // the straggler's own R sits in (since=20, t0=100), so the T at
+        // 120 is a frame from before the sample; the paint at 200 with R
+        // at 180 is the keypress's frame and must pair once offered as
+        // the candidate
         let records = [
             tap(b'R', 1, 40),
             tap(b'T', 1, 120),
@@ -1240,12 +1260,43 @@ mod tests {
             tap(b'T', 2, 200),
         ];
         assert_eq!(
-            pair_paint(&records, 100, tap(b'T', 1, 120)),
+            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
             PairingVerdict::Stray(tap(b'T', 2, 200))
         );
         assert_eq!(
-            pair_paint(&records, 100, tap(b'T', 2, 200)),
+            pair_paint(&records, 20, 100, tap(b'T', 2, 200)),
             PairingVerdict::Paired(tap(b'R', 2, 180))
+        );
+    }
+
+    #[test]
+    fn pair_paint_refuses_stray_for_a_paint_with_no_explaining_redraw_at_all() {
+        // same shape as the straggler case minus its pre-keypress R: a
+        // paint nothing explains must not be skipped even though a later
+        // paired T exists, because that is the paints-without-redraw
+        // product fault the desync abort exists to catch
+        let records = [tap(b'T', 1, 120), tap(b'R', 2, 180), tap(b'T', 2, 200)];
+        assert_eq!(
+            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
+            PairingVerdict::Pending
+        );
+    }
+
+    #[test]
+    fn pair_paint_refuses_stray_when_the_only_earlier_redraw_is_already_claimed() {
+        // the R at 10 sits at or before the previous measured frame's
+        // paint (since=20), so it explained an earlier sample, not this
+        // candidate; counting it would make the straggler check vacuous
+        // against the accumulated record log
+        let records = [
+            tap(b'R', 1, 10),
+            tap(b'T', 1, 120),
+            tap(b'R', 2, 180),
+            tap(b'T', 2, 200),
+        ];
+        assert_eq!(
+            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
+            PairingVerdict::Pending
         );
     }
 
@@ -1253,7 +1304,7 @@ mod tests {
     fn pair_paint_stays_pending_until_a_redraw_or_a_later_paint_arrives() {
         let records = [tap(b'R', 1, 40), tap(b'T', 1, 120)];
         assert_eq!(
-            pair_paint(&records, 100, tap(b'T', 1, 120)),
+            pair_paint(&records, 20, 100, tap(b'T', 1, 120)),
             PairingVerdict::Pending
         );
     }

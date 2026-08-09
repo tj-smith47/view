@@ -920,14 +920,34 @@ pub fn unrecorded_cells(baseline: &BaselineFile, measured: &[MeasuredCell]) -> V
 /// the baseline gates.
 ///
 /// Same asymmetric argument types as [`gate_cell`], for the same reason:
-/// the reversed direction (measured metrics the baseline does not record)
-/// is a legitimate, empty-looking answer, so a swap here would report full
-/// coverage for a cell that stopped producing a gated number.
+/// a swap here would report full coverage for a cell that stopped
+/// producing a gated number. The reversed direction is
+/// [`unrecorded_metrics`].
 #[must_use]
 pub fn unmeasured_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Vec<String> {
     recorded
         .keys()
         .filter(|metric| !measured.metrics.contains_key(*metric))
+        .cloned()
+        .collect()
+}
+
+/// Metrics `measured` produced that the recorded cell holds no bar for,
+/// in sorted order.
+///
+/// The mirror of [`unmeasured_metrics`], and [`unrecorded_cells`] one
+/// level down: a baseline cell that exists but has lost (or never gained)
+/// one of its row's metrics would otherwise leave that metric silently
+/// ungated -- deleting a single key from a recorded cell must be as loud
+/// as deleting the whole cell. A metric new to an existing row therefore
+/// fails a gate until a record run arms it, the same discipline a new
+/// cell already goes through.
+#[must_use]
+pub fn unrecorded_metrics(measured: &MeasuredCell, recorded: &CellMetrics) -> Vec<String> {
+    measured
+        .metrics
+        .keys()
+        .filter(|metric| !recorded.contains_key(*metric))
         .cloned()
         .collect()
 }
@@ -2156,10 +2176,56 @@ mod tests {
     }
 
     #[test]
-    fn gate_ignores_metrics_absent_from_the_baseline() {
+    fn gate_cell_leaves_unrecorded_metrics_to_the_coverage_check() {
+        // no recorded bar means nothing for the breach scan to compare, so
+        // the finding belongs to unrecorded_metrics, which must name it
         let recorded = metrics(&[("ratio_p50", 1.0)]);
         let measured = metrics(&[("ratio_p50", 0.9), ("new_metric", 99.0)]);
         assert!(gate_cell("echo", "minimal", &measured, &recorded, "dev-linux").is_empty());
+        assert_eq!(
+            unrecorded_metrics(
+                &measured_cell(
+                    "echo",
+                    "minimal",
+                    &[("ratio_p50", 0.9), ("new_metric", 99.0)]
+                ),
+                &recorded
+            ),
+            vec!["new_metric"]
+        );
+    }
+
+    #[test]
+    fn a_present_cell_missing_one_recorded_metric_is_named() {
+        // deleting a single key from a recorded cell must be as loud as
+        // deleting the cell: the breach scan cannot see a bar that is not
+        // there, so coverage has to
+        const MEASURED: &[(&str, f64)] = &[
+            ("first_page_p50_ms", 2.4),
+            ("first_page_p99_ms", 5.3),
+            ("match_paint_p50_ms", 3.3),
+            ("match_paint_p99_ms", 5.1),
+        ];
+        let full = metrics(MEASURED);
+        let cell = measured_cell("picker", "minimal", MEASURED);
+        assert!(unrecorded_metrics(&cell, &full).is_empty());
+        let mut one_deleted = full;
+        one_deleted.remove("match_paint_p99_ms");
+        assert!(
+            gate_cell(
+                "picker",
+                "minimal",
+                &metrics(MEASURED),
+                &one_deleted,
+                "dev-linux"
+            )
+            .is_empty(),
+            "the deleted bar cannot breach, which is why coverage must catch it"
+        );
+        assert_eq!(
+            unrecorded_metrics(&cell, &one_deleted),
+            vec!["match_paint_p99_ms"]
+        );
     }
 
     #[test]

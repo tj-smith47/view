@@ -1097,6 +1097,10 @@ fn main() -> Result<()> {
         // metrics both sides hold; naming those makes a silently
         // untested bar as loud as a dropped cell
         let mut unmeasured = Vec::new();
+        // the mirror gap: a present cell that lost one of its metric keys
+        // would otherwise leave that bar silently ungated -- deleting one
+        // key must be as loud as deleting the cell
+        let mut unrecorded_metric = Vec::new();
         let unrecorded = baselines::unrecorded_cells(&file, &measured);
         for cell in &measured {
             // named by unrecorded_cells above and reported with the rest of
@@ -1123,6 +1127,9 @@ fn main() -> Result<()> {
                     unmeasured.push((cell.id.clone(), metric));
                 }
             }
+            for metric in baselines::unrecorded_metrics(cell, recorded) {
+                unrecorded_metric.push((cell.id.clone(), metric));
+            }
         }
         for breach in &breaches {
             eprintln!("{breach}");
@@ -1131,6 +1138,13 @@ fn main() -> Result<()> {
             eprintln!(
                 "GATE COVERAGE FAIL [{}.{}] {metric}: the baseline records this metric but the \
                  run measured no value for it",
+                id.scenario, id.fixture
+            );
+        }
+        for (id, metric) in &unrecorded_metric {
+            eprintln!(
+                "GATE COVERAGE FAIL [{}.{}] {metric}: the run measured this metric but the \
+                 baseline cell holds no bar for it; record it before gating",
                 id.scenario, id.fixture
             );
         }
@@ -1242,6 +1256,7 @@ fn main() -> Result<()> {
             uncovered_cells: uncovered.len(),
             unmeasured_metrics: unmeasured.len(),
             unrecorded_cells: unrecorded.len(),
+            unrecorded_metrics: unrecorded_metric.len(),
             budget_failures,
             stale_shortfalls: stale_shortfalls.len(),
             dead_budgets: dead_budgets.len(),
@@ -1320,6 +1335,7 @@ struct GateTally {
     uncovered_cells: usize,
     unmeasured_metrics: usize,
     unrecorded_cells: usize,
+    unrecorded_metrics: usize,
     budget_failures: usize,
     stale_shortfalls: usize,
     dead_budgets: usize,
@@ -1334,6 +1350,7 @@ impl GateTally {
             uncovered_cells,
             unmeasured_metrics,
             unrecorded_cells,
+            unrecorded_metrics,
             budget_failures,
             stale_shortfalls,
             dead_budgets,
@@ -1342,6 +1359,7 @@ impl GateTally {
             + uncovered_cells
             + unmeasured_metrics
             + unrecorded_cells
+            + unrecorded_metrics
             + budget_failures
             + stale_shortfalls
             + dead_budgets
@@ -1350,7 +1368,8 @@ impl GateTally {
 
 /// A gate run found a measurement outside its recorded bar, a baseline cell
 /// nothing measured, a measured cell the baseline holds no bar for, a
-/// recorded metric this run produced no value for, a spec 3.1 budget missed
+/// recorded metric this run produced no value for, a measured metric its
+/// recorded cell holds no bar for, a spec 3.1 budget missed
 /// with no shortfall recording it (or a recorded one that widened), a spent
 /// shortfall entry left behind after the metric came back inside its
 /// budget, or a budget bound to a metric its own scenario never produces.
@@ -1553,6 +1572,7 @@ mod tests {
             uncovered_cells: 0,
             unmeasured_metrics: 0,
             unrecorded_cells: 0,
+            unrecorded_metrics: 0,
             budget_failures: 0,
             stale_shortfalls: 0,
             dead_budgets: 0,
@@ -1564,11 +1584,12 @@ mod tests {
         );
 
         type Category = (&'static str, fn(&mut GateTally));
-        let categories: [Category; 7] = [
+        let categories: [Category; 8] = [
             ("breaches", |t| t.breaches = 1),
             ("uncovered_cells", |t| t.uncovered_cells = 1),
             ("unmeasured_metrics", |t| t.unmeasured_metrics = 1),
             ("unrecorded_cells", |t| t.unrecorded_cells = 1),
+            ("unrecorded_metrics", |t| t.unrecorded_metrics = 1),
             ("budget_failures", |t| t.budget_failures = 1),
             ("stale_shortfalls", |t| t.stale_shortfalls = 1),
             ("dead_budgets", |t| t.dead_budgets = 1),
@@ -1579,6 +1600,7 @@ mod tests {
                 uncovered_cells: 0,
                 unmeasured_metrics: 0,
                 unrecorded_cells: 0,
+                unrecorded_metrics: 0,
                 budget_failures: 0,
                 stale_shortfalls: 0,
                 dead_budgets: 0,
