@@ -1296,15 +1296,8 @@ fn main() -> Result<()> {
         }
     }
 
-    // one record can produce both surprises on different metrics; the
-    // refusal's code wins because its next step (the replicate-campaign
-    // command) exists only in this run's output, while a masked regression
-    // re-announces itself at the very next gate
-    if spread_refusals > 0 {
-        std::process::exit(EXIT_RECORD_SPREAD_REFUSED);
-    }
-    if masked_regressions > 0 {
-        std::process::exit(EXIT_RECORD_MASKED_REGRESSION);
+    if let Some(code) = record_exit_code(spread_refusals, masked_regressions) {
+        std::process::exit(code);
     }
 
     Ok(())
@@ -1403,6 +1396,26 @@ const EXIT_INCOMPLETE_MATRIX: i32 = 4;
 /// masked-regression 3 because the required follow-up is different in kind
 /// (run a campaign, not investigate a regression).
 const EXIT_RECORD_SPREAD_REFUSED: i32 = 5;
+
+/// The exit code a completed record run reports for its own two possible
+/// surprises, or `None` on a quiet record. A pure decision extracted out of
+/// the record path so the precedence between the two codes is a fact a unit
+/// test can pin directly, rather than only being reachable by driving the
+/// whole record pipeline to produce both surprises on the same run.
+///
+/// One record can produce both surprises on different metrics; the refusal
+/// wins because its next step (the replicate-campaign command) exists only
+/// in this run's output, while a masked regression re-announces itself at
+/// the very next gate.
+fn record_exit_code(spread_refusals: usize, masked_regressions: usize) -> Option<i32> {
+    if spread_refusals > 0 {
+        return Some(EXIT_RECORD_SPREAD_REFUSED);
+    }
+    if masked_regressions > 0 {
+        return Some(EXIT_RECORD_MASKED_REGRESSION);
+    }
+    None
+}
 
 #[cfg(test)]
 mod tests {
@@ -1705,6 +1718,26 @@ mod tests {
                 assert_ne!(a, b, "two verdicts share exit code {a}");
             }
         }
+    }
+
+    #[test]
+    fn a_spread_refusal_outranks_a_masked_regression_on_the_same_run() {
+        assert_eq!(record_exit_code(1, 1), Some(EXIT_RECORD_SPREAD_REFUSED));
+    }
+
+    #[test]
+    fn a_masked_regression_alone_reports_its_own_code() {
+        assert_eq!(record_exit_code(0, 1), Some(EXIT_RECORD_MASKED_REGRESSION));
+    }
+
+    #[test]
+    fn a_spread_refusal_alone_reports_its_own_code() {
+        assert_eq!(record_exit_code(1, 0), Some(EXIT_RECORD_SPREAD_REFUSED));
+    }
+
+    #[test]
+    fn a_quiet_record_reports_no_exit_code() {
+        assert_eq!(record_exit_code(0, 0), None);
     }
 
     #[test]

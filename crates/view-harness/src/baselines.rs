@@ -146,6 +146,12 @@ impl Headroom {
     /// the signature of a lucky draw rather than of faster code; see
     /// [`RatchetOutcome::RefusedBelowSpread`] for why such a draw must not
     /// become the bar.
+    ///
+    /// `recorded` is never NaN or infinite, and is non-positive only under
+    /// [`Headroom::Signed`]: every value that ever reaches this cell first
+    /// passed `ratchet_cell`'s own usability check (finite, and positive
+    /// unless the policy admits a signed delta), so the precondition holds
+    /// by construction rather than by an assertion here.
     #[must_use]
     pub fn record_floor(self, recorded: f64) -> f64 {
         2.0 * recorded - self.bar(recorded)
@@ -1253,6 +1259,7 @@ pub enum RecordMode {
 
 /// What one cell's ratchet did during a record.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct CellRatchet {
     pub scenario: String,
     pub fixture: String,
@@ -1261,6 +1268,7 @@ pub struct CellRatchet {
 
 /// The file to save and a per-cell account of what the ratchet did.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct RecordPlan {
     pub file: BaselineFile,
     pub cells: Vec<CellRatchet>,

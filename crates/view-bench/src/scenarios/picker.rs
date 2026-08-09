@@ -101,6 +101,12 @@ const FIRST_PAGE_TIMEOUT: Duration = Duration::from_secs(30);
 /// walk on a cold cache is disk-bound and legitimately slow.
 const FULL_WALK_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Gap a candidate probe-count sample must hold across, unchanged, before
+/// [`settled_count_token`] trusts it: comfortably above the scheduler-quantum
+/// scale a torn write's remaining bytes take to arrive, negligible against
+/// [`FULL_WALK_TIMEOUT`] even summed over every poll in the loop.
+const TORN_FRAME_SETTLE: Duration = Duration::from_millis(4);
+
 /// Stamp file marking a corpus directory complete, with the layout
 /// version inside. A dotfile on purpose: the picker's walk skips hidden
 /// files, so the stamp never appears as a corpus entry.
@@ -226,11 +232,8 @@ fn ensure_corpus(dir: &Path, bulk_files: usize, with_match_target: bool) -> Resu
         }
         // one probe per tenth of the directory range, in the middle of
         // its band, so no walk order can visit them all early
-        if probe_index(d, dirs).is_some() {
-            let probe = sub.join(format!(
-                "rsentfile{}.txt",
-                probe_index(d, dirs).unwrap_or(0)
-            ));
+        if let Some(i) = probe_index(d, dirs) {
+            let probe = sub.join(format!("rsentfile{i}.txt"));
             std::fs::File::create(&probe)
                 .map_err(|err| setup_err(&probe, format!("creating probe file: {err}")))?;
         }
@@ -339,6 +342,23 @@ fn elapsed_ms(start: Instant) -> f64 {
 /// Occurrences of `token` in the parsed screen text.
 fn count_token(session: &mut BenchSession, token: &str) -> usize {
     session.with_screen(|screen| screen_lines(screen).matches(token).count())
+}
+
+/// A single OS-level write from the picker can arrive at the bench's pty
+/// reader split across more than one channel chunk; a `count_token` read
+/// taken between two chunks of the *same* redraw sees a partial count, and
+/// the next read (once the rest of that redraw's bytes are drained) sees a
+/// higher one -- a single frame torn in transit, misreadable as growth
+/// between two distinct paints. Confirming the count is unchanged across a
+/// short settle window before trusting it filters that tear out: a
+/// still-arriving redraw keeps moving within the window and is reported as
+/// not yet trustworthy, while a genuinely finished (or genuinely paused)
+/// redraw reads the same value on both sides of it.
+fn settled_count_token(session: &mut BenchSession, token: &str) -> Option<usize> {
+    let before = count_token(session, token);
+    std::thread::sleep(TORN_FRAME_SETTLE);
+    let after = count_token(session, token);
+    (before == after).then_some(after)
 }
 
 /// Tight-polls (yielding) until `check` holds, or fails with `what` and
@@ -556,10 +576,10 @@ fn run_scan_phase(
 }
 
 /// Types the probe query against the open picker and watches the visible
-/// result count. Growth between two paints with no input in between is
-/// the streaming observation; a first paint already showing every probe
-/// is inconclusive (the walk may or may not have finished) and reports
-/// `None` so the caller can try again next trial.
+/// result count. Growth between two settled samples with no input in
+/// between is the streaming observation; a first paint already showing
+/// every probe is inconclusive (the walk may or may not have finished)
+/// and reports `None` so the caller can try again next trial.
 fn observe_streaming(
     session: &mut BenchSession,
     trial: usize,
@@ -568,22 +588,23 @@ fn observe_streaming(
     let deadline = Instant::now() + FULL_WALK_TIMEOUT;
     let mut first_seen: Option<usize> = None;
     loop {
-        let count = count_token(session, PROBE_TOKEN);
-        match first_seen {
-            None if count > 0 => {
-                if count >= PROBE_FILES {
-                    return Ok(None);
+        if let Some(count) = settled_count_token(session, PROBE_TOKEN) {
+            match first_seen {
+                None if count > 0 => {
+                    if count >= PROBE_FILES {
+                        return Ok(None);
+                    }
+                    first_seen = Some(count);
                 }
-                first_seen = Some(count);
+                Some(seen) if count > seen => {
+                    return Ok(Some(StreamingEvidence {
+                        trial,
+                        first_seen: seen,
+                        grew_to: count,
+                    }));
+                }
+                _ => {}
             }
-            Some(seen) if count > seen => {
-                return Ok(Some(StreamingEvidence {
-                    trial,
-                    first_seen: seen,
-                    grew_to: count,
-                }));
-            }
-            _ => {}
         }
         if Instant::now() >= deadline {
             return Err(BenchError::Desync {

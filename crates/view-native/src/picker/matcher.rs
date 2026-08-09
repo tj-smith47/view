@@ -119,6 +119,27 @@ impl Session {
             scan_handle: None,
         }
     }
+
+    /// Test-only twin of [`new`](Session::new) that caps nucleo's rayon
+    /// pool at `threads` instead of letting `None` resolve to
+    /// `available_parallelism()` (see `nucleo::worker::Worker::new`). A
+    /// `--test-threads`-parallel run of this module opens close to a dozen
+    /// unbounded sessions at once, each independently sizing its pool to
+    /// the host's core count; the resulting oversubscription starves
+    /// nucleo's own tick loop and turns matches against a single-line
+    /// fixture into multi-second waits, flaking any test with a fixed
+    /// budget. A full duplicate of `new`'s body rather than a delegating
+    /// wrapper, so `new` itself carries no path that only a test exercises.
+    #[cfg(test)]
+    fn new_bounded(source: Source, threads: usize) -> Self {
+        Self {
+            source,
+            nucleo: Nucleo::new(Config::DEFAULT, Arc::new(|| {}), Some(threads), 1),
+            scan_started: AtomicBool::new(false),
+            cancel: Arc::new(AtomicBool::new(false)),
+            scan_handle: None,
+        }
+    }
 }
 
 impl Drop for Session {
@@ -442,6 +463,89 @@ fn char_to_byte_offsets(label: &str, char_indices: &[u32]) -> Vec<u32> {
     byte_offsets
 }
 
+/// Test-only twin of [`ensure_session`] that rebuilds through
+/// [`Session::new_bounded`] instead of [`Session::new`] -- see that
+/// constructor's doc for why a bounded pool matters only under test
+/// parallelism.
+#[cfg(test)]
+fn ensure_session_bounded(session: &mut Option<Session>, source: &Source, threads: usize) {
+    let stale = session.as_ref().map(|active| &active.source) != Some(source);
+    if stale {
+        *session = Some(Session::new_bounded(source.clone(), threads));
+    }
+}
+
+/// Test-only twin of [`handle_query`] that threads `threads` through to
+/// [`ensure_session_bounded`] in place of [`ensure_session`]; every other
+/// step (pattern reparse, streaming, preemption) is identical.
+#[cfg(test)]
+fn handle_query_bounded<S: MsgSink>(
+    session: &mut Option<Session>,
+    request: MatchRequest,
+    rx: &Receiver<WorkerRequest>,
+    tx: &S,
+    threads: usize,
+) -> Result<WorkerRequest, RecvError> {
+    ensure_session_bounded(session, &request.source, threads);
+    let Some(active) = session.as_mut() else {
+        // `ensure_session_bounded` always leaves `session` populated; this
+        // arm exists only so the match stays total for the borrow checker.
+        return rx.recv();
+    };
+    seed_or_scan(active, request.resolved, &request.needle);
+    let pattern = match request.source {
+        Source::LiveGrep { .. } => escape_nucleo_atom_syntax(&request.needle),
+        _ => request.needle.clone(),
+    };
+    active.nucleo.pattern.reparse(
+        0,
+        &pattern,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        false,
+    );
+    match stream_until_preempted(active, request.generation, rx, tx) {
+        Some(preempting) => Ok(preempting),
+        None => rx.recv(),
+    }
+}
+
+/// Test-only twin of [`run`] that carries a bounded thread count into every
+/// session it opens; see [`spawn_bounded`].
+#[cfg(test)]
+fn run_bounded<S: MsgSink>(rx: &Receiver<WorkerRequest>, tx: &S, threads: usize) {
+    let mut session: Option<Session> = None;
+    let mut next = rx.recv();
+    while let Ok(request) = next {
+        next = match request {
+            WorkerRequest::Close => {
+                close_session(&mut session);
+                rx.recv()
+            }
+            WorkerRequest::Query(request) => {
+                handle_query_bounded(&mut session, request, rx, tx, threads)
+            }
+        };
+    }
+}
+
+/// Test-only twin of [`spawn`]: same shutdown shape (runs until `rx`
+/// disconnects), but every [`Session`] it opens caps nucleo's rayon pool at
+/// `threads` rather than the near-CPU-count width `Session::new` resolves
+/// to. A matcher/live-grep test that opens its worker through this instead
+/// of `spawn` no longer contends with the near-dozen other sessions
+/// `--test-threads`-parallel test binaries open at once for the same
+/// handful of host cores -- see [`Session::new_bounded`] for the full
+/// oversubscription mechanism this avoids.
+#[cfg(test)]
+fn spawn_bounded<S: MsgSink + Send + 'static>(
+    rx: Receiver<WorkerRequest>,
+    tx: S,
+    threads: usize,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || run_bounded(&rx, &tx, threads))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
@@ -463,7 +567,11 @@ mod tests {
     fn a_full_query_round_trip_streams_a_ranked_result() {
         let (req_tx, req_rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::sync_channel(16);
-        let _worker = spawn(req_rx, msg_tx);
+        // bounded (see `spawn_bounded`'s doc): a two-item fixture needs no
+        // real matching throughput, so this keeps its session out of the
+        // near-dozen-pool contention --test-threads-parallel runs of this
+        // module otherwise create
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -789,11 +897,16 @@ mod tests {
     fn a_new_live_grep_query_cancels_the_previous_scan_in_flight() {
         let tree = GrepCancelTestTree::build();
         let mut session: Option<Session> = None;
-        ensure_session(
+        // bounded (see `Session::new_bounded`'s doc): this test asserts on
+        // injected-item counts, not match throughput, so it needs no real
+        // matching width and stays out of the near-dozen-pool contention
+        // --test-threads-parallel runs of this module otherwise create
+        ensure_session_bounded(
             &mut session,
             &Source::LiveGrep {
                 root: tree.root.clone(),
             },
+            1,
         );
         let active = session
             .as_mut()
@@ -909,7 +1022,11 @@ mod tests {
 
         let (req_tx, req_rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::sync_channel(16);
-        let _worker = spawn(req_rx, msg_tx);
+        // bounded (see `spawn_bounded`'s doc): the fixture is one line, so
+        // a single matcher thread settles it instantly, and this keeps the
+        // near-dozen sessions --test-threads runs concurrently from
+        // oversubscribing the host
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -919,7 +1036,19 @@ mod tests {
             }))
             .expect("worker channel closed");
 
-        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(30));
+        // 60s rather than this file's usual 30s: this budget covers both a
+        // real on-disk grep walk and nucleo's own match/tick loop, so it
+        // needs more headroom against host CPU contention than a
+        // synthetic, disk-free producer does (see
+        // `a_result_set_streams_before_a_million_entry_scan_finishes`,
+        // which keeps 30s). Reproduced failing at both 30s and 45s under
+        // this host's own baseline load (observed load average ~14 on 12
+        // cores with swap already near capacity, independent of any
+        // concurrent build this test loop itself added) even with the
+        // bounded matcher session already in place, since a shared host
+        // already past its CPU budget can starve the walker thread
+        // regardless of how few matcher threads this session opens.
+        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(60));
         assert!(
             labels.iter().any(|label| label.contains("!=")),
             "expected a result matching the literal `!=` query, got {labels:?}"
@@ -954,7 +1083,11 @@ mod tests {
 
         let (req_tx, req_rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::sync_channel(16);
-        let _worker = spawn(req_rx, msg_tx);
+        // bounded (see `spawn_bounded`'s doc): the fixture is one line, so
+        // a single matcher thread settles it instantly, and this keeps the
+        // near-dozen sessions --test-threads runs concurrently from
+        // oversubscribing the host
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -964,7 +1097,10 @@ mod tests {
             }))
             .expect("worker channel closed");
 
-        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(30));
+        // 60s rather than this file's usual 30s -- see the bang-equals
+        // test above for why a real on-disk grep test needs more headroom
+        // than a synthetic producer under host CPU contention.
+        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(60));
         assert!(
             labels.iter().any(|label| label.contains("cost$")),
             "expected a result matching the literal trailing-`$` query, got {labels:?}"
@@ -1004,7 +1140,11 @@ mod tests {
 
         let (req_tx, req_rx) = mpsc::channel();
         let (msg_tx, msg_rx) = mpsc::sync_channel(16);
-        let _worker = spawn(req_rx, msg_tx);
+        // bounded (see `spawn_bounded`'s doc): the fixture is one line, so
+        // a single matcher thread settles it instantly, and this keeps the
+        // near-dozen sessions --test-threads runs concurrently from
+        // oversubscribing the host
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -1014,7 +1154,10 @@ mod tests {
             }))
             .expect("worker channel closed");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
+        // 60s rather than this file's usual 30s -- see the bang-equals
+        // test above for why a real on-disk grep test needs more headroom
+        // than a synthetic producer under host CPU contention.
+        let deadline = Instant::now() + Duration::from_secs(60);
         let mut items = Vec::new();
         while Instant::now() < deadline {
             let Ok(msg) = msg_rx.recv_timeout(Duration::from_millis(200)) else {
@@ -1029,7 +1172,7 @@ mod tests {
         }
         assert!(
             !items.is_empty(),
-            "expected at least one streamed result within 30s"
+            "expected at least one streamed result within 60s"
         );
         for item in &items {
             for &idx in &item.indices {

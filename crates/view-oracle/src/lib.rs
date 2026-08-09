@@ -138,10 +138,11 @@ pub struct Session {
     /// Frame-to-frame surface reuse, the same path the production runtime
     /// loop renders through, so every capture exercises (and, in debug
     /// builds, self-checks) the cached renderer rather than a
-    /// test-only full rebuild. `RefCell` because every capture method
-    /// takes `&self` -- the cache is this session's private frame history,
-    /// not observable state -- and the borrow never escapes a capture call.
-    cache: std::cell::RefCell<view_surface::SurfaceCache>,
+    /// test-only full rebuild. Capture methods take `&mut self` (the cache
+    /// is this session's private frame history, not observable state) so
+    /// `SurfaceCache::render`'s own `&mut self` requirement is satisfied
+    /// directly, with no interior-mutability panic path to keep sound.
+    cache: view_surface::SurfaceCache,
 }
 
 impl Session {
@@ -152,7 +153,7 @@ impl Session {
     pub fn new(cols: u16, rows: u16) -> Self {
         Self {
             model: Model::with_term_size(cols, rows),
-            cache: std::cell::RefCell::new(view_surface::SurfaceCache::new()),
+            cache: view_surface::SurfaceCache::new(),
         }
     }
 
@@ -170,13 +171,13 @@ impl Session {
     /// through the same cached renderer the production runtime loop paints
     /// from, so successive captures exercise its frame-to-frame reuse.
     #[must_use]
-    pub fn surface(&self) -> Surface {
-        self.cache.borrow_mut().render(&self.model).clone()
+    pub fn surface(&mut self) -> Surface {
+        self.cache.render(&self.model).clone()
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
     #[must_use]
-    pub fn screen_text(&self) -> String {
+    pub fn screen_text(&mut self) -> String {
         raster::screen_text(&self.surface(), self.model.engine.grid())
     }
 }
@@ -192,8 +193,8 @@ pub struct EngineSession {
     /// [`crate::settle`]).
     markers: settle::QuiesceMarkers,
     /// Frame-to-frame surface reuse; see [`Session`]'s same-named field
-    /// for why it exists and why it is a `RefCell`.
-    cache: std::cell::RefCell<view_surface::SurfaceCache>,
+    /// for why it exists and why capture methods take `&mut self`.
+    cache: view_surface::SurfaceCache,
 }
 
 impl EngineSession {
@@ -251,7 +252,7 @@ impl EngineSession {
             engine,
             pump,
             markers: settle::QuiesceMarkers::default(),
-            cache: std::cell::RefCell::new(view_surface::SurfaceCache::new()),
+            cache: view_surface::SurfaceCache::new(),
         })
     }
 
@@ -399,13 +400,13 @@ impl EngineSession {
     /// production runtime loop paints from, so successive captures across a
     /// corpus entry's settle points exercise its frame-to-frame reuse.
     #[must_use]
-    pub fn surface(&self) -> Surface {
-        self.cache.borrow_mut().render(&self.model).clone()
+    pub fn surface(&mut self) -> Surface {
+        self.cache.render(&self.model).clone()
     }
 
     /// Renders the current [`Surface`] to plain text via [`raster::screen_text`].
     #[must_use]
-    pub fn screen_text(&self) -> String {
+    pub fn screen_text(&mut self) -> String {
         raster::screen_text(&self.surface(), self.model.engine.grid())
     }
 
@@ -415,7 +416,7 @@ impl EngineSession {
     /// up with an element index rather than a position inside a joined
     /// string.
     #[must_use]
-    pub fn screen_rows(&self) -> Vec<String> {
+    pub fn screen_rows(&mut self) -> Vec<String> {
         raster::screen_rows(&self.surface(), self.model.engine.grid())
     }
 
@@ -427,7 +428,7 @@ impl EngineSession {
     /// own `HlTable`, the id-independent form the differential compares (see
     /// [`crate::attr`]'s docs).
     #[must_use]
-    pub fn screen(&self) -> Screen {
+    pub fn screen(&mut self) -> Screen {
         let surface = self.surface();
         Screen {
             rows: raster::screen_rows(&surface, self.model.engine.grid()),

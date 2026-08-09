@@ -1281,9 +1281,13 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     // real buffer. Text in the buffer is also the engine-attached half of
     // the ordering asserted above: buffer content can only be on screen
     // once the engine attached and painted, so the placeholder observed
-    // without it genuinely preceded attach
+    // without it genuinely preceded attach. 15s matches this file's own
+    // convention for every other post-delayed-attach content wait (see
+    // `ENGINE_CONTENT_MARKER` below): a real nvim startup competing for
+    // scheduler time under parallel test load can clear 5s on a loaded host
+    // with no product-side delay at all
     assert!(
-        session.wait_for("hello world", Duration::from_secs(5)),
+        session.wait_for("hello world", Duration::from_secs(15)),
         "pre-attach keys never replayed into the buffer after attach, or \
          did not replay in order; last screen:\n{}",
         session.screen()
