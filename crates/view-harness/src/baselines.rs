@@ -1099,8 +1099,12 @@ pub enum RatchetOutcome {
     /// ratchet-only-tightens makes a lucky draw permanent: a bar pinned
     /// below the class's own honest band fails a large fraction of later
     /// honest runs on unchanged code. The legitimate path to a bar this
-    /// low is a replicate campaign whose median clears it, hand-recorded;
-    /// the record report names that command beside the values.
+    /// low is a replicate campaign's median hand-edited into the baseline
+    /// file: the floor is measured off the held recorded value, so a
+    /// `--record` of the median refuses identically, by design -- an
+    /// automated acceptance would be the same single-draw trust the guard
+    /// exists to withdraw. The record report names the command, the cell
+    /// and the file beside the values.
     RefusedBelowSpread {
         metric: String,
         recorded: f64,
@@ -1442,8 +1446,12 @@ impl RecordPlan {
                              draw this deep pins a bar honest runs fail, so the recorded value \
                              was held and the measured one was not written. To move the bar, \
                              re-run `task bench -- --scenario {scenario} --fixture {fixture} \
-                             --class {class}` repeatedly on a quiet host and hand-record the \
-                             replicate median",
+                             --class {class}` repeatedly on a quiet host, take the replicate \
+                             median, and hand-edit {metric} under [{scenario}.{fixture}] in \
+                             {target} to it. The floor is measured off the recorded value this \
+                             refusal holds, so `--record` will refuse the median the same way, \
+                             by design: only a hand edit carries a campaign's median into the \
+                             file",
                             floor = spread.record_floor(*recorded),
                             class = self.class,
                         ));
@@ -2708,6 +2716,51 @@ mod tests {
     }
 
     #[test]
+    fn the_signed_mirror_stays_below_a_negative_recorded_value() {
+        // the downward counterpart of the upward no-inversion guarantee: at
+        // a recorded -0.20 under Signed { 1.30, 0.25 } the floor-dominant
+        // allowance mirrors to -0.45, strictly below the recorded value. A
+        // proportional mirror would invert here (-0.20 * (2 - 1.30) =
+        // -0.14, a floor ABOVE the value it mirrors from) and refuse every
+        // improvement, however small
+        let spread = Headroom::Signed {
+            factor: 1.30,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        };
+        assert!((spread.record_floor(-0.20) - (-0.45)).abs() < 1e-12);
+
+        let table = spread_table(&[("echo.paired_delta_p99_ms", 1.30)]);
+        let existing = metrics(&[("paired_delta_p99_ms", -0.20)]);
+        let floor = spread.record_floor(-0.20);
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("paired_delta_p99_ms", floor)]),
+            "echo",
+            true,
+            &table,
+        );
+        assert_eq!(cell["paired_delta_p99_ms"], floor);
+        assert!(matches!(
+            outcome_for(&outcomes, "paired_delta_p99_ms"),
+            RatchetOutcome::Improved { .. }
+        ));
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("paired_delta_p99_ms", floor - 1e-9)]),
+            "echo",
+            true,
+            &table,
+        );
+        assert_eq!(cell["paired_delta_p99_ms"], -0.20);
+        assert!(matches!(
+            outcome_for(&outcomes, "paired_delta_p99_ms"),
+            RatchetOutcome::RefusedBelowSpread { .. }
+        ));
+    }
+
+    #[test]
     fn the_mirrored_band_matches_the_published_upward_tolerance() {
         // Proportional mirrors to recorded * (2 - factor)
         assert!((Headroom::Proportional(1.25).record_floor(1.0) - 0.75).abs() < 1e-12);
@@ -3084,12 +3137,16 @@ mod tests {
             .find(|line| line.contains("RECORD REFUSED"))
             .expect("a refusal must produce its own alert line");
         for needle in [
+            "RECORD REFUSED [echo.heavy] ratio_p50:",
             "task bench -- --scenario echo --fixture heavy --class dev-linux",
-            "x headroom 1.1",
+            "(x headroom 1.1)",
+            "record floor 1.0026",
             "1.1140",
             "0.9740",
             "quiet host",
             "replicate median",
+            "hand-edit ratio_p50 under [echo.heavy] in dev-linux.toml",
+            "will refuse the median the same way, by design",
         ] {
             assert!(
                 alert.contains(needle),
