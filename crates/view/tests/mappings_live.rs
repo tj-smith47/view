@@ -9,19 +9,22 @@
 //! to after registration, and which side answers when the key is pressed.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant};
+mod common;
+
+use std::path::Path;
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use view_core::msg::{Msg, RpcCall};
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry;
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::Engine;
 use view_native::config::NativeConfig;
 use view_native::mappings::register_plan;
 use view_native::report::report;
 use view_native::supersede::plan;
 use view_native::toast::first_run;
+use view_test_support::ScratchDir;
 
 /// How long a claim reply or an invoke notification is waited for. Generous
 /// because a cold nvim spawn on a loaded CI box is the slow part; a healthy
@@ -40,26 +43,6 @@ const SILENCE: Duration = Duration::from_millis(300);
 /// `mapleader`.
 const LEADER: &str = ",";
 
-/// A fixture config directory whose `init.lua` sets its own leader and maps
-/// `<leader>ff` to an observable command, the way a user running telescope
-/// does.
-fn fixture(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("view-mappings-live-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("init.lua"),
-        format!(
-            "vim.g.mapleader = '{LEADER}'\n\
-             vim.g.view_user_ff = 0\n\
-             vim.keymap.set('n', '<leader>ff', function() vim.g.view_user_ff = 1 end)\n"
-        ),
-    )
-    .unwrap();
-    dir
-}
-
 /// A live nvim reading the fixture's `init.lua` and nothing else, with a UI
 /// attached and its pump sink installed, so what crosses back from a
 /// keypress is observable as the `Msg` the runtime loop would see.
@@ -72,20 +55,21 @@ fn fixture(name: &str) -> PathBuf {
 struct Session {
     engine: Engine,
     rx: Receiver<Msg>,
-    dir: PathBuf,
+    dir: ScratchDir,
 }
 
 impl Session {
     fn start(name: &str) -> Self {
-        let dir = fixture(name);
-        let mut engine = Engine::spawn(
-            EngineConfig::isolated()
-                .with_arg("-u")
-                .with_arg(dir.join("init.lua")),
-        )
-        .unwrap();
-        let (tx, rx): (SyncSender<Msg>, Receiver<Msg>) = std::sync::mpsc::sync_channel(256);
-        let (_pump, _cutover) = engine.start_pump(tx);
+        let dir = common::fixture(
+            &format!("mappings-live-{name}"),
+            &format!(
+                "vim.g.mapleader = '{LEADER}'\n\
+                 vim.g.view_user_ff = 0\n\
+                 vim.keymap.set('n', '<leader>ff', function() vim.g.view_user_ff = 1 end)\n"
+            ),
+        );
+        let cfg = common::isolated_reading(&dir.join("init.lua"));
+        let (engine, _pump, rx) = common::spawn_with_pump(cfg, 256);
         engine.handle.ui_attach(80, 24).unwrap();
         Self { engine, rx, dir }
     }
@@ -130,18 +114,7 @@ impl Session {
     /// The first `Msg` the pump delivers that `want` answers for, within
     /// `budget`. Redraw traffic and every other message flow past.
     fn wait_for<T>(&self, budget: Duration, want: impl Fn(&Msg) -> Option<T>) -> Option<T> {
-        let deadline = Instant::now() + budget;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(left) {
-                Ok(msg) => {
-                    if let Some(found) = want(&msg) {
-                        return Some(found);
-                    }
-                }
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
-            }
-        }
+        common::drain_until(&self.rx, budget, want)
     }
 
     fn claims(&self) -> Vec<MappingClaim> {
@@ -157,12 +130,6 @@ impl Session {
             Msg::FeatureInvoke { feature, verb } => Some((feature.clone(), verb.clone())),
             _ => None,
         })
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.dir).ok();
     }
 }
 

@@ -7,12 +7,14 @@
 //! engine, not a fixture -- can catch it.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
-use std::time::{Duration, Instant};
+mod common;
+
+use std::sync::mpsc::Receiver;
+use std::time::Duration;
 
 use view_core::msg::Msg;
 use view_engine::process::{Engine, EngineConfig};
+use view_test_support::ScratchDir;
 
 /// How long a preview reply is waited for. Generous for the same reason
 /// `bridge_live.rs::ARRIVAL` is: a cold nvim spawn on a loaded box is the
@@ -25,7 +27,7 @@ const ARRIVAL: Duration = Duration::from_secs(10);
 struct Session {
     engine: Engine,
     rx: Receiver<Msg>,
-    dir: PathBuf,
+    dir: ScratchDir,
 }
 
 impl Session {
@@ -36,15 +38,9 @@ impl Session {
     /// incidental state a swapfile has no bearing on for a test that
     /// never crashes nvim and never needs recovery.
     fn start(name: &str) -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "view-picker-preview-live-{name}-{}",
-            std::process::id()
-        ));
-        std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut engine = Engine::spawn(EngineConfig::isolated().with_arg("-n")).unwrap();
-        let (tx, rx): (SyncSender<Msg>, Receiver<Msg>) = std::sync::mpsc::sync_channel(64);
-        let _pump = engine.start_pump(tx);
+        let dir = ScratchDir::new(&format!("picker-preview-live-{name}"));
+        let cfg = EngineConfig::isolated().with_arg("-n");
+        let (engine, _pump, rx) = common::spawn_with_pump(cfg, 64);
         Self { engine, rx, dir }
     }
 
@@ -61,21 +57,10 @@ impl Session {
     /// The first `Msg::PickerPreviewReply` the pump delivers, within
     /// `ARRIVAL`.
     fn wait_for_reply(&self) -> Option<Msg> {
-        let deadline = Instant::now() + ARRIVAL;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            match self.rx.recv_timeout(left) {
-                Ok(msg @ Msg::PickerPreviewReply { .. }) => return Some(msg),
-                Ok(_) => continue,
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => return None,
-            }
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.dir).ok();
+        common::drain_until(&self.rx, ARRIVAL, |msg| match msg {
+            Msg::PickerPreviewReply { .. } => Some(msg.clone()),
+            _ => None,
+        })
     }
 }
 

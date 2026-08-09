@@ -1525,6 +1525,30 @@ mod tests {
     }
 
     #[test]
+    fn preview_buffer_effect_maps_to_engine_ops_preview_buffer() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::PreviewBuffer {
+            path: "src/main.rs".into(),
+            generation: 7,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "preview_buffer(src/main.rs,7)");
+    }
+
+    #[test]
+    fn preview_buffer_write_failure_returns_engine_lost() {
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::PreviewBuffer {
+            path: "src/main.rs".into(),
+            generation: 7,
+        }));
+        assert!(matches!(flow, Flow::EngineLost));
+    }
+
+    #[test]
     fn rename_file_effect_maps_to_engine_ops_rename_file() {
         let ops = FakeOps::default();
         let executor = Executor::new(&ops);
@@ -1600,6 +1624,45 @@ mod tests {
                 );
             }
             other => panic!("expected TreeScanResult, got {other:?}"),
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Same proof as `tree_scan_effect_replies_with_a_real_filesystem_listing`,
+    /// for `Effect::PickerPreviewFallback`'s worker: `Msg::PickerPreviewReply`
+    /// already told the picker nvim has no buffer open for the path, so this
+    /// is the plain `std::fs` read that fills in the preview pane instead --
+    /// the production wiring `FakeOps`-only tests above cannot reach, since
+    /// they never install a `toast_timer`.
+    #[test]
+    fn picker_preview_fallback_effect_replies_with_a_real_file_read() {
+        let root = tree_effect_scratch("preview-fallback");
+        let path = root.join("target.txt");
+        std::fs::write(&path, "line one\nline two").expect("write target.txt");
+
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+        let flow = executor.run(Effect::PickerPreviewFallback {
+            generation: 4,
+            path: path.to_string_lossy().into_owned(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("PickerPreviewFile arrives from the worker thread");
+        match msg {
+            Msg::PickerPreviewFile { generation, lines } => {
+                assert_eq!(generation, 4);
+                assert_eq!(
+                    lines,
+                    Some(vec!["line one".to_string(), "line two".to_string()]),
+                    "the fallback must report the file this test wrote"
+                );
+            }
+            other => panic!("expected PickerPreviewFile, got {other:?}"),
         }
 
         let _ = std::fs::remove_dir_all(&root);

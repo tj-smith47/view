@@ -10,12 +10,14 @@
 //! fixture config, over the exact `RpcCall` a plan produces.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod common;
+
 use std::path::Path;
 
 use view_core::msg::RpcCall;
 use view_core::native::registry;
 use view_engine::handle::EngineHandle;
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::Engine;
 use view_native::config::NativeConfig;
 use view_native::supersede::{plan, Supersession};
 use view_test_support::ScratchDir;
@@ -29,13 +31,10 @@ const FIXTURE_LASTSTATUS: &str = "3";
 /// A fixture config directory holding an `init.lua` that claims the
 /// statusline, the way a user running lualine does.
 fn fixture(name: &str) -> ScratchDir {
-    let dir = ScratchDir::new(&format!("supersede-live-{name}"));
-    std::fs::write(
-        dir.join("init.lua"),
-        format!("vim.opt.laststatus = {FIXTURE_LASTSTATUS}\n"),
+    common::fixture(
+        &format!("supersede-live-{name}"),
+        &format!("vim.opt.laststatus = {FIXTURE_LASTSTATUS}\n"),
     )
-    .unwrap();
-    dir
 }
 
 /// Every file under `dir` as sorted `(name, bytes)` pairs: the snapshot the
@@ -68,17 +67,7 @@ fn snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
 /// `VimEnter` rather than at spawn: before the user's config has run, there
 /// is nothing to supersede.
 fn session(dir: &Path) -> Engine {
-    let mut engine = Engine::spawn(
-        EngineConfig::isolated()
-            .with_arg("-u")
-            .with_arg(dir.join("init.lua")),
-    )
-    .unwrap();
-    let (tx, rx) = std::sync::mpsc::sync_channel(64);
-    let (_pump, _cutover) = engine.start_pump(tx);
-    // drained for the engine's lifetime rather than dropped, per
-    // `Engine::start_pump`'s contract
-    std::thread::spawn(move || while rx.recv().is_ok() {});
+    let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
     engine.handle.ui_attach(80, 24).unwrap();
     engine
 }

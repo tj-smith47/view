@@ -97,6 +97,14 @@ impl From<CachedResolvedStyle> for ResolvedStyle {
 /// nothing while compiling clean. Keying by the group's own nvim name also
 /// makes the file readable to anyone inspecting it, since the keys are the
 /// highlight groups they would write in a colorscheme.
+///
+/// `deny_unknown_fields`'s loud-rejection guarantee above stops at
+/// `chrome`'s own keys: `serde` enforces the attribute only on a struct's
+/// named fields, and a `BTreeMap`'s keys are runtime data, not schema --
+/// so a key this build's `ChromeGroup` set no longer recognizes (a group
+/// renamed or removed) parses without error and is simply never looked up
+/// again, the same silent-drop behavior the container-level attribute
+/// exists to rule out everywhere else in this type.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct CachedTheme {

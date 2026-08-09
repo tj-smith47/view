@@ -121,9 +121,12 @@ macro_rules! chrome_groups {
 
             /// This group's slot in [`Theme`]'s resolved-style array: an
             /// O(1) integer, so a per-frame chrome lookup costs an array
-            /// read with no string compare and no allocation.
+            /// read with no string compare and no allocation. `pub(crate)`:
+            /// the slot layout is `Theme`'s own storage detail, and every
+            /// caller outside it resolves a group through `Theme`'s public
+            /// API instead of indexing the array directly.
             #[must_use]
-            pub const fn index(self) -> usize {
+            pub(crate) const fn index(self) -> usize {
                 self as usize
             }
         }

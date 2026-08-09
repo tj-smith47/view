@@ -93,9 +93,11 @@ enum Waiter {
     /// An async file-tree rename (see [`EngineHandle::rename_file`]):
     /// nothing is blocked on this `msgid`, so its `Response` is decoded and
     /// routed to `pump` as `Msg::TreeRenameReply`, tagged with `generation`
-    /// so a reply from a rename issued before the tree was closed and
-    /// reopened is dropped by `update()` rather than triggering a rescan
-    /// nothing is listening for.
+    /// -- which names the rename request itself, not a scan or a git
+    /// refresh, so `update()` does not compare it against the tree's own
+    /// counters: a successful reply always triggers an unconditional
+    /// rescan, and a refused one surfaces as a notice with the tree left
+    /// exactly as it was.
     Rename { generation: u64 },
     /// An async tree-sidebar create-file prompt (see
     /// [`EngineHandle::request_create_prompt`]): nothing is blocked on this

@@ -98,6 +98,21 @@ pub struct TreeState {
     generation: u64,
     git_generation: u64,
     git_status: HashMap<PathBuf, GitMark>,
+    /// Whether a `git_generation` scan has been issued and not yet replied
+    /// to. Every bridge write/focus callback while a tree is open asks for
+    /// a refresh, so a slow `git status` on a large repo can still be
+    /// running when the next callback fires; without this, each callback
+    /// would spawn its own concurrent process for a reply the tree can
+    /// only ever act on once anyway.
+    git_refresh_in_flight: bool,
+    /// Set when a refresh is requested while one is already in flight, so
+    /// its reply re-arms exactly one more scan instead of the request being
+    /// silently dropped. A single flag rather than a counter: repeated
+    /// callbacks that arrive before the in-flight one answers all want the
+    /// same thing, a status current as of "now", so collapsing them to one
+    /// pending refresh loses nothing a second or third flag would have
+    /// bought.
+    git_refresh_pending: bool,
 }
 
 impl TreeState {
@@ -116,6 +131,8 @@ impl TreeState {
             generation: next_generation(),
             git_generation: 0,
             git_status: HashMap::new(),
+            git_refresh_in_flight: false,
+            git_refresh_pending: false,
         }
     }
 
@@ -151,11 +168,21 @@ impl TreeState {
     }
 
     /// Allocates and records a fresh git generation, for a caller about to
-    /// issue a new `Effect::TreeGitScan`.
+    /// issue a new `Effect::TreeGitScan` -- unless a refresh is already in
+    /// flight, in which case this request is coalesced into it: the flight
+    /// is marked pending and `None` is returned, so the caller issues no
+    /// second scan process. [`TreeState::apply_git`] re-arms a pending
+    /// request once the in-flight one answers, so nothing asked for while a
+    /// scan was running is ever silently dropped -- only deduplicated.
     #[must_use]
-    pub fn request_git_refresh(&mut self) -> u64 {
+    pub fn request_git_refresh(&mut self) -> Option<u64> {
+        if self.git_refresh_in_flight {
+            self.git_refresh_pending = true;
+            return None;
+        }
+        self.git_refresh_in_flight = true;
         self.git_generation = next_generation();
-        self.git_generation
+        Some(self.git_generation)
     }
 
     /// Accepts a filesystem scan reply for `generation`, replacing the
@@ -174,12 +201,20 @@ impl TreeState {
     }
 
     /// Decorations only; an empty status (no git) is a valid state, not
-    /// an error -- the tree renders undecorated.
-    pub fn apply_git(&mut self, generation: u64, status: Vec<GitEntry>) {
+    /// an error -- the tree renders undecorated. Returns `true` when a
+    /// refresh was requested while this one was in flight and coalesced
+    /// into it (see [`TreeState::request_git_refresh`]): the caller must
+    /// issue one more `Effect::TreeGitScan` via a fresh
+    /// `request_git_refresh` call to answer it, since the flag alone
+    /// carries no generation or root to build that effect from.
+    #[must_use]
+    pub fn apply_git(&mut self, generation: u64, status: Vec<GitEntry>) -> bool {
         if generation != self.git_generation {
-            return;
+            return false;
         }
         self.git_status = status.into_iter().map(|e| (e.path, e.mark)).collect();
+        self.git_refresh_in_flight = false;
+        std::mem::take(&mut self.git_refresh_pending)
     }
 
     /// Toggles the directory at visible row `index` between expanded and
@@ -391,8 +426,10 @@ mod tests {
         let scan_gen = tree.generation();
         tree.apply_scan(scan_gen, sample_entries());
 
-        let git_gen = tree.request_git_refresh();
-        tree.apply_git(
+        let git_gen = tree
+            .request_git_refresh()
+            .expect("nothing else is in flight yet");
+        let _ = tree.apply_git(
             git_gen,
             vec![GitEntry {
                 path: PathBuf::from("Cargo.toml"),
@@ -415,8 +452,10 @@ mod tests {
 
         // no git on PATH looks identical to git reporting a clean tree: an
         // empty status vector, applied without error, decorating nothing.
-        let no_git_gen = tree.request_git_refresh();
-        tree.apply_git(no_git_gen, Vec::new());
+        let no_git_gen = tree
+            .request_git_refresh()
+            .expect("the previous refresh already answered, so this allocates fresh");
+        let _ = tree.apply_git(no_git_gen, Vec::new());
         assert!(tree.view().rows.iter().all(|row| row.status.is_none()));
     }
 
@@ -425,8 +464,10 @@ mod tests {
         let mut tree = TreeState::open(PathBuf::from("/repo"));
         let scan_gen = tree.generation();
         tree.apply_scan(scan_gen, sample_entries());
-        let current = tree.request_git_refresh();
-        tree.apply_git(
+        let current = tree
+            .request_git_refresh()
+            .expect("nothing else is in flight yet");
+        let _ = tree.apply_git(
             current + 1,
             vec![GitEntry {
                 path: PathBuf::from("Cargo.toml"),

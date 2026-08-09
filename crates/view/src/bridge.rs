@@ -212,7 +212,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use view_core::events::UiEvent;
     use view_core::theme::{ChromeGroup, ResolvedStyle};
     use view_core::update::update;
 

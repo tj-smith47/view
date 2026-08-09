@@ -11,15 +11,18 @@
 //! observable is a notification that exists outside the redraw stream.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::path::PathBuf;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+mod common;
+
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use view_core::model::Model;
 use view_core::msg::{Effect, Msg, RpcCall};
 use view_core::theme::{ChromeGroup, Theme};
 use view_core::update::update;
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::Engine;
+use view_engine::DamagePump;
+use view_test_support::ScratchDir;
 
 /// How long a bridge notification is waited for. Generous because a cold
 /// nvim spawn on a loaded box is the slow part; a healthy session answers in
@@ -37,16 +40,6 @@ const SCHEME: &str = "blue";
 /// everything the switch produced was written ahead of that reply.
 const SETTLE: Duration = Duration::from_millis(400);
 
-/// A fixture config directory whose `init.lua` runs `extra` once nvim
-/// sources it.
-fn fixture(name: &str, extra: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("view-bridge-live-{name}-{}", std::process::id()));
-    std::fs::remove_dir_all(&dir).ok();
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("init.lua"), extra).unwrap();
-    dir
-}
-
 /// A live nvim reading the fixture's `init.lua` and nothing else, with the
 /// bridge registered and a UI attached, so what crosses back from a
 /// colorscheme change is observable as the `Msg` the runtime loop would see.
@@ -57,22 +50,18 @@ fn fixture(name: &str, extra: &str) -> PathBuf {
 /// the user's config.
 struct Session {
     engine: Engine,
-    pump: view_engine::DamagePump,
+    pump: DamagePump,
     rx: Receiver<Msg>,
-    dir: PathBuf,
+    // held only for its `Drop`: the scratch directory outlives every use
+    // of `dir` above, which is why nothing in this file reads it back
+    _dir: ScratchDir,
 }
 
 impl Session {
     fn start(name: &str, init: &str) -> Self {
-        let dir = fixture(name, init);
-        let mut engine = Engine::spawn(
-            EngineConfig::isolated()
-                .with_arg("-u")
-                .with_arg(dir.join("init.lua")),
-        )
-        .unwrap();
-        let (tx, rx): (SyncSender<Msg>, Receiver<Msg>) = std::sync::mpsc::sync_channel(1024);
-        let (pump, _cutover) = engine.start_pump(tx);
+        let dir = common::fixture(&format!("bridge-live-{name}"), init);
+        let cfg = common::isolated_reading(&dir.join("init.lua"));
+        let (engine, pump, rx) = common::spawn_with_pump(cfg, 1024);
         engine
             .handle
             .register_bridge(engine.api_info.channel_id)
@@ -82,7 +71,7 @@ impl Session {
             engine,
             pump,
             rx,
-            dir,
+            _dir: dir,
         }
     }
 
@@ -158,12 +147,6 @@ impl Session {
             Msg::ColorSchemeChanged { name } => Some(name.clone()),
             _ => None,
         })
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        std::fs::remove_dir_all(&self.dir).ok();
     }
 }
 

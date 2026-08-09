@@ -13,6 +13,15 @@ use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 
+/// Converts a filesystem path to the UTF-8 string an `RpcCall` path field
+/// carries, substituting the replacement character for any byte sequence
+/// that is not valid UTF-8 rather than failing: nvim's own path arguments
+/// are untyped strings, so a lossy round-trip here matches the contract
+/// every wire path already accepts.
+fn path_to_wire(path: &std::path::Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
 /// Applies one message to `model`, returning the effects the executor must
 /// carry out. Never blocks and never performs I/O: every side effect crosses
 /// the boundary as a returned [`Effect`] instead of being performed here.
@@ -156,7 +165,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                                 Some(path) => {
                                     model.pop_overlay();
                                     vec![Effect::Rpc(RpcCall::OpenFile {
-                                        path: path.to_string_lossy().into_owned(),
+                                        path: path_to_wire(&path),
                                     })]
                                 }
                                 None => Vec::new(),
@@ -209,7 +218,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                             let generation = t.generation();
                             vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
                                 generation,
-                                old_path: old_path.to_string_lossy().into_owned(),
+                                old_path: path_to_wire(&old_path),
                                 current_name,
                             })]
                         }
@@ -231,7 +240,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                             let generation = t.generation();
                             vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
                                 generation,
-                                path: path.to_string_lossy().into_owned(),
+                                path: path_to_wire(&path),
                             })]
                         }
                         _ => Vec::new(),
@@ -541,8 +550,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let Some(t) = model.tree_mut() else {
                 return Vec::new();
             };
-            t.apply_git(generation, status);
+            let reissue = t.apply_git(generation, status);
             model.dirty = true;
+            if reissue {
+                return tree_git_refresh_effect(model);
+            }
             Vec::new()
         }
         // a refused rename (`ok: false`) has nothing else to try -- see
@@ -631,7 +643,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let new_path = parent.join(new_name);
             vec![Effect::Rpc(RpcCall::RenameFile {
                 old_path,
-                new_path: new_path.to_string_lossy().into_owned(),
+                new_path: path_to_wire(&new_path),
                 generation: t.generation(),
             })]
         }
@@ -819,14 +831,19 @@ fn open_picker(model: &mut Model, source: crate::native::picker::Source) -> Vec<
 /// refresh is timed off these callbacks rather than the scan, and why the
 /// two carry independent generations. A no-op (empty effect list) when no
 /// tree is open, which is the common case: these callbacks fire on every
-/// buffer write and focus change regardless of the sidebar's state.
+/// buffer write and focus change regardless of the sidebar's state -- and
+/// also when a refresh is already in flight, since `TreeState` coalesces
+/// this request into it rather than spawning a second concurrent scan (see
+/// `TreeState::request_git_refresh`).
 fn tree_git_refresh_effect(model: &mut Model) -> Vec<Effect> {
     let Some(tree) = model.tree_mut() else {
         return Vec::new();
     };
     let root = tree.root().to_path_buf();
-    let generation = tree.request_git_refresh();
-    vec![Effect::TreeGitScan { generation, root }]
+    match tree.request_git_refresh() {
+        Some(generation) => vec![Effect::TreeGitScan { generation, root }],
+        None => Vec::new(),
+    }
 }
 
 fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
@@ -836,6 +853,10 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
     }
     let mut state = crate::native::tree::TreeState::open(model.cwd.clone());
     let scan_generation = state.generation();
+    // a freshly opened `TreeState` has never had a refresh in flight, so
+    // this always allocates rather than coalescing -- the `Option` is
+    // still handled rather than assumed, so a future change to `open`'s
+    // initial state cannot silently turn this into a missing git scan
     let git_generation = state.request_git_refresh();
     let prompt_is_topmost = matches!(
         model.overlays().last().map(|overlay| &overlay.kind),
@@ -848,16 +869,17 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
         model.push_overlay(geometry, OverlayKind::Tree(state));
     }
     model.dirty = true;
-    vec![
-        Effect::TreeScan {
-            generation: scan_generation,
+    let mut effects = vec![Effect::TreeScan {
+        generation: scan_generation,
+        root: model.cwd.clone(),
+    }];
+    if let Some(generation) = git_generation {
+        effects.push(Effect::TreeGitScan {
+            generation,
             root: model.cwd.clone(),
-        },
-        Effect::TreeGitScan {
-            generation: git_generation,
-            root: model.cwd.clone(),
-        },
-    ]
+        });
+    }
+    effects
 }
 
 /// Opens the message-history overlay over a snapshot of `ToastHistory`,
@@ -4167,6 +4189,13 @@ mod tests {
     /// open, a `BufferChanged` (a write callback) must reissue
     /// `Effect::TreeGitScan` against a fresh generation, not merely the
     /// once-at-open refresh `toggle_tree_sidebar` already issues.
+    ///
+    /// The open-time refresh is answered first: `TreeState` coalesces a
+    /// request that arrives while one is already in flight rather than
+    /// spawning a second concurrent scan (see
+    /// `a_write_callback_while_a_refresh_is_in_flight_coalesces_into_it`
+    /// for that case), so this test's reissue proof needs the in-flight
+    /// slot free before the write callback fires.
     #[test]
     fn a_buffer_write_callback_with_a_tree_open_reissues_the_git_scan() {
         let mut m = model();
@@ -4181,6 +4210,13 @@ mod tests {
             .tree_mut()
             .expect("tree must be open after toggling it")
             .git_generation();
+        let _ = update(
+            &mut m,
+            Msg::TreeGitResult {
+                generation: opened_at,
+                status: Vec::new(),
+            },
+        );
 
         let effects = update(
             &mut m,
@@ -4208,7 +4244,8 @@ mod tests {
 
     /// Same proof as the write-callback test above, for the focus-side
     /// trigger (`GitBranchChanged`, fired on `BufEnter`/`DirChanged`/
-    /// `FocusGained`).
+    /// `FocusGained`), with the same open-time refresh answered first for
+    /// the same reason.
     #[test]
     fn a_focus_callback_with_a_tree_open_reissues_the_git_scan() {
         let mut m = model();
@@ -4219,6 +4256,18 @@ mod tests {
                 verb: "toggle".to_string(),
             },
         );
+        let opened_at = m
+            .tree_mut()
+            .expect("tree must be open after toggling it")
+            .git_generation();
+        let _ = update(
+            &mut m,
+            Msg::TreeGitResult {
+                generation: opened_at,
+                status: Vec::new(),
+            },
+        );
+
         let effects = update(
             &mut m,
             Msg::GitBranchChanged {
@@ -4228,6 +4277,68 @@ mod tests {
         assert!(
             matches!(effects.as_slice(), [Effect::TreeGitScan { .. }]),
             "a focus callback with a tree open must reissue exactly one              TreeGitScan: {effects:?}"
+        );
+    }
+
+    /// The coalescing proof ledger 153 exists to add: a write callback that
+    /// arrives while the open-time refresh is still in flight must issue no
+    /// second `Effect::TreeGitScan` -- coalescing it instead of spawning a
+    /// concurrent `git status` process for a reply the tree could only ever
+    /// act on once anyway. Its reply then re-arms exactly one more scan,
+    /// under a fresh generation, proving the coalesced request was
+    /// deduplicated rather than dropped.
+    #[test]
+    fn a_write_callback_while_a_refresh_is_in_flight_coalesces_into_it() {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let in_flight = m
+            .tree_mut()
+            .expect("tree must be open after toggling it")
+            .git_generation();
+
+        let coalesced = update(
+            &mut m,
+            Msg::BufferChanged {
+                name: "a.txt".to_string(),
+                modified: false,
+            },
+        );
+        assert!(
+            coalesced.is_empty(),
+            "a write callback while a git refresh is already in flight must \
+             coalesce into it, not issue a second concurrent scan: {coalesced:?}"
+        );
+        assert_eq!(
+            m.tree_mut().expect("tree still open").git_generation(),
+            in_flight,
+            "coalescing must not allocate a new generation until the \
+             in-flight one answers"
+        );
+
+        let reissued = update(
+            &mut m,
+            Msg::TreeGitResult {
+                generation: in_flight,
+                status: Vec::new(),
+            },
+        );
+        let reissued_generation = match reissued.as_slice() {
+            [Effect::TreeGitScan { generation, .. }] => *generation,
+            other => panic!(
+                "the in-flight refresh's reply must re-arm the coalesced \
+                 request as exactly one fresh TreeGitScan, got {other:?}"
+            ),
+        };
+        assert_ne!(
+            reissued_generation, in_flight,
+            "the re-armed scan must carry a generation later than the one \
+             it coalesced into"
         );
     }
 
