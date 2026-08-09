@@ -266,11 +266,11 @@ fn main() -> Result<()> {
     let (width, height) = term.size()?;
     let residue = term.take_residue();
 
-    let mut model = Model::with_term_size(width, height);
+    // the cwd is resolved once at startup, before any picker ever opens:
+    // `Source::Files` with no root override searches from here
+    let mut model =
+        Model::with_term_size(width, height).with_cwd(std::env::current_dir().unwrap_or_default());
     model.caps = term.caps();
-    // resolved once at startup, before any picker ever opens: `Source::Files`
-    // with no root override searches from here
-    model.cwd = std::env::current_dir().unwrap_or_default();
     vlog::log_with("startup", || {
         format!(
             "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",

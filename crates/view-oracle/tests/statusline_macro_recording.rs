@@ -31,7 +31,8 @@ const BUDGET: Duration = Duration::from_secs(10);
 /// included -- paused once nvim's real content, not the pre-attach shell
 /// placeholder, is on screen.
 ///
-/// `common::isolate_xdg_first_launch` rather than `common::isolate_xdg`:
+/// `common::isolate_xdg_first_launch` rather than
+/// `common::isolate_xdg_native_off`:
 /// the latter writes a `view.toml` disabling every registered feature,
 /// including `statusline`, which is exactly the row this test exists to
 /// exercise. An absent config file is the documented "full experience"

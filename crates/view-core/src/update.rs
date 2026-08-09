@@ -722,11 +722,16 @@ fn dismiss_top_prompt(model: &mut Model) {
 /// `known` distinguishes a registered entry point with no handler yet
 /// (echoes back exactly what was invoked) from one the registry has never
 /// heard of (offers the forms that do work instead of naming a typo).
+///
+/// Only the first carries a `view: ` prefix. The usage line opens with the
+/// ex-command's own name, so prefixing it stutters the product's name into
+/// `view: :View needs ...`, and a line that starts `:View` already says
+/// which tool is speaking.
 fn feature_invoke_notice(feature: &str, verb: &str, known: bool) -> String {
     if known {
         format!("view: no handler for {feature} {verb} in this build")
     } else {
-        format!("view: {}", crate::native::mappings::render_usage())
+        crate::native::mappings::render_usage()
     }
 }
 
@@ -3289,6 +3294,11 @@ mod tests {
             text.contains("picker files"),
             "an unrecognized invoke must fall back to the usage line, not go quiet, \
              got {text:?}"
+        );
+        assert!(
+            text.starts_with(":View "),
+            "the usage line opens with the ex-command itself, never a `view: ` \
+             prefix stuttering into `view: :View ...`, got {text:?}"
         );
         assert!(m.dirty, "the notice must be painted without another event");
         assert!(

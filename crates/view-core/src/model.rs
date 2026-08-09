@@ -146,11 +146,18 @@ impl Model {
         }
     }
 
-    /// Like [`Model::new`], but with `cwd` pre-filled from the process's
-    /// working directory at startup, before any picker ever opens.
+    /// This model with `cwd` pre-filled from the process's working
+    /// directory at startup, before any picker ever opens.
+    ///
+    /// A builder step rather than a second constructor, so it composes with
+    /// [`Model::with_term_size`]: startup needs both, and a constructor
+    /// that could only supply one of them is what left the binary
+    /// assigning the field directly -- two ways to establish the same
+    /// state, one of which no test ever exercised.
     #[must_use]
-    pub fn with_cwd(cwd: PathBuf) -> Self {
-        Self { cwd, ..Self::new() }
+    pub fn with_cwd(mut self, cwd: PathBuf) -> Self {
+        self.cwd = cwd;
+        self
     }
 
     /// The default keys this session registered; see
@@ -332,13 +339,19 @@ impl Model {
     }
 
     /// Records `target` as the owner of the gesture starting now.
-    pub fn capture_mouse(&mut self, target: MouseCapture) {
+    ///
+    /// Crate-private: a gesture's owner is decided by `update()`'s mouse
+    /// arm alone, which is the one place that sees the press and the
+    /// matching release. A consumer outside this crate setting an owner
+    /// would hand nvim a release it never saw a press for.
+    pub(crate) fn capture_mouse(&mut self, target: MouseCapture) {
         self.mouse_capture = Some(target);
     }
 
     /// Ends the gesture in flight, so the next event routes by position
-    /// again.
-    pub fn release_mouse(&mut self) {
+    /// again. Crate-private for the same reason as
+    /// [`Model::capture_mouse`].
+    pub(crate) fn release_mouse(&mut self) {
         self.mouse_capture = None;
     }
 

@@ -190,7 +190,7 @@ fn build_view_pty_with_content(
         cmd.arg(arg);
     }
     cmd.arg(&paths.scratch);
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
 
     let session = PtySession::spawn_configured_with(cmd, 80, 24, policy).unwrap();
 
@@ -204,14 +204,15 @@ fn build_view_pty_with_content(
 /// Like [`spawn_view_pty`], but isolates only the `XDG_*_HOME` env vars
 /// (`common::isolate_xdg_first_launch`) instead of also writing a
 /// `view.toml` that disables every registered feature
-/// (`common::isolate_xdg`, what every other helper in this file uses).
+/// (`common::isolate_xdg_native_off`, what every other helper in this file
+/// uses).
 ///
 /// `NativeConfig::load`'s documented contract is that an absent config file
-/// means every feature defaults on; `isolate_xdg`'s deliberately-written
-/// all-off `view.toml` (a baseline predating any native feature, kept as
-/// the default so unrelated smoke tests are not coupled to a feature's
-/// rendering) would falsify a test whose subject is specifically a
-/// default-on feature. Follows the same precedent as
+/// means every feature defaults on; `isolate_xdg_native_off`'s
+/// deliberately-written all-off `view.toml` (a baseline predating any
+/// native feature, kept as the default so unrelated smoke tests are not
+/// coupled to a feature's rendering) would falsify a test whose subject is
+/// specifically a default-on feature. Follows the same precedent as
 /// `statusline_macro_recording.rs`'s `statusline_session`.
 fn spawn_view_pty_first_launch() -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke");
@@ -760,7 +761,7 @@ fn minus_capital_o_opens_two_vertical_splits() {
     cmd.arg("-O");
     cmd.arg(&a.scratch);
     cmd.arg(&b.scratch);
-    common::isolate_xdg(&mut cmd, &a.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &a.isolated_home);
 
     let isolation = shared_isolation();
     let session = PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap();
@@ -1441,7 +1442,7 @@ fn spawn_view_pty_with_unwritable_view_log() -> ViewPtySession {
     let paths = common::ScratchPaths::new("smoke-view-log");
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
     cmd.env("VIEW_LOG", "/nonexistent-dir-xyz/log.txt");
 
     let isolation = shared_isolation();
@@ -1545,7 +1546,7 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
     cmd.env("VIEW_LOG", &log_path);
     if let Some(value) = colorterm {
         cmd.env("COLORTERM", value);

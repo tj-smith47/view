@@ -27,8 +27,7 @@ use ratatui::layout::Rect as TuiRect;
 use view_core::grid::Grid;
 use view_core::model::{Model, Tier};
 use view_core::native::views::{PickerView, Span, StatuslineView, StyleRole};
-use view_surface::overlay::{self, BorderSet};
-use view_surface::{LayerKind, Rect, Surface};
+use view_surface::{Layer, LayerKind, Rect, Surface};
 use view_tui::paint::{composite_into, Damage};
 
 /// Where the layer sits on the shared canvas both painters render into.
@@ -83,8 +82,7 @@ fn painted_rows(
     height: u16,
     kind: LayerKind,
 ) -> Vec<String> {
-    let borders = BorderSet::for_tier(tier);
-    let layer = overlay::framed(Rect::new(AT_ROW, AT_COL, width, height), kind, borders);
+    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
     let surface = Surface::from_layers(vec![layer]);
 
     let mut model = Model::new();
@@ -105,8 +103,7 @@ fn painted_rows(
 
 /// Renders the same layer through `view-oracle`'s pure-text raster.
 fn rastered_rows(tier: Tier, width: u16, height: u16, kind: LayerKind) -> Vec<String> {
-    let borders = BorderSet::for_tier(tier);
-    let layer = overlay::framed(Rect::new(AT_ROW, AT_COL, width, height), kind, borders);
+    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
     let surface = Surface::from_layers(vec![layer]);
     view_oracle::raster::screen_rows(&surface, &Grid::new())
         .into_iter()

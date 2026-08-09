@@ -272,12 +272,17 @@ pub struct Term {
     /// escape when the `Surface` cursor's shape actually changed instead of
     /// writing it unconditionally on every frame.
     last_cursor_shape: Option<CursorShape>,
-    /// The last mouse-capture state written, so `draw_surface` only toggles
-    /// crossterm's mouse capture when `model.engine.mouse_on` actually
-    /// changed since the last frame instead of writing the escape on every
-    /// paint. `None` before the first frame, matching `last_cursor_shape`'s
-    /// convention.
-    last_mouse_capture: Option<bool>,
+    /// The last terminal mouse-reporting state written, so `draw_surface`
+    /// only toggles crossterm's mouse reporting when `model.engine.mouse_on`
+    /// actually changed since the last frame instead of writing the escape
+    /// on every paint. `None` before the first frame, matching
+    /// `last_cursor_shape`'s convention.
+    ///
+    /// Named for reporting, not capture: this is whether the terminal sends
+    /// mouse events at all, a different concept from
+    /// `view_core::model::Model::mouse_capture`, which names the surface
+    /// that owns the gesture in flight once an event has arrived.
+    last_mouse_reporting: Option<bool>,
     /// The persistent double-buffered shadow of the terminal's cells. Each
     /// frame composites only its damaged rows into it, leaving every other
     /// cell as earlier frames painted it. This is what clips per-frame
@@ -334,7 +339,7 @@ impl Term {
             inner,
             frame_buf,
             last_cursor_shape: None,
-            last_mouse_capture: None,
+            last_mouse_reporting: None,
             shadow: Shadow::new(),
             last_overlay_rows: Vec::new(),
             last_offset: None,
@@ -421,13 +426,13 @@ impl Term {
         #[cfg(feature = "bench-taps")]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
-        if self.last_mouse_capture != Some(model.engine.mouse_on) {
+        if self.last_mouse_reporting != Some(model.engine.mouse_on) {
             if model.engine.mouse_on {
                 crossterm::queue!(sink, EnableMouseCapture)?;
             } else {
                 crossterm::queue!(sink, DisableMouseCapture)?;
             }
-            self.last_mouse_capture = Some(model.engine.mouse_on);
+            self.last_mouse_reporting = Some(model.engine.mouse_on);
         }
         if model.caps.sync {
             sink.write_all(b"\x1b[?2026h")?;

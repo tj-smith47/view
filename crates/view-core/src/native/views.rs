@@ -63,6 +63,12 @@ pub enum StyleRole {
     GitDeleted,
     /// A tree row's git decoration for an untracked entry.
     GitUntracked,
+    /// An overlay's own title, as set into its top border. Its own role
+    /// rather than part of the frame it sits in: a title is the only text
+    /// on that row, and painting it in the border's deliberately dimmed
+    /// color makes the one label naming what the overlay IS the least
+    /// legible thing on it.
+    Title,
 }
 
 impl StyleRole {
@@ -84,6 +90,7 @@ impl StyleRole {
             Self::GitAdded => Some(ChromeGroup::DiffAdd),
             Self::GitDeleted => Some(ChromeGroup::DiffDelete),
             Self::GitUntracked => Some(ChromeGroup::Directory),
+            Self::Title => Some(ChromeGroup::FloatTitle),
         }
     }
 }

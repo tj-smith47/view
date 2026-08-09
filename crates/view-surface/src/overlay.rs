@@ -20,11 +20,11 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::Tier;
 use view_core::native::views::{
-    GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow,
-    TreeView,
+    GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, StyleRole,
+    TreeRow, TreeView,
 };
 
-use crate::{Layer, LayerKind, Rect};
+use crate::LayerKind;
 
 /// The horizontal edge glyph shared by every box-drawing border. Named once
 /// because [`BorderSet::ROUNDED`] and [`BorderSet::PLAIN`] differ only in
@@ -121,22 +121,6 @@ impl BorderSet {
     }
 }
 
-/// One native overlay [`Layer`]: `kind`'s content framed by `borders`
-/// inside `rect`.
-///
-/// The single constructor for a framed layer, so every native feature
-/// places its overlay through the same geometry and gets the same border,
-/// padding, and title treatment. A feature computing its own rect from the
-/// terminal size instead would be one more independent clamp to get wrong.
-#[must_use]
-pub fn framed(rect: Rect, kind: LayerKind, borders: BorderSet) -> Layer {
-    Layer {
-        rect,
-        kind,
-        borders: Some(borders),
-    }
-}
-
 /// The painted rows of one framed overlay, plus which of them holds the
 /// selection.
 #[non_exhaustive]
@@ -149,7 +133,9 @@ pub struct Rows {
     /// A content span carries whatever style role its producer assigned
     /// (e.g. a statusline's diagnostic glyph); frame chrome built in this
     /// module (borders, padding, the selection marker) is always a plain
-    /// span. Use [`line_text`] where only the joined text is needed.
+    /// span, with the single exception of the title set into the top edge,
+    /// which carries [`StyleRole::Title`]. Use [`line_text`] where only the
+    /// joined text is needed.
     pub lines: Vec<Vec<Span>>,
     /// Index into `lines` of the row carrying the overlay's selection, or
     /// `None` when nothing is selected. Returned alongside the rows rather
@@ -201,7 +187,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     let laid = content_rows(kind, &body, text_width, interior, borders);
 
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
-    lines.push(vec![Span::plain(top_edge(width, borders, &body.title))]);
+    lines.push(top_edge(width, borders, &body.title));
     let blank = " ".repeat(usize::from(pad));
     for row in 0..interior {
         let content = laid
@@ -336,9 +322,15 @@ fn picker_split_rows(
 /// becomes painted cells, so a title carrying a control character cannot
 /// reach a row no matter which builder produced it or what a later feature
 /// puts in a view's title.
-fn top_edge(width: u16, borders: BorderSet, title: &str) -> String {
+///
+/// Three spans when a title fits, one when it does not: the label carries
+/// [`StyleRole::Title`] so a painter can give it the colorscheme's own
+/// float-title style, while the border runs on either side stay plain and
+/// take the frame's. One span for the whole row would force the title to
+/// inherit the frame's deliberately dimmed border color -- the row's only
+/// readable text, painted in the row's least readable style.
+fn top_edge(width: u16, borders: BorderSet, title: &str) -> Vec<Span> {
     let span = width - 2;
-    let mut middle = String::new();
     let clean = sanitized(title);
     let label = if clean.trim().is_empty() {
         String::new()
@@ -349,17 +341,24 @@ fn top_edge(width: u16, borders: BorderSet, title: &str) -> String {
     // the title needs a horizontal glyph on each side of it to read as set
     // into the edge rather than as replacing it
     if label_cells > 0 && label_cells.saturating_add(2) <= span {
-        middle.push(borders.horizontal);
-        middle.push_str(&label);
-        for _ in 0..span - label_cells - 1 {
-            middle.push(borders.horizontal);
-        }
+        let trailing = span - label_cells - 1;
+        vec![
+            Span::plain(format!("{}{}", borders.top_left, borders.horizontal)),
+            Span::new(label, StyleRole::Title),
+            Span::plain(format!(
+                "{}{}",
+                borders.horizontal.to_string().repeat(usize::from(trailing)),
+                borders.top_right
+            )),
+        ]
     } else {
-        for _ in 0..span {
-            middle.push(borders.horizontal);
-        }
+        vec![Span::plain(format!(
+            "{}{}{}",
+            borders.top_left,
+            borders.horizontal.to_string().repeat(usize::from(span)),
+            borders.top_right
+        ))]
     }
-    format!("{}{middle}{}", borders.top_left, borders.top_right)
 }
 
 /// The frame's bottom row: two corners and an unbroken horizontal run.
@@ -457,6 +456,11 @@ fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
 
 /// The [`Body`] for a native overlay layer, or `None` for a layer kind that
 /// is not a native overlay at all.
+///
+/// Exhaustive rather than wildcarded, so the `Some` arms here and
+/// [`LayerKind::is_native_overlay`]'s `true` arms cannot drift: a variant
+/// added to one without the other stops compiling instead of quietly
+/// producing a framed layer with nothing in it.
 fn body(kind: &LayerKind) -> Option<Body> {
     match kind {
         LayerKind::Picker(view) => Some(picker_body(view)),
@@ -464,7 +468,12 @@ fn body(kind: &LayerKind) -> Option<Body> {
         LayerKind::Statusline(view) => Some(statusline_body(view)),
         LayerKind::Prompt(view) => Some(prompt_body(view)),
         LayerKind::Palette(view) => Some(palette_body(view)),
-        _ => None,
+        LayerKind::EngineGrid
+        | LayerKind::Cmdline(_)
+        | LayerKind::Messages(_)
+        | LayerKind::Tabline(_)
+        | LayerKind::Popupmenu(_)
+        | LayerKind::Shell => None,
     }
 }
 

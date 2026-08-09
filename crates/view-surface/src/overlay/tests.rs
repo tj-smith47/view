@@ -374,17 +374,47 @@ fn a_tier_maps_to_exactly_one_border_charset() {
     assert_ne!(BorderSet::ASCII.horizontal, BorderSet::ROUNDED.horizontal);
 }
 
+/// The charset a layer carries follows from its kind and the tier, and
+/// nothing else: a native overlay always gets one (never the silent blank
+/// rect an unframed native kind painted), a non-overlay kind never does
+/// (never the framed nothing an engine grid handed a charset produced).
 #[test]
-fn a_framed_layer_carries_the_charset_it_was_built_with() {
-    let rect = Rect {
+fn a_layers_charset_is_derived_from_its_kind_and_tier() {
+    let rect = crate::Rect {
         row: 2,
         col: 4,
         width: 20,
         height: 6,
     };
-    let layer = framed(rect, picker(), BorderSet::PLAIN);
+    let layer = crate::Layer::new(rect, picker(), Tier::Standard);
     assert_eq!(layer.rect, rect);
     assert_eq!(layer.borders, Some(BorderSet::PLAIN));
+    assert!(layer.kind.is_native_overlay());
+
+    for kind in [LayerKind::EngineGrid, LayerKind::Shell] {
+        assert!(!kind.is_native_overlay(), "{kind:?}");
+        let layer = crate::Layer::new(rect, kind, Tier::Full);
+        assert_eq!(
+            layer.borders, None,
+            "a kind with no body to lay out must carry no frame"
+        );
+    }
+}
+
+/// `is_native_overlay` and the layout pass must name the same set: a kind
+/// the predicate frames but `rows` has no body for would paint an empty
+/// box, and one the predicate leaves unframed but `rows` does lay out would
+/// paint nothing at all.
+#[test]
+fn the_framing_predicate_and_the_layout_pass_name_the_same_kinds() {
+    for kind in [picker(), LayerKind::EngineGrid, LayerKind::Shell] {
+        let laid = rows(20, 6, &kind, BorderSet::ASCII);
+        assert_eq!(
+            kind.is_native_overlay(),
+            !laid.lines.is_empty(),
+            "{kind:?} is framed by one rule and laid out by the other"
+        );
+    }
 }
 
 /// Feature-supplied text is data, never a layout directive. A picker row

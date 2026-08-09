@@ -191,6 +191,14 @@ chrome_groups! {
     /// nvim's builtin deleted-diff-line group (`:h hl-DiffDelete`), the
     /// deleted counterpart of [`ChromeGroup::DiffAdd`].
     DiffDelete => "DiffDelete", Emphasis;
+    /// nvim's builtin floating-window title group (`:h hl-FloatTitle`). A
+    /// native overlay's title is set into its top border, and this is the
+    /// group nvim already uses for exactly that -- the title of a float,
+    /// distinct from the border it sits in -- so a colorscheme that themes
+    /// floating windows themes view's overlay titles with it. Without a
+    /// group of its own the title inherited the frame's dimmed border
+    /// color, which is the one part of the frame a user reads as text.
+    FloatTitle => "FloatTitle", Emphasis;
 }
 
 /// The active colorscheme's resolved design system: the default/"Normal"

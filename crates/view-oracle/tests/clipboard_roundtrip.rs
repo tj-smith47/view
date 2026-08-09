@@ -83,7 +83,7 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     // every native feature off: a first-launch takeover notice would
     // otherwise cover the top rows this test types into, and the yank
     // this test is proving has nothing to do with any native surface
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
     // explicit, distinctly-sourced override -- see the module doc for why
     // this is not the ambient `DISPLAY` the hermetic sweep would strip
     cmd.env("DISPLAY", &display);

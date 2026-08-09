@@ -25,8 +25,7 @@ use view_core::model::Tier;
 use view_core::native::views::{
     PaletteRow, PaletteView, PickerView, PromptView, StatuslineView, TreeRow, TreeView,
 };
-use view_surface::overlay::{self, BorderSet};
-use view_surface::{LayerKind, Rect, Surface};
+use view_surface::{Layer, LayerKind, Rect, Surface};
 
 /// The env var that rewrites a golden instead of asserting against it.
 const UPDATE: &str = "VIEW_UPDATE_GOLDENS";
@@ -46,11 +45,7 @@ const AT_COL: u16 = 2;
 /// oracle's own differential legs, and putting it here would make every
 /// golden churn on fixture changes that say nothing about framing.
 fn dump(tier: Tier, width: u16, height: u16, kind: LayerKind) -> String {
-    let layer = overlay::framed(
-        Rect::new(AT_ROW, AT_COL, width, height),
-        kind,
-        BorderSet::for_tier(tier),
-    );
+    let layer = Layer::new(Rect::new(AT_ROW, AT_COL, width, height), kind, tier);
     view_oracle::raster::screen_text(&Surface::from_layers(vec![layer]), &Grid::new())
 }
 
@@ -194,6 +189,43 @@ fn standard_statusline() {
 #[test]
 fn basic_statusline() {
     assert_golden("basic-statusline", &dump(Tier::Basic, 46, 3, statusline()));
+}
+
+/// The height the statusline actually ships at: `render()` sizes its layer
+/// from `Model::statusline_rows()`, which is one row or none, so the box
+/// the trio above dumps is a shape a user never sees. A rect with no room
+/// for distinct edge cells lays out as content edge to edge -- the bar --
+/// and that degrade is the thing worth a committed picture, since it is
+/// the only overlay in the product that always takes it. The framed trio
+/// stays: it is what pins the frame's own tier degradation for a rect that
+/// does have room, which no other statusline dump would show.
+///
+/// All three tiers are dumped even though a bar has no border glyph to
+/// degrade, and the three files are byte-identical on purpose: that
+/// sameness is the claim -- the row a user actually gets must not start
+/// varying with the terminal's capability tier.
+#[test]
+fn full_statusline_bar() {
+    assert_golden(
+        "full-statusline-bar",
+        &dump(Tier::Full, 46, 1, statusline()),
+    );
+}
+
+#[test]
+fn standard_statusline_bar() {
+    assert_golden(
+        "standard-statusline-bar",
+        &dump(Tier::Standard, 46, 1, statusline()),
+    );
+}
+
+#[test]
+fn basic_statusline_bar() {
+    assert_golden(
+        "basic-statusline-bar",
+        &dump(Tier::Basic, 46, 1, statusline()),
+    );
 }
 
 #[test]

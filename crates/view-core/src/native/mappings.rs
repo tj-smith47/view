@@ -14,6 +14,16 @@ pub const COMMAND: &str = "View";
 
 /// One default key view registers for a feature, and the entry point that
 /// key invokes.
+///
+/// Normal mode only, for every spec: there is no `mode` field because the
+/// registration path has no mode vocabulary to carry -- it snapshots the
+/// user's existing normal-mode maps and sets each key with
+/// `vim.keymap.set('n', ...)`. Every entry point here is a "leave what you
+/// are doing and pick something" action, which is a normal-mode gesture in
+/// the editors a switching user comes from too. Registering the same key in
+/// insert or visual mode would need a per-spec mode set, a mode-aware claim
+/// report, and a matching off switch; that is a schema change, not a value
+/// a caller may set today.
 // Constructible by design (no `#[non_exhaustive]`): this is the payload
 // callers assemble for `RpcCall::RegisterMappings`, and a test that cannot
 // build a spec cannot exercise the registration path with one.

@@ -56,7 +56,7 @@ fn scratch_root(nonce_suffix: &str) -> PathBuf {
 /// production route into the overlay every "a"/"r"/"d" test below then
 /// presses its key against.
 fn open_tree(root: &std::path::Path) -> Model {
-    let mut model = Model::with_cwd(root.to_path_buf());
+    let mut model = Model::new().with_cwd(root.to_path_buf());
     let _ = update(
         &mut model,
         Msg::FeatureInvoke {

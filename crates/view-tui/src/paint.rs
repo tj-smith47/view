@@ -1022,6 +1022,11 @@ fn paint_popupmenu(
 /// exception: it derives its interior and frame from `ChromeGroup::StatusLine`
 /// instead, because a status line is a distinct piece of chrome a
 /// colorscheme styles on its own, not a popup.
+///
+/// The title set into the top edge is the one piece of frame chrome with a
+/// style of its own (`ChromeGroup::FloatTitle`, bold): it is the label
+/// naming what the overlay is, and the frame's color is deliberately dimmed
+/// away from readable.
 fn paint_native_overlay(
     layer: &Layer,
     theme: &Theme,
@@ -1062,6 +1067,21 @@ fn paint_native_overlay(
     } else {
         Style::default()
     };
+    // the title's foreground is the colorscheme's own float-title color,
+    // but its background stays the overlay's, so the top edge still reads
+    // as one continuous run rather than a differently-lit patch. Bold in
+    // every case, including the no-truecolor path, where an attribute is
+    // the only way a title can outrank the frame at all
+    let title = if truecolor {
+        ratatui_style(ResolvedStyle {
+            fg: theme.chrome(ChromeGroup::FloatTitle).fg.or(base.fg),
+            bg: base.bg,
+            bold: true,
+            ..ResolvedStyle::default()
+        })
+    } else {
+        Style::default().add_modifier(Modifier::BOLD)
+    };
 
     let last = laid.lines.len().saturating_sub(1);
     for (i, line) in laid.lines.iter().enumerate() {
@@ -1073,9 +1093,15 @@ fn paint_native_overlay(
         }
         let edge_row = laid.framed && (i == 0 || i == last);
         if edge_row {
-            paint_text_row(
-                &view_surface::overlay::line_text(line),
-                frame,
+            // per span, not per row: the top edge carries the overlay's
+            // title in its own role, and blitting the row in one style is
+            // what made the title inherit the border's dimmed color
+            paint_span_row(
+                line,
+                |role| match role {
+                    StyleRole::Title => title,
+                    _ => frame,
+                },
                 area,
                 row,
                 buf,
@@ -3767,7 +3793,7 @@ mod tests {
             let model = caps_model(sync, truecolor, kitty);
             let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
             let rect = Rect::new(1, 2, 24, 7);
-            let layer = view_surface::overlay::framed(rect, native_picker(), borders);
+            let layer = Layer::new(rect, native_picker(), model.caps.tier);
             let buf = paint_layer_alone(&model, layer, 30, 10);
             let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
             for (i, line) in laid.lines.iter().enumerate() {
@@ -3802,8 +3828,7 @@ mod tests {
                 sp: None,
             },
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
         let buf = paint_layer_alone(&model, layer, 30, 10);
         for row in 1..8_u16 {
             for col in 2..26_u16 {
@@ -3821,7 +3846,7 @@ mod tests {
     fn the_selected_row_reverses_even_with_no_color_available() {
         let model = caps_model(false, false, false);
         let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
         let laid = view_surface::overlay::rows(24, 7, &native_picker(), borders);
         let selected = laid.selected.expect("the picker has a selection");
         let buf = paint_layer_alone(&model, layer, 30, 10);
@@ -3845,8 +3870,7 @@ mod tests {
                 sp: None,
             },
         );
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer = view_surface::overlay::framed(Rect::new(1, 2, 24, 7), native_picker(), borders);
+        let layer = Layer::new(Rect::new(1, 2, 24, 7), native_picker(), model.caps.tier);
         let buf = paint_layer_alone(&model, layer, 30, 10);
         let theme = Theme::from_hl(model.engine.hl());
         assert_eq!(
@@ -3871,9 +3895,7 @@ mod tests {
     #[test]
     fn a_native_overlay_larger_than_the_terminal_is_clipped_not_panicked() {
         let model = caps_model(true, true, true);
-        let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
-        let layer =
-            view_surface::overlay::framed(Rect::new(1, 2, 400, 400), native_picker(), borders);
+        let layer = Layer::new(Rect::new(1, 2, 400, 400), native_picker(), model.caps.tier);
         let buf = paint_layer_alone(&model, layer, 12, 5);
         assert_eq!(buf.area.width, 12);
         assert_eq!(
@@ -3883,14 +3905,32 @@ mod tests {
         );
     }
 
-    /// A layer carrying a native kind but no border charset cannot be
-    /// framed, and painting it half-framed would be worse than not
-    /// painting it: the rect keeps whatever is underneath.
+    /// A non-overlay kind carries no border charset, and reaching the
+    /// native-overlay painter with one would frame a layer that has no
+    /// rows to frame. `Layer::new` cannot build that pairing (see
+    /// `view_surface::Layer::new`), so what is left to pin here is that the
+    /// painter's own guard refuses the rect rather than blanking it.
     #[test]
-    fn a_native_layer_with_no_border_charset_paints_nothing() {
+    fn a_layer_with_no_border_charset_paints_nothing() {
         let model = caps_model(true, true, true);
-        let layer = Layer::unframed(Rect::new(1, 2, 24, 7), native_picker());
-        let buf = paint_layer_alone(&model, layer, 30, 10);
+        let layer = Layer::new(
+            Rect::new(1, 2, 24, 7),
+            LayerKind::EngineGrid,
+            model.caps.tier,
+        );
+        assert!(
+            layer.borders.is_none(),
+            "a non-overlay kind carries no frame"
+        );
+        let theme = Theme::from_hl(model.engine.hl());
+        let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 30, 10));
+        paint_native_overlay(
+            &layer,
+            &theme,
+            model.caps.truecolor,
+            ratatui::layout::Rect::new(2, 1, 24, 7),
+            &mut buf,
+        );
         for row in 0..10_u16 {
             for col in 0..30_u16 {
                 assert_eq!(&buf[(col, row)].symbol(), &" ", "({col},{row})");
@@ -3974,7 +4014,7 @@ mod tests {
         let borders = view_surface::overlay::BorderSet::for_tier(model.caps.tier);
         let width = 46_u16;
         let rect = Rect::new(1, 2, width, 1);
-        let layer = view_surface::overlay::framed(rect, spanful_statusline(), borders);
+        let layer = Layer::new(rect, spanful_statusline(), model.caps.tier);
         let laid = view_surface::overlay::rows(width, 1, &spanful_statusline(), borders);
         let buf = paint_layer_alone(&model, layer, width + 4, 4);
 
@@ -4023,6 +4063,74 @@ mod tests {
             diagnostic_error_fg, diagnostic_warning_fg,
             "DiagnosticError and DiagnosticWarning must resolve to visually distinct \
              colors, not collapse to one"
+        );
+    }
+
+    /// The title set into an overlay's top border reads as a label, not as
+    /// more border: it takes `FloatTitle`'s own color and renders bold,
+    /// while the horizontal runs on either side of it keep the frame's
+    /// deliberately dimmed one. Painting the row in a single style is what
+    /// made the one word naming the overlay its least legible text.
+    #[test]
+    fn an_overlay_title_paints_brighter_and_bolder_than_the_frame_around_it() {
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlAttrDefine {
+                id: 9,
+                fg: Some(0x00FF_EE00),
+                bg: None,
+                bold: false,
+                italic: false,
+                underline: false,
+                reverse: false,
+            },
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::HlGroupSet {
+                name: ChromeGroup::FloatTitle.hl_name().to_string(),
+                hl_id: 9,
+            },
+        );
+        let theme = Theme::from_hl(model.engine.hl());
+        let rect = Rect::new(1, 2, 24, 7);
+        let layer = Layer::new(rect, native_picker(), model.caps.tier);
+        let buf = paint_layer_alone(&model, layer, 30, 10);
+
+        // the top edge is `<corner><rule> Files <rule...><corner>`, so the
+        // title's own cells start two columns into the rect
+        let title_col = rect.col + 3;
+        let title_cell = &buf[(title_col, rect.row)];
+        assert_eq!(
+            title_cell.symbol(),
+            "F",
+            "the assertion must be reading the title's own cells"
+        );
+        assert_eq!(
+            title_cell.fg,
+            ratatui_style(ResolvedStyle {
+                fg: theme.chrome(ChromeGroup::FloatTitle).fg,
+                ..ResolvedStyle::default()
+            })
+            .fg
+            .unwrap(),
+            "the title resolves through FloatTitle, not through the border color"
+        );
+        assert!(
+            title_cell.modifier.contains(Modifier::BOLD),
+            "the title is bold, which is the only distinction a terminal with no \
+             color can carry"
+        );
+
+        let edge_cell = &buf[(rect.col, rect.row)];
+        assert_ne!(
+            edge_cell.fg, title_cell.fg,
+            "the corner keeps the frame's dimmed color; a shared style is the defect"
+        );
+        assert!(
+            !edge_cell.modifier.contains(Modifier::BOLD),
+            "only the title is bold, not the run of border it sits in"
         );
     }
 }

@@ -156,7 +156,7 @@ fn tabline_session(paths: &common::ScratchPaths) -> PtySession {
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     cmd.arg(&paths.scratch);
-    common::isolate_xdg(&mut cmd, &paths.isolated_home);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
 
     let mut session = PtySession::spawn_configured(cmd, COLS, ROWS)
         .expect("PtySession::spawn_configured against target/debug/view");

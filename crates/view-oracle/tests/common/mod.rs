@@ -76,24 +76,33 @@ pub fn scratch_root() -> PathBuf {
     root
 }
 
-/// Points every `XDG_*_HOME` var `cmd` sees at a subdirectory of `home`,
-/// isolating the spawned process from the host's real nvim config: a
-/// dashboard plugin or custom keymap on a bare "i" would otherwise make a
-/// typed-text assertion nondeterministic.
+/// Points every `XDG_*_HOME` var `cmd` sees at a subdirectory of `home`
+/// AND plants a `view.toml` there turning every native feature off,
+/// isolating the spawned process both from the host's real nvim config and
+/// from view's own default-on chrome: a dashboard plugin, a custom keymap
+/// on a bare "i", or a statusline row view itself paints would otherwise
+/// make a typed-text assertion nondeterministic.
+///
+/// The name carries the config half deliberately. Writing files is not what
+/// "isolate XDG" says, and a caller reading only the name would take the
+/// all-off `view.toml` for the absent-config default
+/// (`NativeConfig::load`'s documented "full experience"), which is what
+/// [`isolate_xdg_first_launch`] actually leaves in place.
 ///
 /// Only the four directories: the environment variables that redirect an
 /// editor's configuration from outside them are dropped by
 /// `PtySession::spawn_configured` for every pty spawn in the tree, this
 /// one included, so that no caller has to remember a list to stay
 /// hermetic.
-pub fn isolate_xdg(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
+pub fn isolate_xdg_native_off(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
     isolate_xdg_first_launch(cmd, home);
     disable_native_features(home);
 }
 
-/// [`isolate_xdg`] without the config file, for the one test whose subject
-/// is what a first launch does: reading the config, taking the superseded
-/// surfaces over, claiming the feature keys and introducing all of it once.
+/// [`isolate_xdg_native_off`] without the config file, for the one test
+/// whose subject is what a first launch does: reading the config, taking
+/// the superseded surfaces over, claiming the feature keys and introducing
+/// all of it once.
 pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &Path) {
     for var in [
         "XDG_CONFIG_HOME",
@@ -106,9 +115,9 @@ pub fn isolate_xdg_first_launch(cmd: &mut portable_pty::CommandBuilder, home: &P
 }
 
 /// `home`'s subdirectory for the `XDG_*_HOME` variable named `var`. One
-/// derivation for both the environment `isolate_xdg` sets and the files
-/// planted under those directories, so a session never reads a config from
-/// a directory it was not pointed at.
+/// derivation for both the environment `isolate_xdg_native_off` sets and
+/// the files planted under those directories, so a session never reads a
+/// config from a directory it was not pointed at.
 ///
 /// Public because a test that plants its own file under one of those
 /// directories -- or reads back a file the spawned process wrote to one --

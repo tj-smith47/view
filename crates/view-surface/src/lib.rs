@@ -12,7 +12,9 @@ pub use cache::SurfaceCache;
 
 use unicode_width::UnicodeWidthStr;
 use view_core::events::{saturate_u16, PmItem};
-use view_core::model::{CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState};
+use view_core::model::{
+    CmdlineState, Model, Overlay, OverlayKind, PopupmenuState, TablineState, Tier,
+};
 use view_core::native::geometry::OverlayBox;
 use view_core::native::palette::PaletteState;
 use view_core::native::views::{
@@ -167,18 +169,52 @@ pub struct CursorSpec {
     pub shape: CursorShape,
 }
 
-impl Layer {
-    /// A layer that draws no frame of its own: an engine grid, or one of
-    /// the chrome overlays that fills its whole rect with content.
+impl LayerKind {
+    /// Whether this kind is one of the native overlays [`overlay::rows`]
+    /// lays out, and therefore the kind of layer that carries a frame.
     ///
-    /// [`overlay::framed`] is the counterpart for a native overlay, which
-    /// carries the charset its border is drawn from.
+    /// Matched exhaustively (`LayerKind` is `#[non_exhaustive]` only to
+    /// consumers outside this crate), so a new variant cannot be added
+    /// without deciding which side of the line it falls on, here and in
+    /// `overlay::body` alike.
     #[must_use]
-    pub fn unframed(rect: Rect, kind: LayerKind) -> Self {
+    pub const fn is_native_overlay(&self) -> bool {
+        match self {
+            Self::Picker(_)
+            | Self::Tree(_)
+            | Self::Statusline(_)
+            | Self::Prompt(_)
+            | Self::Palette(_) => true,
+            Self::EngineGrid
+            | Self::Cmdline(_)
+            | Self::Messages(_)
+            | Self::Tabline(_)
+            | Self::Popupmenu(_)
+            | Self::Shell => false,
+        }
+    }
+}
+
+impl Layer {
+    /// The one [`Layer`] constructor: `kind` decides whether the layer
+    /// carries a frame, and `tier` decides the charset it is drawn from
+    /// when it does.
+    ///
+    /// Deriving the frame rather than accepting it is what makes the two
+    /// silent-blank mismatches unrepresentable. A native overlay handed no
+    /// charset painted nothing at all (`view-tui`'s painter has no frame to
+    /// draw and refuses to draw half of one), and an engine grid handed a
+    /// charset framed nothing (`overlay::rows` has no body to lay out) --
+    /// in both directions a caller got an empty rect with nothing failing
+    /// loudly. `kind` is the only fact either outcome ever depended on, so
+    /// it is the only fact the caller supplies.
+    #[must_use]
+    pub fn new(rect: Rect, kind: LayerKind, tier: Tier) -> Self {
+        let borders = kind.is_native_overlay().then(|| BorderSet::for_tier(tier));
         Self {
             rect,
             kind,
-            borders: None,
+            borders,
         }
     }
 }
@@ -239,9 +275,10 @@ pub fn render(model: &Model) -> Surface {
     let (grid_w, grid_h) = engine.grid().size();
     let offset = model.chrome_rows();
 
-    let mut layers = vec![Layer::unframed(
+    let mut layers = vec![Layer::new(
         Rect::new(offset, 0, grid_w, grid_h),
         LayerKind::EngineGrid,
+        model.caps.tier,
     )];
 
     if !model.content_painted {
@@ -249,9 +286,10 @@ pub fn render(model: &Model) -> Surface {
         // engine grid: the very first shell paint happens before nvim has
         // ever sent a grid_resize, so grid_w/grid_h are not yet meaningful
         // dimensions to paint a placeholder into
-        layers.push(Layer::unframed(
+        layers.push(Layer::new(
             Rect::new(0, 0, model.term_width, model.term_height),
             LayerKind::Shell,
+            model.caps.tier,
         ));
     }
 
@@ -264,9 +302,10 @@ pub fn render(model: &Model) -> Surface {
         // gets reserved with nothing painted into it or the tabline paints
         // over buffer content
         if offset > 0 {
-            layers.push(Layer::unframed(
+            layers.push(Layer::new(
                 Rect::new(0, 0, grid_w, 1).clamp_to(grid_w, grid_h),
                 LayerKind::Tabline(tabline.clone()),
+                model.caps.tier,
             ));
         }
     }
@@ -293,20 +332,18 @@ pub fn render(model: &Model) -> Surface {
                 .cloned();
             let state = PaletteState::new(cmdline.clone(), completion);
             let rect = palette_rect(model, offset);
-            layers.push(overlay::framed(
+            layers.push(Layer::new(
                 Rect::new(rect.row, rect.col, rect.width, rect.height),
                 LayerKind::Palette(state.view()),
-                BorderSet::for_tier(model.caps.tier),
+                model.caps.tier,
             ));
         } else {
             layers.push(overlay_layer(
-                grid_h.saturating_sub(1),
-                0,
-                grid_w,
-                1,
+                Rect::new(grid_h.saturating_sub(1), 0, grid_w, 1),
                 (grid_w, grid_h),
                 offset,
                 LayerKind::Cmdline(cmdline.clone()),
+                model.caps.tier,
             ));
         }
     }
@@ -362,13 +399,11 @@ pub fn render(model: &Model) -> Surface {
         let height = content_height.saturating_add(2);
         let col = grid_w.saturating_sub(width);
         layers.push(overlay_layer(
-            0,
-            col,
-            width,
-            height,
+            Rect::new(0, col, width, height),
             (grid_w, grid_h),
             offset,
             LayerKind::Messages(visible),
+            model.caps.tier,
         ));
     }
     if let Some(pm) = &engine.popupmenu {
@@ -396,13 +431,11 @@ pub fn render(model: &Model) -> Surface {
                 let width = popupmenu_width(&pm.items).min(grid_w).max(1);
                 let height = u16::try_from(pm.items.len()).unwrap_or(u16::MAX).max(1);
                 layers.push(overlay_layer(
-                    row,
-                    col,
-                    width,
-                    height,
+                    Rect::new(row, col, width, height),
                     (grid_w, grid_h),
                     offset,
                     LayerKind::Popupmenu(pm.clone()),
+                    model.caps.tier,
                 ));
             }
         }
@@ -413,7 +446,7 @@ pub fn render(model: &Model) -> Surface {
         // `grid_h` the engine actually reported -- never recomputed from
         // `term_height`, which would disagree the moment a resize is still
         // in flight to nvim.
-        layers.push(overlay::framed(
+        layers.push(Layer::new(
             Rect::new(
                 offset.saturating_add(grid_h),
                 0,
@@ -421,7 +454,7 @@ pub fn render(model: &Model) -> Surface {
                 model.statusline_rows(),
             ),
             LayerKind::Statusline(engine.statusline.view(grid_w)),
-            BorderSet::for_tier(model.caps.tier),
+            model.caps.tier,
         ));
     }
     // last, and in stack order: a native overlay sits above every engine
@@ -543,33 +576,36 @@ fn cmdline_popupmenu_layer(
         .unwrap_or(u16::MAX)
         .saturating_add(saturate_u16(pm.col));
     let rect = Rect::new(row, col, width, height).clamp_to(model.term_width, model.term_height);
-    Some(Layer::unframed(rect, LayerKind::Popupmenu(pm.clone())))
+    Some(Layer::new(
+        rect,
+        LayerKind::Popupmenu(pm.clone()),
+        model.caps.tier,
+    ))
 }
 
-/// Builds one grid-space overlay [`Layer`]: `row`/`col`/`width`/`height`
-/// are first clamped to `bounds` (the grid's own coordinate space, which is
-/// what wire-derived positions like a popup menu's `(row, col)` are
-/// expressed in), then translated down by `offset` (the reserved chrome
-/// rows) to land in the terminal's own coordinate space. Clamping before
-/// translating means a hostile or stale position/size from wire-derived
-/// state can never place a layer outside the current grid, regardless of
-/// whether chrome is currently reserved.
+/// Builds one grid-space overlay [`Layer`]: `rect` is first clamped to
+/// `bounds` (the grid's own coordinate space, which is what wire-derived
+/// positions like a popup menu's `(row, col)` are expressed in), then
+/// translated down by `offset` (the reserved chrome rows) to land in the
+/// terminal's own coordinate space. Clamping before translating means a
+/// hostile or stale position/size from wire-derived state can never place a
+/// layer outside the current grid, regardless of whether chrome is
+/// currently reserved.
 fn overlay_layer(
-    row: u16,
-    col: u16,
-    width: u16,
-    height: u16,
+    rect: Rect,
     bounds: (u16, u16),
     offset: u16,
     kind: LayerKind,
+    tier: Tier,
 ) -> Layer {
-    let clamped = Rect::new(row, col, width, height).clamp_to(bounds.0, bounds.1);
-    Layer::unframed(
+    let clamped = rect.clamp_to(bounds.0, bounds.1);
+    Layer::new(
         Rect {
             row: clamped.row.saturating_add(offset),
             ..clamped
         },
         kind,
+        tier,
     )
 }
 
@@ -583,10 +619,10 @@ fn overlay_layer(
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
     let kind = layer_kind(&open.kind)?;
     let cells = model.overlay_rect(open);
-    Some(overlay::framed(
+    Some(Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,
-        BorderSet::for_tier(model.caps.tier),
+        model.caps.tier,
     ))
 }
 
@@ -1805,6 +1841,45 @@ mod tests {
             palette_layer.rect.row + 1,
             "cursor must land on the palette's header row, in the same \
              chrome-shifted coordinate space as the box it sits inside"
+        );
+    }
+
+    /// The statusline's layer emission, at this crate's own seam rather
+    /// than only through a pty: the bar is a full-width row placed
+    /// immediately below the grid `grid_target()` already shrank for it,
+    /// and it exists exactly while the feature does.
+    #[test]
+    fn the_statusline_feature_emits_one_full_width_bar_below_the_grid() {
+        let mut model = model_with_grid(40, 11);
+        model.term_width = 40;
+        model.term_height = 12;
+        model.statusline_enabled = true;
+
+        let surface = render(&model);
+        let bars: Vec<&Layer> = surface
+            .layers
+            .iter()
+            .filter(|l| matches!(l.kind, LayerKind::Statusline(_)))
+            .collect();
+        assert_eq!(bars.len(), 1, "exactly one statusline layer: {bars:?}");
+        assert_eq!(
+            bars[0].rect,
+            Rect::new(model.chrome_rows() + 11, 0, 40, 1),
+            "the bar takes the row immediately under the engine grid, full width"
+        );
+        assert!(
+            bars[0].borders.is_some(),
+            "a statusline is a native overlay kind and carries the tier's charset, \
+             even at the height where the layout pass draws no edge cells"
+        );
+
+        model.statusline_enabled = false;
+        assert!(
+            render(&model)
+                .layers
+                .iter()
+                .all(|l| !matches!(l.kind, LayerKind::Statusline(_))),
+            "the feature off means no layer at all, not an empty one"
         );
     }
 }
