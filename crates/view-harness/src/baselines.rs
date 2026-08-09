@@ -123,6 +123,33 @@ impl Headroom {
     pub fn admits_non_positive(self) -> bool {
         matches!(self, Self::Signed { .. })
     }
+
+    /// The lowest value a record may ratchet down to from `recorded` where
+    /// this policy is a class's published spread for the statistic: the
+    /// band that admits `bar(recorded)` of upward tolerance, mirrored
+    /// downward off the same recorded value.
+    ///
+    /// The mirror is additive -- the floor is
+    /// `recorded - (bar(recorded) - recorded)`, i.e.
+    /// `2 * recorded - bar(recorded)` -- so the two policies reduce to:
+    ///
+    /// - [`Headroom::Proportional`]: `recorded * (2 - factor)`, which
+    ///   reaches zero at a factor of 2; a spread that wide admits any draw
+    ///   a positive-by-construction metric can produce, so the floor stops
+    ///   binding exactly where the band stops excluding anything.
+    /// - [`Headroom::Signed`]:
+    ///   `recorded - max(|recorded| * (factor - 1), floor)`, the same
+    ///   allowance the upward bar grants, subtracted instead of added.
+    ///
+    /// A value below this floor improved on the recorded one by more than
+    /// the published spread says honest runs move on this class, which is
+    /// the signature of a lucky draw rather than of faster code; see
+    /// [`RatchetOutcome::RefusedBelowSpread`] for why such a draw must not
+    /// become the bar.
+    #[must_use]
+    pub fn record_floor(self, recorded: f64) -> f64 {
+        2.0 * recorded - self.bar(recorded)
+    }
 }
 
 impl std::fmt::Display for Headroom {
@@ -358,6 +385,15 @@ fn resized(policy: Headroom, factor: f64) -> Headroom {
 /// turn a pass into a failure -- out of a shared-class tail on the strength
 /// of this value is what the exemption exists to forbid, and nothing here
 /// licenses it.
+///
+/// The ratchet's below-spread guard consumes this value under a different
+/// warrant, established the same way: it acts only in the *improving*
+/// direction, refusing to move a recorded bar further below itself than the
+/// published band reaches ([`Headroom::record_floor`]). A mis-sized spread
+/// there can only mis-place the refusal floor -- at worst demanding a
+/// replicate campaign for an honest improvement, which is already the
+/// documented practice on a wide cell -- and can never turn any measurement
+/// into a regression verdict.
 ///
 /// The returned policy carries the metric's own shape, so a signed paired
 /// delta still gets its floor rather than a proportional allowance that
@@ -1051,6 +1087,28 @@ pub enum RatchetOutcome {
         measured: f64,
         regression_masked: bool,
     },
+    /// The measured value sits further below the recorded one than the
+    /// class's published spread for the statistic admits, so the record
+    /// refused it: the recorded value is held and the measured one is not
+    /// written.
+    ///
+    /// The mirror image of the masked-regression surprise. There a
+    /// suspicious *worse* value still writes -- the ratchet keeps the
+    /// better bar and the very next gate re-announces the regression --
+    /// while a suspiciously *better* value must not, because
+    /// ratchet-only-tightens makes a lucky draw permanent: a bar pinned
+    /// below the class's own honest band fails a large fraction of later
+    /// honest runs on unchanged code. The legitimate path to a bar this
+    /// low is a replicate campaign whose median clears it, hand-recorded;
+    /// the record report names that command beside the values.
+    RefusedBelowSpread {
+        metric: String,
+        recorded: f64,
+        measured: f64,
+        /// The published spread that tripped the refusal, carried so the
+        /// report can print the band the measurement fell out of.
+        spread: Headroom,
+    },
     /// The measurement was not a number a bar can be derived from (NaN,
     /// infinite, or non-positive for a metric whose values are positive by
     /// construction), so nothing was recorded for it.
@@ -1086,12 +1144,16 @@ pub enum RatchetOutcome {
 /// clears the replicate band's own rule by under half a percent, so a
 /// record lowering scroll.minimal's floor about 4% (1.7778 to 1.70) puts
 /// the bar at 2.006 against a 2.013 already observed on unchanged
-/// binaries. Sizing a noise-aware floor into the downward move (only
-/// ratchet down past the host's measured resolution) is the refinement
-/// that closes this, and it needs the per-host resolution floor that is
-/// not yet measured; until then the min-ratchet is the faithful "only
-/// improves" rule and the shared-class breach is the documented
-/// loud-breach-then-rerun regime.
+/// binaries. Where the class has published its resolution -- a sidecar
+/// spread for the statistic, read via [`declared_headroom`] -- the
+/// downward move is therefore bounded by the same band mirrored below the
+/// recorded value ([`Headroom::record_floor`]): a single draw past it is
+/// refused ([`RatchetOutcome::RefusedBelowSpread`]) and the recorded bar
+/// held, so moving a bar further than the class's honest runs move takes a
+/// replicate campaign's median, hand-recorded. A class without a published
+/// spread keeps the pure min-ratchet -- a compiled default is a guess, not
+/// a measurement to mirror -- and its shared-class breach stays the
+/// documented loud-breach-then-rerun regime.
 #[must_use]
 pub fn ratchet_cell(
     existing: Option<&CellMetrics>,
@@ -1103,6 +1165,10 @@ pub fn ratchet_cell(
     let mut cell = CellMetrics::new();
     let mut outcomes = Vec::new();
     for (metric, &value) in measured {
+        // resolved off the table before the gate allowance shadows it: the
+        // guard reads the published spread, never the compiled default a
+        // gate allowance falls back to
+        let declared = declared_headroom(headroom, scenario, metric);
         let headroom = headroom_for(headroom, scenario, metric, controlled);
         // most metrics are a latency, a ratio or a size and cannot be zero
         // or below without the run having gone wrong; the signed paired
@@ -1129,12 +1195,26 @@ pub fn ratchet_cell(
                 });
             }
             Some(&recorded) if value < recorded => {
-                cell.insert(metric.clone(), value);
-                outcomes.push(RatchetOutcome::Improved {
-                    metric: metric.clone(),
-                    old: recorded,
-                    new: value,
-                });
+                // a default is a guess about how far the statistic moves,
+                // and refusing a record on a guess would demand a replicate
+                // campaign of every class nobody has characterized
+                let tripped = declared.filter(|spread| value < spread.record_floor(recorded));
+                if let Some(spread) = tripped {
+                    cell.insert(metric.clone(), recorded);
+                    outcomes.push(RatchetOutcome::RefusedBelowSpread {
+                        metric: metric.clone(),
+                        recorded,
+                        measured: value,
+                        spread,
+                    });
+                } else {
+                    cell.insert(metric.clone(), value);
+                    outcomes.push(RatchetOutcome::Improved {
+                        metric: metric.clone(),
+                        old: recorded,
+                        new: value,
+                    });
+                }
             }
             Some(&recorded) => {
                 cell.insert(metric.clone(), recorded);
@@ -1180,6 +1260,9 @@ pub struct CellRatchet {
 pub struct RecordPlan {
     pub file: BaselineFile,
     pub cells: Vec<CellRatchet>,
+    /// The machine class recorded, carried so a below-spread refusal can
+    /// name the exact replicate-campaign command in its own message.
+    pub class: String,
     /// Set when a full-matrix record found an existing baseline it could
     /// not ratchet against (different pin or class) and recorded fresh
     /// instead; the operator is told why the bars did not ratchet.
@@ -1259,6 +1342,7 @@ pub fn plan_record(
     RecordPlan {
         file,
         cells,
+        class: class.to_string(),
         reset_reason,
     }
 }
@@ -1282,6 +1366,20 @@ impl RecordPlan {
                     }
                 )
             })
+            .count()
+    }
+
+    /// The number of metrics the record refused to move further below their
+    /// recorded values than the class's published spread admits. Each held
+    /// its recorded bar, the refused values are not in the file, and the
+    /// operator's path to the lower bar is the replicate-campaign command
+    /// in the metric's own alert line.
+    #[must_use]
+    pub fn spread_refusals(&self) -> usize {
+        self.cells
+            .iter()
+            .flat_map(|cell| &cell.outcomes)
+            .filter(|outcome| matches!(outcome, RatchetOutcome::RefusedBelowSpread { .. }))
             .count()
     }
 
@@ -1331,6 +1429,26 @@ impl RecordPlan {
                         "      held {scenario}.{fixture} {metric}: recorded {recorded:.4} kept \
                          (measured {measured:.4} did not improve it)"
                     ),
+                    RatchetOutcome::RefusedBelowSpread {
+                        metric,
+                        recorded,
+                        measured,
+                        spread,
+                    } => {
+                        alerts.push(format!(
+                            "RECORD REFUSED [{scenario}.{fixture}] {metric}: measured \
+                             {measured:.4} is further below the recorded {recorded:.4} than the \
+                             published spread ({spread}) admits (record floor {floor:.4}); one \
+                             draw this deep pins a bar honest runs fail, so the recorded value \
+                             was held and the measured one was not written. To move the bar, \
+                             re-run `task bench -- --scenario {scenario} --fixture {fixture} \
+                             --class {class}` repeatedly on a quiet host and hand-record the \
+                             replicate median",
+                            floor = spread.record_floor(*recorded),
+                            class = self.class,
+                        ));
+                        continue;
+                    }
                     RatchetOutcome::Held {
                         metric,
                         recorded,
@@ -1365,6 +1483,14 @@ impl RecordPlan {
             alerts.push(format!(
                 "RECORD WARNING: {masked} held metric(s) would have breached the gate; the record \
                  kept the better bar but the measurement shows a regression"
+            ));
+        }
+        let refused = self.spread_refusals();
+        if refused > 0 {
+            alerts.push(format!(
+                "RECORD REFUSAL: {refused} metric(s) measured further below their recorded bars \
+                 than this class's published spread admits; the recorded bars were held and the \
+                 file does not carry the refused value(s)"
             ));
         }
         RecordReport {
@@ -2315,6 +2441,7 @@ mod tests {
                 RatchetOutcome::New { metric, .. }
                 | RatchetOutcome::Improved { metric, .. }
                 | RatchetOutcome::Held { metric, .. }
+                | RatchetOutcome::RefusedBelowSpread { metric, .. }
                 | RatchetOutcome::Rejected { metric, .. } => metric == name,
             })
             .expect("outcome present for the named metric")
@@ -2469,6 +2596,241 @@ mod tests {
                 regression_masked: false,
             }
         );
+    }
+
+    fn spread_table(entries: &[(&str, f64)]) -> HeadroomTable {
+        entries
+            .iter()
+            .map(|(key, factor)| (key.to_string(), *factor))
+            .collect()
+    }
+
+    #[test]
+    fn a_below_spread_improvement_is_refused_and_the_recorded_bar_held() {
+        // recorded 1.20 under a published x1.10 spread tolerates 0.12 of
+        // movement either way; 1.05 is 0.15 below, a draw the published band
+        // says honest runs do not produce, and ratchet-only-tightens would
+        // pin the bar to it forever
+        let existing = metrics(&[("ratio_p50", 1.20)]);
+        let measured = metrics(&[("ratio_p50", 1.05)]);
+        let table = spread_table(&[("echo.ratio_p50", 1.10)]);
+        let (cell, outcomes) = ratchet_cell(Some(&existing), &measured, "echo", false, &table);
+        assert_eq!(
+            cell["ratio_p50"], 1.20,
+            "the refused value must not be written; the recorded bar is held"
+        );
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p50"),
+            &RatchetOutcome::RefusedBelowSpread {
+                metric: "ratio_p50".to_string(),
+                recorded: 1.20,
+                measured: 1.05,
+                spread: Headroom::Proportional(1.10),
+            }
+        );
+    }
+
+    #[test]
+    fn the_record_floor_boundary_is_inclusive_for_a_proportional_spread() {
+        // "further below than the spread" is strict: a draw AT the mirrored
+        // floor moved exactly as far as the published band reaches, which
+        // the band vouches for; one just past it is the draw the band
+        // excludes
+        let table = spread_table(&[("echo.ratio_p50", 1.10)]);
+        let existing = metrics(&[("ratio_p50", 1.20)]);
+        let floor = Headroom::Proportional(1.10).record_floor(1.20);
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p50", floor)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p50"], floor, "an at-floor improvement records");
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p50"),
+            RatchetOutcome::Improved { .. }
+        ));
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p50", floor - 1e-9)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p50"], 1.20);
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p50"),
+            RatchetOutcome::RefusedBelowSpread { .. }
+        ));
+    }
+
+    #[test]
+    fn the_record_floor_boundary_is_inclusive_for_a_signed_spread() {
+        // at a recorded 0.5 the 0.25 ms floor dominates 0.5 * 0.30, so the
+        // band admits a fall to exactly 0.25 -- half the recorded value,
+        // where a proportional mirror would have placed the floor elsewhere
+        let table = spread_table(&[("echo.paired_delta_p99_ms", 1.30)]);
+        let existing = metrics(&[("paired_delta_p99_ms", 0.5)]);
+        let spread = Headroom::Signed {
+            factor: 1.30,
+            floor: SIGNED_DELTA_FLOOR_MS,
+        };
+        let floor = spread.record_floor(0.5);
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("paired_delta_p99_ms", floor)]),
+            "echo",
+            true,
+            &table,
+        );
+        assert_eq!(cell["paired_delta_p99_ms"], floor);
+        assert!(matches!(
+            outcome_for(&outcomes, "paired_delta_p99_ms"),
+            RatchetOutcome::Improved { .. }
+        ));
+
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("paired_delta_p99_ms", floor - 1e-9)]),
+            "echo",
+            true,
+            &table,
+        );
+        assert_eq!(cell["paired_delta_p99_ms"], 0.5);
+        assert!(matches!(
+            outcome_for(&outcomes, "paired_delta_p99_ms"),
+            RatchetOutcome::RefusedBelowSpread { .. }
+        ));
+    }
+
+    #[test]
+    fn the_mirrored_band_matches_the_published_upward_tolerance() {
+        // Proportional mirrors to recorded * (2 - factor)
+        assert!((Headroom::Proportional(1.25).record_floor(1.0) - 0.75).abs() < 1e-12);
+        // a factor of 2 mirrors to zero, so a positive-by-construction
+        // metric can never trip a band that wide
+        assert!(Headroom::Proportional(2.0).record_floor(1.0).abs() < 1e-12);
+        let signed = Headroom::Signed {
+            factor: 1.30,
+            floor: 0.25,
+        };
+        // factor-dominant: recorded - |recorded| * (factor - 1)
+        assert!((signed.record_floor(2.0) - 1.4).abs() < 1e-9);
+        // floor-dominant: recorded - floor
+        assert!((signed.record_floor(0.5) - 0.25).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_deep_improvement_without_a_published_spread_records_normally() {
+        // the compiled default is a guess about how far the statistic
+        // moves, not a measurement; refusing a record on a guess would
+        // demand a replicate campaign of every uncharacterized class
+        let existing = metrics(&[("ratio_p50", 1.20)]);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p50", 0.30)]),
+            "echo",
+            false,
+            &HeadroomTable::new(),
+        );
+        assert_eq!(cell["ratio_p50"], 0.30);
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p50"),
+            RatchetOutcome::Improved { .. }
+        ));
+    }
+
+    #[test]
+    fn a_worsening_stays_on_the_masked_regression_path_under_a_published_spread() {
+        // the guard is one-directional: the worse-direction surprise
+        // already has its own channel, and it writes (the ratchet keeps
+        // the better bar) where the better-direction surprise must not
+        let table = spread_table(&[("echo.ratio_p50", 1.05)]);
+        let existing = metrics(&[("ratio_p50", 1.0)]);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p50", 1.10)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p50"], 1.0);
+        assert_eq!(
+            outcome_for(&outcomes, "ratio_p50"),
+            &RatchetOutcome::Held {
+                metric: "ratio_p50".to_string(),
+                recorded: 1.0,
+                measured: 1.10,
+                regression_masked: true,
+            }
+        );
+    }
+
+    #[test]
+    fn the_scenario_qualified_spread_governs_the_guard_in_its_own_scenario() {
+        // the bare x2.0 host-wide entry mirrors to a floor of 0 and admits
+        // any positive draw; the echo-qualified x1.05 puts the floor at
+        // 0.95, and in echo it must be the one the guard reads
+        let table = spread_table(&[("ratio_p50", 2.0), ("echo.ratio_p50", 1.05)]);
+        let existing = metrics(&[("ratio_p50", 1.0)]);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p50", 0.90)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p50"], 1.0);
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p50"),
+            RatchetOutcome::RefusedBelowSpread {
+                spread: Headroom::Proportional(factor),
+                ..
+            } if (*factor - 1.05).abs() < 1e-12
+        ));
+    }
+
+    #[test]
+    fn the_guard_reads_a_published_spread_the_shared_class_gate_exempts() {
+        // ratio_p99 is ungated on a shared class, but the ratchet still
+        // writes tail bars there and a lucky tail draw pins them just the
+        // same; the spread is a measured fact about how far the number
+        // moves, which is the only thing the guard consumes
+        let table = spread_table(&[("echo.ratio_p99", 1.10)]);
+        let existing = metrics(&[("ratio_p99", 1.0)]);
+        let (cell, outcomes) = ratchet_cell(
+            Some(&existing),
+            &metrics(&[("ratio_p99", 0.85)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p99"], 1.0);
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p99"),
+            RatchetOutcome::RefusedBelowSpread { .. }
+        ));
+    }
+
+    #[test]
+    fn a_fresh_metric_is_not_guarded_because_nothing_recorded_exists_to_fall_below() {
+        let table = spread_table(&[("echo.ratio_p50", 1.05)]);
+        let (cell, outcomes) = ratchet_cell(
+            None,
+            &metrics(&[("ratio_p50", 0.50)]),
+            "echo",
+            false,
+            &table,
+        );
+        assert_eq!(cell["ratio_p50"], 0.50);
+        assert!(matches!(
+            outcome_for(&outcomes, "ratio_p50"),
+            RatchetOutcome::New { .. }
+        ));
     }
 
     fn measured_cell(scenario: &str, fixture: &str, pairs: &[(&str, f64)]) -> MeasuredCell {
@@ -2684,6 +3046,65 @@ mod tests {
         assert!(
             !report.info.iter().any(|l| l.contains("MASKED")),
             "the ledger must not be where a masked regression is reported: {report:?}"
+        );
+    }
+
+    #[test]
+    fn a_refused_record_names_the_replicate_campaign_in_its_own_message() {
+        // the motivating cell: a bar recorded at the 1.114 replicate median
+        // meets a lucky 0.974 draw; under a published x1.10 spread the
+        // record floor is about 1.003, and the operator's whole path from
+        // refusal to a legitimate record -- the scoped command, the spread,
+        // both values -- must live in the alert itself
+        let existing = baseline_with(
+            "v0.12.4",
+            "dev-linux",
+            &[("echo", "heavy", &[("ratio_p50", 1.114)])],
+        );
+        let measured = vec![measured_cell("echo", "heavy", &[("ratio_p50", 0.974)])];
+        let table = spread_table(&[("echo.ratio_p50", 1.10)]);
+        let plan = plan_record(
+            Some(existing),
+            RecordMode::SingleCell,
+            "dev-linux",
+            "v0.12.4",
+            &measured,
+            &table,
+        );
+        assert_eq!(plan.spread_refusals(), 1);
+        assert_eq!(
+            plan.file.cell(&CellId::new("echo", "heavy")).unwrap()["ratio_p50"],
+            1.114,
+            "the file to be written must not carry the refused value"
+        );
+        let report = plan.report("dev-linux.toml");
+        let alert = report
+            .alerts
+            .iter()
+            .find(|line| line.contains("RECORD REFUSED"))
+            .expect("a refusal must produce its own alert line");
+        for needle in [
+            "task bench -- --scenario echo --fixture heavy --class dev-linux",
+            "x headroom 1.1",
+            "1.1140",
+            "0.9740",
+            "quiet host",
+            "replicate median",
+        ] {
+            assert!(
+                alert.contains(needle),
+                "the refusal alert must carry {needle:?}: {alert}"
+            );
+        }
+        assert!(
+            report.alerts.iter().any(|l| l.contains("RECORD REFUSAL:")),
+            "a trailing summary must count the refusals: {:?}",
+            report.alerts
+        );
+        assert!(
+            !report.info.iter().any(|l| l.contains("REFUSED")),
+            "the ledger is not where a refusal is reported: {:?}",
+            report.info
         );
     }
 

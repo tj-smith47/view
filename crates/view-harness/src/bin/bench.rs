@@ -788,6 +788,7 @@ fn main() -> Result<()> {
     let headroom = baselines::load_headroom(&headroom_file, &cli.class)?;
     let recording = cli.record;
     let mut masked_regressions = 0usize;
+    let mut spread_refusals = 0usize;
     let gating = cli.gate;
     let controlled = baselines::is_controlled_class(&cli.class);
 
@@ -1082,6 +1083,7 @@ fn main() -> Result<()> {
         // skippable in a CI log. A distinct code says "written, and you have
         // something to look at" without colliding with the gate's own 1.
         masked_regressions = plan.masked_regressions();
+        spread_refusals = plan.spread_refusals();
     }
 
     if gating {
@@ -1294,6 +1296,13 @@ fn main() -> Result<()> {
         }
     }
 
+    // one record can produce both surprises on different metrics; the
+    // refusal's code wins because its next step (the replicate-campaign
+    // command) exists only in this run's output, while a masked regression
+    // re-announces itself at the very next gate
+    if spread_refusals > 0 {
+        std::process::exit(EXIT_RECORD_SPREAD_REFUSED);
+    }
     if masked_regressions > 0 {
         std::process::exit(EXIT_RECORD_MASKED_REGRESSION);
     }
@@ -1384,6 +1393,16 @@ const EXIT_RECORD_MASKED_REGRESSION: i32 = 3;
 /// baseline was written and no gate verdict was reached. Distinct from a
 /// breach, which is a complete matrix reporting a real regression.
 const EXIT_INCOMPLETE_MATRIX: i32 = 4;
+
+/// A record run refused to move at least one bar further below its
+/// recorded value than the class's published spread admits: the file was
+/// written with those bars held, none of the refused values are in it, and
+/// each refusal's alert names the replicate-campaign command that
+/// legitimately re-records the cell. Non-zero because the operator asked
+/// for a record the run declined to fully perform; distinct from the
+/// masked-regression 3 because the required follow-up is different in kind
+/// (run a campaign, not investigate a regression).
+const EXIT_RECORD_SPREAD_REFUSED: i32 = 5;
 
 #[cfg(test)]
 mod tests {
@@ -1667,6 +1686,25 @@ mod tests {
         // a full-matrix record rebuilds the file and keeps the refusal loud
         require_record_survives_refusal(baselines::RecordMode::FullMatrix, &refused).unwrap();
         require_record_survives_refusal(baselines::RecordMode::SingleCell, &[]).unwrap();
+    }
+
+    #[test]
+    fn every_exit_code_names_a_distinct_verdict() {
+        // 0 is success and 2 is clap's own usage-error exit; a code
+        // colliding with either -- or with another verdict -- makes a CI
+        // log's exit status ambiguous about what actually happened
+        let codes = [
+            EXIT_GATE_BREACH,
+            EXIT_RECORD_MASKED_REGRESSION,
+            EXIT_INCOMPLETE_MATRIX,
+            EXIT_RECORD_SPREAD_REFUSED,
+        ];
+        for (i, a) in codes.iter().enumerate() {
+            assert!(*a != 0 && *a != 2, "verdict code {a} collides");
+            for b in &codes[i + 1..] {
+                assert_ne!(a, b, "two verdicts share exit code {a}");
+            }
+        }
     }
 
     #[test]
