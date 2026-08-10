@@ -137,7 +137,7 @@ mod tests {
     }
 
     #[test]
-    fn route_matches_the_brief_table_exactly() {
+    fn route_matches_the_severity_to_route_mapping_exactly() {
         assert_eq!(route("confirm"), Route::Prompt);
         assert_eq!(route("return_prompt"), Route::Prompt);
         for kind in [

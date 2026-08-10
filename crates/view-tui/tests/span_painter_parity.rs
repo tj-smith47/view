@@ -8,12 +8,11 @@
 //! its text. After the reshape, each painter walks a row's `Vec<Span>`
 //! independently -- `view-tui`'s `paint_span_row` places cells span by
 //! span, `view-oracle`'s `paint_text` still writes `overlay::line_text`'s
-//! flattened `String` -- and a bug in either walk (see the `clip_spans`
-//! early-break bug this same reshape round found and fixed in
-//! `view-surface`) would show up as exactly this: the two painters
-//! disagreeing about what one row says, while each still believes it
-//! painted the row it was handed. That is the divergence class this test
-//! exists to catch.
+//! flattened `String` -- and a bug in either walk (see `view-surface`'s
+//! `clip_spans` early-break bug, fixed alongside this reshape) would show
+//! up as exactly this: the two painters disagreeing about what one row
+//! says, while each still believes it painted the row it was handed. That
+//! is the divergence class this test exists to catch.
 //!
 //! The statusline is the layer under test because it is the only overlay
 //! whose rows carry more than one `StyleRole` in real content (every other

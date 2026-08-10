@@ -74,12 +74,12 @@ getline(1) = "hello from the pipe"
 
 ## `nvim --api-info` (msgpack-RPC metadata, decoded)
 
-The brief's own mandated source, captured directly rather than recalled: `nvim
---api-info` writes the same `nvim_get_api_info` metadata `Engine::spawn`'s
-handshake decodes, as msgpack on stdout. Decoded here with `python3 -m
-msgpack` for a readable diff against the two claims below; the bytes
-themselves are exactly what `EngineHandle`'s own msgpack-rpc reader parses at
-spawn time.
+The mandated source for API metadata, captured directly rather than
+recalled: `nvim --api-info` writes the same `nvim_get_api_info` metadata
+`Engine::spawn`'s handshake decodes, as msgpack on stdout. Decoded here with
+`python3 -m msgpack` for a readable diff against the two claims below; the
+bytes themselves are exactly what `EngineHandle`'s own msgpack-rpc reader
+parses at spawn time.
 
 ```
 $ nvim --api-info > api-info.mpack

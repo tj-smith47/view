@@ -223,8 +223,8 @@ fn truncate_line(line: &str) -> String {
 /// pulling in `regex`/`regex-syntax` as an extra explicit dependency just
 /// for `regex::escape`: `grep-regex` already depends on `regex-syntax`
 /// transitively, and this crate's dependency surface for the picker source
-/// stays exactly `ignore` + `grep-searcher` + `grep-regex`, matching the
-/// brief's chosen shape.
+/// stays exactly `ignore` + `grep-searcher` + `grep-regex`, the live-grep
+/// source's chosen dependency set.
 fn escape_literal(needle: &str) -> String {
     let mut escaped = String::with_capacity(needle.len());
     for c in needle.chars() {

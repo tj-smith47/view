@@ -455,11 +455,10 @@ mod tests {
 
     #[test]
     fn a_reply_for_a_stale_generation_is_dropped_not_merged() {
-        // this is the falsifiable check the brief names: feed results for
-        // an old generation after a newer one has already been issued, and
-        // confirm they never reach the view -- a naive `apply_results` that
-        // always overwrites passes every other test in this module and only
-        // this one catches it
+        // feed results for an old generation after a newer one has already
+        // been issued, and confirm they never reach the view -- a naive
+        // `apply_results` that always overwrites passes every other test in
+        // this module and only this one catches it
         let mut state = PickerState::open(Source::Files {
             root: PathBuf::from("/tmp"),
         });

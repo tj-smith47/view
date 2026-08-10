@@ -115,9 +115,9 @@ keystroke, and how budgets are enforced in CI, lives in
 - [x] Command line, messages, popup menu, tabline, cursor shapes
 - [x] Terminal capability tiers (kitty/ghostty class down to 16-color)
 - [x] Differential oracle, fuzz harness, compat suite, benchmark matrix
-- [ ] **Native UI** (in progress): picker, file tree, statusline, command
-      palette, notifications, theming
-- [ ] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
+- [x] **Native UI**: picker, file tree, statusline, command palette,
+      notifications, theming
+- [x] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
       `ls | view -`)
 - [ ] **AI**: agent panel, ACP client, context providers, in-editor diff
       review

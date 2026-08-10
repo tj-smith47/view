@@ -1699,12 +1699,12 @@ mod tests {
         );
     }
 
-    /// The falsifiable check from the palette's own brief: an insert-mode
-    /// buffer completion (a non-negative `grid`) must show in its own
-    /// popupmenu at the cursor, never inside the palette box -- this is the
-    /// assertion a routing bug that pointed every popupmenu into the
-    /// palette would fail, by name, without touching any other test in this
-    /// file.
+    /// The command palette's popupmenu-routing contract, falsifiable: an
+    /// insert-mode buffer completion (a non-negative `grid`) must show in
+    /// its own popupmenu at the cursor, never inside the palette box --
+    /// this is the assertion a routing bug that pointed every popupmenu
+    /// into the palette would fail, by name, without touching any other
+    /// test in this file.
     #[test]
     fn a_buffer_sourced_popupmenu_never_renders_inside_the_palette_and_keeps_its_own_layer() {
         let mut model = model_with_grid(80, 24);

@@ -3970,7 +3970,7 @@ mod tests {
         }
     }
 
-    /// A statusline exercising every role the brief's consumer mock-up
+    /// A statusline exercising every role the statusline feature row
     /// names: mode, file, the modified marker, both diagnostic roles side
     /// by side, a git branch, and the ruler.
     fn spanful_statusline() -> LayerKind {
@@ -4033,7 +4033,7 @@ mod tests {
         model
     }
 
-    /// The brief's consumer mock-up requires the statusline's diagnostic
+    /// The statusline's chrome-role contract requires its diagnostic
     /// glyphs, mode text, filename, git branch and ruler to read in
     /// distinct colors, not collapse to one flat style. Paints a real span
     /// row through the real terminal compositor and asserts every role's

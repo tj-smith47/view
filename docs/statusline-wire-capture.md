@@ -128,14 +128,13 @@ payload -- the statusline does not need a distinct operator-pending branch.
 
 `laststatus=0` (required by the option-supersession design, already
 implemented in `view-native::supersede`) makes nvim emit `msg_ruler` on
-every cursor move
-exactly as the brief assumes -- no additional engine configuration needed.
+every cursor move with no additional engine configuration needed.
 
 ## Finding: `search_count` is a real, reachable `msg_show` kind, captured live
 
-The prior wire-capture pass could not trigger `search_count` (a `:put`
-quoting failure). This session avoided that by populating the buffer with
-`i...<Esc>` insert instead of `:put`:
+Triggering `search_count` requires a buffer populated via `i...<Esc>` insert
+rather than `:put`, which fails on a quoting issue against the search text
+used here:
 
 ```
 === search forward for repeated token (cat) ===

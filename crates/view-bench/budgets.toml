@@ -124,11 +124,18 @@ max = 0.30
 # not reproduce the two earlier, unreproduced loaded-host crossings this
 # comment used to carry as raw readings (16.429 ms at load 3.9, 16.29 ms
 # under a loaded bracket) -- those stay above this ceiling and outside
-# what the published spread covers. A breach in (16.0, 14.566 x 1.02]
-# reports as an excursion rather than failing; a breach above that,
-# including a repeat of either earlier crossing, still fails as a new
-# finding and should be rerun quiet before being read as a regression:
-# median-of-3 absorbs a lone excursion, not a sustained loaded run.
+# what the published spread covers. A third crossing was seen in the
+# footprint-diet full-matrix campaign (task-footprint-diet-report.md):
+# flood.minimal cadence_p99_ms read 15.370, 15.711, and 17.802 across
+# three full-matrix runs, the 17.802 draw above every crossing recorded
+# here so far. It neither gates nor ratchets on this class (tail
+# statistic, budgets skipped on shared/dev-linux), so it did not fail;
+# it is recorded for the same reason as the two above. A breach in
+# (16.0, 14.566 x 1.02] reports as an excursion rather than failing; a
+# breach above that, including a repeat of any of the three crossings
+# above, still fails as a new finding and should be rerun quiet before
+# being read as a regression: median-of-3 absorbs a lone excursion, not
+# a sustained loaded run.
 [[budget]]
 spec_row = "Sustained scroll, 100k-line file, tier full"
 scenario = "flood"

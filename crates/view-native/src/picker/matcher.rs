@@ -595,7 +595,8 @@ mod tests {
         }
     }
 
-    /// The brief's falsifiable streaming check: a non-empty, ranked result
+    /// The picker-scan budget's falsifiable streaming check (spec: results
+    /// while scanning, never scan-then-show): a non-empty, ranked result
     /// set observed before a 1,000,000-entry scan thread has exited. Drives
     /// this module's own tick/stream loop (`stream_until_preempted`,
     /// `build_results`) directly against a synthetic, staggered producer

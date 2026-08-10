@@ -25,7 +25,7 @@ Same standalone Python msgpack-rpc client as
 
 ## Finding: `msg_showmode` / `msg_showcmd` / `msg_ruler` are not `msg_show` kinds
 
-The brief's routing table lists these three as arms of `route(kind: &str)`
+`toast.rs`'s routing table lists these three as arms of `route(kind: &str)`
 alongside `search_count`. Live capture shows they never arrive that way --
 they are their own top-level redraw events, structurally parallel to
 `msg_show` but never inside one:
@@ -63,11 +63,11 @@ are each their own bracketed event name at the top level of a redraw batch
 (`b[2]` group), the same tier as `msg_show` itself -- never a `kind` string
 carried inside a `msg_show` tuple. A `route(kind: &str)` fed only from
 `UiEvent::MsgShow`'s `kind` field can therefore never receive `"msg_showmode"`,
-`"msg_showcmd"`, or `"msg_ruler"` as input: those three match arms in the
-brief's table are dead code under today's `msg_show`-only wiring, by
+`"msg_showcmd"`, or `"msg_ruler"` as input: those three match arms in
+`route()`'s table are dead code under today's `msg_show`-only wiring, by
 construction of the wire protocol, not a bug in the table. They stay in
-`route()` verbatim (the brief's exact match, byte-for-byte, per "the table IS
-the implementation" and because the call site that decodes these sibling
+`route()` unmodified (per "the table IS the implementation" and because the
+call site that decodes these sibling
 events depends on `route()`'s exact name/signature to classify them once it
 starts feeding them through). The three arms become live once that call
 site threads `UiEvent::MsgShowmode`/`MsgShowcmd`/`MsgRuler` variants through
@@ -93,7 +93,7 @@ doc) as one of the enumerated `kind` values carried inside `msg_show` itself:
 ['msg_show', ['search_cmd', [[0, '/cat                 ', 0]], False, False, False, 5, '']]
 ```
 
-`search_count` was not independently triggered live in this session (the
+`search_count` was not independently triggered live by this capture (the
 multi-match buffer setup needed to force nvim to show `[N/M]` failed on an
 unrelated `:put` quoting issue in the test script, not a protocol gap) but is
 authoritatively documented as a `msg_show` kind by the pinned engine's own
@@ -104,7 +104,7 @@ pipeline today, unlike the three top-level events above.
 
 ## Conclusion for the implementation
 
-- `route(kind: &str)` is implemented as the brief's exact match, unmodified.
+- `route(kind: &str)` is implemented as the routing table above, unmodified.
   Four of its six textual arms (`msg_showmode`, `msg_showcmd`, `msg_ruler`)
   are unreachable through today's `UiEvent::MsgShow`-only call site and will
   only become live when a future call site adds the corresponding

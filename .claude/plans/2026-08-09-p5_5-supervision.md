@@ -985,12 +985,13 @@ rule.
       campaign cited with its actual numbers).
 - [ ] Task 7's acceptance script run and its output captured as evidence
       (kill/hang under each detection path, recovery observed).
-- [ ] Spec-amendment check: this plan touches no owed spec amendment.
+- [x] Spec-amendment check: this plan touches no owed spec amendment.
       Verified against `invention-research.md:§1.4,§6.2` — spec:343-346
       already correctly states remote editing (not supervision) as v0.1
       core with no "post-v0.1" language; the one owed amendment in this
       research package is the media-handoff row at `spec:620`, out of
-      this plan's scope. No spec edit ships with this plan.
+      this plan's scope. No spec edit ships with this plan -- that
+      cross-plan amendment satisfied by `a9f2c98`.
 - [ ] No "post-v0.1" language anywhere in this plan's shipped code,
       comments, or commit messages (v0.1 CORE framing, 2026-08-05 ruling).
 - [ ] `.claude/known-bugs.md` drained, or every remaining item carrying

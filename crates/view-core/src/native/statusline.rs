@@ -53,12 +53,14 @@ pub struct StatuslineState {
 }
 
 /// One segment source updating [`StatuslineState`]. Seven variants though
-/// the brief names six: `Buffer` is added because "file, modified flag from
-/// Model's existing buffer state" does not exist anywhere in the codebase
-/// (confirmed by search) -- nothing tracks buffer identity today, so the
-/// statusline's file segment needs its own bridge-sourced update like every
-/// other segment. Additive over the brief's six, `#[non_exhaustive]` so a
-/// future segment can grow the same way without a breaking change.
+/// the statusline feature row (spec's native-features table) names six
+/// segments: mode, showcmd, file, diagnostics, git branch, ruler/position.
+/// `Buffer` is added because "file, modified flag from Model's existing
+/// buffer state" does not exist anywhere in the codebase (confirmed by
+/// search) -- nothing tracks buffer identity today, so the statusline's
+/// file segment needs its own bridge-sourced update like every other
+/// segment. Additive over the row's six, `#[non_exhaustive]` so a future
+/// segment can grow the same way without a breaking change.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SegmentUpdate {
