@@ -84,6 +84,85 @@ jobs:
       - name: Run CI suite
         run: task ci
 
+  # crates/view-oracle/tests/clipboard_roundtrip.rs skips itself on any host
+  # with no live display -- true of every other job in this workflow, whose
+  # pty spawns strip DISPLAY on purpose (see that test's module doc). This
+  # job exists to be the one host that actually has one, so the system
+  # clipboard leg runs for real instead of skip-reporting a pass on every
+  # push. VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY turns a display that silently
+  # stops answering into a hard failure rather than a second, quieter skip.
+  clipboard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set up task runner
+        uses: arduino/setup-task@v2
+        with:
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install neovim (linux)
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          curl -fsSL -o nvim.appimage "https://github.com/neovim/neovim/releases/download/${ENGINE_PIN}/nvim-linux-x86_64.appimage"
+          chmod +x nvim.appimage
+          ./nvim.appimage --appimage-extract >/dev/null
+          echo "$PWD/squashfs-root/usr/bin" >> "$GITHUB_PATH"
+
+      - name: Check neovim version
+        run: |
+          ENGINE_PIN=$(cat .engine-pin)
+          nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
+
+      - name: Install Xvfb
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+
+      # Deliberately not `xvfb-run`: it sets `DISPLAY` on the wrapped
+      # command's own process, which here is `cargo test` itself.
+      # `PtySession::spawn_configured`'s hermetic sweep (view-engine's
+      # `env::hermetic_sweep`) strips any child override that matches its
+      # own process's ambient value (see that sweep's doc), so a `cargo
+      # test` process that itself inherited `DISPLAY` would have this
+      # test's `VIEW_CLIPBOARD_TEST_DISPLAY`-driven override silently
+      # stripped again before the spawned `view` ever saw it -- verified
+      # locally: `xvfb-run cargo test ...` fails this test with an empty
+      # clipboard read, a bare `Xvfb` left off `cargo test`'s own
+      # environment passes it. Xvfb is started directly instead, and
+      # `DISPLAY` is never exported to this job at all -- only
+      # `VIEW_CLIPBOARD_TEST_DISPLAY`, in the next step, points at it.
+      - name: Start Xvfb
+        run: |
+          Xvfb :99 -screen 0 1280x1024x24 &
+          for _ in $(seq 1 50); do
+            test -e /tmp/.X11-unix/X99 && exit 0
+            sleep 0.1
+          done
+          echo "Xvfb never created its display socket" >&2
+          exit 1
+
+      # arboard's Linux backend (x11rb) speaks the X11 clipboard protocol
+      # in-process; it needs a live X server, not an external clipboard
+      # utility, so Xvfb alone is the whole leg's environment requirement.
+      # VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY turns this test's own "no
+      # display" and "no system clipboard reachable" skip branches into
+      # hard failures, so a display that silently stops answering fails
+      # this job loud instead of reporting green through the skip path a
+      # genuinely headless host takes on purpose.
+      - name: Run system-clipboard tests against Xvfb
+        env:
+          VIEW_CLIPBOARD_TEST_DISPLAY: ":99"
+          VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY: "1"
+        run: cargo test -p view-oracle --test clipboard_roundtrip -- --nocapture
+
   # The differential oracle corpus is merge-blocking on both tier-1
   # platforms (spec section 14: linux + macos tier-1; Windows is tier-2,
   # deferral 4). Its own job so the pty-driven corpus never extends the

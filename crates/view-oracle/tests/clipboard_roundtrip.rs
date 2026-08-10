@@ -19,6 +19,17 @@
 //! and the independent reader process; the hermetic sweep only strips names
 //! the host itself exports, so a name it never sees under `DISPLAY` -- set
 //! explicitly here, by this test alone -- passes through untouched.
+//!
+//! # Why a skip here can also be made to fail
+//!
+//! Absent `VIEW_CLIPBOARD_TEST_DISPLAY`, this test skips rather than fails,
+//! because most hosts (including most of CI) run headless on purpose. A
+//! leg that deliberately provisions a live display (see
+//! `.github/workflows/ci.yml`'s `clipboard` job) has no such excuse: if its
+//! display silently stops answering, the skip path would quietly report a
+//! pass instead of the regression it actually is. `VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY`
+//! is that leg's guard -- set, it turns both of this test's skip branches
+//! into hard failures.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 #[cfg(unix)]
@@ -41,6 +52,22 @@ const NO_DISPLAY_EXIT: i32 = 3;
 /// module doc.
 #[cfg(unix)]
 const TEST_DISPLAY_VAR: &str = "VIEW_CLIPBOARD_TEST_DISPLAY";
+
+/// Set (to any value) to turn this test's two skip branches -- "no display
+/// configured for this run" and "no system clipboard reachable on this
+/// host" -- into hard failures instead of a quiet, passing skip. A leg that
+/// provisions a live display (an `Xvfb` CI job, in particular) sets this so
+/// a display that silently stops being live fails loud, rather than
+/// reporting green through the same path a genuinely headless host takes on
+/// purpose. Unset by default: every other host still skips exactly as
+/// before.
+#[cfg(unix)]
+const REQUIRE_DISPLAY_VAR: &str = "VIEW_CLIPBOARD_TEST_REQUIRE_DISPLAY";
+
+#[cfg(unix)]
+fn display_required() -> bool {
+    std::env::var_os(REQUIRE_DISPLAY_VAR).is_some()
+}
 
 #[cfg(unix)]
 enum ClipboardProbe {
@@ -68,6 +95,11 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
     // run (the common case: most hosts, including CI, run headless) --
     // skip cleanly rather than assume a display exists or fabricate one
     let Ok(display) = std::env::var(TEST_DISPLAY_VAR) else {
+        assert!(
+            !display_required(),
+            "{TEST_DISPLAY_VAR} not set, but {REQUIRE_DISPLAY_VAR} demands a live display on \
+             this leg"
+        );
         eprintln!(
             "skipping a_system_clipboard_yank_is_independently_visible_to_a_fresh_process: \
              {TEST_DISPLAY_VAR} not set, no display configured for this run"
@@ -135,6 +167,12 @@ fn a_system_clipboard_yank_is_independently_visible_to_a_fresh_process() {
             ClipboardProbe::NoDisplay => {
                 session.send(b"\x1b:q!\r").unwrap();
                 let _ = session.wait_for_exit(Duration::from_secs(5));
+                assert!(
+                    !display_required(),
+                    "{REQUIRE_DISPLAY_VAR} demands a reachable system clipboard, but the fresh \
+                     `view --print-clipboard` reader reported none available \
+                     (arboard::Clipboard::new() failed, NO_DISPLAY_EXIT)"
+                );
                 eprintln!(
                     "skipping a_system_clipboard_yank_is_independently_visible_to_a_fresh_process: \
                      no system clipboard reachable on this host"
