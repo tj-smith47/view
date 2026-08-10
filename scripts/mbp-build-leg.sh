@@ -13,6 +13,10 @@
 # leg's to `rm -rf`. Writes a timestamped log under ~/.claude/tmp/mbp-leg/
 # and exits nonzero on any failure: an unreachable host, a failed mirror, or
 # a nonzero `cargo build --workspace` on the far end.
+#
+# Mirrors `git archive HEAD`: the last COMMIT, not the working tree. An
+# uncommitted edit is invisible to this leg, so "OK" attests the committed
+# state only -- commit first if you want an in-progress change checked.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,7 +60,11 @@ if ! ssh "$host" 'zsh -lc "cd ~/repos/view-ci && cargo build --workspace 2>&1 | 
   exit 1
 fi
 
-remote_exit="$(grep -oE 'EXIT:[0-9]+' "$log_file" | tail -1 | cut -d: -f2)"
+# `|| true`: when the marker is absent, grep exits 1 and (under pipefail)
+# fails the whole substitution -- and a failing bare `var="$(...)"` is fatal
+# under `set -e`, so without it the "marker missing" branch below could
+# never run and the script would die with no diagnostic at all.
+remote_exit="$(grep -oE 'EXIT:[0-9]+' "$log_file" | tail -1 | cut -d: -f2 || true)"
 if [ -z "$remote_exit" ]; then
   echo "MBP BUILD LEG FAIL: no EXIT: marker in $host's output; the build's real result is unknown" |
     tee -a "$log_file" >&2
