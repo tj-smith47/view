@@ -4,13 +4,13 @@
 > superpowers:subagent-driven-development to implement this plan
 > task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** the editor that cannot freeze (spec:615, §9 invented capability,
-v0.1 CORE — ruled 2026-08-05, spec:896, no "post-v0.1" framing anywhere in
+**Goal:** the editor that cannot freeze (spec:617, §9 invented capability,
+v0.1 CORE — ruled 2026-08-05, spec:898, no "post-v0.1" framing anywhere in
 this plan). Stall detection on both directions of the RPC connection
 (write-side already exists; read-side is the gap this plan closes),
 an interrupt offer, and automatic restart with swap (`-r`) rehydration —
 "a misbehaving plugin cannot take the editor down." Sequenced first inside
-P5.5 alongside P3 remote editing (spec:608-609, `HANDOFF.md:67-68`).
+P5.5 alongside P3 remote editing (spec:610-611, `HANDOFF.md:67-68`).
 
 **Why this is invention, not tuning:** nvim's own TUI is in-process with its
 core, so a wedged core is a dead terminal — a category difference view can
@@ -137,7 +137,7 @@ dangerously close to three of them at once).
   calibration floor.** New capabilities get NEW budget rows (Task 6);
   no existing row's `max` or `ratio` changes.
 - **v0.1 framing: this is a CORE v0.1 feature** (2026-08-05 ruling,
-  spec:896) — no task, comment, or commit message in this plan uses
+  spec:898) — no task, comment, or commit message in this plan uses
   "post-v0.1" language about anything this plan ships.
 
 ## The hot-path cost bound the design must respect
@@ -986,10 +986,10 @@ rule.
 - [ ] Task 7's acceptance script run and its output captured as evidence
       (kill/hang under each detection path, recovery observed).
 - [x] Spec-amendment check: this plan touches no owed spec amendment.
-      Verified against `invention-research.md:§1.4,§6.2` — spec:343-346
+      Verified against `invention-research.md:§1.4,§6.2` — spec:345-348
       already correctly states remote editing (not supervision) as v0.1
       core with no "post-v0.1" language; the one owed amendment in this
-      research package is the media-handoff row at `spec:620`, out of
+      research package is the media-handoff row at `spec:622`, out of
       this plan's scope. No spec edit ships with this plan -- that
       cross-plan amendment satisfied by `a9f2c98`.
 - [ ] No "post-v0.1" language anywhere in this plan's shipped code,
