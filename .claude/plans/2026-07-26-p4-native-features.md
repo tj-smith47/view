@@ -1940,15 +1940,42 @@ bare checkmark.
       mistake, not a host or product failure. retry2 is the one attested
       retry, run at load1 1.32→2.19, and is clean.
 - [x] Picker §3.1 rows measured and gated (closes P3 deferral 1). Cited:
-      `~/.claude/tmp/battery-perf-audit-retry2.log` lines 120-125, gated
-      `match_paint_p50_ms 2.880`, `match_paint_p99_ms 4.739`,
-      `first_page_p50_ms 2.594`, `first_page_p99_ms 7.548`, all within the
-      recorded dev-linux bars.
+      `~/.claude/tmp/battery-perf-audit-retry2.log`, verbatim markers `gated
+      match_paint_p50_ms 2.880 (median of 3 trials)`, `gated
+      match_paint_p99_ms 4.739 (median of 3 trials)`, `gated
+      first_page_p50_ms 2.594 (median of 3 trials)`, `gated
+      first_page_p99_ms 7.548 (median of 3 trials)`, all within the
+      recorded dev-linux bars. **Correction 2026-08-10** (battery review
+      round 1, finding M1): a prior draft of this citation misstated the
+      log's line range as 120-125; re-verified this session (the log's
+      `gated *` lines are actually at 127-130) and corrected to cite the
+      grep-findable markers directly rather than a line range.
 - [x] The echo `[[shortfall]]` entries in `crates/view-bench/budgets.toml`
       — the ledger enumerates them; the four `ratio_p50` rows and the
       dev-macos `view_p99_ms` tail alike — retired by measurement
       (T16a/T16b), or the residual re-adjudicated with the user — never
-      silently carried. Cited: `crates/view-bench/budgets.toml`
+      silently carried. **Correction 2026-08-10** (battery review round 1,
+      finding I1): the citation below overstated the literal text — only 1
+      of the 4 residual entries' `why` fields carries "User-adjudicated
+      2026-08-09" verbatim. Re-verified per entry: dev-linux `echo.minimal
+      ratio_p50` does carry it verbatim ("User-adjudicated 2026-08-09: the
+      residual is accepted and the <= 1.10 target unchanged..."). dev-linux
+      `echo.heavy ratio_p50` has no `[[shortfall]]` entry at all — retired
+      outright by T16b measurement. dev-macos `echo.minimal ratio_p50`'s
+      `why` attributes the residual without the adjudication phrase ("Same
+      residual as dev-linux's echo.minimal shortfall ... but dev-macos has
+      not had the round-trip stage decomposition dev-linux ran"). dev-macos
+      `echo.heavy ratio_p50`'s `why` characterizes spread rather than
+      adjudicating ("1.3% over the 1.1 bar at the median of a statistic
+      this class cannot pin tighter ... Same own-path residual as
+      echo.minimal on this class"). dev-macos `echo.heavy view_p99_ms`'s
+      `why` attributes the tail to the fixture rather than adjudicating
+      ("29% over the 8 ms bar with the 14-plugin fixture's own paint cost
+      on top"). The user's aggregate adjudication of all four residuals
+      lives in `.claude/measurements/2026-08-08-measurement-layer-
+      rulings.md`'s "2026-08-09 adjudications — the T16 exit pair" section,
+      not duplicated verbatim into each entry's `why`. Original
+      (now-corrected) citation: `crates/view-bench/budgets.toml`
       `[[shortfall]]` section, each entry carries a `why` +
       "User-adjudicated 2026-08-09"; dev-linux `echo.heavy ratio_p50`
       retired by T16b measurement; the 3 residual `ratio_p50` rows
@@ -1957,12 +1984,28 @@ bare checkmark.
       in `.claude/measurements/2026-08-08-measurement-layer-rulings.md`.
 - [x] Measurement-layer carry-ins 1-5 adjudicated (T16 step 5), each
       ruling recorded in `budgets.toml` comments or
-      `.claude/measurements/` with its evidence citation. Cited:
-      `.claude/measurements/2026-08-08-measurement-layer-rulings.md`, 6
-      sections all headed "RULED 2026-08-09": (1) `--record` pinning, (2)
-      single-shot gating <25% regressions, (3) scroll.minimal dev-macos
-      knife-edge, (4) dev-macos echo 1.25 default, (5) auto-staleness
-      dormancy, (6) T16 exit pair.
+      `.claude/measurements/` with its evidence citation.
+      **Correction 2026-08-10** (battery review round 1, finding I2): the
+      citation below overstated the literal headings. Re-verified via
+      `grep -n "^## "` against `.claude/measurements/2026-08-08-
+      measurement-layer-rulings.md`: only sections 1-2 carry "RULED
+      2026-08-09" verbatim ("`--record` can pin a wide-spread cell to a
+      below-median draw — RULED 2026-08-09: option (c)"; "Single-shot
+      gating cannot resolve <25% regressions on that cell — RULED
+      2026-08-09: option (c)"); sections 3-5 carry a bare "— RULED" with no
+      date ("`scroll.minimal` dev-macos knife-edge headroom — RULED";
+      "dev-macos echo routes to the compiled 1.25 default — RULED";
+      "Auto-staleness dormancy on dev-macos — RULED"); section 6 is headed
+      "2026-08-09 adjudications — the T16 exit pair" (the date appears, but
+      not as "RULED 2026-08-09"). All 6 sections are present and each does
+      in fact close with a ruling and evidence, so the underlying claim —
+      carry-ins 1-5 adjudicated with citations — holds; only the "all
+      headed 'RULED 2026-08-09'" phrasing was inaccurate. Original
+      (now-corrected) citation: `.claude/measurements/2026-08-08-
+      measurement-layer-rulings.md`, 6 sections all headed "RULED
+      2026-08-09": (1) `--record` pinning, (2) single-shot gating <25%
+      regressions, (3) scroll.minimal dev-macos knife-edge, (4) dev-macos
+      echo 1.25 default, (5) auto-staleness dormancy, (6) T16 exit pair.
 - [x] Non-interference test passing per feature, each shown to catch a
       deliberately introduced drift (T15 step 4). Cited:
       `~/.claude/tmp/battery-ci.log` lines 1133-1143, 5/5 pass (picker,
@@ -1988,9 +2031,27 @@ bare checkmark.
       overlays: palette/picker/prompt/statusline/statusline_bar/tree × 3
       tiers: basic/standard/full).
 - [x] `.claude/known-bugs.md` drained, or every remaining item carrying
-      explicit user approval. Cited: file read in full this session —
-      0 unchecked live items; the sole entry is `[x] RESOLVED 2026-08-03`
-      (the `settings.json` tracked-vs-gitignored shape decision).
+      explicit user approval. **Correction 2026-08-10** (battery review
+      round 1, finding B1): the citation below was false — the file was
+      not "0 unchecked live items"; it carried roughly 2200 words of
+      unmarked narrative left orphaned by a prior archiving pass that moved
+      their parent checkboxes to `.claude/archive/known-bugs-2026-08.md`
+      without removing the child text (`.superpowers/sdd/progress.md`'s
+      Task 24 entry names this defect directly: "leaving known-bugs.md
+      MANGLED"). Each orphaned paragraph (the Windows CI task-#15 entry,
+      the input_path boundary/tap-cost resolution, the god-files-audit
+      narrative) has now been re-verified against the tree and git history
+      this session and given its own `- [x] RESOLVED` checkbox with
+      citations. The Windows entry's resolution rests on prior-session
+      winserver evidence (commit `1cadae4`'s embedded full-workspace test
+      output, corroborated by `~/.claude/tmp/win-run2.log`) that is not
+      reproducible today because `ssh winserver` returns "No route to
+      host" this session; that gap is stated explicitly in the entry
+      rather than laundered. known-bugs.md now genuinely has 0 unchecked
+      live items across its four entries. Original (now-corrected)
+      citation: file read in full this session — 0 unchecked live items;
+      the sole entry is `[x] RESOLVED 2026-08-03` (the `settings.json`
+      tracked-vs-gitignored shape decision).
 - [x] Dogfood note appended to `.claude/dogfood-journal.md` — real daily
       driving is expected to start this phase, so this note should record
       actual use, not a smoke test. Cited: `.claude/dogfood-journal.md`,
@@ -2018,12 +2079,32 @@ bare checkmark.
       note above for detail).
 - [x] P5 plan authored under the planning protocol, with the ACP spec
       verified live via context7/docs first (the charter requires it).
-      Cited: `.claude/plans/INDEX.md` line 13, "Drafted (adversarially
+      Cited: `.claude/plans/INDEX.md`'s P5 row, "Drafted (adversarially
       reviewed, 3 rounds)"; live ACP verification via WebFetch against
       agentclientprotocol.com is recorded in the P5 planning session
-      (context7 unavailable that session, a sanctioned fallback). All five
-      P5.5 invented-capability plans are also drafted and adversarially
-      reviewed (`.claude/plans/INDEX.md` lines 14-19).
+      (context7 unavailable that session, a sanctioned fallback).
+      **Correction 2026-08-10** (battery review round 1, finding I3): the
+      citation below said "all five" P5.5 plans, but `.claude/plans/
+      INDEX.md`'s P5.5 rows are SIX plans (supervision, remote editing,
+      session DVR, key introspector, image viewing, media playback
+      handoff), all drafted and adversarially reviewed. This does not
+      contradict the spec's "Five invented capabilities" decision-log row
+      (`.claude/specs/2026-07-17-view-design.md`, First-release-scope row),
+      which enumerates the five ruled 2026-08-05 as v0.1 core (supervision,
+      remote editing, session DVR, key introspector, image viewing); media
+      playback handoff was ruled separately and later, 2026-08-07 (spec's
+      §9 media row, "ruled 2026-08-07; open-dispatch ruled 2026-08-08"),
+      making it a sixth invented capability added after the original
+      five-item ruling — and the spec's own P5.5 phase-table row already
+      lists all six together ("supervision, remote editing, session DVR,
+      key introspector, image viewing, media handoff"). All six P5.5
+      plans, media's included, are drafted and adversarially reviewed.
+      Original (now-corrected) citation: `.claude/plans/INDEX.md` line 13,
+      "Drafted (adversarially reviewed, 3 rounds)"; live ACP verification
+      via WebFetch against agentclientprotocol.com is recorded in the P5
+      planning session (context7 unavailable that session, a sanctioned
+      fallback). All five P5.5 invented-capability plans are also drafted
+      and adversarially reviewed (`.claude/plans/INDEX.md` lines 14-19).
 - [x] Every concession or metric degradation encountered during the phase
       carries a Fable 5 adversarial review, per the user's standing rule.
       Cited: `.superpowers/sdd/2026-07-26-p4-native-features/progress.md`
