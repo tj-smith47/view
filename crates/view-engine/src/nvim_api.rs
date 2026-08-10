@@ -283,7 +283,7 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'BufFilePost', 'BufWritePost', 'BufMod
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
   callback = function()
-    vim.rpcnotify(channel, 'view_leaving')
+    pcall(vim.rpcrequest, channel, 'view_leaving')
   end,
 })";
 
@@ -293,6 +293,17 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 /// one is evidence the reader itself must hold at the moment the stream
 /// ends -- after which there is no frame, no channel and no engine left to
 /// ask (see [`EngineHandle::announced_exit`]).
+///
+/// It is the group's only `rpcrequest`, and it is one because a
+/// notification is not delivery: `rpcnotify` hands the bytes to nvim's
+/// event loop and returns, and a process on its way out can exit before
+/// that loop ever writes them. On Windows it frequently does -- one run in
+/// three under load on a real host -- leaving view to read a deliberate
+/// `:qa!` as a crash and respawn the editor its user had just closed. A
+/// request cannot be lost that way: nvim stays inside `VimLeavePre` until
+/// the reply arrives, so an exit that reached this line is an exit view
+/// saw. `pcall` because a channel already gone (view died first) must not
+/// turn nvim's exit into an error message.
 ///
 /// The lua chunk [`EngineHandle::register_clipboard`] runs inside nvim,
 /// taking view's channel id as its single vararg. Installs `g:clipboard`

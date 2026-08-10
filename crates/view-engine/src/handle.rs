@@ -584,12 +584,6 @@ impl EngineHandle {
                                 if let Some(msg) = decode_feature_invoke(&params) {
                                     let _ = pump.route_msg(msg);
                                 }
-                            } else if method == "view_leaving" {
-                                // recorded, not routed: nothing acts on this
-                                // while the engine is still up, and by the
-                                // time anything asks, the connection is gone
-                                // and the loop needs the answer synchronously
-                                reader_announced_exit.store(true, Ordering::Release);
                             } else if method == "view_bridge" {
                                 // best-effort for the same reason
                                 // `view_invoke` is: nvim is not blocked on an
@@ -611,6 +605,27 @@ impl EngineHandle {
                         method,
                         params,
                     }) => {
+                        if method == "view_leaving" {
+                            // recorded and answered here, on the reader
+                            // thread, rather than routed: nothing acts on it
+                            // while the engine is still up, and by the time
+                            // anything asks, the connection is gone and the
+                            // loop needs the answer synchronously. Answering
+                            // from this thread is also what keeps nvim's exit
+                            // off the runtime channel entirely -- a loop that
+                            // is wedged, or gone, must not be able to hold an
+                            // exiting editor inside `VimLeavePre`.
+                            reader_announced_exit.store(true, Ordering::Release);
+                            let resp = RpcMessage::Response {
+                                msgid,
+                                error: Value::Nil,
+                                result: Value::Nil,
+                            };
+                            if let Ok(bytes) = encode_message(&resp) {
+                                let _ = reader_outbox.send(bytes);
+                            }
+                            continue 'read;
+                        }
                         let token = ReplyToken {
                             msgid: u64::from(msgid),
                         };
@@ -719,7 +734,8 @@ impl EngineHandle {
 
     /// Whether the engine announced, on this connection, that it was on its
     /// way out -- nvim's own `VimLeavePre`, relayed by the `view_bridge`
-    /// group ([`register_bridge`](Self::register_bridge)).
+    /// group ([`register_bridge`](Self::register_bridge)) as a blocking
+    /// request this thread answers itself.
     ///
     /// The platform-neutral evidence that a stop was intentional. An exit
     /// status cannot supply it: a signal death is only *reported* as one on
@@ -730,10 +746,17 @@ impl EngineHandle {
     /// `:cq`, `:wq` -- and cannot do when it is killed.
     ///
     /// Ordered before the stop it qualifies, by construction: the reader
-    /// thread records this while decoding the notification, and the same
-    /// thread is the one that later routes `Msg::EngineStopped` when the
-    /// stream ends. A loop that has the stop in hand therefore has this
-    /// answer too.
+    /// thread records this while decoding the request, and the same thread
+    /// is the one that later routes `Msg::EngineStopped` when the stream
+    /// ends. A loop that has the stop in hand therefore has this answer too.
+    ///
+    /// Delivered as a request rather than a notification for a reason that
+    /// only shows up off Linux: a notification is queued into nvim's event
+    /// loop and lost if the process exits before the loop writes it, which
+    /// on Windows happens often enough to read roughly one deliberate quit
+    /// in three as a crash. A request holds nvim inside `VimLeavePre` until
+    /// the reply lands, so the announcement either arrives or the engine
+    /// never left.
     #[must_use]
     pub fn announced_exit(&self) -> bool {
         self.announced_exit.load(Ordering::Acquire)
@@ -1621,6 +1644,60 @@ mod tests {
                 error: Value::Nil,
                 result: Value::Nil,
             }
+        );
+    }
+
+    /// The announcement is answered by the reader thread itself, with no
+    /// sink attached at all: nvim blocks inside `VimLeavePre` until this
+    /// reply lands, so routing it through the runtime channel would let a
+    /// wedged -- or already gone -- loop hold an exiting editor open.
+    #[test]
+    fn an_exit_announcement_is_answered_by_the_reader_not_the_runtime_loop() {
+        let (h, _pump, peer_read, mut peer_write) = pumped_peer();
+
+        assert!(!h.announced_exit(), "nothing had announced anything yet");
+        write_request(&mut peer_write, 11, "view_leaving");
+
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 11,
+                error: Value::Nil,
+                result: Value::Nil,
+            },
+            "an announcement answered with an error leaves nvim's exit \
+             reporting a failure it did not have"
+        );
+        assert!(
+            h.announced_exit(),
+            "the announcement was answered without being recorded"
+        );
+    }
+
+    /// The ordering the whole supervision decision rests on: whoever holds
+    /// the stop holds the announcement that qualifies it, because one
+    /// thread produces both in that order.
+    #[test]
+    fn a_stop_that_followed_an_announcement_carries_it() {
+        let (h, pump, _peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        write_request(&mut peer_write, 12, "view_leaving");
+        drop(peer_write);
+
+        loop {
+            let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            if matches!(msg, Msg::EngineStopped { .. }) {
+                break;
+            }
+        }
+        assert!(
+            h.announced_exit(),
+            "the stop arrived without the announcement that preceded it on \
+             the same thread"
         );
     }
 

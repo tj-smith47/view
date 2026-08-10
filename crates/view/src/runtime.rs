@@ -3521,9 +3521,21 @@ mod tests {
         // `--embed` holds nvim's startup until a UI attaches, so an engine
         // nobody attached to would never read the quit typed below
         engine.handle.ui_attach(80, 24).unwrap();
+        let quit_at = std::time::Instant::now();
         engine.handle.input(":qa!<CR>").unwrap();
 
         let stopped = await_engine_stopped(&rx);
+        // the announcement is a blocking round trip inside nvim's
+        // `VimLeavePre`: answered off the reader thread it costs one pipe
+        // hop, but answered by nothing at all it holds the editor open
+        // until something kills it, and both readings end in an
+        // `EngineStopped` this assertion is the only thing that separates
+        let announced_in = quit_at.elapsed();
+        assert!(
+            announced_in < std::time::Duration::from_secs(5),
+            "the engine took {announced_in:?} to quit: an announced exit is \
+             answered while nvim waits, never waited out"
+        );
         let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model)
             .expect("a stop from the engine this session runs is never dropped");
         let Msg::EngineDown(exit) = resolved else {
