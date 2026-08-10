@@ -607,9 +607,18 @@ mod tests {
     /// `Injector` this producer feeds directly.
     #[test]
     fn a_result_set_streams_before_a_million_entry_scan_finishes() {
-        let mut session = Session::new(Source::Files {
-            root: std::path::PathBuf::from("/synthetic"),
-        });
+        // bounded (see `spawn_bounded`'s doc): the property under test is
+        // tick/snapshot streaming cadence against a throttled producer, not
+        // raw match throughput, so a single matcher thread proves it just as
+        // well while keeping this session out of the near-dozen-pool
+        // contention --test-threads-parallel runs of this module otherwise
+        // create
+        let mut session = Session::new_bounded(
+            Source::Files {
+                root: std::path::PathBuf::from("/synthetic"),
+            },
+            1,
+        );
         let injector = session.nucleo.injector();
         let producer = std::thread::spawn(move || {
             for i in 0..1_000_000u32 {
@@ -722,15 +731,21 @@ mod tests {
     fn replacing_a_session_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
         let mut session: Option<Session> = None;
-        ensure_session(
+        // bounded (see `spawn_bounded`'s doc): this test never reparses a
+        // pattern, so nucleo's own matcher pool does no work at all here --
+        // an unbounded session still paid for spinning up a near-dozen-thread
+        // rayon pool it never used, pure contention this module's
+        // --test-threads-parallel runs otherwise pay for nothing
+        ensure_session_bounded(
             &mut session,
             &Source::Files {
                 root: tree.root.clone(),
             },
+            1,
         );
         let active = session
             .as_mut()
-            .expect("ensure_session always populates session");
+            .expect("ensure_session_bounded always populates session");
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
 
@@ -745,7 +760,7 @@ mod tests {
         // the shape `run()` takes on every request whose source no longer
         // matches the cached one: replaces the session outright, which must
         // drop -- and so cancel -- the old one's still-running Files scan
-        ensure_session(&mut session, &Source::Buffers);
+        ensure_session_bounded(&mut session, &Source::Buffers, 1);
 
         let settle_deadline = Instant::now() + Duration::from_secs(5);
         let mut last = injector.injected_items();
@@ -789,15 +804,21 @@ mod tests {
     fn closing_the_picker_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
         let mut session: Option<Session> = None;
-        ensure_session(
+        // bounded (see `spawn_bounded`'s doc): this test never reparses a
+        // pattern, so nucleo's own matcher pool does no work at all here --
+        // an unbounded session still paid for spinning up a near-dozen-thread
+        // rayon pool it never used, pure contention this module's
+        // --test-threads-parallel runs otherwise pay for nothing
+        ensure_session_bounded(
             &mut session,
             &Source::Files {
                 root: tree.root.clone(),
             },
+            1,
         );
         let active = session
             .as_mut()
-            .expect("ensure_session always populates session");
+            .expect("ensure_session_bounded always populates session");
         let injector = active.nucleo.injector();
         seed_or_scan(active, None, "");
 
@@ -1219,7 +1240,13 @@ mod tests {
     /// snapshot, not the one-time cost of loading it.
     #[test]
     fn keystroke_to_first_results_at_100k_resident_entries() {
-        let mut session = Session::new(Source::Buffers);
+        // bounded (see `spawn_bounded`'s doc): the assertions below are a
+        // generous, deadline-based sanity ceiling, not the gated perf number
+        // (that lives in task 16's paired bench suite instead), so a single
+        // matcher thread stays well inside budget while keeping this session
+        // out of the near-dozen-pool contention --test-threads-parallel runs
+        // of this module otherwise create
+        let mut session = Session::new_bounded(Source::Buffers, 1);
         let injector = session.nucleo.injector();
         for i in 0..100_000u32 {
             injector.push(

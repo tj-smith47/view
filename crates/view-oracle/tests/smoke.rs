@@ -24,6 +24,7 @@
 mod common;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 use view_oracle::{PtySession, QueryPolicy};
@@ -237,6 +238,17 @@ fn spawn_view_pty_first_launch() -> ViewPtySession {
 /// `pty_isolation_exclusive`; taking read on that same thread deadlocks.
 fn spawn_view_pty_raw_isolated(policy: QueryPolicy) -> ViewPtySession {
     build_view_pty(&[], None, policy)
+}
+
+/// Like [`spawn_view_pty_raw_isolated`] but with `extra_args` inserted
+/// before the scratch-file positional argument (e.g. `--nvim-bin
+/// <wrapper>`), for a timing test that both needs to control the embedded
+/// engine's startup and needs the exclusive isolation window.
+fn spawn_view_pty_raw_isolated_with_args(
+    extra_args: &[&std::ffi::OsStr],
+    policy: QueryPolicy,
+) -> ViewPtySession {
+    build_view_pty(extra_args, None, policy)
 }
 
 /// Polls Linux's `/proc/<pid>/task/<pid>/children` for a direct child of
@@ -1177,10 +1189,18 @@ fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
 /// `nvim`-locating helpers) with every argument forwarded verbatim --
 /// standing in for a slow-starting engine without patching nvim itself.
 /// Marked executable directly (`portable_pty`/`Command` exec it, not a
-/// shell), and disambiguated by pid the same way this file's scratch paths
-/// are, since parallel tests in this binary could otherwise collide.
+/// shell). Disambiguated by pid AND a per-call atomic counter, not pid
+/// alone: every test in this binary runs as a thread of the SAME process,
+/// so pid-only naming (this function's original scheme) gives every
+/// concurrently-running wrapper-using test the identical path, letting one
+/// test's cleanup `remove_file` (or a differently-delayed overwrite) race
+/// another's in-flight `view --nvim-bin <wrapper>` spawn -- exactly the
+/// collision `ScratchPaths` in `common/mod.rs` already documents and
+/// avoids via the same pid+counter shape.
 #[cfg(unix)]
 fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
+    static NEXT_WRAPPER_ID: AtomicU64 = AtomicU64::new(0);
+
     let real_nvim = String::from_utf8(
         std::process::Command::new("which")
             .arg("nvim")
@@ -1192,7 +1212,8 @@ fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
     .trim()
     .to_string();
 
-    let path = common::scratch_root().join(format!("delayed-nvim-{}.sh", std::process::id()));
+    let id = NEXT_WRAPPER_ID.fetch_add(1, Ordering::Relaxed);
+    let path = common::scratch_root().join(format!("delayed-nvim-{}-{id}.sh", std::process::id()));
     let script = format!(
         "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
         f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0
@@ -1267,8 +1288,20 @@ fn assert_shell_frame_precedes_attach(session: &mut ViewPtySession) {
 fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order() {
     let wrapper = write_delayed_nvim_wrapper(500);
 
-    let mut session =
-        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+    // This test's ordering proof and its 15s replay wait both depend on
+    // the delayed-nvim wrapper's real wall-clock startup, not just its
+    // artificial 500ms sleep: a real nvim process competing for scheduler
+    // time against this binary's other real-nvim-spawning smoke tests can
+    // itself clear several seconds with zero product-side delay (see the
+    // `wait_for` call below). `pty_isolation_exclusive` -- the same
+    // mechanism this file already uses for its tight-bound startup-latency
+    // tests -- removes that sibling-session contention for the whole test
+    // rather than widening the deadline further.
+    let _exclusive = pty_isolation_exclusive();
+    let mut session = spawn_view_pty_raw_isolated_with_args(
+        &[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()],
+        QueryPolicy::AnswerDa1,
+    );
 
     assert_shell_frame_precedes_attach(&mut session);
 
