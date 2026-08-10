@@ -13,6 +13,28 @@
 //! for a key (see [`crate::nvim_api`]'s `get_mode`), so an engine parked at
 //! a hit-enter prompt still reads as alive while one hung inside a
 //! synchronous call does not.
+//!
+//! # What a verdict measures
+//!
+//! Exactly one thing, and a notice quoting it should claim no more: how
+//! long the oldest probe still owed an answer has gone unanswered, as
+//! observed from the thread that folds the verdict. Two consequences
+//! follow, and both are deliberate.
+//!
+//! An engine that answers every probe, but always later than the threshold,
+//! reads wedged for as long as that lasts rather than reading alive because
+//! something arrived. The window advances to the oldest probe still
+//! outstanding as answers land, so an answer never restarts it while an
+//! older question is still open: an engine replying thirty seconds after
+//! being asked is not a working editor, and the verdict says so.
+//!
+//! An observing thread stalled for longer than the threshold reads wedged
+//! against a perfectly healthy engine, because acknowledgements are
+//! recorded by that same thread: its replies are sitting in its own queue,
+//! unfolded, and the verdict clears on the pass that drains them. That is a
+//! true statement about the engine path as its consumer experiences it --
+//! an editor whose loop is stuck is unresponsive whoever is at fault -- and
+//! it is deliberately not a statement about the engine process alone.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -38,6 +60,17 @@ pub const HEARTBEAT_WEDGE_THRESHOLD: Duration = Duration::from_secs(10);
 /// can flip, so one dropped or slow reply does not read as a false wedge.
 pub const HEARTBEAT_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 
+/// How many probe send times the shared state keeps.
+///
+/// A fold anchors on the oldest probe still outstanding, so it needs that
+/// probe's send time to still be on record: twelve times as many as the
+/// [`HEARTBEAT_WEDGE_THRESHOLD`] / [`HEARTBEAT_PROBE_INTERVAL`] ratio needs
+/// at the shipped constants, and 512 bytes of shared state at that size. A
+/// run outliving the log falls back to the oldest send time still held,
+/// which is newer than the one overwritten and so under-reports the silence
+/// -- the direction that delays a verdict rather than inventing one.
+const SEND_LOG: u64 = 64;
+
 /// What one [`HeartbeatWatch::observe`] call reports about the read side.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,16 +90,82 @@ pub enum Liveness {
     Dead,
 }
 
-/// The state the prober thread and the runtime loop genuinely share.
+/// The state the prober thread and the observing thread genuinely share.
 ///
-/// Two relaxed atomics and nothing else, so the loop's side of the exchange
-/// is a load rather than a lock: the one thing an observer must never do is
-/// wait on the connection, since being unable to answer is precisely the
-/// condition it is asking about.
-#[derive(Debug, Default)]
+/// Atomics and nothing else, so the observer's side of the exchange is a
+/// load rather than a lock: the one thing it must never do is wait on the
+/// connection, since being unable to answer is precisely the condition it
+/// is asking about.
+#[derive(Debug)]
 struct Probe {
+    /// The monotonic base the send times are expressed against. `Instant`
+    /// is not an atomic and nanoseconds since a fixed origin is, which is
+    /// the whole reason this field exists.
+    origin: Instant,
+    /// The newest generation a probe has been issued for.
     sent_generation: AtomicU64,
+    /// The newest generation the engine has answered for.
+    acked_generation: AtomicU64,
+    /// Send times in nanoseconds since `origin`, indexed by generation
+    /// modulo [`SEND_LOG`].
+    sent_at: [AtomicU64; SEND_LOG as usize],
     paused: AtomicBool,
+}
+
+impl Probe {
+    /// Starts paused, so a connection nobody is observing yet is never
+    /// charged for the silence -- see [`HeartbeatWatch::resume`].
+    fn new() -> Self {
+        Self {
+            origin: Instant::now(),
+            sent_generation: AtomicU64::new(0),
+            acked_generation: AtomicU64::new(0),
+            sent_at: std::array::from_fn(|_| AtomicU64::new(0)),
+            paused: AtomicBool::new(true),
+        }
+    }
+
+    fn slot(generation: u64) -> usize {
+        // the cast is exact for any remainder of SEND_LOG, which is far
+        // below usize::MAX on every target this builds for
+        (generation % SEND_LOG) as usize
+    }
+
+    /// `now` as nanoseconds since `origin`, saturating at both ends: a
+    /// clock reading before the origin yields zero rather than wrapping,
+    /// and an uptime past `u64`'s range (some 584 years) pins to the top.
+    fn stamp(&self, now: Instant) -> u64 {
+        u64::try_from(now.saturating_duration_since(self.origin).as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// The oldest generation still owed an answer, or `None` when none is.
+    ///
+    /// Two loads and a comparison, with no clock read, so the steady state
+    /// -- a reply back within a round trip of the probe that asked for it,
+    /// which is the overwhelming majority of observations -- costs an
+    /// observer nothing more than this.
+    fn oldest_outstanding(&self) -> Option<u64> {
+        let sent = self.sent_generation.load(Ordering::Acquire);
+        let acked = self.acked_generation.load(Ordering::Relaxed);
+        if sent <= acked {
+            return None;
+        }
+        // clamped to what the log still holds: past that the true oldest
+        // has been overwritten, and reading a newer generation's send time
+        // shortens the silence rather than inventing one (see `SEND_LOG`)
+        Some((acked + 1).max(sent.saturating_sub(SEND_LOG - 1)))
+    }
+
+    /// How long the oldest probe still owed an answer has been outstanding
+    /// at `now`, or `None` when none is.
+    fn outstanding_for(&self, now: Instant) -> Option<Duration> {
+        let oldest = self.oldest_outstanding()?;
+        let opened = self.sent_at[Self::slot(oldest)].load(Ordering::Relaxed);
+        // saturating: a send stamped after `now` (a caller folding against
+        // an earlier instant than the tick it is asking about) yields zero
+        // rather than wrapping to an instant wedge
+        Some(Duration::from_nanos(self.stamp(now).saturating_sub(opened)))
+    }
 }
 
 /// Issues the periodic probe whose answers [`HeartbeatWatch`] folds.
@@ -84,7 +183,7 @@ pub struct HeartbeatProber {
 impl HeartbeatProber {
     /// Issues one fresh probe, tagged with a generation one higher than the
     /// last. A no-op returning `Ok(())` while the watch is paused (see
-    /// [`HeartbeatWatch::pause`]).
+    /// [`HeartbeatWatch::pause`]), on an open connection only.
     ///
     /// Ticks are not acknowledgement-gated: a probe goes out on schedule
     /// whether or not the previous one was ever answered, so the answer
@@ -95,44 +194,63 @@ impl HeartbeatProber {
     ///
     /// Returns `EngineError::Closed` on the same terms as
     /// [`EngineHandle::request_heartbeat`]: the connection is already
-    /// closed, or its writer thread has exited.
+    /// closed, or its writer thread has exited. A paused prober reports
+    /// that too -- a caller that retires its thread on the first refusal
+    /// would otherwise hold its handle for the process's lifetime whenever
+    /// the connection died inside a pause.
     pub fn tick(&self, handle: &EngineHandle) -> Result<(), EngineError> {
-        if self.probe.paused.load(Ordering::Relaxed) {
+        self.tick_at(handle, Instant::now())
+    }
+
+    /// [`tick`](Self::tick) against an exact clock.
+    fn tick_at(&self, handle: &EngineHandle, now: Instant) -> Result<(), EngineError> {
+        if handle.is_closed() {
+            return Err(EngineError::Closed);
+        }
+        if self.probe.paused.load(Ordering::Acquire) {
             return Ok(());
         }
-        // bumped before the send, never after: a generation that was
-        // allocated but whose request failed to queue must still never be
-        // handed to a second probe, or one answer would resolve two
-        let generation = self.probe.sent_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let generation = self.probe.sent_generation.load(Ordering::Relaxed) + 1;
+        self.probe.sent_at[Probe::slot(generation)].store(self.probe.stamp(now), Ordering::Relaxed);
+        // published after its send time is stamped, and with a release, so
+        // an observer that sees this generation outstanding is guaranteed
+        // the time it went out rather than whatever the slot held a lap
+        // ago. `fetch_max` rather than a store because the generation was
+        // read rather than reserved: two probers on one connection would
+        // otherwise be free to rewind it, and a rewound generation means an
+        // answer that resolves a probe nobody sent.
+        self.probe
+            .sent_generation
+            .fetch_max(generation, Ordering::Release);
+        // sent after the bump, never before: a generation handed to the
+        // wire before it is on record could be answered before the observer
+        // could tell it was ever owed
         handle.request_heartbeat(generation)
     }
 }
 
 /// Watches one connection's read side across successive observations.
 ///
-/// The window is anchored on the last *answer*, not on the last probe sent,
-/// and that is the only arrangement that can report a wedge at all: probes
-/// go out on a fixed cadence regardless of whether anything answers them,
-/// so a window restarted by each send would never grow past one tick
-/// interval however long the engine stayed silent. Anchoring on answers
-/// measures exactly the time in which the engine was asked and did not
-/// reply.
+/// The window is anchored on the send time of the oldest probe still owed
+/// an answer, which is the only anchor that measures what the module doc
+/// says this measures. Anchoring on the last probe *sent* could never
+/// report a wedge at all, since probes go out on a fixed cadence regardless
+/// of whether anything answers them. Anchoring on the last answer
+/// *received* reports one, but forgives an engine that answers everything
+/// far too late: each reply would restart the window while older questions
+/// were still open.
 ///
-/// `sent_generation` is a relaxed atomic because the prober thread writes
-/// it and the observing thread reads it -- the one genuine cross-thread
-/// edge in this design. The acknowledgement side needs no atomic at all:
-/// [`record_ack`](Self::record_ack) and [`observe`](Self::observe) are both
-/// called from the runtime loop's own thread, the first from its message
-/// dispatch and the second from its pass over the frame.
+/// Every field the two threads share lives behind atomics rather than a
+/// lock, because the observing thread is asking whether the connection can
+/// answer and so must never be able to wait on it. The `&mut self` on
+/// [`record_ack`](Self::record_ack) and [`resume`](Self::resume) is an
+/// exclusivity claim, not a borrow the implementation needs: both fold
+/// acknowledgement state, and one owner doing that keeps the fold's
+/// single-writer discipline checkable at compile time.
 #[derive(Debug)]
 pub struct HeartbeatWatch {
     threshold: Duration,
     probe: Arc<Probe>,
-    /// The newest generation the engine has answered for.
-    acked_generation: u64,
-    /// When the current unanswered window opened: the last answer, or the
-    /// point this watch was created or resumed.
-    since: Instant,
 }
 
 impl Default for HeartbeatWatch {
@@ -146,13 +264,14 @@ impl HeartbeatWatch {
     /// unanswered. Production uses [`Default`], which supplies
     /// [`HEARTBEAT_WEDGE_THRESHOLD`]; an explicit threshold exists so a
     /// test can drive the same predicate without spending the real one.
+    ///
+    /// Starts paused: [`resume`](Self::resume) arms it, and until then
+    /// [`HeartbeatProber::tick`] issues nothing.
     #[must_use]
     pub fn new(threshold: Duration) -> Self {
         Self {
             threshold,
-            probe: Arc::new(Probe::default()),
-            acked_generation: 0,
-            since: Instant::now(),
+            probe: Arc::new(Probe::new()),
         }
     }
 
@@ -171,31 +290,53 @@ impl HeartbeatWatch {
     /// tag is for: replies can arrive out of order, and an older one
     /// arriving late is still proof the engine answered just now.
     pub fn record_ack(&mut self, generation: u64) {
-        self.record_ack_at(generation, Instant::now());
+        if generation > self.probe.acked_generation.load(Ordering::Relaxed) {
+            self.probe
+                .acked_generation
+                .store(generation, Ordering::Release);
+        }
     }
 
     /// Folds the connection's read side into a verdict.
     ///
-    /// Never blocks and never sends: one relaxed load, one comparison and
-    /// no allocation, so a paint loop can afford to ask on every pass --
-    /// which it must, since a wedged engine emits no redraws to wake anyone
-    /// and this reports only about the moments it is called. The send lives
-    /// on [`HeartbeatProber::tick`]; this call cannot violate "the paint
-    /// loop never awaits RPC" whatever the connection is doing.
+    /// Never blocks and never sends: two atomic loads and a comparison in
+    /// the steady state, with no clock read and no allocation, so a paint
+    /// loop can afford to ask on every pass -- which it must, since a
+    /// wedged engine emits no redraws to wake anyone and this reports only
+    /// about the moments it is called. The send lives on
+    /// [`HeartbeatProber::tick`]; this call cannot violate "the paint loop
+    /// never awaits RPC" whatever the connection is doing.
     ///
     /// `connection_closed` is the caller's reading of
     /// [`EngineHandle::is_closed`], passed in rather than taken here so
     /// this fold stays answerable without a connection at all.
     #[must_use]
     pub fn observe(&self, connection_closed: bool) -> Liveness {
-        if !connection_closed && !self.outstanding() {
-            // the steady state -- a reply is back within a round trip of
-            // the probe that asked for it, so the overwhelming majority of
-            // passes find nothing owed -- and so the one that has to cost
-            // the least: two relaxed loads, no clock read
+        if !connection_closed && self.probe.oldest_outstanding().is_none() {
             return Liveness::Alive;
         }
-        self.fold(connection_closed, Instant::now())
+        self.observe_at(connection_closed, Instant::now())
+    }
+
+    /// [`observe`](Self::observe) against an exact clock, so a caller can
+    /// prove the predicate against an instant it chooses rather than
+    /// against whatever the scheduler hands it.
+    #[must_use]
+    pub fn observe_at(&self, connection_closed: bool, now: Instant) -> Liveness {
+        if connection_closed {
+            // outranks every timing question below: a probe still waiting
+            // on a connection that is gone is waiting on nothing, and the
+            // patience the threshold buys is patience for an engine that
+            // might yet answer
+            return Liveness::Dead;
+        }
+        match self.probe.outstanding_for(now) {
+            // nothing is owed an answer, so nothing is being withheld
+            // however long the connection has been quiet
+            None => Liveness::Alive,
+            Some(silence) if silence >= self.threshold => Liveness::Wedged,
+            Some(_) => Liveness::Alive,
+        }
     }
 
     /// How long a caller may wait for its own next wakeup before this watch
@@ -216,9 +357,7 @@ impl HeartbeatWatch {
     /// looking again one threshold later.
     #[must_use]
     pub fn poll_deadline(&self) -> Option<Duration> {
-        if !self.outstanding() {
-            return None;
-        }
+        self.probe.oldest_outstanding()?;
         self.deadline_at(Instant::now())
     }
 
@@ -231,80 +370,38 @@ impl HeartbeatWatch {
         self.probe.paused.store(true, Ordering::Relaxed);
     }
 
-    /// Clears the paused flag and re-anchors the unanswered window at now,
-    /// so a pause is never counted as silence the engine is responsible
-    /// for.
+    /// Arms the prober, forgiving every probe still outstanding.
     ///
-    /// Deliberately leaves the sent and acknowledged generations exactly
-    /// where [`pause`](Self::pause) found them, so the pair stays
-    /// monotonic-forward across the cycle: a late reply to a probe sent
-    /// before the pause raises the acknowledged generation to at most its
-    /// pre-pause value, strictly below any generation a post-resume tick
-    /// produces, so it can never satisfy a later wedge check and mask a
-    /// genuine hang. It does re-anchor the window, which is correct rather
-    /// than lenient: an answer, however old the question, is the engine
-    /// demonstrably answering at that moment.
+    /// A pause is the observer's silence, never the engine's: time in which
+    /// nobody was folding answers cannot be charged to the side that may
+    /// well have been giving them. Forgiveness is what re-anchors the
+    /// window here, since the window is anchored on outstanding probes and
+    /// after this call there are none.
+    ///
+    /// Deliberately leaves the sent generation exactly where
+    /// [`pause`](Self::pause) found it, so the pair stays monotonic-forward
+    /// across the cycle: a late reply to a probe sent before the pause
+    /// raises the acknowledged generation to at most its pre-pause value,
+    /// strictly below any generation a post-resume tick produces, so it can
+    /// never satisfy a later wedge check and mask a genuine hang.
     pub fn resume(&mut self) {
-        self.resume_at(Instant::now());
-    }
-
-    /// [`record_ack`](Self::record_ack) against an exact clock.
-    fn record_ack_at(&mut self, generation: u64, now: Instant) {
-        if generation > self.acked_generation {
-            self.acked_generation = generation;
-        }
-        self.since = now;
-    }
-
-    /// [`resume`](Self::resume) against an exact clock.
-    fn resume_at(&mut self, now: Instant) {
-        self.probe.paused.store(false, Ordering::Relaxed);
-        self.since = now;
+        let sent = self.probe.sent_generation.load(Ordering::Acquire);
+        self.probe.acked_generation.store(sent, Ordering::Relaxed);
+        // released after the forgiveness above, so the first tick to see
+        // this connection armed also sees the acknowledgement that came
+        // with the arming rather than a run it should not reopen
+        self.probe.paused.store(false, Ordering::Release);
     }
 
     /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
     fn deadline_at(&self, now: Instant) -> Option<Duration> {
-        if !self.outstanding() {
-            return None;
-        }
-        let remaining = self
-            .threshold
-            .saturating_sub(now.duration_since(self.since));
+        let silence = self.probe.outstanding_for(now)?;
+        let remaining = self.threshold.saturating_sub(silence);
         Some(if remaining.is_zero() {
             self.threshold
         } else {
             remaining
         })
-    }
-
-    /// Whether a probe has been sent that no reply has yet accounted for.
-    fn outstanding(&self) -> bool {
-        self.probe.sent_generation.load(Ordering::Relaxed) > self.acked_generation
-    }
-
-    /// [`observe`](Self::observe) against an exact clock, so the predicate
-    /// is provable against an exact elapsed time instead of a scheduler's.
-    fn fold(&self, connection_closed: bool, now: Instant) -> Liveness {
-        if connection_closed {
-            // outranks every timing question below: a probe still waiting
-            // on a connection that is gone is waiting on nothing, and the
-            // patience the threshold buys is patience for an engine that
-            // might yet answer
-            return Liveness::Dead;
-        }
-        if !self.outstanding() {
-            // nothing is owed an answer, so nothing is being withheld
-            // however long the connection has been quiet
-            return Liveness::Alive;
-        }
-        // saturating: `Instant::duration_since` yields zero for an earlier
-        // `now`, so a clock reading out of order can only under-report a
-        // silence, never invent one
-        if now.duration_since(self.since) >= self.threshold {
-            Liveness::Wedged
-        } else {
-            Liveness::Alive
-        }
     }
 }
 
@@ -314,11 +411,14 @@ mod tests {
     use super::*;
 
     const THRESHOLD: Duration = Duration::from_secs(10);
+    /// The shipped probe-to-threshold ratio, so the timelines below drive
+    /// the cadence production actually runs at rather than a rounder one.
+    const INTERVAL: Duration = Duration::from_secs(2);
 
-    /// A watch and its prober over a connection whose peer neither answers
-    /// nor hangs up, so a probe genuinely goes unanswered rather than
-    /// failing to send. The returned guards keep that connection open for
-    /// the test's duration.
+    /// An armed watch and its prober over a connection whose peer neither
+    /// answers nor hangs up, so a probe genuinely goes unanswered rather
+    /// than failing to send. The returned guards keep that connection open
+    /// for the test's duration.
     fn watched_connection() -> (
         HeartbeatWatch,
         HeartbeatProber,
@@ -330,53 +430,131 @@ mod tests {
     ) {
         let (source, keep_open) = crate::test_peer::IdleSource::new();
         let (handle, notifs) = EngineHandle::start(source, std::io::sink());
-        let watch = HeartbeatWatch::new(THRESHOLD);
+        let mut watch = HeartbeatWatch::new(THRESHOLD);
+        watch.resume();
         let prober = watch.prober();
         (watch, prober, handle, (keep_open, notifs))
+    }
+
+    /// An armed watch over a connection whose peer is already gone, with
+    /// the reader thread's close-and-drain proven to have run.
+    fn lost_connection() -> (HeartbeatWatch, HeartbeatProber, EngineHandle) {
+        let (peer_read, our_write) = std::io::pipe().unwrap();
+        let (our_read, peer_write) = std::io::pipe().unwrap();
+        let pump = crate::damage::PumpShared::new();
+        let handle = EngineHandle::start_pumped(
+            our_read,
+            our_write,
+            Arc::clone(&pump),
+            #[cfg(any(unix, windows))]
+            None,
+        );
+        drop(peer_write);
+        drop(peer_read);
+        let err = handle.request("nvim_get_mode", vec![]).unwrap_err();
+        assert!(matches!(err, EngineError::Closed), "{err:?}");
+        let mut watch = HeartbeatWatch::new(THRESHOLD);
+        watch.resume();
+        let prober = watch.prober();
+        (watch, prober, handle)
     }
 
     #[test]
     fn a_probe_no_one_answers_reads_as_wedged_once_past_the_threshold() {
         let (watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        prober.tick(&handle).unwrap();
-        assert_eq!(watch.fold(false, t0), Liveness::Alive);
-        assert_eq!(watch.fold(false, t0 + THRESHOLD / 2), Liveness::Alive);
-        assert_eq!(watch.fold(false, t0 + THRESHOLD), Liveness::Wedged);
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
+        assert_eq!(watch.observe_at(false, t0), Liveness::Alive);
+        assert_eq!(watch.observe_at(false, t0 + THRESHOLD / 2), Liveness::Alive);
+        assert_eq!(watch.observe_at(false, t0 + THRESHOLD), Liveness::Wedged);
     }
 
     #[test]
     fn a_connection_no_one_has_probed_never_reads_as_wedged() {
         let (watch, _prober, _handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        assert_eq!(watch.fold(false, t0), Liveness::Alive);
-        assert_eq!(watch.fold(false, t0 + THRESHOLD * 100), Liveness::Alive);
+        let t0 = watch.probe.origin;
+        assert_eq!(watch.observe_at(false, t0), Liveness::Alive);
+        assert_eq!(
+            watch.observe_at(false, t0 + THRESHOLD * 100),
+            Liveness::Alive
+        );
     }
 
     #[test]
     fn an_engine_answering_between_probes_never_reads_as_wedged() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
+        let t0 = watch.probe.origin;
         for n in 1..=20 {
             let now = t0 + THRESHOLD / 2 * n;
-            prober.tick(&handle).unwrap();
+            prober.tick_at(&handle, now).unwrap();
             assert_eq!(
-                watch.fold(false, now),
+                watch.observe_at(false, now),
                 Liveness::Alive,
                 "answer {n} read as a wedge"
             );
-            watch.record_ack_at(u64::from(n), now);
+            watch.record_ack(u64::from(n));
+        }
+    }
+
+    /// The anchor tracks the oldest question still open, not the newest
+    /// answer: an engine four probes behind but answering each one inside
+    /// the threshold is slow, not wedged, however long the backlog runs.
+    #[test]
+    fn an_engine_answering_inside_the_threshold_stays_alive_under_a_standing_backlog() {
+        let (mut watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        // four intervals of lag: every probe answered, none of them late
+        let lag = 4;
+        for n in 1..=40u32 {
+            let now = t0 + INTERVAL * n;
+            prober.tick_at(&handle, now).unwrap();
+            if let Some(answered) = n.checked_sub(lag).filter(|a| *a >= 1) {
+                watch.record_ack(u64::from(answered));
+            }
+            assert_eq!(
+                watch.observe_at(false, now),
+                Liveness::Alive,
+                "probe {n} read as a wedge against an engine answering every one of them \
+                 in {}s",
+                (INTERVAL * lag).as_secs()
+            );
+        }
+    }
+
+    /// The failure the answer-anchored window forgives and this one does
+    /// not: an engine answering every probe thirty seconds late is not a
+    /// working editor, however steadily the answers arrive.
+    #[test]
+    fn an_engine_answering_every_probe_far_too_late_never_reads_as_alive_again() {
+        let (mut watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        // fifteen intervals of lag: three times the threshold
+        let lag = 15;
+        for n in 1..=40u32 {
+            let now = t0 + INTERVAL * n;
+            prober.tick_at(&handle, now).unwrap();
+            if let Some(answered) = n.checked_sub(lag).filter(|a| *a >= 1) {
+                watch.record_ack(u64::from(answered));
+            }
+            if now >= t0 + INTERVAL + THRESHOLD {
+                assert_eq!(
+                    watch.observe_at(false, now),
+                    Liveness::Wedged,
+                    "probe {n} read as alive against an engine {}s behind",
+                    (INTERVAL * lag).as_secs()
+                );
+            }
         }
     }
 
     #[test]
     fn the_wedge_clears_as_soon_as_one_probe_is_answered() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        prober.tick(&handle).unwrap();
-        assert_eq!(watch.fold(false, t0 + THRESHOLD), Liveness::Wedged);
-        watch.record_ack_at(1, t0 + THRESHOLD);
-        assert_eq!(watch.fold(false, t0 + THRESHOLD), Liveness::Alive);
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
+        assert_eq!(watch.observe_at(false, t0 + THRESHOLD), Liveness::Wedged);
+        watch.record_ack(1);
+        assert_eq!(watch.observe_at(false, t0 + THRESHOLD), Liveness::Alive);
     }
 
     /// The whole reason the probe carries a generation: an answer that
@@ -386,45 +564,51 @@ mod tests {
     #[test]
     fn a_reply_arriving_out_of_order_never_rewinds_what_has_been_answered() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        prober.tick(&handle).unwrap();
-        prober.tick(&handle).unwrap();
-        watch.record_ack_at(2, t0);
-        watch.record_ack_at(1, t0);
-        assert_eq!(watch.fold(false, t0 + THRESHOLD * 10), Liveness::Alive);
-    }
-
-    /// The second stall is timed from the answer that ended the first, not
-    /// from the first observation after it: the gap between two
-    /// observations belongs to the silence it precedes.
-    #[test]
-    fn a_second_silence_is_timed_from_the_answer_that_ended_the_first() {
-        let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        prober.tick(&handle).unwrap();
-        assert_eq!(watch.fold(false, t0 + THRESHOLD), Liveness::Wedged);
-        let recovered = t0 + THRESHOLD;
-        watch.record_ack_at(1, recovered);
-        prober.tick(&handle).unwrap();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
+        prober.tick_at(&handle, t0).unwrap();
+        watch.record_ack(2);
+        watch.record_ack(1);
         assert_eq!(
-            watch.fold(false, recovered + THRESHOLD - Duration::from_millis(1)),
+            watch.observe_at(false, t0 + THRESHOLD * 10),
             Liveness::Alive
         );
-        assert_eq!(watch.fold(false, recovered + THRESHOLD), Liveness::Wedged);
+    }
+
+    /// The second silence is timed from the probe that opened it, not from
+    /// the answer that ended the first: the two windows are separate
+    /// questions and the gap between them belongs to neither.
+    #[test]
+    fn a_second_silence_is_timed_from_the_probe_that_opened_it() {
+        let (mut watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
+        assert_eq!(watch.observe_at(false, t0 + THRESHOLD), Liveness::Wedged);
+        let recovered = t0 + THRESHOLD;
+        watch.record_ack(1);
+        prober.tick_at(&handle, recovered).unwrap();
+        assert_eq!(
+            watch.observe_at(false, recovered + THRESHOLD - Duration::from_millis(1)),
+            Liveness::Alive
+        );
+        assert_eq!(
+            watch.observe_at(false, recovered + THRESHOLD),
+            Liveness::Wedged
+        );
     }
 
     #[test]
     fn nothing_outstanding_asks_for_no_wakeup_at_all() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
+        let t0 = watch.probe.origin;
         assert_eq!(watch.deadline_at(t0), None);
-        prober.tick(&handle).unwrap();
+        prober.tick_at(&handle, t0).unwrap();
         assert_eq!(watch.deadline_at(t0), Some(THRESHOLD));
         assert_eq!(
             watch.deadline_at(t0 + THRESHOLD / 4),
             Some(THRESHOLD / 4 * 3)
         );
-        watch.record_ack_at(1, t0);
+        watch.record_ack(1);
         assert_eq!(watch.deadline_at(t0), None);
     }
 
@@ -434,8 +618,8 @@ mod tests {
     #[test]
     fn a_confirmed_wedge_keeps_asking_so_the_recovery_is_seen_without_a_keystroke() {
         let (watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        prober.tick(&handle).unwrap();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
         assert_eq!(watch.deadline_at(t0 + THRESHOLD), Some(THRESHOLD));
         assert_eq!(watch.deadline_at(t0 + THRESHOLD * 10), Some(THRESHOLD));
     }
@@ -447,13 +631,18 @@ mod tests {
     #[test]
     fn a_closed_connection_reads_as_dead_with_nothing_probed_and_no_time_elapsed() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        let t0 = watch.since;
-        assert_eq!(watch.fold(true, t0), Liveness::Dead);
-        prober.tick(&handle).unwrap();
-        assert_eq!(watch.fold(true, t0), Liveness::Dead);
-        watch.record_ack_at(1, t0);
-        assert_eq!(watch.fold(true, t0), Liveness::Dead);
-        assert_eq!(watch.fold(true, t0 + THRESHOLD * 10), Liveness::Dead);
+        let t0 = watch.probe.origin;
+        // through the public seam, which is the caller's only reading of a
+        // connection that closed with nothing owed: the timing path below
+        // would report `Alive` for exactly this state
+        assert_eq!(watch.observe(true), Liveness::Dead);
+        assert_eq!(watch.observe(false), Liveness::Alive);
+        assert_eq!(watch.observe_at(true, t0), Liveness::Dead);
+        prober.tick_at(&handle, t0).unwrap();
+        assert_eq!(watch.observe_at(true, t0), Liveness::Dead);
+        watch.record_ack(1);
+        assert_eq!(watch.observe_at(true, t0), Liveness::Dead);
+        assert_eq!(watch.observe_at(true, t0 + THRESHOLD * 10), Liveness::Dead);
     }
 
     /// The whole chain in one pass, since every link between the tick and
@@ -478,6 +667,7 @@ mod tests {
         let _dpump = pump.attach_sink(tx);
 
         let mut watch = HeartbeatWatch::new(THRESHOLD);
+        watch.resume();
         watch.prober().tick(&handle).unwrap();
 
         let mut r = std::io::BufReader::new(peer_read);
@@ -505,7 +695,7 @@ mod tests {
         };
         watch.record_ack(generation);
         assert_eq!(
-            watch.fold(false, watch.since + THRESHOLD * 10),
+            watch.observe_at(false, watch.probe.origin + THRESHOLD * 10),
             Liveness::Alive
         );
     }
@@ -519,9 +709,23 @@ mod tests {
             prober.tick(&handle).unwrap();
         }
         assert_eq!(watch.probe.sent_generation.load(Ordering::Relaxed), 1);
-        watch.resume_at(watch.since);
+        watch.resume();
         prober.tick(&handle).unwrap();
         assert_eq!(watch.probe.sent_generation.load(Ordering::Relaxed), 2);
+    }
+
+    /// The paused prober still answers the one question its caller retires
+    /// on. A thread that ticks until the connection refuses would otherwise
+    /// outlive every connection that died inside a pause, holding an
+    /// engine handle clone for the process's lifetime.
+    #[test]
+    fn a_paused_prober_still_refuses_a_connection_that_is_gone() {
+        let (watch, prober, handle) = lost_connection();
+        watch.pause();
+        let err = prober.tick(&handle).unwrap_err();
+        assert!(matches!(err, EngineError::Closed), "{err:?}");
+        // and no probe was issued on the way to that refusal
+        assert_eq!(watch.probe.sent_generation.load(Ordering::Relaxed), 0);
     }
 
     /// Both halves together, because either alone proves the wrong thing: a
@@ -532,22 +736,26 @@ mod tests {
     #[test]
     fn a_reply_landing_after_a_resume_is_harmless_without_masking_the_next_hang() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        prober.tick(&handle).unwrap();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
         watch.pause();
-        let resumed = watch.since + THRESHOLD * 3;
-        watch.resume_at(resumed);
+        let resumed = t0 + THRESHOLD * 3;
+        watch.resume();
 
         // the pre-pause probe's reply, arriving only now
-        watch.record_ack_at(1, resumed);
-        assert_eq!(watch.fold(false, resumed), Liveness::Alive);
+        watch.record_ack(1);
+        assert_eq!(watch.observe_at(false, resumed), Liveness::Alive);
 
         // and from that same point, a probe nothing answers
-        prober.tick(&handle).unwrap();
+        prober.tick_at(&handle, resumed).unwrap();
         assert_eq!(
-            watch.fold(false, resumed + THRESHOLD - Duration::from_millis(1)),
+            watch.observe_at(false, resumed + THRESHOLD - Duration::from_millis(1)),
             Liveness::Alive
         );
-        assert_eq!(watch.fold(false, resumed + THRESHOLD), Liveness::Wedged);
+        assert_eq!(
+            watch.observe_at(false, resumed + THRESHOLD),
+            Liveness::Wedged
+        );
     }
 
     /// The pause is not counted against the engine: time spent with the
@@ -555,11 +763,31 @@ mod tests {
     #[test]
     fn a_pause_longer_than_the_threshold_is_not_charged_to_the_engine() {
         let (mut watch, prober, handle, _guards) = watched_connection();
-        prober.tick(&handle).unwrap();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
         watch.pause();
-        let resumed = watch.since + THRESHOLD * 10;
-        watch.resume_at(resumed);
-        assert_eq!(watch.fold(false, resumed), Liveness::Alive);
+        let resumed = t0 + THRESHOLD * 10;
+        watch.resume();
+        assert_eq!(watch.observe_at(false, resumed), Liveness::Alive);
+    }
+
+    /// A silence outliving the send log still reads as one: the fallback
+    /// anchor is the oldest send the log still holds, which is a real probe
+    /// and a real send time, so the verdict stays a statement about the
+    /// engine rather than an index into an overwritten slot.
+    #[test]
+    fn a_silence_outliving_the_send_log_still_reads_as_a_wedge() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let probes = u32::try_from(SEND_LOG).unwrap() * 2;
+        for n in 1..=probes {
+            prober.tick_at(&handle, t0 + INTERVAL * n).unwrap();
+        }
+        let last = t0 + INTERVAL * probes;
+        assert_eq!(watch.observe_at(false, last), Liveness::Wedged);
+        // the oldest generation still on record, not the oldest ever sent
+        let oldest = watch.probe.oldest_outstanding().unwrap();
+        assert_eq!(oldest, u64::from(probes) - SEND_LOG + 1);
     }
 
     #[test]
@@ -568,5 +796,21 @@ mod tests {
             HeartbeatWatch::default().threshold,
             HEARTBEAT_WEDGE_THRESHOLD
         );
+    }
+
+    /// A fresh watch probes nothing until its owner arms it, so probes
+    /// answered before anyone was folding replies are never charged to the
+    /// engine (see [`HeartbeatWatch::resume`]).
+    #[test]
+    fn a_watch_nobody_has_armed_issues_no_probe() {
+        let (source, _keep_open) = crate::test_peer::IdleSource::new();
+        let (handle, _notifs) = EngineHandle::start(source, std::io::sink());
+        let watch = HeartbeatWatch::new(THRESHOLD);
+        let prober = watch.prober();
+        for _ in 0..5 {
+            prober.tick(&handle).unwrap();
+        }
+        assert_eq!(watch.probe.sent_generation.load(Ordering::Relaxed), 0);
+        assert_eq!(watch.observe(false), Liveness::Alive);
     }
 }

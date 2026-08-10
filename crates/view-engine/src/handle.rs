@@ -672,17 +672,20 @@ impl EngineHandle {
     /// every request from here on fails with
     /// [`EngineError::Closed`] rather than waiting for a reply.
     ///
-    /// One relaxed atomic load, taking no lock, so a paint loop can afford
-    /// to ask on every pass -- and must be able to, since the answer it
-    /// wants most is the one a lock-taking version could not give: the
-    /// connection's own lock is held by whichever thread is discovering the
-    /// loss. Correspondingly one observation stale at worst, never wrong in
-    /// the other direction: the flag is set inside the same critical
-    /// section that fails every waiter, so `true` here means every
-    /// in-flight request has already been failed.
+    /// One atomic load, taking no lock, so a paint loop can afford to ask
+    /// on every pass -- and must be able to, since the answer it wants most
+    /// is the one a lock-taking version could not give: the connection's
+    /// own lock is held by whichever thread is discovering the loss.
+    /// Correspondingly one observation stale at worst, never wrong in the
+    /// other direction: the flag is set inside the same critical section
+    /// that fails every waiter, once the last of them is already out of the
+    /// pending map and before any of them is told, and this load acquires
+    /// what that store released. So `true` here means no request is still
+    /// waiting on a reply that can never arrive, and a caller handed
+    /// [`EngineError::Closed`] can never read `false` here afterwards.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.closed.load(Ordering::Relaxed)
+        self.closed.load(Ordering::Acquire)
     }
 
     /// Sends a synchronous RPC request to the engine and waits for the response.
@@ -1395,7 +1398,7 @@ fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
 
 /// Marks the connection closed and drains every pending waiter with
 /// [`EngineError::Closed`] in one critical section, so a `send_request`
-/// racing this call either lands before the flag flips (and gets drained
+/// racing this call either lands before that section (and gets drained
 /// here) or observes `closed == true` and never inserts at all. An
 /// `HlProbe` waiter has nothing to send a `Closed` error to (nothing is
 /// blocked on it), so it is dropped silently -- its `Msg::HlProbeReply`
@@ -1404,8 +1407,19 @@ fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
 /// `Theme::from_hl`).
 fn close_and_drain(pending: &Pending) {
     let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
-    p.closed.store(true, Ordering::Relaxed);
-    for (_, waiter) in p.waiters.drain() {
+    let doomed: Vec<Waiter> = p.waiters.drain().map(|(_, waiter)| waiter).collect();
+    // flipped between taking the waiters out of the map and failing them,
+    // with a release paired against [`EngineHandle::is_closed`]'s acquire,
+    // so both readings of the flag hold: nothing is left waiting on a reply
+    // once an observer can see `true`, and a caller handed `Closed` can
+    // never look at the flag and be told the connection is fine. Ordering
+    // the two the other way round makes one of those false whichever way it
+    // is written, and both are load-bearing -- the first for an observer
+    // deciding the connection is gone, the second for the test that pins
+    // it. Still one critical section, so the insert-versus-drain race the
+    // shared lock exists to close is unaffected.
+    p.closed.store(true, Ordering::Release);
+    for waiter in doomed {
         if let Waiter::Reply(tx) = waiter {
             let _ = tx.send(Err(EngineError::Closed));
         }

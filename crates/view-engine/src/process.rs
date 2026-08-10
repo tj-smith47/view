@@ -399,10 +399,12 @@ pub struct Engine {
 /// thread, which must never block -- and a timer is a block.
 ///
 /// Detached, and ends itself: the first tick the connection refuses retires
-/// it, so a replaced engine leaves no prober behind and a process shutting
-/// down waits for nothing. That costs at most one interval of lag between
-/// the connection closing and the thread noticing, during which the ticks
-/// it issues are refused rather than written.
+/// it -- paused or armed alike, which is the whole reason
+/// [`HeartbeatProber::tick`] answers for the connection before it answers
+/// for the pause -- so a replaced engine leaves no prober behind and a
+/// process shutting down waits for nothing. That costs at most one interval
+/// of lag between the connection closing and the thread noticing, during
+/// which the ticks it issues are refused rather than written.
 fn spawn_prober(prober: HeartbeatProber, handle: EngineHandle) {
     std::thread::spawn(move || loop {
         std::thread::sleep(HEARTBEAT_PROBE_INTERVAL);
@@ -569,6 +571,13 @@ impl Engine {
         &mut self,
         sink: impl MsgSink + Send + Sync + 'static,
     ) -> (DamagePump, SinkCutover) {
+        // the heartbeat is armed here rather than at spawn because this is
+        // the first moment a reply can reach the consumer that folds it:
+        // anything the pump staged before this call is returned as
+        // `SinkCutover` and replayed through the caller's own dispatch,
+        // never through the acknowledgement path, so a probe issued before
+        // now would be charged to the engine as silence it did not owe
+        self.heartbeat.resume();
         self.pump.attach_sink(sink)
     }
 

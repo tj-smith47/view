@@ -1101,6 +1101,52 @@ fn wait_for_msg_unified(
     }
 }
 
+/// Turns one delivered wakeup into the `Msg` the loop dispatches, taking
+/// the connection-level bookkeeping that has to happen exactly once per
+/// message and cannot happen inside `update()`: the pure fold has no engine
+/// to ask and no clock to read.
+///
+/// A function rather than a `match` inline in [`run`] so the bookkeeping is
+/// reachable without a terminal, an executor or a loop -- every arm here is
+/// a place a connection-level fact enters the model, and an arm nothing can
+/// call is an arm nothing can prove.
+fn intake(
+    received: Result<Msg, mpsc::RecvError>,
+    engine: &mut Engine,
+    pump: &view_engine::DamagePump,
+    model: &mut Model,
+) -> Msg {
+    match received {
+        Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
+        Ok(Msg::HeartbeatReply { generation }) => {
+            // recorded here rather than in `update()`: this is the runtime
+            // loop's own thread, the same one that folds the verdict a pass
+            // later, so the acknowledgement and the reading of it are
+            // ordered by the loop itself rather than by the memory model
+            engine.heartbeat.record_ack(generation);
+            Msg::HeartbeatReply { generation }
+        }
+        Ok(Msg::EngineStopped(reason)) => {
+            // stashed on the model rather than reported here: this loop
+            // runs behind the terminal's raw-mode alternate screen, so
+            // `main` reports it only after `run` returns and the
+            // terminal is restored (see Msg::EngineStopped's doc)
+            model.fatal_reason = reason;
+            // Same bounded (up to `shutdown_timeout`) block as the
+            // `Flow::EngineLost` arm in `run`, but the reader thread's
+            // stream has already ended by the time this fires, so the
+            // `qa!` send is a harmless no-op and the first `try_wait`
+            // typically finds the child already exited.
+            Msg::EngineDown(engine.wait_exit())
+        }
+        Ok(m) => m,
+        Err(_) => Msg::EngineDown(ExitInfo {
+            code: None,
+            by_signal: false,
+        }),
+    }
+}
+
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
 /// terminal I/O error occurs, returning the final `Model` alongside the
 /// process exit code on the former (the caller persists the model's
@@ -1128,12 +1174,21 @@ pub struct MsgChannel {
 /// while the engine is still attaching is never lost -- see
 /// `startup::drain_pre_attach` for the buffering that covers exactly that
 /// window. The executor drives
-/// `engine.handle` through [`EngineOps`]. There is no periodic timer in the
-/// loop body: painting fires immediately when `update()` marks
-/// `model.dirty`, and the loop blocks in [`wait_for_msg`], which a redraw,
-/// a keystroke, or an engine request wakes directly -- unbounded except
-/// while engine-bound output is pending, where the stall deadline bounds
-/// the sleep.
+/// `engine.handle` through [`EngineOps`]. Painting fires immediately when
+/// `update()` marks `model.dirty`, and the loop blocks in
+/// [`wait_for_msg`], which a redraw, a keystroke, or an engine request
+/// wakes directly.
+///
+/// The loop body runs no timer of its own, but an idle session is not a
+/// silent one: the read side's heartbeat is answered on this same channel
+/// every
+/// [`HEARTBEAT_PROBE_INTERVAL`](view_engine::heartbeat::HEARTBEAT_PROBE_INTERVAL),
+/// so a session with nobody typing wakes at that cadence, records the
+/// acknowledgement in [`intake`], marks nothing dirty and paints nothing.
+/// Between those wakeups the block is unbounded unless a watch asks
+/// otherwise: engine-bound output pending on the write side, or a probe
+/// still unanswered on the read side, each bound the sleep by its own
+/// deadline (see [`watch_deadline`]).
 ///
 /// # Latency
 ///
@@ -1150,6 +1205,13 @@ pub struct MsgChannel {
 /// transient write error or an over-cap payload is logged and skipped
 /// rather than retried or escalated, so this never turns into a stall the
 /// way an engine-bound write can (see `OutboxStallWatch`).
+///
+/// [`note_engine_liveness`] runs on this thread too, once per pass, and its
+/// per-pass cost is two atomic loads and a comparison with no clock read
+/// and no send -- it cannot block on the very connection it is asking
+/// about. Its recurring cost is the wakeup rather than the fold: one extra
+/// pass every probe interval, ending in a dispatch that produces no effect
+/// and no paint.
 ///
 /// # Errors
 ///
@@ -1198,12 +1260,6 @@ pub fn run(
         .with_picker(picker_tx);
     let mut write_stall = OutboxStallWatch::default();
     let mut liveness = Liveness::Alive;
-    // re-anchors the unanswered window at the moment this loop starts
-    // observing. Probes answered before now were staged by the pump and
-    // replayed through `dispatch`, never reaching `record_ack`, so without
-    // this a startup slower than the wedge threshold would open the session
-    // by reporting a wedge that already ended.
-    engine.heartbeat.resume();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1295,36 +1351,7 @@ pub fn run(
         if received.is_ok() {
             view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
         }
-        let msg = match received {
-            Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
-            Ok(Msg::HeartbeatReply { generation }) => {
-                // recorded here rather than in `update()`: this is the
-                // runtime loop's own thread, the same one that folds the
-                // verdict a pass later, which is what lets the
-                // acknowledgement be a plain field instead of a second
-                // cross-thread atomic
-                engine.heartbeat.record_ack(generation);
-                Msg::HeartbeatReply { generation }
-            }
-            Ok(Msg::EngineStopped(reason)) => {
-                // stashed on the model rather than reported here: this loop
-                // runs behind the terminal's raw-mode alternate screen, so
-                // `main` reports it only after `run` returns and the
-                // terminal is restored (see Msg::EngineStopped's doc)
-                model.fatal_reason = reason;
-                // Same bounded (up to `shutdown_timeout`) block as the
-                // `Flow::EngineLost` arm above, but the reader thread's
-                // stream has already ended by the time this fires, so the
-                // `qa!` send is a harmless no-op and the first `try_wait`
-                // typically finds the child already exited.
-                Msg::EngineDown(engine.wait_exit())
-            }
-            Ok(m) => m,
-            Err(_) => Msg::EngineDown(ExitInfo {
-                code: None,
-                by_signal: false,
-            }),
-        };
+        let msg = intake(received, &mut engine, &pump, &mut model);
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
@@ -2796,9 +2823,10 @@ mod tests {
         peer.release();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
-        // nothing has probed it either, so neither side of the connection
-        // is owed anything that a wakeup could report on
-        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        // armed, but nothing has probed it, so neither side of the
+        // connection is owed anything that a wakeup could report on
+        let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        heartbeat.resume();
 
         peer.handle.input("a").unwrap();
         wait_until("the writer drains its backlog", || {
@@ -2843,7 +2871,8 @@ mod tests {
         peer.release();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
-        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        heartbeat.resume();
 
         heartbeat.prober().tick(&peer.handle).unwrap();
         wait_until("the writer drains the probe", || {
@@ -2876,6 +2905,60 @@ mod tests {
             note_engine_liveness(&heartbeat, &mut verdict, &peer.handle);
             verdict == Liveness::Wedged
         });
+    }
+
+    /// The wiring rather than the fold: a real engine, its own prober
+    /// thread, the real reader thread, the real sink and the real
+    /// [`intake`] arm, with nothing between them stubbed. All three seams
+    /// the feature hangs on are load-bearing here -- the prober
+    /// `Engine::spawn` starts, the arming `Engine::start_pump` does, and
+    /// the acknowledgement `intake` records -- and removing any one of them
+    /// leaves this test with nothing to observe: no reply arrives at all,
+    /// or replies arrive and the window never closes.
+    #[test]
+    fn a_live_engine_answers_the_probe_and_the_loops_intake_records_it() {
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        let (pump, _cutover) = engine.start_pump(tx);
+        let mut model = Model::with_term_size(80, 24);
+
+        // generous, and hang-safe: the first tick is one interval out, and
+        // this budget only ever has to outlast a scheduler, never a wedge
+        let deadline =
+            std::time::Instant::now() + view_engine::heartbeat::HEARTBEAT_PROBE_INTERVAL * 4;
+        let mut replies = 0u32;
+        let mut answered_in_full = false;
+        while !answered_in_full {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let Ok(msg) = rx.recv_timeout(left) else {
+                break;
+            };
+            if matches!(msg, Msg::HeartbeatReply { .. }) {
+                replies += 1;
+            }
+            let _ = intake(Ok(msg), &mut engine, &pump, &mut model);
+            // read a whole wedge threshold into the future: `Alive` there
+            // is only possible with nothing outstanding, so it says every
+            // probe this engine has been sent was answered *and* folded in
+            // through the loop's own intake
+            answered_in_full = replies > 0
+                && engine.heartbeat.observe_at(
+                    false,
+                    std::time::Instant::now() + view_engine::heartbeat::HEARTBEAT_WEDGE_THRESHOLD,
+                ) == Liveness::Alive;
+        }
+        assert!(
+            replies > 0,
+            "a live engine answered no heartbeat inside {:?}: nothing is probing it",
+            view_engine::heartbeat::HEARTBEAT_PROBE_INTERVAL * 4
+        );
+        assert!(
+            answered_in_full,
+            "{replies} heartbeat replies reached the sink and the watch still reads a \
+             probe as outstanding: the acknowledgement never made it out of the loop's \
+             intake"
+        );
+        let _ = engine.wait_exit();
     }
 
     #[test]
