@@ -1044,13 +1044,20 @@ impl SupervisionFold {
 /// the connection's closed flag ([`EngineHandle::is_closed`]), and the pair
 /// [`HeartbeatWatch::observe`] reads to answer whether any probe is
 /// outstanding at all. Two more follow in the same pass from
-/// [`watch_deadline`], which asks the same watch for a deadline. No clock
-/// read, no lock, no allocation, no walk of the message log and nothing
-/// dispatched in that state, and nothing sent at all: the send lives on the
-/// engine's own prober thread, so this call cannot await RPC however wedged
-/// the engine is, which is the only reason a paint loop can afford to ask on
-/// every pass. A pass with a probe actually outstanding reads the send-time
-/// log as well and takes one `Instant::now()`.
+/// [`watch_deadline`], which asks the same watch for a deadline.
+///
+/// The steady state named here is the exact one both watches short-circuit
+/// on: nothing queued for the writer and no probe owed an answer. It costs
+/// no clock read, no lock, no allocation, no walk of the message log and no
+/// dispatch. A pass with output pending pays one `Instant::now()` on the
+/// write side, and a pass with a probe outstanding reads the send-time log
+/// and takes one of its own -- both bought by a connection that is
+/// demonstrably mid-something rather than by every keystroke.
+///
+/// Nothing is sent from here at all: the send lives on the engine's own
+/// prober thread, so this call cannot await RPC however wedged the engine
+/// is, which is the only reason a paint loop can afford to ask on every
+/// pass.
 fn note_supervision(
     fold: &mut SupervisionFold,
     write: &mut OutboxStallWatch,
