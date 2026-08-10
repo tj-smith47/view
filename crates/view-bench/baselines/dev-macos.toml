@@ -53,10 +53,10 @@ phys_footprint_mb = 3.56329345703125
 p99_ms = 0.055
 
 [picker.minimal]
-first_page_p50_ms = 1.438375
-first_page_p99_ms = 1.5522909999999999
-match_paint_p50_ms = 8.594042
-match_paint_p99_ms = 61.974250000000005
+first_page_p50_ms = 1.4233749999999998
+first_page_p99_ms = 1.5416670000000001
+match_paint_p50_ms = 7.1591249999999995
+match_paint_p99_ms = 32.347958000000006
 
 [scroll.heavy]
 ratio_p50 = 2.393156602249975
