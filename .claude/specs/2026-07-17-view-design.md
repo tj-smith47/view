@@ -274,11 +274,13 @@ Dependency rules (audit-enforced, cfgd-style):
   corner; upstream PR #32691 makes multigrid the internal default — each
   engine-pin bump re-evaluates the `single_grid` knob's lifespan, and
   `doctor` recognizes multigrid-shaped failures and suggests the knob.)
-- Supervision: engine exit → view keeps the last Surface painted, offers
-  one-key restart; sessions/swapfiles make restart non-destructive. RPC calls
-  carry timeouts; a hung engine (blocked synchronous Lua) yields an honest
-  "engine busy" indicator with interrupt/restart affordances — the UI thread
-  itself never blocks.
+- Supervision: an engine death (a signal, or a reader that stopped for its own
+  reason) → view keeps the last Surface painted, offers one-key restart, and
+  swapfiles make that restart non-destructive; an engine told to exit (`:q`,
+  `:cq`) ends the session with nvim's own status, since recovering from one
+  would respawn the editor a user had just closed. RPC calls carry timeouts; a
+  hung engine (blocked synchronous Lua) yields an honest "engine busy"
+  indicator with interrupt/restart affordances — the UI thread never blocks.
 - Version handshake at attach: `nvim_get_api_info`; mismatch against the tested
   pin → doctor-grade warning, never a hard failure.
 - **Clipboard:** an embedded engine has no TUI, hence no built-in OSC52 path —
@@ -707,6 +709,9 @@ tree = true
 statusline = true
 notifications = true
 palette = true
+
+[supervision]
+auto_restart = true        # false: surface a dead engine and wait for a manual restart
 
 [ai]
 enabled = true

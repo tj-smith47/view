@@ -6,6 +6,7 @@
 mod bridge;
 mod clipboard;
 mod native;
+mod recovery;
 mod runtime;
 mod startup;
 mod theme_cache;
@@ -491,10 +492,18 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
 
+    // built fresh per restart rather than stored once: `EngineConfig` is
+    // consumed by the spawn it describes, and the stdin relay it can carry
+    // is an owned descriptor a second spawn needs a second duplicate of,
+    // not a clone of the first
+    let respawn = || maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
     let (model, exit_code) = runtime::run(
         model,
-        engine,
-        pump,
+        recovery::EngineSession {
+            engine,
+            pump,
+            respawn: &respawn,
+        },
         runtime::MsgChannel {
             tx: msg_tx.clone(),
             rx: msg_rx,

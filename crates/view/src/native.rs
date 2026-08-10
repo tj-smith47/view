@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use view_core::model::Model;
 use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
 use view_core::native::registry;
-use view_native::config::NativeConfig;
+use view_native::config::{NativeConfig, ViewConfig};
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
 use view_native::{mappings, paths, toast};
@@ -104,8 +104,8 @@ impl NativeSession {
         model: &mut Model,
     ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
-        let cfg = match NativeConfig::load(config_path.as_deref()) {
-            Ok(cfg) => cfg,
+        let resolved = match ViewConfig::load(config_path.as_deref()) {
+            Ok(resolved) => resolved,
             Err(err) => {
                 crate::vlog::log_with("native", || format!("config unreadable: {err}"));
                 model.dirty = true;
@@ -113,11 +113,13 @@ impl NativeSession {
                     format!("view: {err}; every native feature stays on this session"),
                     false,
                 );
-                NativeConfig::all_enabled()
+                ViewConfig::defaults()
             }
         };
+        let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
+        model.supervision.auto_restart = resolved.supervision.auto_restart;
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's
         // live grid still claims every row `statusline_rows()` now needs to
@@ -142,6 +144,21 @@ impl NativeSession {
             handed_over: false,
         };
         (session, effects)
+    }
+
+    /// Points this session at a replacement engine.
+    ///
+    /// A restarted engine is a different connection: it answers on its own
+    /// channel, and it carries none of the mappings or option takeovers the
+    /// one it replaced was given. So both facts this session holds about
+    /// the connection are reset -- the channel the registered keys notify
+    /// back over, and whether the takeover has been performed -- and the
+    /// fresh engine's own `VimEnter` performs it again. The config, the
+    /// plan and the first-run record are untouched: they are facts about
+    /// the session, which is the thing that survived.
+    pub(crate) fn rebind(&mut self, channel_id: u64) {
+        self.channel_id = channel_id;
+        self.handed_over = false;
     }
 
     /// Carries out `stage` against `model`, returning whatever it owes the
@@ -398,6 +415,43 @@ mod tests {
         );
     }
 
+    /// A replacement engine has none of the registrations the one it
+    /// replaced was given, and answers on a channel of its own. A session
+    /// that kept either fact would leave a recovered editor with view's keys
+    /// unbound and its notifications addressed to a channel that is gone.
+    #[test]
+    fn a_rebound_session_hands_over_again_and_to_the_new_channel() {
+        let mut session = NativeSession::all_enabled(7, None);
+        let mut m = model();
+        let first = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(
+            !first.is_empty(),
+            "the first takeover registered nothing at all"
+        );
+        assert!(
+            session.follow_up(&mut m, Stage::VimEnter).is_empty(),
+            "one engine is handed over to exactly once"
+        );
+
+        session.rebind(21);
+        let again = session.follow_up(&mut m, Stage::VimEnter);
+        assert!(
+            again.iter().any(|e| matches!(
+                e,
+                Effect::Rpc(RpcCall::RegisterClipboard { channel_id: 21 })
+            )),
+            "the replacement engine was never handed the registrations the \
+             dead one had, or was handed them on the dead one's channel: {again:?}"
+        );
+        assert!(
+            again.iter().any(|e| matches!(
+                e,
+                Effect::Rpc(RpcCall::RegisterMappings { channel_id: 21, .. })
+            )),
+            "view's own keys are unbound in the recovered session: {again:?}"
+        );
+    }
+
     #[test]
     fn cmdheight_is_forced_to_zero_even_with_the_notifications_feature_off() {
         let cfg =
@@ -545,6 +599,39 @@ palette = false
         assert!(
             !off.palette_enabled,
             "the config explicitly disabled the feature"
+        );
+    }
+    /// The `[supervision]` table's one switch reaching the model, over the
+    /// same single load every other table's answers cross.
+    #[test]
+    fn load_recovers_automatically_by_default_and_stops_when_configured() {
+        let mut on = model();
+        let _ = NativeSession::load(None, 7, &mut on);
+        assert!(
+            on.supervision.auto_restart,
+            "an absent config must keep automatic recovery on"
+        );
+
+        let dir = view_test_support::ScratchDir::new("native-supervision-toggle").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(
+            &path,
+            "[supervision]
+auto_restart = false
+",
+        )
+        .expect("a temp config must be writable");
+
+        let mut off = model();
+        let _ = NativeSession::load(Some(path), 7, &mut off);
+
+        assert!(
+            !off.supervision.auto_restart,
+            "the config explicitly turned automatic recovery off"
+        );
+        assert!(
+            off.palette_enabled,
+            "a supervision-only config must leave every native feature on"
         );
     }
 }

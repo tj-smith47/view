@@ -11,7 +11,8 @@ use crate::model::{OverlayId, OverlayKind};
 use crate::msg::{ExitInfo, RegisterType, ReplyToken};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
-    SupervisionChoice, WedgeKind, ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION,
+    SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS, ENGINE_BUSY_MODAL_THRESHOLD,
+    INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION, RESTART_NOTATION,
 };
 use std::time::Duration;
 
@@ -3584,12 +3585,21 @@ fn a_wedge_raises_the_banner_first_and_the_modal_only_past_the_threshold() {
     );
 }
 
+/// A model whose user turned automatic recovery off, so a dead connection
+/// is surfaced and waited on rather than answered with a respawn -- the
+/// only shape in which the dead-engine modal is ever seen.
+fn attended_model() -> Model {
+    let mut m = model();
+    m.supervision.auto_restart = false;
+    m
+}
+
 /// A closed connection spends no patience: the whole reason the
 /// threshold exists is to let a possibly self-resolving condition
 /// resolve, and this one never will.
 #[test]
 fn a_dead_connection_raises_banner_and_modal_on_the_same_observation() {
-    let mut m = model();
+    let mut m = attended_model();
 
     let _ = update(
         &mut m,
@@ -3614,12 +3624,135 @@ fn a_dead_connection_raises_banner_and_modal_on_the_same_observation() {
         !state.offers(SupervisionChoice::Interrupt),
         "no input path survives a closed connection, so Interrupt must not be offered"
     );
-    assert_eq!(state.choices(), vec![SupervisionChoice::Dismiss]);
+    assert_eq!(
+        state.choices(),
+        vec![SupervisionChoice::Restart, SupervisionChoice::Quit]
+    );
+}
+
+/// The switch a user sets, doing the thing it names: a connection observed
+/// dead is replaced without asking, and the modal that would have asked is
+/// never raised.
+#[test]
+fn a_dead_connection_is_recovered_without_asking_unless_the_user_said_otherwise() {
+    let mut unattended = model();
+    let effects = update(
+        &mut unattended,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert!(
+        matches!(&effects[..], [Effect::RestartEngine]),
+        "automatic recovery must respawn on the reading that saw the death: {effects:?}"
+    );
+    assert!(
+        unattended.overlays().is_empty(),
+        "nothing is being asked, so nothing may be on screen asking it: {:?}",
+        unattended.overlays()
+    );
+
+    let mut attended = attended_model();
+    let effects = update(
+        &mut attended,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "a user who turned automatic recovery off must be asked first: {effects:?}"
+    );
+    assert!(attended.engine_busy().is_some(), "and asked on screen");
+}
+
+/// A session whose engine dies every time it starts is not one automatic
+/// recovery can answer, so the automatic half stops and the modal takes
+/// over.
+#[test]
+fn unattended_recovery_gives_up_after_the_bound_and_asks_instead() {
+    let mut m = model();
+    for attempt in 1..=AUTOMATIC_RECOVERY_ATTEMPTS {
+        let effects = update(
+            &mut m,
+            Msg::EngineLiveness {
+                wedge: Some(WedgeKind::Dead),
+                observed_for: Duration::ZERO,
+            },
+        );
+        assert!(
+            matches!(&effects[..], [Effect::RestartEngine]),
+            "recovery {attempt} was refused: {effects:?}"
+        );
+        // the fresh engine answers, which is what ends the episode
+        let _ = update(
+            &mut m,
+            Msg::EngineLiveness {
+                wedge: None,
+                observed_for: Duration::ZERO,
+            },
+        );
+    }
+
+    let effects = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "a session that has spent its silent recoveries must stop taking \
+         them: {effects:?}"
+    );
+    assert!(
+        m.engine_busy().is_some(),
+        "and must ask instead of failing quietly"
+    );
+}
+
+/// The one way out of a dead engine that is not a restart. Nothing reaches
+/// nvim any more, including the keys that would quit it, so this is view's
+/// own exit and it carries nvim's own status.
+#[test]
+fn quitting_a_dead_engine_leaves_with_the_status_nvim_reported() {
+    let mut m = attended_model();
+    let _ = m.supervision.note_engine_stop(
+        ExitInfo {
+            code: Some(137),
+            by_signal: true,
+        },
+        None,
+    );
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: QUIT_NOTATION.to_string(),
+        }),
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Quit { exit_code: 137 })),
+        "quitting a dead engine must carry its own exit status: {effects:?}"
+    );
+    assert!(!m.running, "the session must be marked over");
 }
 
 #[test]
 fn a_healthy_reading_retracts_the_banner_and_closes_the_modal() {
-    let mut m = model();
+    let mut m = attended_model();
     let _ = update(
         &mut m,
         Msg::EngineLiveness {
@@ -3704,7 +3837,7 @@ fn the_modals_readout_follows_the_wedge_it_is_showing() {
 /// rebuilt rather than left showing the old choices.
 #[test]
 fn a_wedge_that_becomes_dead_replaces_the_modal_it_had_opened() {
-    let mut m = model();
+    let mut m = attended_model();
     let _ = update(
         &mut m,
         Msg::EngineLiveness {
@@ -3757,9 +3890,75 @@ fn interrupt_sends_the_live_verified_notation_and_leaves_the_modal_open() {
     );
 }
 
+/// A synchronous Lua wedge swallows `<C-c>` without a trace: the engine
+/// never sees it, nothing changes on screen, and a user pressing it again
+/// has no way to tell a key that did nothing from one that never arrived.
+/// The modal holds the two facts that settle it -- an interrupt was routed
+/// from here, and the wedge it was aimed at is still being reported -- so it
+/// says so.
+#[test]
+fn an_interrupt_the_engine_never_reacted_to_is_reported_on_the_modal() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: INTERRUPT_NOTATION.to_string(),
+        }),
+    );
+    assert!(
+        !m.engine_busy()
+            .expect("the modal stays up over an interrupt")
+            .message()
+            .contains("interrupt sent"),
+        "an interrupt whose answer could still be in flight must not be \
+         reported as unanswered"
+    );
+
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD + INTERRUPT_REACTION_WINDOW,
+        },
+    );
+    let message = m
+        .engine_busy()
+        .expect("the wedge outlived the interrupt, so the modal is still up")
+        .message();
+    assert!(
+        message.ends_with("interrupt sent 5s ago, nothing has answered since"),
+        "the modal says nothing about an interrupt that changed nothing: {message}"
+    );
+
+    // and a session where nobody pressed it says nothing about one
+    let mut untouched = model();
+    let _ = update(
+        &mut untouched,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD + INTERRUPT_REACTION_WINDOW,
+        },
+    );
+    assert!(
+        !untouched
+            .engine_busy()
+            .expect("modal")
+            .message()
+            .contains("interrupt"),
+        "a modal nobody interrupted must not claim one was sent"
+    );
+}
+
 #[test]
 fn a_dead_connections_modal_does_not_answer_the_interrupt_key() {
-    let mut m = model();
+    let mut m = attended_model();
     let _ = update(
         &mut m,
         Msg::EngineLiveness {
@@ -3787,14 +3986,13 @@ fn a_dead_connections_modal_does_not_answer_the_interrupt_key() {
     );
 }
 
-/// The restart plumbing exists and nothing a user can press reaches it.
-/// Every key the open modal paints, plus the key the choice itself names,
-/// must resolve to something other than a respawn for as long as the
-/// respawn would be answered by the shutdown path.
+/// The key on the modal reaches the respawn, from every wedge that paints
+/// it -- and no other key does, so a restart is never something a user
+/// arrives at by typing.
 #[test]
-fn no_key_a_user_can_press_produces_a_restart_effect() {
+fn the_restart_key_reaches_the_respawn_and_no_other_key_does() {
     for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
-        let mut m = model();
+        let mut m = attended_model();
         let _ = update(
             &mut m,
             Msg::EngineLiveness {
@@ -3803,12 +4001,7 @@ fn no_key_a_user_can_press_produces_a_restart_effect() {
             },
         );
         assert!(!m.overlays().is_empty(), "{kind:?} opened no modal");
-        for notation in [
-            SupervisionChoice::Restart.key(),
-            SupervisionChoice::Interrupt.key(),
-            "R",
-            "x",
-        ] {
+        for notation in ["R", "r", "x", "<CR>", SupervisionChoice::Interrupt.key()] {
             let effects = update(
                 &mut m,
                 Msg::Key(Key {
@@ -3819,7 +4012,26 @@ fn no_key_a_user_can_press_produces_a_restart_effect() {
                 !effects.iter().any(|e| matches!(e, Effect::RestartEngine)),
                 "{kind:?} reached a respawn through {notation:?}: {effects:?}"
             );
+            assert!(
+                m.engine_busy().is_some(),
+                "{kind:?} lost its modal to {notation:?}"
+            );
         }
+
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: RESTART_NOTATION.to_string(),
+            }),
+        );
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::RestartEngine)),
+            "{kind:?} does not restart on the key it paints for it: {effects:?}"
+        );
+        assert!(
+            m.engine_busy().is_none(),
+            "{kind:?} left the modal up over the restart it asked for"
+        );
     }
 }
 
@@ -3918,8 +4130,8 @@ fn the_modal_answers_its_choices_and_passes_every_other_key_through() {
     let _ = update(
         &mut m,
         Msg::EngineLiveness {
-            wedge: Some(WedgeKind::Dead),
-            observed_for: Duration::ZERO,
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
         },
     );
     assert!(!m.overlays().is_empty(), "the modal must be open");
@@ -3983,8 +4195,8 @@ fn a_modal_over_a_focused_overlay_leaves_that_overlays_keys_alone() {
     let _ = update(
         &mut m,
         Msg::EngineLiveness {
-            wedge: Some(WedgeKind::Dead),
-            observed_for: Duration::ZERO,
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
         },
     );
     assert_eq!(m.overlays().len(), 2, "{:?}", m.overlays());
@@ -4000,16 +4212,33 @@ fn a_modal_over_a_focused_overlay_leaves_that_overlays_keys_alone() {
             notation: "<Esc>".into(),
         }),
     );
-    // <Esc> is the modal's Dismiss key, so the annunciator goes away -- and
-    // the same <Esc> still does to the tree exactly what it would have done
-    // with no annunciator ever raised, which is the whole invariant: the
-    // modal changes what is on screen, never what a key means
+    // the same <Esc> does to the tree exactly what it would have done with
+    // no annunciator ever raised, which is the whole invariant: the modal
+    // changes what is on screen, never what a key means. And it does not
+    // *also* count as an answer to the annunciator: one keypress dismissing
+    // two things is one of them dismissed by accident, and this modal is
+    // offered once per episode -- an accidental dismissal is the whole
+    // offer, spent on something the user never chose
     assert!(
         matches!(&effects[..], [Effect::TreeClose]),
         "the tree must still answer its own key: {effects:?}"
     );
-    assert!(m.overlays().is_empty(), "{:?}", m.overlays());
+    assert!(
+        m.engine_busy().is_some(),
+        "the <Esc> that closed the tree also closed the annunciator over it: {:?}",
+        m.overlays()
+    );
     assert_eq!(m.focus(), Focus::Engine);
+
+    // and with nothing else claiming it, the very next <Esc> answers the
+    // annunciator exactly as it always did
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    assert!(m.engine_busy().is_none(), "{:?}", m.overlays());
 }
 
 /// The interrupt is picked by the very key it sends, so an open modal

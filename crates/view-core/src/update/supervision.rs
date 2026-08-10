@@ -32,6 +32,18 @@ pub(super) fn note_engine_liveness(
     {
         model.dirty = true;
     }
+    // ahead of every escalation rule below, and answering none of them: a
+    // connection that has closed has exactly one recovery, the user has
+    // already said whether they want to be asked for it, and asking anyway
+    // would leave a modal on screen while the engine it offers to replace
+    // is already being replaced
+    if kind == WedgeKind::Dead && model.supervision.recovers_unattended() {
+        model.supervision.note_unattended_recovery();
+        if model.close_engine_busy() {
+            model.dirty = true;
+        }
+        return vec![Effect::RestartEngine];
+    }
     let since = SinceStamp::new(observed_for);
     match model.engine_busy_mut() {
         Some(open) if open.kind == kind => {
@@ -92,7 +104,16 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
         return Vec::new();
     };
     match choice {
-        SupervisionChoice::Interrupt => Vec::new(),
+        // the interrupt is already on its way as ordinary input; what is
+        // recorded here is that it was, so a wedge outliving it can be
+        // reported as one the interrupt did not reach
+        SupervisionChoice::Interrupt => {
+            if let Some(open) = model.engine_busy_mut() {
+                let sent = open.since;
+                open.note_interrupt(sent);
+            }
+            Vec::new()
+        }
         SupervisionChoice::Restart => {
             model.close_engine_busy();
             model.dirty = true;
@@ -102,6 +123,12 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
             model.close_engine_busy();
             model.dirty = true;
             Vec::new()
+        }
+        SupervisionChoice::Quit => {
+            model.running = false;
+            vec![Effect::Quit {
+                exit_code: model.supervision.exit_code(),
+            }]
         }
     }
 }

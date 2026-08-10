@@ -494,38 +494,58 @@ fn view_paints_wide_character_without_corrupting_neighbor_cell() {
     let _ = session.wait();
 }
 
+/// Supervision's headline promise, end to end: view's engine is killed the
+/// way a crash kills it, and the editor is still there, with a live engine
+/// under it, painting what that engine sends. Until automatic recovery existed this same kill ended the
+/// session with 128+SIGKILL; the exit-status mapping that pinned is pinned
+/// now by the engine that stops because it was told to
+/// (`view_propagates_cquit_exit_code`), which is the only stop that still
+/// ends a session.
 #[cfg(target_os = "linux")]
 #[test]
-fn view_exits_nonzero_when_engine_dies_by_signal() {
+fn view_recovers_its_own_engine_after_a_signal_death() {
     let mut session = spawn_view_pty();
 
     let view_pid = session.view_pid();
-    let nvim_pid = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
         .expect("view never spawned an nvim child within the timeout");
 
     let kill_status = std::process::Command::new("kill")
         .arg("-KILL")
-        .arg(nvim_pid.to_string())
+        .arg(killed.to_string())
         .status()
         .unwrap();
-    assert!(kill_status.success(), "kill -KILL {nvim_pid} failed");
+    assert!(kill_status.success(), "kill -KILL {killed} failed");
 
-    let exit = session
-        .wait()
-        .expect("view process never exited after its embedded nvim was killed");
-    // 128 + SIGKILL(9): the conventional signal-death exit code (see
-    // exit_info_from_status in crates/view-engine/src/process.rs and the
-    // EngineDown arm of update() in crates/view-core/src/update.rs),
-    // stronger than a bare nonzero check since it also pins the exact
-    // mapping formula
-    assert_eq!(
-        exit.exit_code(),
-        137,
-        "view did not map its engine's signal death to 128+signal; screen:\n{}",
+    // a *different* child, not merely a child: the pid answering here is
+    // the whole difference between a session that recovered and one still
+    // holding the corpse of the engine it lost
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut replacement = None;
+    while Instant::now() < deadline && replacement.is_none() {
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(250))
+            .filter(|pid| *pid != killed);
+    }
+    let Some(replacement) = replacement else {
+        panic!(
+            "view never replaced the engine it lost within 30s; screen:\n{}",
+            session.screen()
+        );
+    };
+    assert_ne!(replacement, killed);
+
+    // and the replacement is painting through view: this text is nvim's
+    // own, produced by the swap recovery the restart asked for, and it can
+    // only be on this screen if the fresh engine's grid reached the pump
+    // the restart re-attached and the paint loop that drains it. What a
+    // user does at the prompt underneath it is nvim's own recovery flow;
+    // the affordance that answers it for them is not this test's subject.
+    assert!(
+        session.wait_for("swap", Duration::from_secs(15)),
+        "the replacement engine never painted anything through view; screen:\n{}",
         session.screen()
     );
 }
-
 #[test]
 fn view_shows_an_echoed_message() {
     let mut session = spawn_view_pty();

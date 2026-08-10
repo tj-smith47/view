@@ -922,7 +922,10 @@ mod tests {
         );
         assert_eq!(
             view.choices,
-            vec!["[<Esc>] Dismiss".to_string()],
+            vec![
+                "[<F5>] Restart".to_string(),
+                "[<C-q>] Quit view".to_string()
+            ],
             "the painted rows must be the ones the wedge actually offers"
         );
     }
@@ -958,6 +961,7 @@ mod tests {
             view.choices,
             vec![
                 "[<C-c>] Interrupt".to_string(),
+                "[<F5>] Restart".to_string(),
                 "[<Esc>] Dismiss".to_string()
             ]
         );

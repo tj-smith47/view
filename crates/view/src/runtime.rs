@@ -15,14 +15,17 @@
 //!
 //! [`run`] takes ownership of [`Engine`] for the duration of the call: the
 //! reader and writer threads spawned by `Engine::spawn` live for exactly as
-//! long as `run` is on the stack. `Engine`'s `Drop` (a graceful `qa!`, then a
-//! bounded wait, then `SIGKILL`) runs exactly once, whenever `run` returns --
-//! a clean quit via `Flow::Quit`, or a terminal I/O error propagated with
-//! `?`. The caller in `main.rs` never touches `Engine` again once it has
-//! been handed to `run`.
+//! long as `run` holds that engine. `Engine`'s `Drop` (a graceful `qa!`,
+//! then a bounded wait, then `SIGKILL`) runs exactly once per engine --
+//! when `run` returns (a clean quit via `Flow::Quit`, or a terminal I/O
+//! error propagated with `?`), or, for an engine being replaced, inside the
+//! restart that replaces it ([`crate::recovery::restart_engine`], which
+//! never holds two at once). The caller in `main.rs` never touches `Engine`
+//! again once it has been handed to `run`.
 
 use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
+use crate::recovery::{restart_engine, step, EngineSession, LoopChannels, LoopState};
 use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{
@@ -282,8 +285,10 @@ pub enum Flow {
     /// Quit with the given exit code; the caller returns immediately.
     Quit(i32),
     /// An engine write failed: the engine connection is gone, not the UI.
-    /// The caller resolves the real exit status and requeues
-    /// `Msg::EngineDown` rather than aborting.
+    /// The caller resolves the real exit status and decides between the two
+    /// things that can mean -- an engine told to stop ends the session with
+    /// its own status, an engine nobody asked to stop is handed to
+    /// supervision (see [`crate::recovery::step`]).
     EngineLost,
     /// The user asked the supervision modal to restart the engine. Distinct
     /// from [`EngineLost`](Self::EngineLost) because the two arrive for
@@ -941,17 +946,21 @@ pub(crate) fn dispatch<E: EngineOps>(
 /// side first would report the consequence and hide the cause, and it would
 /// do so on the overwhelming majority of real stalls, since the two
 /// thresholds are equal and both sides cross them together.
-fn wedge_kind(write_stalled: bool, read: Liveness) -> Option<WedgeKind> {
+fn wedge_kind(write_stalled: bool, read: Liveness, lost: bool) -> Option<WedgeKind> {
     match read {
-        // not reachable from this loop today, and deliberately kept: the
-        // intake resolves `Msg::EngineStopped` (and a disconnected channel)
-        // into `Msg::EngineDown` and thence `Effect::Quit` before any
-        // top-of-pass reading of `is_closed` can find the connection gone,
-        // so a closed connection ends the session rather than being
-        // supervised through it. The verdict exists for the respawn that
-        // will change that -- an engine view can bring back is one whose
-        // death is a state to report rather than an exit
-        Liveness::Dead => Some(WedgeKind::Dead),
+        // `lost` is the loop's own resolution of the stop, never the
+        // connection's closed flag on its own: an engine that closed
+        // because its user typed `:q` reaches this seam looking exactly
+        // like one that crashed, and supervising that would offer -- or,
+        // unattended, perform -- a restart of the editor they just closed.
+        // Only `intake` and the failed-write path can tell the two apart,
+        // and only once they have resolved the exit status
+        // (`SupervisionState::note_engine_stop`)
+        Liveness::Dead if lost => Some(WedgeKind::Dead),
+        // closed, and not yet resolved: the reader's own `Msg::EngineStopped`
+        // is already on its way (sent with a blocking send, so it cannot be
+        // dropped), and it carries the facts this verdict must not pre-empt
+        Liveness::Dead => None,
         _ if write_stalled => Some(WedgeKind::WriteSide),
         Liveness::Wedged => Some(WedgeKind::ReadSide),
         // `Liveness` is `#[non_exhaustive]`, so this arm also catches a
@@ -1067,9 +1076,18 @@ fn note_supervision(
     write: &mut OutboxStallWatch,
     read: &HeartbeatWatch,
     handle: &EngineHandle,
+    lost: bool,
 ) -> Option<Msg> {
     let stalled = write.observe(handle);
-    fold.note(wedge_kind(stalled, read.observe(handle.is_closed())))
+    // `lost` short-circuits the closed-flag load rather than adding to it:
+    // a connection the loop has already resolved as gone is not one this
+    // pass has to ask about, and a pass that has not resolved one pays
+    // exactly the single acquire load it always did
+    fold.note(wedge_kind(
+        stalled,
+        read.observe(lost || handle.is_closed()),
+        lost,
+    ))
 }
 
 /// The soonest either watch -- or the visible readout -- would have
@@ -1234,17 +1252,28 @@ fn intake(
             Msg::HeartbeatReply { generation }
         }
         Ok(Msg::EngineStopped(reason)) => {
-            // stashed on the model rather than reported here: this loop
-            // runs behind the terminal's raw-mode alternate screen, so
-            // `main` reports it only after `run` returns and the
-            // terminal is restored (see Msg::EngineStopped's doc)
-            model.fatal_reason = reason;
             // Same bounded (up to `shutdown_timeout`) block as the
             // `Flow::EngineLost` arm in `run`, but the reader thread's
             // stream has already ended by the time this fires, so the
             // `qa!` send is a harmless no-op and the first `try_wait`
             // typically finds the child already exited.
-            Msg::EngineDown(engine.wait_exit())
+            let exit = engine.wait_exit();
+            let recoverable = model.supervision.note_engine_stop(exit, reason.as_deref());
+            // stashed on the model rather than reported here: this loop
+            // runs behind the terminal's raw-mode alternate screen, so
+            // `main` reports it only after `run` returns and the
+            // terminal is restored (see Msg::EngineStopped's doc). A
+            // recovery clears it again -- a session that came back has no
+            // fatal reason left to print at exit.
+            model.fatal_reason = reason.clone();
+            if recoverable {
+                // passed through rather than resolved into a quit: the
+                // supervision fold owns this connection from here, and the
+                // stop is a state to report and offer recovery from
+                Msg::EngineStopped(reason)
+            } else {
+                Msg::EngineDown(exit)
+            }
         }
         Ok(m) => m,
         Err(_) => Msg::EngineDown(ExitInfo {
@@ -1313,6 +1342,13 @@ pub struct MsgChannel {
 /// rather than retried or escalated, so this never turns into a stall the
 /// way an engine-bound write can (see `OutboxStallWatch`).
 ///
+/// A restart is the one call this loop makes that blocks on the engine: it
+/// tears the dead one down and brings its replacement up before the pass
+/// continues. It runs at most once per engine death, on a transition the
+/// user asked for or the auto-recovery rule took, and never on a
+/// steady-state pass -- the same terms the bounded `wait_exit` teardown
+/// already runs on (see [`crate::recovery::restart_engine`]).
+///
 /// The read-side liveness watch runs on this thread too, and costs this
 /// loop five atomic loads per steady-state pass: three in
 /// [`note_engine_liveness`] (the connection's closed flag, plus the sent
@@ -1331,13 +1367,17 @@ pub struct MsgChannel {
 #[cfg_attr(not(unix), allow(unused_variables))]
 pub fn run(
     mut model: Model,
-    mut engine: Engine,
-    pump: view_engine::DamagePump,
+    session: EngineSession<'_>,
     msg_channel: MsgChannel,
     inputs: InputHandles<'_>,
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
 ) -> anyhow::Result<(Model, i32)> {
+    let EngineSession {
+        mut engine,
+        mut pump,
+        respawn,
+    } = session;
     let MsgChannel {
         tx: msg_tx,
         rx: msg_rx,
@@ -1354,22 +1394,30 @@ pub fn run(
     let mut pending = std::collections::VecDeque::new();
     let (clipboard_tx, clipboard_rx) = mpsc::channel();
     let (osc52_tx, osc52_rx) = mpsc::channel();
-    // kept alive for the session's duration; the worker exits once
-    // `clipboard_tx` (held by `executor`) drops at the end of this
-    // function, same lifetime as the engine's own reader/writer threads
-    let _clipboard_worker = crate::clipboard::spawn(engine.handle.clone(), clipboard_rx)?;
+    // the route, not the handle: the worker answers whichever engine this
+    // session currently has, and a restart re-points it rather than
+    // starting a second worker (see `ReplyRoute`)
+    let clipboard_route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+    // kept alive for the session's duration; the worker exits once every
+    // `clipboard_tx` clone (held by `channels` and by `executor`) drops at
+    // the end of this function, same lifetime as the engine's own
+    // reader/writer threads
+    let _clipboard_worker = crate::clipboard::spawn(clipboard_route.clone(), clipboard_rx)?;
     let (picker_tx, picker_rx) = mpsc::channel();
     // kept alive for the process's duration, the same shape as
     // `_clipboard_worker` above: the matcher worker exits once `picker_tx`
-    // (held by `executor`) drops at the end of this function
+    // drops at the end of this function
     let _picker_worker = view_native::picker::matcher::spawn(picker_rx, msg_tx.clone());
-    let executor = Executor::new(engine.handle.clone())
-        .with_clipboard(clipboard_tx)
-        .with_osc52(osc52_tx)
-        .with_toast_timer(msg_tx)
-        .with_picker(picker_tx);
+    let channels = LoopChannels {
+        clipboard: clipboard_tx,
+        osc52: osc52_tx,
+        picker: picker_tx,
+        msg: msg_tx,
+    };
+    let mut executor = channels.executor(engine.handle.clone());
     let mut write_stall = OutboxStallWatch::default();
     let mut supervision = SupervisionFold::default();
+    let mut state = LoopState::default();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1377,6 +1425,58 @@ pub fn run(
     let mut surface_cache = view_surface::SurfaceCache::new();
 
     loop {
+        // ahead of everything else in the pass: every reading below, and
+        // every dispatch, addresses the engine this session has now. A
+        // replacement performed here rather than where it was asked for
+        // happens once, with nothing borrowed from the engine it replaces.
+        if state.restart_requested {
+            state.restart_requested = false;
+            match restart_engine(engine, respawn, &model, &channels, &clipboard_route) {
+                Ok(fresh) => {
+                    engine = fresh.engine;
+                    pump = fresh.pump;
+                    executor = fresh.executor;
+                    // the fresh connection answers on its own channel and
+                    // carries none of the registrations the dead one was
+                    // given; its own `VimEnter` performs the takeover again
+                    follow_ups.native.rebind(engine.api_info.channel_id);
+                    // both watches read the connection they were built for:
+                    // the heartbeat comes fresh with the engine, and the
+                    // write side is reset here for the same reason
+                    write_stall = OutboxStallWatch::default();
+                    state.connection_lost = false;
+                    // answered, not reported: a session that came back has
+                    // no fatal reason left to print at exit
+                    model.fatal_reason = None;
+                    model.dirty = true;
+                    if let crate::startup::CutoverOutcome::Quit(code) = crate::startup::run_cutover(
+                        &mut model,
+                        &executor,
+                        follow_ups,
+                        fresh.staged,
+                        || engine.wait_exit(),
+                    ) {
+                        return Ok((model, code));
+                    }
+                }
+                // no second engine and no way to ask for one: the modal
+                // that offered the restart is gone with the engine it
+                // offered it for, so this ends the session with the reason
+                // `main` prints once the terminal is restored
+                Err(failure) => {
+                    model.running = false;
+                    model.fatal_reason = Some(match failure {
+                        crate::startup::AttachFailure::Spawn(err) => {
+                            format!("the engine could not be restarted: {err}")
+                        }
+                        crate::startup::AttachFailure::Attach(err) => {
+                            format!("the restarted engine could not be attached: {err}")
+                        }
+                    });
+                    return Ok((model, 1));
+                }
+            }
+        }
         // drained at the top of every pass rather than right after the
         // dispatch that queued it: nothing blocks between here and the
         // bottom of the previous pass's own dispatch loop, so this is
@@ -1391,27 +1491,15 @@ pub fn run(
         // at a shape the terminal has left. Costs one relaxed load per pass
         // when nothing resized, which is the whole steady state.
         if let Some((width, height)) = term_size.take() {
-            match dispatch(
+            if let Some(code) = step(
                 &mut model,
                 &executor,
                 follow_ups,
+                &mut state,
+                || engine.wait_exit(),
                 Msg::Resized { width, height },
             ) {
-                Flow::Continue => {}
-                Flow::Quit(code) => return Ok((model, code)),
-                Flow::EngineLost | Flow::RestartEngine => {
-                    // Blocks this dispatch thread for up to `shutdown_timeout`
-                    // (500ms by default -- see `graceful_kill`'s own doc)
-                    // sending `qa!` and polling `try_wait`, but only on this
-                    // already-rare "the engine connection just failed"
-                    // transition, never on the steady-state per-frame path.
-                    let info = engine.wait_exit();
-                    if let Flow::Quit(code) =
-                        dispatch(&mut model, &executor, follow_ups, Msg::EngineDown(info))
-                    {
-                        return Ok((model, code));
-                    }
-                }
+                return Ok((model, code));
             }
         }
         // both sides read here, immediately before the paint that would show
@@ -1423,21 +1511,17 @@ pub fn run(
             &mut write_stall,
             &engine.heartbeat,
             &engine.handle,
+            state.connection_lost,
         ) {
-            match dispatch(&mut model, &executor, follow_ups, msg) {
-                Flow::Continue => {}
-                Flow::Quit(code) => return Ok((model, code)),
-                // the same bounded teardown the `Msg::Resized` arm above
-                // takes, and reached on the same terms: a rare transition,
-                // never a per-frame cost
-                Flow::EngineLost | Flow::RestartEngine => {
-                    let info = engine.wait_exit();
-                    if let Flow::Quit(code) =
-                        dispatch(&mut model, &executor, follow_ups, Msg::EngineDown(info))
-                    {
-                        return Ok((model, code));
-                    }
-                }
+            if let Some(code) = step(
+                &mut model,
+                &executor,
+                follow_ups,
+                &mut state,
+                || engine.wait_exit(),
+                msg,
+            ) {
+                return Ok((model, code));
             }
         }
         // paint before blocking, not after processing: state mutated ahead
@@ -1485,26 +1569,29 @@ pub fn run(
             view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
         }
         let msg = intake(received, &mut engine, &pump, &mut model);
+        // the intake resolved a stop it judged a death rather than the
+        // session ending: from here the supervision fold owns this
+        // connection, and `WedgeKind::Dead` is a verdict it may reach
+        state.connection_lost |= matches!(msg, Msg::EngineStopped(_));
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
-            match dispatch(&mut model, &executor, follow_ups, msg) {
-                Flow::Continue => {}
-                // run() owns engine: returning here runs Drop (graceful
-                // qa! then kill)
-                Flow::Quit(code) => return Ok((model, code)),
-                // an engine write failed: the engine is gone, not the UI;
-                // resolve the real exit status and let update() decide. The
-                // rest of that batch targeted an engine that is already
-                // gone, which is why `dispatch` stops on the first failure
-                // rather than queueing a duplicate EngineDown per remaining
-                // effect
-                // same bounded wait as the `Msg::Resized` arm above (see
-                // its comment) -- an already-rare transition, not a
-                // per-frame cost
-                Flow::EngineLost | Flow::RestartEngine => {
-                    queue.push(Msg::EngineDown(engine.wait_exit()));
-                }
+            if let Some(code) = step(
+                &mut model,
+                &executor,
+                follow_ups,
+                &mut state,
+                || engine.wait_exit(),
+                msg,
+            ) {
+                return Ok((model, code));
+            }
+            // the rest of this batch was addressed to an engine that is
+            // being replaced, and the replacement happens at the top of the
+            // next pass; the residue drain below is what keeps the damage
+            // it staged from being stranded
+            if state.restart_requested {
+                break;
             }
             // a RedrawReady is dropped when the shared channel is
             // momentarily full (the pump disarms pending so a later fold
@@ -1644,6 +1731,11 @@ mod tests {
     /// [`run`] calls, with the message it produces folded through `update()`
     /// the way `dispatch` would. Answers whether that pass changed anything
     /// visible, which is the loop's own cue to repaint.
+    ///
+    /// Always reads the connection as one whose stop the loop has not
+    /// resolved, because every test driving this helper drives a connection
+    /// that is still open. The resolved-death path that flag opens is driven
+    /// directly against [`note_supervision`] by the tests that own it.
     fn note_supervision_pass(
         model: &mut Model,
         fold: &mut SupervisionFold,
@@ -1651,7 +1743,7 @@ mod tests {
         read: &HeartbeatWatch,
         handle: &EngineHandle,
     ) -> bool {
-        let Some(msg) = note_supervision(fold, write, read, handle) else {
+        let Some(msg) = note_supervision(fold, write, read, handle, false) else {
             return false;
         };
         model.dirty = false;
@@ -2939,22 +3031,42 @@ mod tests {
     #[test]
     fn a_moving_writer_leaves_the_read_sides_verdict_alone() {
         assert_eq!(
-            wedge_kind(false, view_engine::heartbeat::Liveness::Wedged),
+            wedge_kind(false, view_engine::heartbeat::Liveness::Wedged, false),
             Some(WedgeKind::ReadSide)
         );
         assert_eq!(
-            wedge_kind(true, view_engine::heartbeat::Liveness::Alive),
+            wedge_kind(true, view_engine::heartbeat::Liveness::Alive, false),
             Some(WedgeKind::WriteSide)
         );
         assert_eq!(
-            wedge_kind(false, view_engine::heartbeat::Liveness::Alive),
+            wedge_kind(false, view_engine::heartbeat::Liveness::Alive, false),
             None
         );
-        // and a closed connection outranks both, since neither side can
-        // recover one
+        // and a closed connection whose stop the loop has resolved outranks
+        // both, since neither side can recover one
         assert_eq!(
-            wedge_kind(true, view_engine::heartbeat::Liveness::Dead),
+            wedge_kind(true, view_engine::heartbeat::Liveness::Dead, true),
             Some(WedgeKind::Dead)
+        );
+    }
+
+    /// The verdict that would respawn an editor its user just closed. A
+    /// connection closing is not evidence of anything on its own: `:q` and a
+    /// crash both close it, and only the loop's own resolution of the exit
+    /// status tells them apart. Until that resolution lands, this reports
+    /// nothing at all rather than guessing.
+    #[test]
+    fn a_closed_connection_is_no_verdict_until_the_loop_has_resolved_its_stop() {
+        assert_eq!(
+            wedge_kind(false, view_engine::heartbeat::Liveness::Dead, false),
+            None,
+            "an unresolved stop must not surface as a wedge to recover from"
+        );
+        assert_eq!(
+            wedge_kind(true, view_engine::heartbeat::Liveness::Dead, false),
+            None,
+            "not even with output stranded in the outbox: the write side \
+             cannot outrank a connection whose stop is still being resolved"
         );
     }
 
@@ -3243,7 +3355,7 @@ mod tests {
         // and the fold the loop runs turns that into the read-side wedge,
         // with the write side draining perfectly throughout
         wait_until("the unanswered probe reads as a wedge", || {
-            note_supervision(&mut fold, &mut watch, &heartbeat, &peer.handle);
+            note_supervision(&mut fold, &mut watch, &heartbeat, &peer.handle, false);
             fold.wedge == Some(WedgeKind::ReadSide)
         });
     }
@@ -3300,6 +3412,91 @@ mod tests {
              intake"
         );
         let _ = engine.wait_exit();
+    }
+
+    /// Waits for the reader thread's own terminal signal, which is the
+    /// message the loop's [`intake`] classifies. Nothing else in the channel
+    /// answers the question these tests ask, and a fixed pause would race a
+    /// process that is still exiting.
+    fn await_engine_stopped(rx: &mpsc::Receiver<Msg>) -> Msg {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let msg = rx
+                .recv_timeout(left)
+                .expect("a stopped engine must signal EngineStopped within 30s");
+            if matches!(msg, Msg::EngineStopped(_)) {
+                return msg;
+            }
+        }
+    }
+
+    /// The most destructive thing supervision could do, guarded at the seam
+    /// that decides it: `:qa!` reaches this loop looking exactly like a
+    /// crash -- the process stopped and the connection closed -- and reading
+    /// it as one would respawn the editor its user had just closed.
+    #[test]
+    fn an_engine_a_user_quit_ends_the_session_rather_than_being_supervised() {
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        let (pump, _cutover) = engine.start_pump(tx);
+        let mut model = Model::with_term_size(80, 24);
+        // `--embed` holds nvim's startup until a UI attaches, so an engine
+        // nobody attached to would never read the quit typed below
+        engine.handle.ui_attach(80, 24).unwrap();
+        engine.handle.input(":qa!<CR>").unwrap();
+
+        let stopped = await_engine_stopped(&rx);
+        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model);
+        let Msg::EngineDown(exit) = resolved else {
+            unreachable!("a quit engine must resolve to EngineDown, got {resolved:?}");
+        };
+        assert_eq!(
+            exit.code,
+            Some(0),
+            "the session must end with nvim's own status"
+        );
+        assert!(
+            !exit.by_signal,
+            "an engine that exited on its own instruction died of no signal"
+        );
+    }
+
+    /// The counterpart, and the reason `Dead` is reachable at all: an engine
+    /// nobody told to stop is a state to report and recover from, not an
+    /// exit to take.
+    #[cfg(unix)]
+    #[test]
+    fn an_engine_killed_out_of_band_is_handed_to_supervision_rather_than_quit() {
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(64);
+        let (pump, _cutover) = engine.start_pump(tx);
+        let mut model = Model::with_term_size(80, 24);
+        let killed = std::process::Command::new("kill")
+            .args(["-KILL", &engine.pid().to_string()])
+            .status()
+            .expect("kill must run for an out-of-band crash to be simulable");
+        assert!(killed.success(), "kill -KILL failed: {killed:?}");
+
+        let stopped = await_engine_stopped(&rx);
+        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model);
+        assert!(
+            matches!(resolved, Msg::EngineStopped(_)),
+            "a killed engine must reach supervision rather than resolve to a \
+             quit, got {resolved:?}"
+        );
+        assert_eq!(
+            model.supervision.exit_code(),
+            137,
+            "the status a user answering with Quit would leave with must be \
+             the one nvim's death reported"
+        );
+        // and the verdict the loop's own fold reaches once that resolution
+        // is in hand, which is the whole point of passing the stop through
+        assert_eq!(
+            wedge_kind(false, Liveness::Dead, true),
+            Some(WedgeKind::Dead)
+        );
     }
 
     #[test]

@@ -166,6 +166,50 @@ fn spawn_and_attach(
     crate::vlog::log_with("engine", || {
         format!("spawned pid={} stdin_relay={stdin_relay}", engine.pid())
     });
+    register_and_attach(engine, stdin_relay, width, height, residue)
+}
+
+/// Replaces a failed engine with a fresh one and brings it through the same
+/// registration and attach sequence [`spawn_and_attach`] performs, so a
+/// restarted session is registered and attached in the one order that has
+/// ever been correct rather than in a second copy of it.
+///
+/// `width`/`height` are the grid's own target size, not the raw terminal's:
+/// the chrome the session already reserved (the statusline row, most
+/// notably) was reserved by a resize the dead engine was told about and the
+/// fresh one has never heard of, so attaching at the terminal's full height
+/// would put the statusline one row below the screen -- the same failure
+/// `NativeSession::load`'s own resize exists to prevent at startup.
+///
+/// No `residue`: the capability probe's leftover bytes belong to the
+/// terminal handshake this process performed once, long before any restart.
+pub(crate) fn restart_and_attach(
+    engine: Engine,
+    cfg: EngineConfig,
+    width: u16,
+    height: u16,
+) -> Result<Engine, AttachFailure> {
+    let stdin_relay = cfg.stdin_relay_requested();
+    let engine = engine.restart(cfg).map_err(AttachFailure::Spawn)?;
+    crate::vlog::log_with("engine", || {
+        format!(
+            "restarted pid={} stdin_relay={stdin_relay} grid={width}x{height}",
+            engine.pid()
+        )
+    });
+    register_and_attach(engine, stdin_relay, width, height, Vec::new())
+}
+
+/// The half of [`spawn_and_attach`] that runs against a child that is
+/// already up: the `VimEnter` autocmd, the `view_bridge` group, the attach
+/// itself, and the terminal handshake's leftover bytes.
+fn register_and_attach(
+    engine: Engine,
+    stdin_relay: bool,
+    width: u16,
+    height: u16,
+    residue: Vec<u8>,
+) -> Result<Engine, AttachFailure> {
     engine
         .handle
         .register_vim_enter_autocmd(engine.api_info.channel_id)

@@ -546,6 +546,45 @@ impl Engine {
         })
     }
 
+    /// Tears the current child down and brings a fresh one up from `cfg`,
+    /// with nvim's own recovery flag applied whenever `cfg` names a file for
+    /// it to act on (see [`with_recovery`]), so the replacement opens what
+    /// its predecessor left in a swap file rather than what is on disk.
+    ///
+    /// The teardown is the existing `Drop` sequence, unchanged and not
+    /// duplicated: `qa!`, a bounded wait, then `SIGKILL` and a reap. The old
+    /// handle is consumed and the new one returned, matching
+    /// [`spawn`](Self::spawn)'s own ownership shape -- there is never a
+    /// moment at which two live engines exist for one session, and a caller
+    /// cannot keep addressing the connection it just replaced.
+    ///
+    /// The replacement carries a fresh [`heartbeat`](Self::heartbeat),
+    /// because it is a fresh [`spawn`](Self::spawn): a watch carried across
+    /// the boundary would arrive holding the dead engine's unanswered
+    /// probes and the silence they accumulated, and would read the healthy
+    /// replacement as wedged on the first observation.
+    ///
+    /// Recovers exactly what nvim's own swap file holds and nothing else.
+    /// view keeps no copy of buffer text to reconcile against -- nvim owns
+    /// it -- so the guarantee here is nvim's own crash-recovery guarantee,
+    /// no stronger: edits made since the last swap flush are gone, and the
+    /// window layout is not recovered at all.
+    ///
+    /// # Errors
+    ///
+    /// The same shapes [`spawn`](Self::spawn) returns, for the same reasons.
+    /// A restart that fails leaves no engine at all: the old child is
+    /// already gone by then, so a caller holds nothing to retry with and
+    /// owes the user a report rather than a silent second attempt.
+    pub fn restart(self, cfg: EngineConfig) -> Result<Self, EngineError> {
+        // explicit, and the whole teardown: `Drop` runs the graceful-then-
+        // forced sequence on every drop path, so re-implementing it here
+        // would be a second copy free to drift from the one every other
+        // shutdown takes
+        drop(self);
+        Self::spawn(with_recovery(cfg))
+    }
+
     /// Attaches the runtime loop's bounded `Msg` channel and returns the
     /// [`DamagePump`] handle for draining compacted damage from it, plus
     /// [`SinkCutover`]: everything that arrived between `spawn` and this
@@ -644,6 +683,123 @@ impl Drop for Engine {
     fn drop(&mut self) {
         let _ = graceful_kill(&self.handle, &mut self.child, self.shutdown_timeout);
     }
+}
+
+/// nvim's own crash-recovery flag: the replacement engine opens each file it
+/// was given from that file's swap file instead of from disk.
+///
+/// Passed through [`EngineConfig::extra_args`] like any other engine
+/// passthrough argument, so [`build_command`] needs no notion of recovery at
+/// all.
+const RECOVERY_ARG: &str = "-r";
+
+/// Applies [`RECOVERY_ARG`] to a restart's config, but only for a spawn that
+/// names a file for it to act on.
+///
+/// The condition is nvim's own, measured against the pinned engine rather
+/// than assumed: `-r` with a file recovers that file's swap and leaves an
+/// ordinary editable session behind (mode `n`, nothing blocking), while `-r`
+/// with no file at all means "list every swap file you can find", which
+/// prints that list to a UI that has just attached, parks the engine at the
+/// prompt acknowledging it, and then exits. A restart is exactly the moment
+/// an engine must come back up, so the flag is applied where it recovers
+/// something and withheld where it would end the replacement.
+///
+/// Position is irrelevant to nvim, which reads options wherever they appear
+/// ahead of `--`, so this appends rather than splicing ahead of the file
+/// arguments a caller already put in `extra_args`.
+fn with_recovery(mut cfg: EngineConfig) -> EngineConfig {
+    // never twice: a session that restarts twice would otherwise hand nvim
+    // `-r -r`, and a config a caller built with the flag already on it is a
+    // config that means it once
+    let already = cfg.extra_args.iter().any(|arg| arg == RECOVERY_ARG);
+    if names_a_file(&cfg.extra_args) && !already {
+        cfg.extra_args.push(OsString::from(RECOVERY_ARG));
+    }
+    cfg
+}
+
+/// nvim options that take no value of their own, so an ordinary word
+/// following one of them is a file name rather than that option's argument.
+///
+/// The list is deliberately the *short* half of nvim's option set: an
+/// argument this build does not recognise is assumed to take a value, which
+/// is the reading that withholds [`RECOVERY_ARG`] (see [`names_a_file`]).
+const OPTIONS_TAKING_NO_VALUE: [&str; 25] = [
+    "--clean",
+    "--embed",
+    "--headless",
+    "--api-info",
+    "--version",
+    "--help",
+    "--noplugin",
+    "-v",
+    "-h",
+    "-n",
+    "-N",
+    "-R",
+    "-d",
+    "-b",
+    "-m",
+    "-M",
+    "-Z",
+    "-e",
+    "-E",
+    "-es",
+    "-Es",
+    "-A",
+    "-o",
+    "-O",
+    "-p",
+];
+
+/// Whether `args` names at least one file for nvim to open.
+///
+/// Errs towards "no" in every case this build cannot read confidently, and
+/// the caller's use of the answer is what makes that the safe direction: a
+/// missed file costs a restart the recovery flag (nvim's own `SwapExists`
+/// handling still meets the swap when the file is opened), while a value
+/// mistaken for a file costs the replacement engine its life.
+fn names_a_file(args: &[OsString]) -> bool {
+    let mut expect_value = false;
+    for (index, arg) in args.iter().enumerate() {
+        let arg = arg.to_string_lossy();
+        // nvim's own rule: only file names after this
+        if arg == "--" {
+            return index + 1 < args.len();
+        }
+        if expect_value {
+            expect_value = false;
+            continue;
+        }
+        // `-l <script> [args...]` hands everything that follows to a Lua
+        // script, so nothing after it is a file nvim opens
+        if arg == "-l" {
+            return false;
+        }
+        if arg.starts_with('-') || arg.starts_with('+') {
+            expect_value = !takes_no_value(&arg);
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Whether `arg` is an option this build knows carries its own value, or
+/// none at all.
+fn takes_no_value(arg: &str) -> bool {
+    OPTIONS_TAKING_NO_VALUE.contains(&arg)
+        // `-V[N][file]`, `-o[N]`, `-O[N]`, `-p[N]`: the value, when there is
+        // one, is attached rather than separate
+        || arg.strip_prefix("-V").is_some_and(|rest| rest.chars().all(char::is_numeric) || !rest.is_empty())
+        || ["-o", "-O", "-p"]
+            .iter()
+            .any(|flag| arg.strip_prefix(flag).is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit())))
+        // `--name=value` carries its value inside the argument
+        || (arg.starts_with("--") && arg.contains('='))
+        // `+cmd` is a whole command in one argument
+        || arg.starts_with('+')
 }
 
 /// Builds the `nvim --embed` command `cfg` describes, applying
@@ -1278,5 +1434,67 @@ mod tests {
         // this one test, and it's done, so close the fd deterministically
         // rather than leaking it for whatever remains of the process.
         drop(relay_fd);
+    }
+
+    fn args(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
+    }
+
+    /// The reading the recovery flag turns on: a plain word nvim would open.
+    #[test]
+    fn a_plain_argument_is_the_file_that_makes_recovery_meaningful() {
+        assert!(names_a_file(&args(&["notes.md"])));
+        assert!(names_a_file(&args(&["--clean", "-n", "notes.md"])));
+        assert!(names_a_file(&args(&["-R", "notes.md", "other.md"])));
+        assert!(names_a_file(&args(&["--", "-not-an-option"])));
+        assert!(names_a_file(&args(&["+42", "notes.md"])));
+        assert!(names_a_file(&args(&["--cmd=set nu", "notes.md"])));
+    }
+
+    /// Every reading that must withhold it. The value cases are the ones
+    /// that matter: a restart that mistook `NONE` for a file would hand nvim
+    /// `-r` with nothing to recover, which lists swap files and exits.
+    #[test]
+    fn an_option_value_is_never_mistaken_for_a_file() {
+        assert!(!names_a_file(&args(&[])));
+        assert!(!names_a_file(&args(&["--clean", "-n"])));
+        assert!(!names_a_file(&args(&["-u", "NONE"])));
+        assert!(!names_a_file(&args(&["--cmd", "set nu"])));
+        assert!(!names_a_file(&args(&["-c", "q"])));
+        assert!(!names_a_file(&args(&["--listen", "127.0.0.1:1234"])));
+        assert!(!names_a_file(&args(&["-l", "script.lua", "notes.md"])));
+        assert!(!names_a_file(&args(&["--"])));
+        // an option this build has never heard of is assumed to consume the
+        // next word, which is the reading that withholds the flag
+        assert!(!names_a_file(&args(&["--future-option", "value"])));
+    }
+
+    #[test]
+    fn recovery_is_applied_exactly_once_and_only_with_a_file_to_recover() {
+        let recovered = with_recovery(EngineConfig::default().with_arg("notes.md"));
+        assert_eq!(
+            recovered.extra_args,
+            args(&["notes.md", RECOVERY_ARG]),
+            "a config naming a file must gain nvim's recovery flag"
+        );
+
+        let bare = with_recovery(EngineConfig::isolated());
+        assert!(
+            !bare.extra_args.iter().any(|arg| arg == RECOVERY_ARG),
+            "a config naming no file must not gain a flag that lists swap \
+             files and exits: {:?}",
+            bare.extra_args
+        );
+
+        let twice = with_recovery(with_recovery(EngineConfig::default().with_arg("notes.md")));
+        assert_eq!(
+            twice
+                .extra_args
+                .iter()
+                .filter(|arg| *arg == RECOVERY_ARG)
+                .count(),
+            1,
+            "a second restart must not stack a second -r"
+        );
     }
 }

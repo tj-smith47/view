@@ -19,6 +19,7 @@
 
 use std::time::Duration;
 
+use crate::msg::ExitInfo;
 use crate::native::views::PromptView;
 
 /// How long a wedge must persist before the sticky banner escalates into the
@@ -44,6 +45,18 @@ pub const ENGINE_BUSY_MODAL_THRESHOLD: Duration = Duration::from_secs(30);
 /// and it is asked for only while a wedge is on screen.
 pub const READOUT_RESOLUTION: Duration = Duration::from_secs(1);
 
+/// How long after an interrupt the modal starts saying the engine has not
+/// reacted to it.
+///
+/// Long enough that a working interrupt is never reported as a failed one:
+/// an engine aborted by `<C-c>` is observed to be alive again by the next
+/// liveness probe that gets an answer, and the probe cadence -- not the
+/// abort, which is immediate -- is what bounds how soon that can happen.
+/// Kept comfortably above that cadence rather than tied to it, since this
+/// crate holds no engine constant (see this module's own doc on what
+/// reaches it).
+pub const INTERRUPT_REACTION_WINDOW: Duration = Duration::from_secs(5);
+
 /// The keystroke [`SupervisionChoice::Interrupt`] sends, in nvim's own
 /// notation, and equally the key that picks it: the modal names the key a
 /// user would already have reached for at a frozen editor, and picking the
@@ -54,15 +67,30 @@ pub const READOUT_RESOLUTION: Duration = Duration::from_secs(1);
 /// aborts an engine stuck inside a Vimscript loop, whose break-check pumps
 /// the event loop and so sees the queued input. It does not reach an engine
 /// inside a synchronous Lua loop, which pumps nothing and answers neither
-/// this nor the liveness probe -- that wedge's only recovery is a restart,
-/// which the modal cannot yet offer: [`SupervisionChoice::Restart`] is
-/// listed nowhere until `Engine::restart()` exists, so the modal presents
-/// the interrupt without claiming it answers every wedge. A third
-/// live-verified fact: nvim discards its unread typeahead when the
-/// interrupt lands, so keys still queued through `nvim_input` at that
-/// moment are lost by nvim itself -- identically with or without the
-/// modal on screen.
+/// this nor the liveness probe -- that wedge's only recovery is
+/// [`SupervisionChoice::Restart`], which is why the modal lists the two
+/// side by side and why an interrupt that lands on the wedge it cannot
+/// reach says so ([`EngineBusyState::note_interrupt`]) instead of leaving a
+/// user pressing it again. A third live-verified fact: nvim discards its
+/// unread typeahead when the interrupt lands, so keys still queued through
+/// `nvim_input` at that moment are lost by nvim itself -- identically with
+/// or without the modal on screen.
 pub const INTERRUPT_NOTATION: &str = "<C-c>";
+
+/// The key that picks [`SupervisionChoice::Restart`].
+///
+/// No key means "restart the editor" to nvim, so this one is chosen by the
+/// other half of the rule [`SupervisionChoice::key`] states: a key nobody
+/// types by reflex at an editor that is merely slow. Function keys are
+/// unbound in a stock nvim and are not on the path of any editing gesture,
+/// which the printable keys, `<CR>`, `<Tab>`, `<Space>`, `<BS>` and the
+/// arrows all are.
+pub const RESTART_NOTATION: &str = "<F5>";
+
+/// The key that picks [`SupervisionChoice::Quit`], offered only for a
+/// connection that has closed. Nothing this key could collide with is
+/// reachable there: no keystroke arrives at an engine that is gone.
+pub const QUIT_NOTATION: &str = "<C-q>";
 
 /// How long the current wedge has been continuously observed.
 ///
@@ -124,11 +152,13 @@ pub enum WedgeKind {
     /// The connection itself is closed. Nothing can be sent to this engine
     /// and nothing more will arrive from it.
     ///
-    /// No runtime path produces this yet: a connection that closes ends the
-    /// session through the intake's own `EngineDown` handling long before a
-    /// supervision reading could see it. It becomes reachable with the
-    /// respawn, which is what turns a closed connection from the end of a
-    /// session into a state a session can be recovered from.
+    /// Raised only for an engine that died -- never for one that stopped
+    /// because it was told to. What makes it reachable at all is that the
+    /// loop now routes a stopped engine through supervision instead of
+    /// straight to a quit, what makes that routing honest is the restart
+    /// behind [`SupervisionChoice::Restart`], and what keeps it from
+    /// respawning an editor its user just closed is
+    /// [`SupervisionState::note_engine_stop`].
     Dead,
 }
 
@@ -177,22 +207,28 @@ impl WedgeKind {
     ///
     /// [`SupervisionChoice::Interrupt`] is absent for [`Dead`](Self::Dead):
     /// no input path survives a closed connection, so offering it would
-    /// present a button that cannot do anything.
+    /// present a button that cannot do anything. It is the *first* choice
+    /// for both open-connection wedges, because it is the recovery that
+    /// keeps the session -- a restart costs whatever nvim's swap file did
+    /// not hold, and an engine that is merely busy may well answer.
     ///
-    /// [`SupervisionChoice::Restart`] is absent everywhere, and that is a
-    /// fact about what the effect can currently reach rather than about the
-    /// choice: nothing yet replaces a live engine, so the only thing it can
-    /// currently reach is the shutdown path, which would answer a request
-    /// to recover the session by ending it. A button may not be offered
-    /// before the thing behind it exists, so the choice stays modelled and
-    /// unlisted until the respawn lands.
+    /// [`SupervisionChoice::Dismiss`] is absent for [`Dead`](Self::Dead),
+    /// and [`SupervisionChoice::Quit`] appears only there. Dismissing an
+    /// annunciator leaves the condition it announced alone, which is a real
+    /// choice for a wedge that may resolve itself and no choice at all for a
+    /// connection that has closed: no keystroke reaches the engine
+    /// afterwards, including the ones that would quit it, so a dismissed
+    /// dead-engine modal would be an editor with no way out. The two things
+    /// that genuinely remain are bringing an engine back and leaving.
     #[must_use]
     pub fn choices(self) -> Vec<SupervisionChoice> {
         match self {
-            Self::ReadSide | Self::WriteSide => {
-                vec![SupervisionChoice::Interrupt, SupervisionChoice::Dismiss]
-            }
-            Self::Dead => vec![SupervisionChoice::Dismiss],
+            Self::ReadSide | Self::WriteSide => vec![
+                SupervisionChoice::Interrupt,
+                SupervisionChoice::Restart,
+                SupervisionChoice::Dismiss,
+            ],
+            Self::Dead => vec![SupervisionChoice::Restart, SupervisionChoice::Quit],
         }
     }
 }
@@ -203,10 +239,13 @@ impl WedgeKind {
 pub enum SupervisionChoice {
     /// Send the engine an interrupt and leave it running.
     Interrupt,
-    /// Tear the engine down and bring a fresh one up.
+    /// Tear the engine down and bring a fresh one up, recovering whatever
+    /// nvim's own swap file held.
     Restart,
     /// Close the modal and leave the condition alone.
     Dismiss,
+    /// End the session, for a connection nothing can be sent to any more.
+    Quit,
 }
 
 impl SupervisionChoice {
@@ -218,15 +257,23 @@ impl SupervisionChoice {
     /// or one no user types by reflex. A bare printable key would fail both
     /// halves -- typing `i` at an editor that is merely slow means "insert",
     /// and answering it with an abort would destroy the operation the user
-    /// was waiting out. [`Restart`](Self::Restart) is unlisted (see
-    /// [`WedgeKind::choices`]) and its key is placeholder plumbing that has
-    /// to satisfy the same rule before it can be offered.
+    /// was waiting out.
+    ///
+    /// The first half is what [`Interrupt`](Self::Interrupt) and
+    /// [`Dismiss`](Self::Dismiss) satisfy: each sends nvim the very key that
+    /// means what the choice does. The second is what
+    /// [`Restart`](Self::Restart) has to satisfy instead, since no keystroke
+    /// means "restart the editor" to nvim -- and being bracketed is not
+    /// enough on its own, because `<CR>`, `<Tab>`, `<Space>`, `<BS>` and the
+    /// arrows are all bracketed *and* reflexive (see
+    /// [`RESTART_NOTATION`]).
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
             Self::Interrupt => INTERRUPT_NOTATION,
-            Self::Restart => "r",
+            Self::Restart => RESTART_NOTATION,
             Self::Dismiss => "<Esc>",
+            Self::Quit => QUIT_NOTATION,
         }
     }
 
@@ -238,6 +285,7 @@ impl SupervisionChoice {
             Self::Interrupt => "Interrupt",
             Self::Restart => "Restart",
             Self::Dismiss => "Dismiss",
+            Self::Quit => "Quit view",
         };
         format!("[{}] {name}", self.key())
     }
@@ -254,13 +302,43 @@ pub struct EngineBusyState {
     pub since: SinceStamp,
     /// Which failure this modal is offering recovery from.
     pub kind: WedgeKind,
+    /// How far into the wedge an interrupt was sent, if one was.
+    ///
+    /// The whole state behind [`interrupt_unanswered`](Self::interrupt_unanswered):
+    /// this modal is closed the moment the wedge clears, so a modal still
+    /// holding this stamp some time later is itself the evidence that the
+    /// interrupt changed nothing.
+    interrupted: Option<SinceStamp>,
 }
 
 impl EngineBusyState {
     /// The modal for `kind`, opened after `since` of it.
     #[must_use]
     pub const fn new(kind: WedgeKind, since: SinceStamp) -> Self {
-        Self { since, kind }
+        Self {
+            since,
+            kind,
+            interrupted: None,
+        }
+    }
+
+    /// Records that the user sent an interrupt `at` this point in the wedge.
+    ///
+    /// Keeps the first: a user pressing `<C-c>` three times has sent three
+    /// interrupts to an engine that reacted to none of them, and the honest
+    /// reading of how long that has been true anchors on the first one.
+    pub fn note_interrupt(&mut self, at: SinceStamp) {
+        self.interrupted.get_or_insert(at);
+    }
+
+    /// Whether an interrupt has now gone long enough without the wedge
+    /// clearing that saying so is a statement about the engine rather than
+    /// about a reply still in flight (see [`INTERRUPT_REACTION_WINDOW`]).
+    #[must_use]
+    pub fn interrupt_unanswered(&self) -> bool {
+        self.interrupted.is_some_and(|sent| {
+            self.since.elapsed().saturating_sub(sent.elapsed()) >= INTERRUPT_REACTION_WINDOW
+        })
     }
 
     /// The choices this modal offers, which is [`WedgeKind::choices`] for
@@ -303,25 +381,77 @@ impl EngineBusyState {
         )
     }
 
-    /// The modal's message line: what is wrong, and for how long it has been
-    /// wrong.
+    /// The modal's message line: what is wrong, for how long it has been
+    /// wrong, and -- once an interrupt has gone unanswered for longer than
+    /// a reply could still be in flight -- that the interrupt did not
+    /// reach it either.
+    ///
+    /// That last clause is the one thing this modal can say about a
+    /// synchronous Lua wedge, which swallows `<C-c>` silently: without it a
+    /// user presses the interrupt, sees the same frozen screen and the same
+    /// readout, and has no way to tell a key that did nothing from a key
+    /// that never arrived.
     #[must_use]
     pub fn message(&self) -> String {
-        format!("{} ({}s)", self.kind.notice(), self.since.readout())
+        let base = format!("{} ({}s)", self.kind.notice(), self.since.readout());
+        match self.interrupted {
+            Some(sent) if self.interrupt_unanswered() => format!(
+                "{base}; interrupt sent {}s ago, nothing has answered since",
+                self.since.readout().saturating_sub(sent.readout())
+            ),
+            _ => base,
+        }
     }
 }
 
-/// Supervision's memory of the current wedge episode.
+/// How many times one session recovers a dead engine without asking before
+/// it starts asking.
 ///
-/// It is what keeps a dismissed modal dismissed: the banner keeps
-/// re-asserting for as long as the condition holds, so an escalation rule
-/// with no memory would re-open the modal on the very next observation
+/// Automatic recovery answers the failure it was built for -- an engine that
+/// dies once -- and cannot answer an engine that dies every time it starts,
+/// which is what a broken plugin or a corrupt swap file produces. A session
+/// that has already spent this many silent recoveries has evidence the
+/// automatic half is not working, so the next death raises the modal and
+/// lets the user decide instead of restarting forever behind their back.
+pub const AUTOMATIC_RECOVERY_ATTEMPTS: u32 = 3;
+
+/// Supervision's per-session settings and its memory of the current wedge
+/// episode.
+///
+/// The episode memory is what keeps a dismissed modal dismissed: the banner
+/// keeps re-asserting for as long as the condition holds, so an escalation
+/// rule with no memory would re-open the modal on the very next observation
 /// after a user closed it.
 #[non_exhaustive]
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SupervisionState {
+    /// Whether a connection observed dead is respawned without asking. When
+    /// `false`, view surfaces the condition and waits for the modal's own
+    /// [`SupervisionChoice::Restart`]; the manual choice works either way.
+    pub auto_restart: bool,
     /// The wedge the user has already been offered a choice for, if any.
     offered: Option<WedgeKind>,
+    /// How many times this session has already recovered without asking.
+    /// Never reset: the count is evidence about the session, not about the
+    /// episode (see [`AUTOMATIC_RECOVERY_ATTEMPTS`]).
+    recovered: u32,
+    /// What the engine's own exit reported, when anything did, so a user who
+    /// answers a dead engine with [`SupervisionChoice::Quit`] leaves with
+    /// the status nvim actually exited with rather than an invented one.
+    exit_code: Option<i32>,
+}
+
+impl Default for SupervisionState {
+    /// Automatic recovery on, no episode offered yet, nothing recovered and
+    /// no exit observed.
+    fn default() -> Self {
+        Self {
+            auto_restart: true,
+            offered: None,
+            recovered: 0,
+            exit_code: None,
+        }
+    }
 }
 
 impl SupervisionState {
@@ -338,8 +468,54 @@ impl SupervisionState {
     }
 
     /// Forgets the episode, so a later wedge escalates on its own terms.
+    /// Leaves the recovery count alone, which is what makes it a bound on
+    /// the session rather than on one outage.
     pub fn forget_episode(&mut self) {
         self.offered = None;
+    }
+
+    /// Whether a dead engine is recovered without asking, right now: the
+    /// user's own switch, and the bound on how often this session may act
+    /// on it.
+    #[must_use]
+    pub fn recovers_unattended(&self) -> bool {
+        self.auto_restart && self.recovered < AUTOMATIC_RECOVERY_ATTEMPTS
+    }
+
+    /// Records one recovery this session performed without asking.
+    pub fn note_unattended_recovery(&mut self) {
+        self.recovered = self.recovered.saturating_add(1);
+    }
+
+    /// Records what the engine's stop reported, and answers whether it is a
+    /// death to recover from or the session's own ending.
+    ///
+    /// nvim exiting on its own terms is the ordinary way a view session
+    /// ends: `:q`, `:qa` and `:cq 3` all reach this seam looking exactly
+    /// like the process stopping, because that is what they are. Recovering
+    /// from one of those would respawn the editor the user had just closed,
+    /// so what has to distinguish a death is that nobody asked for it: a
+    /// signal killed the process (a crash, an OOM kill, an external `kill`),
+    /// or the reader stopped for a reason of its own rather than because the
+    /// stream ended (`reason`, carried by `Msg::EngineStopped`). Everything
+    /// else is an exit, and view leaves with the status nvim chose.
+    ///
+    /// An engine that crashed by calling `exit(1)` on its own is
+    /// indistinguishable here from one a user ended with `:cq`, and is read
+    /// as the exit: reporting nvim's own status is the answer that cannot
+    /// invent a session the user did not ask to keep.
+    #[must_use]
+    pub fn note_engine_stop(&mut self, exit: ExitInfo, reason: Option<&str>) -> bool {
+        self.exit_code = exit.code;
+        exit.by_signal || reason.is_some()
+    }
+
+    /// The status view leaves with when a user answers a dead engine by
+    /// quitting: nvim's own, or failure when nvim never reported one -- the
+    /// same reading `Msg::EngineDown` has always applied.
+    #[must_use]
+    pub fn exit_code(&self) -> i32 {
+        self.exit_code.unwrap_or(1)
     }
 }
 
@@ -359,8 +535,30 @@ mod tests {
     fn a_dead_connection_offers_no_interrupt() {
         let dead = EngineBusyState::new(WedgeKind::Dead, SinceStamp::default());
         assert!(!dead.offers(SupervisionChoice::Interrupt));
-        assert!(dead.offers(SupervisionChoice::Dismiss));
         assert_eq!(dead.choose(SupervisionChoice::Interrupt.key()), None);
+    }
+
+    /// A connection that has closed takes no more keystrokes, including the
+    /// ones that would end the session, so an annunciator a user could
+    /// close over it would leave an editor with no way out.
+    #[test]
+    fn a_dead_connection_offers_recovery_or_the_exit_and_nothing_else() {
+        let dead = EngineBusyState::new(WedgeKind::Dead, SinceStamp::default());
+        assert_eq!(
+            dead.choices(),
+            vec![SupervisionChoice::Restart, SupervisionChoice::Quit]
+        );
+        assert!(!dead.offers(SupervisionChoice::Dismiss));
+        assert_eq!(
+            dead.choose("<Esc>"),
+            None,
+            "dismissing a dead engine is not a choice a user can make"
+        );
+        assert_eq!(
+            dead.choose(RESTART_NOTATION),
+            Some(SupervisionChoice::Restart)
+        );
+        assert_eq!(dead.choose(QUIT_NOTATION), Some(SupervisionChoice::Quit));
     }
 
     #[test]
@@ -382,35 +580,138 @@ mod tests {
         }
     }
 
-    /// No path a user can reach may offer a recovery that does not exist
-    /// yet. The choice, its key and its effect all stay modelled -- the
-    /// respawn that will consume them is built against them -- so the only
-    /// thing standing between a wedged session and a button that ends it
-    /// is this list, and this test is what holds the list closed until the
-    /// respawn lands and flips it deliberately.
+    /// Every wedge has a recovery that replaces the engine, because every
+    /// wedge can be the one an interrupt cannot reach: a synchronous Lua
+    /// loop answers neither the liveness probe nor `<C-c>`, and the model
+    /// has no way to tell that wedge from the Vimscript one the interrupt
+    /// does abort.
     #[test]
-    fn no_wedge_offers_a_restart_while_nothing_can_perform_one() {
+    fn every_wedge_offers_the_restart_and_names_it_on_screen() {
         for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
-            assert!(
-                !kind.choices().contains(&SupervisionChoice::Restart),
-                "{kind:?} offers Restart, which currently reaches the shutdown path"
-            );
             let busy = EngineBusyState::new(kind, SinceStamp::default());
-            assert!(!busy.offers(SupervisionChoice::Restart), "{kind:?}");
+            assert!(busy.offers(SupervisionChoice::Restart), "{kind:?}");
             assert_eq!(
-                busy.choose(SupervisionChoice::Restart.key()),
-                None,
-                "{kind:?} resolves the restart key"
+                busy.choose(RESTART_NOTATION),
+                Some(SupervisionChoice::Restart),
+                "{kind:?} does not resolve the restart key"
             );
             assert!(
-                !busy
-                    .view()
+                busy.view()
                     .choices
                     .iter()
                     .any(|row| row.contains("Restart")),
-                "{kind:?} paints a Restart row"
+                "{kind:?} paints no Restart row: {:?}",
+                busy.view().choices
             );
         }
+    }
+
+    /// An interrupt that changed nothing is the one thing this modal can
+    /// say about a wedge `<C-c>` never reaches, and it may only say it once
+    /// a reply could no longer be in flight.
+    #[test]
+    fn an_interrupt_nothing_answered_is_reported_once_a_reply_is_no_longer_pending() {
+        let mut busy = EngineBusyState::new(WedgeKind::ReadSide, SinceStamp::new(Duration::ZERO));
+        busy.note_interrupt(SinceStamp::new(Duration::from_secs(31)));
+        assert!(!busy.message().contains("interrupt sent"));
+
+        busy.since = SinceStamp::new(
+            Duration::from_secs(31) + INTERRUPT_REACTION_WINDOW - Duration::from_millis(1),
+        );
+        assert!(
+            !busy.interrupt_unanswered(),
+            "a reply could still be in flight: {}",
+            busy.message()
+        );
+
+        busy.since = SinceStamp::new(Duration::from_secs(31) + INTERRUPT_REACTION_WINDOW);
+        assert!(busy.interrupt_unanswered());
+        assert!(
+            busy.message()
+                .ends_with("interrupt sent 5s ago, nothing has answered since"),
+            "{}",
+            busy.message()
+        );
+
+        // a user pressing it again has not restarted the clock on the first
+        busy.note_interrupt(SinceStamp::new(busy.since.elapsed()));
+        assert!(busy.interrupt_unanswered(), "{}", busy.message());
+    }
+
+    /// The switch is a switch, and the bound behind it is not: a session
+    /// whose engine dies every time it starts stops recovering silently and
+    /// starts asking.
+    #[test]
+    fn unattended_recovery_follows_the_switch_and_stops_after_the_bound() {
+        let mut state = SupervisionState::default();
+        assert!(state.auto_restart, "the absent config recovers on its own");
+        for spent in 0..AUTOMATIC_RECOVERY_ATTEMPTS {
+            assert!(state.recovers_unattended(), "recovery {spent} refused");
+            state.note_unattended_recovery();
+        }
+        assert!(
+            !state.recovers_unattended(),
+            "a session that has spent {AUTOMATIC_RECOVERY_ATTEMPTS} silent \
+             recoveries must start asking"
+        );
+        state.forget_episode();
+        assert!(
+            !state.recovers_unattended(),
+            "the bound is on the session, not on one outage"
+        );
+
+        let off = SupervisionState {
+            auto_restart: false,
+            ..SupervisionState::default()
+        };
+        assert!(!off.recovers_unattended());
+    }
+
+    fn stop(code: Option<i32>, by_signal: bool) -> ExitInfo {
+        ExitInfo { code, by_signal }
+    }
+
+    #[test]
+    fn quitting_a_dead_engine_leaves_with_the_status_nvim_reported() {
+        let mut state = SupervisionState::default();
+        assert_eq!(state.exit_code(), 1, "an unreported exit is a failed one");
+        let _ = state.note_engine_stop(stop(Some(0), false), None);
+        assert_eq!(state.exit_code(), 0);
+        let _ = state.note_engine_stop(stop(Some(137), true), None);
+        assert_eq!(state.exit_code(), 137);
+    }
+
+    /// The single most destructive thing supervision could do is bring back
+    /// an editor its user just closed: `:q` reaches the loop looking exactly
+    /// like a crash, because in both cases the process stopped.
+    #[test]
+    fn an_engine_told_to_stop_is_never_one_to_bring_back() {
+        let mut state = SupervisionState::default();
+        assert!(
+            !state.note_engine_stop(stop(Some(0), false), None),
+            ":q must end the session, not restart the engine"
+        );
+        assert!(
+            !state.note_engine_stop(stop(Some(3), false), None),
+            ":cq 3 chose that status deliberately and must be honoured"
+        );
+        assert_eq!(state.exit_code(), 3);
+    }
+
+    #[test]
+    fn an_engine_nobody_asked_to_stop_is_one_to_bring_back() {
+        let mut state = SupervisionState::default();
+        assert!(
+            state.note_engine_stop(stop(Some(139), true), None),
+            "a signal death is nobody's instruction"
+        );
+        assert!(
+            state.note_engine_stop(
+                stop(None, false),
+                Some("the reader could not route an engine request")
+            ),
+            "a reader that stopped for its own reason ended no session"
+        );
     }
 
     #[test]
@@ -468,13 +769,44 @@ mod tests {
             view.choices,
             vec![
                 "[<C-c>] Interrupt".to_string(),
+                "[<F5>] Restart".to_string(),
                 "[<Esc>] Dismiss".to_string()
+            ]
+        );
+
+        let dead = EngineBusyState::new(WedgeKind::Dead, SinceStamp::new(Duration::ZERO)).view();
+        assert_eq!(dead.title, "Engine gone");
+        assert_eq!(
+            dead.choices,
+            vec![
+                "[<F5>] Restart".to_string(),
+                "[<C-q>] Quit view".to_string()
             ]
         );
     }
 
     #[test]
     fn no_offered_choice_binds_a_key_a_user_could_type_by_reflex() {
+        /// Bracketed and reflexive both: being spelled `<...>` says a key is
+        /// not a printable character, and says nothing at all about whether
+        /// a user waiting out a slow editor would press it. These are the
+        /// ones they would.
+        const REFLEXIVE: [&str; 14] = [
+            "<CR>",
+            "<NL>",
+            "<Tab>",
+            "<S-Tab>",
+            "<Space>",
+            "<BS>",
+            "<Del>",
+            "<Esc>",
+            "<Up>",
+            "<Down>",
+            "<Left>",
+            "<Right>",
+            "<PageUp>",
+            "<PageDown>",
+        ];
         for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
             for choice in kind.choices() {
                 let key = choice.key();
@@ -485,7 +817,32 @@ mod tests {
                      typing it at a merely-slow editor would get the choice by \
                      accident"
                 );
+                // the other half of the rule the key's own doc states: a
+                // reflexive key is allowed only where pressing it by
+                // reflex and picking the choice are the same act
+                if key_means_to_nvim_what_the_choice_does(choice) {
+                    continue;
+                }
+                assert!(
+                    !REFLEXIVE.contains(&key),
+                    "{kind:?} offers {choice:?} on {key:?}, which a user waiting \
+                     out a slow editor presses without meaning to pick anything, \
+                     and which does not itself do what {choice:?} does"
+                );
             }
+        }
+    }
+
+    /// Whether pressing this choice's key at nvim, with no modal on screen
+    /// at all, already does what the choice does -- which is what lets
+    /// [`SupervisionChoice::Interrupt`] and [`SupervisionChoice::Dismiss`]
+    /// bind keys a user does press by reflex.
+    fn key_means_to_nvim_what_the_choice_does(choice: SupervisionChoice) -> bool {
+        match choice {
+            // `<C-c>` interrupts, `<Esc>` cancels: a user who pressed either
+            // by reflex asked for exactly what picking it performs
+            SupervisionChoice::Interrupt | SupervisionChoice::Dismiss => true,
+            SupervisionChoice::Restart | SupervisionChoice::Quit => false,
         }
     }
 

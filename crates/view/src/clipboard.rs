@@ -24,6 +24,7 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 
 use view_core::msg::{RegisterType, ReplyToken, ReplyValue};
+use view_engine::handle::EngineError;
 use view_native::clipboard::{lines_to_text, text_to_lines};
 
 use crate::runtime::EngineOps;
@@ -84,6 +85,75 @@ impl ClipboardBackend for arboard::Clipboard {
     }
 }
 
+/// The engine connection this worker answers over, re-pointed rather than
+/// rebuilt when the engine behind it is replaced.
+///
+/// The worker is session-scoped and the engine is not. Its shadow registers
+/// are the entire clipboard on a host with no reachable display (see this
+/// module's own doc), and a restart that started a second worker instead
+/// would empty them -- while on a host that does have a display, the very
+/// same copy survives a restart untouched, because the OS holds it. So on a
+/// restart the handle moves and the thread stays.
+///
+/// A lock rather than a channel because the worker reads it once per job and
+/// the loop writes it once per restart, and because
+/// [`EngineHandle::reply`](view_engine::handle::EngineHandle::reply) never
+/// blocks (it hands bytes to the outbox and returns), so the loop thread
+/// cannot be held here by a wedged engine.
+pub struct ReplyRoute<E: EngineOps> {
+    ops: std::sync::Arc<std::sync::Mutex<E>>,
+}
+
+impl<E: EngineOps> Clone for ReplyRoute<E> {
+    fn clone(&self) -> Self {
+        Self {
+            ops: std::sync::Arc::clone(&self.ops),
+        }
+    }
+}
+
+#[cfg(test)]
+impl ReplyRoute<view_engine::handle::EngineHandle> {
+    /// Whether this route currently names a connection that is still open.
+    ///
+    /// The one externally observable fact about which engine a route holds,
+    /// and enough to tell a route that followed a restart from one left
+    /// pointing at the engine that died: the dead one's handle is closed and
+    /// its replacement's is not.
+    pub(crate) fn addresses_a_live_connection(&self) -> bool {
+        self.ops.lock().is_ok_and(|ops| !ops.is_closed())
+    }
+}
+
+impl<E: EngineOps> ReplyRoute<E> {
+    /// A route answering over `ops`.
+    pub fn new(ops: E) -> Self {
+        Self {
+            ops: std::sync::Arc::new(std::sync::Mutex::new(ops)),
+        }
+    }
+
+    /// Points every later reply at `ops` instead, for the engine that has
+    /// replaced the one this route was built on.
+    pub fn rebind(&self, ops: E) {
+        match self.ops.lock() {
+            Ok(mut held) => *held = ops,
+            // a poisoned route means the loop thread panicked mid-swap, and
+            // the process is already coming down; the worker's replies fail
+            // the same way they would against a closed connection
+            Err(_) => crate::vlog::log("clipboard", "reply route poisoned; not rebound"),
+        }
+    }
+
+    /// Answers `token`, through whichever engine this route currently names.
+    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+        match self.ops.lock() {
+            Ok(ops) => ops.reply(token, value),
+            Err(_) => Err(EngineError::Closed),
+        }
+    }
+}
+
 /// Spawns the clipboard worker and returns its handle; the caller (`run`'s
 /// setup) keeps the `JoinHandle` alive for the session's duration but never
 /// joins it -- the thread runs until `jobs`'s sender side (owned by the
@@ -101,12 +171,12 @@ impl ClipboardBackend for arboard::Clipboard {
 /// Returns the underlying `std::io::Error` if the OS cannot start the
 /// thread.
 pub fn spawn<E: EngineOps + Send + 'static>(
-    ops: E,
+    route: ReplyRoute<E>,
     jobs: mpsc::Receiver<ClipboardJob>,
 ) -> std::io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("view-clipboard".to_owned())
-        .spawn(move || run(&ops, &jobs, || arboard::Clipboard::new().ok()))
+        .spawn(move || run(&route, &jobs, || arboard::Clipboard::new().ok()))
 }
 
 /// The worker's body: one register-keyed shadow map, one lazily-created
@@ -123,7 +193,7 @@ pub fn spawn<E: EngineOps + Send + 'static>(
 /// instead is the only way to prove `read_lines`'s unreachable-vs-failed
 /// branches without a host display.
 fn run<E: EngineOps, C: ClipboardBackend>(
-    ops: &E,
+    route: &ReplyRoute<E>,
     jobs: &mpsc::Receiver<ClipboardJob>,
     connect: impl Fn() -> Option<C>,
 ) {
@@ -134,11 +204,13 @@ fn run<E: EngineOps, C: ClipboardBackend>(
             ClipboardJobKind::Read { register } => {
                 let (lines, regtype) = read_lines(&mut clip, &connect, register, &shadow);
                 // an EngineError here means the engine connection is
-                // already gone (the writer thread exited); there is no
-                // second engine to answer, and the paint loop's own
-                // EngineLost/EngineDown path is what notices the
+                // already gone (the writer thread exited), and the token
+                // it answered belonged to that engine: a restart brings up
+                // a connection with no memory of this request, so there is
+                // nothing to retry against. The paint loop's own
+                // EngineLost/supervision path is what notices the
                 // connection is down, not this reply
-                let _ = ops.reply(job.token, ReplyValue::ClipboardLines { lines, regtype });
+                let _ = route.reply(job.token, ReplyValue::ClipboardLines { lines, regtype });
             }
             ClipboardJobKind::Write {
                 register,
@@ -148,7 +220,7 @@ fn run<E: EngineOps, C: ClipboardBackend>(
                 let text = lines_to_text(&lines, regtype);
                 write_system(&mut clip, &connect, &text);
                 shadow.insert(register, text);
-                let _ = ops.reply(job.token, ReplyValue::Nil);
+                let _ = route.reply(job.token, ReplyValue::Nil);
             }
         }
     }
@@ -518,7 +590,7 @@ mod tests {
     fn a_read_job_answers_its_token_exactly_once_within_a_bounded_wait() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn(ReplyRecorder { tx: reply_tx }, job_rx).unwrap();
+        let worker = spawn(ReplyRoute::new(ReplyRecorder { tx: reply_tx }), job_rx).unwrap();
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 42 },
@@ -547,7 +619,7 @@ mod tests {
     fn a_write_job_answers_its_token_exactly_once_within_a_bounded_wait() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn(ReplyRecorder { tx: reply_tx }, job_rx).unwrap();
+        let worker = spawn(ReplyRoute::new(ReplyRecorder { tx: reply_tx }), job_rx).unwrap();
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 7 },
@@ -585,20 +657,22 @@ mod tests {
     /// with the [`ReplyValue::ClipboardLines`] pair form the fake's own
     /// text and regtype produced.
     fn spawn_fake<E: EngineOps + Send + 'static>(
-        ops: E,
+        route: ReplyRoute<E>,
         jobs: mpsc::Receiver<ClipboardJob>,
         connect: impl Fn() -> Option<FakeClipboard> + Send + 'static,
     ) -> JoinHandle<()> {
-        thread::spawn(move || run(&ops, &jobs, connect))
+        thread::spawn(move || run(&route, &jobs, connect))
     }
 
     #[test]
     fn a_read_job_against_a_reachable_fake_replies_with_its_lines_and_regtype() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn_fake(ReplyRecorder { tx: reply_tx }, job_rx, || {
-            Some(FakeClipboard::reachable(Some("hi\nthere\n")))
-        });
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder { tx: reply_tx }),
+            job_rx,
+            || Some(FakeClipboard::reachable(Some("hi\nthere\n"))),
+        );
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 1 },
@@ -630,7 +704,11 @@ mod tests {
     fn a_write_then_read_through_an_unreachable_backend_round_trips_via_the_shadow() {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
-        let worker = spawn_fake(ReplyRecorder { tx: reply_tx }, job_rx, || None);
+        let worker = spawn_fake(
+            ReplyRoute::new(ReplyRecorder { tx: reply_tx }),
+            job_rx,
+            || None,
+        );
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 1 },
@@ -660,6 +738,61 @@ mod tests {
                 lines: vec!["shadowed".to_owned()],
                 regtype: RegisterType::Charwise,
             }
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// What a restart must not cost a user on a host with no reachable
+    /// display: the shadow registers are the whole clipboard there, and
+    /// they live in the worker thread. A second worker per engine would
+    /// answer the next `"+p` with nothing, while the same copy on a host
+    /// that has a display would still be sitting in the OS clipboard.
+    #[test]
+    fn a_rebound_route_answers_the_new_engine_and_keeps_the_registers_it_held() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (first_tx, first_rx) = mpsc::channel();
+        let route = ReplyRoute::new(ReplyRecorder { tx: first_tx });
+        let worker = spawn_fake(route.clone(), job_rx, || None);
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 1 },
+                kind: ClipboardJobKind::Write {
+                    register: '+',
+                    lines: vec!["copied before the crash".to_owned()],
+                    regtype: RegisterType::Charwise,
+                },
+            })
+            .unwrap();
+        first_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the write must reply within 2s");
+
+        let (second_tx, second_rx) = mpsc::channel();
+        route.rebind(ReplyRecorder { tx: second_tx });
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 2 },
+                kind: ClipboardJobKind::Read { register: '+' },
+            })
+            .unwrap();
+
+        let (msgid, value) = second_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the read must answer the engine the route now names, within 2s");
+        assert_eq!(msgid, 2);
+        assert_eq!(
+            value,
+            ReplyValue::ClipboardLines {
+                lines: vec!["copied before the crash".to_owned()],
+                regtype: RegisterType::Charwise,
+            },
+            "a restart must not empty the registers the worker already held"
+        );
+        assert!(
+            first_rx.try_recv().is_err(),
+            "no reply may reach the engine the route was pointed away from"
         );
 
         drop(job_tx);

@@ -6,8 +6,11 @@
 //! let msg = match msg_rx.recv() {
 //!     Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
 //!     Ok(Msg::EngineStopped(reason)) => {
-//!         model.fatal_reason = reason;
-//!         Msg::EngineDown(engine.wait_exit())
+//!         let exit = engine.wait_exit();
+//!         let recoverable = model.supervision.note_engine_stop(exit, reason.as_deref());
+//!         model.fatal_reason = reason.clone();
+//!         // a death goes to supervision; an exit the user asked for ends the session
+//!         if recoverable { Msg::EngineStopped(reason) } else { Msg::EngineDown(exit) }
 //!     }
 //!     Ok(m) => m,
 //!     Err(_) => Msg::EngineDown(ExitInfo { code: None, by_signal: false }),
@@ -32,7 +35,13 @@ pub enum Msg {
     /// Pump token: damage staged; the loop MUST drain it into `Redraw`
     /// before `update()` sees it (raw = silent no-op).
     RedrawReady,
-    /// Reader token: engine stream ended; the loop resolves `ExitInfo`.
+    /// Reader token: engine stream ended; the loop resolves `ExitInfo` and,
+    /// with it, whether this stop is a death to recover from or the
+    /// session's own ending
+    /// ([`SupervisionState::note_engine_stop`](crate::native::supervision::SupervisionState::note_engine_stop)).
+    /// A death reaches `update()` as this same message and is acted on by
+    /// the liveness fold a later pass takes; an exit is resolved into
+    /// [`EngineDown`](Self::EngineDown) before `update()` sees anything.
     /// Carries the reader thread's own reason when it stopped reading for
     /// a cause other than the engine process simply exiting (e.g. an
     /// engine-initiated request it could not route because the runtime
@@ -402,13 +411,15 @@ pub struct Key {
 /// (status unreadable) to exit 1. `RedrawReady`/`EngineStopped` are loop
 /// plumbing: the loop resolves them before `update()`; `update()` returns
 /// no effects for them (totality).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ExitInfo {
     pub code: Option<i32>,
     /// Whether `code` came from a signal death rather than a normal exit
-    /// status. Decoded for wire completeness; the process exit code the
-    /// bin crate reports is computed from `code` alone, so this does not
-    /// currently change any observable behavior.
+    /// status. The process exit code the bin crate reports is computed from
+    /// `code` alone, but this is what separates an engine that died from one
+    /// that was told to stop: see
+    /// [`SupervisionState::note_engine_stop`](crate::native::supervision::SupervisionState::note_engine_stop),
+    /// which recovers only from the former.
     pub by_signal: bool,
 }
 

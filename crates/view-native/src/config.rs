@@ -1,11 +1,12 @@
-//! The `[native]` table of `view.toml`: which native features a user has
-//! turned off.
+//! The tables of `view.toml` this build reads: `[native]`, which native
+//! features a user has turned off, and `[supervision]`, how far view may go
+//! on its own to recover a failed engine.
 //!
 //! An absent or empty file is the full experience, so every resolution path
 //! that finds nothing to read answers `all_enabled()` rather than failing.
-//! The key set is the feature registry itself, never a second list written
-//! out here, so a feature can never exist in the table and be unspellable
-//! in config.
+//! The key set of `[native]` is the feature registry itself, never a second
+//! list written out here, so a feature can never exist in the table and be
+//! unspellable in config.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -47,6 +48,127 @@ pub struct NativeConfig {
 struct ViewFile {
     #[serde(default)]
     native: BTreeMap<String, bool>,
+    #[serde(default)]
+    supervision: SupervisionTable,
+}
+
+/// The `[supervision]` table's wire shape. Unknown keys are refused rather
+/// than ignored, for the reason `[native]`'s key check states: a misspelled
+/// switch that parses as "leave the default alone" reads to a user exactly
+/// like a switch that worked.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct SupervisionTable {
+    #[serde(default = "yes")]
+    auto_restart: bool,
+}
+
+/// `serde`'s `default` for [`SupervisionTable::auto_restart`], which is the
+/// only field whose absent value is not `bool`'s own default.
+fn yes() -> bool {
+    true
+}
+
+impl Default for SupervisionTable {
+    fn default() -> Self {
+        Self {
+            auto_restart: yes(),
+        }
+    }
+}
+
+/// How far view may go on its own to recover a failed engine.
+///
+/// One field, because it is the one genuine choice here: whether a
+/// connection observed dead is respawned without asking. The thresholds and
+/// the probe cadence behind the detection are internal constants, not knobs
+/// -- a number the tool has already sized correctly is not a decision to
+/// hand a user.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SupervisionConfig {
+    /// `false` surfaces a dead engine and waits for the busy modal's own
+    /// `Restart`; the manual choice works either way.
+    pub auto_restart: bool,
+}
+
+impl Default for SupervisionConfig {
+    /// Automatic recovery on: the config-absent default, and what `--clean`
+    /// resolves to.
+    fn default() -> Self {
+        Self { auto_restart: true }
+    }
+}
+
+/// Everything `view.toml` resolves to for this build, parsed in one pass.
+///
+/// One read and one parse, not one per table: two loaders over the same file
+/// would each own an error path for the same unreadable file, and a caller
+/// would have to decide which of the two answers to believe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewConfig {
+    /// The `[native]` table's resolved answers.
+    pub native: NativeConfig,
+    /// The `[supervision]` table's resolved answers.
+    pub supervision: SupervisionConfig,
+}
+
+impl ViewConfig {
+    /// Every default: the config-absent answer for every table.
+    #[must_use]
+    pub fn defaults() -> Self {
+        Self {
+            native: NativeConfig::all_enabled(),
+            supervision: SupervisionConfig::default(),
+        }
+    }
+
+    /// Parses every table this build reads out of one TOML document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeConfigError`] on invalid TOML, a `[native]` key that
+    /// names no feature, or an unknown key inside `[supervision]`.
+    pub fn from_toml_str(s: &str) -> Result<Self, NativeConfigError> {
+        let file: ViewFile = toml::from_str(s)?;
+        Ok(Self {
+            native: NativeConfig::from_parsed(&file)?,
+            supervision: SupervisionConfig {
+                auto_restart: file.supervision.auto_restart,
+            },
+        })
+    }
+
+    /// Reads `view.toml` from `config_path`, or every default when there is
+    /// no path to read or no file at it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeConfigError`] when the file exists but cannot be read
+    /// or parsed; the error names the path in both cases.
+    pub fn load(config_path: Option<&Path>) -> Result<Self, NativeConfigError> {
+        let Some(path) = config_path else {
+            return Ok(Self::defaults());
+        };
+        match std::fs::read_to_string(path) {
+            // a parse failure that came from a file names that file: a bare
+            // line/column is not actionable when a user has more than one
+            // config in play, and the read failure one arm below already
+            // answers with the path
+            Ok(s) => Self::from_toml_str(&s).map_err(|e| match e {
+                NativeConfigError::Toml(source) => NativeConfigError::ParseFile {
+                    path: path.to_path_buf(),
+                    source,
+                },
+                other => other,
+            }),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::defaults()),
+            Err(source) => Err(NativeConfigError::Read {
+                path: path.to_path_buf(),
+                source,
+            }),
+        }
+    }
 }
 
 impl NativeConfig {
@@ -59,8 +181,17 @@ impl NativeConfig {
     }
 
     /// Parses a `[native]` table. Unknown keys are an error, not a no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeConfigError`] on invalid TOML or a key that names no
+    /// feature in the registry.
     pub fn from_toml_str(s: &str) -> Result<Self, NativeConfigError> {
-        let file: ViewFile = toml::from_str(s)?;
+        ViewConfig::from_toml_str(s).map(|cfg| cfg.native)
+    }
+
+    /// The `[native]` half of an already-parsed document.
+    fn from_parsed(file: &ViewFile) -> Result<Self, NativeConfigError> {
         // serde's `deny_unknown_fields` cannot express this key set: the
         // legal keys are the registry's rows, and a struct field per
         // feature would be a second copy of the table free to drift from
@@ -88,28 +219,13 @@ impl NativeConfig {
     /// Reads `view.toml` from `config_path`, or `all_enabled()` when there
     /// is no path to read or no file at it. An absent file is the full
     /// experience; an unparseable one is an error the CLI reports.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`NativeConfigError`] when the file exists but cannot be read
+    /// or parsed; the error names the path in both cases.
     pub fn load(config_path: Option<&Path>) -> Result<Self, NativeConfigError> {
-        let Some(path) = config_path else {
-            return Ok(Self::all_enabled());
-        };
-        match std::fs::read_to_string(path) {
-            // a parse failure that came from a file names that file: a bare
-            // line/column is not actionable when a user has more than one
-            // config in play, and the read failure one arm below already
-            // answers with the path
-            Ok(s) => Self::from_toml_str(&s).map_err(|e| match e {
-                NativeConfigError::Toml(source) => NativeConfigError::ParseFile {
-                    path: path.to_path_buf(),
-                    source,
-                },
-                other => other,
-            }),
-            Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Self::all_enabled()),
-            Err(source) => Err(NativeConfigError::Read {
-                path: path.to_path_buf(),
-                source,
-            }),
-        }
+        ViewConfig::load(config_path).map(|cfg| cfg.native)
     }
 
     /// Whether the feature named `id` is enabled. An id that names no
@@ -186,7 +302,7 @@ mod tests {
     /// Hand-written, and unavoidably so: it is a transcription of the spec,
     /// which no build artifact carries. What is *not* hand-written is which
     /// of them this build reads -- see [`loaded_tables`].
-    static SPECIFIED_TABLES: [&str; 4] = ["native", "ui", "engine", "ai"];
+    static SPECIFIED_TABLES: [&str; 5] = ["native", "ui", "engine", "supervision", "ai"];
 
     /// Every top-level table **this crate's** loader reads, taken from
     /// [`ViewFile`]'s own rendered shape rather than restated.
@@ -448,5 +564,93 @@ mod tests {
         let cfg = NativeConfig::all_enabled();
         assert!(!cfg.enabled("pickr"));
         assert!(!cfg.enabled(""));
+    }
+    #[test]
+    fn an_absent_supervision_table_recovers_automatically() {
+        assert!(ViewConfig::defaults().supervision.auto_restart);
+        let cfg = ViewConfig::from_toml_str("[native]\npicker = false\n")
+            .expect("a file with no supervision table must parse");
+        assert!(
+            cfg.supervision.auto_restart,
+            "an unstated switch must keep the derived default, not bool's"
+        );
+        assert!(
+            !cfg.native.enabled("picker"),
+            "the other table still resolves"
+        );
+    }
+
+    #[test]
+    fn supervision_auto_restart_can_be_turned_off() {
+        let cfg = ViewConfig::from_toml_str("[supervision]\nauto_restart = false\n")
+            .expect("the documented switch must parse");
+        assert!(!cfg.supervision.auto_restart);
+        assert_eq!(
+            cfg.native,
+            NativeConfig::all_enabled(),
+            "turning off automatic recovery must not touch any native feature"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_supervision_key_is_refused_rather_than_ignored() {
+        let err = ViewConfig::from_toml_str("[supervision]\nauto_restrat = false\n")
+            .expect_err("a typo that silently keeps the default is unreadable to a user");
+        assert!(
+            format!("{err}").contains("auto_restrat"),
+            "the error must name the offending key, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_non_bool_auto_restart_is_an_error() {
+        let err = ViewConfig::from_toml_str("[supervision]\nauto_restart = \"yes\"\n")
+            .expect_err("only a boolean switches automatic recovery");
+        assert!(
+            matches!(err, NativeConfigError::Toml(_)),
+            "expected a TOML type error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn the_example_configs_supervision_block_is_the_shipped_default() {
+        let cfg = ViewConfig::from_toml_str(EXAMPLE_TOML).expect("the example must parse");
+        assert_eq!(cfg.supervision, SupervisionConfig::default());
+    }
+
+    #[test]
+    fn the_examples_supervision_switch_actually_turns_the_automatic_half_off() {
+        // the example, edited the way its own comment tells a user to
+        let edited = EXAMPLE_TOML.replace("auto_restart = true", "auto_restart = false");
+        assert_ne!(edited, EXAMPLE_TOML, "the example must still ship the key");
+        let cfg = ViewConfig::from_toml_str(&edited).expect("the edited example must parse");
+        assert!(!cfg.supervision.auto_restart);
+    }
+
+    #[test]
+    fn one_read_answers_every_table_from_disk() {
+        let dir = view_test_support::ScratchDir::new("view-config-both").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(
+            &path,
+            "[native]\ntree = false\n\n[supervision]\nauto_restart = false\n",
+        )
+        .expect("a temp config must be writable");
+        let cfg = ViewConfig::load(Some(&path)).expect("both tables must load together");
+        assert!(!cfg.native.enabled("tree"));
+        assert!(!cfg.supervision.auto_restart);
+    }
+
+    #[test]
+    fn no_path_and_no_file_are_both_every_default() {
+        assert_eq!(
+            ViewConfig::load(None).expect("no path must resolve"),
+            ViewConfig::defaults()
+        );
+        let missing = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-view.toml");
+        assert_eq!(
+            ViewConfig::load(Some(&missing)).expect("an absent file must resolve"),
+            ViewConfig::defaults()
+        );
     }
 }

@@ -39,8 +39,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // wherever the stack sits, and then routed below exactly as it
             // would have been with no modal open -- see
             // `note_supervision_choice` on why an annunciator may neither
-            // swallow a keystroke nor charge a user one to answer it
-            let mut effects = note_supervision_choice(model, &notation);
+            // swallow a keystroke nor charge a user one to answer it.
+            //
+            // Only while the engine owns the keyboard, which is the same
+            // condition as "this key is about to reach nvim". An overlay
+            // that takes focus is answering the key itself, and the
+            // annunciator stacked over it must not read that answer as its
+            // own: one <Esc> at a picker under this modal would otherwise
+            // close both, spending the episode's single offer on a
+            // dismissal the user never made.
+            let mut effects = match model.focus() {
+                Focus::Engine => note_supervision_choice(model, &notation),
+                Focus::Native(_) => Vec::new(),
+            };
             effects.extend(route_key(model, notation));
             effects
         }
@@ -58,11 +69,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             effects
         }
-        // loop plumbing tokens: the loop resolves these into Redraw/EngineDown
-        // before update() ever sees them, so both arms are no-ops here;
+        // loop plumbing tokens: the loop resolves the damage behind
+        // RedrawReady, and the exit status behind EngineStopped, before
+        // update() ever sees them. EngineStopped still arrives here when the
+        // loop judged the stop a death rather than the session's own ending
+        // (`SupervisionState::note_engine_stop`) -- the fold that acts on it
+        // is the liveness reading a later pass takes, never this arm.
         // EngineReady is consumed even earlier, by startup's pre-attach
         // draining loop, before the steady-state loop this match belongs to
-        // ever starts, so this arm is unreachable in practice but kept for
+        // ever starts, so that arm is unreachable in practice but kept for
         // the same defensive-totality reason
         Msg::RedrawReady | Msg::EngineStopped(_) | Msg::EngineReady => Vec::new(),
         Msg::EngineDown(exit) => {
