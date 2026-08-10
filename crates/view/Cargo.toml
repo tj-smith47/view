@@ -63,7 +63,7 @@ rustix = { version = "1", default-features = false, features = [
 # cfg(unix): cargo unions the two tables' features for apple targets
 # (which satisfy both cfg predicates), so non-apple unix builds never pull
 # in the fs module this needs.
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
 # The same view-engine, with the constructor that builds a connection over

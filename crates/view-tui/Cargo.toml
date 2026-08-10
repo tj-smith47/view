@@ -51,7 +51,7 @@ signal-hook = { version = "0.3", default-features = false }
 # same rustix dependency declared under cfg(unix): cargo unions the two
 # tables' features for apple targets (which satisfy both cfg predicates),
 # so non-apple unix builds never pull in the fs module this needs.
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
