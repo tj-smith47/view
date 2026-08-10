@@ -83,10 +83,21 @@ impl OutboxStallWatch {
     /// this reports only about the moments it is called and a wedged engine
     /// emits no redraws to wake anyone. It never touches the connection's
     /// lock and never blocks, wedged or not.
+    ///
+    /// The clock is read only when the queue is not empty. An idle
+    /// connection is the whole steady state of a session nobody is typing
+    /// at, and its verdict is false whatever the time is, so a reading a
+    /// caller could not use is one the caller does not pay for.
     #[must_use]
     pub fn observe(&mut self, handle: &EngineHandle) -> bool {
+        self.observe_with(handle, Instant::now)
+    }
+
+    /// [`observe`](Self::observe) with the clock supplied as a source rather
+    /// than taken here, so a test can prove which observations reach for it.
+    fn observe_with(&mut self, handle: &EngineHandle, clock: impl FnOnce() -> Instant) -> bool {
         let (queued, delivered) = handle.write_progress();
-        self.fold(queued, delivered, Instant::now())
+        self.fold_lazily(queued, delivered, clock)
     }
 
     /// How long a caller may wait for its own next wakeup before this watch
@@ -123,7 +134,20 @@ impl OutboxStallWatch {
     /// [`observe`](Self::observe) with both readings supplied, so the
     /// predicate is provable against an exact queue depth, an exact
     /// delivered count and an exact clock instead of a scheduler's.
+    #[cfg(test)]
     fn fold(&mut self, queued: usize, delivered: u64, now: Instant) -> bool {
+        self.fold_lazily(queued, delivered, || now)
+    }
+
+    /// [`fold`](Self::fold) with the clock supplied as a source rather than
+    /// a value, so the empty-queue path can decline to read it at all and a
+    /// test can prove that it declined.
+    fn fold_lazily(
+        &mut self,
+        queued: usize,
+        delivered: u64,
+        clock: impl FnOnce() -> Instant,
+    ) -> bool {
         let moved = delivered != self.delivered;
         self.delivered = delivered;
         if queued == 0 {
@@ -138,9 +162,10 @@ impl OutboxStallWatch {
             // it, rather than at the one after: the gap between two
             // observations belongs to the stall it precedes, and dropping
             // it would let a lazily-observed connection under-report
-            self.since = Some(now);
+            self.since = Some(clock());
             return false;
         }
+        let now = clock();
         let since = *self.since.get_or_insert(now);
         // saturating: `Instant::duration_since` yields zero for an earlier
         // `now`, so a clock reading out of order can only under-report a
@@ -168,6 +193,61 @@ mod tests {
         assert!(!w.fold(1, 0, t0 + THRESHOLD / 2));
         assert!(w.fold(1, 0, t0 + THRESHOLD));
         assert!(w.fold(3, 0, t0 + THRESHOLD * 10));
+    }
+
+    /// The same short-circuit through the seam production calls, against a
+    /// real handle's own queue readings rather than supplied ones: the
+    /// steady state of a session nobody is typing at must reach for nothing
+    /// it cannot use.
+    #[test]
+    fn observing_an_idle_connection_reads_no_clock() {
+        let (source, _keep_open) = crate::test_peer::IdleSource::new();
+        let (handle, _notifs) = EngineHandle::start(source, std::io::sink());
+        let mut w = watch();
+        let reads = std::cell::Cell::new(0_u32);
+        let clock = || {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                Instant::now()
+            }
+        };
+
+        for _ in 0..16 {
+            assert!(!w.observe_with(&handle, clock()));
+        }
+        assert_eq!(
+            reads.get(),
+            0,
+            "an idle connection paid for a clock reading its verdict cannot use"
+        );
+    }
+
+    #[test]
+    fn an_idle_queue_never_reads_the_clock_and_a_pending_one_always_does() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        let reads = std::cell::Cell::new(0_u32);
+        let clock = |at: Instant| {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                at
+            }
+        };
+
+        assert!(!w.fold_lazily(0, 0, clock(t0)));
+        assert!(!w.fold_lazily(0, 9, clock(t0)));
+        assert_eq!(
+            reads.get(),
+            0,
+            "an idle connection paid for a reading its verdict cannot use"
+        );
+
+        assert!(!w.fold_lazily(1, 9, clock(t0)));
+        assert_eq!(reads.get(), 1, "a queued message must open its window");
+        assert!(w.fold_lazily(1, 9, clock(t0 + THRESHOLD)));
+        assert_eq!(reads.get(), 2);
     }
 
     #[test]

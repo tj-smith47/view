@@ -1,6 +1,6 @@
 //! Scaffolding shared by this crate's live-nvim integration test binaries
 //! (`bridge_live.rs`, `mappings_live.rs`, `picker_preview_live.rs`,
-//! `supersede_live.rs`): a scratch config-fixture writer, an
+//! `supersede_live.rs`, `supervision_live.rs`): a scratch config-fixture writer, an
 //! engine-plus-pump spawn, and the predicate-drain wait loop each of those
 //! files re-derived on its own before this existed.
 //!

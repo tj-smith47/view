@@ -21,7 +21,7 @@ pub struct Model {
     /// by hand on every close.
     ///
     /// Private, and reachable only through [`Model::overlays`],
-    /// [`Model::push_overlay`] and [`Model::pop_overlay`], for the same
+    /// [`Model::push_overlay`] and [`Model::pop_focused_overlay`], for the same
     /// reason [`EngineModel::grid`] is: a `pub` field lets a caller push an
     /// `OverlayId` that is already on the stack, and two entries sharing an
     /// id make [`Model::overlay_at`] answer with a token that names two
@@ -183,8 +183,8 @@ impl Model {
         self.claimed_keys = claimed;
     }
 
-    /// Who owns input this frame: the topmost open overlay, or the engine
-    /// when none is open.
+    /// Who owns input this frame: the topmost focus-taking overlay, or the
+    /// engine when none is open.
     ///
     /// Derived from [`Model::overlays`] rather than stored alongside it. A
     /// stored focus is a second fact that has to agree with overlay
@@ -193,10 +193,61 @@ impl Model {
     /// state unrepresentable.
     #[must_use]
     pub fn focus(&self) -> Focus {
-        match self.overlays.last() {
+        match self.focused_overlay() {
             Some(overlay) => Focus::Native(overlay.id),
             None => Focus::Engine,
         }
+    }
+
+    /// Whether an overlay of this kind takes the keyboard while it is open.
+    ///
+    /// Every kind does except [`OverlayKind::EngineBusy`], which is raised
+    /// by view noticing something rather than by the user asking for it,
+    /// and which is on screen precisely when the engine may be slow to
+    /// answer. A user who keeps typing at a long operation has always had
+    /// those keystrokes queued and applied on catch-up, so an annunciator
+    /// that consumed them would turn a slow operation into lost work. It
+    /// answers its own choice keys, and every other key routes as though it
+    /// were not there.
+    const fn takes_focus(kind: &OverlayKind) -> bool {
+        !matches!(kind, OverlayKind::EngineBusy(_))
+    }
+
+    fn focused_overlay(&self) -> Option<&Overlay> {
+        self.overlays
+            .iter()
+            .rev()
+            .find(|overlay| Self::takes_focus(&overlay.kind))
+    }
+
+    /// The topmost focus-taking overlay, for a feature that needs to fold
+    /// its own state forward as input arrives.
+    #[must_use]
+    pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
+        self.overlays
+            .iter_mut()
+            .rev()
+            .find(|overlay| Self::takes_focus(&overlay.kind))
+    }
+
+    /// Closes the overlay [`Model::focus`] names, wherever it sits in the
+    /// stack, and returns it.
+    ///
+    /// Not the top of the stack: a non-focus-taking overlay may be sitting
+    /// above it, and popping that instead would close an annunciator the
+    /// user never addressed while leaving the overlay they did address open.
+    pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
+        let pos = self
+            .overlays
+            .iter()
+            .rposition(|overlay| Self::takes_focus(&overlay.kind))?;
+        let closed = self.overlays.remove(pos);
+        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
+            if closed.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        Some(closed)
     }
 
     /// The topmost overlay covering the terminal cell at `(row, col)`, or
@@ -219,13 +270,6 @@ impl Model {
     #[must_use]
     pub fn overlays(&self) -> &[Overlay] {
         &self.overlays
-    }
-
-    /// The topmost overlay, the one holding focus, for a feature that needs
-    /// to fold its own state forward as input arrives.
-    #[must_use]
-    pub fn top_overlay_mut(&mut self) -> Option<&mut Overlay> {
-        self.overlays.last_mut()
     }
 
     /// The open picker's state, wherever it sits in the stack -- not only
@@ -261,7 +305,7 @@ impl Model {
     /// whether one was found to close. Removed by kind rather than only
     /// when topmost, so a toggle key reaches it even in the corner case
     /// where a prompt has landed above it in the meantime (see
-    /// [`OverlayKind::Tree`]'s stacking doc); [`Model::pop_overlay`] alone
+    /// [`OverlayKind::Tree`]'s stacking doc); [`Model::pop_focused_overlay`] alone
     /// would close the wrong overlay in that case.
     pub fn close_tree(&mut self) -> bool {
         let Some(pos) = self
@@ -363,20 +407,6 @@ impl Model {
         // u64::MAX overlays to reach the saturation point
         self.next_overlay_id = self.next_overlay_id.saturating_add(1);
         id
-    }
-
-    /// Closes the topmost overlay and returns it, or `None` when none is
-    /// open. Any mouse gesture that overlay had captured is released with
-    /// it, so a drag whose target closed mid-gesture cannot keep routing to
-    /// something that is gone.
-    pub fn pop_overlay(&mut self) -> Option<Overlay> {
-        let closed = self.overlays.pop();
-        if let (Some(overlay), Some(MouseCapture::Overlay(held))) = (&closed, self.mouse_capture) {
-            if overlay.id == held {
-                self.mouse_capture = None;
-            }
-        }
-        closed
     }
 
     /// Who owns the mouse gesture in flight: the surface that received the

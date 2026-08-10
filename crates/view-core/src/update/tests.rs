@@ -48,7 +48,7 @@ fn some_overlay_kind() -> OverlayKind {
         }]),
     );
     throwaway
-        .pop_overlay()
+        .pop_focused_overlay()
         .expect("MsgShow opens a Prompt overlay")
         .kind
 }
@@ -644,7 +644,7 @@ fn any_sequence_of_pushes_pops_and_escapes_leaves_focus_on_the_stack_top() {
                     shadow.push(id);
                 }
                 1 => {
-                    m.pop_overlay();
+                    m.pop_focused_overlay();
                     shadow.pop();
                 }
                 2 => {
@@ -743,7 +743,7 @@ fn focus_is_the_top_of_the_stack_and_the_engine_when_it_is_empty() {
         Focus::Native(upper),
         "the overlay opened last is the one on top"
     );
-    m.pop_overlay();
+    m.pop_focused_overlay();
     assert_eq!(m.focus(), Focus::Native(lower));
 }
 
@@ -758,7 +758,7 @@ fn every_open_overlay_holds_an_id_no_other_one_holds() {
 
     // an id is retired with its overlay rather than recycled: a token
     // held past a close names nothing instead of a later overlay
-    let closed = m.pop_overlay().map(|o| o.id);
+    let closed = m.pop_focused_overlay().map(|o| o.id);
     let reopened = open_overlay(&mut m);
     assert_ne!(Some(reopened), closed);
     assert_eq!(stack_ids(&m).len(), 8);
@@ -940,7 +940,7 @@ fn closing_an_overlay_mid_gesture_releases_the_capture_it_held() {
     let _ = update(&mut m, mouse("press", 12, 40));
     assert!(m.mouse_capture().is_some());
 
-    m.pop_overlay();
+    m.pop_focused_overlay();
     assert_eq!(
         m.mouse_capture(),
         None,
@@ -2253,7 +2253,7 @@ fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() 
 }
 
 /// The real close path a user takes to abandon a picker: `<Esc>` routed
-/// through `update()`, not a direct `model.pop_overlay()` call, must
+/// through `update()`, not a direct `model.pop_focused_overlay()` call, must
 /// emit `Effect::PickerClose` so the matcher worker drops its live
 /// `Session` and stops any `Files` scan still walking a huge tree (see
 /// `Effect::PickerClose`'s own doc). Disabling the emission at the
@@ -3608,10 +3608,7 @@ fn a_dead_connection_raises_banner_and_modal_on_the_same_observation() {
         !state.offers(SupervisionChoice::Interrupt),
         "no input path survives a closed connection, so Interrupt must not be offered"
     );
-    assert_eq!(
-        state.choices(),
-        vec![SupervisionChoice::Restart, SupervisionChoice::Dismiss]
-    );
+    assert_eq!(state.choices(), vec![SupervisionChoice::Dismiss]);
 }
 
 #[test]
@@ -3765,15 +3762,18 @@ fn a_dead_connections_modal_does_not_answer_the_interrupt_key() {
         },
     );
 
+    let notation = SupervisionChoice::Interrupt.key().to_string();
     let effects = update(
         &mut m,
         Msg::Key(Key {
-            notation: SupervisionChoice::Interrupt.key().to_string(),
+            notation: notation.clone(),
         }),
     );
+    // not consumed and not acted on: a key this wedge offers no choice for
+    // is an ordinary keystroke, and it goes where an ordinary keystroke goes
     assert!(
-        effects.is_empty(),
-        "a disabled choice produced an effect: {effects:?}"
+        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation: sent })] if *sent == notation),
+        "a disabled choice must fall through to the engine, got {effects:?}"
     );
     assert!(
         !m.overlays().is_empty(),
@@ -3781,36 +3781,40 @@ fn a_dead_connections_modal_does_not_answer_the_interrupt_key() {
     );
 }
 
+/// The restart plumbing exists and nothing a user can press reaches it.
+/// Every key the open modal paints, plus the key the choice itself names,
+/// must resolve to something other than a respawn for as long as the
+/// respawn would be answered by the shutdown path.
 #[test]
-fn restart_asks_the_loop_to_respawn_and_closes_the_modal() {
-    let mut m = model();
-    let _ = update(
-        &mut m,
-        Msg::EngineLiveness {
-            wedge: Some(WedgeKind::Dead),
-            observed_for: Duration::ZERO,
-        },
-    );
-
-    let effects = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: SupervisionChoice::Restart.key().to_string(),
-        }),
-    );
-    assert!(
-        matches!(&effects[..], [Effect::RestartEngine]),
-        "Restart must ask the loop to respawn, got {effects:?}"
-    );
-    assert!(
-        m.overlays().is_empty(),
-        "the modal must close on the choice"
-    );
-    assert_eq!(
-        visible_texts(&m),
-        vec![WedgeKind::Dead.notice().to_string()],
-        "the banner describes a condition the choice has not yet changed"
-    );
+fn no_key_a_user_can_press_produces_a_restart_effect() {
+    for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::EngineLiveness {
+                wedge: Some(kind),
+                observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+            },
+        );
+        assert!(!m.overlays().is_empty(), "{kind:?} opened no modal");
+        for notation in [
+            SupervisionChoice::Restart.key(),
+            SupervisionChoice::Interrupt.key(),
+            "R",
+            "x",
+        ] {
+            let effects = update(
+                &mut m,
+                Msg::Key(Key {
+                    notation: notation.to_string(),
+                }),
+            );
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::RestartEngine)),
+                "{kind:?} reached a respawn through {notation:?}: {effects:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -3894,10 +3898,11 @@ fn a_new_wedge_episode_offers_the_modal_again() {
     );
 }
 
-/// The modal owns the keyboard while it is up, so a key that reaches it
-/// never also reaches the engine underneath.
+/// The modal answers its own choices and takes nothing else, so a session
+/// that keeps typing at a slow operation still has its keystrokes applied
+/// when that operation finishes.
 #[test]
-fn the_modal_holds_focus_while_it_is_open() {
+fn the_modal_answers_its_choices_and_passes_every_other_key_through() {
     let mut m = model();
     let _ = update(
         &mut m,
@@ -3906,7 +3911,13 @@ fn the_modal_holds_focus_while_it_is_open() {
             observed_for: Duration::ZERO,
         },
     );
-    assert!(matches!(m.focus(), Focus::Native(_)));
+    assert!(!m.overlays().is_empty(), "the modal must be open");
+    assert_eq!(
+        m.focus(),
+        Focus::Engine,
+        "the modal must not take the keyboard from the engine it is describing"
+    );
+
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -3914,7 +3925,77 @@ fn the_modal_holds_focus_while_it_is_open() {
         }),
     );
     assert!(
-        effects.is_empty(),
-        "a key the modal does not answer must not reach the engine: {effects:?}"
+        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == "x"),
+        "a key the modal does not answer must reach the engine: {effects:?}"
     );
+    assert!(
+        !m.overlays().is_empty(),
+        "and it must not close the modal on the way past"
+    );
+
+    // the one key it does answer, from the same stack position
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: SupervisionChoice::Dismiss.key().to_string(),
+        }),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(m.overlays().is_empty(), "Dismiss must close the modal");
+}
+
+/// The modal opening over an overlay that does hold the keyboard must not
+/// take it: a picker or tree open when a wedge is noticed keeps answering
+/// its own keys, exactly as it would have with no modal on screen.
+#[test]
+fn a_modal_over_a_focused_overlay_leaves_that_overlays_keys_alone() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let tree_id = match m.overlays().last() {
+        Some(overlay) if matches!(overlay.kind, OverlayKind::Tree(_)) => overlay.id,
+        other => unreachable!("toggle must have opened a Tree overlay: {other:?}"),
+    };
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert_eq!(m.overlays().len(), 2, "{:?}", m.overlays());
+    assert_eq!(
+        m.focus(),
+        Focus::Native(tree_id),
+        "the annunciator took focus from the overlay the user opened"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    // <Esc> is the modal's Dismiss key, and the modal is on top of the
+    // stack, so it answers first -- the tree stays exactly as it was
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(m.focus(), Focus::Native(tree_id));
+
+    // and with the annunciator gone the same key reaches the tree
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    assert!(
+        matches!(&effects[..], [Effect::TreeClose]),
+        "the tree must still answer its own key: {effects:?}"
+    );
+    assert!(m.overlays().is_empty());
 }

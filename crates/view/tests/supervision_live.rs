@@ -13,7 +13,10 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use view_core::native::supervision::INTERRUPT_NOTATION;
+use view_core::model::Model;
+use view_core::msg::{Effect, Key, Msg, RpcCall};
+use view_core::native::supervision::{WedgeKind, ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION};
+use view_core::update::update;
 
 /// How long the engine is told to stay busy for. Far longer than any budget
 /// below, so a probe that answers cannot be the busy work finishing on its
@@ -25,8 +28,19 @@ const BUSY_SECS: u64 = 60;
 /// loaded box, still an order of magnitude short of `BUSY_SECS`.
 const INTERRUPTED: Duration = Duration::from_secs(5);
 
+/// How long the engine is given to get inside the loop it was told to run.
+/// A budget, not a wait: the wait below ends the moment the engine actually
+/// stops answering, so a fast host spends milliseconds here and a loaded one
+/// spends what it needs.
+const ENTERS_LOOP: Duration = Duration::from_secs(30);
+
 /// A live engine with a UI attached and nothing in its config, put to work on
-/// `busy` and left there.
+/// `busy` and blocked before this returns.
+///
+/// The readiness condition is the engine's own silence, never a sleep: a
+/// fixed pause races the engine on any loaded host, and losing that race
+/// makes every assertion below vacuous in the passing direction -- an engine
+/// still reading the command line answers nothing either.
 fn busy_engine(label: &str, busy: &str) -> view_engine::process::Engine {
     let dir = common::fixture(&format!("supervision-live-{label}"), "");
     let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
@@ -35,10 +49,16 @@ fn busy_engine(label: &str, busy: &str) -> view_engine::process::Engine {
     // a caller waiting on the reply to work that never returns could not go
     // on to interrupt it
     engine.handle.input(busy).unwrap();
-    // long enough for the typed line to have been submitted and entered, so
-    // what follows is measured against an engine that is already inside the
-    // loop rather than one still reading the command
-    std::thread::sleep(Duration::from_millis(800));
+
+    let deadline = Instant::now() + ENTERS_LOOP;
+    // an engine that has not yet entered the loop answers this promptly;
+    // one that has answers it not at all, which is the whole signal
+    while engine.handle.get_mode().is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "{label}: the engine kept answering for {ENTERS_LOOP:?} after being              told to run a {BUSY_SECS}s loop, so it never entered it"
+        );
+    }
     engine
 }
 
@@ -107,5 +127,87 @@ fn a_synchronous_lua_loop_answers_neither_the_liveness_probe_nor_the_interrupt()
         answered.is_err(),
         "the interrupt reached a synchronous Lua loop, so INTERRUPT_NOTATION's doc \
          comment understates what it can do: {answered:?}"
+    );
+}
+
+/// The modal is raised by view noticing something, not by the user asking
+/// for it, and the thing it notices is very often a long operation that
+/// finishes. Anything typed while it is up must land in the buffer exactly
+/// as it would have with no modal on screen -- proved here against a real
+/// engine and a real buffer rather than against the effect alone, since an
+/// effect that never reaches nvim is the failure this is guarding.
+#[test]
+fn every_key_the_modal_does_not_answer_still_lands_in_the_buffer() {
+    let dir = common::fixture("supervision-live-passthrough", "");
+    let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    let mut model = Model::with_term_size(80, 24);
+    let _ = update(
+        &mut model,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    assert!(
+        !model.overlays().is_empty(),
+        "a wedge past the threshold must have opened the modal"
+    );
+
+    // typed with the modal up, one keypress at a time, exactly as the input
+    // reader delivers them
+    for notation in ["i", "a", "x", "y", "z"] {
+        let effects = update(
+            &mut model,
+            Msg::Key(Key {
+                notation: notation.to_string(),
+            }),
+        );
+        if notation == "i" {
+            // the one key this wedge does answer: it sends the interrupt
+            // instead, which a buffer never sees
+            assert!(
+                matches!(
+                    &effects[..],
+                    [Effect::Rpc(RpcCall::Input { notation: sent })] if sent == INTERRUPT_NOTATION
+                ),
+                "the interrupt choice sent something else: {effects:?}"
+            );
+            continue;
+        }
+        let [Effect::Rpc(RpcCall::Input { notation: sent })] = &effects[..] else {
+            panic!("{notation:?} was swallowed by the modal: {effects:?}");
+        };
+        assert_eq!(sent, notation);
+        engine.handle.input(sent).unwrap();
+    }
+
+    // <Esc> is the modal's own Dismiss key, so this one stops here
+    let effects = update(
+        &mut model,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(model.overlays().is_empty(), "Dismiss must close the modal");
+
+    // and with it gone the identical key routes to the engine again
+    let effects = update(
+        &mut model,
+        Msg::Key(Key {
+            notation: "<Esc>".into(),
+        }),
+    );
+    let [Effect::Rpc(RpcCall::Input { notation: sent })] = &effects[..] else {
+        panic!("a key with no overlay open must reach the engine: {effects:?}");
+    };
+    engine.handle.input(sent).unwrap();
+
+    assert_eq!(
+        engine.handle.eval_str("getline(1)").unwrap(),
+        "xyz",
+        "keystrokes typed at the modal never reached the buffer"
     );
 }

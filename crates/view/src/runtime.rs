@@ -30,7 +30,7 @@ use view_core::msg::{
     OSC52_MAX_PAYLOAD_BYTES,
 };
 use view_core::native::mappings::MappingSpec;
-use view_core::native::supervision::WedgeKind;
+use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::heartbeat::{HeartbeatWatch, Liveness};
@@ -931,21 +931,33 @@ pub(crate) fn dispatch<E: EngineOps>(
 /// A closed connection outranks every timing question below it, the same
 /// ordering [`HeartbeatWatch::observe_at`] applies for the same reason: a
 /// probe still waiting on a connection that is gone is waiting on nothing.
-/// Between the two open-connection failures the read side's verdict wins,
-/// because its probe is chosen to keep answering through the states that are
-/// not failures (see `view_engine::heartbeat`'s module doc), so an engine
-/// that fails it has failed the more specific test -- and an engine that has
-/// stopped reading view's output has usually stopped answering it too, which
-/// would otherwise report the consequence and hide the cause.
+///
+/// Between the two open-connection failures the write side's verdict wins,
+/// because it is the one that can be the root cause of the other. Every
+/// probe the read side is waiting on left through the same outbox, so a
+/// writer that has stopped delivering is enough on its own to make the read
+/// side report a wedge -- while a writer that is still delivering rules the
+/// write side out entirely, whatever the read side says. Taking the read
+/// side first would report the consequence and hide the cause, and it would
+/// do so on the overwhelming majority of real stalls, since the two
+/// thresholds are equal and both sides cross them together.
 fn wedge_kind(write_stalled: bool, read: Liveness) -> Option<WedgeKind> {
     match read {
+        // not reachable from this loop today, and deliberately kept: the
+        // intake resolves `Msg::EngineStopped` (and a disconnected channel)
+        // into `Msg::EngineDown` and thence `Effect::Quit` before any
+        // top-of-pass reading of `is_closed` can find the connection gone,
+        // so a closed connection ends the session rather than being
+        // supervised through it. The verdict exists for the respawn that
+        // will change that -- an engine view can bring back is one whose
+        // death is a state to report rather than an exit
         Liveness::Dead => Some(WedgeKind::Dead),
+        _ if write_stalled => Some(WedgeKind::WriteSide),
         Liveness::Wedged => Some(WedgeKind::ReadSide),
         // `Liveness` is `#[non_exhaustive]`, so this arm also catches a
-        // verdict a later engine build might add: it falls back to the write
-        // side's own reading rather than being reported through wording
-        // chosen for a different failure
-        _ => write_stalled.then_some(WedgeKind::WriteSide),
+        // verdict a later engine build might add: with the write side moving
+        // and no verdict this build understands, there is nothing to report
+        _ => None,
     }
 }
 
@@ -962,8 +974,9 @@ struct SupervisionFold {
     /// The wedge the previous pass saw, so a healthy pass that follows a
     /// healthy pass can be recognised without a clock read.
     wedge: Option<WedgeKind>,
-    /// When the current wedge was first observed. `None` while there is
-    /// none.
+    /// When the current *episode* was first observed -- the first pass that
+    /// saw any wedge at all, not the first that saw this kind. `None` while
+    /// there is none.
     since: Option<std::time::Instant>,
 }
 
@@ -988,7 +1001,15 @@ impl SupervisionFold {
         let now = std::time::Instant::now();
         if observed != self.wedge {
             self.wedge = observed;
-            self.since = observed.map(|_| now);
+            // the clock belongs to the outage, not to its classification: a
+            // write-side stall that later reads as a read-side one is the
+            // same connection still quiet, and re-anchoring here would show
+            // a user who has waited a minute a readout starting from zero
+            self.since = match (observed, self.since) {
+                (None, _) => None,
+                (Some(_), opened @ Some(_)) => opened,
+                (Some(_), None) => Some(now),
+            };
         }
         let observed_for = self.since.map_or(std::time::Duration::ZERO, |opened| {
             now.saturating_duration_since(opened)
@@ -997,6 +1018,18 @@ impl SupervisionFold {
             wedge: observed,
             observed_for,
         })
+    }
+
+    /// How long the loop may wait before the visible readout would be
+    /// wrong, or `None` while nothing is showing one.
+    ///
+    /// Costs nothing outside a wedge: the option is `None` and the caller's
+    /// existing deadline is returned untouched. Inside one it is the whole
+    /// reason the elapsed seconds move at all -- a quiet engine sends
+    /// nothing to wake the loop with, so a loop that only woke on traffic
+    /// would paint `(31s)` and hold it there until the wedge ended.
+    fn readout_deadline(&self) -> Option<std::time::Duration> {
+        self.wedge.map(|_| READOUT_RESOLUTION)
     }
 }
 
@@ -1028,18 +1061,33 @@ fn note_supervision(
     fold.note(wedge_kind(stalled, read.observe(handle.is_closed())))
 }
 
-/// The soonest either watch would have something new to say, or `None` when
-/// neither would.
+/// The soonest either watch -- or the visible readout -- would have
+/// something new to say, or `None` when none of them would.
 ///
 /// `None` from one watch means "as long as you like" and never shortens the
 /// other's answer; a caller that took the shorter of `None` and a duration
 /// as "no wakeup" would sleep through the one condition that was actually
 /// arming a deadline.
-fn watch_deadline(write: &OutboxStallWatch, read: &HeartbeatWatch) -> Option<std::time::Duration> {
-    match (write.poll_deadline(), read.poll_deadline()) {
+fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
+    let watches = match (wakeups.write.poll_deadline(), wakeups.read.poll_deadline()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (only, None) | (None, only) => only,
+    };
+    match (watches, wakeups.supervision.readout_deadline()) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (only, None) | (None, only) => only,
     }
+}
+
+/// Everything that can ask the loop to wake itself up rather than be woken
+/// by traffic. All three are read together on every pass, so they travel
+/// together: a caller holding two of them and forgetting the third gets a
+/// loop that sleeps through the one condition it was arming for.
+#[derive(Clone, Copy)]
+struct Wakeups<'a> {
+    write: &'a OutboxStallWatch,
+    read: &'a HeartbeatWatch,
+    supervision: &'a SupervisionFold,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
@@ -1058,10 +1106,9 @@ fn watch_deadline(write: &OutboxStallWatch, read: &HeartbeatWatch) -> Option<std
 #[cfg(any(not(unix), test))]
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
-    write_stall: &OutboxStallWatch,
-    heartbeat: &HeartbeatWatch,
+    wakeups: Wakeups<'_>,
 ) -> Option<Result<Msg, mpsc::RecvError>> {
-    let Some(deadline) = watch_deadline(write_stall, heartbeat) else {
+    let Some(deadline) = watch_deadline(wakeups) else {
         return Some(msg_rx.recv());
     };
     match msg_rx.recv_timeout(deadline) {
@@ -1119,8 +1166,7 @@ pub struct InputHandles<'a> {
 #[allow(clippy::type_complexity)]
 fn wait_for_msg_unified(
     msg_rx: &mpsc::Receiver<Msg>,
-    write_stall: &OutboxStallWatch,
-    heartbeat: &HeartbeatWatch,
+    wakeups: Wakeups<'_>,
     input: &mut view_tui::input::InputSource,
     waker: &crate::wake::LoopWaker,
     term_size: &view_tui::terminal::TermSizeCell,
@@ -1141,8 +1187,7 @@ fn wait_for_msg_unified(
             Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        let ready =
-            crate::wake::poll_readiness(input, waker, watch_deadline(write_stall, heartbeat))?;
+        let ready = crate::wake::poll_readiness(input, waker, watch_deadline(wakeups))?;
         if ready.timed_out {
             return Ok(None);
         }
@@ -1399,15 +1444,25 @@ pub fn run(
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,
-            &write_stall,
-            &engine.heartbeat,
+            Wakeups {
+                write: &write_stall,
+                read: &engine.heartbeat,
+                supervision: &supervision,
+            },
             input,
             &waker,
             &term_size,
             &mut pending,
         )?;
         #[cfg(not(unix))]
-        let received = wait_for_msg(&msg_rx, &write_stall, &engine.heartbeat);
+        let received = wait_for_msg(
+            &msg_rx,
+            Wakeups {
+                write: &write_stall,
+                read: &engine.heartbeat,
+                supervision: &supervision,
+            },
+        );
         let Some(received) = received else {
             // the wait expired against the stall watch's own deadline
             // rather than delivering anything: go around and re-read the
@@ -2809,6 +2864,142 @@ mod tests {
         }
     }
 
+    /// The combination production actually produces, and the one every
+    /// other write-side test here deliberately excludes by leaving the
+    /// heartbeat paused: probes leave through the same outbox as everything
+    /// else, so a writer parked inside a write stops the read side too and
+    /// both verdicts are true at once. The notice must name the writer --
+    /// the one of the two that can be the cause rather than the effect --
+    /// and a moving writer is what rules it out.
+    #[test]
+    fn a_connection_wedged_on_both_sides_names_the_writer() {
+        let peer = WedgedPeer::new();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
+        let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        heartbeat.resume();
+        let prober = heartbeat.prober();
+
+        peer.handle.input("a").unwrap();
+        peer.await_parked_write();
+        peer.handle.input("b").unwrap();
+        // queued behind the parked write like any other message, which is
+        // exactly why a stalled writer wedges the read side as well
+        prober.tick(&peer.handle).unwrap();
+
+        // the write side's window opens at the observation that first finds
+        // the backlog unmoved, never at the first one -- see
+        // `OutboxStallWatch`'s own doc on why it is timed between two
+        assert!(!watch.observe(&peer.handle));
+        std::thread::sleep(TEST_STALL_THRESHOLD * 3);
+        assert_eq!(
+            heartbeat.observe(peer.handle.is_closed()),
+            view_engine::heartbeat::Liveness::Wedged,
+            "the read side must be genuinely wedged or this test pins nothing"
+        );
+        assert!(
+            watch.observe(&peer.handle),
+            "the write side must be genuinely stalled or this test pins nothing"
+        );
+
+        assert!(note_supervision_pass(
+            &mut model,
+            &mut fold,
+            &mut watch,
+            &heartbeat,
+            &peer.handle
+        ));
+        assert_eq!(
+            fold.wedge,
+            Some(WedgeKind::WriteSide),
+            "both sides wedged must read as the write side"
+        );
+        assert_eq!(
+            visible_texts(&model),
+            vec![WedgeKind::WriteSide.notice().to_string()],
+            "the notice named the consequence instead of the cause"
+        );
+    }
+
+    /// The write side's precedence is a precedence, not a preference: a
+    /// writer that is demonstrably moving cannot be the wedge, so the read
+    /// side's verdict stands on its own.
+    #[test]
+    fn a_moving_writer_leaves_the_read_sides_verdict_alone() {
+        assert_eq!(
+            wedge_kind(false, view_engine::heartbeat::Liveness::Wedged),
+            Some(WedgeKind::ReadSide)
+        );
+        assert_eq!(
+            wedge_kind(true, view_engine::heartbeat::Liveness::Alive),
+            Some(WedgeKind::WriteSide)
+        );
+        assert_eq!(
+            wedge_kind(false, view_engine::heartbeat::Liveness::Alive),
+            None
+        );
+        // and a closed connection outranks both, since neither side can
+        // recover one
+        assert_eq!(
+            wedge_kind(true, view_engine::heartbeat::Liveness::Dead),
+            Some(WedgeKind::Dead)
+        );
+    }
+
+    /// An outage that changes classification is one outage: the readout a
+    /// user has been watching count up must not restart because the fold
+    /// changed its mind about which half is at fault.
+    #[test]
+    fn a_wedge_changing_kind_keeps_the_episodes_own_clock() {
+        let mut fold = SupervisionFold::default();
+        let Some(Msg::EngineLiveness { observed_for, .. }) = fold.note(Some(WedgeKind::WriteSide))
+        else {
+            panic!("the first wedge must be reported");
+        };
+        assert_eq!(observed_for, std::time::Duration::ZERO);
+        let opened = fold.since.expect("the episode opened its clock");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let Some(Msg::EngineLiveness {
+            wedge,
+            observed_for,
+        }) = fold.note(Some(WedgeKind::ReadSide))
+        else {
+            panic!("the reclassified wedge must be reported");
+        };
+        assert_eq!(wedge, Some(WedgeKind::ReadSide));
+        assert_eq!(
+            fold.since,
+            Some(opened),
+            "the reclassification restarted the episode's clock"
+        );
+        assert!(
+            observed_for >= std::time::Duration::from_millis(20),
+            "the readout went backwards across the flip: {observed_for:?}"
+        );
+
+        // and the clock is released only when the outage itself ends
+        assert!(fold.note(None).is_some());
+        assert_eq!(fold.since, None);
+    }
+
+    /// The readout is the only thing on screen that changes while an engine
+    /// is quiet, and nothing quiet wakes the loop, so the fold has to ask.
+    #[test]
+    fn a_visible_episode_asks_for_the_wakeup_its_readout_needs() {
+        let mut fold = SupervisionFold::default();
+        assert_eq!(
+            fold.readout_deadline(),
+            None,
+            "a healthy session must not pay for a wakeup it has nothing to paint at"
+        );
+        let _ = fold.note(Some(WedgeKind::ReadSide));
+        assert_eq!(fold.readout_deadline(), Some(READOUT_RESOLUTION));
+        let _ = fold.note(None);
+        assert_eq!(fold.readout_deadline(), None);
+    }
+
     #[test]
     fn a_wedged_engine_raises_the_notice_and_retracts_it_when_the_writer_moves_again() {
         let mut peer = WedgedPeer::new();
@@ -2896,7 +3087,15 @@ mod tests {
         let start = std::time::Instant::now();
         while !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle) {
             assert!(
-                wait_for_msg(&msg_rx, &watch, &heartbeat).is_none(),
+                wait_for_msg(
+                    &msg_rx,
+                    Wakeups {
+                        write: &watch,
+                        read: &heartbeat,
+                        supervision: &fold,
+                    },
+                )
+                .is_none(),
                 "the wait outlasted the stall deadline and returned the watchdog's \
                  message: a wedge nobody types at would never be surfaced"
             );
@@ -2938,7 +3137,11 @@ mod tests {
             &peer.handle
         ));
         assert_eq!(
-            watch_deadline(&watch, &heartbeat),
+            watch_deadline(Wakeups {
+                write: &watch,
+                read: &heartbeat,
+                supervision: &fold,
+            }),
             None,
             "an idle session armed a deadline, so the loop would wake on a \
              schedule it has never paid for"
@@ -2952,7 +3155,14 @@ mod tests {
             let _ = msg_tx.send(Msg::RedrawReady);
         });
         let start = std::time::Instant::now();
-        let received = wait_for_msg(&msg_rx, &watch, &heartbeat);
+        let received = wait_for_msg(
+            &msg_rx,
+            Wakeups {
+                write: &watch,
+                read: &heartbeat,
+                supervision: &fold,
+            },
+        );
         assert!(
             matches!(received, Some(Ok(Msg::RedrawReady))),
             "an idle wait returned something other than the one message sent to it"
@@ -3003,7 +3213,15 @@ mod tests {
         });
         let start = std::time::Instant::now();
         assert!(
-            wait_for_msg(&msg_rx, &watch, &heartbeat).is_none(),
+            wait_for_msg(
+                &msg_rx,
+                Wakeups {
+                    write: &watch,
+                    read: &heartbeat,
+                    supervision: &fold,
+                },
+            )
+            .is_none(),
             "the wait outlasted the unanswered probe's deadline and returned the \
              watchdog's message: a read-side wedge nobody types at would never surface"
         );

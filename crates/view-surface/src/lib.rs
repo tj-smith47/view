@@ -921,10 +921,9 @@ mod tests {
             view.message
         );
         assert_eq!(
-            view.choices.len(),
-            2,
-            "a dead connection offers restart and dismiss only: {:?}",
-            view.choices
+            view.choices,
+            vec!["[<Esc>] Dismiss".to_string()],
+            "the painted rows must be the ones the wedge actually offers"
         );
     }
 

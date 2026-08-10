@@ -34,6 +34,16 @@ use crate::native::views::PromptView;
 /// resolve itself, which is why [`WedgeKind::Dead`] does not spend it.
 pub const ENGINE_BUSY_MODAL_THRESHOLD: Duration = Duration::from_secs(30);
 
+/// How often a visible readout changes, and so how often a loop showing one
+/// has something new to paint.
+///
+/// The whole point of an elapsed readout is that it moves: a user looking at
+/// a frozen `(41s)` learns nothing about whether the wait is still going.
+/// Nothing else wakes a loop while the engine is quiet -- that is what being
+/// quiet means -- so this is the cadence a wedged session has to ask for,
+/// and it is asked for only while a wedge is on screen.
+pub const READOUT_RESOLUTION: Duration = Duration::from_secs(1);
+
 /// The keystroke [`SupervisionChoice::Interrupt`] sends, in nvim's own
 /// notation.
 ///
@@ -73,6 +83,10 @@ impl SinceStamp {
     /// The whole seconds a readout shows. Coarser than
     /// [`elapsed`](Self::elapsed) on purpose: the modal prints seconds, so
     /// two stamps agreeing here would repaint the same frame.
+    ///
+    /// A loop that wants the readout to actually count must look again at
+    /// least once per [`READOUT_RESOLUTION`], since a wedged engine sends
+    /// nothing that would otherwise wake it.
     #[must_use]
     pub const fn readout(self) -> u64 {
         self.0.as_secs()
@@ -102,20 +116,29 @@ pub enum WedgeKind {
     WriteSide,
     /// The connection itself is closed. Nothing can be sent to this engine
     /// and nothing more will arrive from it.
+    ///
+    /// No runtime path produces this yet: a connection that closes ends the
+    /// session through the intake's own `EngineDown` handling long before a
+    /// supervision reading could see it. It becomes reachable with the
+    /// respawn, which is what turns a closed connection from the end of a
+    /// session into a state a session can be recovered from.
     Dead,
 }
 
 impl WedgeKind {
     /// The sticky banner's text for this wedge.
     ///
-    /// Worded to what the verdict behind it actually measures and no
-    /// further: an engine that has gone quiet is described as quiet, never
-    /// as crashed, since only [`Dead`](Self::Dead) has observed the
-    /// connection end.
+    /// Worded to the observation the verdict behind it is made of, never to
+    /// a diagnosis of who is at fault. The read-side verdict in particular
+    /// covers two failures that look identical from here -- an engine that
+    /// has stopped answering, and a view loop too stalled to fold the
+    /// answers it was given -- and the one thing true of both is that no
+    /// reply has been seen. Only [`Dead`](Self::Dead) has observed anything
+    /// about the engine itself, and it says only that the connection ended.
     #[must_use]
     pub const fn notice(self) -> &'static str {
         match self {
-            Self::ReadSide => "nvim has stopped answering; view is still running",
+            Self::ReadSide => "view has not seen a reply from nvim",
             Self::WriteSide => "keystrokes queued: nvim has stopped reading view's output",
             Self::Dead => "the nvim connection has closed; no further input reaches it",
         }
@@ -148,15 +171,21 @@ impl WedgeKind {
     /// [`SupervisionChoice::Interrupt`] is absent for [`Dead`](Self::Dead):
     /// no input path survives a closed connection, so offering it would
     /// present a button that cannot do anything.
+    ///
+    /// [`SupervisionChoice::Restart`] is absent everywhere, and that is a
+    /// temporary state of this list rather than a property of the choice:
+    /// nothing yet replaces a live engine, so the only thing the effect can
+    /// currently reach is the shutdown path, which would answer a request
+    /// to recover the session by ending it. A button may not be offered
+    /// before the thing behind it exists, so the choice stays modelled and
+    /// unlisted until the respawn lands.
     #[must_use]
     pub fn choices(self) -> Vec<SupervisionChoice> {
         match self {
-            Self::ReadSide | Self::WriteSide => vec![
-                SupervisionChoice::Interrupt,
-                SupervisionChoice::Restart,
-                SupervisionChoice::Dismiss,
-            ],
-            Self::Dead => vec![SupervisionChoice::Restart, SupervisionChoice::Dismiss],
+            Self::ReadSide | Self::WriteSide => {
+                vec![SupervisionChoice::Interrupt, SupervisionChoice::Dismiss]
+            }
+            Self::Dead => vec![SupervisionChoice::Dismiss],
         }
     }
 }
@@ -265,32 +294,17 @@ impl EngineBusyState {
     }
 }
 
-/// Supervision's per-session settings and its memory of the current wedge
-/// episode.
+/// Supervision's memory of the current wedge episode.
 ///
-/// The episode memory is what keeps a dismissed modal dismissed: the banner
-/// keeps re-asserting for as long as the condition holds, so an escalation
-/// rule with no memory would re-open the modal on the very next observation
+/// It is what keeps a dismissed modal dismissed: the banner keeps
+/// re-asserting for as long as the condition holds, so an escalation rule
+/// with no memory would re-open the modal on the very next observation
 /// after a user closed it.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SupervisionState {
-    /// Whether a connection observed dead is respawned without asking. When
-    /// `false`, view surfaces the condition and waits for the modal's own
-    /// `Restart`; the manual choice works either way.
-    pub auto_restart: bool,
     /// The wedge the user has already been offered a choice for, if any.
     offered: Option<WedgeKind>,
-}
-
-impl Default for SupervisionState {
-    /// Automatic recovery on, no episode offered yet.
-    fn default() -> Self {
-        Self {
-            auto_restart: true,
-            offered: None,
-        }
-    }
 }
 
 impl SupervisionState {
@@ -328,13 +342,12 @@ mod tests {
     fn a_dead_connection_offers_no_interrupt() {
         let dead = EngineBusyState::new(WedgeKind::Dead, SinceStamp::default());
         assert!(!dead.offers(SupervisionChoice::Interrupt));
-        assert!(dead.offers(SupervisionChoice::Restart));
         assert!(dead.offers(SupervisionChoice::Dismiss));
         assert_eq!(dead.choose(SupervisionChoice::Interrupt.key()), None);
     }
 
     #[test]
-    fn an_open_connection_offers_every_recovery() {
+    fn an_open_connection_offers_the_interrupt() {
         for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide] {
             let busy = EngineBusyState::new(kind, SinceStamp::default());
             assert!(busy.offers(SupervisionChoice::Interrupt), "{kind:?}");
@@ -344,16 +357,42 @@ mod tests {
                 "{kind:?}"
             );
             assert_eq!(
-                busy.choose("r"),
-                Some(SupervisionChoice::Restart),
-                "{kind:?}"
-            );
-            assert_eq!(
                 busy.choose("<Esc>"),
                 Some(SupervisionChoice::Dismiss),
                 "{kind:?}"
             );
             assert_eq!(busy.choose("q"), None, "{kind:?}");
+        }
+    }
+
+    /// No path a user can reach may offer a recovery that does not exist
+    /// yet. The choice, its key and its effect all stay modelled -- the
+    /// respawn that will consume them is built against them -- so the only
+    /// thing standing between a wedged session and a button that ends it
+    /// is this list, and this test is what holds the list closed until the
+    /// respawn lands and flips it deliberately.
+    #[test]
+    fn no_wedge_offers_a_restart_while_nothing_can_perform_one() {
+        for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
+            assert!(
+                !kind.choices().contains(&SupervisionChoice::Restart),
+                "{kind:?} offers Restart, which currently reaches the shutdown path"
+            );
+            let busy = EngineBusyState::new(kind, SinceStamp::default());
+            assert!(!busy.offers(SupervisionChoice::Restart), "{kind:?}");
+            assert_eq!(
+                busy.choose(SupervisionChoice::Restart.key()),
+                None,
+                "{kind:?} resolves the restart key"
+            );
+            assert!(
+                !busy
+                    .view()
+                    .choices
+                    .iter()
+                    .any(|row| row.contains("Restart")),
+                "{kind:?} paints a Restart row"
+            );
         }
     }
 
@@ -366,15 +405,41 @@ mod tests {
         assert!(SinceStamp::new(ENGINE_BUSY_MODAL_THRESHOLD).past_modal_threshold());
     }
 
+    /// A notice may report what the fold observed and nothing else. The
+    /// read-side verdict is the one that tempts an author into a diagnosis:
+    /// it is raised identically by an engine that stopped answering and by
+    /// a view loop too stalled to fold the answers it received, so any
+    /// sentence naming a culprit is false half the time it is shown.
     #[test]
-    fn no_notice_claims_a_crash_the_verdict_did_not_observe() {
+    fn no_notice_claims_more_than_the_verdict_observed() {
+        /// Phrases that assert a state nothing measured: a crash, a death,
+        /// or an affirmative attribution of blame to one side.
+        const OVERCLAIMS: [&str; 8] = [
+            "crash",
+            "died",
+            "is dead",
+            "hung",
+            "frozen",
+            "nvim has stopped answering",
+            "nvim is not responding",
+            "view is still running",
+        ];
         for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide] {
             let notice = kind.notice();
-            assert!(
-                !notice.contains("crash") && !notice.contains("died"),
-                "{kind:?} overclaims: {notice}"
-            );
+            for claim in OVERCLAIMS {
+                assert!(
+                    !notice.contains(claim),
+                    "{kind:?} overclaims {claim:?}: {notice}"
+                );
+            }
         }
+        assert!(
+            WedgeKind::ReadSide
+                .notice()
+                .starts_with("view has not seen"),
+            "the read-side notice must report the observation, not its cause: {}",
+            WedgeKind::ReadSide.notice()
+        );
     }
 
     #[test]
@@ -384,11 +449,7 @@ mod tests {
         assert_eq!(view.title, "Engine busy");
         assert_eq!(
             view.choices,
-            vec![
-                "[i] Interrupt".to_string(),
-                "[r] Restart".to_string(),
-                "[<Esc>] Dismiss".to_string(),
-            ]
+            vec!["[i] Interrupt".to_string(), "[<Esc>] Dismiss".to_string()]
         );
     }
 
@@ -404,7 +465,6 @@ mod tests {
     #[test]
     fn an_episode_is_offered_once_and_forgotten_on_demand() {
         let mut state = SupervisionState::default();
-        assert!(state.auto_restart);
         assert!(!state.already_offered(WedgeKind::ReadSide));
         state.note_offered(WedgeKind::ReadSide);
         assert!(state.already_offered(WedgeKind::ReadSide));

@@ -90,6 +90,17 @@ const _: () = assert!(
 /// margin, at three relaxed loads apiece.
 const ANCHOR_READ_ATTEMPTS: usize = 3;
 
+/// How soon a caller told `Alive` by a raced anchor read is asked to look
+/// again.
+///
+/// Short on purpose, and never a spin: reaching it costs
+/// [`ANCHOR_READ_ATTEMPTS`] consecutive interleavings with a prober that
+/// ticks once every [`HEARTBEAT_PROBE_INTERVAL`], and the tick that caused
+/// the race has finished by the time the caller comes back. It is short
+/// enough that a genuine wedge sitting under the raced reading reaches its
+/// notice at the same time it otherwise would.
+const UNSETTLED_RETRY: Duration = Duration::from_millis(1);
+
 /// What one [`HeartbeatWatch::observe`] call reports about the read side.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,29 +213,47 @@ impl Probe {
     }
 
     /// How long the oldest probe still owed an answer has been outstanding
-    /// at `now`, or `None` when none is.
-    fn outstanding_for(&self, now: Instant) -> Option<Duration> {
+    /// at `now`.
+    fn outstanding_for(&self, now: Instant) -> Outstanding {
         for _ in 0..ANCHOR_READ_ATTEMPTS {
             let sent = self.sent_generation.load(Ordering::Acquire);
             let acked = self.acked_generation.load(Ordering::Relaxed);
             if sent <= acked {
-                return None;
+                return Outstanding::Nothing;
             }
             if let Some(opened) = self.anchor_nanos(sent, acked) {
                 // saturating: a send stamped after `now` (a caller folding
                 // against an earlier instant than the tick it is asking
                 // about) yields zero rather than wrapping to an instant
                 // wedge
-                return Some(Duration::from_nanos(self.stamp(now).saturating_sub(opened)));
+                return Outstanding::For(Duration::from_nanos(
+                    self.stamp(now).saturating_sub(opened),
+                ));
             }
         }
-        // every attempt raced a tick, so no send time here can be trusted --
-        // and a connection with a probe outstanding that has just been
-        // probed this hard is not one to report as answering. The reading
-        // that cannot hide a wedge is the maximum, and a caller reading
-        // again on its next pass gets a settled answer.
-        Some(Duration::MAX)
+        Outstanding::Unsettled
     }
+}
+
+/// What one anchor read found, kept apart from the duration it usually
+/// yields because the third case is not a measurement at all.
+///
+/// A reading that raced a tick on every attempt has no send time behind it,
+/// so it is evidence of nothing except that another look is owed. Folding
+/// it in as a very long silence -- the shape that cannot hide a wedge --
+/// makes the deadline arithmetic right and the verdict wrong: an engine
+/// answering perfectly reads wedged for the one pass that raced, which is
+/// long enough to raise a notice and repaint. The two consumers want
+/// opposite things from it, so it is handed to them unresolved and each
+/// decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outstanding {
+    /// Every probe issued has been answered.
+    Nothing,
+    /// The oldest probe still owed an answer has been waiting this long.
+    For(Duration),
+    /// Every anchor read raced a tick; no send time here can be trusted.
+    Unsettled,
 }
 
 /// Issues the periodic probe whose answers [`HeartbeatWatch`] folds.
@@ -393,13 +422,7 @@ impl HeartbeatWatch {
             // might yet answer
             return Liveness::Dead;
         }
-        match self.probe.outstanding_for(now) {
-            // nothing is owed an answer, so nothing is being withheld
-            // however long the connection has been quiet
-            None => Liveness::Alive,
-            Some(silence) if silence >= self.threshold => Liveness::Wedged,
-            Some(_) => Liveness::Alive,
-        }
+        Self::verdict(self.probe.outstanding_for(now), self.threshold)
     }
 
     /// How long a caller may wait for its own next wakeup before this watch
@@ -456,15 +479,45 @@ impl HeartbeatWatch {
         self.probe.paused.store(false, Ordering::Release);
     }
 
-    /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
-    fn deadline_at(&self, now: Instant) -> Option<Duration> {
-        let silence = self.probe.outstanding_for(now)?;
-        let remaining = self.threshold.saturating_sub(silence);
+    /// What one anchor reading says about the engine.
+    fn verdict(silence: Outstanding, threshold: Duration) -> Liveness {
+        match silence {
+            // nothing is owed an answer, so nothing is being withheld
+            // however long the connection has been quiet
+            Outstanding::Nothing => Liveness::Alive,
+            Outstanding::For(silence) if silence >= threshold => Liveness::Wedged,
+            Outstanding::For(_) => Liveness::Alive,
+            // a verdict is a statement about the engine and there is no
+            // reading behind this one to make a statement from. A real
+            // wedge underneath it keeps its latency: the deadline the same
+            // reading arms is shorter than any wakeup the caller was
+            // otherwise waiting on, so the settled answer lands within
+            // `UNSETTLED_RETRY` of the pass that raced
+            Outstanding::Unsettled => Liveness::Alive,
+        }
+    }
+
+    /// How long the caller of that same reading may wait before asking again.
+    fn deadline(silence: Outstanding, threshold: Duration) -> Option<Duration> {
+        let silence = match silence {
+            Outstanding::Nothing => return None,
+            Outstanding::For(silence) => silence,
+            // the one reading that must not be slept on: the caller was
+            // told `Alive` by a reading that measured nothing, so the
+            // re-read owed to it is the whole content of this deadline
+            Outstanding::Unsettled => return Some(UNSETTLED_RETRY),
+        };
+        let remaining = threshold.saturating_sub(silence);
         Some(if remaining.is_zero() {
-            self.threshold
+            threshold
         } else {
             remaining
         })
+    }
+
+    /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
+    fn deadline_at(&self, now: Instant) -> Option<Duration> {
+        Self::deadline(self.probe.outstanding_for(now), self.threshold)
     }
 }
 
@@ -912,6 +965,74 @@ mod tests {
         prober.tick_at(&handle, landed).unwrap();
         assert_eq!(watch.observe_at(false, landed), Liveness::Wedged);
         assert_eq!(watch.deadline_at(landed), Some(THRESHOLD));
+    }
+
+    /// The raced reading's whole contract, stated where it can be stated
+    /// exactly: it says nothing about the engine, and it says the caller
+    /// owes another look almost immediately. The pair matters together --
+    /// a verdict of `Alive` on its own would postpone a real wedge's
+    /// notice by whatever the caller was otherwise going to sleep for.
+    #[test]
+    fn a_raced_reading_raises_no_verdict_and_asks_to_be_read_again_at_once() {
+        assert_eq!(
+            HeartbeatWatch::verdict(Outstanding::Unsettled, THRESHOLD),
+            Liveness::Alive,
+            "a reading that measured nothing was allowed to accuse the engine"
+        );
+        assert_eq!(
+            HeartbeatWatch::deadline(Outstanding::Unsettled, THRESHOLD),
+            Some(UNSETTLED_RETRY)
+        );
+        assert!(
+            UNSETTLED_RETRY < THRESHOLD,
+            "the re-read must land far inside the window it is standing in for"
+        );
+        // and the settled readings are untouched by the split
+        assert_eq!(
+            HeartbeatWatch::verdict(Outstanding::Nothing, THRESHOLD),
+            Liveness::Alive
+        );
+        assert_eq!(
+            HeartbeatWatch::deadline(Outstanding::Nothing, THRESHOLD),
+            None
+        );
+        assert_eq!(
+            HeartbeatWatch::verdict(Outstanding::For(THRESHOLD), THRESHOLD),
+            Liveness::Wedged
+        );
+    }
+
+    /// The same thing through the seam a runtime loop actually calls,
+    /// against the interleaving that produces it: a prober advancing
+    /// generations as fast as it can while an observer folds verdicts at an
+    /// instant no settled reading could call wedged. Every `Wedged` here is
+    /// a raced reading escaping as a verdict, and one is enough to flash a
+    /// notice at a user whose engine is fine.
+    #[test]
+    fn an_observer_racing_the_prober_never_reads_a_verdict_the_clock_denies() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let ticks = 4_000_u32;
+        let ticker = std::thread::spawn(move || {
+            for n in 1..=ticks {
+                // stamped inside the window on purpose: no settled reading
+                // taken at `t0 + INTERVAL` can be `Wedged`, so the verdict
+                // under test has only the race to come from
+                prober.tick_at(&handle, t0).unwrap();
+                std::hint::black_box(n);
+            }
+        });
+        let mut observations = 0_u32;
+        while !ticker.is_finished() {
+            assert_eq!(
+                watch.observe_at(false, t0 + INTERVAL),
+                Liveness::Alive,
+                "a reading that raced the prober was reported as a wedge"
+            );
+            observations += 1;
+        }
+        ticker.join().unwrap();
+        assert!(observations > 0, "the observer never got to run");
     }
 
     #[test]

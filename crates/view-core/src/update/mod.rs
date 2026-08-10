@@ -33,6 +33,15 @@ fn path_to_wire(path: &std::path::Path) -> String {
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(Key { notation }) => {
+            // ahead of everything below, including the transient-dismiss
+            // bookkeeping: the busy modal is the newest thing on screen, so
+            // the three keys it answers are its own wherever the stack sits.
+            // Every other key falls through untouched -- see
+            // `resolve_supervision_choice` on why an annunciator may not
+            // swallow input
+            if let Some(effects) = resolve_supervision_choice(model, &notation) {
+                return effects;
+            }
             // any keypress is "the user is reading again": gives a
             // transient (info-kind) toast a readable duration bounded by
             // real activity instead of a wall-clock timer the runtime
@@ -59,26 +68,26 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // transient rules
             if !cmdline_open
                 && matches!(
-                    model.top_overlay_mut().map(|ov| &ov.kind),
+                    model.focused_overlay_mut().map(|ov| &ov.kind),
                     Some(OverlayKind::Prompt(_))
                 )
             {
-                model.pop_overlay();
+                model.pop_focused_overlay();
                 model.dirty = true;
             }
             // <Esc> closes a picker sitting directly on top of the stack.
             // Checked here, ahead of the focus match below, so a picker
             // buried under a still-open prompt (the stacking rule a modal
             // prompt keeps its focus, see `OverlayKind::Picker`'s doc) never
-            // sees this: `top_overlay_mut` names the prompt in that case,
+            // sees this: `focused_overlay_mut` names the prompt in that case,
             // not the picker, and the pattern below simply does not match.
             if notation == "<Esc>"
                 && matches!(
-                    model.top_overlay_mut().map(|ov| &ov.kind),
+                    model.focused_overlay_mut().map(|ov| &ov.kind),
                     Some(OverlayKind::Picker(_))
                 )
             {
-                model.pop_overlay();
+                model.pop_focused_overlay();
                 // without this the closed picker stays on screen until some
                 // unrelated event repaints: the paint loop's `if model.dirty`
                 // gate is the only repaint trigger, and popping an overlay
@@ -94,7 +103,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             match model.focus() {
                 Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-                Focus::Native(_) => match model.top_overlay_mut().map(|ov| &mut ov.kind) {
+                Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
                     // the prompt overlay answers by feeding the engine a
                     // keystroke -- the engine is blocked in its own input
                     // loop, not on an RpcRequest, so this is the one Native
@@ -125,11 +134,11 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                     // discards the payload deliberately: every branch below
                     // reaches the tree through `model.tree_mut()` fresh
                     // instead, since a bound `&mut TreeState` here would
-                    // keep `model` borrowed across the `model.pop_overlay()`
+                    // keep `model` borrowed across the `model.pop_focused_overlay()`
                     // and `model.close_tree()` calls the <CR>/<Esc> arms need
                     Some(OverlayKind::Tree(_)) => match notation.as_str() {
                         "<Esc>" => {
-                            model.pop_overlay();
+                            model.pop_focused_overlay();
                             model.dirty = true;
                             vec![Effect::TreeClose]
                         }
@@ -167,7 +176,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                             model.dirty = true;
                             match to_open {
                                 Some(path) => {
-                                    model.pop_overlay();
+                                    model.pop_focused_overlay();
                                     vec![Effect::Rpc(RpcCall::OpenFile {
                                         path: path_to_wire(&path),
                                     })]
@@ -249,13 +258,6 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                         }
                         _ => Vec::new(),
                     },
-                    // discards the payload for the same reason the tree arm
-                    // above does: resolving a choice pops this overlay, and a
-                    // bound `&mut EngineBusyState` would keep `model`
-                    // borrowed across that call
-                    Some(OverlayKind::EngineBusy(_)) => {
-                        resolve_supervision_choice(model, &notation)
-                    }
                     // the key belongs to the overlay on top of the stack,
                     // and no other overlay kind carries a key handler yet,
                     // so consuming it is the whole of that routing. <Esc>
@@ -264,7 +266,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                     // the keyboard.
                     _ => {
                         if notation == "<Esc>" {
-                            model.pop_overlay();
+                            model.pop_focused_overlay();
                             model.dirty = true;
                         }
                         Vec::new()
@@ -808,10 +810,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
 /// hook into.
 fn dismiss_top_prompt(model: &mut Model) {
     if matches!(
-        model.top_overlay_mut().map(|ov| &ov.kind),
+        model.focused_overlay_mut().map(|ov| &ov.kind),
         Some(OverlayKind::Prompt(_))
     ) {
-        model.pop_overlay();
+        model.pop_focused_overlay();
     }
 }
 
@@ -1201,7 +1203,8 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
             // an unmatched key: the two are wire-identical, so re-learning
             // unconditionally on every CmdlineShow is simpler than trying
             // to tell them apart
-            if let Some(OverlayKind::Prompt(p)) = model.top_overlay_mut().map(|ov| &mut ov.kind) {
+            if let Some(OverlayKind::Prompt(p)) = model.focused_overlay_mut().map(|ov| &mut ov.kind)
+            {
                 p.learn_cmdline(&cmdline);
             }
             model.engine.cmdline = Some(cmdline);
@@ -1247,7 +1250,7 @@ fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
                 .last()
                 .and_then(PromptState::from_entry);
             if let Some(state) = prompt_state {
-                match model.top_overlay_mut().map(|ov| &mut ov.kind) {
+                match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
                     Some(OverlayKind::Prompt(p)) => *p = state,
                     _ => {
                         model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));

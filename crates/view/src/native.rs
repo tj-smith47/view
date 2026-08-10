@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use view_core::model::Model;
 use view_core::msg::{Effect, EngineRequest, Msg, OptionValue, RpcCall};
 use view_core::native::registry;
-use view_native::config::{NativeConfig, ViewConfig};
+use view_native::config::NativeConfig;
 use view_native::report::report;
 use view_native::supersede::{plan, Supersession};
 use view_native::{mappings, paths, toast};
@@ -104,8 +104,8 @@ impl NativeSession {
         model: &mut Model,
     ) -> (Self, Vec<Effect>) {
         let mut effects = Vec::new();
-        let resolved = match ViewConfig::load(config_path.as_deref()) {
-            Ok(resolved) => resolved,
+        let cfg = match NativeConfig::load(config_path.as_deref()) {
+            Ok(cfg) => cfg,
             Err(err) => {
                 crate::vlog::log_with("native", || format!("config unreadable: {err}"));
                 model.dirty = true;
@@ -113,13 +113,11 @@ impl NativeSession {
                     format!("view: {err}; every native feature stays on this session"),
                     false,
                 );
-                ViewConfig::defaults()
+                NativeConfig::all_enabled()
             }
         };
-        let cfg = resolved.native;
         model.statusline_enabled = cfg.enabled("statusline");
         model.palette_enabled = cfg.enabled("palette");
-        model.supervision.auto_restart = resolved.supervision.auto_restart;
         // `ui_attach` already ran, at the raw terminal height, before this
         // config was even read (see `main.rs`'s call ordering), so nvim's
         // live grid still claims every row `statusline_rows()` now needs to
@@ -547,39 +545,6 @@ palette = false
         assert!(
             !off.palette_enabled,
             "the config explicitly disabled the feature"
-        );
-    }
-    /// The `[supervision]` table's one switch reaching the model, over the
-    /// same single load every other table's answers cross.
-    #[test]
-    fn load_recovers_automatically_by_default_and_stops_when_configured() {
-        let mut on = model();
-        let _ = NativeSession::load(None, 7, &mut on);
-        assert!(
-            on.supervision.auto_restart,
-            "an absent config must keep automatic recovery on"
-        );
-
-        let dir = view_test_support::ScratchDir::new("native-supervision-toggle").unwrap();
-        let path = dir.join("view.toml");
-        std::fs::write(
-            &path,
-            "[supervision]
-auto_restart = false
-",
-        )
-        .expect("a temp config must be writable");
-
-        let mut off = model();
-        let _ = NativeSession::load(Some(path), 7, &mut off);
-
-        assert!(
-            !off.supervision.auto_restart,
-            "the config explicitly turned automatic recovery off"
-        );
-        assert!(
-            off.palette_enabled,
-            "a supervision-only config must leave every native feature on"
         );
     }
 }

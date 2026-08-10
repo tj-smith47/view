@@ -51,9 +51,6 @@ pub(super) fn note_engine_liveness(
         }
         None => {}
     }
-    if !model.supervision.already_offered(kind) {
-        model.supervision.forget_episode();
-    }
     if model.engine_busy().is_none()
         && !model.supervision.already_offered(kind)
         && (kind.escalates_immediately() || since.past_modal_threshold())
@@ -68,21 +65,27 @@ pub(super) fn note_engine_liveness(
     Vec::new()
 }
 
-/// Resolves a keypress on the open interrupt/restart modal.
+/// Resolves a keypress against the open interrupt/restart modal, or `None`
+/// when the modal is closed or has no answer for that key.
 ///
-/// A key naming a choice this wedge does not offer resolves to nothing and
-/// is consumed, the same as any other key the modal has no answer for: the
-/// modal owns the keyboard while it is up, so nothing here may fall through
-/// to the engine underneath.
-pub(super) fn resolve_supervision_choice(model: &mut Model, notation: &str) -> Vec<Effect> {
-    let Some(choice) = model.engine_busy().and_then(|state| state.choose(notation)) else {
-        return Vec::new();
-    };
-    match choice {
+/// `None` is a routing decision, not a shrug: the caller must go on to route
+/// the key exactly as it would have with no modal open. The modal is raised
+/// by view noticing a condition, never by the user asking for it, and the
+/// condition it announces is very often a long operation that is going to
+/// finish -- keystrokes typed at one have always queued and been applied on
+/// catch-up, and an annunciator that ate them would turn a slow save into
+/// lost work. A key naming a choice this wedge does not offer is one of
+/// those: [`crate::native::supervision::WedgeKind::choices`] decides what
+/// the modal answers, and everything else is the engine's.
+pub(super) fn resolve_supervision_choice(model: &mut Model, notation: &str) -> Option<Vec<Effect>> {
+    let choice = model
+        .engine_busy()
+        .and_then(|state| state.choose(notation))?;
+    Some(match choice {
         // the modal stays up: an interrupt reaches an engine whose break
         // check still runs and no other, so a user who sees nothing change
-        // must be able to reach `Restart` without waiting for the modal to
-        // be offered a second time
+        // still has the modal in front of them rather than having spent
+        // their one look at it
         SupervisionChoice::Interrupt => vec![Effect::Rpc(RpcCall::Input {
             notation: INTERRUPT_NOTATION.to_string(),
         })],
@@ -98,5 +101,5 @@ pub(super) fn resolve_supervision_choice(model: &mut Model, notation: &str) -> V
             model.dirty = true;
             Vec::new()
         }
-    }
+    })
 }

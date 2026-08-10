@@ -708,9 +708,6 @@ statusline = true
 notifications = true
 palette = true
 
-[supervision]
-auto_restart = true        # false: surface a dead engine and wait for a manual restart
-
 [ai]
 enabled = true
 agent = "claude-code"      # ACP agent id or ["cmd", "args…"]
