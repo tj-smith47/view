@@ -128,7 +128,9 @@ pub struct CorpusRoots {
 /// unix via `statvfs`: the corpora cost ~1.1M inodes and directory
 /// blocks, and running the disk to zero mid-generation would take the
 /// host down with it rather than failing one bench row.
+#[cfg(unix)]
 const REQUIRED_BYTES: u64 = 1 << 30;
+#[cfg(unix)]
 const REQUIRED_INODES: u64 = 1_300_000;
 
 /// Generates (or reuses) both corpora under `root`, returning their
