@@ -643,6 +643,10 @@ fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
         // itself is: rows in a centered box, no fields of its own the
         // palette's LayerKind doesn't already carry
         OverlayKind::MessageHistory(state) => Some(LayerKind::Palette(state.view())),
+        // a titled box with a message line and a fixed answer list is what
+        // the confirm prompt's own layer already draws; the busy modal
+        // carries no field that shape does not
+        OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
         _ => None,
     }
 }
@@ -880,6 +884,48 @@ mod tests {
             unreachable!()
         };
         assert!(!view.title.is_empty(), "a tree layer must carry a title");
+    }
+
+    /// The busy modal paints, and paints its choices -- the same silent-
+    /// wildcard hazard the tree test above exists for, applied to the
+    /// overlay a user only ever sees when something has already gone wrong.
+    #[test]
+    fn an_open_engine_busy_overlay_paints_a_prompt_layer_carrying_its_choices() {
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::supervision::{EngineBusyState, SinceStamp, WedgeKind};
+
+        let mut model = model_with_grid(60, 20);
+        model.term_width = 60;
+        model.term_height = 20;
+        model.push_overlay(
+            OverlayBox::new(60, 30),
+            OverlayKind::EngineBusy(EngineBusyState::new(
+                WedgeKind::Dead,
+                SinceStamp::new(std::time::Duration::from_secs(4)),
+            )),
+        );
+
+        let surface = render(&model);
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("an open busy modal must contribute a layer");
+        let LayerKind::Prompt(view) = &layer.kind else {
+            unreachable!()
+        };
+        assert_eq!(view.title, WedgeKind::Dead.title());
+        assert!(
+            view.message.contains(WedgeKind::Dead.notice()),
+            "the modal must say what is wrong: {}",
+            view.message
+        );
+        assert_eq!(
+            view.choices.len(),
+            2,
+            "a dead connection offers restart and dismiss only: {:?}",
+            view.choices
+        );
     }
 
     #[test]

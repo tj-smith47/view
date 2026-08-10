@@ -94,6 +94,27 @@ pub enum Msg {
     HeartbeatReply {
         generation: u64,
     },
+    /// The runtime loop's folded reading of both sides of the engine
+    /// connection, and how long that reading has held.
+    ///
+    /// `wedge` is `None` for a healthy connection, which is also how a wedge
+    /// is retracted: the banner and the modal both come down on the first
+    /// observation that no longer sees one. Carried as a message rather than
+    /// applied by the loop directly so that the escalation rule -- banner
+    /// now, modal after [`ENGINE_BUSY_MODAL_THRESHOLD`] -- lives in
+    /// `update()` with every other state transition, and is provable with no
+    /// engine attached.
+    ///
+    /// `observed_for` is measured by the loop, which owns the clock this
+    /// crate does not have. It is the age of the current wedge, restarting
+    /// whenever the verdict changes, and is `Duration::ZERO` on the
+    /// observation that clears one.
+    ///
+    /// [`ENGINE_BUSY_MODAL_THRESHOLD`]: crate::native::supervision::ENGINE_BUSY_MODAL_THRESHOLD
+    EngineLiveness {
+        wedge: Option<crate::native::supervision::WedgeKind>,
+        observed_for: Duration,
+    },
     /// A user reached a native feature, either through one of view's
     /// registered default keys or through the `:View` command. `feature` is
     /// a [`registry`](crate::native::registry) id and `verb` the entry point
@@ -584,6 +605,16 @@ pub enum Effect {
     Quit {
         exit_code: i32,
     },
+    /// Tears the current engine down and brings a fresh one up, keeping the
+    /// session and its terminal.
+    ///
+    /// Carried by the loop rather than the executor: the executor holds only
+    /// a clone of the engine's RPC handle, while the `Engine` value whose
+    /// lifetime this effect changes belongs to the loop. Recovery is nvim's
+    /// own -- the fresh engine inherits whatever its swap file persisted, and
+    /// view replays nothing, since it never held authoritative buffer text
+    /// to replay.
+    RestartEngine,
     /// Arms the idle-expiry timer for one `Route::Transient` toast: after
     /// `after` elapses with no other effect having cancelled it, the timer
     /// worker sends `Msg::ToastExpired { id }` back into the loop. One-shot

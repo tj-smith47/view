@@ -589,7 +589,11 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
         match crate::runtime::dispatch(model, executor, follow_ups, msg) {
             crate::runtime::Flow::Continue => {}
             crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
-            crate::runtime::Flow::EngineLost => {
+            // a restart chosen during the cutover is the same teardown here
+            // as a lost engine: the fresh connection this window is still
+            // establishing is the one that would be torn down, and startup
+            // has no steady-state loop to bring a replacement back into
+            crate::runtime::Flow::EngineLost | crate::runtime::Flow::RestartEngine => {
                 engine_alive = false;
                 break;
             }

@@ -94,6 +94,11 @@ pub struct Model {
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
     /// ask for it itself. Empty until startup sets it.
     pub cwd: PathBuf,
+    /// Supervision's settings and its memory of the current wedge episode;
+    /// see [`crate::native::supervision::SupervisionState`]. `auto_restart`
+    /// is set once at startup from the `[supervision]` table, the same way
+    /// `statusline_enabled` is set from `[native]`.
+    pub supervision: crate::native::supervision::SupervisionState,
 }
 
 impl Model {
@@ -129,6 +134,7 @@ impl Model {
             statusline_enabled: false,
             palette_enabled: false,
             cwd: PathBuf::new(),
+            supervision: crate::native::supervision::SupervisionState::default(),
         }
     }
 
@@ -262,6 +268,53 @@ impl Model {
             .overlays
             .iter()
             .position(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        else {
+            return false;
+        };
+        let removed = self.overlays.remove(pos);
+        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
+            if removed.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        true
+    }
+
+    /// The open interrupt/restart modal's state, wherever it sits in the
+    /// stack. Found by kind rather than by position for the same reason
+    /// [`Model::picker_mut`] is: the runtime keeps folding the wedge it is
+    /// showing, and a modal that a later overlay landed on top of must still
+    /// receive that refresh.
+    #[must_use]
+    pub fn engine_busy(&self) -> Option<&crate::native::supervision::EngineBusyState> {
+        self.overlays
+            .iter()
+            .find_map(|overlay| match &overlay.kind {
+                OverlayKind::EngineBusy(state) => Some(state),
+                _ => None,
+            })
+    }
+
+    /// The open interrupt/restart modal's state, mutably; see
+    /// [`Model::engine_busy`].
+    #[must_use]
+    pub fn engine_busy_mut(&mut self) -> Option<&mut crate::native::supervision::EngineBusyState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::EngineBusy(state) => Some(state),
+                _ => None,
+            })
+    }
+
+    /// Closes the interrupt/restart modal, wherever it sits in the stack,
+    /// and reports whether one was found to close -- the same by-kind
+    /// removal [`Model::close_tree`] performs, and for the same reason.
+    pub fn close_engine_busy(&mut self) -> bool {
+        let Some(pos) = self
+            .overlays
+            .iter()
+            .position(|overlay| matches!(overlay.kind, OverlayKind::EngineBusy(_)))
         else {
             return false;
         };
@@ -1141,6 +1194,13 @@ pub enum OverlayKind {
     /// an overlay with no more specific key handling always has. See
     /// [`crate::native::palette::MessageHistoryState`].
     MessageHistory(crate::native::palette::MessageHistoryState),
+    /// The interrupt/restart modal a wedged or lost engine escalates into,
+    /// carrying which wedge opened it and how long that wedge has lasted.
+    /// Pushed on top of whatever is already open, including a blocked-engine
+    /// `Prompt`: an engine that has stopped answering cannot resolve that
+    /// prompt either, so the recovery offer outranks it. See
+    /// [`crate::native::supervision::EngineBusyState`].
+    EngineBusy(crate::native::supervision::EngineBusyState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

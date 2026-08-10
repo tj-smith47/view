@@ -30,24 +30,13 @@ use view_core::msg::{
     OSC52_MAX_PAYLOAD_BYTES,
 };
 use view_core::native::mappings::MappingSpec;
+use view_core::native::supervision::WedgeKind;
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
 use view_engine::heartbeat::{HeartbeatWatch, Liveness};
 use view_engine::process::Engine;
 use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
-
-/// What the user is told while the engine has stopped accepting view's
-/// output.
-///
-/// The consequence leads and the diagnosis follows, because the toast
-/// overlay truncates at the tail to fit the grid: on a narrow terminal the
-/// operator keeps the half that says their typing is not lost. Fixed text,
-/// carrying neither a live duration nor a queue depth, since the notice is
-/// re-asserted on every loop pass for as long as the stall lasts and text
-/// that changed between passes would repaint the toast on each of them to
-/// say nothing more actionable.
-const ENGINE_STALLED_NOTICE: &str = "keystrokes queued: nvim has stopped reading view's output";
 
 /// The notify surface [`Executor`] drives, factored out from [`EngineHandle`]
 /// so its effect-to-call mapping is testable against a recording fake
@@ -296,6 +285,12 @@ pub enum Flow {
     /// The caller resolves the real exit status and requeues
     /// `Msg::EngineDown` rather than aborting.
     EngineLost,
+    /// The user asked the supervision modal to restart the engine. Distinct
+    /// from [`EngineLost`](Self::EngineLost) because the two arrive for
+    /// opposite reasons -- one is the connection failing, the other is a
+    /// deliberate choice made about a connection that may still be open --
+    /// and the recovery each is owed differs accordingly.
+    RestartEngine,
 }
 
 /// Carries out [`Effect`]s against an [`EngineOps`] connection. Never
@@ -638,6 +633,10 @@ impl<E: EngineOps> Executor<E> {
                 Flow::Continue
             }
             Effect::Quit { exit_code } => Flow::Quit(exit_code),
+            // handed straight back to the loop: the engine's lifetime
+            // belongs to whoever owns the `Engine` value, and this executor
+            // holds only a clone of its RPC handle
+            Effect::RestartEngine => Flow::RestartEngine,
             // one-shot: a background thread that owns exactly one send, never
             // a persistent multi-deadline scheduler. The loop has no
             // free-running clock of its own (see this module's own doc), so
@@ -927,61 +926,106 @@ pub(crate) fn dispatch<E: EngineOps>(
     flow
 }
 
-/// Reads the engine's write side once and raises or retracts the stalled-
-/// engine notice on `model` to match what it finds. Returns whether the
-/// visible message set changed, which is the caller's cue to repaint.
+/// Which wedge, if any, the two watches see between them.
 ///
-/// Costs two relaxed atomic loads plus one walk of the message log per
-/// call, and never takes the engine's writer lock --
-/// a wedge is precisely the state in which that lock is held by a thread
-/// parked inside a write, so a check that wanted it could not report the
-/// one condition it exists for.
-///
-/// Re-asserted rather than edge-triggered: `msg_clear` empties the log
-/// wholesale, and a notice raised once on the way in would be gone for good
-/// while the condition it describes is still true.
-fn note_write_stall(
-    model: &mut Model,
-    watch: &mut OutboxStallWatch,
-    handle: &EngineHandle,
-) -> bool {
-    let stalled = watch.observe(handle);
-    model
-        .engine
-        .messages
-        .set_native_condition(stalled.then_some(ENGINE_STALLED_NOTICE))
+/// A closed connection outranks every timing question below it, the same
+/// ordering [`HeartbeatWatch::observe_at`] applies for the same reason: a
+/// probe still waiting on a connection that is gone is waiting on nothing.
+/// Between the two open-connection failures the read side's verdict wins,
+/// because its probe is chosen to keep answering through the states that are
+/// not failures (see `view_engine::heartbeat`'s module doc), so an engine
+/// that fails it has failed the more specific test -- and an engine that has
+/// stopped reading view's output has usually stopped answering it too, which
+/// would otherwise report the consequence and hide the cause.
+fn wedge_kind(write_stalled: bool, read: Liveness) -> Option<WedgeKind> {
+    match read {
+        Liveness::Dead => Some(WedgeKind::Dead),
+        Liveness::Wedged => Some(WedgeKind::ReadSide),
+        // `Liveness` is `#[non_exhaustive]`, so this arm also catches a
+        // verdict a later engine build might add: it falls back to the write
+        // side's own reading rather than being reported through wording
+        // chosen for a different failure
+        _ => write_stalled.then_some(WedgeKind::WriteSide),
+    }
 }
 
-/// Reads the engine's read side once and answers whether the verdict moved
-/// since the previous pass, which is the caller's cue to repaint.
+/// The loop's running fold of both sides of the engine connection into the
+/// one supervision reading `update()` acts on.
 ///
-/// A sibling of [`note_write_stall`] rather than a second mode of it: the
-/// two watch opposite directions of the same connection, fail differently,
-/// and recover differently, and folding a read-side verdict into a
-/// function whose whole contract is about queued output would leave neither
-/// nameable.
+/// One fold rather than a watch-shaped notice each, because at most one
+/// condition notice is ever shown ([`view_core::model::Messages::set_native_condition`]):
+/// two callers raising and retracting that single slot from opposite
+/// verdicts would clear each other's text on alternate passes and repaint
+/// the frame every time.
+#[derive(Debug, Default)]
+struct SupervisionFold {
+    /// The wedge the previous pass saw, so a healthy pass that follows a
+    /// healthy pass can be recognised without a clock read.
+    wedge: Option<WedgeKind>,
+    /// When the current wedge was first observed. `None` while there is
+    /// none.
+    since: Option<std::time::Instant>,
+}
+
+impl SupervisionFold {
+    /// Folds this pass's verdict into the message the loop dispatches, or
+    /// `None` when there is nothing new to say.
+    ///
+    /// The steady state -- no wedge now, none last pass, which is every pass
+    /// of a healthy session -- costs two discriminant comparisons and returns
+    /// before any clock is read, any message is built, or any dispatch
+    /// happens. Everything past that early return is paid for only by a
+    /// connection that has actually gone quiet.
+    ///
+    /// A wedged pass dispatches on every pass rather than only on the
+    /// transition, which is what keeps the banner re-asserted against an
+    /// `msg_clear` that would otherwise take it down while its condition is
+    /// still true.
+    fn note(&mut self, observed: Option<WedgeKind>) -> Option<Msg> {
+        if observed.is_none() && self.wedge.is_none() {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        if observed != self.wedge {
+            self.wedge = observed;
+            self.since = observed.map(|_| now);
+        }
+        let observed_for = self.since.map_or(std::time::Duration::ZERO, |opened| {
+            now.saturating_duration_since(opened)
+        });
+        Some(Msg::EngineLiveness {
+            wedge: observed,
+            observed_for,
+        })
+    }
+}
+
+/// Reads both sides of the engine connection once and folds them into the
+/// supervision message the loop dispatches, or `None` when neither side has
+/// anything new to say.
 ///
-/// Costs three atomic loads on the steady-state pass: one acquire load of
-/// the connection's closed flag ([`EngineHandle::is_closed`]) and the pair
+/// Costs five atomic loads on the steady-state pass: two relaxed loads for
+/// the write side's queue reading ([`OutboxStallWatch::observe`], which never
+/// takes the engine's writer lock -- a wedge is precisely the state in which
+/// that lock is held by a thread parked inside a write), one acquire load of
+/// the connection's closed flag ([`EngineHandle::is_closed`]), and the pair
 /// [`HeartbeatWatch::observe`] reads to answer whether any probe is
-/// outstanding at all (an acquire load of the sent generation, a relaxed
-/// load of the acknowledged one). Two more follow in the same pass from
-/// [`watch_deadline`], which asks the same watch for a deadline -- five in
-/// total per pass, plus comparisons. No clock read, no lock, no allocation,
-/// and nothing sent: the send lives on the engine's own prober thread, so
-/// this call cannot await RPC however wedged the engine is, which is the
-/// only reason a paint loop can afford to ask on every pass. A pass with a
-/// probe actually outstanding reads the send-time log as well and takes one
-/// `Instant::now()`.
-fn note_engine_liveness(
-    watch: &HeartbeatWatch,
-    verdict: &mut Liveness,
+/// outstanding at all. Two more follow in the same pass from
+/// [`watch_deadline`], which asks the same watch for a deadline. No clock
+/// read, no lock, no allocation, no walk of the message log and nothing
+/// dispatched in that state, and nothing sent at all: the send lives on the
+/// engine's own prober thread, so this call cannot await RPC however wedged
+/// the engine is, which is the only reason a paint loop can afford to ask on
+/// every pass. A pass with a probe actually outstanding reads the send-time
+/// log as well and takes one `Instant::now()`.
+fn note_supervision(
+    fold: &mut SupervisionFold,
+    write: &mut OutboxStallWatch,
+    read: &HeartbeatWatch,
     handle: &EngineHandle,
-) -> bool {
-    let observed = watch.observe(handle.is_closed());
-    let moved = observed != *verdict;
-    *verdict = observed;
-    moved
+) -> Option<Msg> {
+    let stalled = write.observe(handle);
+    fold.note(wedge_kind(stalled, read.observe(handle.is_closed())))
 }
 
 /// The soonest either watch would have something new to say, or `None` when
@@ -1269,7 +1313,7 @@ pub fn run(
         .with_toast_timer(msg_tx)
         .with_picker(picker_tx);
     let mut write_stall = OutboxStallWatch::default();
-    let mut liveness = Liveness::Alive;
+    let mut supervision = SupervisionFold::default();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1299,7 +1343,7 @@ pub fn run(
             ) {
                 Flow::Continue => {}
                 Flow::Quit(code) => return Ok((model, code)),
-                Flow::EngineLost => {
+                Flow::EngineLost | Flow::RestartEngine => {
                     // Blocks this dispatch thread for up to `shutdown_timeout`
                     // (500ms by default -- see `graceful_kill`'s own doc)
                     // sending `qa!` and polling `try_wait`, but only on this
@@ -1314,18 +1358,31 @@ pub fn run(
                 }
             }
         }
-        // checked here, immediately before the paint that would show it: an
-        // engine that has stopped reading view's output also sends no
-        // redraws, so nothing else in this loop can notice
-        if note_write_stall(&mut model, &mut write_stall, &engine.handle) {
-            model.dirty = true;
-        }
-        // the read side's own reading, taken beside the write side's rather
-        // than inside it: an engine can drain everything view sends and
-        // still answer none of it, and that failure has its own verdict and
-        // its own recovery
-        if note_engine_liveness(&engine.heartbeat, &mut liveness, &engine.handle) {
-            model.dirty = true;
+        // both sides read here, immediately before the paint that would show
+        // what they found: an engine that has stopped reading view's output
+        // -- or stopped answering it -- also sends no redraws, so nothing
+        // else in this loop can notice
+        if let Some(msg) = note_supervision(
+            &mut supervision,
+            &mut write_stall,
+            &engine.heartbeat,
+            &engine.handle,
+        ) {
+            match dispatch(&mut model, &executor, follow_ups, msg) {
+                Flow::Continue => {}
+                Flow::Quit(code) => return Ok((model, code)),
+                // the same bounded teardown the `Msg::Resized` arm above
+                // takes, and reached on the same terms: a rare transition,
+                // never a per-frame cost
+                Flow::EngineLost | Flow::RestartEngine => {
+                    let info = engine.wait_exit();
+                    if let Flow::Quit(code) =
+                        dispatch(&mut model, &executor, follow_ups, Msg::EngineDown(info))
+                    {
+                        return Ok((model, code));
+                    }
+                }
+            }
         }
         // paint before blocking, not after processing: state mutated ahead
         // of the loop (the startup cutover replays staged messages straight
@@ -1379,7 +1436,9 @@ pub fn run(
                 // same bounded wait as the `Msg::Resized` arm above (see
                 // its comment) -- an already-rare transition, not a
                 // per-frame cost
-                Flow::EngineLost => queue.push(Msg::EngineDown(engine.wait_exit())),
+                Flow::EngineLost | Flow::RestartEngine => {
+                    queue.push(Msg::EngineDown(engine.wait_exit()));
+                }
             }
             // a RedrawReady is dropped when the shared channel is
             // momentarily full (the pump disarms pending so a later fold
@@ -1515,6 +1574,29 @@ mod tests {
     /// `Messages::visible_lines` returns one span-row per line; these tests
     /// only assert on the text a stall notice carries, so this flattens
     /// each row back to a plain string.
+    /// Drives one loop pass's worth of supervision: the same production fold
+    /// [`run`] calls, with the message it produces folded through `update()`
+    /// the way `dispatch` would. Answers whether that pass changed anything
+    /// visible, which is the loop's own cue to repaint.
+    fn note_supervision_pass(
+        model: &mut Model,
+        fold: &mut SupervisionFold,
+        write: &mut OutboxStallWatch,
+        read: &HeartbeatWatch,
+        handle: &EngineHandle,
+    ) -> bool {
+        let Some(msg) = note_supervision(fold, write, read, handle) else {
+            return false;
+        };
+        model.dirty = false;
+        let effects = update(model, msg);
+        assert!(
+            effects.is_empty(),
+            "a liveness reading produced effects the loop would have to run: {effects:?}"
+        );
+        model.dirty
+    }
+
     fn visible_texts(model: &Model) -> Vec<String> {
         model
             .engine
@@ -2732,6 +2814,10 @@ mod tests {
         let mut peer = WedgedPeer::new();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
+        // paused, so the read side reports Alive and this test's subject
+        // stays the write side alone
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
 
         peer.handle.input("a").unwrap();
         peer.await_parked_write();
@@ -2742,7 +2828,7 @@ mod tests {
         // the stall is measured from an observation, never asserted by the
         // first one: nothing has yet been seen to stop moving
         assert!(
-            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
             "the notice was raised by the observation that first saw the backlog, \
              before any time had passed for the writer to be stalled through"
         );
@@ -2750,17 +2836,17 @@ mod tests {
 
         std::thread::sleep(TEST_STALL_THRESHOLD * 3);
         assert!(
-            note_write_stall(&mut model, &mut watch, &peer.handle),
+            note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
             "a writer parked inside a write, with a second message queued behind it \
              and the threshold long past, raised no notice"
         );
         assert_eq!(
             visible_texts(&model),
-            vec![ENGINE_STALLED_NOTICE.to_string()]
+            vec![WedgeKind::WriteSide.notice().to_string()]
         );
 
         assert!(
-            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
             "re-asserting an unchanged notice reported a change, which repaints \
              the toast on every loop pass for as long as the stall lasts"
         );
@@ -2771,7 +2857,7 @@ mod tests {
         assert!(!model.engine.messages.dismiss_transient_on_keypress(false));
         assert_eq!(
             visible_texts(&model),
-            vec![ENGINE_STALLED_NOTICE.to_string()]
+            vec![WedgeKind::WriteSide.notice().to_string()]
         );
 
         peer.release();
@@ -2779,7 +2865,7 @@ mod tests {
             peer.handle.write_progress().0 == 0
         });
         assert!(
-            note_write_stall(&mut model, &mut watch, &peer.handle),
+            note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
             "the backlog drained and the notice was not retracted"
         );
         assert!(model.engine.messages.entries.is_empty());
@@ -2790,6 +2876,7 @@ mod tests {
         let mut peer = WedgedPeer::new();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
         // nothing else will ever arrive: a wedged engine sends no redraws,
         // and this operator typed once and then stopped. The watchdog is
         // not a wakeup the loop may rely on -- it exists so a wait that
@@ -2807,7 +2894,7 @@ mod tests {
         // the loop's own shape: read the write side, wait, repeat
         let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         let start = std::time::Instant::now();
-        while !note_write_stall(&mut model, &mut watch, &peer.handle) {
+        while !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle) {
             assert!(
                 wait_for_msg(&msg_rx, &watch, &heartbeat).is_none(),
                 "the wait outlasted the stall deadline and returned the watchdog's \
@@ -2820,7 +2907,7 @@ mod tests {
         }
         assert_eq!(
             visible_texts(&model),
-            vec![ENGINE_STALLED_NOTICE.to_string()]
+            vec![WedgeKind::WriteSide.notice().to_string()]
         );
         peer.release();
     }
@@ -2833,6 +2920,7 @@ mod tests {
         peer.release();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
         // armed, but nothing has probed it, so neither side of the
         // connection is owed anything that a wakeup could report on
         let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
@@ -2842,7 +2930,13 @@ mod tests {
         wait_until("the writer drains its backlog", || {
             peer.handle.write_progress().0 == 0
         });
-        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        assert!(!note_supervision_pass(
+            &mut model,
+            &mut fold,
+            &mut watch,
+            &heartbeat,
+            &peer.handle
+        ));
         assert_eq!(
             watch_deadline(&watch, &heartbeat),
             None,
@@ -2881,6 +2975,7 @@ mod tests {
         peer.release();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
         let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         heartbeat.resume();
 
@@ -2888,7 +2983,13 @@ mod tests {
         wait_until("the writer drains the probe", || {
             peer.handle.write_progress().0 == 0
         });
-        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        assert!(!note_supervision_pass(
+            &mut model,
+            &mut fold,
+            &mut watch,
+            &heartbeat,
+            &peer.handle
+        ));
         assert_eq!(
             watch.poll_deadline(),
             None,
@@ -2910,10 +3011,11 @@ mod tests {
             start.elapsed() < std::time::Duration::from_secs(WAIT_WATCHDOG_SECS),
             "the wait ran to the watchdog rather than to the probe's own deadline"
         );
-        let mut verdict = Liveness::Alive;
+        // and the fold the loop runs turns that into the read-side wedge,
+        // with the write side draining perfectly throughout
         wait_until("the unanswered probe reads as a wedge", || {
-            note_engine_liveness(&heartbeat, &mut verdict, &peer.handle);
-            verdict == Liveness::Wedged
+            note_supervision(&mut fold, &mut watch, &heartbeat, &peer.handle);
+            fold.wedge == Some(WedgeKind::ReadSide)
         });
     }
 
@@ -2976,13 +3078,17 @@ mod tests {
         let mut peer = WedgedPeer::new();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
+        // paused, so the read side reports Alive and this test's subject
+        // stays the write side alone
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         peer.release();
 
         for i in 0..20 {
             peer.handle.input("a").unwrap();
             peer.await_parked_write();
             assert!(
-                !note_write_stall(&mut model, &mut watch, &peer.handle),
+                !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
                 "a delivering writer read as stalled on write {i}"
             );
             std::thread::sleep(TEST_STALL_THRESHOLD / 2);
@@ -2995,16 +3101,26 @@ mod tests {
         let mut peer = WedgedPeer::new();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let mut fold = SupervisionFold::default();
+        // paused, so the read side reports Alive and this test's subject
+        // stays the write side alone
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         peer.release();
 
         peer.handle.input("a").unwrap();
         wait_until("the writer drains its backlog", || {
             peer.handle.write_progress().0 == 0
         });
-        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        assert!(!note_supervision_pass(
+            &mut model,
+            &mut fold,
+            &mut watch,
+            &heartbeat,
+            &peer.handle
+        ));
         std::thread::sleep(TEST_STALL_THRESHOLD * 3);
         assert!(
-            !note_write_stall(&mut model, &mut watch, &peer.handle),
+            !note_supervision_pass(&mut model, &mut fold, &mut watch, &heartbeat, &peer.handle),
             "an engine with an empty queue read as stalled after three thresholds \
              of doing nothing, which is an idle editor rather than a wedged one"
         );

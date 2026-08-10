@@ -10,6 +10,7 @@ pub mod picker;
 pub mod prompt;
 pub mod registry;
 pub mod statusline;
+pub mod supervision;
 pub mod toast;
 pub mod tree;
 pub mod views;
