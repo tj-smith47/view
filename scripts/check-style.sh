@@ -26,12 +26,22 @@ check_narrative_markers() {
   # "task" also checked case-insensitively, following the same shape as
   # "step" above: this tree has committed lowercase "task N" narrative
   # references (matcher.rs and budgets.rs) that the case-sensitive check
-  # above missed. Requiring a directly adjacent number keeps this from
-  # flagging the ordinary lowercase word "task" on its own, which -- unlike
-  # "step" -- does have legitimate unrelated prose readings; the other four
-  # words above ("phase"/"wave"/"cycle"/"session") stay case-sensitive since
-  # no lowercase-numbered instance of any of them has been found here.
-  if grep -rniE "${anchor}\\btask [0-9]" "${targets[@]}"; then
+  # above missed. A bare digit-adjacency match false-positives on ordinary
+  # prose where the number belongs to the NEXT phrase, not a task citation
+  # ("spawn a background task 3 seconds before the deadline fires", "this
+  # queue drains one task 4 times per tick under load") -- requiring the
+  # digit be followed by a non-alphanumeric-non-space character (an
+  # apostrophe, quote, comma, ...) or end of line, rather than by
+  # whitespace then a word, isolates the citation shapes this tree actually
+  # had ("task 16's...", `see task 19"`) from that prose. This is a
+  # precision-over-recall trade, not a complete grammar: a citation phrased
+  # as "task 16 owns the paired..." -- digit followed by whitespace then a
+  # verb, structurally identical to the prose false positives above -- will
+  # slip through uncaught, same as "as task 7 requires" would. Accepted
+  # because a missed citation still reads as ordinary English and does no
+  # harm left in place, where a false-positive failure blocks an unrelated,
+  # correct commit.
+  if grep -rniE "${anchor}\\btask [0-9]+([^[:alnum:] ]|\$)" "${targets[@]}"; then
     echo "STYLE FAIL: session-narrative comment marker (task)"; fail=1
   fi
   # spec-task tags (T4/T5/T6): a comment/doc must state what the code does,
