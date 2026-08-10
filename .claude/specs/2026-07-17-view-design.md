@@ -617,7 +617,7 @@ separate processes with view interposed on every keystroke and frame.
 | Session DVR | Visual scrub/replay of what the screen showed, branch from any point, exportable replay file — over the same keystream+frame recording the oracle uses |
 | Key introspector | `:View keys`: which mapping fired, whose it was, what it displaced — live, over the key-claim reporting layer (§5.3) |
 | Image viewing | kitty graphics protocol on the `full` tier (§7), half-block cell fallback below, painted as a native overlay; extends to picker preview and tree hover; the engine keeps the buffer, view supersedes only the paint |
-| Media playback (ruled 2026-08-07) | `view file.mp4` / audio: seamless full-terminal handoff to a detected system `mpv` (terminal video output, audio native to mpv; doctor-guided when absent, never bundled), view resumes on exit; composited in-pane playback arrives with the workspace arc (§15.1) |
+| Media playback (ruled 2026-08-07; open-dispatch ruled 2026-08-08) | `view file.mp4` / audio: seamless full-terminal handoff to a detected system `mpv` (terminal video output, audio native to mpv; doctor-guided when absent, never bundled), view resumes on exit. Not CLI-only: every open path (CLI arg, tree select, picker accept) runs one shared open-dispatch — the same type detection routing to buffer, image overlay, or media handoff — so selecting a video in the tree plays it (plan 2026-08-09-p5_5-media.md owns the mechanism); composited in-pane playback arrives with the workspace arc (§15.1) |
 
 `ext_messages` routing — owning messages means owning *dialogs* (it forces
 `cmdheight=0`; the engine's message area ceases to exist):
