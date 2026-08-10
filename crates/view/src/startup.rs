@@ -617,7 +617,7 @@ pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
 
     for msg in presink {
         let msg = match msg {
-            Msg::EngineStopped(reason) => {
+            Msg::EngineStopped { reason, .. } => {
                 model.fatal_reason = reason;
                 let exit = engine_stopped_exit.take().map_or(
                     view_core::msg::ExitInfo {
@@ -1010,7 +1010,10 @@ mod tests {
                 theme: &mut crate::bridge::ThemeBridge::new(None),
             },
             CutoverInput {
-                presink: vec![Msg::EngineStopped(None)],
+                presink: vec![Msg::EngineStopped {
+                    generation: 1,
+                    reason: None,
+                }],
                 pending_redraw: vec![UiEvent::Flush],
                 resize: Some((100, 40)),
                 keys: vec![key("should-not-be-sent")],
@@ -1032,7 +1035,7 @@ mod tests {
         assert!(executor.into_ops().calls.into_inner().is_empty());
     }
 
-    /// A presink `Msg::EngineStopped(Some(reason))` stashes the reason on
+    /// A presink `Msg::EngineStopped` carrying a reason stashes it on
     /// `model.fatal_reason` before translating to `Msg::EngineDown`, the
     /// same as a live one does in `runtime::run`'s own loop: `main.rs`
     /// reads it off the returned model after the terminal is restored,
@@ -1051,7 +1054,10 @@ mod tests {
                 theme: &mut crate::bridge::ThemeBridge::new(None),
             },
             CutoverInput {
-                presink: vec![Msg::EngineStopped(Some("wedged reader".to_string()))],
+                presink: vec![Msg::EngineStopped {
+                    generation: 1,
+                    reason: Some("wedged reader".to_string()),
+                }],
                 pending_redraw: vec![],
                 resize: None,
                 keys: vec![],

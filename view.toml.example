@@ -20,6 +20,11 @@ palette = true
 # about the automatic half, and only about an engine that died: one that
 # exited because you told it to (`:q`, `:cq`) is the session ending, and
 # view leaves with nvim's own status no matter how this is set.
+#
+# view tells those two apart by nvim announcing its own departure as it
+# leaves, not by the status it exits with -- so a quit is a quit on Linux,
+# macOS and Windows alike, and an engine that dies without a word is a
+# death even when it manages to exit 0.
 
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for the modal's own Restart

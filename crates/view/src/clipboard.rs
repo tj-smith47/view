@@ -34,6 +34,14 @@ use crate::runtime::EngineOps;
 /// docs for why the worker, not the loop, owns that obligation).
 pub struct ClipboardJob {
     pub token: ReplyToken,
+    /// Which engine this job's token belongs to
+    /// ([`ReplyRoute::epoch`]). A `ReplyToken` is a bare msgid, and a fresh
+    /// nvim starts its own msgids low again, so a job still in flight when
+    /// the engine is replaced holds a number that names a live request on
+    /// the replacement -- an unrelated one. Stamped by the producer, not
+    /// read by the worker at reply time, because the worker cannot tell a
+    /// job queued before the swap from one queued after it.
+    pub epoch: u64,
     pub kind: ClipboardJobKind,
 }
 
@@ -102,12 +110,14 @@ impl ClipboardBackend for arboard::Clipboard {
 /// cannot be held here by a wedged engine.
 pub struct ReplyRoute<E: EngineOps> {
     ops: std::sync::Arc<std::sync::Mutex<E>>,
+    epoch: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl<E: EngineOps> Clone for ReplyRoute<E> {
     fn clone(&self) -> Self {
         Self {
             ops: std::sync::Arc::clone(&self.ops),
+            epoch: std::sync::Arc::clone(&self.epoch),
         }
     }
 }
@@ -130,14 +140,33 @@ impl<E: EngineOps> ReplyRoute<E> {
     pub fn new(ops: E) -> Self {
         Self {
             ops: std::sync::Arc::new(std::sync::Mutex::new(ops)),
+            epoch: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         }
+    }
+
+    /// Which engine this route currently answers over, counted from zero and
+    /// stepped by every [`rebind`](Self::rebind).
+    ///
+    /// Stamped onto each [`ClipboardJob`] as it is queued, so a reply can be
+    /// checked against the connection its token was issued on rather than
+    /// written blind to whichever connection is current when it comes back.
+    #[must_use]
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Points every later reply at `ops` instead, for the engine that has
     /// replaced the one this route was built on.
     pub fn rebind(&self, ops: E) {
         match self.ops.lock() {
-            Ok(mut held) => *held = ops,
+            Ok(mut held) => {
+                *held = ops;
+                // published under the same lock the reply path takes, so a
+                // worker mid-reply either answers the old engine before the
+                // swap or reads the stepped epoch after it, never the new
+                // engine with the old epoch's blessing
+                self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
             // a poisoned route means the loop thread panicked mid-swap, and
             // the process is already coming down; the worker's replies fail
             // the same way they would against a closed connection
@@ -145,10 +174,30 @@ impl<E: EngineOps> ReplyRoute<E> {
         }
     }
 
-    /// Answers `token`, through whichever engine this route currently names.
-    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+    /// Answers `token` over the engine this route names, if `epoch` still
+    /// names that engine.
+    ///
+    /// A stale epoch is dropped rather than written: the request this token
+    /// answers died with its connection, and nvim already failed it. Writing
+    /// it anyway would answer whatever request the replacement happens to
+    /// have open under the same msgid -- a blocked `g:clipboard` call
+    /// answered with another register's text, or a `VimEnter` answered with
+    /// a list of lines.
+    fn reply(&self, epoch: u64, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
         match self.ops.lock() {
-            Ok(ops) => ops.reply(token, value),
+            Ok(ops) => {
+                if epoch != self.epoch() {
+                    crate::vlog::log_with("clipboard", || {
+                        format!(
+                            "dropped a reply for msgid {} from engine epoch {epoch} (now {})",
+                            token.msgid,
+                            self.epoch()
+                        )
+                    });
+                    return Ok(());
+                }
+                ops.reply(token, value)
+            }
             Err(_) => Err(EngineError::Closed),
         }
     }
@@ -210,7 +259,11 @@ fn run<E: EngineOps, C: ClipboardBackend>(
                 // nothing to retry against. The paint loop's own
                 // EngineLost/supervision path is what notices the
                 // connection is down, not this reply
-                let _ = route.reply(job.token, ReplyValue::ClipboardLines { lines, regtype });
+                let _ = route.reply(
+                    job.epoch,
+                    job.token,
+                    ReplyValue::ClipboardLines { lines, regtype },
+                );
             }
             ClipboardJobKind::Write {
                 register,
@@ -220,7 +273,7 @@ fn run<E: EngineOps, C: ClipboardBackend>(
                 let text = lines_to_text(&lines, regtype);
                 write_system(&mut clip, &connect, &text);
                 shadow.insert(register, text);
-                let _ = route.reply(job.token, ReplyValue::Nil);
+                let _ = route.reply(job.epoch, job.token, ReplyValue::Nil);
             }
         }
     }
@@ -594,6 +647,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 42 },
+                epoch: 0,
                 kind: ClipboardJobKind::Read { register: '+' },
             })
             .unwrap();
@@ -623,6 +677,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 7 },
+                epoch: 0,
                 kind: ClipboardJobKind::Write {
                     register: '+',
                     lines: vec!["hello".to_owned()],
@@ -676,6 +731,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 1 },
+                epoch: 0,
                 kind: ClipboardJobKind::Read { register: '+' },
             })
             .unwrap();
@@ -712,6 +768,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 1 },
+                epoch: 0,
                 kind: ClipboardJobKind::Write {
                     register: '+',
                     lines: vec!["shadowed".to_owned()],
@@ -726,6 +783,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 2 },
+                epoch: 0,
                 kind: ClipboardJobKind::Read { register: '+' },
             })
             .unwrap();
@@ -758,6 +816,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 1 },
+                epoch: 0,
                 kind: ClipboardJobKind::Write {
                     register: '+',
                     lines: vec!["copied before the crash".to_owned()],
@@ -774,6 +833,7 @@ mod tests {
         job_tx
             .send(ClipboardJob {
                 token: ReplyToken { msgid: 2 },
+                epoch: route.epoch(),
                 kind: ClipboardJobKind::Read { register: '+' },
             })
             .unwrap();
@@ -793,6 +853,48 @@ mod tests {
         assert!(
             first_rx.try_recv().is_err(),
             "no reply may reach the engine the route was pointed away from"
+        );
+
+        drop(job_tx);
+        let _ = worker.join();
+    }
+
+    /// The hazard a bare msgid cannot see: a job queued against the dead
+    /// engine reaches the worker after the swap, and its `ReplyToken` names
+    /// a msgid the *replacement* is just as likely to have open -- msgids
+    /// start low again on every fresh connection. Answering it would hand
+    /// some unrelated blocked request another register's text.
+    #[test]
+    fn a_job_stamped_by_the_dead_engine_is_never_answered_by_its_replacement() {
+        let (job_tx, job_rx) = mpsc::channel();
+        let (first_tx, _first_rx) = mpsc::channel();
+        let route = ReplyRoute::new(ReplyRecorder { tx: first_tx });
+        let worker = spawn_fake(route.clone(), job_rx, || None);
+
+        let stale = ClipboardJob {
+            token: ReplyToken { msgid: 4 },
+            epoch: route.epoch(),
+            kind: ClipboardJobKind::Read { register: '+' },
+        };
+        let (second_tx, second_rx) = mpsc::channel();
+        route.rebind(ReplyRecorder { tx: second_tx });
+        job_tx.send(stale).unwrap();
+        job_tx
+            .send(ClipboardJob {
+                token: ReplyToken { msgid: 4 },
+                epoch: route.epoch(),
+                kind: ClipboardJobKind::Read { register: '*' },
+            })
+            .unwrap();
+
+        let (msgid, _value) = second_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("the replacement's own job must still answer, within 2s");
+        assert_eq!(msgid, 4);
+        assert!(
+            second_rx.try_recv().is_err(),
+            "the stale job's reply must be dropped, not written to the \
+             connection that inherited its msgid"
         );
 
         drop(job_tx);

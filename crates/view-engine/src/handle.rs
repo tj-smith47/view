@@ -5,7 +5,7 @@ use rmpv::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{mpsc, Arc, Mutex, PoisonError};
+use std::sync::{mpsc, Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 use view_core::msg::{
     DeleteConfirmOutcome, EngineRequest, Msg, RegisterType, ReplyToken, ReplyValue,
@@ -196,6 +196,12 @@ pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
     closed: Arc<AtomicBool>,
+    announced_exit: Arc<AtomicBool>,
+    /// Signalled once by whichever of the two threads discovers the
+    /// connection is gone, right after it publishes `closed`. What a caller
+    /// resolving a stop waits on when it needs the reader's own findings
+    /// (`announced_exit`) and not merely the child's exit status.
+    settled: Arc<Condvar>,
     outbox: Arc<crate::outbox::Outbox>,
 }
 
@@ -205,6 +211,8 @@ impl Clone for EngineHandle {
             next_msgid: Arc::clone(&self.next_msgid),
             pending: Arc::clone(&self.pending),
             closed: Arc::clone(&self.closed),
+            announced_exit: Arc::clone(&self.announced_exit),
+            settled: Arc::clone(&self.settled),
             outbox: Arc::clone(&self.outbox),
         }
     }
@@ -322,6 +330,8 @@ impl EngineHandle {
         #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
         let closed = Arc::new(AtomicBool::new(false));
+        let announced_exit = Arc::new(AtomicBool::new(false));
+        let settled = Arc::new(Condvar::new());
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
             closed: Arc::clone(&closed),
@@ -335,6 +345,7 @@ impl EngineHandle {
         ));
 
         let writer_pending = Arc::clone(&pending);
+        let writer_settled = Arc::clone(&settled);
         let writer_outbox = Arc::clone(&outbox);
         std::thread::spawn(move || {
             while let Ok(bytes) = write_rx.recv() {
@@ -343,7 +354,7 @@ impl EngineHandle {
                     // recovery): fail every pending waiter instead of
                     // leaving them to hang on a response that can never
                     // arrive, and reject every future request up front
-                    close_and_drain(&writer_pending);
+                    close_and_drain(&writer_pending, &writer_settled);
                     break;
                 }
             }
@@ -352,6 +363,8 @@ impl EngineHandle {
         let reader_pending = Arc::clone(&pending);
         let reader_outbox = Arc::clone(&outbox);
         let reader_pump = pump;
+        let reader_announced_exit = Arc::clone(&announced_exit);
+        let reader_settled = Arc::clone(&settled);
         std::thread::spawn(move || {
             let mut r = std::io::BufReader::new(reader);
             let mut fatal_reason: Option<String> = None;
@@ -571,6 +584,12 @@ impl EngineHandle {
                                 if let Some(msg) = decode_feature_invoke(&params) {
                                     let _ = pump.route_msg(msg);
                                 }
+                            } else if method == "view_leaving" {
+                                // recorded, not routed: nothing acts on this
+                                // while the engine is still up, and by the
+                                // time anything asks, the connection is gone
+                                // and the loop needs the answer synchronously
+                                reader_announced_exit.store(true, Ordering::Release);
                             } else if method == "view_bridge" {
                                 // best-effort for the same reason
                                 // `view_invoke` is: nvim is not blocked on an
@@ -655,17 +674,69 @@ impl EngineHandle {
                 // and a dropped EngineStopped is unrecoverable, not merely
                 // best-effort (see damage.rs module docs' bounded channel
                 // contract)
-                pump.route_terminal(Msg::EngineStopped(fatal_reason));
+                pump.route_engine_stopped(fatal_reason);
             }
             // engine is gone: fail every in-flight request instead of hanging
-            close_and_drain(&reader_pending);
+            close_and_drain(&reader_pending, &reader_settled);
         });
         Self {
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
             closed,
+            announced_exit,
+            settled,
             outbox,
         }
+    }
+
+    /// Blocks until this connection has published everything it found, or
+    /// `timeout` elapses; `true` when it settled.
+    ///
+    /// Only the paths that resolve a stop need it, and they need it for one
+    /// reason: [`announced_exit`](Self::announced_exit) is a *finding*, not
+    /// a status. A stop discovered through the reader's own terminal message
+    /// already carries the ordering for free (same thread, message after
+    /// finding). A stop discovered because a *write* failed does not -- the
+    /// writer can lose its pipe while the reader is still draining the
+    /// bytes that say why -- and reading the finding then would call an
+    /// engine that announced its exit a death and respawn it.
+    ///
+    /// Bounded rather than unbounded: the caller reaches here having already
+    /// reaped the child, so the reader is at EOF and its remaining work is a
+    /// drain, but a loop that could block forever on a thread that never
+    /// wakes is not a trade a paint loop can make.
+    pub fn wait_until_settled(&self, timeout: std::time::Duration) -> bool {
+        if self.is_closed() {
+            return true;
+        }
+        let guard = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        let (_guard, outcome) = self
+            .settled
+            .wait_timeout_while(guard, timeout, |p| !p.closed.load(Ordering::Acquire))
+            .unwrap_or_else(PoisonError::into_inner);
+        !outcome.timed_out()
+    }
+
+    /// Whether the engine announced, on this connection, that it was on its
+    /// way out -- nvim's own `VimLeavePre`, relayed by the `view_bridge`
+    /// group ([`register_bridge`](Self::register_bridge)).
+    ///
+    /// The platform-neutral evidence that a stop was intentional. An exit
+    /// status cannot supply it: a signal death is only *reported* as one on
+    /// Unix (`ExitStatusExt`), and even there an engine that exited `1`
+    /// because its own Lua config threw is indistinguishable by status from
+    /// a user who typed `:cq 1`. What is not ambiguous is nvim saying so
+    /// itself, which it does on every ordinary exit path -- `:q`, `:qa`,
+    /// `:cq`, `:wq` -- and cannot do when it is killed.
+    ///
+    /// Ordered before the stop it qualifies, by construction: the reader
+    /// thread records this while decoding the notification, and the same
+    /// thread is the one that later routes `Msg::EngineStopped` when the
+    /// stream ends. A loop that has the stop in hand therefore has this
+    /// answer too.
+    #[must_use]
+    pub fn announced_exit(&self) -> bool {
+        self.announced_exit.load(Ordering::Acquire)
     }
 
     /// Whether the connection has been marked closed: its peer is gone and
@@ -1405,7 +1476,7 @@ fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
 /// simply never arrives, which `update()` already treats identically to any
 /// other reply that never lands (the pre-probe fallback in
 /// `Theme::from_hl`).
-fn close_and_drain(pending: &Pending) {
+fn close_and_drain(pending: &Pending, settled: &Condvar) {
     let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
     let doomed: Vec<Waiter> = p.waiters.drain().map(|(_, waiter)| waiter).collect();
     // flipped between taking the waiters out of the map and failing them,
@@ -1424,6 +1495,8 @@ fn close_and_drain(pending: &Pending) {
             let _ = tx.send(Err(EngineError::Closed));
         }
     }
+    drop(p);
+    settled.notify_all();
 }
 
 // `ReplyValue` is `#[non_exhaustive]` from view-core (rmpv-free by design,
@@ -1629,8 +1702,12 @@ mod tests {
         let stopped = rx
             .recv_timeout(Duration::from_secs(2))
             .expect("EngineStopped must arrive once the dummy is drained");
-        let Msg::EngineStopped(Some(reason)) = stopped else {
-            unreachable!("expected EngineStopped(Some(reason)), got {stopped:?}");
+        let Msg::EngineStopped {
+            reason: Some(reason),
+            ..
+        } = stopped
+        else {
+            unreachable!("expected EngineStopped carrying a reason, got {stopped:?}");
         };
         assert!(
             reason.contains("view_vim_enter"),

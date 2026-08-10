@@ -279,8 +279,21 @@ vim.api.nvim_create_autocmd({ 'BufEnter', 'BufFilePost', 'BufWritePost', 'BufMod
   callback = function()
     vim.rpcnotify(channel, 'view_bridge', 'buffer', vim.fn.expand('%:t'), vim.bo.modified)
   end,
+})
+vim.api.nvim_create_autocmd('VimLeavePre', {
+  group = group,
+  callback = function()
+    vim.rpcnotify(channel, 'view_leaving')
+  end,
 })";
 
+/// `VimLeavePre` gets its own method rather than another `view_bridge`
+/// event: every other hook in the group is editor state a later frame
+/// recomputes, delivered best-effort into the runtime channel, while this
+/// one is evidence the reader itself must hold at the moment the stream
+/// ends -- after which there is no frame, no channel and no engine left to
+/// ask (see [`EngineHandle::announced_exit`]).
+///
 /// The lua chunk [`EngineHandle::register_clipboard`] runs inside nvim,
 /// taking view's channel id as its single vararg. Installs `g:clipboard`
 /// (`:help g:clipboard`) so `"+y`/`"+p` route through view's own clipboard

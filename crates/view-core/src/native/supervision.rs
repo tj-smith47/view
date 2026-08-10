@@ -494,20 +494,29 @@ impl SupervisionState {
     /// ends: `:q`, `:qa` and `:cq 3` all reach this seam looking exactly
     /// like the process stopping, because that is what they are. Recovering
     /// from one of those would respawn the editor the user had just closed,
-    /// so what has to distinguish a death is that nobody asked for it: a
-    /// signal killed the process (a crash, an OOM kill, an external `kill`),
-    /// or the reader stopped for a reason of its own rather than because the
-    /// stream ended (`reason`, carried by `Msg::EngineStopped`). Everything
-    /// else is an exit, and view leaves with the status nvim chose.
+    /// so what distinguishes a death is that the engine never said it was
+    /// leaving: `announced_exit` is nvim's own `VimLeavePre`, relayed over
+    /// the connection before it closed
+    /// ([`EngineHandle::announced_exit`](../../../view_engine/handle/struct.EngineHandle.html#method.announced_exit)).
+    /// Every ordinary exit path announces; nothing killed can.
     ///
-    /// An engine that crashed by calling `exit(1)` on its own is
-    /// indistinguishable here from one a user ended with `:cq`, and is read
-    /// as the exit: reporting nvim's own status is the answer that cannot
-    /// invent a session the user did not ask to keep.
+    /// That is the whole predicate, deliberately: an exit *status* cannot
+    /// carry this. A signal death is only reported as one on Unix, so a
+    /// predicate resting on it leaves supervision inert on Windows -- no
+    /// process death there could ever read as a death, and the
+    /// `[supervision]` switch would document behavior that platform cannot
+    /// reach. `by_signal` stays as corroboration for the case nvim is denied
+    /// the chance to announce anything at all, which is exactly what a
+    /// `SIGKILL` is.
+    ///
+    /// It also closes the case an exit status never could: nvim ending with
+    /// `exit(1)` because its own config threw is announced (`VimLeavePre`
+    /// runs) and reads as the exit it is, where a status-based reading had
+    /// to guess between that and `:cq 1`.
     #[must_use]
-    pub fn note_engine_stop(&mut self, exit: ExitInfo, reason: Option<&str>) -> bool {
+    pub fn note_engine_stop(&mut self, exit: ExitInfo, announced_exit: bool) -> bool {
         self.exit_code = exit.code;
-        exit.by_signal || reason.is_some()
+        exit.by_signal || !announced_exit
     }
 
     /// The status view leaves with when a user answers a dead engine by
@@ -671,13 +680,19 @@ mod tests {
         ExitInfo { code, by_signal }
     }
 
+    /// nvim announced it was leaving before the connection went, which is
+    /// what every ordinary exit path does.
+    const ANNOUNCED: bool = true;
+    /// The connection went with nothing said, which is what a death is.
+    const SILENT: bool = false;
+
     #[test]
     fn quitting_a_dead_engine_leaves_with_the_status_nvim_reported() {
         let mut state = SupervisionState::default();
         assert_eq!(state.exit_code(), 1, "an unreported exit is a failed one");
-        let _ = state.note_engine_stop(stop(Some(0), false), None);
+        let _ = state.note_engine_stop(stop(Some(0), false), ANNOUNCED);
         assert_eq!(state.exit_code(), 0);
-        let _ = state.note_engine_stop(stop(Some(137), true), None);
+        let _ = state.note_engine_stop(stop(Some(137), true), SILENT);
         assert_eq!(state.exit_code(), 137);
     }
 
@@ -688,29 +703,42 @@ mod tests {
     fn an_engine_told_to_stop_is_never_one_to_bring_back() {
         let mut state = SupervisionState::default();
         assert!(
-            !state.note_engine_stop(stop(Some(0), false), None),
+            !state.note_engine_stop(stop(Some(0), false), ANNOUNCED),
             ":q must end the session, not restart the engine"
         );
         assert!(
-            !state.note_engine_stop(stop(Some(3), false), None),
+            !state.note_engine_stop(stop(Some(3), false), ANNOUNCED),
             ":cq 3 chose that status deliberately and must be honoured"
         );
         assert_eq!(state.exit_code(), 3);
+        // the case an exit status alone cannot answer: nvim's own config
+        // threw and it left with 1, which `:cq 1` also produces. The
+        // announcement is what separates them, and it is present here
+        assert!(
+            !state.note_engine_stop(stop(Some(1), false), ANNOUNCED),
+            "an engine that said it was leaving ended the session, whatever \
+             status it chose"
+        );
     }
 
     #[test]
     fn an_engine_nobody_asked_to_stop_is_one_to_bring_back() {
         let mut state = SupervisionState::default();
         assert!(
-            state.note_engine_stop(stop(Some(139), true), None),
+            state.note_engine_stop(stop(Some(139), true), SILENT),
             "a signal death is nobody's instruction"
         );
         assert!(
-            state.note_engine_stop(
-                stop(None, false),
-                Some("the reader could not route an engine request")
-            ),
-            "a reader that stopped for its own reason ended no session"
+            state.note_engine_stop(stop(None, false), SILENT),
+            "an engine that vanished without a word ended no session"
+        );
+        // the platform half of the same rule: nothing off Unix reports a
+        // signal death as one, so a predicate that needed `by_signal` would
+        // make supervision unreachable there. The announcement's absence
+        // carries it on every platform
+        assert!(
+            state.note_engine_stop(stop(Some(1), false), SILENT),
+            "a death that could not be reported as a signal is still a death"
         );
     }
 

@@ -972,18 +972,20 @@ mod tests {
 
         // signal 0 probes for existence: the group is fully gone only once
         // every member (leader and grandchild alike) has been killed and
-        // reaped, and init reaps a SIGKILLed orphan promptly. 30s, not 5s:
-        // this waits out a two-step reap chain (the leader's own kill/reap
-        // plus init's independent re-parented reap of the grandchild), and a
-        // host under concurrent build load can starve the scheduler enough
-        // to blow a much smaller wall-clock budget with no leak on view's
-        // side at all -- 15s alone was still observed failing on this
-        // exact host's own chronic baseline contention (load average above
-        // its core count even with no concurrent build running at all),
-        // and this poll costs nothing extra to wait out since it is a
-        // correctness check, never a timed perf assertion
+        // reaped, and init reaps a SIGKILLed orphan promptly. The budget is
+        // deliberately far larger than the work: this waits out a two-step
+        // reap chain (the leader's own kill/reap plus init's independent
+        // re-parented reap of the grandchild) neither step of which this
+        // process schedules, so its wall-clock cost is a property of host
+        // contention and not of the leak being tested for. Successive
+        // ceilings of 15s and then 30s were each observed failing on this
+        // host under nothing worse than the rest of the suite running
+        // beside them, while the same test alone finishes in hundredths of
+        // a second. A ceiling that can lose that race turns a correctness
+        // check into a load meter; costing nothing on a healthy host is the
+        // whole point, since the loop exits the moment the group is gone
         let group = nix::unistd::Pid::from_raw(i32::try_from(leader).unwrap());
-        let deadline = Instant::now() + Duration::from_secs(30);
+        let deadline = Instant::now() + Duration::from_secs(120);
         while nix::sys::signal::killpg(group, None::<nix::sys::signal::Signal>)
             != Err(nix::errno::Errno::ESRCH)
         {

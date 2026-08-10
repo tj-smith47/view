@@ -277,10 +277,13 @@ Dependency rules (audit-enforced, cfgd-style):
 - Supervision: an engine death (a signal, or a reader that stopped for its own
   reason) → view keeps the last Surface painted, offers one-key restart, and
   swapfiles make that restart non-destructive; an engine told to exit (`:q`,
-  `:cq`) ends the session with nvim's own status, since recovering from one
-  would respawn the editor a user had just closed. RPC calls carry timeouts; a
-  hung engine (blocked synchronous Lua) yields an honest "engine busy"
-  indicator with interrupt/restart affordances — the UI thread never blocks.
+  `:cq`) announces its own departure over view's bridge before the channel
+  closes, and that announcement — never the exit status, which carries no
+  intent at all on Windows — is what ends the session with nvim's own status
+  instead of respawning the editor a user had just closed. RPC calls carry
+  timeouts; a hung engine (blocked synchronous Lua) yields an honest "engine
+  busy" indicator with interrupt/restart affordances — the UI thread never
+  blocks.
 - Version handshake at attach: `nvim_get_api_info`; mismatch against the tested
   pin → doctor-grade warning, never a hard failure.
 - **Clipboard:** an embedded engine has no TUI, hence no built-in OSC52 path —

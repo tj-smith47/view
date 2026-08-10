@@ -194,11 +194,12 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         "the recovered engine is parked at a prompt nobody can answer"
     );
 
-    let cmdline = read_cmdline(engine.pid());
     assert!(
-        cmdline.iter().any(|arg| arg == "-r"),
-        "the recovering child carries no -r: {cmdline:?}"
+        spawned_with(&engine, "-r"),
+        "the recovering child carries no -r: {:?}",
+        engine.command_line()
     );
+    assert_os_agrees(&engine);
 }
 
 /// The falsifier for the flag's condition, and the reason it has one: `-r`
@@ -214,12 +215,13 @@ fn a_restart_with_no_file_to_recover_carries_no_flag_and_stays_usable() {
         .restart(cfg())
         .expect("a crashed engine must restart");
 
-    let cmdline = read_cmdline(engine.pid());
     assert!(
-        !cmdline.iter().any(|arg| arg == "-r"),
+        !spawned_with(&engine, "-r"),
         "a restart with no file to recover must not ask nvim to list swap \
-         files: {cmdline:?}"
+         files: {:?}",
+        engine.command_line()
     );
+    assert_os_agrees(&engine);
 
     engine.handle.ui_attach(80, 24).unwrap();
     assert!(
@@ -328,29 +330,48 @@ fn a_restart_never_inherits_the_dead_engines_wedge() {
     );
 }
 
-/// The child's argv as the OS holds it. Linux only: `/proc` is the one place
-/// a spawned process's own command line is readable without cooperation from
-/// the process, and the flag's application rule is pinned without a spawn at
-/// all by `process.rs`'s own unit tests.
+/// Whether the engine's child was handed `flag`, according to the command
+/// line the spawn itself recorded.
+///
+/// The authority on every platform: `Engine::command_line` is read off the
+/// `Command` that was spawned, so an assertion made against it is an
+/// assertion about what the child actually received rather than about a
+/// rule re-derived from the config a second time.
+fn spawned_with(engine: &Engine, flag: &str) -> bool {
+    engine.command_line().iter().any(|arg| arg == flag)
+}
+
+/// Cross-checks the recorded command line against the one the OS reports for
+/// the running child, so a recording that stopped matching reality is caught
+/// rather than believed. Linux only: `/proc` is the one place a spawned
+/// process's argv is readable without cooperation from the process.
 #[cfg(target_os = "linux")]
-fn read_cmdline(pid: u32) -> Vec<String> {
+fn assert_os_agrees(engine: &Engine) {
+    let pid = engine.pid();
     let raw = std::fs::read(format!("/proc/{pid}/cmdline"))
         .unwrap_or_else(|e| panic!("/proc/{pid}/cmdline unreadable: {e}"));
     assert!(
         !raw.is_empty(),
         "pid {pid} has an empty command line: it is a zombie, not a running engine"
     );
-    raw.split(|byte| *byte == 0)
+    let os: Vec<String> = raw
+        .split(|byte| *byte == 0)
         .filter(|arg| !arg.is_empty())
         .map(|arg| String::from_utf8_lossy(arg).into_owned())
-        .collect()
+        .collect();
+    let recorded: Vec<String> = engine
+        .command_line()
+        .iter()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        os, recorded,
+        "the OS reports a command line the spawn did not record"
+    );
 }
 
-/// Off Linux the assertions above are made against the arguments this build
-/// would pass rather than the ones the OS reports, so the flag's *rule* is
-/// still exercised on every platform while its delivery is proven where the
-/// process table can be read.
+/// The cross-check is a Linux-only extra, never the assertion itself: every
+/// test above asserts through [`spawned_with`], which answers on every
+/// platform.
 #[cfg(not(target_os = "linux"))]
-fn read_cmdline(_pid: u32) -> Vec<String> {
-    Vec::new()
-}
+fn assert_os_agrees(_engine: &Engine) {}

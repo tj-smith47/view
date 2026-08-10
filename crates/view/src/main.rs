@@ -168,6 +168,27 @@ fn engine_config(cli: &Cli) -> EngineConfig {
     cfg
 }
 
+/// The config a *replacement* engine is spawned from, when the one this
+/// session started with died.
+///
+/// Deliberately not [`engine_config`] threaded through
+/// [`maybe_relay_stdin`] the way the first spawn is. The piped stdin a
+/// `cmd | view -` session began with was consumed by the engine that died:
+/// re-arming the relay hands the replacement a descriptor already at EOF,
+/// and leaving `-` in the arguments *without* a relay armed is worse still,
+/// since nvim would then read view's own `--embed` RPC channel as buffer
+/// text. The dash goes.
+///
+/// What that costs is stated rather than hidden: the piped content comes
+/// back only as far as nvim's own swap file holds it. view keeps no copy of
+/// buffer text to replay -- nvim owns it -- so there is nothing else to
+/// recover a `[No Name]` buffer from here.
+fn respawn_config(cli: &Cli) -> EngineConfig {
+    let mut cfg = engine_config(cli);
+    cfg.extra_args.retain(|arg| arg != "-");
+    cfg
+}
+
 /// Arms `cfg`'s stdin relay when `passthrough` names `-` and the process's
 /// own stdin is not a terminal (`ls | view -`): duplicates it onto the
 /// fixed descriptor `startup::spawn_and_attach` tells nvim to read via
@@ -493,10 +514,8 @@ fn main() -> Result<()> {
     }
 
     // built fresh per restart rather than stored once: `EngineConfig` is
-    // consumed by the spawn it describes, and the stdin relay it can carry
-    // is an owned descriptor a second spawn needs a second duplicate of,
-    // not a clone of the first
-    let respawn = || maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
+    // consumed by the spawn it describes
+    let respawn = || respawn_config(&cli);
     let (model, exit_code) = runtime::run(
         model,
         recovery::EngineSession {
@@ -579,6 +598,37 @@ mod tests {
         assert!(
             help.contains("before the first argument meant for nvim"),
             "the rendered --help must state the ordering rule, got:\n{help}"
+        );
+    }
+
+    /// A replacement engine is not a second first-spawn: the pipe that fed
+    /// the original is drained, and `-` left in place with no relay armed
+    /// would have nvim read the RPC channel itself as buffer text.
+    #[test]
+    fn a_replacement_engine_is_never_pointed_at_the_pipe_the_first_one_drank() {
+        let cli = Cli::parse_from(["view", "-"]);
+        assert_eq!(
+            engine_config(&cli).extra_args,
+            vec![std::ffi::OsString::from("-")],
+            "the first spawn must still be handed the dash it was asked for"
+        );
+        assert!(
+            respawn_config(&cli).extra_args.is_empty(),
+            "the replacement was pointed back at a pipe with nothing left in \
+             it: {:?}",
+            respawn_config(&cli).extra_args
+        );
+        assert!(
+            !respawn_config(&cli).stdin_relay_requested(),
+            "the replacement re-armed the relay on a drained descriptor"
+        );
+
+        let mixed = Cli::parse_from(["view", "-", "notes.md"]);
+        assert_eq!(
+            respawn_config(&mixed).extra_args,
+            vec![std::ffi::OsString::from("notes.md")],
+            "dropping the dash must not cost the replacement the real file \
+             the session also named"
         );
     }
 

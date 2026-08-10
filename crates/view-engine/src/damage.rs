@@ -56,6 +56,7 @@
 //! staged with nothing to wake the consumer for it.
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::TrySendError;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -448,14 +449,29 @@ impl Route {
 pub(crate) struct PumpShared {
     damage: Mutex<DamageBuffer>,
     route: Mutex<Route>,
+    generation: u64,
 }
+
+/// Hands every pump -- and so every connection, since a pump is built once
+/// per [`crate::process::Engine::spawn`] -- an id no other connection in
+/// this process has held.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 impl PumpShared {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
             damage: Mutex::new(DamageBuffer::default()),
             route: Mutex::new(Route::default()),
+            generation: NEXT_GENERATION.fetch_add(1, Ordering::Relaxed),
         })
+    }
+
+    /// This connection's generation: the tag every terminal message it
+    /// routes carries, so a loop holding a replacement can tell a stop that
+    /// describes the engine it is running from one that describes the
+    /// engine it replaced.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Folds a decoded `redraw` batch and, iff this fold transitions the
@@ -634,12 +650,27 @@ impl PumpShared {
         route.hold_if_refused(which, sink.try_send(msg));
     }
 
-    /// Routes the terminal `Msg::EngineStopped` signal with a blocking
-    /// `send` rather than `try_send` (see module docs' bounded channel
-    /// contract for why a dropped `EngineStopped` is unrecoverable, unlike a
-    /// dropped `RedrawReady`). Stages it in the arrival-order FIFO if no
-    /// sink is attached yet, same as [`route_msg`](Self::route_msg).
-    pub(crate) fn route_terminal(&self, msg: Msg) {
+    /// Routes this connection's terminal `Msg::EngineStopped`, stamped with
+    /// [`generation`](Self::generation), with a blocking `send` rather than
+    /// `try_send` (see module docs' bounded channel contract for why a
+    /// dropped `EngineStopped` is unrecoverable, unlike a dropped
+    /// `RedrawReady`). Stages it in the arrival-order FIFO if no sink is
+    /// attached yet, same as [`route_msg`](Self::route_msg).
+    ///
+    /// The stamp is what makes a restart safe. Every connection this process
+    /// opens shares one loop channel, and the reader of a connection being
+    /// replaced posts its stop *after* the replacement is live -- the
+    /// teardown a restart performs is what produces that stop. Unstamped, a
+    /// loop reading it would resolve it against the engine it is now running
+    /// and tear down the replacement it had just brought up.
+    pub(crate) fn route_engine_stopped(&self, reason: Option<String>) {
+        self.route_terminal(Msg::EngineStopped {
+            generation: self.generation,
+            reason,
+        });
+    }
+
+    fn route_terminal(&self, msg: Msg) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(sink) = route.sink.clone() else {
             route.presink.push_back(msg);
@@ -1250,7 +1281,7 @@ mod tests {
 
         let blocked = Arc::clone(&shared);
         let sender = std::thread::spawn(move || {
-            blocked.route_terminal(Msg::EngineStopped(None));
+            blocked.route_engine_stopped(None);
         });
 
         // give the blocking send every chance to have wrongly returned
@@ -1266,7 +1297,7 @@ mod tests {
         sender.join().expect("blocked sender thread must not panic");
 
         assert!(
-            matches!(rx.recv(), Ok(Msg::EngineStopped(None))),
+            matches!(rx.recv(), Ok(Msg::EngineStopped { reason: None, .. })),
             "EngineStopped must arrive once the channel has room, not be dropped"
         );
     }

@@ -517,13 +517,15 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
         .unwrap();
     assert!(kill_status.success(), "kill -KILL {killed} failed");
 
+    let killed_at = Instant::now();
+
     // a *different* child, not merely a child: the pid answering here is
     // the whole difference between a session that recovered and one still
     // holding the corpse of the engine it lost
     let deadline = Instant::now() + Duration::from_secs(30);
     let mut replacement = None;
     while Instant::now() < deadline && replacement.is_none() {
-        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(250))
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
             .filter(|pid| *pid != killed);
     }
     let Some(replacement) = replacement else {
@@ -533,6 +535,19 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
         );
     };
     assert_ne!(replacement, killed);
+    // an unattended recovery is decided by the supervision fold, which the
+    // loop reaches on its own readout tick rather than on a message -- so
+    // the pass that decides it must go straight back to the top instead of
+    // through the wait, or the user watches a frozen editor for another
+    // whole `READOUT_RESOLUTION` after the decision was already made. Timed
+    // to the spawn, not to the first paint, so this measures the loop's own
+    // turnaround and not nvim's startup.
+    let took = killed_at.elapsed();
+    assert!(
+        took < view_core::native::supervision::READOUT_RESOLUTION,
+        "the replacement engine took {took:?} to start: an unattended \
+         recovery must not wait on the readout timer"
+    );
 
     // and the replacement is painting through view: this text is nvim's
     // own, produced by the swap recovery the restart asked for, and it can
@@ -546,6 +561,90 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
         session.screen()
     );
 }
+
+/// The restart the other recovery test cannot reach: this one replaces an
+/// engine whose reader thread is *still alive* at the moment of the swap.
+///
+/// A signal-killed engine is already reaped by the time its replacement is
+/// asked for, so the reader has spoken its one terminal message and gone
+/// before the swap -- the stop and the restart are ordered by the death
+/// itself. A wedged engine is not: `Engine::restart` is what ends it, and
+/// the reader it shared a connection with reports that ending *after* the
+/// replacement is attached and running. That report names a connection this
+/// session no longer has, and acting on it would tear down a healthy engine
+/// (or, with unattended recovery on, restart one that never died). So the
+/// assertion is a count, not a liveness check: exactly one replacement, and
+/// it keeps running.
+///
+/// Slow by construction -- the modal offering `<F5>` is deliberately behind
+/// `HEARTBEAT_WEDGE_THRESHOLD` + `ENGINE_BUSY_MODAL_THRESHOLD` (10s + 30s),
+/// because a user must never be interrupted for a hiccup. There is no
+/// shorter route to a restart of a live engine.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restart_of_a_still_running_engine_leaves_exactly_one_replacement() {
+    let mut session = spawn_view_pty();
+
+    let view_pid = session.view_pid();
+    let wedged = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+
+    // SIGSTOP rather than a busy loop inside nvim: both stop the engine
+    // answering heartbeats with its reader thread intact, but a stopped
+    // child costs the host nothing, and a suite that runs on a contended
+    // box must not spend 40 seconds of a core spinning in `:lua`
+    let stop_status = std::process::Command::new("kill")
+        .arg("-STOP")
+        .arg(wedged.to_string())
+        .status()
+        .unwrap();
+    assert!(stop_status.success(), "kill -STOP {wedged} failed");
+
+    assert!(
+        session.wait_for("Restart", Duration::from_secs(90)),
+        "the wedge modal never offered a restart; screen:\n{}",
+        session.screen()
+    );
+    // `<F5>` as the terminal sends it
+    session.send(b"\x1b[15~").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut replacement = None;
+    while Instant::now() < deadline && replacement.is_none() {
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(250))
+            .filter(|pid| *pid != wedged);
+    }
+    let Some(replacement) = replacement else {
+        panic!(
+            "the restart never produced a different engine within 30s; screen:\n{}",
+            session.screen()
+        );
+    };
+
+    // the window in which the dead reader's report arrives: it is sent the
+    // moment the old child is reaped, which is inside the restart above, so
+    // anything it was going to do has happened well before this ends
+    let watch_until = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < watch_until {
+        if let Some(pid) = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(500)) {
+            assert_eq!(
+                pid, replacement,
+                "a third engine appeared: the replaced engine's terminal \
+                 message was acted on against the session that replaced it"
+            );
+        }
+    }
+
+    // and the session is the user's again, not a screen with a modal still
+    // on it over an engine nobody is driving
+    session.send(b"\x1b:echo \"restarted\"\r").unwrap();
+    assert!(
+        session.wait_for("restarted", Duration::from_secs(15)),
+        "the replacement engine never answered a command; screen:\n{}",
+        session.screen()
+    );
+}
+
 #[test]
 fn view_shows_an_echoed_message() {
     let mut session = spawn_view_pty();

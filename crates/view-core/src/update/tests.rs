@@ -1052,7 +1052,14 @@ fn engine_down_without_code_exits_one_and_signal_code_passes_through() {
 fn loop_tokens_are_noops_and_engine_request_always_replies() {
     let mut m = model();
     assert!(update(&mut m, Msg::RedrawReady).is_empty());
-    assert!(update(&mut m, Msg::EngineStopped(None)).is_empty());
+    assert!(update(
+        &mut m,
+        Msg::EngineStopped {
+            generation: 1,
+            reason: None
+        }
+    )
+    .is_empty());
     let effects = update(
         &mut m,
         Msg::EngineRequest(EngineRequest::VimEnter {
@@ -3725,7 +3732,7 @@ fn quitting_a_dead_engine_leaves_with_the_status_nvim_reported() {
             code: Some(137),
             by_signal: true,
         },
-        None,
+        false,
     );
     let _ = update(
         &mut m,
@@ -4173,6 +4180,86 @@ fn the_modal_answers_its_choices_and_passes_every_other_key_through() {
         "answering the modal must cost no keystroke: {effects:?}"
     );
     assert!(m.overlays().is_empty(), "Dismiss must close the modal");
+}
+
+/// The exemption to the rule the test below pins, and what makes it safe to
+/// grant: a connection that is gone offers only keys nothing else answers.
+///
+/// A `Dead` modal stacked over a picker paints `[<F5>] Restart` and
+/// `[<C-q>] Quit view`. If the focus rule silenced those the way it silences
+/// `<Esc>`, the modal would be naming keys that do nothing -- and unlike
+/// every other wedge, this one cannot be dismissed and the engine under it
+/// cannot be reached, so the two keys it paints are the only way out of the
+/// session at all.
+#[test]
+fn a_focused_overlays_keys_never_collide_with_a_dead_engines_choices() {
+    /// Every notation an overlay holding the keyboard acts on: the generic
+    /// `<Esc>` pop, the tree's own navigation and open, and the query
+    /// editing a picker applies to anything printable plus `<BS>`.
+    const FOCUSED_OVERLAY_KEYS: [&str; 5] = ["<Esc>", "<CR>", "<Up>", "<Down>", "<BS>"];
+
+    for choice in WedgeKind::Dead.choices() {
+        let key = choice.key();
+        assert!(
+            !FOCUSED_OVERLAY_KEYS.contains(&key),
+            "a dead engine offers {choice:?} on {key:?}, which an overlay \
+             holding the keyboard answers itself: answering it here as well \
+             would act on both"
+        );
+        assert!(
+            key.len() > 1,
+            "a dead engine offers {choice:?} on the bare key {key:?}, which \
+             a picker would fold into its query"
+        );
+    }
+}
+
+/// The exemption, driven: a tree open when the connection dies keeps its own
+/// keys, and the modal above it still answers the two that are the only way
+/// out.
+#[test]
+fn a_dead_engines_choices_are_answered_over_an_overlay_that_holds_the_keyboard() {
+    let mut m = attended_model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    let tree_id = match m.overlays().last() {
+        Some(overlay) if matches!(overlay.kind, OverlayKind::Tree(_)) => overlay.id,
+        other => unreachable!("toggle must have opened a Tree overlay: {other:?}"),
+    };
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(tree_id),
+        "the annunciator took focus from the overlay the user opened"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: RESTART_NOTATION.to_string(),
+        }),
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::RestartEngine)),
+        "the only way out of a dead session was painted and not answered: \
+         {effects:?}"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(tree_id),
+        "answering the annunciator closed the overlay underneath it"
+    );
 }
 
 /// The modal opening over an overlay that does hold the keyboard must not

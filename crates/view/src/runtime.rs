@@ -311,6 +311,15 @@ pub struct Executor<E: EngineOps> {
     /// than silently drop the token (see `run`'s match arms below and
     /// `EngineRequest`'s one-reply-per-token contract).
     clipboard: Option<mpsc::Sender<crate::clipboard::ClipboardJob>>,
+    /// Which engine this executor's connection is, as
+    /// [`crate::clipboard::ReplyRoute::epoch`] counts them. Stamped onto
+    /// every clipboard job this executor queues, so a job outstanding when
+    /// the engine is replaced is recognisable as belonging to the dead
+    /// connection -- a restart builds a new executor from the stepped
+    /// epoch, and the jobs the old one left in the channel keep the old
+    /// number. Read here rather than at reply time because the worker
+    /// cannot tell those two apart once they are in the same queue.
+    reply_epoch: u64,
     /// The terminal's OSC52 job channel, drained synchronously by `run`'s
     /// loop on the thread that owns `Term` (see `Effect::Osc52Copy`'s doc
     /// for why this cannot be a write from the clipboard worker thread).
@@ -438,6 +447,7 @@ impl<E: EngineOps> Executor<E> {
         Self {
             ops,
             clipboard: None,
+            reply_epoch: 0,
             osc52: None,
             toast_timer: None,
             picker: None,
@@ -450,6 +460,14 @@ impl<E: EngineOps> Executor<E> {
     #[must_use]
     pub fn with_clipboard(mut self, tx: mpsc::Sender<crate::clipboard::ClipboardJob>) -> Self {
         self.clipboard = Some(tx);
+        self
+    }
+
+    /// Stamps every clipboard job this executor queues as belonging to
+    /// engine `epoch` (see [`crate::clipboard::ReplyRoute::epoch`]).
+    #[must_use]
+    pub fn with_reply_epoch(mut self, epoch: u64) -> Self {
+        self.reply_epoch = epoch;
         self
     }
 
@@ -564,6 +582,7 @@ impl<E: EngineOps> Executor<E> {
                     Some(tx) => {
                         let job = crate::clipboard::ClipboardJob {
                             token,
+                            epoch: self.reply_epoch,
                             kind: crate::clipboard::ClipboardJobKind::Read { register },
                         };
                         if tx.send(job).is_err() {
@@ -602,6 +621,7 @@ impl<E: EngineOps> Executor<E> {
                     Some(tx) => {
                         let job = crate::clipboard::ClipboardJob {
                             token,
+                            epoch: self.reply_epoch,
                             kind: crate::clipboard::ClipboardJobKind::Write {
                                 register,
                                 lines,
@@ -1235,13 +1255,29 @@ fn wait_for_msg_unified(
 /// reachable without a terminal, an executor or a loop -- every arm here is
 /// a place a connection-level fact enters the model, and an arm nothing can
 /// call is an arm nothing can prove.
+///
+/// `None` means the wakeup carried nothing this session should act on: a
+/// terminal message belonging to a connection it has already replaced.
+/// The whole stop, in the shape [`step`] resolves it from.
+///
+/// A named function rather than a closure spelled out at each of `run`'s
+/// dispatch sites: three copies of "what counts as a stop" is exactly the
+/// drift `step` exists to prevent.
+fn engine_stop(engine: &mut Engine) -> crate::recovery::EngineStop {
+    let (exit, announced_exit) = engine.stop_report();
+    crate::recovery::EngineStop {
+        exit,
+        announced_exit,
+    }
+}
+
 fn intake(
     received: Result<Msg, mpsc::RecvError>,
     engine: &mut Engine,
     pump: &view_engine::DamagePump,
     model: &mut Model,
-) -> Msg {
-    match received {
+) -> Option<Msg> {
+    Some(match received {
         Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
         Ok(Msg::HeartbeatReply { generation }) => {
             // recorded here rather than in `update()`: this is the runtime
@@ -1251,14 +1287,34 @@ fn intake(
             engine.heartbeat.record_ack(generation);
             Msg::HeartbeatReply { generation }
         }
-        Ok(Msg::EngineStopped(reason)) => {
+        // a stop belonging to a connection this session has already
+        // replaced. One loop channel serves every engine a session opens,
+        // and the reader of a replaced engine posts its stop only after the
+        // replacement is live -- the restart's own teardown is what
+        // produces it. Acted on, it would resolve against the engine now
+        // running: `wait_exit` below would kill the healthy replacement,
+        // and the session would report the death it had just recovered
+        // from. There is nothing left to do about a connection that is
+        // gone and already succeeded, so it is dropped outright.
+        Ok(Msg::EngineStopped { generation, .. }) if generation != engine.generation() => {
+            crate::vlog::log_with("engine", || {
+                format!(
+                    "dropped a stop from replaced engine generation {generation} (running {})",
+                    engine.generation()
+                )
+            });
+            return None;
+        }
+        Ok(Msg::EngineStopped { generation, reason }) => {
             // Same bounded (up to `shutdown_timeout`) block as the
             // `Flow::EngineLost` arm in `run`, but the reader thread's
             // stream has already ended by the time this fires, so the
             // `qa!` send is a harmless no-op and the first `try_wait`
             // typically finds the child already exited.
             let exit = engine.wait_exit();
-            let recoverable = model.supervision.note_engine_stop(exit, reason.as_deref());
+            let recoverable = model
+                .supervision
+                .note_engine_stop(exit, engine.handle.announced_exit());
             // stashed on the model rather than reported here: this loop
             // runs behind the terminal's raw-mode alternate screen, so
             // `main` reports it only after `run` returns and the
@@ -1270,7 +1326,7 @@ fn intake(
                 // passed through rather than resolved into a quit: the
                 // supervision fold owns this connection from here, and the
                 // stop is a state to report and offer recovery from
-                Msg::EngineStopped(reason)
+                Msg::EngineStopped { generation, reason }
             } else {
                 Msg::EngineDown(exit)
             }
@@ -1280,7 +1336,7 @@ fn intake(
             code: None,
             by_signal: false,
         }),
-    }
+    })
 }
 
 /// Runs the unified loop until `update()` produces `Effect::Quit` or a
@@ -1414,7 +1470,7 @@ pub fn run(
         picker: picker_tx,
         msg: msg_tx,
     };
-    let mut executor = channels.executor(engine.handle.clone());
+    let mut executor = channels.executor(engine.handle.clone(), clipboard_route.epoch());
     let mut write_stall = OutboxStallWatch::default();
     let mut supervision = SupervisionFold::default();
     let mut state = LoopState::default();
@@ -1496,7 +1552,7 @@ pub fn run(
                 &executor,
                 follow_ups,
                 &mut state,
-                || engine.wait_exit(),
+                || engine_stop(&mut engine),
                 Msg::Resized { width, height },
             ) {
                 return Ok((model, code));
@@ -1518,10 +1574,19 @@ pub fn run(
                 &executor,
                 follow_ups,
                 &mut state,
-                || engine.wait_exit(),
+                || engine_stop(&mut engine),
                 msg,
             ) {
                 return Ok((model, code));
+            }
+            // straight back to the top rather than on through the wait
+            // below, matching what the message path does after its own
+            // batch: an engine that has stopped sending anything wakes this
+            // loop only on the readout timer, so a restart the fold itself
+            // asked for would otherwise sit unstarted for up to
+            // `READOUT_RESOLUTION` behind a screen the user cannot use.
+            if state.restart_requested {
+                continue;
             }
         }
         // paint before blocking, not after processing: state mutated ahead
@@ -1568,11 +1633,15 @@ pub fn run(
         if received.is_ok() {
             view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
         }
-        let msg = intake(received, &mut engine, &pump, &mut model);
+        let Some(msg) = intake(received, &mut engine, &pump, &mut model) else {
+            // nothing to dispatch: the intake dropped a message addressed
+            // to a connection this session no longer runs
+            continue;
+        };
         // the intake resolved a stop it judged a death rather than the
         // session ending: from here the supervision fold owns this
         // connection, and `WedgeKind::Dead` is a verdict it may reach
-        state.connection_lost |= matches!(msg, Msg::EngineStopped(_));
+        state.connection_lost |= matches!(msg, Msg::EngineStopped { .. });
         let mut queue = vec![msg];
         let mut drained_residue = false;
         while let Some(msg) = queue.pop() {
@@ -1581,7 +1650,7 @@ pub fn run(
                 &executor,
                 follow_ups,
                 &mut state,
-                || engine.wait_exit(),
+                || engine_stop(&mut engine),
                 msg,
             ) {
                 return Ok((model, code));
@@ -3425,7 +3494,7 @@ mod tests {
             let msg = rx
                 .recv_timeout(left)
                 .expect("a stopped engine must signal EngineStopped within 30s");
-            if matches!(msg, Msg::EngineStopped(_)) {
+            if matches!(msg, Msg::EngineStopped { .. }) {
                 return msg;
             }
         }
@@ -3441,13 +3510,22 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<Msg>(64);
         let (pump, _cutover) = engine.start_pump(tx);
         let mut model = Model::with_term_size(80, 24);
+        // the same registration, in the same order, `startup` performs on
+        // every real session: it is what installs the `VimLeavePre` relay
+        // this seam's answer rests on, so a test that skipped it would be
+        // asserting against an engine no user ever runs
+        engine
+            .handle
+            .register_bridge(engine.api_info.channel_id)
+            .unwrap();
         // `--embed` holds nvim's startup until a UI attaches, so an engine
         // nobody attached to would never read the quit typed below
         engine.handle.ui_attach(80, 24).unwrap();
         engine.handle.input(":qa!<CR>").unwrap();
 
         let stopped = await_engine_stopped(&rx);
-        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model);
+        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model)
+            .expect("a stop from the engine this session runs is never dropped");
         let Msg::EngineDown(exit) = resolved else {
             unreachable!("a quit engine must resolve to EngineDown, got {resolved:?}");
         };
@@ -3479,9 +3557,10 @@ mod tests {
         assert!(killed.success(), "kill -KILL failed: {killed:?}");
 
         let stopped = await_engine_stopped(&rx);
-        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model);
+        let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model)
+            .expect("a stop from the engine this session runs is never dropped");
         assert!(
-            matches!(resolved, Msg::EngineStopped(_)),
+            matches!(resolved, Msg::EngineStopped { .. }),
             "a killed engine must reach supervision rather than resolve to a \
              quit, got {resolved:?}"
         );

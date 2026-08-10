@@ -12,6 +12,7 @@ use crate::msg::{
 use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
+use crate::native::supervision::WedgeKind;
 
 mod supervision;
 
@@ -33,24 +34,35 @@ fn path_to_wire(path: &std::path::Path) -> String {
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(Key { notation }) => {
-            // ahead of every other keypress rule, and consuming nothing: the
-            // busy modal is the newest thing on screen, so a key naming one
-            // of its choices is folded into the episode's bookkeeping here
-            // wherever the stack sits, and then routed below exactly as it
-            // would have been with no modal open -- see
-            // `note_supervision_choice` on why an annunciator may neither
-            // swallow a keystroke nor charge a user one to answer it.
+            // ahead of every other keypress rule: the busy modal is the
+            // newest thing on screen, so a key naming one of its choices is
+            // folded into the episode's bookkeeping here, and then routed
+            // below exactly as it would have been with no modal open -- see
+            // `note_supervision_choice` on which of those keys the routing
+            // then reaches nvim with.
             //
-            // Only while the engine owns the keyboard, which is the same
-            // condition as "this key is about to reach nvim". An overlay
+            // While the engine owns the keyboard, which is the same
+            // condition as "this key is about to reach nvim": an overlay
             // that takes focus is answering the key itself, and the
             // annunciator stacked over it must not read that answer as its
-            // own: one <Esc> at a picker under this modal would otherwise
+            // own -- one <Esc> at a picker under this modal would otherwise
             // close both, spending the episode's single offer on a
             // dismissal the user never made.
-            let mut effects = match model.focus() {
-                Focus::Engine => note_supervision_choice(model, &notation),
-                Focus::Native(_) => Vec::new(),
+            //
+            // Except for a connection that is gone, which is answered
+            // wherever the stack sits. Its choices collide with nothing a
+            // focused overlay answers (`a_focused_overlays_keys_never_collide_
+            // with_a_dead_engines_choices`), and it offers no dismissal at
+            // all, so there is no offer to spend by accident -- while a
+            // modal painting keys it would refuse is an editor telling its
+            // user the way out is a key that does nothing.
+            let answers_anywhere = model
+                .engine_busy()
+                .is_some_and(|open| open.kind == WedgeKind::Dead);
+            let mut effects = if answers_anywhere || model.focus() == Focus::Engine {
+                note_supervision_choice(model, &notation)
+            } else {
+                Vec::new()
             };
             effects.extend(route_key(model, notation));
             effects
@@ -79,7 +91,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // draining loop, before the steady-state loop this match belongs to
         // ever starts, so that arm is unreachable in practice but kept for
         // the same defensive-totality reason
-        Msg::RedrawReady | Msg::EngineStopped(_) | Msg::EngineReady => Vec::new(),
+        Msg::RedrawReady | Msg::EngineStopped { .. } | Msg::EngineReady => Vec::new(),
         Msg::EngineDown(exit) => {
             model.running = false;
             vec![Effect::Quit {

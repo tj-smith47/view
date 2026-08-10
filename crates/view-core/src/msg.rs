@@ -5,12 +5,17 @@
 //! ```ignore
 //! let msg = match msg_rx.recv() {
 //!     Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
-//!     Ok(Msg::EngineStopped(reason)) => {
+//!     // a stop describing an engine this session has already replaced is
+//!     // dropped here, before anything acts on it
+//!     Ok(Msg::EngineStopped { generation, .. }) if generation != engine.generation() => continue,
+//!     Ok(Msg::EngineStopped { generation, reason }) => {
 //!         let exit = engine.wait_exit();
-//!         let recoverable = model.supervision.note_engine_stop(exit, reason.as_deref());
+//!         let recoverable = model
+//!             .supervision
+//!             .note_engine_stop(exit, engine.handle.announced_exit());
 //!         model.fatal_reason = reason.clone();
 //!         // a death goes to supervision; an exit the user asked for ends the session
-//!         if recoverable { Msg::EngineStopped(reason) } else { Msg::EngineDown(exit) }
+//!         if recoverable { Msg::EngineStopped { generation, reason } } else { Msg::EngineDown(exit) }
 //!     }
 //!     Ok(m) => m,
 //!     Err(_) => Msg::EngineDown(ExitInfo { code: None, by_signal: false }),
@@ -52,7 +57,18 @@ pub enum Msg {
     /// or corrupt the screen outright. The caller stashes it (see the
     /// module doc's call site) and reports it only once the terminal is
     /// restored.
-    EngineStopped(Option<String>),
+    EngineStopped {
+        /// Which connection's reader announced this. One loop channel serves
+        /// every engine a session opens, and the reader of an engine being
+        /// replaced posts its stop after the replacement is already live, so
+        /// a stop is only ever about the connection that carried it. The
+        /// loop drops any whose generation is not the one it is running (see
+        /// the module doc's call site).
+        generation: u64,
+        /// The reader thread's own reason, when it stopped reading for a
+        /// cause other than the engine process simply exiting.
+        reason: Option<String>,
+    },
     /// Loop plumbing: startup's pre-attach key-buffering loop consumes this
     /// the moment the background attach thread finishes `nvim_ui_attach`,
     /// unblocking its `recv()` without a poll or a timer. Never reachable

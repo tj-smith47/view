@@ -249,7 +249,7 @@ fn wait_for_engine_stopped(msgs: &std::sync::mpsc::Receiver<Msg>) -> bool {
     loop {
         let left = deadline.saturating_duration_since(std::time::Instant::now());
         match msgs.recv_timeout(left) {
-            Ok(Msg::EngineStopped(_)) => return true,
+            Ok(Msg::EngineStopped { .. }) => return true,
             Ok(_) => {}
             Err(_) => return false,
         }

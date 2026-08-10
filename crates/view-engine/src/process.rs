@@ -387,6 +387,7 @@ pub struct Engine {
     /// expression as [`handle`](Self::handle), which an accessor borrowing
     /// all of `Engine` would forbid.
     pub heartbeat: HeartbeatWatch,
+    command_line: Vec<OsString>,
 }
 
 /// Starts the one thread that owns the heartbeat cadence, ticking `prober`
@@ -463,6 +464,13 @@ impl Engine {
             crate::env::prepare_hermetic_home()?;
         }
         let mut command = build_command(&cfg);
+        // read back off the `Command` that is about to be spawned rather than
+        // re-derived from `cfg`: a second derivation is free to drift from
+        // what the child actually receives, and the whole point of exposing
+        // this is to be able to assert on the real thing
+        let command_line: Vec<OsString> = std::iter::once(command.get_program().to_os_string())
+            .chain(command.get_args().map(std::ffi::OsStr::to_os_string))
+            .collect();
         // the stdin `Stdio::piped()` would build on Windows is opened without
         // the right to read its own attributes, which is the right the
         // outbox's readiness query needs, and no later call can widen it. A
@@ -543,6 +551,7 @@ impl Engine {
             api_info,
             pump,
             heartbeat,
+            command_line,
         })
     }
 
@@ -624,6 +633,30 @@ impl Engine {
         attached
     }
 
+    /// How long a stop resolution waits for the reader thread to publish
+    /// what it found, once the child itself is already reaped. It is a
+    /// drain of an at-EOF stream, not work: this is a ceiling on a thread
+    /// that never wakes, not a budget anything is expected to spend.
+    const READER_SETTLE: Duration = Duration::from_millis(250);
+
+    /// Resolves the whole stop: the child's real exit status, and whether
+    /// the engine announced it was leaving before the connection went
+    /// ([`EngineHandle::announced_exit`](crate::handle::EngineHandle::announced_exit)).
+    ///
+    /// One call rather than two reads because the two are only meaningful
+    /// together and only in this order. The status is resolved first, which
+    /// reaps the child and so guarantees the reader's stream is at EOF; the
+    /// wait that follows is what makes the announcement's absence mean
+    /// "there was none" rather than "the reader had not got to it yet".
+    ///
+    /// A bounded (up to `shutdown_timeout` plus [`READER_SETTLE`]) block, on
+    /// a transition that happens at most once per engine.
+    pub fn stop_report(&mut self) -> (ExitInfo, bool) {
+        let exit = self.wait_exit();
+        self.handle.wait_until_settled(Self::READER_SETTLE);
+        (exit, self.handle.announced_exit())
+    }
+
     /// Resolves the engine's exit status into an [`ExitInfo`], for the
     /// runtime loop to call once its reader signals `Msg::EngineStopped`
     /// (the reader thread's stream ended, so the connection is already
@@ -645,6 +678,35 @@ impl Engine {
                 by_signal: false,
             },
         }
+    }
+
+    /// This connection's generation: an id no other connection this process
+    /// opens has held, carried by every `Msg::EngineStopped` its reader
+    /// routes.
+    ///
+    /// One loop channel serves every engine a session opens, and the reader
+    /// of an engine being replaced posts its stop *after* the replacement is
+    /// live -- the teardown [`restart`](Self::restart) performs is what
+    /// produces that stop. Comparing this against the stop's own stamp is
+    /// how a caller separates a stop from the connection it currently runs
+    /// from a stop belonging to one it already replaced.
+    #[must_use]
+    pub fn generation(&self) -> u64 {
+        self.pump.generation()
+    }
+
+    /// The exact command line this engine's child was spawned with, program
+    /// name first: read off the `Command` at spawn time, never re-derived
+    /// from the config.
+    ///
+    /// The one place the argument-shaping rules in [`with_recovery`] can be
+    /// asserted for what they actually delivered on every platform. Reading
+    /// it back out of the OS process table instead is a Linux-only luxury
+    /// (`/proc/<pid>/cmdline`), and a test written against that alone proves
+    /// nothing anywhere else.
+    #[must_use]
+    pub fn command_line(&self) -> &[OsString] {
+        &self.command_line
     }
 
     /// The OS process id of the spawned child. For diagnostics and tests
@@ -776,6 +838,13 @@ fn names_a_file(args: &[OsString]) -> bool {
         // script, so nothing after it is a file nvim opens
         if arg == "-l" {
             return false;
+        }
+        // nvim's `-` is an operand, not an option: it names the buffer fed
+        // from piped stdin. Reading it as an option would consume whatever
+        // followed it as that option's value, so `cmd | view - notes.md`
+        // would lose the real file too
+        if arg == "-" {
+            return true;
         }
         if arg.starts_with('-') || arg.starts_with('+') {
             expect_value = !takes_no_value(&arg);
@@ -1449,6 +1518,11 @@ mod tests {
         assert!(names_a_file(&args(&["--", "-not-an-option"])));
         assert!(names_a_file(&args(&["+42", "notes.md"])));
         assert!(names_a_file(&args(&["--cmd=set nu", "notes.md"])));
+        // `cmd | view -`: the dash is the buffer, and the word after one is
+        // never its value
+        assert!(names_a_file(&args(&["-"])));
+        assert!(names_a_file(&args(&["-", "notes.md"])));
+        assert!(names_a_file(&args(&["--clean", "-"])));
     }
 
     /// Every reading that must withhold it. The value cases are the ones

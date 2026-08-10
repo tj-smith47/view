@@ -58,9 +58,19 @@ pub(crate) struct LoopChannels {
 
 impl LoopChannels {
     /// The executor for `handle`, wired to every worker this session owns.
-    pub(crate) fn executor(&self, handle: EngineHandle) -> Executor<EngineHandle> {
+    ///
+    /// `reply_epoch` is the clipboard route's count of engines *after* it
+    /// has been re-pointed at `handle`, so the jobs this executor queues are
+    /// distinguishable from the ones its predecessor left outstanding (see
+    /// [`crate::clipboard::ReplyRoute::epoch`]).
+    pub(crate) fn executor(
+        &self,
+        handle: EngineHandle,
+        reply_epoch: u64,
+    ) -> Executor<EngineHandle> {
         Executor::new(handle)
             .with_clipboard(self.clipboard.clone())
+            .with_reply_epoch(reply_epoch)
             .with_osc52(self.osc52.clone())
             .with_toast_timer(self.msg.clone())
             .with_picker(self.picker.clone())
@@ -129,7 +139,8 @@ pub(crate) fn restart_engine(
         Vec::new()
     };
     route.rebind(engine.handle.clone());
-    let executor = channels.executor(engine.handle.clone());
+    // after the rebind, so the epoch read here is the replacement's
+    let executor = channels.executor(engine.handle.clone(), route.epoch());
     Ok(Restarted {
         engine,
         pump,
@@ -146,6 +157,18 @@ pub(crate) fn restart_engine(
     })
 }
 
+/// What a stopped engine reports about how it stopped: the child's real
+/// status, and whether it said it was on its way out before the connection
+/// closed.
+///
+/// The two travel together because neither answers alone. The status says
+/// what to leave with; the announcement says whether to leave at all, and it
+/// is the only half a Windows build can read for a process death.
+pub(crate) struct EngineStop {
+    pub(crate) exit: ExitInfo,
+    pub(crate) announced_exit: bool,
+}
+
 /// Dispatches one message and resolves whatever flow it produced, returning
 /// `Some(exit_code)` when the loop must stop and return that code.
 ///
@@ -154,8 +177,9 @@ pub(crate) fn restart_engine(
 /// in the message queue is exactly the drift that would let a crashed engine
 /// quit the editor down one path and offer recovery down another.
 ///
-/// `exit` resolves the child's real status, and is called only on the failed
-/// write that has not already been resolved -- a bounded (up to the engine's
+/// `stop` resolves the child's real status alongside whether the engine
+/// announced it was leaving, and is called only on the failed write that has
+/// not already been resolved -- a bounded (up to the engine's
 /// `shutdown_timeout`) block on a transition that happens at most once per
 /// engine, never on a steady-state pass.
 pub(crate) fn step<E: EngineOps>(
@@ -163,7 +187,7 @@ pub(crate) fn step<E: EngineOps>(
     executor: &Executor<E>,
     follow_ups: &mut FollowUps<'_>,
     state: &mut LoopState,
-    exit: impl FnOnce() -> ExitInfo,
+    stop: impl FnOnce() -> EngineStop,
     msg: Msg,
 ) -> Option<i32> {
     match dispatch(model, executor, follow_ups, msg) {
@@ -181,11 +205,11 @@ pub(crate) fn step<E: EngineOps>(
         // than reporting the same loss once per remaining effect
         Flow::EngineLost if state.connection_lost => None,
         Flow::EngineLost => {
-            let exit = exit();
-            if model
-                .supervision
-                .note_engine_stop(exit, model.fatal_reason.as_deref())
-            {
+            let EngineStop {
+                exit,
+                announced_exit,
+            } = stop();
+            if model.supervision.note_engine_stop(exit, announced_exit) {
                 state.connection_lost = true;
                 None
             } else {
@@ -219,10 +243,22 @@ mod tests {
         FollowUps { native, theme }
     }
 
-    fn exit(code: i32, by_signal: bool) -> ExitInfo {
-        ExitInfo {
-            code: Some(code),
-            by_signal,
+    /// The stop an engine that said it was leaving reports: `:q` / `:cq`.
+    fn announced(code: i32) -> EngineStop {
+        EngineStop {
+            exit: ExitInfo {
+                code: Some(code),
+                by_signal: false,
+            },
+            announced_exit: true,
+        }
+    }
+
+    /// The stop an engine that never got to say anything reports.
+    fn silent(code: Option<i32>, by_signal: bool) -> EngineStop {
+        EngineStop {
+            exit: ExitInfo { code, by_signal },
+            announced_exit: false,
         }
     }
 
@@ -294,7 +330,7 @@ mod tests {
             &executor,
             &mut inert_follow_ups(&mut native, &mut theme),
             &mut state,
-            || exit(0, false),
+            || announced(0),
             Msg::Key(Key {
                 notation: "a".to_string(),
             }),
@@ -324,7 +360,7 @@ mod tests {
             &executor,
             &mut inert_follow_ups(&mut native, &mut theme),
             &mut state,
-            || exit(139, true),
+            || silent(Some(139), true),
             Msg::Key(Key {
                 notation: "a".to_string(),
             }),

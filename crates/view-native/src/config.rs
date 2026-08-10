@@ -130,7 +130,10 @@ impl ViewConfig {
     /// Returns [`NativeConfigError`] on invalid TOML, a `[native]` key that
     /// names no feature, or an unknown key inside `[supervision]`.
     pub fn from_toml_str(s: &str) -> Result<Self, NativeConfigError> {
-        let file: ViewFile = toml::from_str(s)?;
+        // boxed: `toml::de::Error` is 128+ bytes on the msvc ABI, which
+        // makes every `Result<_, NativeConfigError>` in this module a
+        // large-error return there (`clippy::result_large_err`)
+        let file: ViewFile = toml::from_str(s).map_err(|e| NativeConfigError::Toml(Box::new(e)))?;
         Ok(Self {
             native: NativeConfig::from_parsed(&file)?,
             supervision: SupervisionConfig {
@@ -265,12 +268,12 @@ pub enum NativeConfigError {
         /// The path whose contents failed to parse.
         path: PathBuf,
         /// The underlying TOML error, with its line and column.
-        source: toml::de::Error,
+        source: Box<toml::de::Error>,
     },
     /// TOML given directly as a string is not valid, or a `[native]` value
     /// in it is not a boolean. No path: there is no file behind it.
     #[error(transparent)]
-    Toml(#[from] toml::de::Error),
+    Toml(#[from] Box<toml::de::Error>),
     /// A key inside `[native]` names no feature in the registry.
     #[error("unknown key `{key}` in [native]: no such native feature (known: {known})")]
     UnknownFeature {
@@ -280,6 +283,13 @@ pub enum NativeConfigError {
         known: String,
     },
 }
+
+/// Every `Result` in this module carries `NativeConfigError` by value, so a
+/// variant growing past `clippy::result_large_err`'s 128-byte threshold is a
+/// lint failure rather than a review note -- and it fires per target ABI, so
+/// the first host to see it can be one nobody builds on daily (msvc reads
+/// `toml::de::Error` as 128+ bytes where linux-gnu does not).
+const _: () = assert!(std::mem::size_of::<NativeConfigError>() <= 128);
 
 #[cfg(test)]
 mod tests {
