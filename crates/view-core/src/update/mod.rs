@@ -15,7 +15,7 @@ use crate::native::statusline::SegmentUpdate;
 
 mod supervision;
 
-use supervision::{note_engine_liveness, resolve_supervision_choice};
+use supervision::{note_engine_liveness, note_supervision_choice};
 
 /// Converts a filesystem path to the UTF-8 string an `RpcCall` path field
 /// carries, substituting the replacement character for any byte sequence
@@ -33,246 +33,16 @@ fn path_to_wire(path: &std::path::Path) -> String {
 pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     match msg {
         Msg::Key(Key { notation }) => {
-            // ahead of everything below, including the transient-dismiss
-            // bookkeeping: the busy modal is the newest thing on screen, so
-            // the three keys it answers are its own wherever the stack sits.
-            // Every other key falls through untouched -- see
-            // `resolve_supervision_choice` on why an annunciator may not
-            // swallow input
-            if let Some(effects) = resolve_supervision_choice(model, &notation) {
-                return effects;
-            }
-            // any keypress is "the user is reading again": gives a
-            // transient (info-kind) toast a readable duration bounded by
-            // real activity instead of a wall-clock timer the runtime
-            // never delivers to `update`; runs regardless of focus, since
-            // the semantic is user activity, not specifically engine input
-            let cmdline_open = model.engine.cmdline.is_some();
-            if model
-                .engine
-                .messages
-                .dismiss_transient_on_keypress(cmdline_open)
-            {
-                model.dirty = true;
-            }
-            // a resolved prompt's overlay follows the same lazy-dismiss
-            // timing as its underlying MessageEntry (see
-            // dismiss_transient_on_keypress): nvim sends no msg_clear on
-            // resolution, and cmdline_hide alone cannot tell "resolved"
-            // apart from "about to re-arm" (both start with the identical
-            // cmdline_hide + flush; the wire only disambiguates once a
-            // later, separate redraw batch either does or doesn't bring a
-            // new cmdline_show), so the overlay closes on the first
-            // keypress observed after the cmdline has actually stayed
-            // closed, exactly when the toast falls back to ordinary
-            // transient rules
-            if !cmdline_open
-                && matches!(
-                    model.focused_overlay_mut().map(|ov| &ov.kind),
-                    Some(OverlayKind::Prompt(_))
-                )
-            {
-                model.pop_focused_overlay();
-                model.dirty = true;
-            }
-            // <Esc> closes a picker sitting directly on top of the stack.
-            // Checked here, ahead of the focus match below, so a picker
-            // buried under a still-open prompt (the stacking rule a modal
-            // prompt keeps its focus, see `OverlayKind::Picker`'s doc) never
-            // sees this: `focused_overlay_mut` names the prompt in that case,
-            // not the picker, and the pattern below simply does not match.
-            if notation == "<Esc>"
-                && matches!(
-                    model.focused_overlay_mut().map(|ov| &ov.kind),
-                    Some(OverlayKind::Picker(_))
-                )
-            {
-                model.pop_focused_overlay();
-                // without this the closed picker stays on screen until some
-                // unrelated event repaints: the paint loop's `if model.dirty`
-                // gate is the only repaint trigger, and popping an overlay
-                // produces no engine redraw to trip it
-                model.dirty = true;
-                // tells the matcher worker to drop its live Session so a
-                // Files scan still walking a huge tree does not keep
-                // running unobserved -- see Effect::PickerClose's doc; the
-                // session-replacement path in the worker only fires on a
-                // later query for a different source, which closing here
-                // may never produce
-                return vec![Effect::PickerClose];
-            }
-            match model.focus() {
-                Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
-                Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
-                    // the prompt overlay answers by feeding the engine a
-                    // keystroke -- the engine is blocked in its own input
-                    // loop, not on an RpcRequest, so this is the one Native
-                    // arm that still reaches RpcCall::Input
-                    Some(OverlayKind::Prompt(p)) => {
-                        if p.accepts(&notation) {
-                            vec![Effect::Rpc(RpcCall::Input { notation })]
-                        } else {
-                            Vec::new()
-                        }
-                    }
-                    // every other key edits the query and re-asks the
-                    // matcher worker; edit_query itself decides what a
-                    // notation means (a plain char, <BS>, or a no-op it
-                    // still bumps the generation for), so this arm never
-                    // inspects notation itself.
-                    Some(OverlayKind::Picker(p)) => {
-                        let generation = p.edit_query(&notation);
-                        let needle = p.query().to_string();
-                        let source = p.source().clone();
-                        vec![Effect::PickerQuery {
-                            generation,
-                            needle,
-                            source,
-                            resolved: None,
-                        }]
-                    }
-                    // discards the payload deliberately: every branch below
-                    // reaches the tree through `model.tree_mut()` fresh
-                    // instead, since a bound `&mut TreeState` here would
-                    // keep `model` borrowed across the `model.pop_focused_overlay()`
-                    // and `model.close_tree()` calls the <CR>/<Esc> arms need
-                    Some(OverlayKind::Tree(_)) => match notation.as_str() {
-                        "<Esc>" => {
-                            model.pop_focused_overlay();
-                            model.dirty = true;
-                            vec![Effect::TreeClose]
-                        }
-                        "<Down>" => {
-                            if let Some(t) = model.tree_mut() {
-                                t.move_selection(1);
-                            }
-                            model.dirty = true;
-                            Vec::new()
-                        }
-                        "<Up>" => {
-                            if let Some(t) = model.tree_mut() {
-                                t.move_selection(-1);
-                            }
-                            model.dirty = true;
-                            Vec::new()
-                        }
-                        // a directory toggles in place; a leaf's path is
-                        // opened through RPC (nvim owns the buffer this
-                        // creates) and the sidebar closes on the same
-                        // keypress, matching a picker selection's own
-                        // close-on-open behavior
-                        "<CR>" => {
-                            let to_open = model.tree_mut().and_then(|t| {
-                                let entry = t.selected_entry()?;
-                                if entry.is_dir {
-                                    if let Some(idx) = t.view().selected {
-                                        t.toggle_expand(idx);
-                                    }
-                                    None
-                                } else {
-                                    t.selected_path()
-                                }
-                            });
-                            model.dirty = true;
-                            match to_open {
-                                Some(path) => {
-                                    model.pop_focused_overlay();
-                                    vec![Effect::Rpc(RpcCall::OpenFile {
-                                        path: path_to_wire(&path),
-                                    })]
-                                }
-                                None => Vec::new(),
-                            }
-                        }
-                        // opens the blocked-engine Prompt overlay through
-                        // the entry's own RpcCall (`vim.fn.input` primed
-                        // with a `kind = "confirm"` `nvim_echo`, see
-                        // `RpcCall::TreeCreatePrompt`'s doc) rather than any
-                        // new local input state: the reply routes back as
-                        // `Msg::TreeCreatePromptReply` and resolves the
-                        // actual file write from there, once nvim has
-                        // answered. Any selection, including none at all
-                        // (an empty tree), can create -- `TreeCreatePromptReply`
-                        // resolves the target directory from whatever is
-                        // selected at reply time (see its arm below), since
-                        // nothing about the tree's selection can move while
-                        // this prompt holds focus.
-                        "a" => {
-                            let Some(t) = model.tree_mut() else {
-                                return Vec::new();
-                            };
-                            let generation = t.generation();
-                            vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
-                        }
-                        // renaming a directory has no backing effect --
-                        // `RpcCall::RenameFile` and the `Effect::Tree*File`
-                        // pair are file-only by their own doc contracts --
-                        // so a directory selection is a silent no-op here
-                        // rather than opening a prompt whose answer nothing
-                        // could act on.
-                        "r" => {
-                            let Some(t) = model.tree_mut() else {
-                                return Vec::new();
-                            };
-                            let Some(entry) = t.selected_entry() else {
-                                return Vec::new();
-                            };
-                            if entry.is_dir {
-                                return Vec::new();
-                            }
-                            let current_name = entry
-                                .path
-                                .file_name()
-                                .map(|name| name.to_string_lossy().into_owned())
-                                .unwrap_or_default();
-                            let Some(old_path) = t.selected_path() else {
-                                return Vec::new();
-                            };
-                            let generation = t.generation();
-                            vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
-                                generation,
-                                old_path: path_to_wire(&old_path),
-                                current_name,
-                            })]
-                        }
-                        // same file-only restriction as "r", for the same
-                        // reason.
-                        "d" => {
-                            let Some(t) = model.tree_mut() else {
-                                return Vec::new();
-                            };
-                            let Some(entry) = t.selected_entry() else {
-                                return Vec::new();
-                            };
-                            if entry.is_dir {
-                                return Vec::new();
-                            }
-                            let Some(path) = t.selected_path() else {
-                                return Vec::new();
-                            };
-                            let generation = t.generation();
-                            vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
-                                generation,
-                                path: path_to_wire(&path),
-                            })]
-                        }
-                        _ => Vec::new(),
-                    },
-                    // the key belongs to the overlay on top of the stack,
-                    // and no other overlay kind carries a key handler yet,
-                    // so consuming it is the whole of that routing. <Esc>
-                    // closes exactly that one overlay, which is why it pops
-                    // rather than clearing: an overlay underneath it keeps
-                    // the keyboard.
-                    _ => {
-                        if notation == "<Esc>" {
-                            model.pop_focused_overlay();
-                            model.dirty = true;
-                        }
-                        Vec::new()
-                    }
-                },
-            }
+            // ahead of every other keypress rule, and consuming nothing: the
+            // busy modal is the newest thing on screen, so a key naming one
+            // of its choices is folded into the episode's bookkeeping here
+            // wherever the stack sits, and then routed below exactly as it
+            // would have been with no modal open -- see
+            // `note_supervision_choice` on why an annunciator may neither
+            // swallow a keystroke nor charge a user one to answer it
+            let mut effects = note_supervision_choice(model, &notation);
+            effects.extend(route_key(model, notation));
+            effects
         }
         Msg::Paste(text) => match model.focus() {
             // never replayed as nvim_input keystrokes: one undo unit, no
@@ -799,6 +569,247 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 root,
             }]
         }
+    }
+}
+
+/// Routes one keypress to whatever currently owns the keyboard, after
+/// [`note_supervision_choice`] has had its look at it.
+///
+/// Split out of [`update`]'s `Msg::Key` arm so that the supervision modal's
+/// bookkeeping can run first without consuming the key: this is the routing
+/// a keypress gets whether or not that modal is on screen, which is the
+/// whole of what makes that modal free to answer.
+fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
+    // any keypress is "the user is reading again": gives a
+    // transient (info-kind) toast a readable duration bounded by
+    // real activity instead of a wall-clock timer the runtime
+    // never delivers to `update`; runs regardless of focus, since
+    // the semantic is user activity, not specifically engine input
+    let cmdline_open = model.engine.cmdline.is_some();
+    if model
+        .engine
+        .messages
+        .dismiss_transient_on_keypress(cmdline_open)
+    {
+        model.dirty = true;
+    }
+    // a resolved prompt's overlay follows the same lazy-dismiss
+    // timing as its underlying MessageEntry (see
+    // dismiss_transient_on_keypress): nvim sends no msg_clear on
+    // resolution, and cmdline_hide alone cannot tell "resolved"
+    // apart from "about to re-arm" (both start with the identical
+    // cmdline_hide + flush; the wire only disambiguates once a
+    // later, separate redraw batch either does or doesn't bring a
+    // new cmdline_show), so the overlay closes on the first
+    // keypress observed after the cmdline has actually stayed
+    // closed, exactly when the toast falls back to ordinary
+    // transient rules
+    if !cmdline_open
+        && matches!(
+            model.focused_overlay_mut().map(|ov| &ov.kind),
+            Some(OverlayKind::Prompt(_))
+        )
+    {
+        model.pop_focused_overlay();
+        model.dirty = true;
+    }
+    // <Esc> closes a picker sitting directly on top of the stack.
+    // Checked here, ahead of the focus match below, so a picker
+    // buried under a still-open prompt (the stacking rule a modal
+    // prompt keeps its focus, see `OverlayKind::Picker`'s doc) never
+    // sees this: `focused_overlay_mut` names the prompt in that case,
+    // not the picker, and the pattern below simply does not match.
+    if notation == "<Esc>"
+        && matches!(
+            model.focused_overlay_mut().map(|ov| &ov.kind),
+            Some(OverlayKind::Picker(_))
+        )
+    {
+        model.pop_focused_overlay();
+        // without this the closed picker stays on screen until some
+        // unrelated event repaints: the paint loop's `if model.dirty`
+        // gate is the only repaint trigger, and popping an overlay
+        // produces no engine redraw to trip it
+        model.dirty = true;
+        // tells the matcher worker to drop its live Session so a
+        // Files scan still walking a huge tree does not keep
+        // running unobserved -- see Effect::PickerClose's doc; the
+        // session-replacement path in the worker only fires on a
+        // later query for a different source, which closing here
+        // may never produce
+        return vec![Effect::PickerClose];
+    }
+    match model.focus() {
+        Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
+        Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
+            // the prompt overlay answers by feeding the engine a
+            // keystroke -- the engine is blocked in its own input
+            // loop, not on an RpcRequest, so this is the one Native
+            // arm that still reaches RpcCall::Input
+            Some(OverlayKind::Prompt(p)) => {
+                if p.accepts(&notation) {
+                    vec![Effect::Rpc(RpcCall::Input { notation })]
+                } else {
+                    Vec::new()
+                }
+            }
+            // every other key edits the query and re-asks the
+            // matcher worker; edit_query itself decides what a
+            // notation means (a plain char, <BS>, or a no-op it
+            // still bumps the generation for), so this arm never
+            // inspects notation itself.
+            Some(OverlayKind::Picker(p)) => {
+                let generation = p.edit_query(&notation);
+                let needle = p.query().to_string();
+                let source = p.source().clone();
+                vec![Effect::PickerQuery {
+                    generation,
+                    needle,
+                    source,
+                    resolved: None,
+                }]
+            }
+            // discards the payload deliberately: every branch below
+            // reaches the tree through `model.tree_mut()` fresh
+            // instead, since a bound `&mut TreeState` here would
+            // keep `model` borrowed across the `model.pop_focused_overlay()`
+            // and `model.close_tree()` calls the <CR>/<Esc> arms need
+            Some(OverlayKind::Tree(_)) => match notation.as_str() {
+                "<Esc>" => {
+                    model.pop_focused_overlay();
+                    model.dirty = true;
+                    vec![Effect::TreeClose]
+                }
+                "<Down>" => {
+                    if let Some(t) = model.tree_mut() {
+                        t.move_selection(1);
+                    }
+                    model.dirty = true;
+                    Vec::new()
+                }
+                "<Up>" => {
+                    if let Some(t) = model.tree_mut() {
+                        t.move_selection(-1);
+                    }
+                    model.dirty = true;
+                    Vec::new()
+                }
+                // a directory toggles in place; a leaf's path is
+                // opened through RPC (nvim owns the buffer this
+                // creates) and the sidebar closes on the same
+                // keypress, matching a picker selection's own
+                // close-on-open behavior
+                "<CR>" => {
+                    let to_open = model.tree_mut().and_then(|t| {
+                        let entry = t.selected_entry()?;
+                        if entry.is_dir {
+                            if let Some(idx) = t.view().selected {
+                                t.toggle_expand(idx);
+                            }
+                            None
+                        } else {
+                            t.selected_path()
+                        }
+                    });
+                    model.dirty = true;
+                    match to_open {
+                        Some(path) => {
+                            model.pop_focused_overlay();
+                            vec![Effect::Rpc(RpcCall::OpenFile {
+                                path: path_to_wire(&path),
+                            })]
+                        }
+                        None => Vec::new(),
+                    }
+                }
+                // opens the blocked-engine Prompt overlay through
+                // the entry's own RpcCall (`vim.fn.input` primed
+                // with a `kind = "confirm"` `nvim_echo`, see
+                // `RpcCall::TreeCreatePrompt`'s doc) rather than any
+                // new local input state: the reply routes back as
+                // `Msg::TreeCreatePromptReply` and resolves the
+                // actual file write from there, once nvim has
+                // answered. Any selection, including none at all
+                // (an empty tree), can create -- `TreeCreatePromptReply`
+                // resolves the target directory from whatever is
+                // selected at reply time (see its arm below), since
+                // nothing about the tree's selection can move while
+                // this prompt holds focus.
+                "a" => {
+                    let Some(t) = model.tree_mut() else {
+                        return Vec::new();
+                    };
+                    let generation = t.generation();
+                    vec![Effect::Rpc(RpcCall::TreeCreatePrompt { generation })]
+                }
+                // renaming a directory has no backing effect --
+                // `RpcCall::RenameFile` and the `Effect::Tree*File`
+                // pair are file-only by their own doc contracts --
+                // so a directory selection is a silent no-op here
+                // rather than opening a prompt whose answer nothing
+                // could act on.
+                "r" => {
+                    let Some(t) = model.tree_mut() else {
+                        return Vec::new();
+                    };
+                    let Some(entry) = t.selected_entry() else {
+                        return Vec::new();
+                    };
+                    if entry.is_dir {
+                        return Vec::new();
+                    }
+                    let current_name = entry
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    let Some(old_path) = t.selected_path() else {
+                        return Vec::new();
+                    };
+                    let generation = t.generation();
+                    vec![Effect::Rpc(RpcCall::TreeRenamePrompt {
+                        generation,
+                        old_path: path_to_wire(&old_path),
+                        current_name,
+                    })]
+                }
+                // same file-only restriction as "r", for the same
+                // reason.
+                "d" => {
+                    let Some(t) = model.tree_mut() else {
+                        return Vec::new();
+                    };
+                    let Some(entry) = t.selected_entry() else {
+                        return Vec::new();
+                    };
+                    if entry.is_dir {
+                        return Vec::new();
+                    }
+                    let Some(path) = t.selected_path() else {
+                        return Vec::new();
+                    };
+                    let generation = t.generation();
+                    vec![Effect::Rpc(RpcCall::TreeDeleteConfirm {
+                        generation,
+                        path: path_to_wire(&path),
+                    })]
+                }
+                _ => Vec::new(),
+            },
+            // the key belongs to the overlay on top of the stack,
+            // and no other overlay kind carries a key handler yet,
+            // so consuming it is the whole of that routing. <Esc>
+            // closes exactly that one overlay, which is why it pops
+            // rather than clearing: an overlay underneath it keeps
+            // the keyboard.
+            _ => {
+                if notation == "<Esc>" {
+                    model.pop_focused_overlay();
+                    model.dirty = true;
+                }
+                Vec::new()
+            }
+        },
     }
 }
 

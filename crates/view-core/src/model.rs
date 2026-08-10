@@ -94,10 +94,10 @@ pub struct Model {
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
     /// ask for it itself. Empty until startup sets it.
     pub cwd: PathBuf,
-    /// Supervision's settings and its memory of the current wedge episode;
-    /// see [`crate::native::supervision::SupervisionState`]. `auto_restart`
-    /// is set once at startup from the `[supervision]` table, the same way
-    /// `statusline_enabled` is set from `[native]`.
+    /// Supervision's memory of the current wedge episode -- which wedge the
+    /// user has already been offered a modal for, so a dismissed one stays
+    /// dismissed while the banner behind it keeps re-asserting; see
+    /// [`crate::native::supervision::SupervisionState`].
     pub supervision: crate::native::supervision::SupervisionState,
 }
 

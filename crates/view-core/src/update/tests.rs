@@ -1,3 +1,9 @@
+// declares its own test-only-ness rather than inheriting it from the
+// `#[cfg(test)] mod tests;` line that reaches it: the per-file path of
+// `scripts/audit-god-files.sh` (and so the on-save hook) classifies a file
+// by that file alone, and without this it reads a sibling test module as
+// production code over the ceiling
+#![cfg(test)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::events::UiEvent;
@@ -3834,7 +3840,12 @@ fn dismiss_closes_the_modal_keeps_the_banner_and_does_not_reopen() {
             notation: SupervisionChoice::Dismiss.key().to_string(),
         }),
     );
-    assert!(effects.is_empty(), "{effects:?}");
+    // dismiss-and-forward: closing an annunciator the user never asked for
+    // may not cost them the keystroke it took to close it
+    assert!(
+        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"),
+        "Dismiss must still deliver the <Esc> to the engine: {effects:?}"
+    );
     assert!(m.overlays().is_empty(), "Dismiss must close the modal");
     assert_eq!(
         visible_texts(&m),
@@ -3918,20 +3929,25 @@ fn the_modal_answers_its_choices_and_passes_every_other_key_through() {
         "the modal must not take the keyboard from the engine it is describing"
     );
 
-    let effects = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "x".into(),
-        }),
-    );
-    assert!(
-        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == "x"),
-        "a key the modal does not answer must reach the engine: {effects:?}"
-    );
-    assert!(
-        !m.overlays().is_empty(),
-        "and it must not close the modal on the way past"
-    );
+    // "i" above all: it is the key a user waiting out a slow operation
+    // reaches for by reflex, and the modal binding it would answer that
+    // reflex by aborting the operation they were waiting for
+    for notation in ["i", "a", "x", "r"] {
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: notation.into(),
+            }),
+        );
+        assert!(
+            matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation: sent })] if sent == notation),
+            "a key the modal does not answer must reach the engine: {notation:?} gave {effects:?}"
+        );
+        assert!(
+            !m.overlays().is_empty(),
+            "and {notation:?} must not close the modal on the way past"
+        );
+    }
 
     // the one key it does answer, from the same stack position
     let effects = update(
@@ -3940,7 +3956,10 @@ fn the_modal_answers_its_choices_and_passes_every_other_key_through() {
             notation: SupervisionChoice::Dismiss.key().to_string(),
         }),
     );
-    assert!(effects.is_empty(), "{effects:?}");
+    assert!(
+        matches!(&effects[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == "<Esc>"),
+        "answering the modal must cost no keystroke: {effects:?}"
+    );
     assert!(m.overlays().is_empty(), "Dismiss must close the modal");
 }
 
@@ -3981,21 +4000,99 @@ fn a_modal_over_a_focused_overlay_leaves_that_overlays_keys_alone() {
             notation: "<Esc>".into(),
         }),
     );
-    // <Esc> is the modal's Dismiss key, and the modal is on top of the
-    // stack, so it answers first -- the tree stays exactly as it was
-    assert!(effects.is_empty(), "{effects:?}");
-    assert_eq!(m.focus(), Focus::Native(tree_id));
-
-    // and with the annunciator gone the same key reaches the tree
-    let effects = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "<Esc>".into(),
-        }),
-    );
+    // <Esc> is the modal's Dismiss key, so the annunciator goes away -- and
+    // the same <Esc> still does to the tree exactly what it would have done
+    // with no annunciator ever raised, which is the whole invariant: the
+    // modal changes what is on screen, never what a key means
     assert!(
         matches!(&effects[..], [Effect::TreeClose]),
         "the tree must still answer its own key: {effects:?}"
     );
-    assert!(m.overlays().is_empty());
+    assert!(m.overlays().is_empty(), "{:?}", m.overlays());
+    assert_eq!(m.focus(), Focus::Engine);
+}
+
+/// The interrupt is picked by the very key it sends, so an open modal
+/// changes nothing about what reaches nvim -- only whether the episode is
+/// still being announced.
+#[test]
+fn the_interrupt_key_puts_the_same_bytes_on_the_wire_modal_or_not() {
+    let mut wedged = model();
+    let _ = update(
+        &mut wedged,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+        },
+    );
+    assert!(wedged.engine_busy().is_some(), "the modal must be open");
+    let with_modal = update(
+        &mut wedged,
+        Msg::Key(Key {
+            notation: INTERRUPT_NOTATION.to_string(),
+        }),
+    );
+
+    let mut healthy = model();
+    let without_modal = update(
+        &mut healthy,
+        Msg::Key(Key {
+            notation: INTERRUPT_NOTATION.to_string(),
+        }),
+    );
+
+    assert!(
+        matches!(&without_modal[..], [Effect::Rpc(RpcCall::Input { notation })] if notation == INTERRUPT_NOTATION),
+        "the no-modal path must forward the interrupt unchanged: {without_modal:?}"
+    );
+    assert_eq!(
+        format!("{with_modal:?}"),
+        format!("{without_modal:?}"),
+        "picking the choice must produce the identical wire input"
+    );
+    assert!(
+        wedged.engine_busy().is_some(),
+        "an interrupt that may not land must leave the modal up to try again"
+    );
+}
+
+/// Every key runs the keypress bookkeeping the rest of `update` owes it,
+/// including the keys the modal answers: an annunciator on screen may not
+/// quietly change what a keypress means anywhere else in the model.
+#[test]
+fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
+    for notation in [
+        SupervisionChoice::Interrupt.key(),
+        SupervisionChoice::Dismiss.key(),
+    ] {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::EngineLiveness {
+                wedge: Some(WedgeKind::ReadSide),
+                observed_for: ENGINE_BUSY_MODAL_THRESHOLD,
+            },
+        );
+        m.engine
+            .messages
+            .push("echomsg".to_string(), vec![(0, "written".into())], false);
+        m.engine.messages.note_flush();
+        assert!(
+            visible_texts(&m).iter().any(|line| line == "written"),
+            "{:?}",
+            visible_texts(&m)
+        );
+
+        let _ = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: notation.to_string(),
+            }),
+        );
+        assert!(
+            !visible_texts(&m).iter().any(|line| line == "written"),
+            "{notation:?} skipped the transient dismissal: {:?}",
+            visible_texts(&m)
+        );
+    }
 }

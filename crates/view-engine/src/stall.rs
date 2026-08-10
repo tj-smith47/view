@@ -115,20 +115,33 @@ impl OutboxStallWatch {
     /// window has already said what it had to say, and its remaining job --
     /// noticing that delivery resumed -- is served by looking again one
     /// threshold later.
+    ///
+    /// Reads no clock in that idle steady state: the absence of a window is
+    /// answerable from this watch's own memory, and a healthy loop asks this
+    /// question once per pass.
     #[must_use]
     pub fn poll_deadline(&self) -> Option<Duration> {
-        self.deadline_at(Instant::now())
+        self.deadline_with(Instant::now)
     }
 
-    /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
-    fn deadline_at(&self, now: Instant) -> Option<Duration> {
+    /// [`poll_deadline`](Self::poll_deadline) with the clock supplied as a
+    /// source rather than a value, so a test can prove which questions reach
+    /// for it -- the same seam [`observe_with`](Self::observe_with) exists
+    /// for, and for the same reason.
+    fn deadline_with(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
         let since = self.since?;
-        let remaining = self.threshold.saturating_sub(now.duration_since(since));
+        let remaining = self.threshold.saturating_sub(clock().duration_since(since));
         Some(if remaining.is_zero() {
             self.threshold
         } else {
             remaining
         })
+    }
+
+    /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
+    #[cfg(test)]
+    fn deadline_at(&self, now: Instant) -> Option<Duration> {
+        self.deadline_with(|| now)
     }
 
     /// [`observe`](Self::observe) with both readings supplied, so the
@@ -248,6 +261,34 @@ mod tests {
         assert_eq!(reads.get(), 1, "a queued message must open its window");
         assert!(w.fold_lazily(1, 9, clock(t0 + THRESHOLD)));
         assert_eq!(reads.get(), 2);
+    }
+
+    /// The other half of the healthy pass: a loop asks each watch for a
+    /// deadline every time round, and with nothing queued that answer is
+    /// already known, so it may not cost a clock read either.
+    #[test]
+    fn an_idle_queue_answers_the_deadline_question_without_reading_the_clock() {
+        let mut w = watch();
+        let t0 = Instant::now();
+        let reads = std::cell::Cell::new(0_u32);
+        let clock = |at: Instant| {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                at
+            }
+        };
+
+        assert_eq!(w.deadline_with(clock(t0)), None);
+        assert_eq!(
+            reads.get(),
+            0,
+            "an idle connection paid for a reading its answer cannot use"
+        );
+
+        assert!(!w.fold(1, 9, t0));
+        assert_eq!(w.deadline_with(clock(t0)), Some(THRESHOLD));
+        assert_eq!(reads.get(), 1, "a pending write must time its own window");
     }
 
     #[test]

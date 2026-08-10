@@ -927,6 +927,42 @@ mod tests {
         );
     }
 
+    /// The rows a user reads are the keys they can press, and for the
+    /// interrupt that key is the one they would already have reached for.
+    #[test]
+    fn a_busy_modal_paints_the_interrupt_under_the_key_that_sends_it() {
+        use view_core::native::geometry::OverlayBox;
+        use view_core::native::supervision::{EngineBusyState, SinceStamp, WedgeKind};
+
+        let mut model = model_with_grid(60, 20);
+        model.term_width = 60;
+        model.term_height = 20;
+        model.push_overlay(
+            OverlayBox::new(60, 30),
+            OverlayKind::EngineBusy(EngineBusyState::new(
+                WedgeKind::ReadSide,
+                SinceStamp::new(std::time::Duration::from_secs(31)),
+            )),
+        );
+
+        let surface = render(&model);
+        let layer = surface
+            .layers
+            .iter()
+            .find(|l| matches!(l.kind, LayerKind::Prompt(_)))
+            .expect("an open busy modal must contribute a layer");
+        let LayerKind::Prompt(view) = &layer.kind else {
+            unreachable!()
+        };
+        assert_eq!(
+            view.choices,
+            vec![
+                "[<C-c>] Interrupt".to_string(),
+                "[<Esc>] Dismiss".to_string()
+            ]
+        );
+    }
+
     #[test]
     fn engine_only_model_renders_one_grid_layer_with_block_cursor_at_grid_cursor() {
         let mut model = model_with_grid(10, 5);

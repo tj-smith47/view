@@ -207,6 +207,44 @@ if [ -d crates ]; then
 else
   echo "STYLE FAIL: crates/ directory missing"; fail=1
 fi
+# One fold, and only one, may raise the single locally-raised condition
+# notice. `Messages::set_native_condition` shows at most one such notice and
+# re-asserts it on every pass -- a notice raised once on the transition would
+# be dropped for good by the next `msg_clear` -- so a second production
+# caller does not add a second notice: the two overwrite each other every
+# pass and the banner flaps between them, which is a bug no test of either
+# caller alone can see. Pinned rather than left to review, because the tree
+# has already had to delete a second caller for exactly this reason.
+CONDITION_OWNER="crates/view-core/src/update/supervision.rs"
+CONDITION_CALLS=2
+if [ -f scripts/audit-god-files.sh ] && [ -d crates ]; then
+  # production call sites only, via the god-file scanner's own classifier:
+  # this must not trip on the doc comments naming the function, nor on the
+  # unit tests that legitimately drive it directly
+  prod_lines=$(bash scripts/audit-god-files.sh --prod-lines) || prod_lines=""
+  if [ -z "$prod_lines" ]; then
+    echo "STYLE FAIL: could not read production lines to check condition-notice ownership"
+    fail=1
+  else
+    sites=$(printf '%s\n' "$prod_lines" | grep -E '\.set_native_condition\(' || true)
+    found=$(printf '%s' "$sites" | grep -c . || true)
+    strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:" || true)
+    if [ -n "$strangers" ]; then
+      printf '%s\n' "$strangers"
+      echo "STYLE FAIL: set_native_condition called outside $CONDITION_OWNER"
+      echo "  The one visible condition notice is owned by a single fold that"
+      echo "  re-asserts or retracts it every pass. Route the new condition"
+      echo "  through that fold instead of raising it here."
+      fail=1
+    elif [ "$found" != "$CONDITION_CALLS" ]; then
+      printf '%s\n' "$sites"
+      echo "STYLE FAIL: $CONDITION_OWNER makes $found set_native_condition calls, pinned at $CONDITION_CALLS"
+      echo "  The pin is the retract and the assert of one fold. If a third is"
+      echo "  genuinely one fold's business, move the pin and say why here."
+      fail=1
+    fi
+  fi
+fi
 for dir in compat corpus; do
   if [ -d "$dir" ]; then
     # --exclude-dir=.cache: compat/.cache/ is the gitignored, populated-at-

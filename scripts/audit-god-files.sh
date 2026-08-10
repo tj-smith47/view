@@ -51,6 +51,18 @@ if [[ "${1:-}" == --counts ]]; then
     shift
 fi
 
+# --prod-lines: emit "<path>:<lineno>:<line>" for every production CODE line
+# of those same files, and exit. Exported so a check that must reason about
+# production call sites (check-style.sh's single-owner clause) gets this
+# script's audited answer to "is this line test code or a comment?" instead
+# of re-deriving one out of grep flags that cannot see a #[cfg(test)] region
+# or a doc comment quoting the call it is banning.
+PROD_LINES=""
+if [[ "${1:-}" == --prod-lines ]]; then
+    PROD_LINES=1
+    shift
+fi
+
 ROOT="${1:-}"
 # A single existing directory arg selects tree-wide mode against that root; any
 # other args are treated as files for the per-file fast path.
@@ -78,7 +90,7 @@ GOD_FILE_DEBT=()
 # the // inside "https://…" and swallows the rest of the file, and an
 # indent-anchored close ends early on a } at column 0 inside a raw string.
 count_prod_lines() {
-    awk '
+    awk -v emit="${PROD_LINE_EMIT:-}" '
         function strip_code(l,   out, i, n, c, k, endm, m) {
             out = ""; i = 1; n = length(l)
             while (i <= n) {
@@ -142,7 +154,7 @@ count_prod_lines() {
             if (l ~ /not[[:space:]]*\(/) return 0
             return (l ~ /(^|[(,[:space:]])test([),]|$)/)
         }
-        function flush() { if (cur != "") printf("%d\t%s\n", prod, cur) }
+        function flush() { if (emit == "" && cur != "") printf("%d\t%s\n", prod, cur) }
 
         FNR == 1 {
             flush()
@@ -177,7 +189,10 @@ count_prod_lines() {
             }
             # Production count is CODE lines only: strip_code leaves nothing but
             # whitespace for a blank or comment-only line, so those never count.
-            if (code ~ /[^[:space:]]/) prod++
+            if (code ~ /[^[:space:]]/) {
+                prod++
+                if (emit != "") printf("%s:%d:%s\n", FILENAME, FNR, $0)
+            }
         }
 
         END { flush() }
@@ -419,6 +434,11 @@ done
 
 if [[ -n "$COUNTS_ONLY" ]]; then
     count_prod_lines "${PROD_FILES[@]}"
+    exit 0
+fi
+
+if [[ -n "$PROD_LINES" ]]; then
+    PROD_LINE_EMIT=1 count_prod_lines "${PROD_FILES[@]}"
     exit 0
 fi
 

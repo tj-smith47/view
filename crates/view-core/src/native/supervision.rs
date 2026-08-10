@@ -45,7 +45,9 @@ pub const ENGINE_BUSY_MODAL_THRESHOLD: Duration = Duration::from_secs(30);
 pub const READOUT_RESOLUTION: Duration = Duration::from_secs(1);
 
 /// The keystroke [`SupervisionChoice::Interrupt`] sends, in nvim's own
-/// notation.
+/// notation, and equally the key that picks it: the modal names the key a
+/// user would already have reached for at a frozen editor, and picking the
+/// choice is that key arriving at nvim.
 ///
 /// Live-verified against the pinned engine rather than assumed (see
 /// `crates/view/tests/supervision_live.rs`): fed through `nvim_input`, this
@@ -173,8 +175,8 @@ impl WedgeKind {
     /// present a button that cannot do anything.
     ///
     /// [`SupervisionChoice::Restart`] is absent everywhere, and that is a
-    /// temporary state of this list rather than a property of the choice:
-    /// nothing yet replaces a live engine, so the only thing the effect can
+    /// fact about what the effect can currently reach rather than about the
+    /// choice: nothing yet replaces a live engine, so the only thing it can
     /// currently reach is the shutdown path, which would answer a request
     /// to recover the session by ending it. A button may not be offered
     /// before the thing behind it exists, so the choice stays modelled and
@@ -204,10 +206,20 @@ pub enum SupervisionChoice {
 
 impl SupervisionChoice {
     /// The key that picks this choice, in nvim's own notation.
+    ///
+    /// Constrained by the modal taking no focus: the key that picks a choice
+    /// still reaches the engine as ordinary input, so a listed choice may
+    /// only bind a key whose meaning to nvim is the thing the choice does,
+    /// or one no user types by reflex. A bare printable key would fail both
+    /// halves -- typing `i` at an editor that is merely slow means "insert",
+    /// and answering it with an abort would destroy the operation the user
+    /// was waiting out. [`Restart`](Self::Restart) is unlisted (see
+    /// [`WedgeKind::choices`]) and its key is placeholder plumbing that has
+    /// to satisfy the same rule before it can be offered.
     #[must_use]
     pub const fn key(self) -> &'static str {
         match self {
-            Self::Interrupt => "i",
+            Self::Interrupt => INTERRUPT_NOTATION,
             Self::Restart => "r",
             Self::Dismiss => "<Esc>",
         }
@@ -352,7 +364,7 @@ mod tests {
             let busy = EngineBusyState::new(kind, SinceStamp::default());
             assert!(busy.offers(SupervisionChoice::Interrupt), "{kind:?}");
             assert_eq!(
-                busy.choose("i"),
+                busy.choose(INTERRUPT_NOTATION),
                 Some(SupervisionChoice::Interrupt),
                 "{kind:?}"
             );
@@ -449,7 +461,36 @@ mod tests {
         assert_eq!(view.title, "Engine busy");
         assert_eq!(
             view.choices,
-            vec!["[i] Interrupt".to_string(), "[<Esc>] Dismiss".to_string()]
+            vec![
+                "[<C-c>] Interrupt".to_string(),
+                "[<Esc>] Dismiss".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn no_offered_choice_binds_a_key_a_user_could_type_by_reflex() {
+        for kind in [WedgeKind::ReadSide, WedgeKind::WriteSide, WedgeKind::Dead] {
+            for choice in kind.choices() {
+                let key = choice.key();
+                assert!(
+                    key.starts_with('<') && key.ends_with('>'),
+                    "{kind:?} offers {choice:?} on the bare key {key:?}: the modal \
+                     takes no focus, so that key still reaches nvim, and a user \
+                     typing it at a merely-slow editor would get the choice by \
+                     accident"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_interrupt_choice_is_picked_by_the_very_key_it_sends() {
+        assert_eq!(SupervisionChoice::Interrupt.key(), INTERRUPT_NOTATION);
+        let busy = EngineBusyState::new(WedgeKind::ReadSide, SinceStamp::new(Duration::ZERO));
+        assert_eq!(
+            busy.choose(INTERRUPT_NOTATION),
+            Some(SupervisionChoice::Interrupt)
         );
     }
 

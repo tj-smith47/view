@@ -441,10 +441,21 @@ impl HeartbeatWatch {
     /// window has already said what it had to say, and its remaining job --
     /// noticing that the engine started answering again -- is served by
     /// looking again one threshold later.
+    ///
+    /// Reads no clock while nothing is outstanding: the absence of a window
+    /// is answerable from the prober's own memory, and a healthy loop asks
+    /// this question once per pass.
     #[must_use]
     pub fn poll_deadline(&self) -> Option<Duration> {
+        self.deadline_with(Instant::now)
+    }
+
+    /// [`poll_deadline`](Self::poll_deadline) with the clock supplied as a
+    /// source rather than a value, so a test can prove which questions reach
+    /// for it.
+    fn deadline_with(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
         self.probe.oldest_outstanding()?;
-        self.deadline_at(Instant::now())
+        Self::deadline(self.probe.outstanding_for(clock()), self.threshold)
     }
 
     /// Stops [`HeartbeatProber::tick`] from issuing any *new* probe.
@@ -516,8 +527,9 @@ impl HeartbeatWatch {
     }
 
     /// [`poll_deadline`](Self::poll_deadline) against an exact clock.
+    #[cfg(test)]
     fn deadline_at(&self, now: Instant) -> Option<Duration> {
-        Self::deadline(self.probe.outstanding_for(now), self.threshold)
+        self.deadline_with(|| now)
     }
 }
 
@@ -726,6 +738,39 @@ mod tests {
         );
         watch.record_ack(1);
         assert_eq!(watch.deadline_at(t0), None);
+    }
+
+    /// A loop asks this every pass, so the answer it already knows must be
+    /// free: with no probe outstanding there is no silence to time, and a
+    /// clock read taken before discovering that is one a healthy session
+    /// pays for nothing.
+    #[test]
+    fn nothing_outstanding_answers_without_reading_the_clock() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let reads = std::cell::Cell::new(0_u32);
+        let clock = |at: Instant| {
+            let reads = &reads;
+            move || {
+                reads.set(reads.get() + 1);
+                at
+            }
+        };
+
+        assert_eq!(watch.deadline_with(clock(t0)), None);
+        assert_eq!(
+            reads.get(),
+            0,
+            "an idle watch paid for a reading its answer cannot use"
+        );
+
+        prober.tick_at(&handle, t0).unwrap();
+        assert_eq!(watch.deadline_with(clock(t0)), Some(THRESHOLD));
+        assert_eq!(
+            reads.get(),
+            1,
+            "an outstanding probe must time its own window"
+        );
     }
 
     /// Never zero once the verdict has flipped: a zero wait is a spin, and

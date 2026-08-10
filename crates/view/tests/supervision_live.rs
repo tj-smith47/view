@@ -136,8 +136,12 @@ fn a_synchronous_lua_loop_answers_neither_the_liveness_probe_nor_the_interrupt()
 /// as it would have with no modal on screen -- proved here against a real
 /// engine and a real buffer rather than against the effect alone, since an
 /// effect that never reaches nvim is the failure this is guarding.
+///
+/// `i` leads the sequence deliberately: it is the reflex keystroke of a
+/// user waiting out a slow operation, and a modal that bound it would
+/// answer that reflex by aborting the operation being waited for.
 #[test]
-fn every_key_the_modal_does_not_answer_still_lands_in_the_buffer() {
+fn every_key_typed_at_the_modal_still_lands_in_the_buffer() {
     let dir = common::fixture("supervision-live-passthrough", "");
     let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
     engine.handle.ui_attach(80, 24).unwrap();
@@ -157,25 +161,13 @@ fn every_key_the_modal_does_not_answer_still_lands_in_the_buffer() {
 
     // typed with the modal up, one keypress at a time, exactly as the input
     // reader delivers them
-    for notation in ["i", "a", "x", "y", "z"] {
+    for notation in ["i", "x", "y", "z"] {
         let effects = update(
             &mut model,
             Msg::Key(Key {
                 notation: notation.to_string(),
             }),
         );
-        if notation == "i" {
-            // the one key this wedge does answer: it sends the interrupt
-            // instead, which a buffer never sees
-            assert!(
-                matches!(
-                    &effects[..],
-                    [Effect::Rpc(RpcCall::Input { notation: sent })] if sent == INTERRUPT_NOTATION
-                ),
-                "the interrupt choice sent something else: {effects:?}"
-            );
-            continue;
-        }
         let [Effect::Rpc(RpcCall::Input { notation: sent })] = &effects[..] else {
             panic!("{notation:?} was swallowed by the modal: {effects:?}");
         };
@@ -183,17 +175,53 @@ fn every_key_the_modal_does_not_answer_still_lands_in_the_buffer() {
         engine.handle.input(sent).unwrap();
     }
 
-    // <Esc> is the modal's own Dismiss key, so this one stops here
+    // asserted here rather than only at the end: this blocking round-trip is
+    // also the barrier the interrupt below needs, since `nvim_input` queues
+    // and an interrupt flushes whatever typeahead is still unread
+    assert_eq!(
+        engine.handle.eval_str("getline(1)").unwrap(),
+        "xyz",
+        "keystrokes typed at the modal never reached the buffer"
+    );
+
+    // the interrupt choice, picked by the very key it sends: the wire input
+    // is what the engine would have received with no modal on screen, and
+    // the modal stays up because the interrupt may not have landed
+    let effects = update(
+        &mut model,
+        Msg::Key(Key {
+            notation: INTERRUPT_NOTATION.to_string(),
+        }),
+    );
+    let [Effect::Rpc(RpcCall::Input { notation: sent })] = &effects[..] else {
+        panic!("the interrupt choice sent something else: {effects:?}");
+    };
+    assert_eq!(sent, INTERRUPT_NOTATION);
+    engine.handle.input(sent).unwrap();
+    assert!(
+        !model.overlays().is_empty(),
+        "an interrupt that may not land must leave the modal up"
+    );
+
+    // <Esc> is the modal's own Dismiss key, and it both closes the modal and
+    // goes on to nvim: answering an annunciator the user never asked for may
+    // not cost them a keystroke, so this <Esc> is also the one that leaves
+    // insert mode
     let effects = update(
         &mut model,
         Msg::Key(Key {
             notation: "<Esc>".into(),
         }),
     );
-    assert!(effects.is_empty(), "{effects:?}");
+    let [Effect::Rpc(RpcCall::Input { notation: sent })] = &effects[..] else {
+        panic!("Dismiss must still deliver its <Esc> to the engine: {effects:?}");
+    };
+    engine.handle.input(sent).unwrap();
     assert!(model.overlays().is_empty(), "Dismiss must close the modal");
 
-    // and with it gone the identical key routes to the engine again
+    // and with it gone the identical key routes to the engine the same way,
+    // which is the whole claim: the modal changed what was on screen and
+    // nothing about what a key does
     let effects = update(
         &mut model,
         Msg::Key(Key {
@@ -208,6 +236,11 @@ fn every_key_the_modal_does_not_answer_still_lands_in_the_buffer() {
     assert_eq!(
         engine.handle.eval_str("getline(1)").unwrap(),
         "xyz",
-        "keystrokes typed at the modal never reached the buffer"
+        "answering the modal cost the buffer the keystrokes it was typed"
+    );
+    assert_eq!(
+        engine.handle.eval_str("mode()").unwrap(),
+        "n",
+        "the dismissal's <Esc> never reached the engine, so insert mode survived it"
     );
 }

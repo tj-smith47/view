@@ -1046,13 +1046,17 @@ impl SupervisionFold {
 /// outstanding at all. Two more follow in the same pass from
 /// [`watch_deadline`], which asks the same watch for a deadline.
 ///
-/// The steady state named here is the exact one both watches short-circuit
-/// on: nothing queued for the writer and no probe owed an answer. It costs
-/// no clock read, no lock, no allocation, no walk of the message log and no
-/// dispatch. A pass with output pending pays one `Instant::now()` on the
-/// write side, and a pass with a probe outstanding reads the send-time log
-/// and takes one of its own -- both bought by a connection that is
-/// demonstrably mid-something rather than by every keystroke.
+/// The steady state named here is the exact one all four of those questions
+/// short-circuit on: nothing queued for the writer and no probe owed an
+/// answer. The whole pass costs no clock read, no lock, no allocation, no
+/// walk of the message log and no dispatch -- the deadline questions decline
+/// the clock on the same evidence the observations do
+/// ([`OutboxStallWatch::poll_deadline`], [`HeartbeatWatch::poll_deadline`]),
+/// so a healthy session pays for no reading any of them could use. A pass
+/// with output pending pays one `Instant::now()` on the write side, and a
+/// pass with a probe outstanding reads the send-time log and takes one of
+/// its own -- both bought by a connection that is demonstrably
+/// mid-something rather than by every keystroke.
 ///
 /// Nothing is sent from here at all: the send lives on the engine's own
 /// prober thread, so this call cannot await RPC however wedged the engine

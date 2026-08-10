@@ -1,3 +1,7 @@
+// see `crates/view-core/src/update/tests.rs` on why a sibling test module
+// carries the whole-file attribute the `#[cfg(test)] mod tests;` line
+// already implies
+#![cfg(test)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;
