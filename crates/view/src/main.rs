@@ -259,7 +259,7 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
 }
 
 fn main() -> Result<()> {
-    // startup's own debug-build stderr log (see startup::paint_shell_frame)
+    // startup's own VIEW_LOG "startup" line (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
     // Term::init: the capability probe that init() runs is itself startup
     // work the design spec's 50ms target is meant to cover

@@ -677,6 +677,27 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let Some(new_name) = name.filter(|n| !n.is_empty()) else {
                 return Vec::new();
             };
+            // Same untrusted-typed-answer shape as `TreeCreatePromptReply`
+            // above (see that arm's own comment) -- only more dangerous
+            // here, since `RenameFile` goes over RPC straight to nvim
+            // (`runtime.rs`'s effect executor), and unlike create's
+            // `create_new(true)` a rename has no create-only guard: an
+            // escaped destination that already exists is silently
+            // overwritten rather than refused. The rename prompt's
+            // contract is the same "one leaf name beside the original"
+            // a file manager's own rename action offers, so it gets the
+            // identical single-`Component::Normal` guard.
+            let is_single_plain_component = matches!(
+                std::path::Path::new(&new_name)
+                    .components()
+                    .collect::<Vec<_>>()[..],
+                [std::path::Component::Normal(_)]
+            );
+            if !is_single_plain_component {
+                return model
+                    .engine
+                    .record_native_notice(format!("view: invalid file name {new_name:?}"), false);
+            }
             let old = std::path::PathBuf::from(&old_path);
             let Some(parent) = old.parent() else {
                 return Vec::new();
@@ -4349,6 +4370,118 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::TreeCreateFile { .. })),
             "a multi-component relative path must never reach TreeCreateFile: {effects:?}"
+        );
+    }
+
+    /// The rename fix's positive case, mirroring
+    /// `tree_create_prompt_reply_with_a_plain_name_creates_beside_the_root`:
+    /// an ordinary single-component answer must still reach
+    /// `Effect::Rpc(RpcCall::RenameFile)`, unaffected by the new
+    /// validation.
+    #[test]
+    fn tree_rename_prompt_reply_with_a_plain_name_renames_beside_the_original() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeRenamePromptReply {
+                generation,
+                old_path: "/tree/root/old.txt".to_string(),
+                name: Some("new.txt".to_string()),
+            },
+        );
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::Rpc(RpcCall::RenameFile { old_path, new_path, .. })]
+                    if old_path == "/tree/root/old.txt" && new_path.ends_with("new.txt")
+            ),
+            "a plain leaf name must still produce exactly one RenameFile call: {effects:?}"
+        );
+    }
+
+    /// An absolute answer must never reach `Effect::Rpc(RpcCall::RenameFile)`:
+    /// `PathBuf::join` with an absolute argument discards `parent` entirely,
+    /// so an unvalidated `parent.join(new_name)` would rename the file to
+    /// wherever the typed text names, anywhere on the filesystem the process
+    /// can reach, not beside the file's own original location.
+    #[test]
+    fn tree_rename_prompt_reply_rejects_an_absolute_path() {
+        let (mut m, generation) = model_with_open_tree();
+        let evil = if cfg!(windows) {
+            "C:\\evil.txt"
+        } else {
+            "/evil.txt"
+        };
+        let effects = update(
+            &mut m,
+            Msg::TreeRenamePromptReply {
+                generation,
+                old_path: "/tree/root/old.txt".to_string(),
+                name: Some(evil.to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RenameFile { .. }))),
+            "an absolute path must never reach RenameFile: {effects:?}"
+        );
+        let entry = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the refusal must surface a visible notice");
+        assert!(
+            entry.content.iter().any(|(_, t)| t.contains("invalid")),
+            "expected an \"invalid file name\" notice, got {:?}",
+            entry.content
+        );
+    }
+
+    /// A `..`-laden answer must never reach `Effect::Rpc(RpcCall::RenameFile)`
+    /// either: joined onto `parent`, it climbs out of the tree root the same
+    /// way an absolute path replaces it outright.
+    #[test]
+    fn tree_rename_prompt_reply_rejects_a_parent_traversal() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeRenamePromptReply {
+                generation,
+                old_path: "/tree/root/old.txt".to_string(),
+                name: Some("../../etc/cron.d/evil".to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RenameFile { .. }))),
+            "a `..`-laden path must never reach RenameFile: {effects:?}"
+        );
+    }
+
+    /// Nested rename (a name embedding its own directory separator) was
+    /// never a feature this prompt supports -- its contract is one leaf
+    /// name beside the original -- so a relative-but-multi-component
+    /// answer is refused on the same terms as an absolute or `..`-laden
+    /// one, not silently accepted as a move into a new subdirectory.
+    #[test]
+    fn tree_rename_prompt_reply_rejects_a_nested_relative_path() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeRenamePromptReply {
+                generation,
+                old_path: "/tree/root/old.txt".to_string(),
+                name: Some("sub/dir/new.txt".to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::Rpc(RpcCall::RenameFile { .. }))),
+            "a multi-component relative path must never reach RenameFile: {effects:?}"
         );
     }
 

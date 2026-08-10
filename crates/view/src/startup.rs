@@ -92,9 +92,20 @@ impl KeyRing {
 /// ordinary steady state; startup is the one caller that opts into the
 /// placeholder) for this frame to show the shell rather than an empty grid.
 ///
-/// Debug builds log the elapsed time since `process_start` to stderr: the
-/// design spec's informal 50ms shell-paint target, measured here but not
-/// enforced (the formal budget gate lands with the bench harness).
+/// Logs the elapsed time since `process_start` under the `"startup"`
+/// `VIEW_LOG` topic: the design spec's informal 50ms shell-paint target,
+/// measured here but not enforced (the formal budget gate lands with the
+/// bench harness). Routed through [`crate::vlog::log_with`] rather than a
+/// bare stderr write, unlike `view-tui`'s own `tiers::log_caps`: that log
+/// line runs before `Term::init` ever enters the alternate screen (raw mode
+/// only, still the visible screen -- see `terminal.rs`'s own doc comment on
+/// why its `\r\n` has to be explicit), while this one fires from inside
+/// `paint_shell_frame`, called only after `Term::init` has entered both raw
+/// mode and the alternate screen (see `main.rs`'s own call ordering); a
+/// bare stderr write at this point lands inside the frame this call just
+/// painted, not on any screen a developer could read it from. `vlog` is the
+/// zero-overhead-when-unset channel every other startup measurement in
+/// `main.rs` already uses for the same reason.
 ///
 /// # Errors
 ///
@@ -107,20 +118,14 @@ pub fn paint_shell_frame(
     let surface = view_surface::render(model);
     // the placeholder shell is always a whole-frame paint
     term.draw_surface(model, &surface, &view_core::grid::GridDamage::full())?;
-    log_shell_paint_latency(process_start);
+    crate::vlog::log_with("startup", || {
+        format!(
+            "shell frame painted {:?} after process start",
+            process_start.elapsed()
+        )
+    });
     Ok(())
 }
-
-#[cfg(debug_assertions)]
-fn log_shell_paint_latency(process_start: Instant) {
-    eprintln!(
-        "view: shell frame painted {:?} after process start\r",
-        process_start.elapsed()
-    );
-}
-
-#[cfg(not(debug_assertions))]
-fn log_shell_paint_latency(_process_start: Instant) {}
 
 /// Distinguishes a failure launching the `nvim` process at all (a missing
 /// or broken `--nvim-bin`/`PATH` binary, most commonly) from a failure
