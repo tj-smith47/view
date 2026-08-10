@@ -2,6 +2,9 @@
 // carries the whole-file attribute the `#[cfg(test)] mod tests;` line
 // already implies
 #![cfg(test)]
+// see `crates/view-core/src/update/tests.rs` on why the older-clippy
+// duplicate report is answered rather than removed
+#![allow(clippy::duplicated_attributes)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use super::*;

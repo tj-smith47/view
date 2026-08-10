@@ -957,24 +957,19 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
         ws_ypixel: 0,
     };
     let pty = nix::pty::openpty(Some(&winsize), None).expect("openpty for the piped-stdin test");
-    let (stdin_read, mut stdin_write) = {
-        // `pipe()` wraps raw `libc::pipe()` with neither end `O_CLOEXEC`
-        // (confirmed against `nix-0.31.3`'s own `unistd.rs`), so a plain
-        // `pipe()` here leaves `stdin_write` inherited across this test
-        // process's own `cmd.spawn()` fork+exec of `view`, and again across
-        // `view`'s own fork+exec of nvim -- a live write-end duplicate
-        // surviving in both descendant processes forever, so nvim's read on
-        // its relayed stdin fd never reaches EOF (this was the stdin-relay
-        // "deadlock" this test used to report: not a `view`/nvim bug, a
-        // leaked fd from this harness's own pipe). `pipe2(O_CLOEXEC)` sets
-        // close-on-exec atomically on both ends; the read end still reaches
-        // the child fine since `cmd.stdin(Stdio::from(stdin_read))` redirects
-        // it onto fd 0 via an explicit `dup2` during exec setup, which does
-        // not carry `FD_CLOEXEC` over to the new descriptor.
-        let (read, write) = nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC)
-            .expect("cloexec pipe for the child's stdin");
-        (read, std::fs::File::from(write))
-    };
+    // Both ends close-on-exec, which `std::io::pipe` guarantees and
+    // `nix::unistd::pipe` does not: an inherited write-end duplicate
+    // survives this process's own fork+exec of `view` and again `view`'s
+    // fork+exec of nvim, so nvim's read on its relayed stdin never reaches
+    // EOF (the stdin-relay "deadlock" this test used to report was that
+    // leaked fd, not a `view` or nvim bug). std's own pipe rather than
+    // `nix::unistd::pipe2`, which nix gates off macOS entirely -- and a
+    // `pipe` plus a separate `fcntl` would reopen the same leak for any
+    // fork racing between the two calls. The read end still reaches the
+    // child, since `Stdio::from` redirects it onto fd 0 with a `dup2`
+    // during exec setup and a `dup2` result does not carry `FD_CLOEXEC`.
+    let (stdin_read, mut stdin_write) =
+        std::io::pipe().expect("cloexec pipe for the child's stdin");
     let stdout_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stdout");
     let stderr_fd = nix::unistd::dup(&pty.slave).expect("dup pty slave for stderr");
 

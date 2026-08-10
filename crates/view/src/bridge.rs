@@ -202,9 +202,9 @@ impl ThemeBridge {
     /// to run through the loop's own effect executor.
     fn persist(&mut self, model: &mut Model) -> (Settled, Vec<Effect>) {
         let hl = model.engine.hl();
-        if !hl
+        if hl
             .confirmed()
-            .is_some_and(|probe| probe.generation == hl.probe_generation())
+            .is_none_or(|probe| probe.generation != hl.probe_generation())
         {
             return (Settled::No, Vec::new());
         }
