@@ -54,7 +54,11 @@ echo "-- building on $host --" | tee -a "$log_file"
 # EXIT:0 and defeat the nonzero-on-failure contract this script exists to
 # keep. zsh's `pipestatus` array holds each pipeline stage's own status,
 # 1-indexed, so `[1]` is cargo's.
-if ! ssh "$host" 'zsh -lc "cd ~/repos/view-ci && cargo build --workspace 2>&1 | tail -30; echo EXIT:${pipestatus[1]}"' \
+# `\${pipestatus[1]}`, escaped: the double-quoted zsh -lc string is expanded
+# by the OUTER remote login shell first, whose own pipestatus is always 0 --
+# unescaped, every build reported EXIT:0, success or not. The backslash
+# defers expansion to the inner zsh that actually ran the pipeline.
+if ! ssh "$host" 'zsh -lc "cd ~/repos/view-ci && cargo build --workspace 2>&1 | tail -30; echo EXIT:\${pipestatus[1]}"' \
   >>"$log_file" 2>&1; then
   echo "MBP BUILD LEG FAIL: the ssh session to $host itself failed" | tee -a "$log_file" >&2
   exit 1
