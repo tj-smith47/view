@@ -64,26 +64,24 @@ pub fn status(root: &Path) -> Vec<GitEntry> {
 /// to "nothing to decorate".
 #[must_use]
 pub fn status_bounded(root: &Path) -> (Vec<GitEntry>, bool) {
-    run_git_status(root, None, GIT_STATUS_TIMEOUT)
+    run_git_status(root, Path::new("git"), GIT_STATUS_TIMEOUT)
 }
 
-/// `status`'s implementation, taking an optional `PATH` override so a test
-/// can prove the "`git` absent from `PATH`" degrade without mutating the
-/// test process's own environment (which every other test in the binary
-/// shares) -- overriding `PATH` on this one child `Command` is enough to
-/// make Rust's own executable-search logic fail to resolve `git`
-/// identically to it genuinely being uninstalled, without the process-wide
-/// side effect that would otherwise demand the re-exec isolation
-/// `view_engine::process`'s fd-3 regression test needs for a truly
-/// process-global resource. `timeout` is injected (rather than always
-/// [`GIT_STATUS_TIMEOUT`]) so a test can prove the bound itself without
-/// waiting out the real production deadline.
-fn run_git_status(
-    root: &Path,
-    path_override: Option<&str>,
-    timeout: Duration,
-) -> (Vec<GitEntry>, bool) {
-    let mut cmd = Command::new("git");
+/// `status`'s implementation, taking the program to run so a test can prove
+/// both spawn-side degrades -- a `git` that is not installed, and one that
+/// never exits -- without mutating the test process's own environment,
+/// which every other test in the binary shares.
+///
+/// The program itself rather than a `PATH` override, because a `PATH`
+/// override does not mean the same thing everywhere: Unix resolves the
+/// child's program through the `PATH` the child is given, while Windows
+/// falls back to the parent process's own, so an emptied `PATH` there
+/// still finds the real `git` and proves nothing. A name nothing resolves
+/// fails to spawn identically on every platform. `timeout` is injected
+/// (rather than always [`GIT_STATUS_TIMEOUT`]) so a test can prove the
+/// bound itself without waiting out the real production deadline.
+fn run_git_status(root: &Path, program: &Path, timeout: Duration) -> (Vec<GitEntry>, bool) {
+    let mut cmd = Command::new(program);
     cmd.current_dir(root)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -103,9 +101,6 @@ fn run_git_status(
             "--",
             ".",
         ]);
-    if let Some(path) = path_override {
-        cmd.env("PATH", path);
-    }
     let Ok(child) = cmd.spawn() else {
         return (Vec::new(), false);
     };
@@ -346,14 +341,15 @@ mod tests {
     }
 
     /// The falsifiable check the tree's git-decoration support exists to
-    /// satisfy: with `git` absent from `PATH`, the tree still lists files
-    /// (proven separately by `tree::fs::scan`, which never shells out to
-    /// git at all) with no decorations, rather than erroring or blocking.
-    /// See `run_git_status`'s doc for why this overrides `PATH` on the
-    /// child `Command` alone instead of the whole test process's
-    /// environment.
+    /// satisfy: with no `git` to run, the tree still lists files (proven
+    /// separately by `tree::fs::scan`, which never shells out to git at
+    /// all) with no decorations, rather than erroring or blocking. The
+    /// repository is real and dirty, so anything short of a failed spawn
+    /// would report a decoration here. See `run_git_status`'s doc for why
+    /// the absence is a program nothing resolves rather than an emptied
+    /// `PATH`.
     #[test]
-    fn git_absent_from_path_reports_no_decorations_not_an_error() {
+    fn an_unrunnable_git_reports_no_decorations_not_an_error() {
         let root = scratch("no-git-on-path");
         init_repo(&root);
         std::fs::write(root.join("a.txt"), "one\n").expect("write a.txt");
@@ -361,15 +357,19 @@ mod tests {
         git(&root, &["commit", "-q", "-m", "init"]);
         std::fs::write(root.join("a.txt"), "two\n").expect("modify a.txt");
 
-        let (entries, timed_out) = run_git_status(&root, Some(""), GIT_STATUS_TIMEOUT);
+        let (entries, timed_out) = run_git_status(
+            &root,
+            Path::new("view-git-that-is-not-installed"),
+            GIT_STATUS_TIMEOUT,
+        );
         assert!(
             entries.is_empty(),
-            "with git absent from PATH the tree must report no \
-             decorations, not an error: {entries:?}"
+            "with no git to run the tree must report no decorations, not \
+             an error: {entries:?}"
         );
         assert!(
             !timed_out,
-            "git absent from PATH is a spawn failure, not a timeout"
+            "a git that never started is a spawn failure, not a timeout"
         );
 
         let _ = std::fs::remove_dir_all(&root);
@@ -408,19 +408,11 @@ mod tests {
         std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
         std::fs::set_permissions(&fake_git, perms).expect("chmod fake git");
 
-        // `bin_dir` is prepended to the real `PATH`, not substituted for
-        // it: the script's own `sleep` (and the `/bin/sh` interpreter its
-        // shebang names) must still resolve normally, while `bin_dir`
-        // sitting first guarantees the fake `git` shadows any real one.
-        let real_path = std::env::var("PATH").unwrap_or_default();
-        let path_override = format!(
-            "{}:{real_path}",
-            bin_dir.to_str().expect("utf8 scratch path")
-        );
-
+        // named outright rather than shadowed onto a `PATH`: the
+        // environment stays untouched, so the script's own `sleep` and the
+        // `/bin/sh` its shebang names resolve exactly as they always would
         let started = std::time::Instant::now();
-        let (entries, timed_out) =
-            run_git_status(&root, Some(&path_override), Duration::from_millis(200));
+        let (entries, timed_out) = run_git_status(&root, &fake_git, Duration::from_millis(200));
         let elapsed = started.elapsed();
 
         assert!(entries.is_empty(), "a killed child reports no decorations");

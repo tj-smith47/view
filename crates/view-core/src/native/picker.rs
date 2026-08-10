@@ -549,9 +549,16 @@ mod tests {
         let gen = state.generation();
         let item = PickerItem::grep_match("src/mod:weird.rs", 3, "let x = 1;");
         state.apply_results(gen, vec![item]);
+        // joined rather than spelled out: the separator between root and
+        // match is the platform's, and a hardcoded '/' asserts a Unix
+        // rendering on a Windows host that never produced one -- while the
+        // ':' this test is about is a path character on Unix and the drive
+        // separator on Windows, where splitting a label at it resolves
+        // `C:\repo\src\main.rs` to `C`
+        let expected = PathBuf::from("/repo").join("src/mod:weird.rs");
         assert_eq!(
             state.selected_path().as_deref(),
-            Some("/repo/src/mod:weird.rs"),
+            Some(expected.to_string_lossy().as_ref()),
             "a live-grep path containing ':' must resolve to the real file, \
              not the text before the first ':' in the display label"
         );

@@ -421,15 +421,20 @@ return { loaded = false }";
 /// vararg. Constant, like every other chunk here: no caller data is
 /// interpolated into the source itself.
 ///
-/// `vim.fn.fnameescape` guards the one caller-controlled value the chunk
-/// does interpolate: `path` reaches `vim.cmd.edit` as a literal argument to
-/// an ex command, and an unescaped path containing a space, `%`, `#`, or a
-/// leading `+` would otherwise be parsed as command syntax rather than a
-/// filename -- see `docs/tree-open-file-wire-capture.md` for the live
-/// capture backing that, including the unescaped negative control.
+/// `path` reaches nvim as a parsed argument with filename magic switched
+/// off, rather than as text an ex command re-parses: a space, `%`, `#` or a
+/// leading `+` in a filename is command syntax to `:edit` (see
+/// `docs/tree-open-file-wire-capture.md` for the live capture, including
+/// the unescaped negative control), and `magic.file = false` is what makes
+/// each of them an ordinary character instead.
+///
+/// Escaping the text was the other way to get there and it does not
+/// survive the platform: `fnameescape` escapes `\` because `\` is a
+/// metacharacter on Unix, and on Windows `\` is the path separator, so
+/// every Windows path arrived doubled and opened nothing at all.
 const OPEN_FILE_CHUNK: &str = "\
 local path = ...
-vim.cmd.edit(vim.fn.fnameescape(path))";
+vim.api.nvim_cmd({ cmd = 'edit', args = { path }, magic = { file = false, bar = false } }, {})";
 
 /// Renames a file on disk and, when a buffer is open for the old path,
 /// retargets that buffer onto the new one in the same call -- verified live
