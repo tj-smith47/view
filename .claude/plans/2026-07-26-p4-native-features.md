@@ -1906,35 +1906,133 @@ Authored with the plan per protocol step 7. Each item closes with an
 evidence citation — the command run and its observed output — never a
 bare checkmark.
 
-- [ ] `task ci` green (fmt-check, lint, audit, style, loc, test).
-- [ ] `task oracle` green, including every three-state entry (T15).
-- [ ] `task compat` green across the §13.3 named set in all three states,
-      or each red row filed with a user-approved deferral.
-- [ ] `task perf-audit` green with native features ENABLED, every §3.1
-      row compared against its P3-exit baseline (T16).
-- [ ] Picker §3.1 rows measured and gated (closes P3 deferral 1).
-- [ ] The echo `[[shortfall]]` entries in
-      `crates/view-bench/budgets.toml` — the ledger enumerates them; the
-      four `ratio_p50` rows and the dev-macos `view_p99_ms` tail alike —
-      retired by measurement (T16a/T16b), or the residual re-adjudicated
-      with the user — never silently carried.
-- [ ] Measurement-layer carry-ins 1–5 adjudicated (T16 step 5), each
+- [x] `task ci` green (fmt-check, lint, audit, style, loc, test). Cited at
+      HEAD c579b41: `~/.claude/tmp/battery-ci.log`, `EXIT:0`.
+- [x] `task oracle` green, including every three-state entry (T15). Cited:
+      `~/.claude/tmp/battery-oracle.log`, 26/26 `PARITY`, `EXIT:0`, incl.
+      `laststatus-superseded` (line 27) and `laststatus-restored` (line 26).
+- [x] `task compat` green across the §13.3 named set in all three states,
+      or each red row filed with a user-approved deferral. Cited:
+      `~/.claude/tmp/battery-compat.log` (30 OK + 1 SKIPPED — `daily-config`
+      skipped because `VIEW_DAILY_CONFIG` is unset by design), plus
+      `~/.claude/tmp/battery-compat-daily.log` (31/31 OK with
+      `VIEW_DAILY_CONFIG` set) covering native-only/superseded/deferred and
+      the present-only class; both `EXIT:0`.
+- [x] `task perf-audit` green with native features ENABLED, every §3.1 row
+      compared against its P3-exit baseline (T16). Cited:
+      `~/.claude/tmp/battery-perf-audit-retry2.log`, `perf-audit wrapper
+      exit: 0` (line 375), `EXIT:0` (line 376), `gate OK: 13 cell(s) within
+      recorded bars, 0 metric(s) checked against spec 3.1 budgets, 0
+      accepted shortfall(s) still held, 0 reading(s) past spec` (line 134);
+      `bench-micro` (6 benches: grid_apply, update_key, input_handoff,
+      damage_fold, render_frame, paint_frame) also clean in the same run.
+      `BUDGET SKIP [dev-linux]` (line 133) is expected, not an anomaly:
+      `crates/view-harness/src/baselines.rs::is_controlled_class` gates
+      spec-3.1 attestation on a `controlled-*`-prefixed class, and no such
+      class is provisioned anywhere in this repo (`dev-linux`, `dev-macos`,
+      `gh-linux`, `gh-macos` are all regression-tripwire-only by design,
+      matching the gate-attestation-split ruling). Two prior contamination
+      events on this leg are disclosed rather than hidden: the original run
+      (`~/.claude/tmp/battery-perf-audit.log`) hit a genuine host-load `GATE
+      BREACH` (picker.minimal `first_page_p50_ms` 3.8460 > 3.6737 at load1
+      7.57) and was not the authorized retry; the first retry
+      (`battery-perf-audit-retry.log`) was killed by an operator Bash-timeout
+      mistake, not a host or product failure. retry2 is the one attested
+      retry, run at load1 1.32→2.19, and is clean.
+- [x] Picker §3.1 rows measured and gated (closes P3 deferral 1). Cited:
+      `~/.claude/tmp/battery-perf-audit-retry2.log` lines 120-125, gated
+      `match_paint_p50_ms 2.880`, `match_paint_p99_ms 4.739`,
+      `first_page_p50_ms 2.594`, `first_page_p99_ms 7.548`, all within the
+      recorded dev-linux bars.
+- [x] The echo `[[shortfall]]` entries in `crates/view-bench/budgets.toml`
+      — the ledger enumerates them; the four `ratio_p50` rows and the
+      dev-macos `view_p99_ms` tail alike — retired by measurement
+      (T16a/T16b), or the residual re-adjudicated with the user — never
+      silently carried. Cited: `crates/view-bench/budgets.toml`
+      `[[shortfall]]` section, each entry carries a `why` +
+      "User-adjudicated 2026-08-09"; dev-linux `echo.heavy ratio_p50`
+      retired by T16b measurement; the 3 residual `ratio_p50` rows
+      (dev-linux echo.minimal, dev-macos echo.minimal, dev-macos
+      echo.heavy) plus the dev-macos `view_p99_ms` tail are re-adjudicated
+      in `.claude/measurements/2026-08-08-measurement-layer-rulings.md`.
+- [x] Measurement-layer carry-ins 1-5 adjudicated (T16 step 5), each
       ruling recorded in `budgets.toml` comments or
-      `.claude/measurements/` with its evidence citation.
-- [ ] Non-interference test passing per feature, each shown to catch a
-      deliberately introduced drift (T15 step 4).
-- [ ] Every feature in `registry::features()` reachable, opt-out-able by
-      its exact `off_switch`, and reported by the first-run toast.
-- [ ] Golden snapshots present for every native overlay × all three tiers.
-- [ ] `.claude/known-bugs.md` drained, or every remaining item carrying
-      explicit user approval.
-- [ ] Dogfood note appended to `.claude/dogfood-journal.md` — real daily
+      `.claude/measurements/` with its evidence citation. Cited:
+      `.claude/measurements/2026-08-08-measurement-layer-rulings.md`, 6
+      sections all headed "RULED 2026-08-09": (1) `--record` pinning, (2)
+      single-shot gating <25% regressions, (3) scroll.minimal dev-macos
+      knife-edge, (4) dev-macos echo 1.25 default, (5) auto-staleness
+      dormancy, (6) T16 exit pair.
+- [x] Non-interference test passing per feature, each shown to catch a
+      deliberately introduced drift (T15 step 4). Cited:
+      `~/.claude/tmp/battery-ci.log` lines 1133-1143, 5/5 pass (picker,
+      picker-grep, picker-buffers, tree, message-history);
+      `.superpowers/sdd/2026-07-26-p4-native-features/task-15-report.md`
+      records 3 sabotage rounds, each correctly FAILED before revert,
+      `git diff --stat` clean after revert.
+- [x] Every feature in `registry::features()` reachable, opt-out-able by
+      its exact `off_switch`, and reported by the first-run toast. Cited:
+      `crates/view-core/src/native/registry.rs` unit tests
+      `ids_are_unique` / `off_switch_spells_the_id_a_user_can_paste` /
+      `is_feature_answers_only_for_table_rows`
+      (`~/.claude/tmp/battery-ci.log` lines 482-494);
+      `crates/view-native/src/toast.rs::first_run` unit test
+      `the_first_run_announces_every_handed_over_surface_with_its_off_switch`
+      (line 1231); supersede-table tests (lines 1215-1219) confirm every
+      takeover row names a live registry feature and reverses with its own
+      `off_switch` verbatim. Live-confirmed interactively this session (see
+      the guided-QA item below): removing/restoring `native.picker = false`
+      in `view.toml` suppresses/restores `<leader>ff` symmetrically.
+- [x] Golden snapshots present for every native overlay × all three tiers.
+      Cited: `~/.claude/tmp/battery-ci.log` lines 1421-1442, 18/18 pass (6
+      overlays: palette/picker/prompt/statusline/statusline_bar/tree × 3
+      tiers: basic/standard/full).
+- [x] `.claude/known-bugs.md` drained, or every remaining item carrying
+      explicit user approval. Cited: file read in full this session —
+      0 unchecked live items; the sole entry is `[x] RESOLVED 2026-08-03`
+      (the `settings.json` tracked-vs-gitignored shape decision).
+- [x] Dogfood note appended to `.claude/dogfood-journal.md` — real daily
       driving is expected to start this phase, so this note should record
-      actual use, not a smoke test.
-- [ ] Guided acceptance QA pass (the P3 doc's successor, covering the
-      user-visible surface this phase actually ships).
-- [ ] P5 plan authored under the planning protocol, with the ACP spec
+      actual use, not a smoke test. Cited: `.claude/dogfood-journal.md`,
+      "## 2026-08-10 — P4 exit" entry, appended this session from real
+      interactive tmux sessions against `target/release/view` at c579b41
+      covering the picker, tree, statusline, notifications, message
+      history, completion palette, cmdline, first-run announcement
+      (persistence confirmed across relaunch in two independently-isolated
+      scratch HOMEs), and the picker off-switch both directions; records
+      two real documentation bugs the pass caught and fixed in
+      `.claude/qa/p4-guided-qa.md` (tree focus-routing key set;
+      transient-vs-sticky toast wording), and the discovery that
+      `docs/compat.md` was stale in the tracked tree (regenerated via
+      `task oracle -- page`, `~/.claude/tmp/battery-oracle-page.log`,
+      `EXIT:0`, "wrote docs/compat.md (31 rows, pin v0.12.4, 2026-08-10)").
+- [x] Guided acceptance QA pass (the P3 doc's successor, covering the
+      user-visible surface this phase actually ships). Cited:
+      `.claude/qa/p4-guided-qa.md` (28 steps, sections A-H), run
+      interactively this session against the release binary in three
+      isolated scratch HOME/XDG environments; all 28 steps observed
+      passing, including step 28's gate-enforced doc/build agreement
+      (`mappings::tests::the_keys_page_renders_the_table_this_build_registers`,
+      `~/.claude/tmp/battery-ci.log` line 1185). Two documentation defects
+      found and fixed in the doc itself during the pass (see the dogfood
+      note above for detail).
+- [x] P5 plan authored under the planning protocol, with the ACP spec
       verified live via context7/docs first (the charter requires it).
-- [ ] Every concession or metric degradation encountered during the phase
+      Cited: `.claude/plans/INDEX.md` line 13, "Drafted (adversarially
+      reviewed, 3 rounds)"; live ACP verification via WebFetch against
+      agentclientprotocol.com is recorded in the P5 planning session
+      (context7 unavailable that session, a sanctioned fallback). All five
+      P5.5 invented-capability plans are also drafted and adversarially
+      reviewed (`.claude/plans/INDEX.md` lines 14-19).
+- [x] Every concession or metric degradation encountered during the phase
       carries a Fable 5 adversarial review, per the user's standing rule.
+      Cited: `.superpowers/sdd/2026-07-26-p4-native-features/progress.md`
+      line 194 (Task 16: `pss_mb` gate breach 5.2100 vs 4.9526 surfaced,
+      review dispatched to a `fable` subagent with a measurement-integrity
+      reconciliation mandate); line 209 (ratchet-guard: `fable` implementer
+      per the 2026-08-09 carry-in-1 ruling); lines 226-231 (footprint-diet:
+      `fable` high-scrutiny review dispatched — verdict spec-mechanically-met
+      / evidentially-broken — remedy applied, scoped re-review dispatched to
+      the same reviewer and CLOSED, "No new Critical/Important. Quality
+      APPROVED").
 

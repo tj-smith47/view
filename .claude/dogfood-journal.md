@@ -46,3 +46,39 @@ still-open noice ext_* suppression item, observed in real use. New since
 the 94f8732 entry: the daily-config compat scenario now exercises this
 same real-config surface as a harness row (15/15 OK on both hosts at
 bb139c5, twice back-to-back on macOS).
+
+## 2026-08-10 — P4 exit
+
+Guided acceptance pass against the release binary at c579b41, three scratch
+HOME/XDG environments (isolated from the real host's own state dir) driven
+through scripted tmux sessions covering the full P4 native surface: the
+picker (files/buffers/grep opened, an entry selected, `<Esc>` closed it with
+the buffer underneath untouched), the file tree (`<leader>e` opens; while it
+has focus keys route through view's own tree state machine rather than
+nvim's keymap table, so only `<Down>`/`<Up>`/`<CR>`/`<Esc>`/`a`/`r`/`d` do
+anything and `<leader>e` itself is silently swallowed until focus returns to
+the buffer — this is a real behavior difference from an nvim-native tree
+plugin and is now called out explicitly in the guided QA doc), the
+statusline (rendered via toast on first activation), notification toasts
+(`:echo` renders transient and expires on its own; `:bogus` renders sticky
+and survives both the idle timeout and a keypress, matching bare nvim's own
+error persistence), message history (`<leader>fm`), the completion palette
+and cmdline, the first-run announcement (fires once per config path, with a
+config-path-keyed record confirmed to persist correctly across relaunch in
+two independently-isolated scratch HOMEs), and the picker off-switch
+(`native.picker = false` suppresses `<leader>ff` and falls back to the
+user's own mapping or none; removing the line restores it — confirmed
+symmetric both directions).
+
+Two real documentation-accuracy bugs were caught and fixed by actually
+driving the steps rather than assuming: the guided QA doc's tree section
+described `j`/`k` navigation and a plain `<leader>e` close, when the real
+overlay-focus routing only accepts the keys above; and its notifications
+section described all messages as transient, when nvim's error/warning
+kinds route Sticky. Both are exactly the class of defect a guided pass
+exists to catch. `docs/compat.md` was also found stale in the tracked tree
+(2026-08-03, 15 rows, pre-three-state) against the current
+`compat/results.json` (31 rows, all three-state OK) and was regenerated via
+`task oracle -- page`. `docs/keymaps.md` cross-checks clean against every
+mapped key exercised live, and is gate-enforced by
+`mappings::tests::the_keys_page_renders_the_table_this_build_registers`.
