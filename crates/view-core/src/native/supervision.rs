@@ -54,9 +54,14 @@ pub const READOUT_RESOLUTION: Duration = Duration::from_secs(1);
 /// aborts an engine stuck inside a Vimscript loop, whose break-check pumps
 /// the event loop and so sees the queued input. It does not reach an engine
 /// inside a synchronous Lua loop, which pumps nothing and answers neither
-/// this nor the liveness probe -- that wedge's only recovery is
-/// [`SupervisionChoice::Restart`], which is why the modal offers both rather
-/// than presenting an interrupt as the answer.
+/// this nor the liveness probe -- that wedge's only recovery is a restart,
+/// which the modal cannot yet offer: [`SupervisionChoice::Restart`] is
+/// listed nowhere until `Engine::restart()` exists, so the modal presents
+/// the interrupt without claiming it answers every wedge. A third
+/// live-verified fact: nvim discards its unread typeahead when the
+/// interrupt lands, so keys still queued through `nvim_input` at that
+/// moment are lost by nvim itself -- identically with or without the
+/// modal on screen.
 pub const INTERRUPT_NOTATION: &str = "<C-c>";
 
 /// How long the current wedge has been continuously observed.

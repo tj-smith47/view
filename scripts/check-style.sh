@@ -226,7 +226,10 @@ if [ -f scripts/audit-god-files.sh ] && [ -d crates ]; then
     echo "STYLE FAIL: could not read production lines to check condition-notice ownership"
     fail=1
   else
-    sites=$(printf '%s\n' "$prod_lines" | grep -E '\.set_native_condition\(' || true)
+    # any non-identifier char before the name, so UFCS calls
+    # (`Messages::set_native_condition(...)`) cannot walk past the pin; the
+    # definition itself is the one legitimate non-call mention
+    sites=$(printf '%s\n' "$prod_lines" | grep -E '[^A-Za-z0-9_]set_native_condition\(' | grep -v 'fn set_native_condition' || true)
     found=$(printf '%s' "$sites" | grep -c . || true)
     strangers=$(printf '%s' "$sites" | grep -v "^$CONDITION_OWNER:" || true)
     if [ -n "$strangers" ]; then
@@ -244,6 +247,11 @@ if [ -f scripts/audit-god-files.sh ] && [ -d crates ]; then
       fail=1
     fi
   fi
+else
+  # fail closed: a renamed or missing classifier must not silently drop the
+  # ownership pin while the rest of the style gate stays green
+  echo "STYLE FAIL: scripts/audit-god-files.sh or crates/ missing; cannot check condition-notice ownership"
+  fail=1
 fi
 for dir in compat corpus; do
   if [ -d "$dir" ]; then
