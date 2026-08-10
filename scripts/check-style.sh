@@ -23,6 +23,17 @@ check_narrative_markers() {
   if grep -rniE "${anchor}\\bstep [0-9]" "${targets[@]}"; then
     echo "STYLE FAIL: session-narrative comment marker (step)"; fail=1
   fi
+  # "task" also checked case-insensitively, following the same shape as
+  # "step" above: this tree has committed lowercase "task N" narrative
+  # references (matcher.rs and budgets.rs) that the case-sensitive check
+  # above missed. Requiring a directly adjacent number keeps this from
+  # flagging the ordinary lowercase word "task" on its own, which -- unlike
+  # "step" -- does have legitimate unrelated prose readings; the other four
+  # words above ("phase"/"wave"/"cycle"/"session") stay case-sensitive since
+  # no lowercase-numbered instance of any of them has been found here.
+  if grep -rniE "${anchor}\\btask [0-9]" "${targets[@]}"; then
+    echo "STYLE FAIL: session-narrative comment marker (task)"; fail=1
+  fi
   # spec-task tags (T4/T5/T6): a comment/doc must state what the code does,
   # never which spec task produced it. Two shapes: a slash-joined sequence
   # (T4/T5/T6, T10/T11), which has no legitimate non-task-tag reading

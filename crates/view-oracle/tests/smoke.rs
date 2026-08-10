@@ -1295,9 +1295,15 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     // itself clear several seconds with zero product-side delay (see the
     // `wait_for` call below). `pty_isolation_exclusive` -- the same
     // mechanism this file already uses for its tight-bound startup-latency
-    // tests -- removes that sibling-session contention for the whole test
-    // rather than widening the deadline further.
-    let _exclusive = pty_isolation_exclusive();
+    // tests -- removes that sibling-session contention for those two
+    // wall-clock-bound waits only, not the whole test: `std::sync::RwLock`
+    // has no downgrade, so the guard is held as an `Option`, dropped, and
+    // replaced with the ordinary shared guard once both waits are done,
+    // rather than blocking every other pty test in the binary for the
+    // untimed `:wq`/exit tail below too. That tail is bounded in its own
+    // right (see `wait_for_exit` below): a wedged engine at exit must fail
+    // this test loudly rather than hang the whole binary, and with it CI.
+    let mut exclusive = Some(pty_isolation_exclusive());
     let mut session = spawn_view_pty_raw_isolated_with_args(
         &[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()],
         QueryPolicy::AnswerDa1,
@@ -1326,10 +1332,25 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
         session.screen()
     );
 
+    // both wall-clock-bound waits above are done; downgrade to the shared
+    // lock so the untimed tail below no longer blocks every other pty test
+    // in the binary for its duration
+    drop(exclusive.take());
+    session._isolation = shared_isolation();
+
     session.send(b"\x1b:wq\r").unwrap();
+    // `wait_for_exit`, not `wait`'s unbounded block: kills and reaps the
+    // child on deadline, so a wedged engine here fails this assertion
+    // promptly with no orphaned process, instead of hanging the whole test
+    // binary (and CI) behind it.
     let exit = session
-        .wait()
-        .expect("view never exited after :wq against the delayed engine");
+        .wait_for_exit(Duration::from_secs(15))
+        .unwrap_or_else(|| {
+            panic!(
+                "view never exited within 15s of :wq against the delayed engine; screen:\n{}",
+                session.screen()
+            )
+        });
     assert!(
         exit.success(),
         "view did not exit cleanly after :wq; screen:\n{}",

@@ -25,7 +25,7 @@
 //! metric = "ratio_p50"
 //! class = "dev-linux"
 //! accepted = 1.3537866848241882
-//! why = "unattributed; see task 19"
+//! why = "unattributed; investigation pending"
 //! ```
 //!
 //! Every budget is an upper bound, because every metric the harness records

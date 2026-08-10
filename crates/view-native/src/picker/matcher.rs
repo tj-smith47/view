@@ -1233,8 +1233,8 @@ mod tests {
 
     /// Spec 3.1's picker-match row (keystroke -> first results painted,
     /// 100k resident entries, <= 16 ms) measured once here and recorded in
-    /// the commit description; task 16 owns the paired, class-gated
-    /// bench-suite version of this budget. "Resident" means the corpus is
+    /// the commit description; a paired, class-gated bench-suite scenario
+    /// enforces this budget going forward. "Resident" means the corpus is
     /// fully matched before the timer starts: the cost under measurement is
     /// one incremental re-match against an already-settled 100k-item
     /// snapshot, not the one-time cost of loading it.
@@ -1242,10 +1242,10 @@ mod tests {
     fn keystroke_to_first_results_at_100k_resident_entries() {
         // bounded (see `spawn_bounded`'s doc): the assertions below are a
         // generous, deadline-based sanity ceiling, not the gated perf number
-        // (that lives in task 16's paired bench suite instead), so a single
-        // matcher thread stays well inside budget while keeping this session
-        // out of the near-dozen-pool contention --test-threads-parallel runs
-        // of this module otherwise create
+        // (that lives in the paired, class-gated bench suite instead), so a
+        // single matcher thread stays well inside budget while keeping this
+        // session out of the near-dozen-pool contention --test-threads-
+        // parallel runs of this module otherwise create
         let mut session = Session::new_bounded(Source::Buffers, 1);
         let injector = session.nucleo.injector();
         for i in 0..100_000u32 {
@@ -1297,7 +1297,7 @@ mod tests {
         // a generous, debug-build-safe sanity ceiling, not the spec's real
         // 16 ms bar -- that number was measured once in release mode for
         // this commit's description (4.550806 ms) and is gated going
-        // forward by task 16's paired, class-gated bench suite, not this
+        // forward by a paired, class-gated bench-suite scenario, not this
         // unit test; a debug build's unoptimized fuzzy match alone measured
         // 24.924149 ms here, which is why this ceiling is generous rather
         // than the product bar
