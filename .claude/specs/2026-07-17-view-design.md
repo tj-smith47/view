@@ -274,7 +274,8 @@ Dependency rules (audit-enforced, cfgd-style):
   corner; upstream PR #32691 makes multigrid the internal default — each
   engine-pin bump re-evaluates the `single_grid` knob's lifespan, and
   `doctor` recognizes multigrid-shaped failures and suggests the knob.)
-- Supervision: an engine death (a signal, or a reader that stopped for its own
+- Supervision: an engine death (any exit nvim never announced — a signal, a
+  crash that manages a clean exit status, a reader that stopped for its own
   reason) → view keeps the last Surface painted, offers one-key restart, and
   swapfiles make that restart non-destructive; an engine told to exit (`:q`,
   `:cq`) announces its own departure over view's bridge before the channel

@@ -559,6 +559,7 @@ mod tests {
     }
 
     /// A bounded wait, never a sleep: the condition is the whole assertion.
+    #[cfg(unix)]
     fn wait_until(what: &str, mut probe: impl FnMut() -> bool) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         while !probe() {

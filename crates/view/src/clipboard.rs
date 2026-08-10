@@ -122,7 +122,7 @@ impl<E: EngineOps> Clone for ReplyRoute<E> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl ReplyRoute<view_engine::handle::EngineHandle> {
     /// Whether this route currently names a connection that is still open.
     ///
