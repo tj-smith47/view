@@ -31,13 +31,16 @@ echo "== mbp build leg, $(date -u +%Y-%m-%dT%H:%M:%SZ) ==" | tee "$log_file"
 git log --oneline -1 | tee -a "$log_file"
 
 echo "-- mirroring tracked tree to $host:~/repos/view-ci --" | tee -a "$log_file"
-# `*(N)`, not a bare `*`: zsh (mbp's login shell) aborts a glob with no
+# `*(ND)`, not a bare `*`: zsh (mbp's login shell) aborts a glob with no
 # matches by default, unlike bash, so a first run against a freshly
 # `mkdir -p`'d, still-empty view-ci would fail here before ever reaching
 # tar. The `(N)` qualifier is zsh's own nullglob-for-one-pattern -- an empty
-# match expands to nothing instead of erroring.
+# match expands to nothing instead of erroring. `(D)` includes dotfiles,
+# which plain `*` skips -- without it a tracked dotfile removed from a later
+# commit would silently survive the wipe and leak into subsequent builds
+# (zsh globs never generate `.` or `..`, so the recursive rm stays safe).
 if ! git archive HEAD |
-  ssh "$host" 'zsh -lc "mkdir -p ~/repos/view-ci && rm -rf ~/repos/view-ci/*(N) && tar -x -C ~/repos/view-ci"' \
+  ssh "$host" 'zsh -lc "mkdir -p ~/repos/view-ci && rm -rf ~/repos/view-ci/*(ND) && tar -x -C ~/repos/view-ci"' \
     >>"$log_file" 2>&1; then
   echo "MBP BUILD LEG FAIL: could not mirror the tree to $host (host unreachable, or the remote mkdir/rm/tar failed)" |
     tee -a "$log_file" >&2
