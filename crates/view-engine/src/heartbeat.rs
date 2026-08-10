@@ -71,6 +71,25 @@ pub const HEARTBEAT_PROBE_INTERVAL: Duration = Duration::from_secs(2);
 /// -- the direction that delays a verdict rather than inventing one.
 const SEND_LOG: u64 = 64;
 
+// tied at compile time rather than by comment: shortening the probe interval
+// shortens the ring in wall-clock terms, and a ring narrower than the
+// threshold would leave the fold clamping against engines that are merely
+// slow instead of measuring them
+const _: () = assert!(
+    SEND_LOG as u128 * HEARTBEAT_PROBE_INTERVAL.as_millis()
+        >= 2 * HEARTBEAT_WEDGE_THRESHOLD.as_millis(),
+    "SEND_LOG probe intervals must span at least twice HEARTBEAT_WEDGE_THRESHOLD"
+);
+
+/// How many times a fold re-reads the shared state before giving up on
+/// getting a reading that no tick moved underneath it.
+///
+/// One retry would do at the prober's cadence -- a second collision needs
+/// two ticks inside the handful of loads below, which is 4 s of probes in
+/// the width of one function -- and three is the same reasoning with a
+/// margin, at three relaxed loads apiece.
+const ANCHOR_READ_ATTEMPTS: usize = 3;
+
 /// What one [`HeartbeatWatch::observe`] call reports about the read side.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -153,18 +172,58 @@ impl Probe {
         // clamped to what the log still holds: past that the true oldest
         // has been overwritten, and reading a newer generation's send time
         // shortens the silence rather than inventing one (see `SEND_LOG`)
-        Some((acked + 1).max(sent.saturating_sub(SEND_LOG - 1)))
+        Some(Self::anchor_generation(sent, acked))
+    }
+
+    /// Which generation's send time anchors the window, given a `sent`/`acked`
+    /// pair already read.
+    fn anchor_generation(sent: u64, acked: u64) -> u64 {
+        (acked + 1).max(sent.saturating_sub(SEND_LOG - 1))
+    }
+
+    /// The anchor's send time in nanoseconds, read against the `sent`
+    /// generation the caller already observed, or `None` when a tick landed
+    /// after that observation and the reading cannot be trusted.
+    ///
+    /// The check is not paranoia about a stale value; it is the one
+    /// interleaving that can invert a verdict. Once the window is saturated
+    /// the clamp above points at generation `sent - 63`, whose slot is the
+    /// very slot the next tick (`sent + 1`) writes -- the two differ by
+    /// exactly [`SEND_LOG`]. A tick landing between the caller's generation
+    /// load and this stamp load would therefore hand back the *new* probe's
+    /// send time for the *oldest* probe's slot, and an engine silent for
+    /// hours would read as answered a moment ago. Re-reading the generation
+    /// catches exactly that, and costs one acquire load on the path where a
+    /// probe is already outstanding.
+    fn anchor_nanos(&self, sent: u64, acked: u64) -> Option<u64> {
+        let opened =
+            self.sent_at[Self::slot(Self::anchor_generation(sent, acked))].load(Ordering::Relaxed);
+        (self.sent_generation.load(Ordering::Acquire) == sent).then_some(opened)
     }
 
     /// How long the oldest probe still owed an answer has been outstanding
     /// at `now`, or `None` when none is.
     fn outstanding_for(&self, now: Instant) -> Option<Duration> {
-        let oldest = self.oldest_outstanding()?;
-        let opened = self.sent_at[Self::slot(oldest)].load(Ordering::Relaxed);
-        // saturating: a send stamped after `now` (a caller folding against
-        // an earlier instant than the tick it is asking about) yields zero
-        // rather than wrapping to an instant wedge
-        Some(Duration::from_nanos(self.stamp(now).saturating_sub(opened)))
+        for _ in 0..ANCHOR_READ_ATTEMPTS {
+            let sent = self.sent_generation.load(Ordering::Acquire);
+            let acked = self.acked_generation.load(Ordering::Relaxed);
+            if sent <= acked {
+                return None;
+            }
+            if let Some(opened) = self.anchor_nanos(sent, acked) {
+                // saturating: a send stamped after `now` (a caller folding
+                // against an earlier instant than the tick it is asking
+                // about) yields zero rather than wrapping to an instant
+                // wedge
+                return Some(Duration::from_nanos(self.stamp(now).saturating_sub(opened)));
+            }
+        }
+        // every attempt raced a tick, so no send time here can be trusted --
+        // and a connection with a probe outstanding that has just been
+        // probed this hard is not one to report as answering. The reading
+        // that cannot hide a wedge is the maximum, and a caller reading
+        // again on its next pass gets a settled answer.
+        Some(Duration::MAX)
     }
 }
 
@@ -215,10 +274,14 @@ impl HeartbeatProber {
         // published after its send time is stamped, and with a release, so
         // an observer that sees this generation outstanding is guaranteed
         // the time it went out rather than whatever the slot held a lap
-        // ago. `fetch_max` rather than a store because the generation was
-        // read rather than reserved: two probers on one connection would
-        // otherwise be free to rewind it, and a rewound generation means an
-        // answer that resolves a probe nobody sent.
+        // ago. `fetch_max` rather than a store keeps the generation
+        // monotonic if this is ever reached concurrently, which is strictly
+        // damage control and not concurrency support: two probers reading
+        // the same generation would send two probes tagged alike, and one
+        // answer would resolve both. What actually holds is the invariant
+        // that there is one prober per connection -- `Engine::spawn` calls
+        // `spawn_prober` exactly once and nothing else ticks a live
+        // connection.
         self.probe
             .sent_generation
             .fetch_max(generation, Ordering::Release);
@@ -788,6 +851,67 @@ mod tests {
         // the oldest generation still on record, not the oldest ever sent
         let oldest = watch.probe.oldest_outstanding().unwrap();
         assert_eq!(oldest, u64::from(probes) - SEND_LOG + 1);
+    }
+
+    /// The one interleaving that can invert a verdict, recreated exactly: an
+    /// observer reads the generation pair, a tick lands, and the slot the
+    /// observer was about to read is the slot that tick just overwrote --
+    /// they alias whenever the window is saturated, because the two
+    /// generations differ by exactly `SEND_LOG`. Reading it anyway would
+    /// hand an engine silent for two minutes the send time of a probe
+    /// issued this instant.
+    #[test]
+    fn a_tick_landing_mid_read_invalidates_the_anchor_it_would_have_overwritten() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let saturating = u32::try_from(SEND_LOG).unwrap();
+        for n in 1..=saturating {
+            prober.tick_at(&handle, t0 + INTERVAL * n).unwrap();
+        }
+
+        // the pair an observer reads before it goes looking in the log
+        let sent = watch.probe.sent_generation.load(Ordering::Relaxed);
+        let acked = watch.probe.acked_generation.load(Ordering::Relaxed);
+        let anchor = Probe::anchor_generation(sent, acked);
+        assert_eq!(anchor, sent - (SEND_LOG - 1));
+        assert_eq!(
+            Probe::slot(sent + 1),
+            Probe::slot(anchor),
+            "the next tick has to alias the anchor's slot or this test pins nothing"
+        );
+        let anchored_at = watch.probe.anchor_nanos(sent, acked);
+        assert_eq!(
+            anchored_at,
+            Some(u64::try_from(INTERVAL.as_nanos()).unwrap()),
+            "an unraced read must still yield the anchor's own send time"
+        );
+
+        // and now the tick, landing between that pair and the stamp read
+        prober
+            .tick_at(&handle, t0 + INTERVAL * (saturating + 1))
+            .unwrap();
+        assert_eq!(
+            watch.probe.anchor_nanos(sent, acked),
+            None,
+            "a stamp read across a tick was accepted: a saturated window would \
+             report the new probe's send time as the old one's and read Alive"
+        );
+    }
+
+    /// The retry is what makes the invalidation above harmless: a fold that
+    /// re-reads finds a settled pair and the verdict stands.
+    #[test]
+    fn a_saturated_window_reads_wedged_through_the_tick_that_aliases_its_anchor() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let probes = u32::try_from(SEND_LOG).unwrap();
+        for n in 1..=probes {
+            prober.tick_at(&handle, t0 + INTERVAL * n).unwrap();
+        }
+        let landed = t0 + INTERVAL * (probes + 1);
+        prober.tick_at(&handle, landed).unwrap();
+        assert_eq!(watch.observe_at(false, landed), Liveness::Wedged);
+        assert_eq!(watch.deadline_at(landed), Some(THRESHOLD));
     }
 
     #[test]

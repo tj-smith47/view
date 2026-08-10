@@ -576,9 +576,13 @@ impl Engine {
         // anything the pump staged before this call is returned as
         // `SinkCutover` and replayed through the caller's own dispatch,
         // never through the acknowledgement path, so a probe issued before
-        // now would be charged to the engine as silence it did not owe
+        // now would be charged to the engine as silence it did not owe.
+        // After the attach, not before: a tick landing in the window
+        // between the two would have its reply staged rather than sunk, and
+        // that generation would stay outstanding for the session's life.
+        let attached = self.pump.attach_sink(sink);
         self.heartbeat.resume();
-        self.pump.attach_sink(sink)
+        attached
     }
 
     /// Resolves the engine's exit status into an [`ExitInfo`], for the

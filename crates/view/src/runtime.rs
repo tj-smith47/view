@@ -961,11 +961,18 @@ fn note_write_stall(
 /// function whose whole contract is about queued output would leave neither
 /// nameable.
 ///
-/// Costs one relaxed atomic load for the connection's closed flag and one
-/// for the probe generation, then a comparison -- no lock, no allocation,
-/// and nothing sent. The send lives on the engine's own prober thread, so
+/// Costs three atomic loads on the steady-state pass: one acquire load of
+/// the connection's closed flag ([`EngineHandle::is_closed`]) and the pair
+/// [`HeartbeatWatch::observe`] reads to answer whether any probe is
+/// outstanding at all (an acquire load of the sent generation, a relaxed
+/// load of the acknowledged one). Two more follow in the same pass from
+/// [`watch_deadline`], which asks the same watch for a deadline -- five in
+/// total per pass, plus comparisons. No clock read, no lock, no allocation,
+/// and nothing sent: the send lives on the engine's own prober thread, so
 /// this call cannot await RPC however wedged the engine is, which is the
-/// only reason a paint loop can afford to ask on every pass.
+/// only reason a paint loop can afford to ask on every pass. A pass with a
+/// probe actually outstanding reads the send-time log as well and takes one
+/// `Instant::now()`.
 fn note_engine_liveness(
     watch: &HeartbeatWatch,
     verdict: &mut Liveness,
@@ -1206,9 +1213,12 @@ pub struct MsgChannel {
 /// rather than retried or escalated, so this never turns into a stall the
 /// way an engine-bound write can (see `OutboxStallWatch`).
 ///
-/// [`note_engine_liveness`] runs on this thread too, once per pass, and its
-/// per-pass cost is two atomic loads and a comparison with no clock read
-/// and no send -- it cannot block on the very connection it is asking
+/// The read-side liveness watch runs on this thread too, and costs this
+/// loop five atomic loads per steady-state pass: three in
+/// [`note_engine_liveness`] (the connection's closed flag, plus the sent
+/// and acknowledged generations) and two more when [`watch_deadline`] asks
+/// the same watch what deadline to arm. No clock read, no lock and no send
+/// in that state -- it cannot block on the very connection it is asking
 /// about. Its recurring cost is the wakeup rather than the fold: one extra
 /// pass every probe interval, ending in a dispatch that produces no effect
 /// and no paint.
