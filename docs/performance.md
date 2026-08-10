@@ -80,12 +80,12 @@ speaking Neovim's RPC protocol just costs this much. Neovim ships its own
 out-of-process TUI, which makes that theory testable. Measured under the
 identical protocol on the same host:
 
-| steady typing, dev-linux | vs bare Neovim |
+| steady typing, dev-linux (no plugins / 14-plugin stack) | vs bare Neovim |
 |---|---|
-| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.02x** |
-| view, at the time of that measurement | 1.22x |
+| Neovim's own TUI driving a headless Neovim over the UI protocol | **1.04x / 1.02x** |
+| view, at the time of that measurement | 1.22x / 1.24x |
 
-Speaking the protocol from another process costs about 2%. Roughly nine
+Speaking the protocol from another process costs about 2-4%. Roughly nine
 tenths of the gap was view's own code. (Three earlier theories, a
 thread-hop cost floor, the pty transport, and the measurement
 instrumentation itself, also failed to survive measurement; each retraction
@@ -119,10 +119,11 @@ key belongs to Neovim or to view's own UI. No other stage on either path
 exceeds 21 µs.
 
 *Measured 2026-08-03 (`df411f19`). The largest item above, the
-49.1 µs p50 key-decoded->loop-wake hop, has since collapsed to 13.9 µs
-p50 with the input-thread/runtime-loop unification (spec:97-99's
-2026-08-09 adjudication) -- this decomposition's ~644 µs total predates
-that change and reads high.*
+key-decoded->loop-wake hop (49.1 µs p50 in this table; 52.4 µs p50 in
+the reading taken immediately before the change), has since collapsed
+to 13.9 µs p50 with the input-thread/runtime-loop unification
+(spec:97-99's 2026-08-09 adjudication) -- this decomposition's ~644 µs
+total predates that change and reads high.*
 
 ## How budgets are enforced
 
