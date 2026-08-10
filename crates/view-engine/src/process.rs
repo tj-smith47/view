@@ -9,6 +9,7 @@
 
 use crate::damage::{DamagePump, PumpShared, SinkCutover};
 use crate::handle::{EngineError, EngineHandle};
+use crate::heartbeat::{HeartbeatProber, HeartbeatWatch, HEARTBEAT_PROBE_INTERVAL};
 use rmpv::Value;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -380,6 +381,35 @@ pub struct Engine {
     /// sink are staged rather than lost. See `crate::damage` for the full
     /// contract.
     pump: Arc<PumpShared>,
+    /// The read side's liveness watch, fed by a prober thread this engine
+    /// spawned and folded by whichever thread observes it. A public field
+    /// rather than an accessor because the one caller reads it in the same
+    /// expression as [`handle`](Self::handle), which an accessor borrowing
+    /// all of `Engine` would forbid.
+    pub heartbeat: HeartbeatWatch,
+}
+
+/// Starts the one thread that owns the heartbeat cadence, ticking `prober`
+/// every [`HEARTBEAT_PROBE_INTERVAL`] against `handle`.
+///
+/// A thread of its own because neither the request seam the probe rides nor
+/// the reply seam its answer comes back on has any notion of a clock: they
+/// send when told and deliver when answered. It cannot be the runtime
+/// loop's thread, which must never originate the send, nor the reader
+/// thread, which must never block -- and a timer is a block.
+///
+/// Detached, and ends itself: the first tick the connection refuses retires
+/// it, so a replaced engine leaves no prober behind and a process shutting
+/// down waits for nothing. That costs at most one interval of lag between
+/// the connection closing and the thread noticing, during which the ticks
+/// it issues are refused rather than written.
+fn spawn_prober(prober: HeartbeatProber, handle: EngineHandle) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(HEARTBEAT_PROBE_INTERVAL);
+        if prober.tick(&handle).is_err() {
+            break;
+        }
+    });
 }
 
 /// Owns a spawned child during [`Engine::spawn`] so every early-return path
@@ -502,12 +532,15 @@ impl Engine {
         let Some(child) = guard.0.take() else {
             return Err(EngineError::Io(std::io::Error::other("child slot empty")));
         };
+        let heartbeat = HeartbeatWatch::default();
+        spawn_prober(heartbeat.prober(), handle.clone());
         Ok(Self {
             handle,
             child,
             shutdown_timeout: cfg.shutdown_timeout,
             api_info,
             pump,
+            heartbeat,
         })
     }
 

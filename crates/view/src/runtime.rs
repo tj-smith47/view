@@ -32,6 +32,7 @@ use view_core::msg::{
 use view_core::native::mappings::MappingSpec;
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
+use view_engine::heartbeat::{HeartbeatWatch, Liveness};
 use view_engine::process::Engine;
 use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
@@ -951,24 +952,65 @@ fn note_write_stall(
         .set_native_condition(stalled.then_some(ENGINE_STALLED_NOTICE))
 }
 
-/// Waits for the loop's next message, bounded by the stall watch's deadline
-/// when it has one. `None` means the wait expired with nothing delivered
-/// and the caller should re-read the write side.
+/// Reads the engine's read side once and answers whether the verdict moved
+/// since the previous pass, which is the caller's cue to repaint.
 ///
-/// Unbounded whenever `watch` asks for no wakeup, which is the entire idle
-/// steady state: an editor with nothing queued sleeps until a keystroke, a
-/// redraw or an engine request wakes it, exactly as it always has, and pays
-/// no periodic wakeup for a condition that cannot be true. A deadline
-/// exists only while output is pending -- delivering or wedged, the watch
-/// cannot know yet, and for the wedged case the wakeup is the point: a
-/// wedged engine emits no redraws, so an operator who types once and then
-/// waits would otherwise be told nothing at all.
+/// A sibling of [`note_write_stall`] rather than a second mode of it: the
+/// two watch opposite directions of the same connection, fail differently,
+/// and recover differently, and folding a read-side verdict into a
+/// function whose whole contract is about queued output would leave neither
+/// nameable.
+///
+/// Costs one relaxed atomic load for the connection's closed flag and one
+/// for the probe generation, then a comparison -- no lock, no allocation,
+/// and nothing sent. The send lives on the engine's own prober thread, so
+/// this call cannot await RPC however wedged the engine is, which is the
+/// only reason a paint loop can afford to ask on every pass.
+fn note_engine_liveness(
+    watch: &HeartbeatWatch,
+    verdict: &mut Liveness,
+    handle: &EngineHandle,
+) -> bool {
+    let observed = watch.observe(handle.is_closed());
+    let moved = observed != *verdict;
+    *verdict = observed;
+    moved
+}
+
+/// The soonest either watch would have something new to say, or `None` when
+/// neither would.
+///
+/// `None` from one watch means "as long as you like" and never shortens the
+/// other's answer; a caller that took the shorter of `None` and a duration
+/// as "no wakeup" would sleep through the one condition that was actually
+/// arming a deadline.
+fn watch_deadline(write: &OutboxStallWatch, read: &HeartbeatWatch) -> Option<std::time::Duration> {
+    match (write.poll_deadline(), read.poll_deadline()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (only, None) | (None, only) => only,
+    }
+}
+
+/// Waits for the loop's next message, bounded by whichever watch has a
+/// deadline. `None` means the wait expired with nothing delivered and the
+/// caller should re-read both sides of the connection.
+///
+/// Unbounded whenever neither watch asks for a wakeup, which is the entire
+/// idle steady state: an editor with nothing queued and nothing owed an
+/// answer sleeps until a keystroke, a redraw or an engine request wakes it,
+/// and pays no periodic wakeup for a condition that cannot be true. A
+/// deadline exists only while output is pending or a probe is unanswered --
+/// moving or wedged, the watches cannot know yet, and for the wedged case
+/// the wakeup is the point: a wedged engine emits no redraws, so an
+/// operator who types once and then waits would otherwise be told nothing
+/// at all.
 #[cfg(any(not(unix), test))]
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
-    watch: &OutboxStallWatch,
+    write_stall: &OutboxStallWatch,
+    heartbeat: &HeartbeatWatch,
 ) -> Option<Result<Msg, mpsc::RecvError>> {
-    let Some(deadline) = watch.poll_deadline() else {
+    let Some(deadline) = watch_deadline(write_stall, heartbeat) else {
         return Some(msg_rx.recv());
     };
     match msg_rx.recv_timeout(deadline) {
@@ -1026,7 +1068,8 @@ pub struct InputHandles<'a> {
 #[allow(clippy::type_complexity)]
 fn wait_for_msg_unified(
     msg_rx: &mpsc::Receiver<Msg>,
-    watch: &OutboxStallWatch,
+    write_stall: &OutboxStallWatch,
+    heartbeat: &HeartbeatWatch,
     input: &mut view_tui::input::InputSource,
     waker: &crate::wake::LoopWaker,
     term_size: &view_tui::terminal::TermSizeCell,
@@ -1047,7 +1090,8 @@ fn wait_for_msg_unified(
             Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        let ready = crate::wake::poll_readiness(input, waker, watch.poll_deadline())?;
+        let ready =
+            crate::wake::poll_readiness(input, waker, watch_deadline(write_stall, heartbeat))?;
         if ready.timed_out {
             return Ok(None);
         }
@@ -1153,6 +1197,13 @@ pub fn run(
         .with_toast_timer(msg_tx)
         .with_picker(picker_tx);
     let mut write_stall = OutboxStallWatch::default();
+    let mut liveness = Liveness::Alive;
+    // re-anchors the unanswered window at the moment this loop starts
+    // observing. Probes answered before now were staged by the pump and
+    // replayed through `dispatch`, never reaching `record_ack`, so without
+    // this a startup slower than the wedge threshold would open the session
+    // by reporting a wedge that already ended.
+    engine.heartbeat.resume();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1203,6 +1254,13 @@ pub fn run(
         if note_write_stall(&mut model, &mut write_stall, &engine.handle) {
             model.dirty = true;
         }
+        // the read side's own reading, taken beside the write side's rather
+        // than inside it: an engine can drain everything view sends and
+        // still answer none of it, and that failure has its own verdict and
+        // its own recovery
+        if note_engine_liveness(&engine.heartbeat, &mut liveness, &engine.handle) {
+            model.dirty = true;
+        }
         // paint before blocking, not after processing: state mutated ahead
         // of the loop (the startup cutover replays staged messages straight
         // through dispatch) would otherwise sit unpainted until the next
@@ -1219,13 +1277,14 @@ pub fn run(
         let received = wait_for_msg_unified(
             &msg_rx,
             &write_stall,
+            &engine.heartbeat,
             input,
             &waker,
             &term_size,
             &mut pending,
         )?;
         #[cfg(not(unix))]
-        let received = wait_for_msg(&msg_rx, &write_stall);
+        let received = wait_for_msg(&msg_rx, &write_stall, &engine.heartbeat);
         let Some(received) = received else {
             // the wait expired against the stall watch's own deadline
             // rather than delivering anything: go around and re-read the
@@ -1238,6 +1297,15 @@ pub fn run(
         }
         let msg = match received {
             Ok(Msg::RedrawReady) => Msg::Redraw(pump.take_damage()),
+            Ok(Msg::HeartbeatReply { generation }) => {
+                // recorded here rather than in `update()`: this is the
+                // runtime loop's own thread, the same one that folds the
+                // verdict a pass later, which is what lets the
+                // acknowledgement be a plain field instead of a second
+                // cross-thread atomic
+                engine.heartbeat.record_ack(generation);
+                Msg::HeartbeatReply { generation }
+            }
             Ok(Msg::EngineStopped(reason)) => {
                 // stashed on the model rather than reported here: this loop
                 // runs behind the terminal's raw-mode alternate screen, so
@@ -2700,10 +2768,11 @@ mod tests {
         peer.handle.input("b").unwrap();
 
         // the loop's own shape: read the write side, wait, repeat
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         let start = std::time::Instant::now();
         while !note_write_stall(&mut model, &mut watch, &peer.handle) {
             assert!(
-                wait_for_msg(&msg_rx, &watch).is_none(),
+                wait_for_msg(&msg_rx, &watch, &heartbeat).is_none(),
                 "the wait outlasted the stall deadline and returned the watchdog's \
                  message: a wedge nobody types at would never be surfaced"
             );
@@ -2727,6 +2796,9 @@ mod tests {
         peer.release();
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        // nothing has probed it either, so neither side of the connection
+        // is owed anything that a wakeup could report on
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
 
         peer.handle.input("a").unwrap();
         wait_until("the writer drains its backlog", || {
@@ -2734,7 +2806,7 @@ mod tests {
         });
         assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
         assert_eq!(
-            watch.poll_deadline(),
+            watch_deadline(&watch, &heartbeat),
             None,
             "an idle session armed a deadline, so the loop would wake on a \
              schedule it has never paid for"
@@ -2748,7 +2820,7 @@ mod tests {
             let _ = msg_tx.send(Msg::RedrawReady);
         });
         let start = std::time::Instant::now();
-        let received = wait_for_msg(&msg_rx, &watch);
+        let received = wait_for_msg(&msg_rx, &watch, &heartbeat);
         assert!(
             matches!(received, Some(Ok(Msg::RedrawReady))),
             "an idle wait returned something other than the one message sent to it"
@@ -2758,6 +2830,52 @@ mod tests {
             "the idle wait returned before its only message was sent: the loop was \
              woken by a deadline an idle session must not arm"
         );
+    }
+
+    /// The read side's own version of the wedge nobody types at: the write
+    /// side is draining perfectly, so it arms no deadline at all, and the
+    /// only thing that could ever wake the loop is the answer that is not
+    /// coming. Without the read side's deadline in the same wait, an
+    /// operator who typed once and stopped would be told nothing.
+    #[test]
+    fn an_unanswered_probe_arms_the_deadline_a_silent_read_side_leaves_unarmed() {
+        let mut peer = WedgedPeer::new();
+        peer.release();
+        let mut model = Model::with_term_size(80, 24);
+        let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+
+        heartbeat.prober().tick(&peer.handle).unwrap();
+        wait_until("the writer drains the probe", || {
+            peer.handle.write_progress().0 == 0
+        });
+        assert!(!note_write_stall(&mut model, &mut watch, &peer.handle));
+        assert_eq!(
+            watch.poll_deadline(),
+            None,
+            "the write side armed a deadline, so this proves nothing about the read side"
+        );
+
+        let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(WAIT_WATCHDOG_SECS));
+            let _ = msg_tx.send(Msg::RedrawReady);
+        });
+        let start = std::time::Instant::now();
+        assert!(
+            wait_for_msg(&msg_rx, &watch, &heartbeat).is_none(),
+            "the wait outlasted the unanswered probe's deadline and returned the \
+             watchdog's message: a read-side wedge nobody types at would never surface"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(WAIT_WATCHDOG_SECS),
+            "the wait ran to the watchdog rather than to the probe's own deadline"
+        );
+        let mut verdict = Liveness::Alive;
+        wait_until("the unanswered probe reads as a wedge", || {
+            note_engine_liveness(&heartbeat, &mut verdict, &peer.handle);
+            verdict == Liveness::Wedged
+        });
     }
 
     #[test]

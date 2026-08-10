@@ -359,6 +359,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             }
             Vec::new()
         }
+        Msg::HeartbeatReply { .. } => {
+            // the acknowledgement itself is recorded by the runtime loop's
+            // liveness watch on the way in, before this arm ever runs; the
+            // model holds no read-side state for it to land in, and marking
+            // the frame dirty for a reading that changed nothing visible
+            // would repaint on every probe interval for the whole session
+            Vec::new()
+        }
         Msg::FeatureInvoke { feature, verb } => {
             if feature == "picker" {
                 if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {

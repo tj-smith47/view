@@ -309,6 +309,16 @@ struct Route {
     /// answer can still be the right one, so an older held reply is
     /// superseded rather than kept.
     deferred_probe: Option<Msg>,
+    /// The newest `Msg::HeartbeatReply` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot rather than a queue, on the same terms as
+    /// [`Route::deferred_probe`]: only the newest generation's
+    /// acknowledgement can still move a liveness verdict, and an older held
+    /// one is superseded rather than kept. Held rather than dropped because
+    /// a discarded acknowledgement is indistinguishable from an engine that
+    /// never answered, which is exactly the reading that raises a wedge.
+    deferred_heartbeat: Option<Msg>,
     /// The `Msg::MappingsClaimed` an attached-but-full sink refused, held
     /// for the next routing attempt to retry.
     ///
@@ -366,6 +376,7 @@ struct Route {
 #[derive(Debug, Clone, Copy)]
 enum Held {
     Probe,
+    Heartbeat,
     Claims,
     BufferList,
     Preview,
@@ -379,6 +390,7 @@ impl Route {
     fn slot(&mut self, which: Held) -> &mut Option<Msg> {
         match which {
             Held::Probe => &mut self.deferred_probe,
+            Held::Heartbeat => &mut self.deferred_heartbeat,
             Held::Claims => &mut self.deferred_claims,
             Held::BufferList => &mut self.deferred_buffer_list,
             Held::Preview => &mut self.deferred_preview,
@@ -395,6 +407,7 @@ impl Route {
     fn retry_deferred(&mut self) {
         for which in [
             Held::Probe,
+            Held::Heartbeat,
             Held::Claims,
             Held::BufferList,
             Held::Preview,
@@ -513,6 +526,18 @@ impl PumpShared {
     /// [`Route::deferred_probe`] for the next routing attempt to carry it.
     pub(crate) fn route_probe_reply(&self, msg: Msg) {
         self.route_held(msg, Held::Probe);
+    }
+
+    /// Routes a `Msg::HeartbeatReply` without ever dropping it on a full
+    /// sink, and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped acknowledgement reads as an engine that did not answer,
+    /// and enough of them in a row read as a wedge: the one failure this
+    /// reply exists to report would then be reported about a connection
+    /// that was healthy the whole time.
+    pub(crate) fn route_heartbeat(&self, msg: Msg) {
+        self.route_held(msg, Held::Heartbeat);
     }
 
     /// Routes a `Msg::MappingsClaimed` without ever dropping it on a full

@@ -81,6 +81,19 @@ pub enum Msg {
         fg: Option<u32>,
         bg: Option<u32>,
     },
+    /// The async acknowledgement of one read-side liveness probe. Carries
+    /// no value: that the engine answered at all is the whole signal, and
+    /// `generation` names which probe it answered, so a reply arriving out
+    /// of order can be folded in without moving the liveness verdict
+    /// backwards -- the same stale-reply guard [`Msg::HlProbeReply`]
+    /// documents, applied to a watch rather than to a colour.
+    ///
+    /// Recorded by the runtime loop's own liveness watch as it dispatches
+    /// this, not by `update()`: the verdict is a reading of a connection,
+    /// which this crate holds no state about.
+    HeartbeatReply {
+        generation: u64,
+    },
     /// A user reached a native feature, either through one of view's
     /// registered default keys or through the `:View` command. `feature` is
     /// a [`registry`](crate::native::registry) id and `verb` the entry point

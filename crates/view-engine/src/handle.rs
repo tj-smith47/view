@@ -4,7 +4,7 @@ use crate::ui_events::decode_redraw;
 use rmpv::Value;
 use std::collections::HashMap;
 use std::io::{Read, Write};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex, PoisonError};
 use std::time::Duration;
 use view_core::msg::{
@@ -70,6 +70,14 @@ enum Waiter {
     /// so its `Response` is decoded and routed to `pump` as
     /// `Msg::HlProbeReply` instead of sent anywhere synchronous.
     HlProbe { generation: u64 },
+    /// An async read-side liveness probe (see
+    /// [`EngineHandle::request_heartbeat`]): nothing is blocked on this
+    /// `msgid` either, and its `Response` carries no value this connection
+    /// cares about -- an acknowledgement is a "still answering" signal, not
+    /// a reading -- so it is routed to `pump` as `Msg::HeartbeatReply`,
+    /// tagged with `generation` so a reply arriving out of order cannot
+    /// move a liveness verdict backwards.
+    Heartbeat { generation: u64 },
     /// An async mapping registration (see
     /// [`EngineHandle::request_mappings`]): nothing is blocked on this
     /// `msgid` either, and its `Response` carries every key the chunk
@@ -129,10 +137,17 @@ enum Waiter {
 /// Without sharing the lock, a request could insert itself into the map
 /// after the draining thread has already run, leaking a waiter that will
 /// never be resolved (the original hang this type exists to close).
-#[derive(Default)]
 struct PendingState {
     waiters: HashMap<u32, Waiter>,
-    closed: bool,
+    /// Shared with [`EngineHandle::is_closed`] rather than owned outright,
+    /// so an observer that must not wait on this lock -- a paint loop
+    /// asking whether the connection is still there is asking precisely
+    /// because it may not be -- can read the flag without taking it. Every
+    /// *write* still happens inside the critical section below, so the
+    /// insert-versus-drain race the shared lock exists to close is
+    /// unaffected; the lock-free read is only ever one observation stale,
+    /// which costs the observer one more pass and nothing else.
+    closed: Arc<AtomicBool>,
 }
 
 type Pending = Arc<Mutex<PendingState>>;
@@ -180,6 +195,7 @@ type Pending = Arc<Mutex<PendingState>>;
 pub struct EngineHandle {
     next_msgid: Arc<AtomicU32>,
     pending: Pending,
+    closed: Arc<AtomicBool>,
     outbox: Arc<crate::outbox::Outbox>,
 }
 
@@ -188,6 +204,7 @@ impl Clone for EngineHandle {
         Self {
             next_msgid: Arc::clone(&self.next_msgid),
             pending: Arc::clone(&self.pending),
+            closed: Arc::clone(&self.closed),
             outbox: Arc::clone(&self.outbox),
         }
     }
@@ -304,7 +321,11 @@ impl EngineHandle {
         notif_tx: Option<mpsc::Sender<EngineNotification>>,
         #[cfg(any(unix, windows))] pipe: Option<crate::outbox::PipeHandle>,
     ) -> Self {
-        let pending: Pending = Arc::new(Mutex::new(PendingState::default()));
+        let closed = Arc::new(AtomicBool::new(false));
+        let pending: Pending = Arc::new(Mutex::new(PendingState {
+            waiters: HashMap::new(),
+            closed: Arc::clone(&closed),
+        }));
         let (write_tx, write_rx) = mpsc::channel::<Vec<u8>>();
         let outbox = Arc::new(crate::outbox::Outbox::new(
             Box::new(writer),
@@ -375,6 +396,18 @@ impl EngineHandle {
                                         fg,
                                         bg,
                                     });
+                                }
+                            }
+                            Some(Waiter::Heartbeat { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply still answers the only
+                                    // question this probe asks -- the engine
+                                    // was reachable enough to reply -- so it
+                                    // acknowledges the generation exactly as
+                                    // a successful one does rather than
+                                    // leaving the watch to time it out as
+                                    // silence
+                                    pump.route_heartbeat(Msg::HeartbeatReply { generation });
                                 }
                             }
                             Some(Waiter::MappingClaims) => {
@@ -630,8 +663,26 @@ impl EngineHandle {
         Self {
             next_msgid: Arc::new(AtomicU32::new(1)),
             pending,
+            closed,
             outbox,
         }
+    }
+
+    /// Whether the connection has been marked closed: its peer is gone and
+    /// every request from here on fails with
+    /// [`EngineError::Closed`] rather than waiting for a reply.
+    ///
+    /// One relaxed atomic load, taking no lock, so a paint loop can afford
+    /// to ask on every pass -- and must be able to, since the answer it
+    /// wants most is the one a lock-taking version could not give: the
+    /// connection's own lock is held by whichever thread is discovering the
+    /// loss. Correspondingly one observation stale at worst, never wrong in
+    /// the other direction: the flag is set inside the same critical
+    /// section that fails every waiter, so `true` here means every
+    /// in-flight request has already been failed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Relaxed)
     }
 
     /// Sends a synchronous RPC request to the engine and waits for the response.
@@ -822,7 +873,7 @@ impl EngineHandle {
         let (tx, rx) = mpsc::channel();
         {
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            if p.closed {
+            if p.closed.load(Ordering::Relaxed) {
                 return Err(EngineError::Closed);
             }
             p.waiters.insert(msgid, Waiter::Reply(tx));
@@ -862,6 +913,27 @@ impl EngineHandle {
         generation: u64,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::HlProbe { generation })
+    }
+
+    /// Issues `nvim_get_mode` as a fire-and-forget liveness probe tagged
+    /// with `generation`, whose acknowledgement is routed to the
+    /// connection's pump as `Msg::HeartbeatReply` (see
+    /// [`Waiter::Heartbeat`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe).
+    ///
+    /// `nvim_get_mode` rather than any other method because the pinned
+    /// engine answers it on receipt even while its main loop is blocked
+    /// waiting for a key (see [`get_mode`](Self::get_mode)), so the states
+    /// in which an engine is deliberately waiting read as answering rather
+    /// than as silence.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the probe is never written in
+    /// either case.
+    pub fn request_heartbeat(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_async("nvim_get_mode", vec![], Waiter::Heartbeat { generation })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -1043,7 +1115,7 @@ impl EngineHandle {
         let bytes = encode_message(&msg)?;
         {
             let mut p = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
-            if p.closed {
+            if p.closed.load(Ordering::Relaxed) {
                 return Err(EngineError::Closed);
             }
             p.waiters.insert(msgid, waiter);
@@ -1332,7 +1404,7 @@ fn decode_hl_probe_reply(result: &Value) -> (Option<u32>, Option<u32>) {
 /// `Theme::from_hl`).
 fn close_and_drain(pending: &Pending) {
     let mut p = pending.lock().unwrap_or_else(PoisonError::into_inner);
-    p.closed = true;
+    p.closed.store(true, Ordering::Relaxed);
     for (_, waiter) in p.waiters.drain() {
         if let Waiter::Reply(tx) = waiter {
             let _ = tx.send(Err(EngineError::Closed));
@@ -1945,6 +2017,99 @@ mod tests {
         assert_eq!(generation, 1);
         assert_eq!(fg, None);
         assert_eq!(bg, None);
+    }
+
+    #[test]
+    fn request_heartbeat_sends_the_pinned_wire_shape() {
+        let (h, _pump, peer_read, _peer_write) = pumped_peer();
+        h.request_heartbeat(3).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { method, params, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        assert_eq!(method, "nvim_get_mode");
+        assert!(params.is_empty(), "{params:?}");
+    }
+
+    /// End-to-end through the reader thread's own routing: the
+    /// acknowledgement arrives on the pump's sink tagged with the exact
+    /// generation the probe was issued for, which is the whole payload a
+    /// liveness watch reads.
+    #[test]
+    fn heartbeat_reply_routes_heartbeatreply_with_the_generation_it_was_issued_for() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.request_heartbeat(7).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("mode"), Value::from("n")),
+                (Value::from("blocking"), Value::from(false)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HeartbeatReply { generation } = msg else {
+            unreachable!("expected HeartbeatReply, got {msg:?}");
+        };
+        assert_eq!(generation, 7);
+    }
+
+    /// An engine that answers with an error answered: the reply resolves
+    /// the generation exactly as a successful one does, since the probe
+    /// asks whether anything comes back at all and this did.
+    #[test]
+    fn a_heartbeat_reply_carrying_a_remote_error_still_acknowledges_the_generation() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.request_heartbeat(2).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::from("boom"),
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HeartbeatReply { generation } = msg else {
+            unreachable!("expected HeartbeatReply, got {msg:?}");
+        };
+        assert_eq!(generation, 2);
+    }
+
+    /// The lock-free reading and the locked one never disagree: by the time
+    /// a drained waiter has been told the connection is closed, the flag an
+    /// observer reads without the lock already says so.
+    #[test]
+    fn is_closed_reads_true_by_the_time_a_pending_waiter_has_been_failed() {
+        let (h, _pump, peer_read, peer_write) = pumped_peer();
+        assert!(!h.is_closed());
+        drop(peer_write);
+        drop(peer_read);
+        let err = h.request("nvim_get_mode", vec![]).unwrap_err();
+        assert!(matches!(err, EngineError::Closed), "{err:?}");
+        assert!(h.is_closed());
     }
 
     /// The reader routes a bridge notification the whole way through to the
