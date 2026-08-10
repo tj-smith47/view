@@ -619,6 +619,29 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let Some(name) = name.filter(|n| !n.is_empty()) else {
                 return Vec::new();
             };
+            // The typed answer is untrusted user input, not a path this
+            // prompt's own UX ever offers a way to build safely: an
+            // absolute answer (`/etc/passwd`) replaces `target_dir`
+            // entirely under `Path::join`'s own semantics (the joined path
+            // becomes whatever was typed, ignoring the base), and a `..`
+            // component climbs out of the tree root the same way from a
+            // relative one. This prompt's contract is "one leaf name beside
+            // the selection" (the same contract a file manager's own
+            // new-file action offers) -- nested creation was never a
+            // feature it supports -- so a single `Component::Normal` is the
+            // only shape accepted; anything else is refused with a visible
+            // notice rather than silently normalized, since normalizing a
+            // `..`-laden answer still risks landing somewhere the tree was
+            // never rooted at.
+            let is_single_plain_component = matches!(
+                std::path::Path::new(&name).components().collect::<Vec<_>>()[..],
+                [std::path::Component::Normal(_)]
+            );
+            if !is_single_plain_component {
+                return model
+                    .engine
+                    .record_native_notice(format!("view: invalid file name {name:?}"), false);
+            }
             // creates inside the selected directory, or alongside the
             // selected file (its parent), or at the tree's own root when
             // nothing is selected -- the same "beside what's under the
@@ -4199,6 +4222,133 @@ mod tests {
             m.mouse_capture(),
             Some(MouseCapture::Overlay(unrelated_id)),
             "close_tree must never release a capture it does not own"
+        );
+    }
+
+    /// Opens a tree on a fresh `Model` and returns the generation
+    /// `TreeCreatePromptReply` must echo back to be honored -- the shared
+    /// setup every `tree_create_prompt_reply_*` test below starts from.
+    fn model_with_open_tree() -> (Model, u64) {
+        let mut m = model();
+        let _ = update(
+            &mut m,
+            Msg::FeatureInvoke {
+                feature: "tree".to_string(),
+                verb: "toggle".to_string(),
+            },
+        );
+        let generation = m
+            .tree_mut()
+            .expect("toggle must have opened the tree")
+            .generation();
+        (m, generation)
+    }
+
+    /// The path-traversal fix's positive case: an ordinary single-component
+    /// name must still reach `Effect::TreeCreateFile`, unaffected by the
+    /// new validation -- without this, the rejection tests below would
+    /// prove nothing (a validator that refuses everything would also pass
+    /// them).
+    #[test]
+    fn tree_create_prompt_reply_with_a_plain_name_creates_beside_the_root() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeCreatePromptReply {
+                generation,
+                name: Some("new_file.txt".to_string()),
+            },
+        );
+        assert!(
+            matches!(
+                &effects[..],
+                [Effect::TreeCreateFile { path, .. }]
+                    if path.file_name().and_then(|n| n.to_str()) == Some("new_file.txt")
+            ),
+            "a plain leaf name must still produce exactly one TreeCreateFile: {effects:?}"
+        );
+    }
+
+    /// An absolute answer must never reach `Effect::TreeCreateFile`:
+    /// `PathBuf::join` with an absolute argument discards the base
+    /// entirely, so an unvalidated `target_dir.join(name)` would write
+    /// wherever the typed text names, anywhere on the filesystem the
+    /// process can reach, not beside the tree's own root.
+    #[test]
+    fn tree_create_prompt_reply_rejects_an_absolute_path() {
+        let (mut m, generation) = model_with_open_tree();
+        let evil = if cfg!(windows) {
+            "C:\\evil.txt"
+        } else {
+            "/evil.txt"
+        };
+        let effects = update(
+            &mut m,
+            Msg::TreeCreatePromptReply {
+                generation,
+                name: Some(evil.to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::TreeCreateFile { .. })),
+            "an absolute path must never reach TreeCreateFile: {effects:?}"
+        );
+        let entry = m
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("the refusal must surface a visible notice");
+        assert!(
+            entry.content.iter().any(|(_, t)| t.contains("invalid")),
+            "expected an \"invalid file name\" notice, got {:?}",
+            entry.content
+        );
+    }
+
+    /// A `..`-laden answer must never reach `Effect::TreeCreateFile`
+    /// either: joined onto `target_dir`, it climbs out of the tree root
+    /// the same way an absolute path replaces it outright.
+    #[test]
+    fn tree_create_prompt_reply_rejects_a_parent_traversal() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeCreatePromptReply {
+                generation,
+                name: Some("../../etc/cron.d/evil".to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::TreeCreateFile { .. })),
+            "a `..`-laden path must never reach TreeCreateFile: {effects:?}"
+        );
+    }
+
+    /// Nested creation (a name embedding its own directory separator) was
+    /// never a feature this prompt supports -- its contract is one leaf
+    /// name beside the selection -- so a relative-but-multi-component
+    /// answer is refused on the same terms as an absolute or `..`-laden
+    /// one, not silently accepted as a new subdirectory structure.
+    #[test]
+    fn tree_create_prompt_reply_rejects_a_nested_relative_path() {
+        let (mut m, generation) = model_with_open_tree();
+        let effects = update(
+            &mut m,
+            Msg::TreeCreatePromptReply {
+                generation,
+                name: Some("sub/dir/file.txt".to_string()),
+            },
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::TreeCreateFile { .. })),
+            "a multi-component relative path must never reach TreeCreateFile: {effects:?}"
         );
     }
 

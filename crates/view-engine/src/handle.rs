@@ -1357,7 +1357,19 @@ fn reply_value_to_wire(value: &ReplyValue) -> Value {
             Value::from(regtype.as_nvim_str()),
         ]),
         #[allow(unreachable_patterns)]
-        _ => Value::Nil,
+        other => {
+            // A future `ReplyValue` variant view-core adds compiles
+            // against this wildcard (see the arm's own doc comment above)
+            // without anything forcing this function to be updated for
+            // it -- fail loud where that omission is cheap to catch, and
+            // fall back to the already-safe `Nil` reply in release rather
+            // than crash a running engine over an encoding gap.
+            debug_assert!(
+                false,
+                "reply_value_to_wire has no wire encoding for {other:?}; add one"
+            );
+            Value::Nil
+        }
     }
 }
 

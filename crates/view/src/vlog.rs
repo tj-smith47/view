@@ -84,6 +84,16 @@ pub fn log_with(topic: &str, payload: impl FnOnce() -> String) {
     write_line(file, topic, &payload());
 }
 
+// Latency consequence: `dispatch`'s `log_msg` call runs this synchronously
+// on the loop's own dispatch thread for every `Msg`, so with `VIEW_LOG` set
+// each dispatch pays one blocking `writeln!` under this process-wide
+// `Mutex`, serializing against every other logger call in flight. Not an
+// RPC wait (the paint-loop-never-awaits-RPC rule this crate holds
+// elsewhere is about the engine connection, not local file I/O), but a
+// real per-message file write on the hot path nonetheless -- acceptable
+// only because `VIEW_LOG` is opt-in and every call site above already
+// short-circuits to a single `Option` check, costing nothing, when it is
+// unset (see this module's own doc).
 fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
     let ms = START.get().map_or(0, |start| start.elapsed().as_millis());
     let mut f = file.lock().unwrap_or_else(PoisonError::into_inner);

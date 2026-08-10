@@ -7,9 +7,12 @@
 //! [`CachedTheme`] is the only type that ever touches `serde`.
 //!
 //! Corrupt, missing, or schema-incompatible cache state is never fatal:
-//! every failure path here logs to stderr and falls back to
-//! `Theme::default()` (or, for `store`, simply gives up) rather than
-//! propagating an error startup would have to handle specially.
+//! every failure path here falls back to `Theme::default()` (or, for
+//! `store`, simply gives up) and returns a diagnostic string rather than
+//! propagating an error startup would have to handle specially. Nothing in
+//! this module writes to stderr directly: `load`/`store` run while the
+//! terminal may still be raw-mode/alternate-screen owned, so the caller
+//! decides how (or whether) a returned diagnostic reaches the user.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -191,10 +194,17 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
     view_native::paths::cache_dir(state_dir).join(format!("theme-{hash:016x}.toml"))
 }
 
-/// Loads the last-cached theme for `config_path`, or `None`, loudly logged
-/// to stderr, when the state directory cannot be determined, the cache file
-/// is missing or unreadable, its contents fail to parse, or its schema is
-/// newer than this build understands.
+/// Loads the last-cached theme for `config_path`, alongside a diagnostic for
+/// any branch that is not a clean hit (the state directory cannot be
+/// determined, the cache file is missing or unreadable, its contents fail
+/// to parse, or its schema is newer than this build understands).
+///
+/// The diagnostic is returned as data rather than printed here: this runs
+/// while the terminal may still be raw-mode/alternate-screen owned (theme
+/// resolution happens before the startup shell even paints), where a bare
+/// stderr write is invisible at best and corrupts the screen at worst. The
+/// caller decides how it reaches the user -- a native notice once `Model`
+/// exists, buffered until an effect executor does.
 ///
 /// `None` rather than `Theme::default()`: the caller only seeds the engine's
 /// highlight table on `Some`, so a genuine cache miss leaves `hl.groups`
@@ -206,12 +216,15 @@ fn cache_path(state_dir: &Path, config_path: &Path) -> PathBuf {
 /// theme, and unconditionally seeding either one registers those two groups
 /// with all-false attributes, permanently defeating that fallback.
 #[must_use]
-pub fn load(config_path: &Path) -> Option<Theme> {
+pub fn load(config_path: &Path) -> (Option<Theme>, Option<String>) {
     let Some(path) = cache_target(config_path) else {
-        eprintln!(
-            "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
+        return (
+            None,
+            Some(
+                "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; theme cache unavailable, using built-in defaults"
+                    .to_string(),
+            ),
         );
-        return None;
     };
     load_from_path(&path)
 }
@@ -233,37 +246,44 @@ pub(crate) fn cache_target(config_path: &Path) -> Option<PathBuf> {
 /// without mutating process environment. Public to this crate for the same
 /// reason as [`store_to_path`]: it is the read side of a slot a caller
 /// already holds the path to.
+///
+/// See [`load`]'s doc comment for why the diagnostic is data, not a stderr
+/// write.
 #[must_use]
-pub(crate) fn load_from_path(path: &Path) -> Option<Theme> {
+pub(crate) fn load_from_path(path: &Path) -> (Option<Theme>, Option<String>) {
     let contents = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            eprintln!(
-                "view: no theme cache at {} yet, using built-in defaults",
-                path.display()
+            return (
+                None,
+                Some(format!(
+                    "view: no theme cache at {} yet, using built-in defaults",
+                    path.display()
+                )),
             );
-            return None;
         }
         Err(e) => {
-            eprintln!(
-                "view: failed to read theme cache {}: {e}, using built-in defaults",
-                path.display()
+            return (
+                None,
+                Some(format!(
+                    "view: failed to read theme cache {}: {e}, using built-in defaults",
+                    path.display()
+                )),
             );
-            return None;
         }
     };
     match toml::from_str::<CachedTheme>(&contents) {
-        Ok(cached) if cached.schema_version > CACHE_SCHEMA_VERSION => {
-            eprintln!(
+        Ok(cached) if cached.schema_version > CACHE_SCHEMA_VERSION => (
+            None,
+            Some(format!(
                 "view: theme cache {} is schema v{}, newer than this build's v{CACHE_SCHEMA_VERSION}; using built-in defaults",
                 path.display(),
                 cached.schema_version
-            );
-            None
-        }
-        Ok(cached) => Some(cached.into()),
+            )),
+        ),
+        Ok(cached) => (Some(cached.into()), None),
         Err(e) => {
-            match toml::from_str::<SchemaProbe>(&contents) {
+            let notice = match toml::from_str::<SchemaProbe>(&contents) {
                 // a version this build has since superseded: the file is
                 // intact, its shape simply predates the current schema, and
                 // saying "corrupt" about a perfectly good older cache would
@@ -275,60 +295,64 @@ pub(crate) fn load_from_path(path: &Path) -> Option<Theme> {
                 Ok(probe)
                     if probe.schema_version > 0 && probe.schema_version < CACHE_SCHEMA_VERSION =>
                 {
-                    eprintln!(
+                    format!(
                         "view: theme cache {} is schema v{}, written before this build's v{CACHE_SCHEMA_VERSION}; using built-in defaults until this session stores its own",
                         path.display(),
                         probe.schema_version
-                    );
+                    )
                 }
-                _ => eprintln!(
+                _ => format!(
                     "view: corrupt theme cache {}: {e}, using built-in defaults",
                     path.display()
                 ),
-            }
-            None
+            };
+            (None, Some(notice))
         }
     }
 }
 
-/// Persists `theme` for `config_path`. Any failure (no state directory, a
-/// directory-creation error, a write error) is logged to stderr and
-/// otherwise ignored: a cache write is a best-effort convenience for the
-/// *next* startup, never something the current session should fail over.
-pub fn store(theme: Theme, config_path: &Path) {
+/// Persists `theme` for `config_path`, returning a diagnostic on any
+/// failure (no state directory, a directory-creation error, a write error).
+/// Never printed here -- see [`load`]'s doc comment for why -- and
+/// otherwise ignored by every failure mode: a cache write is a best-effort
+/// convenience for the *next* startup, never something the current session
+/// should fail over.
+#[must_use]
+pub fn store(theme: Theme, config_path: &Path) -> Option<String> {
     let Some(path) = cache_target(config_path) else {
-        eprintln!(
+        return Some(
             "view: no XDG_STATE_HOME, HOME, or LOCALAPPDATA set; cannot cache theme for next startup"
+                .to_string(),
         );
-        return;
     };
-    store_to_path(theme, &path);
+    store_to_path(theme, &path)
 }
 
 /// [`store`]'s implementation given an already-resolved cache file path;
 /// see [`load_from_path`] for why the path-taking split exists. Public to
 /// this crate for the same reason as [`cache_target`]: a mid-session write
 /// already holds its resolved path and must not re-read the environment.
-pub(crate) fn store_to_path(theme: Theme, path: &Path) {
+#[must_use]
+pub(crate) fn store_to_path(theme: Theme, path: &Path) -> Option<String> {
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
+            return Some(format!(
                 "view: failed to create theme cache directory {}: {e}",
                 parent.display()
-            );
-            return;
+            ));
         }
     }
     let cached: CachedTheme = theme.into();
     let rendered = match toml::to_string_pretty(&cached) {
         Ok(r) => r,
-        Err(e) => {
-            eprintln!("view: failed to serialize theme cache: {e}");
-            return;
-        }
+        Err(e) => return Some(format!("view: failed to serialize theme cache: {e}")),
     };
-    if let Err(e) = std::fs::write(path, rendered) {
-        eprintln!("view: failed to write theme cache {}: {e}", path.display());
+    match std::fs::write(path, rendered) {
+        Ok(()) => None,
+        Err(e) => Some(format!(
+            "view: failed to write theme cache {}: {e}",
+            path.display()
+        )),
     }
 }
 
@@ -486,8 +510,8 @@ mod tests {
         let dir = tmp_dir("roundtrip");
         let path = dir.join("theme.toml");
         let theme = Theme::with_colors(Some(0xABCDEF), Some(0x010203));
-        store_to_path(theme, &path);
-        let loaded = load_from_path(&path);
+        assert_eq!(store_to_path(theme, &path), None);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -497,8 +521,8 @@ mod tests {
         let dir = tmp_dir("roundtrip-unset");
         let path = dir.join("theme.toml");
         let theme = Theme::default();
-        store_to_path(theme, &path);
-        let loaded = load_from_path(&path);
+        assert_eq!(store_to_path(theme, &path), None);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -543,8 +567,8 @@ mod tests {
                 ..ResolvedStyle::default()
             },
         );
-        store_to_path(theme, &path);
-        let loaded = load_from_path(&path);
+        assert_eq!(store_to_path(theme, &path), None);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -553,7 +577,7 @@ mod tests {
     fn missing_cache_file_yields_none_without_panicking() {
         let dir = tmp_dir("missing");
         let path = dir.join("does-not-exist.toml");
-        let loaded = load_from_path(&path);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -563,7 +587,7 @@ mod tests {
         let dir = tmp_dir("corrupt");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "this is not valid { toml at all ]]]").unwrap();
-        let loaded = load_from_path(&path);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -579,7 +603,9 @@ mod tests {
         let dir = tmp_dir("legacy");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "fg = 16777215\nbg = 0\n").unwrap();
-        let loaded = load_from_path(&path).expect("a successfully parsed legacy file is a hit");
+        let (loaded, notice) = load_from_path(&path);
+        let loaded = loaded.expect("a successfully parsed legacy file is a hit");
+        assert_eq!(notice, None, "a clean hit must carry no diagnostic");
         assert_eq!(loaded.fg, Some(16_777_215));
         assert_eq!(loaded.bg, Some(0));
         assert_eq!(
@@ -602,8 +628,12 @@ mod tests {
         let dir = tmp_dir("future-schema");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "schema_version = 999\nfg = 1\nbg = 2\n").unwrap();
-        let loaded = load_from_path(&path);
+        let (loaded, notice) = load_from_path(&path);
         assert_eq!(loaded, None);
+        assert!(
+            notice.is_some(),
+            "a schema this build cannot read must return a diagnostic, not silently fall back"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -633,8 +663,9 @@ mod tests {
                 },
             );
         }
-        store_to_path(theme, &path);
-        let loaded = load_from_path(&path).expect("a freshly stored cache must load");
+        assert_eq!(store_to_path(theme, &path), None);
+        let (loaded, _) = load_from_path(&path);
+        let loaded = loaded.expect("a freshly stored cache must load");
         for group in ChromeGroup::ALL {
             assert_eq!(
                 loaded.chrome(group),
@@ -662,7 +693,12 @@ mod tests {
             "schema_version = 1\nfg = 1\nbg = 2\n\n[status_line]\nfg = 3\n",
         )
         .unwrap();
-        assert_eq!(load_from_path(&path), None);
+        let (loaded, notice) = load_from_path(&path);
+        assert_eq!(loaded, None);
+        assert!(
+            notice.is_some(),
+            "an older-schema file must still return a diagnostic even though it is not corrupt"
+        );
         let probe: SchemaProbe = toml::from_str(
             &std::fs::read_to_string(&path).expect("the planted file must be readable"),
         )
@@ -692,10 +728,10 @@ mod tests {
         let second_config = Path::new("/home/second/.config/view/view.toml");
         let first_theme = Theme::with_colors(Some(0x0A0A0A), Some(0x0B0B0B));
         let second_theme = Theme::with_colors(Some(0x0C0C0C), Some(0x0D0D0D));
-        store(first_theme, first_config);
-        store(second_theme, second_config);
-        let first_loaded = load(first_config);
-        let second_loaded = load(second_config);
+        assert_eq!(store(first_theme, first_config), None);
+        assert_eq!(store(second_theme, second_config), None);
+        let (first_loaded, _) = load(first_config);
+        let (second_loaded, _) = load(second_config);
         let cache_dir = view_native::paths::cache_dir(&dir);
         let mut entries: Vec<PathBuf> = std::fs::read_dir(&cache_dir)
             .expect("the cache directory must exist after two stores")
@@ -732,7 +768,7 @@ mod tests {
         let dir = tmp_dir("unknown-field");
         let path = dir.join("theme.toml");
         std::fs::write(&path, "fg = 1\nbg = 2\nsome_future_field = true\n").unwrap();
-        let loaded = load_from_path(&path);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, None);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -742,9 +778,9 @@ mod tests {
         let dir = tmp_dir("nested");
         let path = dir.join("nested").join("dirs").join("theme.toml");
         let theme = Theme::with_colors(Some(1), Some(2));
-        store_to_path(theme, &path);
+        assert_eq!(store_to_path(theme, &path), None);
         assert!(path.exists());
-        let loaded = load_from_path(&path);
+        let (loaded, _) = load_from_path(&path);
         assert_eq!(loaded, Some(theme));
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -916,8 +952,8 @@ mod tests {
 
         let config_path = Path::new("/home/x/.config/view/view.toml");
         let theme = Theme::with_colors(Some(0x123456), Some(0x654321));
-        store(theme, config_path);
-        let loaded = load(config_path);
+        let store_notice = store(theme, config_path);
+        let (loaded, load_notice) = load(config_path);
 
         match prev {
             Some(v) => std::env::set_var("XDG_STATE_HOME", v),
@@ -925,6 +961,8 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
 
+        assert_eq!(store_notice, None, "a clean store must carry no diagnostic");
         assert_eq!(loaded, Some(theme));
+        assert_eq!(load_notice, None, "a clean hit must carry no diagnostic");
     }
 }

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 
 use view_core::events::UiEvent;
 use view_core::model::Model;
-use view_core::msg::Msg;
+use view_core::msg::{Effect, Msg};
 use view_core::theme::Theme;
 
 /// What `msg` means to the theme cache, read from the message before
@@ -131,24 +131,42 @@ impl ThemeBridge {
     /// announcement leaves the bridge armed for exactly one highlight batch,
     /// so a config that redefines a chrome group on every window or mode
     /// change cannot turn each of those into a synchronous cache write.
-    pub(crate) fn follow_up(&mut self, model: &Model, trigger: Trigger) {
+    /// Returns whatever effect a failed write owes the engine (a native
+    /// notice reporting the failure), the same "return it, never push it
+    /// directly" contract [`crate::native::NativeSession::load`] follows --
+    /// this runs on the runtime loop's own dispatch seam, where the caller
+    /// (`runtime::dispatch`) already has the executor these effects need to
+    /// run through.
+    pub(crate) fn follow_up(&mut self, model: &mut Model, trigger: Trigger) -> Vec<Effect> {
         if self.target.is_none() {
-            return;
+            return Vec::new();
         }
         match trigger {
-            Trigger::None => {}
+            Trigger::None => Vec::new(),
             // an announcement arriving mid-switch does not stack: what gets
             // persisted is the scheme that ends up applied, and a user
             // cycling schemes quickly must not leave the cache holding one
             // they passed through
             Trigger::Switched => {
                 self.pending = Pending::Open;
-                let _ = self.persist(model);
+                let (_, effects) = self.persist(model);
+                effects
             }
+            // Gated on `pending == Open` *before* calling `persist`, not
+            // after: an unannounced highlight batch (the steady-state case,
+            // by far the most common `Applied` trigger) must never reach
+            // `persist` at all, or every ordinary redraw that happens to
+            // redefine a highlight group would attempt a cache write with
+            // no switch behind it.
             Trigger::Applied => {
-                if self.pending == Pending::Open && self.persist(model) == Settled::Yes {
+                if self.pending != Pending::Open {
+                    return Vec::new();
+                }
+                let (settled, effects) = self.persist(model);
+                if settled == Settled::Yes {
                     self.pending = Pending::Idle;
                 }
+                effects
             }
         }
     }
@@ -172,27 +190,41 @@ impl ThemeBridge {
     /// finished just as completely as one that changed something, and
     /// reporting otherwise would leave the switch armed over a session that
     /// has nothing further to say.
-    fn persist(&mut self, model: &Model) -> Settled {
+    ///
+    /// `store_to_path` runs synchronously on the runtime loop thread here,
+    /// not off-loaded: it is bounded to one small TOML write per switch (see
+    /// this type's own doc comment for why the write path never reaches the
+    /// steady state), so its cost is one file write on an already-rare,
+    /// user-initiated event rather than per-frame paint-path work. A write
+    /// failure never reaches stderr directly -- the terminal may be
+    /// mid-frame when this runs -- it is turned into a native notice through
+    /// `model.engine.record_native_notice` instead, returned for the caller
+    /// to run through the loop's own effect executor.
+    fn persist(&mut self, model: &mut Model) -> (Settled, Vec<Effect>) {
         let hl = model.engine.hl();
         if !hl
             .confirmed()
             .is_some_and(|probe| probe.generation == hl.probe_generation())
         {
-            return Settled::No;
+            return (Settled::No, Vec::new());
         }
         let theme = Theme::from_hl(hl);
         if self.written == Some(theme) {
-            return Settled::Yes;
+            return (Settled::Yes, Vec::new());
         }
         let Some(path) = &self.target else {
-            return Settled::Yes;
+            return (Settled::Yes, Vec::new());
         };
         crate::vlog::log_with("theme", || {
             format!("caching switched colorscheme to {}", path.display())
         });
-        crate::theme_cache::store_to_path(theme, path);
+        let notice = crate::theme_cache::store_to_path(theme, path);
         self.written = Some(theme);
-        Settled::Yes
+        let effects = match notice {
+            Some(text) => model.engine.record_native_notice(text, false),
+            None => Vec::new(),
+        };
+        (Settled::Yes, effects)
     }
 }
 
@@ -397,13 +429,13 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
 
         define_group(&mut model, ChromeGroup::StatusLine, 42, 0x0011_2233);
-        bridge.follow_up(&model, Trigger::Applied);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
 
-        let cached = crate::theme_cache::load_from_path(&path)
-            .expect("the applied switch must have been cached");
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the applied switch must have been cached");
         assert_eq!(
             cached.chrome(ChromeGroup::StatusLine),
             ResolvedStyle {
@@ -432,16 +464,17 @@ mod tests {
         let mut model = settled_model();
 
         define_group(&mut model, ChromeGroup::TabLineFill, 7, 0x00ff_00ff);
-        bridge.follow_up(&model, Trigger::Applied);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
         assert!(
             !path.exists(),
             "nothing had announced a switch yet, so nothing may be persisted"
         );
 
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
 
-        let cached = crate::theme_cache::load_from_path(&path)
-            .expect("an announcement whose colors already landed must still cache them");
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached =
+            cached.expect("an announcement whose colors already landed must still cache them");
         assert_eq!(
             cached.chrome(ChromeGroup::TabLineFill).fg,
             Some(0x00ff_00ff)
@@ -458,21 +491,21 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
 
         let frame = ordinary_frame();
         let carried = bridge.classify(&frame);
         let _ = update(&mut model, frame);
-        bridge.follow_up(&model, carried);
+        let _ = bridge.follow_up(&mut model, carried);
         assert!(
             bridge.pending == Pending::Open,
             "a frame carrying no highlights closed the switch before its colors arrived"
         );
 
         define_group(&mut model, ChromeGroup::MsgArea, 11, 0x0000_beef);
-        bridge.follow_up(&model, Trigger::Applied);
-        let cached = crate::theme_cache::load_from_path(&path)
-            .expect("the batch that did move the colors must have been cached");
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the batch that did move the colors must have been cached");
         assert_eq!(cached.chrome(ChromeGroup::MsgArea).fg, Some(0x0000_beef));
         assert!(bridge.pending == Pending::Idle);
     }
@@ -488,9 +521,9 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
         define_group(&mut model, ChromeGroup::StatusLine, 3, 0x0011_2233);
-        bridge.follow_up(&model, Trigger::Applied);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
         assert!(
             bridge.pending == Pending::Idle,
             "the switch's own highlight batch must have closed it"
@@ -503,11 +536,11 @@ mod tests {
                 u64::from(id),
                 0x00aa_bb00 + id,
             );
-            bridge.follow_up(&model, Trigger::Applied);
+            let _ = bridge.follow_up(&mut model, Trigger::Applied);
         }
 
-        let cached = crate::theme_cache::load_from_path(&path)
-            .expect("the announced switch must have been cached");
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the announced switch must have been cached");
         assert_eq!(
             cached.chrome(ChromeGroup::StatusLine).fg,
             Some(0x0011_2233),
@@ -524,7 +557,7 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
         let _ = update(
             &mut model,
             Msg::Redraw(vec![UiEvent::DefaultColorsSet {
@@ -533,10 +566,10 @@ mod tests {
                 sp: None,
             }]),
         );
-        bridge.follow_up(&model, Trigger::Applied);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
+        let (still_ambiguous_cache, _) = crate::theme_cache::load_from_path(&path);
         assert!(
-            crate::theme_cache::load_from_path(&path)
-                .is_none_or(|cached| cached.fg != Some(0x00ab_cdef)),
+            still_ambiguous_cache.is_none_or(|cached| cached.fg != Some(0x00ab_cdef)),
             "the background is still ambiguous: this write would persist a theme that never existed"
         );
 
@@ -549,10 +582,10 @@ mod tests {
                 bg: Some(0x0044_5566),
             },
         );
-        bridge.follow_up(&model, Trigger::Applied);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
 
-        let cached = crate::theme_cache::load_from_path(&path)
-            .expect("the answered probe must have released the write");
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the answered probe must have released the write");
         assert_eq!(cached.bg, Some(0x0044_5566));
         assert_eq!(cached.fg, Some(0x00ab_cdef));
     }
@@ -567,7 +600,7 @@ mod tests {
         let mut model = settled_model();
         for id in 1..8 {
             define_group(&mut model, ChromeGroup::TabLine, id, 0x0000_1111);
-            bridge.follow_up(&model, Trigger::Applied);
+            let _ = bridge.follow_up(&mut model, Trigger::Applied);
         }
         assert!(
             !path.exists(),
@@ -583,13 +616,13 @@ mod tests {
         let mut bridge = bridge_writing_to(&path);
         let mut model = settled_model();
 
-        bridge.follow_up(&model, Trigger::Switched);
-        bridge.follow_up(&model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
 
         define_group(&mut model, ChromeGroup::Pmenu, 9, 0x00fa_ce00);
-        bridge.follow_up(&model, Trigger::Applied);
-        let cached =
-            crate::theme_cache::load_from_path(&path).expect("the settled scheme must be cached");
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
+        let (cached, _) = crate::theme_cache::load_from_path(&path);
+        let cached = cached.expect("the settled scheme must be cached");
         assert_eq!(cached.chrome(ChromeGroup::Pmenu).fg, Some(0x00fa_ce00));
     }
 
@@ -597,10 +630,48 @@ mod tests {
     #[test]
     fn a_session_with_no_config_path_writes_nothing_and_stays_idle() {
         let mut bridge = ThemeBridge::new(None);
-        let model = settled_model();
-        bridge.follow_up(&model, Trigger::Switched);
-        bridge.follow_up(&model, Trigger::Applied);
+        let mut model = settled_model();
+        let _ = bridge.follow_up(&mut model, Trigger::Switched);
+        let _ = bridge.follow_up(&mut model, Trigger::Applied);
         assert!(bridge.target.is_none());
         assert!(bridge.pending == Pending::Idle);
+    }
+
+    /// A mid-session write failure must reach the user through the model's
+    /// own native-notice channel, never a direct stderr write -- this runs
+    /// on the runtime loop while the terminal is raw-mode/alternate-screen
+    /// owned, where a bare stderr write is invisible at best. The scratch
+    /// "path" is planted as a directory rather than a file, so
+    /// `store_to_path`'s directory-creation step succeeds (the parent
+    /// already exists) but its own `fs::write` fails on the write step
+    /// this test exercises.
+    #[test]
+    fn a_write_failure_surfaces_as_a_native_notice_not_stderr() {
+        let path = scratch("write-failure");
+        std::fs::create_dir_all(&path).expect("the planted directory must be creatable");
+        let mut bridge = bridge_writing_to(&path);
+        let mut model = settled_model();
+
+        let effects = bridge.follow_up(&mut model, Trigger::Switched);
+
+        assert!(
+            !effects.is_empty(),
+            "a failed write must return the notice's toast-expiry effect for the caller to run"
+        );
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            1,
+            "a failed write must record exactly one native notice"
+        );
+        let entry = &model.engine.messages.entries[0];
+        assert_eq!(entry.kind, "native");
+        assert!(
+            entry
+                .content
+                .iter()
+                .any(|(_, text)| text.contains("failed to write theme cache")),
+            "the notice must name the failure, got {:?}",
+            entry.content
+        );
     }
 }

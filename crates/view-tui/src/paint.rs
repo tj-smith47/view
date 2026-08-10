@@ -3898,14 +3898,42 @@ mod tests {
     /// stop, never index past the buffer.
     #[test]
     fn a_native_overlay_larger_than_the_terminal_is_clipped_not_panicked() {
-        let model = caps_model(true, true, true);
+        // `caps_model` alone establishes no theme, so every cell's derived
+        // background is `Color::Reset` by construction (see
+        // `a_terminal_without_truecolor_gets_no_derived_color`) regardless
+        // of whether the paint walk actually reached it -- that would make
+        // this test's clip-boundary proof below vacuous. A real
+        // `DefaultColorsSet`, the same setup
+        // `a_truecolor_terminal_frames_a_native_overlay_in_a_dimmed_interior_color`
+        // uses, gives the interior a non-`Reset` color the walk can
+        // actually be caught failing to reach.
+        let mut model = caps_model(true, true, true);
+        apply(
+            &mut model,
+            view_core::events::UiEvent::DefaultColorsSet {
+                fg: Some(0x00C8_C8C8),
+                bg: Some(0x0011_2233),
+                sp: None,
+            },
+        );
         let layer = Layer::new(Rect::new(1, 2, 400, 400), native_picker(), model.caps.tier);
         let buf = paint_layer_alone(&model, layer, 12, 5);
-        assert_eq!(buf.area.width, 12);
         assert_eq!(
             &buf[(2, 1)].symbol(),
             &"╭",
             "the top-left corner lands at the rect origin"
+        );
+        // `buf.area.width` merely echoes the TestBackend size this test
+        // constructed -- it is true even if the painter stopped after one
+        // cell. The bottom-right visible cell (the far clipped edge of the
+        // 400x400 rect) must still carry the overlay's own painted
+        // background rather than the buffer's untouched `Color::Reset`
+        // default, proving the paint walk actually reached and filled all
+        // the way to the clip boundary instead of bailing out early.
+        assert_ne!(
+            buf[(11, 4)].bg,
+            ratatui::style::Color::Reset,
+            "the clipped bottom-right cell was never painted"
         );
     }
 

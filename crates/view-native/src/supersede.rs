@@ -509,6 +509,7 @@ mod tests {
     #[test]
     fn every_entry_rides_an_api_call_never_the_keyboard() {
         let plan = plan(&NativeConfig::all_enabled(), registry::features());
+        assert!(!plan.is_empty(), "the all-enabled plan must not be empty");
         for entry in &plan {
             assert!(
                 matches!(entry.rpc, RpcCall::HoldOption { .. }),

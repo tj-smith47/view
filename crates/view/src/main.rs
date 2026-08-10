@@ -17,6 +17,7 @@ use clap::Parser;
 use std::sync::mpsc;
 use std::time::Instant;
 use view_core::model::{Model, Tier};
+use view_core::msg::Effect;
 use view_core::theme::Theme;
 use view_engine::process::EngineConfig;
 use view_tui::terminal::Term;
@@ -302,10 +303,19 @@ fn main() -> Result<()> {
     // answers `ui_attach` with its own `default_colors_set`. The `[native]`
     // table behind the same path is read later, once there is a channel for
     // the features it enables to notify back over (see `NativeSession`).
+    //
+    // Any notice this block owes the user is buffered as an effect rather
+    // than printed: the terminal is already raw-mode/alternate-screen owned
+    // by `Term::init` above, where a bare stderr write is invisible at best
+    // (see `TerminalGuard`'s doc comment) and no effect executor exists yet
+    // to run a native notice through. `run_cutover`'s own toast timer picks
+    // these up the same way it already does for `drained.toast_effects` --
+    // see that binding's construction below.
+    let mut pre_executor_effects: Vec<Effect> = Vec::new();
     let config_path = resolve_config_path(&cli);
     match &config_path {
         Some(path) => {
-            let cached = theme_cache::load(path);
+            let (cached, notice) = theme_cache::load(path);
             vlog::log_with("theme", || {
                 format!(
                     "cache {} path={}",
@@ -313,6 +323,9 @@ fn main() -> Result<()> {
                     path.display()
                 )
             });
+            if let Some(notice) = notice {
+                pre_executor_effects.extend(model.engine.record_native_notice(notice, false));
+            }
             // only seeds on a genuine cache hit: seeding from a miss's
             // Theme::default() would register TabLineSel/PmenuSel with
             // all-false attrs, permanently defeating Theme::from_hl's
@@ -328,9 +341,10 @@ fn main() -> Result<()> {
         // is nothing to warn about
         None if cli.clean => {}
         None => {
-            eprintln!(
-                "view: cannot resolve a config path (no XDG_CONFIG_HOME, HOME, or APPDATA set); theme cache disabled this run"
-            );
+            pre_executor_effects.extend(model.engine.record_native_notice(
+                "view: cannot resolve a config path (no XDG_CONFIG_HOME, HOME, or APPDATA set); theme cache disabled this run".to_string(),
+                false,
+            ));
         }
     }
 
@@ -414,13 +428,17 @@ fn main() -> Result<()> {
 
     // `.with_toast_timer` wired on this executor too, not only the one
     // `runtime::run` builds later: `drained.toast_effects` (buffered while
-    // no executor existed at all, in `drain_pre_attach`) and `load`'s own
-    // broken-config notice below both need a real toast-expiry timer the
-    // moment they run, which is here -- strictly before `runtime::run`'s
-    // loop -- not deferred any further than "the first executor that
-    // exists."
+    // no executor existed at all, in `drain_pre_attach`), `pre_executor_effects`
+    // (buffered the same way for the theme-cache/config-path notices above,
+    // built even earlier), and `load`'s own broken-config notice below all
+    // need a real toast-expiry timer the moment they run, which is here --
+    // strictly before `runtime::run`'s loop -- not deferred any further than
+    // "the first executor that exists."
     let executor = runtime::Executor::new(engine.handle.clone()).with_toast_timer(msg_tx.clone());
-    for eff in drained.toast_effects {
+    for eff in pre_executor_effects
+        .into_iter()
+        .chain(drained.toast_effects)
+    {
         let _ = executor.run(eff);
     }
     // built before the cutover, not after: a config that sources quickly has
@@ -456,7 +474,6 @@ fn main() -> Result<()> {
         || engine.wait_exit(),
     );
     if let startup::CutoverOutcome::Quit(code) = outcome {
-        persist_theme(&model, &config_path);
         vlog::log_with("engine", || format!("exit code={code}"));
         // nvim already reported its own exit (a presink Msg::EngineStopped,
         // translated by run_cutover): drop explicitly so Engine's Drop
@@ -464,6 +481,12 @@ fn main() -> Result<()> {
         // would otherwise skip every destructor on this stack
         drop(engine);
         term.restore_now();
+        // after restore_now, not before: persist_theme's own diagnostic (on
+        // a cache-write failure) is a plain stderr write, and the terminal
+        // is raw-mode/alternate-screen owned until the line above -- see
+        // report_fatal_reason's doc comment for the same ordering
+        // requirement on the read side.
+        persist_theme(&model, &config_path);
         report_fatal_reason(&model);
         std::process::exit(code);
     }
@@ -483,12 +506,15 @@ fn main() -> Result<()> {
         &mut follow_ups,
         &mut term,
     )?;
-    persist_theme(&model, &config_path);
     vlog::log_with("engine", || format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be
     // restored explicitly first; every other return path (an error
-    // propagated via `?` above) is covered by `Drop` on `term`.
+    // propagated via `?` above) is covered by `Drop` on `term`. Also why
+    // persist_theme runs after this line and not before: its own
+    // diagnostic (on a cache-write failure) is a plain stderr write, valid
+    // only once the terminal is no longer raw-mode/alternate-screen owned.
     term.restore_now();
+    persist_theme(&model, &config_path);
     report_fatal_reason(&model);
     std::process::exit(exit_code);
 }
@@ -497,9 +523,17 @@ fn main() -> Result<()> {
 /// every exit path that reaches one (both quit shapes call this identically
 /// rather than each carrying its own copy, so a future third exit path
 /// cannot copy one and silently miss the store).
+///
+/// Callers must call this only after `term.restore_now()`: a write failure
+/// here is reported with a plain `eprintln!`, which is only safe once the
+/// terminal is no longer raw-mode/alternate-screen owned (see
+/// `report_fatal_reason`'s doc comment for the same requirement on the
+/// read side).
 fn persist_theme(model: &Model, config_path: &Option<std::path::PathBuf>) {
     if let Some(path) = config_path {
-        theme_cache::store(Theme::from_hl(model.engine.hl()), path);
+        if let Some(notice) = theme_cache::store(Theme::from_hl(model.engine.hl()), path) {
+            eprintln!("{notice}");
+        }
     }
 }
 

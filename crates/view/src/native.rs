@@ -211,6 +211,17 @@ impl NativeSession {
     /// worst that costs is repeating it next launch, and staying silent
     /// instead would trade a repeated notice for a user who is never told
     /// what took their key.
+    ///
+    /// Latency consequence: `toast::first_run` underneath this reads and,
+    /// when there is anything new to announce, writes the record file
+    /// (`std::fs::read_to_string`/`create_dir_all`/`write` in
+    /// `view-native`'s `toast.rs`) synchronously, on whatever thread calls
+    /// this -- the same `dispatch` thread every `Msg` runs through, since
+    /// this follow-up fires from `Stage::Claims`. That stage fires exactly
+    /// once per session, right after nvim reports its key claims during
+    /// startup, so the blocking disk I/O lands on time-to-first-paint at
+    /// most once and never recurs on the per-frame steady-state path this
+    /// crate's performance budgets actually gate.
     fn announce(&self, model: &mut Model) -> Vec<Effect> {
         let handovers = report(&self.plan, model.claimed_keys(), registry::features());
         if handovers.is_empty() {

@@ -404,6 +404,28 @@ fn drain_osc52<S: Osc52Sink>(osc52_rx: &mpsc::Receiver<Osc52Job>, sink: &mut S) 
     }
 }
 
+/// Spawns `f` on its own thread, logging rather than panicking if the OS
+/// refuses to create one. `std::thread::spawn` panics on that failure
+/// internally (it is `Builder::new().spawn(f).expect(...)`), which would
+/// crash the whole editor over a resource-exhaustion condition every
+/// caller below already treats as an ordinary, recoverable degrade when
+/// the reply channel itself is unwired (see each `Effect` arm's own doc).
+/// Returns whether the thread was actually spawned, for the one caller
+/// (`Effect::TreeGitScan`) whose reply, unlike every other one here,
+/// clears a state machine flag with no other clearer.
+fn spawn_or_log<F>(label: &'static str, f: F) -> bool
+where
+    F: FnOnce() + Send + 'static,
+{
+    match std::thread::Builder::new().spawn(f) {
+        Ok(_) => true,
+        Err(err) => {
+            crate::vlog::log_with(label, || format!("thread spawn failed: {err}"));
+            false
+        }
+    }
+}
+
 impl<E: EngineOps> Executor<E> {
     /// Wraps `ops` for the runtime loop to drive, with neither the
     /// clipboard worker nor the OSC52 terminal channel wired: every
@@ -623,7 +645,7 @@ impl<E: EngineOps> Executor<E> {
             Effect::ScheduleToastExpiry { id, after } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("toast-expiry", move || {
                         std::thread::sleep(after);
                         let _ = tx.send(Msg::ToastExpired { id });
                     });
@@ -672,7 +694,7 @@ impl<E: EngineOps> Executor<E> {
             Effect::PickerPreviewFallback { generation, path } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("picker-preview-fallback", move || {
                         let lines =
                             view_native::picker::preview::read_file(std::path::Path::new(&path));
                         let _ = tx.send(Msg::PickerPreviewFile { generation, lines });
@@ -701,7 +723,7 @@ impl<E: EngineOps> Executor<E> {
                 }
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("tree-scan", move || {
                         let entries = view_native::tree::fs::scan(&root, &cancel);
                         let _ = tx.send(Msg::TreeScanResult {
                             generation,
@@ -724,16 +746,42 @@ impl<E: EngineOps> Executor<E> {
             // bounded-and-killed) `git` only delays this background send,
             // never a frame.
             Effect::TreeGitScan { generation, root } => {
-                if let Some(tx) = &self.toast_timer {
+                let delivered = self.toast_timer.as_ref().map(|tx| {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("tree-git-scan", move || {
                         let (status, timed_out) = view_native::tree::git::status_bounded(&root);
                         let _ = tx.send(Msg::TreeGitResult {
                             generation,
                             status,
                             timed_out,
                         });
-                    });
+                    })
+                });
+                if delivered != Some(true) {
+                    // `TreeState::apply_git` is the only clearer of
+                    // `git_refresh_in_flight` (already set `true` by the
+                    // `request_git_refresh` call that produced this effect
+                    // -- see `view_native::tree::git`'s `GIT_STATUS_TIMEOUT`
+                    // doc for why an unanswered generation is a permanent
+                    // wedge, not a transient one, and why that call bounds a
+                    // wedged `git` child for exactly this reason). An
+                    // unwired `toast_timer`, or a `spawn_or_log` that could
+                    // not even get the reply thread onto the OS, drops the
+                    // reply just as silently, without that bound: the
+                    // tree's git decorations freeze for the rest of the
+                    // session, or until the tree is closed and reopened.
+                    // Every real executor wires `toast_timer`
+                    // unconditionally (`main.rs`'s only construction site)
+                    // and a thread-spawn failure here is a resource
+                    // exhaustion this process is already in serious trouble
+                    // from -- reaching here in a debug/test build is a
+                    // wiring regression or a test gap worth catching loudly
+                    // rather than shipping the silent freeze.
+                    debug_assert!(
+                        false,
+                        "TreeGitScan generation {generation} could not reply; \
+                         git_refresh_in_flight can never clear for it"
+                    );
                 }
                 Flow::Continue
             }
@@ -763,7 +811,7 @@ impl<E: EngineOps> Executor<E> {
             Effect::TreeCreateFile { path, generation } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("tree-create-file", move || {
                         let ok = std::fs::OpenOptions::new()
                             .write(true)
                             .create_new(true)
@@ -778,7 +826,7 @@ impl<E: EngineOps> Executor<E> {
             Effect::TreeDeleteFile { path, generation } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
-                    std::thread::spawn(move || {
+                    spawn_or_log("tree-delete-file", move || {
                         let ok = std::fs::remove_file(&path).is_ok();
                         let _ = tx.send(Msg::TreeDeleteFileResult { generation, ok });
                     });
@@ -827,9 +875,10 @@ pub struct FollowUps<'a> {
 /// recorded.
 ///
 /// The theme-cache follow-up sits at the same seam for the same reason, and
-/// before the native one because it emits no effects at all: it reads the
-/// highlight state `update()` just produced and, at most once per
-/// colorscheme change, writes it out.
+/// before the native one because it has nothing to do with the native
+/// feature registry: it reads the highlight state `update()` just produced
+/// and, at most once per colorscheme change, writes it out -- emitting a
+/// native notice of its own only on a write failure.
 #[must_use]
 pub(crate) fn dispatch<E: EngineOps>(
     model: &mut Model,
@@ -853,7 +902,18 @@ pub(crate) fn dispatch<E: EngineOps>(
     if flow != Flow::Continue {
         return flow;
     }
-    follow_ups.theme.follow_up(model, trigger);
+    for eff in follow_ups.theme.follow_up(model, trigger) {
+        match executor.run(eff) {
+            Flow::Continue => {}
+            other => {
+                flow = other;
+                break;
+            }
+        }
+    }
+    if flow != Flow::Continue {
+        return flow;
+    }
     for eff in follow_ups.native.follow_up(model, stage) {
         match executor.run(eff) {
             Flow::Continue => {}
@@ -1123,6 +1183,11 @@ pub fn run(
                 Flow::Continue => {}
                 Flow::Quit(code) => return Ok((model, code)),
                 Flow::EngineLost => {
+                    // Blocks this dispatch thread for up to `shutdown_timeout`
+                    // (500ms by default -- see `graceful_kill`'s own doc)
+                    // sending `qa!` and polling `try_wait`, but only on this
+                    // already-rare "the engine connection just failed"
+                    // transition, never on the steady-state per-frame path.
                     let info = engine.wait_exit();
                     if let Flow::Quit(code) =
                         dispatch(&mut model, &executor, follow_ups, Msg::EngineDown(info))
@@ -1179,6 +1244,11 @@ pub fn run(
                 // `main` reports it only after `run` returns and the
                 // terminal is restored (see Msg::EngineStopped's doc)
                 model.fatal_reason = reason;
+                // Same bounded (up to `shutdown_timeout`) block as the
+                // `Flow::EngineLost` arm above, but the reader thread's
+                // stream has already ended by the time this fires, so the
+                // `qa!` send is a harmless no-op and the first `try_wait`
+                // typically finds the child already exited.
                 Msg::EngineDown(engine.wait_exit())
             }
             Ok(m) => m,
@@ -1201,6 +1271,9 @@ pub fn run(
                 // gone, which is why `dispatch` stops on the first failure
                 // rather than queueing a duplicate EngineDown per remaining
                 // effect
+                // same bounded wait as the `Msg::Resized` arm above (see
+                // its comment) -- an already-rare transition, not a
+                // per-frame cost
                 Flow::EngineLost => queue.push(Msg::EngineDown(engine.wait_exit())),
             }
             // a RedrawReady is dropped when the shared channel is
@@ -1777,6 +1850,25 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A `toast_timer`-less `Executor` (every bare `FakeOps`-only test
+    /// above it) dropping `TreeGitScan` cannot merely no-op the way
+    /// `ScheduleToastExpiry`/`Osc52Copy` safely do: `TreeState::apply_git`
+    /// is the only clearer of `git_refresh_in_flight`, already set `true`
+    /// by the `request_git_refresh` call that produced this effect, so a
+    /// dropped reply here is a permanent wedge for the rest of the tree's
+    /// session, not a cosmetic delay. This pins that the debug-build guard
+    /// actually fires rather than silently reintroducing the wedge.
+    #[test]
+    #[should_panic(expected = "git_refresh_in_flight can never clear")]
+    fn a_tree_git_scan_without_a_toast_timer_fails_loud_in_debug_builds() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let _ = executor.run(Effect::TreeGitScan {
+            generation: 1,
+            root: std::path::PathBuf::from("."),
+        });
     }
 
     /// Proves `Executor::run` actually spawns the create worker and reports

@@ -40,7 +40,18 @@ fn scratch(tag: &str) -> PathBuf {
 #[test]
 fn a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing() {
     let Some(nvim) = nvim_bin() else {
-        eprintln!("skipping: no nvim on PATH or at $VIEW_NVIM_BIN");
+        // `cargo test` swallows stdout/stderr for a passing test, so a
+        // plain eprintln here is indistinguishable from an actual pass in
+        // the default run's output -- add the same `::warning::` workflow
+        // command `view-harness`'s bench binary uses for platform-skipped
+        // cells (see `skip_announcements` in `view-harness/src/bin/bench.rs`)
+        // so a skip on CI still surfaces on the checks page instead of
+        // silently reading as a verified mechanism proof.
+        let reason = "no nvim on PATH or at $VIEW_NVIM_BIN";
+        println!("skipping a_remote_ui_client_draws_the_headless_servers_buffer_and_echoes_typing: {reason}");
+        if std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true") {
+            println!("::warning::remote_ui mechanism test skipped: {reason}");
+        }
         return;
     };
     let dir = scratch("echo");

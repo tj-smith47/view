@@ -67,8 +67,12 @@ steps = [
   { wait_for = "hello", timeout_ms = 15000 },
   { assert_absent = "E5108" },
   # No lualine anywhere in this fixture, so nothing could paint the
-  # powerline glyph even if the native statusline were somehow off; the
-  # meaningful fact this state alone can prove is that the native
-  # statusline still draws with zero plugins present at all.
-  { assert_cell_not = { row = 29, col = 85, glyph = "" } },
+  # powerline glyph; the fact this state alone can prove is that the
+  # native statusline still draws with zero plugins present at all --
+  # nvim only emits msg_ruler while laststatus=0 (the statusline
+  # feature's own supersession setting, see docs/statusline-wire-capture.md),
+  # so its "All" scroll indicator appearing here is proof the native
+  # statusline's ruler segment actually rendered, not just that the row's
+  # background chrome painted.
+  { wait_for = "All", timeout_ms = 5000 },
 ]

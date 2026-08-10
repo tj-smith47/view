@@ -160,6 +160,20 @@ pub fn spawn_live_grep_scan(
                 .unwrap_or_else(|_| entry.path())
                 .to_string_lossy()
                 .into_owned();
+            // Reads `entry.path()` straight off disk via `grep-searcher`,
+            // with no RPC round trip and no check of whether nvim already
+            // has this exact path open with unsaved edits -- unlike
+            // `preview.rs`'s disk-read fallback (see its own module doc),
+            // which only ever reads a path nvim has *no* buffer for. A
+            // live-grep match against a dirty buffer can therefore show
+            // stale text, or a stale line number, relative to what the
+            // buffer actually holds: accepted here because the walker runs
+            // on its own background thread over an entire tree, and an RPC
+            // round trip per candidate file would defeat the whole point of
+            // scanning off the paint loop (see this module's own doc). The
+            // picker's `<CR>`-open flow re-resolves through the live buffer
+            // regardless, so a stale grep result never writes anything; it
+            // can only mislead the label shown before that.
             let _ = searcher.search_path(
                 &matcher,
                 entry.path(),
@@ -345,6 +359,63 @@ mod tests {
             items,
             vec!["needle.txt:2: a needle sits here".to_string()],
             "expected exactly one match at line 2, formatted as path:line: text, got {items:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Pins the exact tradeoff `spawn_live_grep_scan`'s own comment above
+    /// its `search_path` call discloses: the scan has zero awareness of
+    /// buffer state and reflects only whatever bytes sit on disk the
+    /// instant it reads them. Writes a needle to disk, then overwrites the
+    /// same path with content that has no needle *before* the scan ever
+    /// runs -- if this scanner cached, buffered, or otherwise remembered
+    /// the file's earlier content the way an open nvim buffer's unsaved
+    /// edits would, the stale needle would still be found. It is not: the
+    /// scan sees only the final, current disk state.
+    #[test]
+    fn live_grep_reads_current_disk_bytes_never_a_remembered_earlier_version() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-staleness-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        let file = root.join("dirty.txt");
+        std::fs::write(&file, "an earlier version has needlemark here\n").expect("write baseline");
+        std::fs::write(&file, "the current version has no trace of it\n")
+            .expect("overwrite before scanning");
+
+        let mut nucleo: nucleo::Nucleo<PickerItem> =
+            nucleo::Nucleo::new(nucleo::Config::DEFAULT, Arc::new(|| {}), None, 1);
+        let injector = nucleo.injector();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let handle = spawn_live_grep_scan(
+            root.clone(),
+            "needlemark".to_string(),
+            injector,
+            cancel.clone(),
+        );
+        handle.join().expect("grep scan thread panicked");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            nucleo.tick(10);
+            if std::time::Instant::now() > deadline {
+                break;
+            }
+        }
+        assert_eq!(
+            nucleo.snapshot().item_count(),
+            0,
+            "the scan found the overwritten version's earlier content, meaning it read \
+             something other than the file's current bytes on disk"
         );
 
         let _ = std::fs::remove_dir_all(&root);

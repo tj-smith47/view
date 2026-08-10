@@ -121,6 +121,17 @@ fn rastered_rows(tier: Tier, width: u16, height: u16, kind: LayerKind) -> Vec<St
 fn assert_parity(tier: Tier, truecolor: bool, width: u16, height: u16, kind: LayerKind) {
     let painted = painted_rows(tier, truecolor, width, height, kind.clone());
     let rastered = rastered_rows(tier, width, height, kind);
+
+    // A silent upstream regression (an empty Surface, a layer that never
+    // reached the compositor) would make both painters agree on all-blank
+    // rows and the assert_eq below would pass without ever exercising
+    // paint_span_row's per-span walk -- anchor that real, non-blank
+    // content actually reached the painter before trusting parity on it.
+    assert!(
+        painted.iter().any(|row| !row.trim().is_empty()),
+        "painted_rows produced no non-blank content for tier {tier:?}; the parity check below would be vacuous"
+    );
+
     assert_eq!(
         painted, rastered,
         "view-tui and view-oracle disagree on tier {tier:?} truecolor={truecolor}"
