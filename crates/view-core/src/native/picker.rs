@@ -554,7 +554,10 @@ mod tests {
         // rendering on a Windows host that never produced one -- while the
         // ':' this test is about is a path character on Unix and the drive
         // separator on Windows, where splitting a label at it resolves
-        // `C:\repo\src\main.rs` to `C`
+        // `C:\repo\src\main.rs` to `C`. Building `expected` with the same
+        // join production uses makes the separator half of this assertion
+        // unfalsifiable by construction; the ':' surviving intact is the
+        // half under test
         let expected = PathBuf::from("/repo").join("src/mod:weird.rs");
         assert_eq!(
             state.selected_path().as_deref(),

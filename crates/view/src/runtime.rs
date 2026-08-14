@@ -3486,14 +3486,18 @@ mod tests {
     /// Waits for the reader thread's own terminal signal, which is the
     /// message the loop's [`intake`] classifies. Nothing else in the channel
     /// answers the question these tests ask, and a fixed pause would race a
-    /// process that is still exiting.
-    fn await_engine_stopped(rx: &mpsc::Receiver<Msg>) -> Msg {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    /// process that is still exiting. The bound is the caller's to pick
+    /// because for some callers it is the assertion itself: a quit whose
+    /// announcement went unanswered never produces an `EngineStopped` at
+    /// all, so arriving inside a short bound is what proves the answer
+    /// happened.
+    fn await_engine_stopped(rx: &mpsc::Receiver<Msg>, within: std::time::Duration) -> Msg {
+        let deadline = std::time::Instant::now() + within;
         loop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
-            let msg = rx
-                .recv_timeout(left)
-                .expect("a stopped engine must signal EngineStopped within 30s");
+            let msg = rx.recv_timeout(left).unwrap_or_else(|_| {
+                panic!("a stopped engine must signal EngineStopped within {within:?}")
+            });
             if matches!(msg, Msg::EngineStopped { .. }) {
                 return msg;
             }
@@ -3521,21 +3525,16 @@ mod tests {
         // `--embed` holds nvim's startup until a UI attaches, so an engine
         // nobody attached to would never read the quit typed below
         engine.handle.ui_attach(80, 24).unwrap();
-        let quit_at = std::time::Instant::now();
         engine.handle.input(":qa!<CR>").unwrap();
 
-        let stopped = await_engine_stopped(&rx);
         // the announcement is a blocking round trip inside nvim's
         // `VimLeavePre`: answered off the reader thread it costs one pipe
-        // hop, but answered by nothing at all it holds the editor open
-        // until something kills it, and both readings end in an
-        // `EngineStopped` this assertion is the only thing that separates
-        let announced_in = quit_at.elapsed();
-        assert!(
-            announced_in < std::time::Duration::from_secs(5),
-            "the engine took {announced_in:?} to quit: an announced exit is \
-             answered while nvim waits, never waited out"
-        );
+        // hop, but answered by nothing at all it holds the editor open with
+        // no `EngineStopped` ever produced -- dropping the reply write
+        // wedges this wait to its full bound -- so the short bound IS the
+        // discriminator: a stop that arrives at all arrived because the
+        // announcement was answered
+        let stopped = await_engine_stopped(&rx, std::time::Duration::from_secs(5));
         let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model)
             .expect("a stop from the engine this session runs is never dropped");
         let Msg::EngineDown(exit) = resolved else {
@@ -3568,7 +3567,7 @@ mod tests {
             .expect("kill must run for an out-of-band crash to be simulable");
         assert!(killed.success(), "kill -KILL failed: {killed:?}");
 
-        let stopped = await_engine_stopped(&rx);
+        let stopped = await_engine_stopped(&rx, std::time::Duration::from_secs(30));
         let resolved = intake(Ok(stopped), &mut engine, &pump, &mut model)
             .expect("a stop from the engine this session runs is never dropped");
         assert!(

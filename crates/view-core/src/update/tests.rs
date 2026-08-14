@@ -4,9 +4,10 @@
 // by that file alone, and without this it reads a sibling test module as
 // production code over the ceiling
 #![cfg(test)]
-// clippy before 1.94 reads the file-level gate and the `mod` declaration's
-// as one attribute written twice; the file-level one is load-bearing for
-// the reason directly above, so the report is answered where it is raised
+// clippy before 1.94 reads the file-level gate and the one on the
+// `#[cfg(test)] mod` declaration that reaches this file as the same
+// attribute written twice; the file-level one is load-bearing for the
+// reason directly above, so the report is answered where it is raised
 #![allow(clippy::duplicated_attributes)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;

@@ -297,9 +297,10 @@ vim.api.nvim_create_autocmd('VimLeavePre', {
 /// It is the group's only `rpcrequest`, and it is one because a
 /// notification is not delivery: `rpcnotify` hands the bytes to nvim's
 /// event loop and returns, and a process on its way out can exit before
-/// that loop ever writes them. On Windows it frequently does -- one run in
-/// three under load on a real host -- leaving view to read a deliberate
-/// `:qa!` as a crash and respawn the editor its user had just closed. A
+/// that loop ever writes them. On Windows it does exactly that: a wire
+/// probe over a failing suite saw the announcement arrive zero times in
+/// ten exits, view reading each deliberate `:qa!` as a crash and
+/// respawning the editor its user had just closed. A
 /// request cannot be lost that way: nvim stays inside `VimLeavePre` until
 /// the reply arrives, so an exit that reached this line is an exit view
 /// saw. `pcall` because a channel already gone (view died first) must not
@@ -423,10 +424,13 @@ return { loaded = false }";
 ///
 /// `path` reaches nvim as a parsed argument with filename magic switched
 /// off, rather than as text an ex command re-parses: a space, `%`, `#` or a
-/// leading `+` in a filename is command syntax to `:edit` (see
-/// `docs/tree-open-file-wire-capture.md` for the live capture, including
-/// the unescaped negative control), and `magic.file = false` is what makes
-/// each of them an ordinary character instead.
+/// leading `+` in a filename is command syntax to `:edit`. The two halves
+/// carry different characters -- the argument list is what keeps the space
+/// and the leading `+` out of command parsing, and `magic.file = false` is
+/// what stops `%`, `#` and `\` from expanding as filename magic on top of
+/// it -- each half measured separately in
+/// `docs/tree-open-file-wire-capture.md`, including the magic-left-on
+/// negative control.
 ///
 /// Escaping the text was the other way to get there and it does not
 /// survive the platform: `fnameescape` escapes `\` because `\` is a

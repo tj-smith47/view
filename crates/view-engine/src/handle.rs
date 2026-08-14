@@ -621,6 +621,11 @@ impl EngineHandle {
                                 error: Value::Nil,
                                 result: Value::Nil,
                             };
+                            // a reply that fails to encode is dropped, and
+                            // nvim then waits inside `VimLeavePre` until this
+                            // thread's own stop routes through
+                            // `graceful_kill`'s 500ms backstop -- bounded,
+                            // never wedged
                             if let Ok(bytes) = encode_message(&resp) {
                                 let _ = reader_outbox.send(bytes);
                             }

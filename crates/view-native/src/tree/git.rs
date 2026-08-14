@@ -375,13 +375,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// The falsifiable check the IMPORTANT fix exists to satisfy: a `git`
-    /// that never exits must not hang this module forever, or the sidebar's
-    /// git decorations freeze for the rest of the session (`apply_git` is
-    /// the only clearer of `git_refresh_in_flight`). A fake `git` on a
-    /// scratch `PATH` that sleeps well past a short injected timeout proves
-    /// the call returns `(empty, true)` in bounded wall-clock time rather
-    /// than blocking for the sleep's full duration.
+    /// The falsifiable check the deadline exists to satisfy: a `git` that
+    /// never exits must not hang this module forever, or the sidebar's git
+    /// decorations freeze for the rest of the session (`apply_git` is the
+    /// only clearer of `git_refresh_in_flight`). A fake `git` -- a script
+    /// that sleeps well past a short injected timeout, handed to the status
+    /// call outright as the program to run -- proves the call returns
+    /// `(empty, true)` in bounded wall-clock time rather than blocking for
+    /// the sleep's full duration.
     // The fake `git` this test spawns is a `#!/bin/sh` script and the
     // permission bits it sets are POSIX-only; a wedged-child bound is not a
     // platform-specific property, but this particular way of simulating one
