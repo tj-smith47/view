@@ -350,8 +350,8 @@ Compat has three classes; only the first is "by construction":
   `GIT_EDITOR=view` abort flows depend on it).
 - Remote editing is v0.1 core (§9 invented capabilities, ruled 2026-08-05):
   the engine spawns over SSH while paint and input stay local. Attaching to
-  an already-running instance via nvim 0.12 `:detach`/`:connect` remains a
-  recorded post-v0.1 candidate.
+  an already-running instance via `:detach`/`:connect` is chartered
+  post-v0.1, after remote ships (plans/2026-08-14-post-v01-charters.md C1).
 
 ### 5.2 RPC client (own, thin — decided)
 
@@ -862,7 +862,7 @@ graphics substrate (§9 image viewing) and media handoff are their seeds.
   them auto-provisioned on first `[ai]` use, pinned and checksummed like the
   engine — "no post-install steps" spans the AI feature too.
 - Single install command; no post-install steps. Repo: `/opt/repos/view`,
-  master branch, tj-smith47 identity, `.claude/` gitignored, Taskfile from
+  master branch, tj-smith47 identity, machine-local `.claude/` session files gitignored (spec/plans/hooks tracked), Taskfile from
   day one.
 
 ## 17. Phases (implementation plans derive from these)

@@ -18,6 +18,7 @@ spec; on conflict the spec wins and the plan gets fixed.
 | P5.5 Invented capabilities — image viewing | `2026-08-09-p5_5-image.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed, 2 rounds; start-gated on P5.5-media's shared open-dispatch mechanism) |
 | P5.5 Invented capabilities — media playback handoff | `2026-08-09-p5_5-media.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed, 4 rounds + coordinator round 5; Task 3 landing-order-gated on P5.5-supervision's `pause()`/`resume()` amendment) |
 | P6 Polish, multigrid, doctor, Windows tier-1 | charter: `2026-07-18-p3-p6-charters.md`; full plan at P5 completion | Chartered |
+| Post-v0.1 charters (reattach persistence, agent-fleet attention, theme-switcher interop) | `2026-08-14-post-v01-charters.md` (charter format per `2026-07-18-p3-p6-charters.md`; origin: tmux/herdr/omarchy gap analysis) | Chartered (2026-08-14; adversarially reviewed, 1 round, findings folded) |
 
 Policy: each pending plan is written when its phase starts, against the real
 interfaces produced by the previous phase, using the same task format as P0/P1
