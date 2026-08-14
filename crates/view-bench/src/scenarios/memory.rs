@@ -462,8 +462,29 @@ mod tests {
     #[test]
     #[cfg(target_os = "macos")]
     fn tree_memory_falls_back_to_the_single_process_reading() {
-        let own = read_memory_mb(std::process::id()).unwrap();
-        let tree = read_tree_memory_mb(std::process::id()).unwrap();
+        // Read against a quiescent subject rather than this process. Both
+        // calls sample a live quantity, and a test binary running its suite
+        // in parallel moves its own footprint by a page or two between two
+        // of them -- which an exact comparison then reports as a
+        // child-tracking reader that does not exist. A shell waiting on a
+        // background sleeper allocates nothing while it waits, and its
+        // having a live child is what makes the equality mean anything: on
+        // macOS the tree reading *is* the single-process reading, so the
+        // child's own footprint must not appear in it.
+        let mut subject = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2 & wait")
+            .spawn()
+            .expect("spawning a quiescent subject that has a child of its own");
+        let pid = subject.id();
+        // long enough for the shell to reach its wait and the sleeper to
+        // fault its own pages in, so a tree reading that counted the child
+        // would differ by far more than the noise this avoids
+        std::thread::sleep(Duration::from_millis(200));
+        let own = read_memory_mb(pid).unwrap();
+        let tree = read_tree_memory_mb(pid).unwrap();
+        subject.kill().expect("killing the throwaway subject");
+        let _ = subject.wait();
         assert!(
             (tree - own).abs() < f64::EPSILON,
             "macOS has no child-tracking reader, so tree must equal own exactly: \
