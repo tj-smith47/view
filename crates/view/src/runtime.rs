@@ -36,7 +36,7 @@ use view_core::native::mappings::MappingSpec;
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::{EngineError, EngineHandle};
-use view_engine::heartbeat::{HeartbeatWatch, Liveness};
+use view_engine::heartbeat::{wedge_kind, HeartbeatWatch};
 use view_engine::process::Engine;
 use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
@@ -949,45 +949,6 @@ pub(crate) fn dispatch<E: EngineOps>(
         }
     }
     flow
-}
-
-/// Which wedge, if any, the two watches see between them.
-///
-/// A closed connection outranks every timing question below it, the same
-/// ordering [`HeartbeatWatch::observe_at`] applies for the same reason: a
-/// probe still waiting on a connection that is gone is waiting on nothing.
-///
-/// Between the two open-connection failures the write side's verdict wins,
-/// because it is the one that can be the root cause of the other. Every
-/// probe the read side is waiting on left through the same outbox, so a
-/// writer that has stopped delivering is enough on its own to make the read
-/// side report a wedge -- while a writer that is still delivering rules the
-/// write side out entirely, whatever the read side says. Taking the read
-/// side first would report the consequence and hide the cause, and it would
-/// do so on the overwhelming majority of real stalls, since the two
-/// thresholds are equal and both sides cross them together.
-fn wedge_kind(write_stalled: bool, read: Liveness, lost: bool) -> Option<WedgeKind> {
-    match read {
-        // `lost` is the loop's own resolution of the stop, never the
-        // connection's closed flag on its own: an engine that closed
-        // because its user typed `:q` reaches this seam looking exactly
-        // like one that crashed, and supervising that would offer -- or,
-        // unattended, perform -- a restart of the editor they just closed.
-        // Only `intake` and the failed-write path can tell the two apart,
-        // and only once they have resolved the exit status
-        // (`SupervisionState::note_engine_stop`)
-        Liveness::Dead if lost => Some(WedgeKind::Dead),
-        // closed, and not yet resolved: the reader's own `Msg::EngineStopped`
-        // is already on its way (sent with a blocking send, so it cannot be
-        // dropped), and it carries the facts this verdict must not pre-empt
-        Liveness::Dead => None,
-        _ if write_stalled => Some(WedgeKind::WriteSide),
-        Liveness::Wedged => Some(WedgeKind::ReadSide),
-        // `Liveness` is `#[non_exhaustive]`, so this arm also catches a
-        // verdict a later engine build might add: with the write side moving
-        // and no verdict this build understands, there is nothing to report
-        _ => None,
-    }
 }
 
 /// The loop's running fold of both sides of the engine connection into the
@@ -3094,51 +3055,6 @@ mod tests {
         );
     }
 
-    /// The write side's precedence is a precedence, not a preference: a
-    /// writer that is demonstrably moving cannot be the wedge, so the read
-    /// side's verdict stands on its own.
-    #[test]
-    fn a_moving_writer_leaves_the_read_sides_verdict_alone() {
-        assert_eq!(
-            wedge_kind(false, view_engine::heartbeat::Liveness::Wedged, false),
-            Some(WedgeKind::ReadSide)
-        );
-        assert_eq!(
-            wedge_kind(true, view_engine::heartbeat::Liveness::Alive, false),
-            Some(WedgeKind::WriteSide)
-        );
-        assert_eq!(
-            wedge_kind(false, view_engine::heartbeat::Liveness::Alive, false),
-            None
-        );
-        // and a closed connection whose stop the loop has resolved outranks
-        // both, since neither side can recover one
-        assert_eq!(
-            wedge_kind(true, view_engine::heartbeat::Liveness::Dead, true),
-            Some(WedgeKind::Dead)
-        );
-    }
-
-    /// The verdict that would respawn an editor its user just closed. A
-    /// connection closing is not evidence of anything on its own: `:q` and a
-    /// crash both close it, and only the loop's own resolution of the exit
-    /// status tells them apart. Until that resolution lands, this reports
-    /// nothing at all rather than guessing.
-    #[test]
-    fn a_closed_connection_is_no_verdict_until_the_loop_has_resolved_its_stop() {
-        assert_eq!(
-            wedge_kind(false, view_engine::heartbeat::Liveness::Dead, false),
-            None,
-            "an unresolved stop must not surface as a wedge to recover from"
-        );
-        assert_eq!(
-            wedge_kind(true, view_engine::heartbeat::Liveness::Dead, false),
-            None,
-            "not even with output stranded in the outbox: the write side \
-             cannot outrank a connection whose stop is still being resolved"
-        );
-    }
-
     /// An outage that changes classification is one outage: the readout a
     /// user has been watching count up must not restart because the fold
     /// changed its mind about which half is at fault.
@@ -3467,7 +3383,7 @@ mod tests {
                 && engine.heartbeat.observe_at(
                     false,
                     std::time::Instant::now() + view_engine::heartbeat::HEARTBEAT_WEDGE_THRESHOLD,
-                ) == Liveness::Alive;
+                ) == view_engine::heartbeat::Liveness::Alive;
         }
         assert!(
             replies > 0,
@@ -3584,7 +3500,7 @@ mod tests {
         // and the verdict the loop's own fold reaches once that resolution
         // is in hand, which is the whole point of passing the stop through
         assert_eq!(
-            wedge_kind(false, Liveness::Dead, true),
+            wedge_kind(false, view_engine::heartbeat::Liveness::Dead, true),
             Some(WedgeKind::Dead)
         );
     }

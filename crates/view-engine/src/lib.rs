@@ -25,7 +25,8 @@ mod wire;
 pub use damage::{DamagePump, SinkCutover};
 pub use handle::{EngineError, EngineHandle};
 pub use heartbeat::{
-    HeartbeatProber, HeartbeatWatch, Liveness, HEARTBEAT_PROBE_INTERVAL, HEARTBEAT_WEDGE_THRESHOLD,
+    wedge_kind, HeartbeatProber, HeartbeatWatch, Liveness, HEARTBEAT_PROBE_INTERVAL,
+    HEARTBEAT_WEDGE_THRESHOLD,
 };
 // test-only: EngineNotification is the type EngineHandle::start's unbounded
 // channel carries, and that constructor is itself test-support-gated (see

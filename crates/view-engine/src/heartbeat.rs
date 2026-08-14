@@ -40,6 +40,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use view_core::native::supervision::WedgeKind;
+
 use crate::handle::{EngineError, EngineHandle};
 
 /// How long a probe may go unacknowledged, while the connection is still
@@ -530,6 +532,56 @@ impl HeartbeatWatch {
     #[cfg(test)]
     fn deadline_at(&self, now: Instant) -> Option<Duration> {
         self.deadline_with(|| now)
+    }
+}
+
+/// Which wedge, if any, the two watches over one connection see between
+/// them: the write side's own backlog reading ([`crate::stall`]), this
+/// module's read-side verdict, and the caller's resolution of whether a
+/// stop was a death.
+///
+/// A closed connection outranks every timing question below it, the same
+/// ordering [`HeartbeatWatch::observe_at`] applies for the same reason: a
+/// probe still waiting on a connection that is gone is waiting on nothing.
+///
+/// Between the two open-connection failures the write side's verdict wins,
+/// because it is the one that can be the root cause of the other. Every
+/// probe the read side is waiting on left through the same outbox, so a
+/// writer that has stopped delivering is enough on its own to make the read
+/// side report a wedge -- while a writer that is still delivering rules the
+/// write side out entirely, whatever the read side says. Taking the read
+/// side first would report the consequence and hide the cause, and it would
+/// do so on the overwhelming majority of real stalls, since the two
+/// thresholds are equal and both sides cross them together.
+///
+/// `lost` is the caller's own resolution of the stop, never the
+/// connection's closed flag on its own: an engine that closed because its
+/// user typed `:q` reaches this classification looking exactly like one
+/// that crashed, and supervising that would offer -- or, unattended,
+/// perform -- a restart of the editor they just closed. Only a resolved
+/// exit status can tell the two apart
+/// ([`SupervisionState::note_engine_stop`](view_core::native::supervision::SupervisionState::note_engine_stop)),
+/// so a closed connection with `lost` still unresolved yields no wedge at
+/// all rather than pre-empting the facts that resolution carries.
+///
+/// Lives here rather than beside the loop that folds it so the oracle's
+/// reproduced hang schedules classify a verdict through the same function
+/// production does: a second copy would let the two agree with each other
+/// while both drifted from the runtime.
+#[must_use]
+pub fn wedge_kind(write_stalled: bool, read: Liveness, lost: bool) -> Option<WedgeKind> {
+    match read {
+        Liveness::Dead if lost => Some(WedgeKind::Dead),
+        // closed, and not yet resolved: the reader's own `Msg::EngineStopped`
+        // is already on its way (sent with a blocking send, so it cannot be
+        // dropped), and it carries the facts this verdict must not pre-empt
+        Liveness::Dead => None,
+        _ if write_stalled => Some(WedgeKind::WriteSide),
+        Liveness::Wedged => Some(WedgeKind::ReadSide),
+        // `Liveness` is `#[non_exhaustive]`, so this arm also catches a
+        // verdict a later engine build might add: with the write side moving
+        // and no verdict this build understands, there is nothing to report
+        _ => None,
     }
 }
 
@@ -1102,5 +1154,47 @@ mod tests {
         }
         assert_eq!(watch.probe.sent_generation.load(Ordering::Relaxed), 0);
         assert_eq!(watch.observe(false), Liveness::Alive);
+    }
+
+    /// The write side's precedence is a precedence, not a preference: a
+    /// writer that is demonstrably moving cannot be the wedge, so the read
+    /// side's verdict stands on its own.
+    #[test]
+    fn a_moving_writer_leaves_the_read_sides_verdict_alone() {
+        assert_eq!(
+            wedge_kind(false, Liveness::Wedged, false),
+            Some(WedgeKind::ReadSide)
+        );
+        assert_eq!(
+            wedge_kind(true, Liveness::Alive, false),
+            Some(WedgeKind::WriteSide)
+        );
+        assert_eq!(wedge_kind(false, Liveness::Alive, false), None);
+        // and a closed connection whose stop the caller has resolved
+        // outranks both, since neither side can recover one
+        assert_eq!(
+            wedge_kind(true, Liveness::Dead, true),
+            Some(WedgeKind::Dead)
+        );
+    }
+
+    /// The verdict that would respawn an editor its user just closed. A
+    /// connection closing is not evidence of anything on its own: `:q` and a
+    /// crash both close it, and only a resolved exit status tells them
+    /// apart. Until that resolution lands, this reports nothing at all
+    /// rather than guessing.
+    #[test]
+    fn a_closed_connection_is_no_verdict_until_its_stop_has_been_resolved() {
+        assert_eq!(
+            wedge_kind(false, Liveness::Dead, false),
+            None,
+            "an unresolved stop must not surface as a wedge to recover from"
+        );
+        assert_eq!(
+            wedge_kind(true, Liveness::Dead, false),
+            None,
+            "not even with output stranded in the outbox: the write side \
+             cannot outrank a connection whose stop is still being resolved"
+        );
     }
 }
