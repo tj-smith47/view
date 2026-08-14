@@ -1836,8 +1836,12 @@ fn derived_tier(policy: QueryPolicy, colorterm: Option<&str>) -> String {
     cmd.arg(&paths.scratch);
     common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
     cmd.env("VIEW_LOG", &log_path);
-    if let Some(value) = colorterm {
-        cmd.env("COLORTERM", value);
+    // COLORTERM is on the hermetic allowlist, so a truecolor host shell
+    // reaches the child unless its absence is forced here rather than
+    // assumed.
+    match colorterm {
+        Some(value) => cmd.env("COLORTERM", value),
+        None => cmd.env_remove("COLORTERM"),
     }
 
     let isolation = shared_isolation();
