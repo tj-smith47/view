@@ -1,7 +1,9 @@
 //! Monotonic-timestamp tap at this crate's paint boundary (frame
-//! content written to the terminal), compiled only
-//! under the `bench-taps` feature; a plain build contains none of this
-//! module, so shipping binaries carry zero tap cost by construction.
+//! content written to the terminal), compiled only on unix under the
+//! `bench-taps` feature; a plain build contains none of this module, so
+//! shipping binaries carry zero tap cost by construction, and a Windows
+//! build carries none at all because the channel below is a unix
+//! mechanism.
 //!
 //! Records are one ASCII line each, `<tag> <seq> <nanos>\n`, written to
 //! the file descriptor named by `VIEW_BENCH_TAP_FD`. The descriptor is
@@ -21,6 +23,7 @@
 
 use std::fs::File;
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -82,12 +85,7 @@ fn open_sink() -> Option<File> {
     let fd: u32 = std::env::var("VIEW_BENCH_TAP_FD").ok()?.parse().ok()?;
     let mut options = std::fs::OpenOptions::new();
     options.write(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .custom_flags(i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or_default());
-    }
+    options.custom_flags(i32::try_from(rustix::fs::OFlags::NONBLOCK.bits()).unwrap_or_default());
     options.open(format!("/dev/fd/{fd}")).ok()
 }
 

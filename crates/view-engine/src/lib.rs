@@ -9,7 +9,7 @@ mod outbox;
 pub mod process;
 pub mod rpc;
 pub mod stall;
-#[cfg(feature = "bench-taps")]
+#[cfg(all(unix, feature = "bench-taps"))]
 mod tap;
 // test-only: a peer that parks inside a write, which no real engine can be
 // asked to become, shared by every crate whose tests need one wedged

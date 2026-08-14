@@ -423,7 +423,7 @@ impl Term {
         surface: &Surface,
         grid_damage: &GridDamage,
     ) -> std::io::Result<()> {
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_reporting != Some(model.engine.mouse_on) {
@@ -444,14 +444,14 @@ impl Term {
         // whole-frame repaint instead.
         let offset = model.chrome_rows();
         let cur_overlay = overlay_rows(surface);
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);
         // the terminal size comes from the model (fed by Msg::Resized and
         // startup), not a per-frame TIOCGWINSZ query: the shadow's resize
         // still forces a full repaint on any change, so a resize is followed
         // on the next frame without the syscall.
         let area = frame_area(model);
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_AREA_RESOLVED);
         let resized = self.shadow.resize(area);
         let force_full = resized || self.last_offset != Some(offset);
@@ -475,7 +475,7 @@ impl Term {
         // the cells that actually changed against what the terminal already
         // shows; no full-buffer copy runs, because the shadow's buffers swap
         self.shadow.compose(model, surface, &damage);
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_COMPOSED);
         // disjoint field borrows: `shadow` supplies the cells while `inner`'s
         // backend encodes them into the shared frame buffer
@@ -502,7 +502,7 @@ impl Term {
         // reaches the terminal in one syscall, atomically from the pty
         // reader's point of view. The tap here brackets exactly that write
         // and flush against TAG_TERM_WRITTEN, isolating the pty write cost.
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_FLUSH_START);
         let mut out = std::io::stdout().lock();
         {
@@ -511,7 +511,7 @@ impl Term {
             frame.clear();
         }
         out.flush()?;
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_TERM_WRITTEN);
         Ok(())
     }

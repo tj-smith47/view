@@ -26,7 +26,10 @@ test-support = []
 # Compiles monotonic-timestamp taps at the RPC-written and redraw-parsed
 # boundaries (src/tap.rs) for the measurement harness. Off by default:
 # without it the tap module does not exist in the compilation at all, so
-# shipping builds carry zero tap code or cost.
+# shipping builds carry zero tap code or cost. Unix-only even when on --
+# the tap channel is a `/dev/fd` reopen and the rustix clock behind it is
+# itself a cfg(unix) dependency -- so the module and its call sites are
+# fenced `cfg(all(unix, feature = "bench-taps"))`.
 bench-taps = []
 # Builds an engine with no heartbeat prober behind it: the counterfactual
 # arm of the paired campaign that keeps the read-side probe's cost off the

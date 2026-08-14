@@ -571,7 +571,7 @@ impl EngineHandle {
                             // anywhere
                             if method == "redraw" {
                                 let events = decode_redraw(&params);
-                                #[cfg(feature = "bench-taps")]
+                                #[cfg(all(unix, feature = "bench-taps"))]
                                 crate::tap::tap(crate::tap::TAG_REDRAW_PARSED);
                                 pump.fold_redraw(events);
                             } else if method == "view_invoke" {
@@ -908,7 +908,7 @@ impl EngineHandle {
             params,
         };
         let bytes = encode_message(&msg)?;
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_RPC_HANDOFF);
         if self.outbox.send(bytes) {
             Ok(())

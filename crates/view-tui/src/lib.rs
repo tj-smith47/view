@@ -4,7 +4,7 @@ pub mod input;
 pub mod keys;
 pub mod mouse;
 pub mod paint;
-#[cfg(feature = "bench-taps")]
+#[cfg(all(unix, feature = "bench-taps"))]
 pub mod tap;
 pub mod terminal;
 pub mod tiers;

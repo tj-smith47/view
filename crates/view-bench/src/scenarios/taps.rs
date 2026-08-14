@@ -1807,8 +1807,11 @@ mod tests {
         out
     }
 
-    /// The attribute that keeps a line out of a default build.
-    const TAPS_CFG: &str = "#[cfg(feature = \"bench-taps\")]";
+    /// The attribute that keeps a line out of a default build. The `unix`
+    /// half is not decoration: the tap channel is a `/dev/fd` reopen of a
+    /// harness pipe, so a tap site reachable on Windows is a site that
+    /// cannot compile there.
+    const TAPS_CFG: &str = "#[cfg(all(unix, feature = \"bench-taps\"))]";
 
     /// Indentation of `line` in spaces.
     fn indent_of(line: &str) -> usize {
@@ -1854,7 +1857,7 @@ mod tests {
 
     #[test]
     fn no_tap_reaches_a_default_build() {
-        // Each tap module is itself `#[cfg(feature = "bench-taps")]`, so an
+        // Each tap module is itself attributed with TAPS_CFG, so an
         // unguarded call site fails to compile rather than quietly adding
         // cost to the measured path. That moat is the strongest one
         // available, but nothing in the tree re-checks the two facts it

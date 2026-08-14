@@ -333,7 +333,7 @@ impl InputSource {
 pub(crate) fn event_to_msg(event: Event, size: &TermSizeCell) -> Option<Msg> {
     match event {
         Event::Key(k) => {
-            #[cfg(feature = "bench-taps")]
+            #[cfg(all(unix, feature = "bench-taps"))]
             crate::tap::tap(crate::tap::TAG_KEY_READ);
             encode_key(&k).map(|notation| Msg::Key(Key { notation }))
         }

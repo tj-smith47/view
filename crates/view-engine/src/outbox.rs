@@ -154,7 +154,7 @@ impl Outbox {
                 let sent = writer.write_all(&bytes).and_then(|()| writer.flush());
                 self.took_inline.fetch_add(1, Ordering::Relaxed);
                 drop(writer);
-                #[cfg(feature = "bench-taps")]
+                #[cfg(all(unix, feature = "bench-taps"))]
                 crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
                 return sent.is_ok();
             }
@@ -208,7 +208,7 @@ impl Outbox {
         if sent.is_err() {
             return false;
         }
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_RPC_WRITTEN);
         true
     }

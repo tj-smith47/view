@@ -1590,7 +1590,7 @@ pub fn run(
             // write side, which is the whole reason the deadline was armed
             continue;
         };
-        #[cfg(feature = "bench-taps")]
+        #[cfg(all(unix, feature = "bench-taps"))]
         if received.is_ok() {
             view_tui::tap::tap(view_tui::tap::TAG_LOOP_WAKE);
         }

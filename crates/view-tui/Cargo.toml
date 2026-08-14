@@ -14,6 +14,9 @@ workspace = true
 # dependency with the clock and O_NONBLOCK-open features the tap needs.
 # Off by default: without it the tap module does not exist in the
 # compilation at all, so shipping builds carry zero tap code or cost.
+# Unix-only even when on -- the tap channel is a `/dev/fd` reopen and the
+# rustix it widens is itself a cfg(unix) dependency -- so the module and
+# its call sites are fenced `cfg(all(unix, feature = "bench-taps"))`.
 bench-taps = ["rustix/time", "rustix/fs"]
 
 [dependencies]
