@@ -31,12 +31,40 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
+/// Where every session in this file writes its swap files, named by the test
+/// rather than read back out of nvim's own state directory.
+///
+/// nvim resolves that state directory per platform: on unix
+/// `$XDG_STATE_HOME/nvim/swap`, on Windows `$XDG_STATE_HOME/nvim-data/swap`
+/// (measured on the pinned engine, which honours the variable on both and
+/// differs only in the leaf it appends). A test that hard-codes one of those
+/// shapes finds an empty directory on the other platform and fails on its own
+/// precondition rather than on the behavior it means to measure.
+fn swap_dir(dir: &Path) -> PathBuf {
+    dir.join("swap")
+}
+
+/// The startup command pinning `'directory'` to [`swap_dir`].
+///
+/// A `--cmd`, because nvim runs those before it opens any file and so before
+/// the first swap file is written; a `-c` would arrive after the buffer that
+/// already made one. Written as Lua with a long-bracket string so a path
+/// carrying Windows separators, spaces or commas needs no `:set` escaping.
+/// The trailing `//` is nvim's own request for swap names built from the
+/// file's whole path, so two same-named files never collide in one directory.
+fn pin_swap_dir(dir: &Path) -> String {
+    format!("lua vim.o.directory = [[{}//]]", swap_dir(dir).display())
+}
+
 /// A config with swap files enabled and every one of them written under
 /// `dir`, so a recovery reads the swap this test made rather than anything
 /// the host happens to hold.
 fn session(dir: &Path) -> EngineConfig {
+    std::fs::create_dir_all(swap_dir(dir)).unwrap();
     EngineConfig::default()
         .with_arg("--clean")
+        .with_arg("--cmd")
+        .with_arg(pin_swap_dir(dir))
         .with_env("XDG_STATE_HOME", dir.join("state"))
         .with_shutdown_timeout(Duration::from_millis(500))
 }
@@ -48,8 +76,7 @@ fn editing(dir: &Path, file: &Path) -> EngineConfig {
 
 /// The swap files nvim has written under `dir` so far.
 fn swap_files(dir: &Path) -> Vec<PathBuf> {
-    let swap = dir.join("state").join("nvim").join("swap");
-    std::fs::read_dir(swap)
+    std::fs::read_dir(swap_dir(dir))
         .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
         .unwrap_or_default()
 }
