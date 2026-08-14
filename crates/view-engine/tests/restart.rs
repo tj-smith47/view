@@ -1,6 +1,8 @@
-//! `Engine::restart` against a real nvim: a child killed out of band is
-//! replaced by a live one, an unsaved edit comes back out of nvim's own swap
-//! file, and neither teardown leaves a process behind.
+//! `Engine::restart` and the swap file a crash leaves behind, against a real
+//! nvim: a child killed out of band is replaced by a live one, an unsaved
+//! edit comes back out of nvim's own swap file without anybody answering the
+//! prompt that normally guards it, and neither teardown leaves a process
+//! behind.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -29,15 +31,138 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-/// A config editing `file` with swap files enabled and every one of them
-/// written under `dir`, so a recovery reads the swap this test made rather
-/// than anything the host happens to hold.
-fn editing(dir: &Path, file: &Path) -> EngineConfig {
+/// A config with swap files enabled and every one of them written under
+/// `dir`, so a recovery reads the swap this test made rather than anything
+/// the host happens to hold.
+fn session(dir: &Path) -> EngineConfig {
     EngineConfig::default()
         .with_arg("--clean")
         .with_env("XDG_STATE_HOME", dir.join("state"))
-        .with_arg(file)
         .with_shutdown_timeout(Duration::from_millis(500))
+}
+
+/// [`session`], plus the `file` it opens as an argument.
+fn editing(dir: &Path, file: &Path) -> EngineConfig {
+    session(dir).with_arg(file)
+}
+
+/// The swap files nvim has written under `dir` so far.
+fn swap_files(dir: &Path) -> Vec<PathBuf> {
+    let swap = dir.join("state").join("nvim").join("swap");
+    std::fs::read_dir(swap)
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default()
+}
+
+/// Replaces the current buffer's text with `text` and flushes nvim's swap
+/// file, without ever writing the file to disk.
+///
+/// nvim flushes the swap on its own schedule ('updatetime'/'updatecount'),
+/// which is exactly the pacing that bounds what a real crash recovers;
+/// `:preserve` is nvim's own way to ask for that flush now, so a test built
+/// on this measures the recovery rather than the flush timer.
+fn write_unsaved_edit(engine: &Engine, text: &str) {
+    engine
+        .handle
+        .request_timeout(
+            "nvim_buf_set_lines",
+            vec![
+                0.into(),
+                0.into(),
+                (-1).into(),
+                false.into(),
+                rmpv::Value::Array(vec![text.into()]),
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_buf_set_lines");
+    engine
+        .handle
+        .request_timeout(
+            "nvim_command",
+            vec!["preserve".into()],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers :preserve");
+}
+
+/// The current buffer's first line, as nvim reports it.
+fn first_line(engine: &Engine) -> String {
+    let lines = engine
+        .handle
+        .request_timeout(
+            "nvim_buf_get_lines",
+            vec![0.into(), 0.into(), (-1).into(), false.into()],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_buf_get_lines");
+    lines
+        .as_array()
+        .and_then(|lines| lines.first())
+        .and_then(|line| line.as_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("nvim_buf_get_lines answered with {lines:?}"))
+}
+
+/// How many swap prompts this engine has answered on its user's behalf, per
+/// the counter the injected `SwapExists` autocommand keeps. Read through
+/// `get()`, so an engine that never met a swap file answers 0 rather than
+/// failing on a variable nothing ever set.
+fn swap_events(engine: &Engine) -> u64 {
+    engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from("get(g:, 'view_swap_recovered', 0)")],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval")
+        .as_u64()
+        .expect("the swap-prompt counter is a number")
+}
+
+/// Whether the engine's session carries the `SwapExists` autocommand at all.
+///
+/// What separates "met no swap prompt" from "had nothing installed to meet
+/// one with": a count of zero answered prompts means the first only when the
+/// guard that would have answered them is live.
+fn swap_guard_live(engine: &Engine) -> bool {
+    engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from("exists('#SwapExists')")],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval")
+        .as_u64()
+        == Some(1)
+}
+
+/// Leaves behind exactly what a crash leaves: `file` holding `text` in a
+/// flushed swap file, on disk holding whatever it held before, and the
+/// process that made the edit killed out of band so nothing cleaned up after
+/// it.
+fn crash_with_unsaved_edit(dir: &Path, file: &Path, text: &str) {
+    let engine = Engine::spawn(editing(dir, file)).unwrap();
+    // --embed holds startup until a UI attaches, so the file is not even
+    // loaded (and has no swap file) before this
+    engine.handle.ui_attach(80, 24).unwrap();
+    write_unsaved_edit(&engine, text);
+    crash(engine);
+}
+
+/// Kills `engine`'s child out of band and reaps it, so the swap file it
+/// leaves belongs to a process the next session will find gone.
+///
+/// The drop is what reaps: a killed child nothing waited on keeps its
+/// process-table entry as a zombie, and nvim reads an owner that still has
+/// one as a session that may still be editing the file.
+fn crash(engine: Engine) {
+    let pid = engine.pid();
+    kill_out_of_band(pid);
+    drop(engine);
+    wait_until_gone(pid);
 }
 
 /// Kills `pid` without going through `Engine`, so the teardown a restart
@@ -140,32 +265,7 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
     // --embed holds startup until a UI attaches, so the file is not even
     // loaded (and has no swap file) before this
     engine.handle.ui_attach(80, 24).unwrap();
-    engine
-        .handle
-        .request_timeout(
-            "nvim_buf_set_lines",
-            vec![
-                0.into(),
-                0.into(),
-                (-1).into(),
-                false.into(),
-                rmpv::Value::Array(vec!["never written to disk".into()]),
-            ],
-            Duration::from_secs(5),
-        )
-        .unwrap();
-    // nvim flushes the swap on its own schedule ('updatetime'/'updatecount'),
-    // which is exactly the pacing that bounds what a real crash recovers;
-    // `:preserve` is nvim's own way to ask for that flush now, so this test
-    // measures the recovery rather than the flush timer
-    engine
-        .handle
-        .request_timeout(
-            "nvim_command",
-            vec!["preserve".into()],
-            Duration::from_secs(5),
-        )
-        .unwrap();
+    write_unsaved_edit(&engine, "never written to disk");
     kill_out_of_band(engine.pid());
 
     let engine = engine
@@ -173,21 +273,10 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         .expect("a crashed engine must restart");
     engine.handle.ui_attach(80, 24).unwrap();
 
-    let lines = engine
-        .handle
-        .request_timeout(
-            "nvim_buf_get_lines",
-            vec![0.into(), 0.into(), (-1).into(), false.into()],
-            Duration::from_secs(5),
-        )
-        .unwrap();
     assert_eq!(
-        lines
-            .as_array()
-            .and_then(|l| l.first())
-            .and_then(|l| l.as_str()),
-        Some("never written to disk"),
-        "the restart did not recover the swap file's contents: {lines:?}"
+        first_line(&engine),
+        "never written to disk",
+        "the restart did not recover the swap file's contents"
     );
     assert!(
         !blocking(&engine),
@@ -200,6 +289,135 @@ fn a_restart_recovers_the_unsaved_edit_its_predecessor_left_in_swap() {
         engine.command_line()
     );
     assert_os_agrees(&engine);
+}
+
+/// The prompt an embedded engine cannot ask: a session started over a
+/// crashed one's swap file is not handed `-r` (only a restart is), so it
+/// meets nvim's own `[O]pen/[E]dit/[R]ecover/[D]elete/[Q]uit` question the
+/// way any other editor would -- except that this one has no terminal of its
+/// own to ask through, and would park there until something answered.
+#[test]
+fn a_session_started_over_a_crashed_ones_swap_recovers_without_asking() {
+    let dir = scratch("recovers-without-asking");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+    crash_with_unsaved_edit(&dir, &file, "never written to disk");
+
+    let engine = Engine::spawn(editing(&dir, &file)).unwrap();
+    assert!(
+        !spawned_with(&engine, "-r"),
+        "this is a plain spawn, not a restart: {:?}",
+        engine.command_line()
+    );
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    // read first, and through an ordinary request, because that is the
+    // barrier the two assertions below need: `nvim_get_mode` is answered on
+    // receipt even while nvim is still starting up, so a verdict taken
+    // before an ordinary request has come back is a verdict about a session
+    // that had not reached the file yet
+    let recovered = first_line(&engine);
+    assert_eq!(
+        recovered, "never written to disk",
+        "the session came up on the file as it is on disk, discarding what \
+         the swap held"
+    );
+    assert!(
+        !blocking(&engine),
+        "the engine is parked at a swap prompt nobody can answer"
+    );
+    assert_eq!(
+        swap_events(&engine),
+        1,
+        "the swap file this test left was not met as a SwapExists event"
+    );
+}
+
+/// The window a startup flag cannot reach: the swap file is met by an open
+/// the user asks for long after the session came up, where `-r` (an argument
+/// nvim reads once) has nothing left to say. The autocommand covers it
+/// because it lives for the session, not for its startup.
+#[test]
+fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
+    let dir = scratch("mid-session-swap");
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+    crash_with_unsaved_edit(&dir, &file, "typed after the last write");
+
+    // no file argument at all, so this session meets nothing at startup
+    let engine = Engine::spawn(session(&dir)).unwrap();
+    engine.handle.ui_attach(80, 24).unwrap();
+    engine
+        .handle
+        .request_timeout(
+            "nvim_command",
+            vec![rmpv::Value::from(format!("edit {}", file.display()))],
+            Duration::from_secs(5),
+        )
+        .expect("an open over a swap file must return, not park inside :edit");
+
+    assert!(
+        !blocking(&engine),
+        "the engine is parked at a swap prompt nobody can answer"
+    );
+    assert_eq!(
+        swap_events(&engine),
+        1,
+        "the swap file this test left was not met as a SwapExists event"
+    );
+    assert_eq!(
+        first_line(&engine),
+        "typed after the last write",
+        "the open discarded what the swap held"
+    );
+}
+
+/// The disconfirm, and the bound on what the autocommand is allowed to do: a
+/// crash with nothing unsaved still leaves a swap file behind (nvim writes
+/// one the moment a buffer loads, not when it is first modified), but it
+/// holds nothing the file on disk does not. nvim answers that case itself --
+/// no `SwapExists` event is raised at all -- so a session that meets one
+/// must show no sign of a recovery it never performed.
+#[test]
+fn a_crash_with_nothing_unsaved_raises_no_swap_event_at_all() {
+    let dir = scratch("clean-crash");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let engine = Engine::spawn(editing(&dir, &file)).unwrap();
+    engine.handle.ui_attach(80, 24).unwrap();
+    // proves the buffer really loaded, so the swap file asserted below is
+    // this session's rather than the trace of a startup that never got there
+    assert_eq!(first_line(&engine), "what is on disk");
+    crash(engine);
+    assert!(
+        !swap_files(&dir).is_empty(),
+        "the crash left no swap file, so this test cannot tell a swap that \
+         raises no event from one that was never there"
+    );
+
+    let engine = Engine::spawn(editing(&dir, &file)).unwrap();
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    assert!(
+        swap_guard_live(&engine),
+        "the session carries no SwapExists guard, so a count of zero \
+         answered prompts says nothing"
+    );
+    assert_eq!(
+        swap_events(&engine),
+        0,
+        "a swap file holding nothing unsaved was answered as a recovery"
+    );
+    assert_eq!(
+        first_line(&engine),
+        "what is on disk",
+        "the session came up holding something other than the file on disk"
+    );
+    assert!(
+        !blocking(&engine),
+        "the engine is parked at a swap prompt nobody can answer"
+    );
 }
 
 /// The falsifier for the flag's condition, and the reason it has one: `-r`

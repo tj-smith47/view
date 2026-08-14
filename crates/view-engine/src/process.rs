@@ -440,7 +440,8 @@ impl Drop for ChildGuard {
 
 impl Engine {
     /// Spawns `nvim --embed` per `cfg` and performs the `nvim_get_api_info`
-    /// handshake.
+    /// handshake. The child carries the swap-prompt autocommand every spawn
+    /// is given (see [`SWAP_RECOVERY_CMD`]).
     ///
     /// # Errors
     ///
@@ -747,6 +748,37 @@ impl Drop for Engine {
     }
 }
 
+/// Answers nvim's swap-file prompt with "recover", on every spawn, before
+/// any file is opened.
+///
+/// Finding a swap file is a question nvim asks its user
+/// (`[O]pen/[E]dit/[R]ecover/[D]elete/[Q]uit`) and then blocks its own main
+/// loop until somebody answers. An embedded engine meets that question at
+/// the two moments it can least afford to stop: during startup, before the
+/// frontend has a frame to draw the question in, and inside the `:edit` a
+/// later file open turns into, which then never returns. `v:swapchoice` is
+/// nvim's own documented way for an autocommand to answer on the user's
+/// behalf (`:help SwapExists`), and `r` is the answer that keeps the work --
+/// recover from the swap, the same outcome [`RECOVERY_ARG`] gives a restart.
+///
+/// A startup argument rather than an `nvim_exec_lua`/`nvim_command`
+/// registration over the RPC channel, measured against the pinned engine
+/// rather than assumed. An autocommand registered over the channel after the
+/// handshake and before `nvim_ui_attach` does fire: it runs, and
+/// `v:swapchoice` reads back `r` inside it from both Lua and Vimscript. nvim
+/// still shows `E325` and parks the session on the dialog, then applies the
+/// dialog's own default, which opens the file from disk and drops everything
+/// the swap held. The identical autocommand given as `--cmd` recovers the
+/// swap and leaves an ordinary session (mode `n`, nothing blocking), which is
+/// also what a real terminal nvim does with it.
+///
+/// `g:view_swap_recovered` counts the prompts answered this way. Answering is
+/// what erases every other trace that one was asked: no `E325` notice, no
+/// message to the UI, and a recovered buffer that looks exactly like a buffer
+/// whose file simply held that text.
+const SWAP_RECOVERY_CMD: &str = "autocmd SwapExists * let v:swapchoice = 'r' | \
+     let g:view_swap_recovered = get(g:, 'view_swap_recovered', 0) + 1";
+
 /// nvim's own crash-recovery flag: the replacement engine opens each file it
 /// was given from that file's swap file instead of from disk.
 ///
@@ -819,9 +851,10 @@ const OPTIONS_TAKING_NO_VALUE: [&str; 25] = [
 ///
 /// Errs towards "no" in every case this build cannot read confidently, and
 /// the caller's use of the answer is what makes that the safe direction: a
-/// missed file costs a restart the recovery flag (nvim's own `SwapExists`
-/// handling still meets the swap when the file is opened), while a value
-/// mistaken for a file costs the replacement engine its life.
+/// missed file costs a restart the recovery flag, and the `SwapExists`
+/// autocommand every spawn carries ([`SWAP_RECOVERY_CMD`]) still recovers the
+/// swap when the file is opened, while a value mistaken for a file costs the
+/// replacement engine its life.
 fn names_a_file(args: &[OsString]) -> bool {
     let mut expect_value = false;
     for (index, arg) in args.iter().enumerate() {
@@ -876,7 +909,15 @@ fn takes_no_value(arg: &str) -> bool {
 /// gets is the plan a caller can inspect, never a second derivation of it.
 fn build_command(cfg: &EngineConfig) -> Command {
     let mut command = Command::new(&cfg.nvim_bin);
-    command.arg("--embed").args(&cfg.extra_args);
+    // ahead of `extra_args`, which is where a caller's file arguments live:
+    // nvim runs `--cmd` commands before it opens any of them, and an
+    // autocommand registered after the file it is meant to guard is already
+    // open guards nothing
+    command
+        .arg("--embed")
+        .arg("--cmd")
+        .arg(SWAP_RECOVERY_CMD)
+        .args(&cfg.extra_args);
     for (name, value) in cfg.env_plan() {
         match value {
             Some(value) => command.env(name, value),
@@ -1569,6 +1610,23 @@ mod tests {
                 .count(),
             1,
             "a second restart must not stack a second -r"
+        );
+    }
+
+    /// Position is the whole guarantee here: nvim runs `--cmd` commands in
+    /// the order it is given them and before it opens any file, so the
+    /// autocommand must precede whatever the caller put in `extra_args`.
+    #[test]
+    fn every_spawn_carries_the_swap_answer_ahead_of_the_files_it_opens() {
+        let command = build_command(&EngineConfig::default().with_arg("notes.md"));
+        let spawned: Vec<OsString> = command
+            .get_args()
+            .map(std::ffi::OsStr::to_os_string)
+            .collect();
+        assert_eq!(
+            spawned,
+            args(&["--embed", "--cmd", SWAP_RECOVERY_CMD, "notes.md"]),
+            "the swap answer must ride every spawn, ahead of its files"
         );
     }
 }
