@@ -1049,7 +1049,7 @@ impl SupervisionFold {
 /// declines the clock on the same evidence its observation does
 /// ([`OutboxStallWatch::poll_deadline`]), and pays one `Instant::now()` only
 /// on a pass with output pending; a pass with a probe outstanding reads the
-/// send-time log instead of the cadence anchor and takes the same single
+/// send-time log in addition to the cadence anchor and takes the same single
 /// reading -- both bought by a connection that is demonstrably mid-something
 /// rather than by every keystroke.
 ///
@@ -1208,8 +1208,14 @@ fn wait_for_msg_unified(
             Err(mpsc::TryRecvError::Disconnected) => return Ok(Some(Err(mpsc::RecvError))),
             Err(mpsc::TryRecvError::Empty) => {}
         }
-        let ready = crate::wake::poll_readiness(input, waker, watch_deadline(wakeups))?;
+        let deadline = watch_deadline(wakeups);
+        crate::vlog::log_with("sleep", || match deadline {
+            Some(d) => format!("armed {}ms", d.as_millis()),
+            None => "unbounded".to_owned(),
+        });
+        let ready = crate::wake::poll_readiness(input, waker, deadline)?;
         if ready.timed_out {
+            crate::vlog::log("sleep", "expired");
             return Ok(None);
         }
         if ready.input {
