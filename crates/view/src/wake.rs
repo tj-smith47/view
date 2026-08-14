@@ -232,10 +232,18 @@ pub struct Readiness {
 
 /// Polls the terminal's fds and the wake pipe for readiness, sleeping up
 /// to `timeout` (`None` sleeps until something is ready). A readiness
-/// poll, not a read: every byte stays where it is until the owning side
-/// drains it -- and not an RPC await: no nvim reply is ever waited on
-/// here, only fd readiness, so the paint loop's never-awaits-RPC rule
-/// holds by construction.
+/// poll, not a read: every byte the kernel holds stays where it is until
+/// the owning side drains it -- and not an RPC await: no nvim reply is
+/// ever waited on here, only readiness, so the paint loop's
+/// never-awaits-RPC rule holds by construction.
+///
+/// Readiness describes the whole input state, not just the descriptor's
+/// share of it: the terminal handle is asked for an already-decoded event
+/// (`InputSource::has_buffered`) before this ever sleeps. Bytes crossterm
+/// has already lifted out of the kernel queue produce no fd readiness of
+/// their own, so a sleep entered without that question is a sleep on a
+/// terminal whose input has been read but never delivered -- and nothing
+/// short of a further, unrelated keystroke would end it.
 ///
 /// A terminal handle already marked dead keeps its fds out of the set
 /// (a hung-up descriptor reports ready forever); the wake pipe alone then
@@ -253,6 +261,13 @@ pub fn poll_readiness(
     timeout: Option<std::time::Duration>,
 ) -> std::io::Result<Readiness> {
     use rustix::event::{PollFd, PollFlags};
+
+    if input.has_buffered() {
+        return Ok(Readiness {
+            input: true,
+            timed_out: false,
+        });
+    }
 
     let timespec = timeout.map(|t| rustix::event::Timespec {
         tv_sec: i64::try_from(t.as_secs()).unwrap_or(i64::MAX),

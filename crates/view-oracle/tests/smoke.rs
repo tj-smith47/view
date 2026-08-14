@@ -240,6 +240,31 @@ fn spawn_view_pty_raw_isolated(policy: QueryPolicy) -> ViewPtySession {
     build_view_pty(&[], None, policy)
 }
 
+/// Like [`spawn_view_pty_raw`], but `preload` is already sitting in the
+/// pty's input queue when `view` is spawned, so the child's very first
+/// terminal read finds it there.
+///
+/// The distinction matters to exactly one property: input that arrived with
+/// nothing following it. Sending after the spawn would add a second write,
+/// and a second write is a fresh readiness edge -- enough on its own to
+/// release a loop stalled on the first.
+fn spawn_view_pty_preloaded(
+    preload: &[u8],
+    isolation: Option<RwLockReadGuard<'static, ()>>,
+    policy: QueryPolicy,
+) -> ViewPtySession {
+    let paths = common::ScratchPaths::new("smoke");
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
+
+    ViewPtySession {
+        session: PtySession::spawn_preloaded(cmd, 80, 24, policy, preload).unwrap(),
+        paths,
+        _isolation: isolation,
+    }
+}
+
 /// Like [`spawn_view_pty_raw_isolated`] but with `extra_args` inserted
 /// before the scratch-file positional argument (e.g. `--nvim-bin
 /// <wrapper>`), for a timing test that both needs to control the embedded
@@ -434,6 +459,66 @@ fn view_survives_a_promptly_replying_terminal_bursting_past_the_probes_chunk_siz
          end marker -- the burst's tail was likely stranded in a buffered \
          stdin handle instead of staying visible in the kernel for the \
          real input path to pick up; contents:\n{saved:?}"
+    );
+}
+
+#[test]
+fn a_startup_burst_that_nothing_follows_still_reaches_nvim_and_quits() {
+    // The burst test above proves the startup probe hands its residue on;
+    // this one proves the residue is acted on with no later input to prompt
+    // it. The two differ by exactly one thing: there, the `:wq` is a second,
+    // later write, and a write to the pty is itself a readiness edge on the
+    // terminal fd. Here the DA1 reply, the typed text and the quit are one
+    // burst already queued before `view` execs, so nothing ever arrives
+    // again.
+    //
+    // That is the shape a two-reader terminal strands. Anything that asks
+    // crossterm for an event moves the kernel's queued bytes into
+    // crossterm's own userspace buffer; the kernel queue then reads empty,
+    // and a readiness gate that consults only the raw fd concludes there is
+    // nothing to drain. A later keystroke hides it completely -- the next
+    // byte re-arms the fd and the buffered tail flushes along with it -- so
+    // only a burst nothing follows can catch it. Unfixed, the session sits
+    // until something kills it and the file is never written at all.
+    //
+    // `QueryPolicy::Silent` for the same reason the burst test uses it: the
+    // DA1 reply is part of the burst, and a pty answering on its own would
+    // let the probe finish before the burst was ever queued.
+    let isolation = shared_isolation();
+
+    let payload = "A".repeat(260);
+    let end_marker = "ENDMARKER";
+    let mut burst = Vec::new();
+    burst.extend_from_slice(b"\x1b[?62c");
+    burst.push(b'i');
+    burst.extend_from_slice(payload.as_bytes());
+    burst.extend_from_slice(end_marker.as_bytes());
+    burst.extend_from_slice(b"\x1b:wq\r");
+    assert!(
+        burst.len() > 256,
+        "the burst must exceed the probe's 256-byte chunk size to leave \
+         residue at all, got {} bytes",
+        burst.len()
+    );
+
+    let mut session = spawn_view_pty_preloaded(&burst, isolation, QueryPolicy::Silent);
+
+    let exit = session.wait_for_exit(Duration::from_secs(20)).expect(
+        "view never exited: the queued `:wq` never reached nvim, so the burst \
+         is stranded in a buffer the readiness gate cannot see and no further \
+         byte will ever arrive to release it",
+    );
+    assert!(
+        exit.success(),
+        "view did not exit cleanly after the queued :wq"
+    );
+
+    let saved = session.read_saved_file();
+    let expected_tail = format!("{payload}{end_marker}");
+    assert!(
+        saved.contains(&expected_tail),
+        "saved file did not contain the burst payload typed before startup \
+         finished; contents:\n{saved:?}"
     );
 }
 

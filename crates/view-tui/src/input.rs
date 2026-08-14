@@ -164,6 +164,30 @@ impl InputSource {
         self.dead
     }
 
+    /// Whether an event is already decodable right now, including one no
+    /// readiness poll on [`tty_fd`](Self::tty_fd) can ever see.
+    ///
+    /// One terminal has two readers here: the loop's readiness poll watches
+    /// the kernel's tty queue, while crossterm's own reads move bytes out of
+    /// that queue and into a userspace buffer of its own. Once bytes have
+    /// moved, the kernel queue is empty and the fd is not ready, so a gate
+    /// built on the fd alone reports "nothing to drain" while a fully
+    /// decoded keystroke sits in crossterm waiting to be handed over. It
+    /// stays there until some unrelated later byte re-arms the fd -- and if
+    /// the input ended with that burst, forever. Asking crossterm directly
+    /// is the half of the terminal's state the descriptor cannot describe.
+    ///
+    /// The query is itself a zero-timeout crossterm poll, so it can pull
+    /// ready kernel bytes into that same buffer. That is deliberate rather
+    /// than a leak: bytes this call moves are bytes its own answer already
+    /// accounts for. An error reads as "nothing to hand over" -- liveness is
+    /// [`drain`](Self::drain)'s call to make, and it makes it as soon as the
+    /// fd itself reports the hangup.
+    #[must_use]
+    pub fn has_buffered(&self) -> bool {
+        !self.dead && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
+    }
+
     /// Drains everything ready without blocking: empties the SIGWINCH
     /// self-pipe, then decodes every complete terminal event crossterm has
     /// (or can read) into core [`Msg`]s handed to `sink`, publishing any

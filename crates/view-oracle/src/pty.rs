@@ -483,10 +483,37 @@ impl PtySession {
     ///
     /// As [`spawn_configured`](Self::spawn_configured).
     pub fn spawn_configured_with(
+        cmd: CommandBuilder,
+        cols: u16,
+        rows: u16,
+        policy: QueryPolicy,
+    ) -> Result<Self, OracleError> {
+        Self::spawn_preloaded(cmd, cols, rows, policy, &[])
+    }
+
+    /// Like [`spawn_configured_with`](Self::spawn_configured_with), but
+    /// queues `preload` in the pty's input queue *before* the child is
+    /// spawned, so those bytes are already waiting the first time the child
+    /// reads its terminal.
+    ///
+    /// A [`send`](Self::send) after the spawn cannot express the same thing.
+    /// It races the child's exec, and -- decisively for any test whose
+    /// subject is a stalled readiness gate -- a later write is itself a
+    /// fresh readiness edge that un-stalls the stall under test. Preloading
+    /// is the only way to assert "this input arrived and nothing whatsoever
+    /// followed it".
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn_configured`](Self::spawn_configured), plus
+    /// [`OracleError::Io`] if the preloaded bytes cannot be written into the
+    /// pty.
+    pub fn spawn_preloaded(
         mut cmd: CommandBuilder,
         cols: u16,
         rows: u16,
         policy: QueryPolicy,
+        preload: &[u8],
     ) -> Result<Self, OracleError> {
         hermetic_env(&mut cmd)?;
         let pty = native_pty_system();
@@ -499,6 +526,21 @@ impl PtySession {
             })
             .map_err(|e| OracleError::Pty(e.to_string()))?;
 
+        // taken (and written through) before the spawn, which is what makes
+        // `preload` land ahead of the child's first read rather than racing it
+        let writer: SharedWriter = Arc::new(Mutex::new(
+            pair.master
+                .take_writer()
+                .map_err(|e| OracleError::Pty(e.to_string()))?,
+        ));
+        if !preload.is_empty() {
+            let mut guard = writer
+                .lock()
+                .map_err(|_| OracleError::Pty("pty writer lock poisoned".into()))?;
+            guard.write_all(preload)?;
+            guard.flush()?;
+        }
+
         let child = pair
             .slave
             .spawn_command(cmd)
@@ -507,11 +549,6 @@ impl PtySession {
             .master
             .try_clone_reader()
             .map_err(|e| OracleError::Pty(e.to_string()))?;
-        let writer: SharedWriter = Arc::new(Mutex::new(
-            pair.master
-                .take_writer()
-                .map_err(|e| OracleError::Pty(e.to_string()))?,
-        ));
         // the slave fd must not outlive the child's own copy, or the master
         // never sees EOF once the child exits
         drop(pair.slave);
