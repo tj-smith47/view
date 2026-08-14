@@ -103,6 +103,15 @@ struct Session {
     /// otherwise make the worker give up and block on the next request
     /// forever while a real match is still moments away on disk.
     scan_handle: Option<JoinHandle<()>>,
+    /// When set, [`stream_until_preempted`] mirrors its tick-state
+    /// transitions and exit reason into `sources::scan_probe` under this
+    /// key, so a starved matcher test's panic carries the worker-side
+    /// timeline next to the scan-side one -- the starvation class this
+    /// diagnoses cannot be told apart from the receiving channel alone.
+    /// Only `handle_query_bounded` ever sets it; the production `run`
+    /// path leaves it `None`.
+    #[cfg(test)]
+    probe_key: Option<String>,
 }
 
 impl Session {
@@ -117,6 +126,8 @@ impl Session {
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
+            #[cfg(test)]
+            probe_key: None,
         }
     }
 
@@ -138,6 +149,7 @@ impl Session {
             scan_started: AtomicBool::new(false),
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
+            probe_key: None,
         }
     }
 }
@@ -359,6 +371,8 @@ fn stream_until_preempted<S: MsgSink>(
     rx: &Receiver<WorkerRequest>,
     tx: &S,
 ) -> Option<WorkerRequest> {
+    #[cfg(test)]
+    let mut probe_last = String::new();
     loop {
         let status = active.nucleo.tick(TICK_BUDGET_MS);
         if status.changed {
@@ -374,7 +388,30 @@ fn stream_until_preempted<S: MsgSink>(
             .scan_handle
             .as_ref()
             .is_none_or(std::thread::JoinHandle::is_finished);
+        // transitions only: this loop spins hot, and an unconditional note
+        // per pass would swamp the event log without adding information
+        #[cfg(test)]
+        if let Some(key) = &active.probe_key {
+            let state = format!(
+                "worker tick: changed={} running={} scan_done={scan_finished} items={} matched={}",
+                status.changed,
+                status.running,
+                active.nucleo.snapshot().item_count(),
+                active.nucleo.snapshot().matched_item_count()
+            );
+            if state != probe_last {
+                sources::scan_probe::note(key, state.clone());
+                probe_last = state;
+            }
+        }
         if !status.running && scan_finished {
+            #[cfg(test)]
+            if let Some(key) = &active.probe_key {
+                sources::scan_probe::note(
+                    key,
+                    "worker: stream loop exit (no matcher work, scan finished)".to_string(),
+                );
+            }
             return None;
         }
         // a newer query or a close has already arrived: stop ticking the
@@ -383,6 +420,10 @@ fn stream_until_preempted<S: MsgSink>(
         // `PickerState::apply_results` will drop as stale anyway (or a
         // session about to be dropped regardless)
         if let Ok(next) = rx.try_recv() {
+            #[cfg(test)]
+            if let Some(key) = &active.probe_key {
+                sources::scan_probe::note(key, "worker: stream loop preempted".to_string());
+            }
             return Some(next);
         }
     }
@@ -492,6 +533,7 @@ fn handle_query_bounded<S: MsgSink>(
         // arm exists only so the match stays total for the borrow checker.
         return rx.recv();
     };
+    active.probe_key = Some(request.needle.clone());
     seed_or_scan(active, request.resolved, &request.needle);
     let pattern = match request.source {
         Source::LiveGrep { .. } => escape_nucleo_atom_syntax(&request.needle),
