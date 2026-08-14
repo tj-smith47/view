@@ -1123,11 +1123,27 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     // parser, so this is raw bytes rather than a rendered screen.
     let screen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
     let screen_writer = std::sync::Arc::clone(&screen);
+    // The same responder every `PtySession` runs, rather than a second
+    // hand-rolled answer to "what does a real terminal reply": this pty is
+    // hand-rolled only because `portable_pty` cannot split the child's stdin
+    // from its stdout, not because it should behave any less like a
+    // terminal. `AnswerFullTier` is what makes the capability assertion
+    // below falsifiable -- a probe that never reached a tty resolves the
+    // same all-false floor no matter what this pty would have answered.
+    let mut responder = view_oracle::QueryResponder::for_policy(QueryPolicy::AnswerFullTier);
+    let mut answer = master
+        .try_clone()
+        .expect("clone pty master for the capability responder");
     std::thread::spawn(move || {
         let mut sink = [0_u8; 4096];
         while let Ok(n) = drain.read(&mut sink) {
             if n == 0 {
                 break;
+            }
+            let replies = responder.replies_for(&sink[..n]);
+            if !replies.is_empty() {
+                let _ = answer.write_all(&replies);
+                let _ = answer.flush();
             }
             if let Ok(mut buf) = screen_writer.lock() {
                 buf.extend_from_slice(&sink[..n]);
@@ -1184,6 +1200,21 @@ fn piped_stdin_content_reaches_the_first_buffer_and_survives_wq() {
     assert!(
         status.success(),
         "view did not exit cleanly after :w + :qa!; status={status:?}; last pty bytes:\n{dump:?}"
+    );
+    // The probe reads replies off descriptor 0, and this session started with
+    // a pipe there. Resolving `sync` and `kitty_kbd` at all therefore proves
+    // the session found its real terminal and put it on that descriptor:
+    // without that, the probe has a pipe to read from, no reply can ever
+    // arrive, and both flags fall to the same floor an unanswered terminal
+    // produces. The keystrokes below it depend on the same fact, since
+    // crossterm picks its input descriptor by asking whether fd 0 is a tty
+    // and has no other hook to offer.
+    let caps_line = dump.as_deref().unwrap_or_default();
+    assert!(
+        caps_line.contains("sync=true") && caps_line.contains("kitty_kbd=true"),
+        "a piped-stdin session negotiated no capabilities with the terminal \
+         answering every query, so its probe was reading the pipe rather than \
+         the tty; last pty bytes:\n{dump:?}"
     );
 
     let saved =

@@ -35,7 +35,12 @@ unicode-width = "0.2.2"
 # feature set crossterm itself enables), so this adds no new dependency
 # surface, just a direct edge to an already-vetted crate.
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1", default-features = false, features = ["std", "termios", "pipe"] }
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "termios",
+    "pipe",
+    "stdio",
+] }
 # The SIGWINCH self-pipe behind `input::InputSource` (see that module's
 # docs): a resize is a signal, not a tty byte, so the runtime loop's fd
 # readiness poll needs a crate-registered pipe to wake on one. Already

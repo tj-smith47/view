@@ -69,7 +69,9 @@ pub use parity::{
     compare, masked_rows, snapshot, Divergence, DivergenceKind, Probe, ReferenceSide, Screen,
     StateSnapshot, ViewSide,
 };
-pub use pty::{kill_process_group, make_hermetic, PtySession, QueryPolicy, SpawnEnv};
+pub use pty::{
+    kill_process_group, make_hermetic, PtySession, QueryPolicy, QueryResponder, SpawnEnv,
+};
 pub use reference::ReferenceSession;
 
 /// Errors surfaced by the headless drivers.

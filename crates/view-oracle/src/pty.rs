@@ -90,7 +90,7 @@ const FULL_TIER: &[Answer] = &[SYNC, KITTY, DA1];
 
 impl QueryPolicy {
     /// The query/reply pairs a session under this policy answers.
-    fn answers(self) -> &'static [Answer] {
+    pub(crate) fn answers(self) -> &'static [Answer] {
         match self {
             Self::AnswerDa1 => DA1_ONLY,
             Self::AnswerFullTier => FULL_TIER,
@@ -103,7 +103,14 @@ impl QueryPolicy {
 /// yields the bytes a real terminal would write back. Stateful across chunks:
 /// a query straddling a read boundary is still recognized, because the tail
 /// of one chunk is carried into the scan of the next.
-struct QueryResponder {
+///
+/// [`PtySession`] drives one of these on every session it spawns, so an
+/// ordinary test never names it. It is public for the test that cannot use
+/// [`PtySession`] at all: `portable_pty` wires a child's stdin to the same
+/// slave as its stdout, so a `cmd | view -` shape has to hand-roll its pty,
+/// and hand-rolling the responder alongside it would be a second, drifting
+/// answer to "what does a real terminal reply".
+pub struct QueryResponder {
     /// The trailing bytes of the last chunk that could still begin a query
     /// completed by the next one (bounded by the longest query minus one).
     tail: Vec<u8>,
@@ -111,6 +118,12 @@ struct QueryResponder {
 }
 
 impl QueryResponder {
+    /// A responder answering exactly what `policy` promises.
+    #[must_use]
+    pub fn for_policy(policy: QueryPolicy) -> Self {
+        Self::new(policy.answers())
+    }
+
     fn new(answers: &'static [Answer]) -> Self {
         Self {
             tail: Vec::new(),
@@ -125,7 +138,7 @@ impl QueryResponder {
 
     /// The replies (concatenated) for every query found in `chunk`, or empty
     /// if none. Carries an unmatched tail forward so a split query is caught.
-    fn replies_for(&mut self, chunk: &[u8]) -> Vec<u8> {
+    pub fn replies_for(&mut self, chunk: &[u8]) -> Vec<u8> {
         let mut scan = std::mem::take(&mut self.tail);
         scan.extend_from_slice(chunk);
         let mut out = Vec::new();

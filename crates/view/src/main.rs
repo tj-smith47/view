@@ -293,6 +293,16 @@ fn main() -> Result<()> {
     }
     deny_unsupported_stdin_relay(&cli.passthrough)?;
     let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
+    // strictly after the relay, which is the one consumer of the piped fd 0
+    // this replaces, and strictly before the capability probe, crossterm and
+    // `InputSource` each go looking for a terminal of their own
+    #[cfg(unix)]
+    if !view_tui::input::adopt_terminal_stdin() {
+        vlog::log(
+            "startup",
+            "no terminal on stdin, stdout, stderr or /dev/tty: this session takes no input",
+        );
+    }
 
     let mut term =
         Term::init(cli.tier.map(Tier::from)).context("failed to initialize terminal backend")?;

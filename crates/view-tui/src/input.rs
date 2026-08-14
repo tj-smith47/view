@@ -51,6 +51,59 @@ impl TtyFd {
     }
 }
 
+/// Makes descriptor 0 name this process's terminal when it does not
+/// already, reporting whether terminal input has a descriptor to arrive on
+/// once this returns.
+///
+/// `cmd | view -` starts with a pipe on fd 0 and the terminal only on fd 1
+/// and fd 2, and two independent readers then have to find the terminal for
+/// themselves: this module's [`InputSource`], and crossterm, whose choice
+/// is internal and keyed solely off `isatty(0)`. Both fall back to opening
+/// `/dev/tty`, and on macOS that descriptor cannot be watched by anything.
+/// `poll(2)` answers `POLLNVAL` and a kqueue `EVFILT_READ` registration
+/// fails with `EINVAL`, for the very same terminal that answers normally
+/// through fd 1. crossterm's event reader is built once per process and
+/// cached, so its registration failing there is permanent: the session
+/// paints, and not one keystroke ever arrives.
+///
+/// Putting the terminal on fd 0 removes the fork rather than patching it.
+/// Every reader then resolves the one descriptor the shell already opened
+/// on the tty device, which every readiness mechanism on every platform can
+/// watch, and none of them reaches for `/dev/tty` at all. nvim does the
+/// same thing, for the same reason, when its own stdin is a pipe.
+///
+/// The piped content is not lost to this: `main` duplicates fd 0 for the
+/// engine's stdin relay before calling here, and a session that never asked
+/// for `-` has no use for those bytes in the first place.
+///
+/// `/dev/tty` remains the last resort, for a session whose three standard
+/// descriptors are all redirected. It is last because it is the one that
+/// macOS cannot watch, not because it is least likely.
+#[cfg(unix)]
+pub fn adopt_terminal_stdin() -> bool {
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return true;
+    }
+    let stdout = std::io::stdout();
+    if stdout.is_terminal() && rustix::stdio::dup2_stdin(&stdout).is_ok() {
+        return true;
+    }
+    let stderr = std::io::stderr();
+    if stderr.is_terminal() && rustix::stdio::dup2_stdin(&stderr).is_ok() {
+        return true;
+    }
+    // read-write, matching what crossterm's own `/dev/tty` fallback opens:
+    // fd 0 is shared with every other reader from here on, and one of them
+    // opening the same device with wider access would otherwise be the only
+    // difference between two descriptors that must behave identically
+    std::fs::File::options()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .is_ok_and(|tty| rustix::stdio::dup2_stdin(&tty).is_ok())
+}
+
 /// One non-blocking drain's outcome, telling the caller whether the
 /// terminal side of the poll set is still trustworthy.
 #[cfg(unix)]
@@ -162,6 +215,18 @@ impl InputSource {
     #[must_use]
     pub fn is_dead(&self) -> bool {
         self.dead
+    }
+
+    /// Records the terminal as gone without a drain having said so, for the
+    /// caller that learns it from the readiness side instead.
+    ///
+    /// The case that needs it is a descriptor the readiness mechanism
+    /// refuses outright rather than one that hung up: `POLLNVAL` is
+    /// level-triggered and returns instantly forever, so a fd that reports
+    /// it has to leave the poll set on the spot or the runtime loop spins at
+    /// full speed on a terminal it can never read.
+    pub fn mark_lost(&mut self) {
+        self.dead = true;
     }
 
     /// Whether an event is already decodable right now, including one no

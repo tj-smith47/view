@@ -250,13 +250,64 @@ pub struct Readiness {
 /// still delivers every channel wakeup. `EINTR` retries internally rather
 /// than surfacing as a phantom wake or error.
 ///
+/// `POLLNVAL` is the one revent that is not a fact about the terminal at
+/// all: it says `poll(2)` cannot describe this descriptor, which macOS
+/// answers for a `/dev/tty` fallback fd whose terminal is otherwise
+/// perfectly alive. Reading it as input-ready would drain a queue nothing
+/// put bytes in; reading it as not-ready would spin, since it is
+/// level-triggered and returns instantly on every call. The handle is
+/// marked lost instead, which is the only answer that terminates -- and
+/// `view_tui::input::adopt_terminal_stdin` is what keeps a descriptor that
+/// answers this way out of the set to begin with. `POLLHUP` and `POLLERR`
+/// keep reporting ready: those do describe the terminal, and the drain is
+/// where this session decides a terminal has ended.
+///
 /// # Errors
 ///
 /// Returns the underlying `std::io::Error` for any poll failure other
 /// than `EINTR`.
+/// What the terminal fds' revents say, split into the two facts the caller
+/// acts on separately.
+#[cfg(unix)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TerminalVerdict {
+    /// At least one terminal descriptor has something the drain should
+    /// collect, or has ended in a way the drain is the place to discover.
+    ready: bool,
+    /// At least one terminal descriptor cannot be described by `poll(2)` at
+    /// all, so it has to leave the set rather than be asked again.
+    unwatchable: bool,
+}
+
+/// Reads the terminal side of one completed poll.
+///
+/// Separated from [`poll_readiness`] because the interesting half of it is
+/// the flag arithmetic, and an `InputSource` can only be built against the
+/// process's own real terminal -- a fact that would otherwise put the
+/// `POLLNVAL` verdict permanently out of reach of any test.
+#[cfg(unix)]
+fn classify_terminal_revents(
+    revents: impl Iterator<Item = rustix::event::PollFlags>,
+) -> TerminalVerdict {
+    use rustix::event::PollFlags;
+
+    let mut verdict = TerminalVerdict {
+        ready: false,
+        unwatchable: false,
+    };
+    for flags in revents {
+        if flags.contains(PollFlags::NVAL) {
+            verdict.unwatchable = true;
+        } else if !flags.is_empty() {
+            verdict.ready = true;
+        }
+    }
+    verdict
+}
+
 #[cfg(unix)]
 pub fn poll_readiness(
-    input: &view_tui::input::InputSource,
+    input: &mut view_tui::input::InputSource,
     waker: &LoopWaker,
     timeout: Option<std::time::Duration>,
 ) -> std::io::Result<Readiness> {
@@ -288,9 +339,12 @@ pub fn poll_readiness(
                 })
             }
             Ok(_) => {
-                let input_ready = fds.iter().skip(1).any(|fd| !fd.revents().is_empty());
+                let verdict = classify_terminal_revents(fds.iter().skip(1).map(PollFd::revents));
+                if verdict.unwatchable {
+                    input.mark_lost();
+                }
                 return Ok(Readiness {
-                    input: input_ready,
+                    input: verdict.ready,
                     timed_out: false,
                 });
             }
@@ -386,6 +440,41 @@ mod tests {
             !pipe_has_byte(waker.fd()),
             "a send that queued nothing must not wake the loop to find nothing"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn poll_flags_split_into_drainable_and_unwatchable() {
+        use rustix::event::PollFlags;
+
+        let ready = |flags: &[PollFlags]| classify_terminal_revents(flags.iter().copied());
+
+        assert_eq!(
+            ready(&[PollFlags::empty(), PollFlags::empty()]),
+            TerminalVerdict {
+                ready: false,
+                unwatchable: false
+            }
+        );
+        assert!(ready(&[PollFlags::IN]).ready);
+        // a hung-up or errored terminal still drains: the last events
+        // crossterm holds are delivered there, and the drain is where this
+        // session declares a terminal gone
+        assert!(ready(&[PollFlags::HUP]).ready);
+        assert!(ready(&[PollFlags::ERR]).ready);
+        // NVAL is not the terminal ending, it is `poll(2)` refusing to
+        // describe the descriptor -- level-triggered, so asking again is a
+        // spin, and draining a queue nothing filled is a lie
+        assert_eq!(
+            ready(&[PollFlags::NVAL]),
+            TerminalVerdict {
+                ready: false,
+                unwatchable: true
+            }
+        );
+        // one unwatchable descriptor never suppresses another's real input
+        let mixed = ready(&[PollFlags::NVAL, PollFlags::IN]);
+        assert!(mixed.ready && mixed.unwatchable);
     }
 
     #[test]
