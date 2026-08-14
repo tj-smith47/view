@@ -533,19 +533,41 @@ fn run_bounded<S: MsgSink>(rx: &Receiver<WorkerRequest>, tx: &S, threads: usize)
 /// pool at one thread is not enough on a two-core host, where two live
 /// nucleo pools contending for the cores starve one of them past any fixed
 /// budget (a 60 s wait for a one-line fixture's results, reproduced 3/3 on
-/// the Windows CI mirror at 2% background load). Acquired by
-/// [`spawn_bounded`] and [`new_bounded_serial`] -- the only two ways a test
-/// opens a session -- so no `--test-threads` width can run two sessions at
-/// once. Poisoning is deliberately ignored: a panicked test's session is
-/// gone, so the next test can safely proceed.
+/// the Windows CI mirror at 2% background load). A hand-rolled binary
+/// semaphore rather than a `Mutex` because the permit must be `Send`:
+/// [`spawn_bounded`] moves it into its worker thread so the slot frees
+/// only after the worker's session is torn down, never when some
+/// test-side binding happens to drop first. Every test-side opener
+/// threads through here -- [`spawn_bounded`], [`new_bounded_serial`] and
+/// [`ensure_session_bounded_serial`] -- so no `--test-threads` width can
+/// run two test-opened sessions at once.
 #[cfg(test)]
-static NUCLEO_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+mod session_serial {
+    use std::sync::{Condvar, Mutex, PoisonError};
 
-#[cfg(test)]
-fn nucleo_serial() -> std::sync::MutexGuard<'static, ()> {
-    NUCLEO_SERIAL
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    static BUSY: Mutex<bool> = Mutex::new(false);
+    static FREED: Condvar = Condvar::new();
+
+    /// The slot itself; dropping it frees the next opener. Poisoning is
+    /// deliberately ignored: a panicked test's session is gone, so the
+    /// next test can safely proceed.
+    pub(super) struct Permit;
+
+    pub(super) fn acquire() -> Permit {
+        let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
+        while *busy {
+            busy = FREED.wait(busy).unwrap_or_else(PoisonError::into_inner);
+        }
+        *busy = true;
+        Permit
+    }
+
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            *BUSY.lock().unwrap_or_else(PoisonError::into_inner) = false;
+            FREED.notify_one();
+        }
+    }
 }
 
 /// Test-only twin of [`spawn`]: same shutdown shape (runs until `rx`
@@ -555,35 +577,49 @@ fn nucleo_serial() -> std::sync::MutexGuard<'static, ()> {
 /// of `spawn` no longer contends with the near-dozen other sessions
 /// `--test-threads`-parallel test binaries open at once for the same
 /// handful of host cores -- see [`Session::new_bounded`] for the full
-/// oversubscription mechanism this avoids. Returns the [`NUCLEO_SERIAL`]
-/// guard alongside the handle; bind it to a named `_serial` (never a bare
-/// `_`, which drops it immediately) so the test holds its serialization
-/// slot until it finishes.
+/// oversubscription mechanism this avoids. The [`session_serial`] permit
+/// is acquired before the thread spawns and released by the worker only
+/// after [`run_bounded`] returns -- its session already dropped -- so
+/// there is no caller-side binding to get wrong and no window where the
+/// next test's pool overlaps this one's.
 #[cfg(test)]
 fn spawn_bounded<S: MsgSink + Send + 'static>(
     rx: Receiver<WorkerRequest>,
     tx: S,
     threads: usize,
-) -> (JoinHandle<()>, std::sync::MutexGuard<'static, ()>) {
-    let serial = nucleo_serial();
-    (
-        std::thread::spawn(move || run_bounded(&rx, &tx, threads)),
-        serial,
-    )
+) -> JoinHandle<()> {
+    let permit = session_serial::acquire();
+    std::thread::spawn(move || {
+        let _permit = permit;
+        run_bounded(&rx, &tx, threads);
+    })
 }
 
 /// Opener for the tests that drive a bounded [`Session`] directly (feeding
-/// its injector by hand) rather than through a worker loop: pairs the
-/// session with the same [`NUCLEO_SERIAL`] guard `spawn_bounded` hands out,
-/// so direct-drive tests serialize identically. The same binding rule
-/// applies: a bare `_` drops the guard immediately.
+/// its injector by hand) rather than through a worker loop. The permit
+/// comes first in the pair on purpose: pattern bindings drop in reverse
+/// declaration order, so `let (_serial, mut session)` tears the session
+/// down before the slot frees.
 #[cfg(test)]
-fn new_bounded_serial(
-    source: Source,
+fn new_bounded_serial(source: Source, threads: usize) -> (session_serial::Permit, Session) {
+    let permit = session_serial::acquire();
+    (permit, Session::new_bounded(source, threads))
+}
+
+/// The [`ensure_session_bounded`] entry for tests that call it directly
+/// rather than through a bounded worker: takes the permit by reference so
+/// the borrow checker proves the caller holds the slot across every call,
+/// including the second one a replacement test makes (an owned permit
+/// here would deadlock it). The worker loop keeps calling the raw form --
+/// it already runs under the permit its spawner moved into the thread.
+#[cfg(test)]
+fn ensure_session_bounded_serial(
+    _serial: &session_serial::Permit,
+    session: &mut Option<Session>,
+    source: &Source,
     threads: usize,
-) -> (Session, std::sync::MutexGuard<'static, ()>) {
-    let serial = nucleo_serial();
-    (Session::new_bounded(source, threads), serial)
+) {
+    ensure_session_bounded(session, source, threads);
 }
 
 #[cfg(test)]
@@ -611,7 +647,7 @@ mod tests {
         // real matching throughput, so this keeps its session out of the
         // near-dozen-pool contention --test-threads-parallel runs of this
         // module otherwise create
-        let (_worker, _serial) = spawn_bounded(req_rx, msg_tx, 1);
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -654,7 +690,7 @@ mod tests {
         // well while keeping this session out of the near-dozen-pool
         // contention --test-threads-parallel runs of this module otherwise
         // create
-        let (mut session, _serial) = new_bounded_serial(
+        let (_serial, mut session) = new_bounded_serial(
             Source::Files {
                 root: std::path::PathBuf::from("/synthetic"),
             },
@@ -771,13 +807,15 @@ mod tests {
     #[test]
     fn replacing_a_session_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
+        let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `spawn_bounded`'s doc): this test never reparses a
         // pattern, so nucleo's own matcher pool does no work at all here --
         // an unbounded session still paid for spinning up a near-dozen-thread
         // rayon pool it never used, pure contention this module's
         // --test-threads-parallel runs otherwise pay for nothing
-        ensure_session_bounded(
+        ensure_session_bounded_serial(
+            &serial,
             &mut session,
             &Source::Files {
                 root: tree.root.clone(),
@@ -801,7 +839,7 @@ mod tests {
         // the shape `run()` takes on every request whose source no longer
         // matches the cached one: replaces the session outright, which must
         // drop -- and so cancel -- the old one's still-running Files scan
-        ensure_session_bounded(&mut session, &Source::Buffers, 1);
+        ensure_session_bounded_serial(&serial, &mut session, &Source::Buffers, 1);
 
         let settle_deadline = Instant::now() + Duration::from_secs(5);
         let mut last = injector.injected_items();
@@ -844,13 +882,15 @@ mod tests {
     #[test]
     fn closing_the_picker_cancels_its_files_scan_in_flight() {
         let tree = CancelTestTree::build();
+        let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `spawn_bounded`'s doc): this test never reparses a
         // pattern, so nucleo's own matcher pool does no work at all here --
         // an unbounded session still paid for spinning up a near-dozen-thread
         // rayon pool it never used, pure contention this module's
         // --test-threads-parallel runs otherwise pay for nothing
-        ensure_session_bounded(
+        ensure_session_bounded_serial(
+            &serial,
             &mut session,
             &Source::Files {
                 root: tree.root.clone(),
@@ -958,12 +998,14 @@ mod tests {
     #[test]
     fn a_new_live_grep_query_cancels_the_previous_scan_in_flight() {
         let tree = GrepCancelTestTree::build();
+        let serial = session_serial::acquire();
         let mut session: Option<Session> = None;
         // bounded (see `Session::new_bounded`'s doc): this test asserts on
         // injected-item counts, not match throughput, so it needs no real
         // matching width and stays out of the near-dozen-pool contention
         // --test-threads-parallel runs of this module otherwise create
-        ensure_session_bounded(
+        ensure_session_bounded_serial(
+            &serial,
             &mut session,
             &Source::LiveGrep {
                 root: tree.root.clone(),
@@ -1088,7 +1130,7 @@ mod tests {
         // a single matcher thread settles it instantly, and this keeps the
         // near-dozen sessions --test-threads runs concurrently from
         // oversubscribing the host
-        let (_worker, _serial) = spawn_bounded(req_rx, msg_tx, 1);
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -1149,7 +1191,7 @@ mod tests {
         // a single matcher thread settles it instantly, and this keeps the
         // near-dozen sessions --test-threads runs concurrently from
         // oversubscribing the host
-        let (_worker, _serial) = spawn_bounded(req_rx, msg_tx, 1);
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -1206,7 +1248,7 @@ mod tests {
         // a single matcher thread settles it instantly, and this keeps the
         // near-dozen sessions --test-threads runs concurrently from
         // oversubscribing the host
-        let (_worker, _serial) = spawn_bounded(req_rx, msg_tx, 1);
+        let _worker = spawn_bounded(req_rx, msg_tx, 1);
         req_tx
             .send(WorkerRequest::Query(MatchRequest {
                 generation: 1,
@@ -1287,7 +1329,7 @@ mod tests {
         // single matcher thread stays well inside budget while keeping this
         // session out of the near-dozen-pool contention --test-threads-
         // parallel runs of this module otherwise create
-        let (mut session, _serial) = new_bounded_serial(Source::Buffers, 1);
+        let (_serial, mut session) = new_bounded_serial(Source::Buffers, 1);
         let injector = session.nucleo.injector();
         for i in 0..100_000u32 {
             injector.push(

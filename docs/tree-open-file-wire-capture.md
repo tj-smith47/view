@@ -117,5 +117,6 @@ Two findings the implementation's doc depends on:
   Windows path, the bug that retired the previous chunk shape.
 - Live-verified in `crates/view-engine/tests/open_file_live.rs`, which
   drives `EngineHandle::open_file` itself (not a reimplemented chunk) for
-  each hostile case above and asserts the resulting buffer's name and
-  content.
+  each hostile case above that the host filesystem can represent (`|` and
+  `\` cannot exist in Windows filenames, so those two fixtures are
+  unix-only) and asserts the resulting buffer's name and content.
