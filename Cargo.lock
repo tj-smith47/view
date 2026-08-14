@@ -2358,6 +2358,7 @@ dependencies = [
  "portable-pty",
  "rustix",
  "thiserror 2.0.18",
+ "view-core",
  "view-oracle",
  "vt100",
 ]

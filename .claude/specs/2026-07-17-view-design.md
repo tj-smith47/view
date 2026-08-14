@@ -104,6 +104,7 @@ is a faster, smoother UX over nvim."
 | Picker scan: 1M-file tree | streaming (results while scanning, never scan-then-show); first page ≤ 100 ms warm-cache | bench suite |
 | view-side memory (PSS), 10 buffers, post-workload | ≤ 150 MB | bench suite |
 | Redraw under engine event burst (plugin storm, `:terminal` flood) | UI thread never blocks; coalesced paint stays inside the staleness budget | design invariant + test |
+| Engine supervision: time to notice a read-side hang | p99 ≤ 12000 ms, from the engine entering a synchronous Lua loop to the banner naming the wedge being on screen. The number is the heartbeat's own arithmetic and not a chosen target: `HEARTBEAT_WEDGE_THRESHOLD` (10 s) plus one `HEARTBEAT_PROBE_INTERVAL` (2 s), because the last probe an engine can answer is the one fired just before it stops serving. A read-side hang is the one failure no redraw traffic can reveal — the connection stays open and view's output is drained — so this row is what stands behind the claim that a misbehaving plugin cannot silently take the editor down. Its paired quantity, how long a replacement takes to paint a swap-recovered buffer (`restart_rehydrate_p99_ms`), is recorded by the same row and bounded by no promise here yet: the first recording arms the regression baseline, and a bound derived from that recording would be one no measurement could fail | bench suite (`supervision` row, pty) |
 
 Budgets are targets until first measured; once measured, the measured-or-better
 value becomes the regression baseline. **Gating is paired, not absolute:** every

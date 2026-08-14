@@ -476,7 +476,7 @@ pub type CellMetrics = BTreeMap<String, f64>;
 /// from this list is refused at the moment it produces it, before anything
 /// is recorded, and the per-metric policy table in this module's tests is
 /// checked against this list rather than hand-kept beside it.
-pub const RECORDED_METRICS: [&str; 24] = [
+pub const RECORDED_METRICS: [&str; 26] = [
     "ratio_p50",
     "ratio_p99",
     "paired_delta_p99_ms",
@@ -501,6 +501,8 @@ pub const RECORDED_METRICS: [&str; 24] = [
     "match_paint_p99_ms",
     "first_page_p50_ms",
     "first_page_p99_ms",
+    "wedge_detect_p99_ms",
+    "restart_rehydrate_p99_ms",
 ];
 
 /// Metric names in `measured` that [`RECORDED_METRICS`] does not declare,
@@ -2021,6 +2023,8 @@ mod tests {
             ("first_page_p99_ms", None, absolute),
             ("shell_visible_cold_ms", None, absolute),
             ("marker_cold_ms", None, absolute),
+            ("wedge_detect_p99_ms", None, absolute),
+            ("restart_rehydrate_p99_ms", None, absolute),
             ("paired_delta_p99_ms", None, signed),
             ("control_delta_p99_ms", None, signed),
         ];

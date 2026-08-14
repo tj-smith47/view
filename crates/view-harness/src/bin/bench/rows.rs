@@ -484,6 +484,54 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             }
             Ok(metrics)
         }
+        "supervision" => {
+            let side = world.side(fixture, "view")?;
+            let view_spec = view_spec_from(side, bins.view_bins());
+            let outcome =
+                supervision::run(ViewSpec(&view_spec), protocol, settle_deadline(fixture))
+                    .with_context(|| format!("supervision/{fixture} run failed"))?;
+            for (phase, trials) in [
+                ("wedge-detect", &outcome.detect_trials),
+                ("restart-rehydrate", &outcome.rehydrate_trials),
+            ] {
+                for trial in trials {
+                    println!(
+                        "{}",
+                        report::absolute_cell(
+                            scenario,
+                            fixture,
+                            phase,
+                            report::AbsoluteStats {
+                                p50: trial.p50(),
+                                p99: trial.p99(),
+                                max: trial.max(),
+                                unit: "ms",
+                                samples: trial.len(),
+                                // every sample is its own process against a
+                                // failure that happens once per process:
+                                // there is no state a warmup sample could
+                                // warm, and dropping one would cost a
+                                // detection ceiling for nothing
+                                warmup: 0,
+                            }
+                        )
+                    );
+                }
+            }
+            let trials = outcome.detect_trials.len();
+            let mut metrics = CellMetrics::new();
+            for (metric, value) in [
+                ("wedge_detect_p99_ms", outcome.gated_wedge_detect_p99_ms),
+                (
+                    "restart_rehydrate_p99_ms",
+                    outcome.gated_restart_rehydrate_p99_ms,
+                ),
+            ] {
+                println!("{}", report::aggregate_line(metric, value, trials));
+                metrics.insert(metric.to_string(), value);
+            }
+            Ok(metrics)
+        }
         other => bail!(
             "unknown scenario {other:?}; known: {}",
             known_scenarios().join(", ")

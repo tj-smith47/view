@@ -374,7 +374,21 @@ impl HangReport {
     }
 }
 
-/// The Lua chunk that wedges the read side for `budget`.
+/// The Lua chunk that wedges the read side for `budget`, as typed input
+/// terminated by nvim's own `<CR>` notation.
+///
+/// See [`wedge_command`] for the chunk itself and for why it is written the
+/// way it is; this wrapper only adds the submit key an `nvim_input` caller
+/// needs. A caller typing into a terminal instead sends the command with a
+/// carriage return of its own, which is why the two are separate.
+fn wedge_chunk_for(budget: Duration) -> String {
+    format!("{}<CR>", wedge_command(budget))
+}
+
+/// The `:` command that wedges the read side for `budget`, with no submit
+/// key: the shared source for every consumer that has to hold an engine
+/// still, whether it types the command over a terminal or hands it to
+/// `nvim_input`.
 ///
 /// A Lua `while`, not a Vimscript one: Vimscript's break check pumps the
 /// event loop, so an engine inside it goes on answering and there is no
@@ -397,9 +411,10 @@ impl HangReport {
 /// here is the one closing the `<CR>` that would have submitted the command
 /// line. An engine sent a `<` in this position never runs the chunk at all;
 /// it sits at a `:` prompt, answers everything, and reads perfectly alive.
-fn wedge_chunk_for(budget: Duration) -> String {
+#[must_use]
+pub fn wedge_command(budget: Duration) -> String {
     format!(
-        ":lua local t=vim.uv.hrtime() while {} - (vim.uv.hrtime()-t) > 0 do end<CR>",
+        ":lua local t=vim.uv.hrtime() while {} - (vim.uv.hrtime()-t) > 0 do end",
         budget.as_nanos()
     )
 }
@@ -414,8 +429,12 @@ fn wedge_chunk_for(budget: Duration) -> String {
 /// no `setsid` at all, so its pid names no process group, and a group signal
 /// aimed at it would either find nothing or land on an unrelated group that
 /// happens to carry that id.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Pty`] if the platform's kill refuses the pid.
 #[cfg(unix)]
-fn kill_out_of_band(pid: u32) -> Result<(), OracleError> {
+pub fn kill_out_of_band(pid: u32) -> Result<(), OracleError> {
     let pid =
         i32::try_from(pid).map_err(|_| OracleError::Pty(format!("pid {pid} out of range")))?;
     nix::sys::signal::kill(
@@ -428,8 +447,13 @@ fn kill_out_of_band(pid: u32) -> Result<(), OracleError> {
 /// See the Unix arm for the contract. Windows has no signals, so the
 /// force-kill is `taskkill /F`, the same lever `view-engine`'s own crash
 /// tests reach for there.
+///
+/// # Errors
+///
+/// Returns [`OracleError::Pty`] if `taskkill` refuses the pid, or an io
+/// error if it cannot be run at all.
 #[cfg(windows)]
-fn kill_out_of_band(pid: u32) -> Result<(), OracleError> {
+pub fn kill_out_of_band(pid: u32) -> Result<(), OracleError> {
     let status = std::process::Command::new("taskkill")
         .args(["/F", "/PID", &pid.to_string()])
         .status()?;

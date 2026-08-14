@@ -28,6 +28,12 @@ test-support = []
 # without it the tap module does not exist in the compilation at all, so
 # shipping builds carry zero tap code or cost.
 bench-taps = []
+# Builds an engine with no heartbeat prober behind it: the counterfactual
+# arm of the paired campaign that keeps the read-side probe's cost off the
+# echo and input rows (crates/view-harness/tests/heartbeat_cost.rs). Off by
+# default, and the only thing it removes is the cadence -- a build carrying
+# it has no supervision for a read-side hang and must never be shipped.
+bench-no-heartbeat = []
 
 [dependencies]
 rmpv = "1.3.1"

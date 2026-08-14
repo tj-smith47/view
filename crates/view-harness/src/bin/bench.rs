@@ -30,7 +30,9 @@ use clap::Parser;
 use view_bench::report;
 #[cfg(unix)]
 use view_bench::scenarios::echo_control;
-use view_bench::scenarios::{echo, first_paint, flood, memory, picker, scroll, Protocol};
+use view_bench::scenarios::{
+    echo, first_paint, flood, memory, picker, scroll, supervision, Protocol,
+};
 
 // The internal-boundary and echo_path rows run through the unix-only tap
 // channel; their driver code lives in a cfg-gated child module so it is
@@ -66,6 +68,7 @@ const MATRIX: &[(&str, &str)] = &[
     ("input_path", "minimal"),
     ("output_path", "minimal"),
     ("picker", "minimal"),
+    ("supervision", "minimal"),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are

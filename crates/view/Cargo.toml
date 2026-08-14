@@ -17,6 +17,11 @@ workspace = true
 # view-tui); the bench harness builds this variant into its own target
 # dir so the plain release binary stays byte-for-byte tap-free.
 bench-taps = ["view-engine/bench-taps", "view-tui/bench-taps"]
+# The paired campaign's counterfactual arm: an otherwise identical binary
+# whose engine runs no heartbeat prober, so the probe's cost on the echo and
+# input rows can be measured as a difference rather than argued about. Never
+# shipped -- see the view-engine feature it forwards to.
+bench-no-heartbeat = ["view-engine/bench-no-heartbeat"]
 
 [dependencies]
 anyhow = "1.0.103"

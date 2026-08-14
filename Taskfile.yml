@@ -97,6 +97,19 @@ tasks:
       - cargo bench -p view-surface --bench render_frame
       - cargo bench -p view-tui --bench paint_frame
 
+  heartbeat-ab:
+    desc: Paired echo/input_path campaign, heartbeat prober armed vs compiled out (crates/view-harness/tests/heartbeat_cost.rs)
+    cmds:
+      - cargo build --release -p view
+      - cargo build --release -p view --features bench-taps --target-dir target/taps
+      # one target dir per arm: the counterfactual binary must never be able
+      # to overwrite the shipped one the other arm measures, and a shared dir
+      # would rebuild both on every feature flip
+      - cargo build --release -p view --features bench-no-heartbeat --target-dir target/no-heartbeat
+      - cargo build --release -p view --features bench-taps,bench-no-heartbeat --target-dir target/taps-no-heartbeat
+      - cargo build --release -p view-harness --bin bench
+      - cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
+
   perf-audit:
     desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class, then every hot-path micro-bench (task perf-audit CLASS=dev-linux)
     vars:

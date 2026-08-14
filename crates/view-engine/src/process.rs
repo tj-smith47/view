@@ -9,7 +9,7 @@
 
 use crate::damage::{DamagePump, PumpShared, SinkCutover};
 use crate::handle::{EngineError, EngineHandle};
-use crate::heartbeat::{HeartbeatProber, HeartbeatWatch, HEARTBEAT_PROBE_INTERVAL};
+use crate::heartbeat::{HeartbeatProber, HeartbeatWatch};
 use rmpv::Value;
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
@@ -391,7 +391,7 @@ pub struct Engine {
 }
 
 /// Starts the one thread that owns the heartbeat cadence, ticking `prober`
-/// every [`HEARTBEAT_PROBE_INTERVAL`] against `handle`.
+/// every [`crate::heartbeat::HEARTBEAT_PROBE_INTERVAL`] against `handle`.
 ///
 /// A thread of its own because neither the request seam the probe rides nor
 /// the reply seam its answer comes back on has any notion of a clock: they
@@ -406,9 +406,20 @@ pub struct Engine {
 /// process shutting down waits for nothing. That costs at most one interval
 /// of lag between the connection closing and the thread noticing, during
 /// which the ticks it issues are refused rather than written.
+///
+/// Under `bench-no-heartbeat` there is no thread and no tick at all: the
+/// measurement arm that binary exists for has to be the absence of this
+/// cadence, not a paused copy of it, so the counterfactual is a compilation
+/// without the prober rather than one that still wakes on the interval.
 fn spawn_prober(prober: HeartbeatProber, handle: EngineHandle) {
+    #[cfg(feature = "bench-no-heartbeat")]
+    {
+        let _ = (prober, handle);
+        return;
+    }
+    #[cfg(not(feature = "bench-no-heartbeat"))]
     std::thread::spawn(move || loop {
-        std::thread::sleep(HEARTBEAT_PROBE_INTERVAL);
+        std::thread::sleep(crate::heartbeat::HEARTBEAT_PROBE_INTERVAL);
         if prober.tick(&handle).is_err() {
             break;
         }

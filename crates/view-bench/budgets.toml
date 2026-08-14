@@ -180,6 +180,31 @@ scenario = "picker"
 metric = "first_page_p99_ms"
 max = 100.0
 
+# 12000 is not a chosen round number: it is what the heartbeat's own two
+# constants add up to (`HEARTBEAT_WEDGE_THRESHOLD` 10 s plus one
+# `HEARTBEAT_PROBE_INTERVAL` 2 s), the same sum `view_oracle::hang`'s
+# DETECTION_BOUND computes for its assertions. A probe fired just before the
+# engine stops serving is the last one it can answer, so the verdict cannot
+# arrive sooner, and every wedge lands at some phase inside a probe
+# interval, so a p99 measured over fresh spawns sits near the sum rather
+# than under it. That is the point of the bound: it fails when detection
+# takes longer than the constants promise, not when it takes as long as they
+# say.
+#
+# The row's second metric, restart_rehydrate_p99_ms, deliberately has no
+# entry here. Nothing in the spec bounds how long a replacement engine may
+# take to bring a recovered buffer back, and a bound written from the first
+# recording would be a number computed from the measurement it bounds --
+# the defect that withdrew the input-path row's 232 and the first-paint
+# row's cold_ms bar. The recorded baseline is what gates it until a spec row
+# states a promise for it, which is exactly the state this file's header
+# calls a real one rather than an oversight.
+[[budget]]
+spec_row = "Engine supervision: time to notice a read-side hang"
+scenario = "supervision"
+metric = "wedge_detect_p99_ms"
+max = 12000.0
+
 # Metrics measured outside their budget today.
 #
 # A shortfall is how an unmet budget is allowed to exist: it must be written
