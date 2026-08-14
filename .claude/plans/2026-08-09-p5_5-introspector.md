@@ -6,7 +6,7 @@
 
 **Goal:** `:View keys log` — a live overlay answering "which mapping fired,
 whose it was, what it displaced," on demand, during a real session
-(spec:625, §9 invented capability, v0.1 CORE — ruled 2026-08-05, spec:906,
+(spec:627, §9 invented capability, v0.1 CORE — ruled 2026-08-05, spec:908,
 no "post-v0.1" framing anywhere in this plan).
 
 **Why this is invention, not tuning:** nvim's own `:map`/`:verbose map`
@@ -16,7 +16,7 @@ neither can, since nvim's own TUI has no interposed observer between a
 keypress and the mapping it triggers. view's separate-process, every-
 keystroke-interposed architecture is what makes a live log possible at
 all, the same premise every other P5.5 capability rests on
-(spec:616-618).
+(spec:618-620).
 
 **Correcting `invention-research.md`'s characterization of the seam:** the
 research sheet states "no per-dispatch event... present in this table" —
@@ -60,7 +60,7 @@ before writing code if this plan's citations seem stale; reality wins.
 **Round 1 fixes** (review verdict: APPROVED, minors only), applied against
 the original draft:
 
-- **MINOR — spec-line citations:** spec:621 → spec:625 (this plan's own
+- **MINOR — spec-line citations:** spec:621 → spec:627 (this plan's own
   charter row), both occurrences plus the Exit Checklist's spec-amendment
   check.
 - **MINOR — `MappingClaim` interface citation:** corrected `feature`/`lhs`
@@ -388,7 +388,7 @@ already satisfy, with no exception carved out for it.
 - [ ] Task 1-4's falsifiable checks all pass, captured as evidence.
 - [ ] `render_usage()`'s existing feature/key cross-check test passes
       against the new 6th registry entry with no special-casing.
-- [ ] Spec-amendment check: spec:625 already correctly describes this
+- [ ] Spec-amendment check: spec:627 already correctly describes this
       capability's scope ("which mapping fired, whose it was, what it
       displaced"); no spec edit is owed by this plan.
 - [ ] No "post-v0.1" language anywhere in this plan's shipped code,
