@@ -14,8 +14,18 @@ tasks:
     cmd: cargo fmt --all --check
 
   lint:
-    desc: Clippy with warnings as errors
-    cmd: cargo clippy --workspace --all-targets -- -D warnings
+    desc: Clippy with warnings as errors, over the shipped feature set and then over every feature
+    cmds:
+      - cargo clippy --workspace --all-targets -- -D warnings
+      # the shipped set never compiles the arms behind bench-taps,
+      # bench-support or bench-no-heartbeat, so a lint that stopped at the
+      # line above would leave the counterfactual engine's own code
+      # unchecked: --all-features is this tree's clippy floor
+      # (.claude/rules/rust.md) and is what puts those cfg arms in front of
+      # it. Clippy builds with debug assertions on, so the no-heartbeat
+      # arm's ship guard stays dormant here and needs no build environment
+      # of its own
+      - cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
@@ -99,6 +109,12 @@ tasks:
 
   heartbeat-ab:
     desc: Paired echo/input_path campaign, heartbeat prober armed vs compiled out (crates/view-harness/tests/heartbeat_cost.rs)
+    # the ship guard on the no-heartbeat arm refuses an optimized build that
+    # does not name the campaign it is for (view-engine/src/process.rs), and
+    # this is the campaign: the variable is set here, in the one target that
+    # legitimately wants a binary with no read-side supervision in it
+    env:
+      VIEW_BENCH_NO_HEARTBEAT: "1"
     cmds:
       - cargo build --release -p view
       - cargo build --release -p view --features bench-taps --target-dir target/taps
@@ -111,17 +127,29 @@ tasks:
       - cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
 
   perf-audit:
-    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class, then every hot-path micro-bench (task perf-audit CLASS=dev-linux)
+    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class (~28 min), then the heartbeat armed-vs-absent campaign (four release builds plus four 400-sample cells; AB=skip drops it), then every hot-path micro-bench (task perf-audit CLASS=dev-linux AB=skip)
     vars:
       CLASS: '{{.CLASS | default "dev-linux"}}'
+      AB: '{{.AB | default "run"}}'
     cmds:
-      # a shell chain (not two `task:` steps) so the exit code below can be
-      # captured and echoed as this target's own final log line on every
-      # path; `&&` preserves the original fail-fast semantics (bench-micro
-      # never runs if bench itself failed), and `exit` forwards the true
-      # code to task's own caller
+      # a shell chain (not three `task:` steps) so the exit code below can
+      # be captured and echoed as this target's own final log line on every
+      # path; `&&` preserves the original fail-fast semantics (nothing later
+      # runs if the matrix itself failed), and `exit` forwards the true code
+      # to task's own caller.
+      #
+      # The A/B campaign runs here rather than nowhere: it is the only thing
+      # that holds the heartbeat's cost to what this class can resolve, and
+      # a claim nothing ever re-checks decays. It is skippable because it
+      # costs its own campaign on top of an already long gate, and a
+      # pre-release run that never finishes is worth less than one that
+      # states what it left out -- which the skip line does, in the log.
       - >-
-        task bench CLI_ARGS="--all --class {{.CLASS}} --gate" && task bench-micro;
+        task bench CLI_ARGS="--all --class {{.CLASS}} --gate"
+        && { if [ "{{.AB}}" = skip ]; then
+        echo "perf-audit: heartbeat A/B campaign skipped (AB=skip)";
+        else task heartbeat-ab; fi; }
+        && task bench-micro;
         code=$?; echo "perf-audit wrapper exit: $code"; exit $code
 
   commit:

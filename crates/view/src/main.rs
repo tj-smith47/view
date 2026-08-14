@@ -23,6 +23,19 @@ use view_core::theme::Theme;
 use view_engine::process::EngineConfig;
 use view_tui::terminal::Term;
 
+/// What this build calls itself in its own startup diagnostics.
+///
+/// Plain for the shipped editor; suffixed for the paired campaign's
+/// counterfactual arm, whose engine runs no heartbeat prober and therefore
+/// notices no read-side hang. The compile guard in `view-engine` is what
+/// keeps such a build from being made by accident; this is what makes one
+/// that exists say so wherever it is read from.
+const VERSION: &str = if cfg!(feature = "bench-no-heartbeat") {
+    concat!(env!("CARGO_PKG_VERSION"), "+bench-no-heartbeat")
+} else {
+    env!("CARGO_PKG_VERSION")
+};
+
 /// `--tier`'s value vocabulary. A separate `clap`-derived enum rather than
 /// deriving `ValueEnum` on `view_core::model::Tier` directly: `clap` is a
 /// CLI/`main.rs`-boundary concern (per this crate's own convention of
@@ -317,11 +330,7 @@ fn main() -> Result<()> {
     vlog::log_with("startup", || {
         format!(
             "version={} caps tier={:?} sync={} truecolor={} kitty_kbd={} term={width}x{height}",
-            env!("CARGO_PKG_VERSION"),
-            model.caps.tier,
-            model.caps.sync,
-            model.caps.truecolor,
-            model.caps.kitty_kbd
+            VERSION, model.caps.tier, model.caps.sync, model.caps.truecolor, model.caps.kitty_kbd
         )
     });
     // opts into startup's placeholder shell (statusline bar plus a static

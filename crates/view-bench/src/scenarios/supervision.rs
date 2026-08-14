@@ -19,7 +19,9 @@
 //!   the read-side wedge is on screen. The connection stays open and the
 //!   engine drains everything view writes, so nothing but the heartbeat can
 //!   notice, and the ceiling is the heartbeat's own:
-//!   [`view_oracle::hang::DETECTION_BOUND`].
+//!   [`view_oracle::hang::DETECTION_BOUND`], which every sample is swept
+//!   across (see [`wedge_phase`]) so the recorded tail is the worst phase
+//!   of the probe interval rather than one arbitrary point inside it.
 //! - **restart rehydrate** -- the engine killed out of band until the
 //!   unsaved line it was holding is painted again by its replacement. That
 //!   line is never written to disk, so a screen holding it again is
@@ -37,7 +39,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use view_core::native::supervision::WedgeKind;
-use view_oracle::hang::{kill_out_of_band, wedge_command};
+use view_oracle::hang::{kill_out_of_band, wedge_command, HEARTBEAT_PROBE_INTERVAL};
 
 use crate::boundaries::screen_holds;
 use crate::sampling::{median_of_trials, Distribution};
@@ -160,8 +162,15 @@ pub fn run(
     for _ in 0..protocol.trials {
         let mut detect = Vec::with_capacity(SAMPLES);
         let mut rehydrate = Vec::with_capacity(SAMPLES);
-        for _ in 0..SAMPLES {
-            detect.push(detect_sample(&own_state_home(view.0), settle)?);
+        for sample in 0..SAMPLES {
+            detect.push(detect_sample(
+                &own_state_home(view.0),
+                settle,
+                wedge_phase(sample),
+            )?);
+            // no phase of its own: a closed connection is noticed on the
+            // spot rather than at the next probe, so nothing this boundary
+            // times is a function of where the heartbeat's cadence stood
             rehydrate.push(rehydrate_sample(&own_state_home(view.0), settle)?);
         }
         detect_trials.push(Distribution::from_samples(&detect, 0)?);
@@ -177,11 +186,56 @@ pub fn run(
     })
 }
 
+/// Where inside the heartbeat's probe interval one sample's wedge lands.
+///
+/// The quantity this row records is a function of one variable: how long
+/// after the last answered probe the engine stopped serving. A wedge is
+/// noticed at the first probe it fails to answer, so detection falls as
+/// that offset grows and jumps a whole interval when it passes the tick.
+/// The spawn-to-settle path costs very nearly the same every time -- an
+/// earlier recording's fifteen samples spanned 4.5 ms of a 2 s interval --
+/// so a sample fired at a fixed delay after settle reads one phase over and
+/// over, and its p99 is a constant wearing a tail's name: it says nothing
+/// about the rest of the cadence, hides a regression of up to a whole
+/// interval there, and is not a seed a controlled class could ratchet from.
+///
+/// So the delay covers the interval instead of holding still: sample `k` of
+/// `SAMPLES` waits `k / SAMPLES` of one interval, which puts the run's
+/// worst sample within a stratum of the phase where a wedge lands just
+/// after a tick -- the worst case, and the one the ceiling is written for.
+/// Deterministic rather than drawn, and the same cover in every trial: the
+/// gated statistic is the median across trials of a per-trial p99, so
+/// trials that swept different phases would make that median a mid-order
+/// statistic over three different quantities, where sweeping one cover
+/// makes every trial's p99 the same worst phase and lets the median do the
+/// job the protocol gives it -- absorbing one unlucky spawn.
+///
+/// What the recorded p99 therefore is: the ceiling, less however far the
+/// nearest stratum fell short of the worst phase (under
+/// `HEARTBEAT_PROBE_INTERVAL / SAMPLES`, and a property of this host's
+/// spawn path rather than of the code). It approaches the bound from below
+/// and can sit on it, which is why the budget row that bounds it allows for
+/// the frame and the poll that read it (`budgets.toml`, spec 3.1) rather
+/// than comparing against a bound reached exactly.
+fn wedge_phase(sample: usize) -> Duration {
+    let strata = u32::try_from(SAMPLES).unwrap_or(1).max(1);
+    let stratum = u32::try_from(sample).unwrap_or(0);
+    HEARTBEAT_PROBE_INTERVAL * stratum / strata
+}
+
 /// One wedge sample: a settled session, the engine held in a synchronous
-/// Lua loop, and the wait for the banner that says so.
-fn detect_sample(view: &SpawnSpec, settle: SettleBound) -> Result<f64, BenchError> {
+/// Lua loop `phase` into the heartbeat's cadence, and the wait for the
+/// banner that says so.
+fn detect_sample(
+    view: &SpawnSpec,
+    settle: SettleBound,
+    phase: Duration,
+) -> Result<f64, BenchError> {
     let mut session = spawn_settled(view, settle)?;
     let pid = engine_pid(&mut session)?;
+    // waited out before the clock starts, so placing the wedge inside the
+    // probe interval moves which phase is measured and not what is measured
+    std::thread::sleep(phase);
     let start = Instant::now();
     session.send(submitted(&wedge_command(WEDGE_SELF_BOUND)).as_bytes())?;
     let detected = wait_for(
@@ -411,6 +465,41 @@ mod tests {
     #[test]
     fn the_wait_outlasts_the_heartbeats_own_ceiling() {
         assert!(DETECT_TIMEOUT > DETECTION_BOUND);
+    }
+
+    /// A delay that never moves reads one point of the probe interval as if
+    /// it were a tail, so the cover is asserted rather than assumed: every
+    /// sample of a trial takes a distinct stratum, the strata are evenly
+    /// spaced, they start at the tick and stay inside one interval, and no
+    /// phase of the interval is further than a stratum from a sample.
+    #[test]
+    fn the_wedge_phases_cover_the_probe_interval_evenly() {
+        let strata = u32::try_from(SAMPLES).unwrap();
+        let stride = HEARTBEAT_PROBE_INTERVAL / strata;
+        let phases: Vec<Duration> = (0..SAMPLES).map(wedge_phase).collect();
+        assert_eq!(phases.first(), Some(&Duration::ZERO), "{phases:?}");
+        assert!(
+            phases.iter().all(|phase| *phase < HEARTBEAT_PROBE_INTERVAL),
+            "a phase outside the interval measures the next one's: {phases:?}"
+        );
+        for pair in phases.windows(2) {
+            // whole nanoseconds: an interval the stratum count does not
+            // divide evenly loses under a nanosecond per boundary to
+            // truncation, nine orders of magnitude below the phase asserted
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap >= stride && gap <= stride + Duration::from_nanos(1),
+                "uneven strata ({gap:?} against {stride:?}): {phases:?}"
+            );
+        }
+        let uncovered = HEARTBEAT_PROBE_INTERVAL
+            - *phases
+                .last()
+                .expect("SAMPLES is a nonzero constant, so a trial has phases");
+        assert!(
+            uncovered <= stride + Duration::from_nanos(u64::from(strata)),
+            "{uncovered:?} of the interval sits further than one stratum from any sample"
+        );
     }
 
     /// A sample recovers the swap it left itself and no other, so the one

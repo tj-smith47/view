@@ -33,6 +33,9 @@ bench-taps = []
 # echo and input rows (crates/view-harness/tests/heartbeat_cost.rs). Off by
 # default, and the only thing it removes is the cadence -- a build carrying
 # it has no supervision for a read-side hang and must never be shipped.
+# That last sentence is enforced rather than asked for: an optimized build
+# with this feature on fails to compile unless VIEW_BENCH_NO_HEARTBEAT is
+# set in the build environment (src/process.rs, next to spawn_prober).
 bench-no-heartbeat = []
 
 [dependencies]

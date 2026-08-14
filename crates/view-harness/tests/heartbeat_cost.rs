@@ -86,9 +86,20 @@ fn bench_bin() -> PathBuf {
         .join(if cfg!(windows) { "bench.exe" } else { "bench" })
 }
 
+/// Whether this run is on a GitHub runner, by the same variable the bench
+/// binary reads to decide whether a skip needs a checks-page annotation.
+fn under_gha() -> bool {
+    std::env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true")
+}
+
 /// This host's own class name. The bench binary refuses a class naming
 /// another platform, and nothing here records or gates, so the campaign
 /// names the host it is on rather than asking an operator to.
+///
+/// Platform is all it knows, so on a shared runner this would answer
+/// `dev-linux` for a machine that is nothing of the sort -- which is why
+/// the campaign refuses to run there at all rather than borrowing a class
+/// name (see [`under_gha`] at its entry).
 fn class() -> String {
     let os = if cfg!(target_os = "macos") {
         "macos"
@@ -197,6 +208,20 @@ fn tolerance(scenario: &str, metric: &str) -> f64 {
 #[test]
 #[ignore = "drives four release binaries through two full bench rows; run via task heartbeat-ab"]
 fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
+    // a runner is not the dev machine whose name `class()` would answer for
+    // it: the tolerance below and the baselines the bench arms compare
+    // against are both properties of the host that published them, and no
+    // gh class has published a spread for these two statistics at all. So
+    // the campaign says what it did not measure instead of consuming
+    // dev-linux's headroom on a machine that never earned it -- announced
+    // on the checks page, because a silent skip reads as a verified claim.
+    if under_gha() {
+        let reason = "no gh class publishes a resolvable spread for these rows, and the dev \
+                      class's spread describes a different machine";
+        println!("skipping the_heartbeat_prober_costs_nothing_this_class_can_measure: {reason}");
+        println!("::warning::heartbeat armed-vs-absent campaign skipped: {reason}");
+        return;
+    }
     let mut rows = vec![Row {
         scenario: "echo",
         fixture: "minimal",

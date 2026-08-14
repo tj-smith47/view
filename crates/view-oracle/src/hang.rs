@@ -71,9 +71,15 @@ use view_core::model::Model;
 use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::supervision::{WedgeKind, RESTART_NOTATION};
 use view_core::update::update;
-use view_engine::heartbeat::{
-    wedge_kind, Liveness, HEARTBEAT_PROBE_INTERVAL, HEARTBEAT_WEDGE_THRESHOLD,
-};
+use view_engine::heartbeat::{wedge_kind, Liveness, HEARTBEAT_WEDGE_THRESHOLD};
+
+/// The cadence a wedge's detection time is a phase of.
+///
+/// Re-exported rather than reached for directly: a consumer that sweeps its
+/// samples across the interval so a tail lands on the worst phase needs the
+/// same number this module's [`DETECTION_BOUND`] is built from, and only
+/// this crate is sanctioned to speak to `view-engine` on its behalf.
+pub use view_engine::heartbeat::HEARTBEAT_PROBE_INTERVAL;
 use view_engine::process::{Engine, EngineConfig};
 use view_engine::{DamagePump, OutboxStallWatch};
 

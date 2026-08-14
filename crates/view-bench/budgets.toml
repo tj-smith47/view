@@ -180,30 +180,44 @@ scenario = "picker"
 metric = "first_page_p99_ms"
 max = 100.0
 
-# 12000 is not a chosen round number: it is what the heartbeat's own two
-# constants add up to (`HEARTBEAT_WEDGE_THRESHOLD` 10 s plus one
-# `HEARTBEAT_PROBE_INTERVAL` 2 s), the same sum `view_oracle::hang`'s
-# DETECTION_BOUND computes for its assertions. A probe fired just before the
-# engine stops serving is the last one it can answer, so the verdict cannot
-# arrive sooner, and every wedge lands at some phase inside a probe
-# interval, so a p99 measured over fresh spawns sits near the sum rather
-# than under it. That is the point of the bound: it fails when detection
-# takes longer than the constants promise, not when it takes as long as they
-# say.
+# 12500 is not a chosen round number: it is what the heartbeat's own two
+# constants add up to, plus what reading the result costs. The sum is
+# `HEARTBEAT_WEDGE_THRESHOLD` (10 s) plus one `HEARTBEAT_PROBE_INTERVAL`
+# (2 s) -- 12000, the same `view_oracle::hang::DETECTION_BOUND` computes --
+# because a probe fired just before the engine stops serving is the last one
+# it can answer, so the verdict cannot arrive sooner. The remaining 500 ms
+# is that module's `OBSERVATION_SLACK`, the identical allowance its
+# `detection_deadline()` adds before the oracle asserts this same quantity,
+# and it is here for the same reason: the bound is reached exactly rather
+# than approached, so a comparison allowing nothing for the frame that
+# paints the banner and the poll that reads it fails honest measurements.
+# The scenario's samples cover the probe interval rather than repeating one
+# undocumented offset into it, so this p99 is the top of that cover -- one
+# stratum of the ceiling at most, and on the ceiling itself when a stratum
+# lands just past a tick. That is what makes the allowance load-bearing
+# rather than decorative. The bound still fails when detection takes longer
+# than the constants promise: 500 ms is a quarter of the smallest thing that
+# can go wrong here, which is a whole probe interval.
 #
 # The row's second metric, restart_rehydrate_p99_ms, deliberately has no
 # entry here. Nothing in the spec bounds how long a replacement engine may
 # take to bring a recovered buffer back, and a bound written from the first
 # recording would be a number computed from the measurement it bounds --
 # the defect that withdrew the input-path row's 232 and the first-paint
-# row's cold_ms bar. The recorded baseline is what gates it until a spec row
-# states a promise for it, which is exactly the state this file's header
-# calls a real one rather than an oversight.
+# row's cold_ms bar.
+#
+# What the recording buys is a seed, not a gate. Both of this row's metrics
+# are p99s, and a tail is recorded but never gated on a shared class
+# (`view_harness::baselines::gate_headroom`), so the ratchet leaves both
+# alone on dev-linux; the max below attests only where `is_controlled_class`
+# holds, which no class does yet. So nothing gates either metric today: the
+# recorded baseline is what a controlled class would ratchet from, and the
+# max is what it would attest against.
 [[budget]]
 spec_row = "Engine supervision: time to notice a read-side hang"
 scenario = "supervision"
 metric = "wedge_detect_p99_ms"
-max = 12000.0
+max = 12500.0
 
 # Metrics measured outside their budget today.
 #

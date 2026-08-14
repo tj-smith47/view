@@ -390,6 +390,25 @@ pub struct Engine {
     command_line: Vec<OsString>,
 }
 
+// A comment saying the feature must never be shipped is not a mechanism, so
+// an optimized build carrying it has to name the campaign it exists for:
+// `task heartbeat-ab` sets VIEW_BENCH_NO_HEARTBEAT for the two
+// counterfactual binaries it builds, and nothing else in the tree sets it,
+// so every other release build with the prober compiled out fails to
+// compile instead of becoming an artifact with no supervision in it.
+// `debug_assertions` is what separates the two cases: a debug build cannot
+// be mistaken for a shipped editor, so a lint or test leg may compile the
+// arm below with no ceremony, while the builds that could plausibly leave
+// the machine must be deliberate. `option_env!` is tracked by cargo, so
+// flipping the variable rebuilds rather than reusing a cached verdict.
+#[cfg(all(feature = "bench-no-heartbeat", not(debug_assertions)))]
+const _: () = assert!(
+    option_env!("VIEW_BENCH_NO_HEARTBEAT").is_some(),
+    "bench-no-heartbeat compiles out read-side hang supervision and must never ship: set \
+     VIEW_BENCH_NO_HEARTBEAT=1 in the build environment (as `task heartbeat-ab` does) if this \
+     optimized build really is the paired campaign's counterfactual arm"
+);
+
 /// Starts the one thread that owns the heartbeat cadence, ticking `prober`
 /// every [`crate::heartbeat::HEARTBEAT_PROBE_INTERVAL`] against `handle`.
 ///
@@ -412,11 +431,10 @@ pub struct Engine {
 /// cadence, not a paused copy of it, so the counterfactual is a compilation
 /// without the prober rather than one that still wakes on the interval.
 fn spawn_prober(prober: HeartbeatProber, handle: EngineHandle) {
+    // consumed rather than returned around: the arm below is compiled out
+    // in this configuration, so nothing follows this to skip
     #[cfg(feature = "bench-no-heartbeat")]
-    {
-        let _ = (prober, handle);
-        return;
-    }
+    let _ = (prober, handle);
     #[cfg(not(feature = "bench-no-heartbeat"))]
     std::thread::spawn(move || loop {
         std::thread::sleep(crate::heartbeat::HEARTBEAT_PROBE_INTERVAL);

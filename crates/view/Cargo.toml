@@ -20,7 +20,10 @@ bench-taps = ["view-engine/bench-taps", "view-tui/bench-taps"]
 # The paired campaign's counterfactual arm: an otherwise identical binary
 # whose engine runs no heartbeat prober, so the probe's cost on the echo and
 # input rows can be measured as a difference rather than argued about. Never
-# shipped -- see the view-engine feature it forwards to.
+# shipped, and unable to be built optimized without saying so -- see the
+# view-engine feature it forwards to for the guard that enforces it. A
+# binary that does carry it names itself in its own startup diagnostics
+# (src/main.rs `VERSION`).
 bench-no-heartbeat = ["view-engine/bench-no-heartbeat"]
 
 [dependencies]
