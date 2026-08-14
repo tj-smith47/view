@@ -82,3 +82,21 @@ exists to catch. `docs/compat.md` was also found stale in the tracked tree
 `task oracle -- page`. `docs/keymaps.md` cross-checks clean against every
 mapped key exercised live, and is gate-enforced by
 `mappings::tests::the_keys_page_renders_the_table_this_build_registers`.
+
+2026-08-14 — deliberately induced engine wedges, driven by hand in live
+tmux sessions (not the acceptance harness). On dev-linux: a typed
+60s-bound `:lua` hrtime spin against an idle session raised the read-side
+banner at 11.26s with no further input — the idle wake-gap fix doing its
+job in a real terminal. On the mbp (held awake with caffeinate): the same
+typed wedge raised the banner at ~11-12s, held it through the modal
+window, and the session came back clean when the spin released. Watching
+the readout tick by eye surfaced one wart worth keeping: after a
+swap-recovery restart, nvim's multi-line recovery report sits over the
+buffer top until a manual Ctrl-L — a real user would wonder whether the
+restart worked. Filed in known-bugs.md, treatment owed to the S5
+recovery-notice ruling. Also driven by hand: a transient `:echo` toast on
+an idle macOS session expires and repaints at exactly 4s with zero input.
+The macOS sessions only behave when the laptop is actually awake — the
+Deep-Idle/DarkWake cycling that corrupted weeks of remote evidence is a
+host property, and any future by-hand macOS dogfooding over ssh needs the
+caffeinate wrapper too.

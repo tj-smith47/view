@@ -11,7 +11,7 @@ spec; on conflict the spec wins and the plan gets fixed.
 | P3 Oracle + compat suite + bench CI gates | `2026-07-18-p3-oracle-bench-gates.md` (charter: `2026-07-18-p3-p6-charters.md`) | Complete (merged at `4b44791`) |
 | P4 Native features + theming | `2026-07-26-p4-native-features.md` (charter: `2026-07-18-p3-p6-charters.md`) | Reviewed (both adversarial rounds folded at `47e14bf`) |
 | P5 AI (ACP client, panel, diff review) | `2026-08-09-p5-ai.md` (charter: `2026-07-18-p3-p6-charters.md`; ACP v1 verified against live spec at plan time) | Drafted (adversarially reviewed, 3 rounds) |
-| P5.5 Invented capabilities — engine supervision | `2026-08-09-p5_5-supervision.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed; amended for media's `pause()`/`resume()` landing-order dependency) |
+| P5.5 Invented capabilities — engine supervision | `2026-08-09-p5_5-supervision.md` (charter: spec §9, §17 phase table) | Complete (T1–T7 landed through `ea81e66`, each adversarially reviewed; exit checklist closed 2026-08-14 — ci, oracle + hang schedules, acceptance script, and pristine perf-audit all green, evidence cited per checkbox in the plan) |
 | P5.5 Invented capabilities — remote editing (incl. speculative echo) | `2026-08-09-p5_5-remote.md` (charter: spec §9, §5.6, §17 phase table) | Drafted (adversarially reviewed, 3 rounds) |
 | P5.5 Invented capabilities — session DVR | `2026-08-09-p5_5-dvr.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed, 4 rounds + coordinator round 5) |
 | P5.5 Invented capabilities — key introspector | `2026-08-09-p5_5-introspector.md` (charter: spec §9, §17 phase table) | Drafted (adversarially reviewed, 1 round) |

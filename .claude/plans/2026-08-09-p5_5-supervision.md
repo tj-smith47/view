@@ -988,14 +988,37 @@ rule.
 
 ## P5.5-Supervision Exit Checklist
 
-- [ ] `task ci` green (fmt-check, lint, audit, style, loc, test).
-- [ ] `task oracle` green, including Task 5's reproduced hang schedules
-      (both wedge kinds).
-- [ ] `task perf-audit` green: the two new supervision rows recorded and
+- [x] `task ci` green (fmt-check, lint, audit, style, loc, test) — green
+      at `ea81e66` and again at `1a85c61` via the close-out gate chain
+      (2026-08-14, dev-linux; also green on mbp macOS at the 29b-fix
+      tip). The gate itself caught one env-sensitive test at close: the
+      tier smoke test assumed COLORTERM absent instead of forcing it,
+      fixed in `1a85c61`.
+- [x] `task oracle` green, including Task 5's reproduced hang schedules
+      (both wedge kinds) — compat corpus ORACLE_EXIT=0 and
+      `task oracle -- hang` HANG_EXIT=0 (2026-08-14): read-side-wedge
+      Wedged @12.0s, dead-connection Dead @638µs with replacement
+      answering in 12.3ms, blocked-on-key control Alive @12.5s.
+- [x] `task perf-audit` green: the two new supervision rows recorded and
       gated; every pre-existing §3.1 row unchanged (Task 6's paired
-      campaign cited with its actual numbers).
-- [ ] Task 7's acceptance script run and its output captured as evidence
-      (kill/hang under each detection path, recovery observed).
+      campaign cited with its actual numbers) — pristine run 2026-08-14
+      at `ea81e66` on quiet dev-linux (cfgd session paused, load 0.12 at
+      launch): gate OK, 14 cells within recorded bars, 0 shortfalls;
+      supervision `wedge_detect_p99_ms 11613.302`,
+      `restart_rehydrate_p99_ms 26.059`; heartbeat A/B campaign
+      armed/absent 0.9736 (echo ratio_p50) and 0.9001 (key_to_rpc_p99),
+      prober cost below this class's resolution (floors 1.06/1.15);
+      bench-micro within noise. An earlier full-matrix picker
+      `first_page_p50 4.347 > bar 3.674` was classified as concurrent
+      cfgd-build contamination (three independent green reads: 2.861
+      solo, 2.136 chained, 2.258 pristine).
+- [x] Task 7's acceptance script run and its output captured as evidence
+      (kill/hang under each detection path, recovery observed) — landed
+      `66808b8` (`scripts/acceptance/supervision.sh`, `task acceptance`);
+      two green runs 2026-08-14. Honest deviation recorded: `<C-c>` is
+      asserted unanswered against a synchronous Lua wedge (it provably
+      never reaches that loop, `supervision_live.rs:150`); interrupt
+      recovery is proven on the Vimscript wedge instead.
 - [x] Spec-amendment check: this plan touches no owed spec amendment.
       Verified against `invention-research.md:§1.4,§6.2` — spec:352-355
       already correctly states remote editing (not supervision) as v0.1
@@ -1003,13 +1026,21 @@ rule.
       research package is the media-handoff row at `spec:629`, out of
       this plan's scope. No spec edit ships with this plan -- that
       cross-plan amendment satisfied by `a9f2c98`.
-- [ ] No "post-v0.1" language anywhere in this plan's shipped code,
-      comments, or commit messages (v0.1 CORE framing, 2026-08-05 ruling).
-- [ ] `.claude/known-bugs.md` drained, or every remaining item carrying
-      explicit user approval.
-- [ ] Dogfood note appended to `.claude/dogfood-journal.md` — a real
-      wedge/crash encountered (or deliberately induced) during daily use,
-      not only the scripted acceptance run.
-- [ ] `.claude/plans/INDEX.md` gains the P5.5-supervision row (this
+- [x] No "post-v0.1" language anywhere in this plan's shipped code,
+      comments, or commit messages (v0.1 CORE framing, 2026-08-05 ruling)
+      — recon 2026-08-14 clean: the only "post-v0.1" hits in the tree are
+      two legitimate spec/charter references outside this plan's shipped
+      surface.
+- [x] `.claude/known-bugs.md` drained, or every remaining item carrying
+      explicit user approval — two open items remain, both with ruling
+      authority: the unbracketed-paste key-backlog spin defers under the
+      user's 2026-08-10 perf-revisit ruling (first exhibit for the
+      root-cause session); the post-restart swap-recovery report box is
+      owned by the S5 recovery-notice pitch awaiting the user's ruling.
+- [x] Dogfood note appended to `.claude/dogfood-journal.md` — 2026-08-14
+      entry: hand-driven wedges on both platforms, the post-restart
+      report-box wart, idle toast expiry, the mbp caffeinate carrier fact.
+- [x] `.claude/plans/INDEX.md` gains the P5.5-supervision row (this
       draft's HTML-comment header above) when the plan is moved under
-      `.claude/plans/` — resolves `invention-research.md:§6.4`.
+      `.claude/plans/` — row present since the plan landed; status text
+      updated at checklist close.
