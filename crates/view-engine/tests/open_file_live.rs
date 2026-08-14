@@ -43,9 +43,12 @@ fn open_file_opens_hostile_character_filenames_without_misparsing_them() {
         "both space and % and # and +weird.txt",
     ];
     // `|` and `\` cannot exist in Windows filenames, so these two on-disk
-    // fixtures are unix-only -- the property under test is not
-    #[cfg(unix)]
-    cases.extend(["a|b.txt", "back\\slash.txt"]);
+    // fixtures are unix-only -- the property under test is not. `cfg!`
+    // rather than a `#[cfg(unix)]` extend so `mut` stays used on every
+    // platform (Windows clippy fails the build on `unused_mut` otherwise).
+    if cfg!(unix) {
+        cases.extend(["a|b.txt", "back\\slash.txt"]);
+    }
 
     let mut engine = Engine::spawn(EngineConfig::isolated()).expect("spawn engine");
     let (tx, rx) = mpsc::sync_channel(64);
