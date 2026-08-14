@@ -182,6 +182,15 @@ enum Command {
     /// rendering and staleness logic; this arm only reads inputs and
     /// writes the file).
     Page,
+    /// Drives `view_oracle::hang`'s reproduced hang schedules against a real
+    /// pinned engine: a read-side wedge, a killed connection, and the
+    /// key-wait control the first two are only meaningful against.
+    Hang {
+        /// One schedule by name (`read-side-wedge`, `dead-connection`,
+        /// `blocked-on-key`) instead of all three.
+        #[arg(long)]
+        schedule: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -194,6 +203,13 @@ fn main() -> Result<()> {
         Some(Command::Fuzz { seed, rounds, keys }) => fuzz_command(seed, rounds, keys),
         Some(Command::Compat { path }) => compat_command(&path),
         Some(Command::Page) => page_command(),
+        Some(Command::Hang { schedule }) => {
+            if view_harness::hang::run(schedule.as_deref())? {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
         None => run_command(&cli.path),
     }
 }

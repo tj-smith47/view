@@ -16,6 +16,7 @@ pub mod budgets;
 pub mod corpus;
 pub mod fixture;
 pub mod fuzz;
+pub mod hang;
 pub mod page;
 pub mod results;
 pub mod scenario;

@@ -23,6 +23,10 @@
 //!   `Model`/`Grid`. Not another fidelity tier: a differential second
 //!   opinion at the same tier as `EngineSession`, for comparing the two
 //!   appliers against each other rather than against nvim's own state.
+//! - [`hang`]: the adversarial tier. Not a fidelity level at all: a real
+//!   engine deliberately stopped from serving, on a schedule, so the
+//!   supervision stack's verdicts, escalation and recovery are measured
+//!   against a failure that actually happened rather than a simulated one.
 //! - [`parity`]: the comparison layer a corpus runner drives -- state
 //!   probes ([`StateSnapshot`]/[`snapshot`]) plus a masked row-by-row grid
 //!   diff ([`compare`]/[`masked_rows`]) between any two [`Probe`] sources,
@@ -37,6 +41,7 @@
 
 mod attr;
 pub mod compat;
+pub mod hang;
 mod minimize;
 mod parity;
 pub mod pty;
