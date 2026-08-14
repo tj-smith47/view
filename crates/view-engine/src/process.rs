@@ -748,8 +748,8 @@ impl Drop for Engine {
     }
 }
 
-/// Answers nvim's swap-file prompt with "recover", on every spawn, before
-/// any file is opened.
+/// Answers an otherwise unanswered swap-file prompt with "recover", on every
+/// spawn, before any file is opened.
 ///
 /// Finding a swap file is a question nvim asks its user
 /// (`[O]pen/[E]dit/[R]ecover/[D]elete/[Q]uit`) and then blocks its own main
@@ -761,23 +761,55 @@ impl Drop for Engine {
 /// behalf (`:help SwapExists`), and `r` is the answer that keeps the work --
 /// recover from the swap, the same outcome [`RECOVERY_ARG`] gives a restart.
 ///
-/// A startup argument rather than an `nvim_exec_lua`/`nvim_command`
-/// registration over the RPC channel, measured against the pinned engine
-/// rather than assumed. An autocommand registered over the channel after the
-/// handshake and before `nvim_ui_attach` does fire: it runs, and
-/// `v:swapchoice` reads back `r` inside it from both Lua and Vimscript. nvim
-/// still shows `E325` and parks the session on the dialog, then applies the
-/// dialog's own default, which opens the file from disk and drops everything
-/// the swap held. The identical autocommand given as `--cmd` recovers the
-/// swap and leaves an ordinary session (mode `n`, nothing blocking), which is
-/// also what a real terminal nvim does with it.
+/// # Only the swap nobody still owns
 ///
-/// `g:view_swap_recovered` counts the prompts answered this way. Answering is
-/// what erases every other trace that one was asked: no `E325` notice, no
+/// The answer is given only when `v:swapchoice` is still empty, which is the
+/// difference between recovering a dead session's work and stealing a live
+/// one's. nvim ships its own `SwapExists` handler in the `nvim.swapfile`
+/// group, it runs first, and against the pinned engine it decides the two
+/// cases apart: a swap whose owning process is gone reads back
+/// `swapinfo().pid == 0`, so nvim leaves `v:swapchoice` empty for a human to
+/// answer -- the crash case, and the one this recovers. A swap whose owner is
+/// still running is answered `e` with a `W325` warning, and a second view
+/// started on that file must keep exactly that behavior: two sessions
+/// recovering one swap end holding divergent unsaved copies of the file, with
+/// nothing on screen to say so.
+///
+/// # In a group of its own
+///
+/// nvim passes `-u` through verbatim, so a migrated vimrc runs whatever it
+/// already said, and a bare `autocmd!` at the top of one is a common way for
+/// a config to claim the autocommands from there on. Ungrouped, that line
+/// deletes this guard and silently reinstates both hangs. The named group is what survives
+/// it, the same hardening nvim's own defaults use for the same reason.
+///
+/// # Why a startup argument
+///
+/// Measured against the pinned engine rather than assumed. An autocommand
+/// registered over the RPC channel after the handshake and before
+/// `nvim_ui_attach` does fire: it runs, and `v:swapchoice` reads back `r`
+/// inside it from both Lua and Vimscript. nvim still shows `E325` and parks
+/// the session on the dialog, then applies the dialog's own default, which
+/// opens the file from disk and drops everything the swap held. The identical
+/// autocommand given as `--cmd` recovers the swap and leaves an ordinary
+/// session (mode `n`, nothing blocking), which is also what a real terminal
+/// nvim does with it.
+///
+/// `g:view_swap_recovered` counts the prompts answered here, and only those:
+/// a prompt nvim answered itself leaves the counter where it was. Answering
+/// is what erases every other trace that one was asked: no `E325` notice, no
 /// message to the UI, and a recovered buffer that looks exactly like a buffer
 /// whose file simply held that text.
-const SWAP_RECOVERY_CMD: &str = "autocmd SwapExists * let v:swapchoice = 'r' | \
-     let g:view_swap_recovered = get(g:, 'view_swap_recovered', 0) + 1";
+const SWAP_RECOVERY_CMD: &str = "lua vim.api.nvim_create_autocmd('SwapExists', { \
+     group = vim.api.nvim_create_augroup('view_swap_recovery', { clear = true }), \
+     pattern = '*', \
+     desc = 'Recover a swap file no live process still owns', \
+     callback = function() \
+     if vim.v.swapchoice ~= '' then return end \
+     vim.v.swapchoice = 'r' \
+     vim.g.view_swap_recovered = (vim.g.view_swap_recovered or 0) + 1 \
+     end, \
+     })";
 
 /// nvim's own crash-recovery flag: the replacement engine opens each file it
 /// was given from that file's swap file instead of from disk.
@@ -907,6 +939,18 @@ fn takes_no_value(arg: &str) -> bool {
 /// Builds the `nvim --embed` command `cfg` describes, applying
 /// [`EngineConfig::env_plan`] entry by entry so the environment the child
 /// gets is the plan a caller can inspect, never a second derivation of it.
+///
+/// # The one `--cmd` this spends
+///
+/// [`SWAP_RECOVERY_CMD`] rides every spawn as a `--cmd`, and nvim caps how
+/// many of those it accepts. Measured against the pinned engine (v0.12.4):
+/// `--cmd` and `-c`/`+cmd` are budgeted separately at ten each, so a config
+/// whose [`EngineConfig::extra_args`] carry ten `-c` arguments is unaffected
+/// and one carrying ten `--cmd` arguments is one over. Going over is a hard
+/// startup failure, never a dropped argument: nvim prints `Too many
+/// "+command", "-c command" or "--cmd command" arguments` and exits 1 before
+/// the RPC channel exists, which a caller sees as a handshake that never
+/// happens. Nine `--cmd` arguments are what a config may still spend.
 fn build_command(cfg: &EngineConfig) -> Command {
     let mut command = Command::new(&cfg.nvim_bin);
     // ahead of `extra_args`, which is where a caller's file arguments live:
@@ -1627,6 +1671,40 @@ mod tests {
             spawned,
             args(&["--embed", "--cmd", SWAP_RECOVERY_CMD, "notes.md"]),
             "the swap answer must ride every spawn, ahead of its files"
+        );
+    }
+
+    /// The two properties a live test proves end to end, pinned here as text
+    /// as well, since either can be dropped by an edit that still leaves the
+    /// autocommand firing and every command line unchanged: the group that
+    /// survives a vimrc's `autocmd!`, and the emptiness check that leaves a
+    /// live owner's swap to nvim.
+    #[test]
+    fn the_swap_answer_is_grouped_and_answers_only_an_unclaimed_prompt() {
+        assert!(
+            SWAP_RECOVERY_CMD.contains("nvim_create_augroup('view_swap_recovery'"),
+            "an ungrouped autocommand is deleted by a vimrc's bare autocmd!: \
+             {SWAP_RECOVERY_CMD}"
+        );
+        assert!(
+            SWAP_RECOVERY_CMD.contains("if vim.v.swapchoice ~= '' then return end"),
+            "an unconditional answer overrules nvim's own verdict on a swap \
+             a live process still owns: {SWAP_RECOVERY_CMD}"
+        );
+    }
+
+    /// One `--cmd`, never two: nvim caps them at ten (see [`build_command`]),
+    /// and a second one spent here would come out of the caller's own budget.
+    #[test]
+    fn a_spawn_spends_exactly_one_cmd_argument() {
+        let command = build_command(&EngineConfig::isolated());
+        assert_eq!(
+            command
+                .get_args()
+                .filter(|arg| *arg == std::ffi::OsStr::new("--cmd"))
+                .count(),
+            1,
+            "the swap answer must cost the caller one --cmd slot, no more"
         );
     }
 }

@@ -121,17 +121,24 @@ fn swap_events(engine: &Engine) -> u64 {
         .expect("the swap-prompt counter is a number")
 }
 
-/// Whether the engine's session carries the `SwapExists` autocommand at all.
+/// Whether the engine's session carries view's own `SwapExists` guard.
 ///
 /// What separates "met no swap prompt" from "had nothing installed to meet
 /// one with": a count of zero answered prompts means the first only when the
 /// guard that would have answered them is live.
+///
+/// Asked of view's group by name rather than of the event. nvim ships a
+/// `SwapExists` autocommand of its own (`nvim.swapfile`), so a bare
+/// `exists('#SwapExists')` answers 1 on a session that carries no view guard
+/// at all and proves nothing about the counter beside it.
 fn swap_guard_live(engine: &Engine) -> bool {
     engine
         .handle
         .request_timeout(
             "nvim_eval",
-            vec![rmpv::Value::from("exists('#SwapExists')")],
+            vec![rmpv::Value::from(
+                "exists('#view_swap_recovery#SwapExists')",
+            )],
             Duration::from_secs(5),
         )
         .expect("a live engine answers nvim_eval")
@@ -330,6 +337,119 @@ fn a_session_started_over_a_crashed_ones_swap_recovers_without_asking() {
         swap_events(&engine),
         1,
         "the swap file this test left was not met as a SwapExists event"
+    );
+}
+
+/// The bound on whose swap may be recovered: an owner that is still editing.
+/// Recovering there would hand a second session the first one's unsaved work
+/// while the first goes on editing it, and the two would part with divergent
+/// copies of one file and nothing on screen to say either happened. nvim
+/// decides that case itself (`W325`, edit the file as it is on disk), and a
+/// guard that answered anyway would overrule it.
+#[test]
+fn a_session_started_over_a_live_engines_swap_leaves_the_owner_its_work() {
+    let dir = scratch("live-owner-swap");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+
+    let owner = Engine::spawn(editing(&dir, &file)).unwrap();
+    // --embed holds startup until a UI attaches, so the file is not even
+    // loaded (and has no swap file) before this
+    owner.handle.ui_attach(80, 24).unwrap();
+    write_unsaved_edit(&owner, "the owner is still editing this");
+    assert!(
+        !swap_files(&dir).is_empty(),
+        "the owner flushed no swap file, so the second session below would \
+         meet no prompt at all"
+    );
+
+    let second = Engine::spawn(editing(&dir, &file)).unwrap();
+    second.handle.ui_attach(80, 24).unwrap();
+
+    assert_eq!(
+        first_line(&second),
+        "what is on disk",
+        "the second session recovered a swap its owner is still editing"
+    );
+    assert!(
+        swap_guard_live(&second),
+        "the session carries no SwapExists guard, so a count of zero \
+         answered prompts says nothing"
+    );
+    assert_eq!(
+        swap_events(&second),
+        0,
+        "view answered a prompt nvim had already decided for a live owner"
+    );
+    assert!(
+        !blocking(&second),
+        "the second engine is parked at a swap prompt nobody can answer"
+    );
+    assert_eq!(
+        first_line(&owner),
+        "the owner is still editing this",
+        "the owner lost the edit it never wrote"
+    );
+}
+
+/// The migrated vimrc nvim passes through verbatim, and the one line in it
+/// that reaches this guard: a bare `autocmd!` claims the autocommands from
+/// there on, and would delete an ungrouped guard along with everything else.
+/// The group is what survives it, so a recovery that would have hung the
+/// session still happens under a config that asked for no autocommands at
+/// all.
+#[test]
+fn a_vimrc_clearing_every_autocommand_leaves_the_swap_guard_standing() {
+    let dir = scratch("vimrc-clears-autocmds");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+    let vimrc = dir.join("init.vim");
+    // the second line is what proves `-u` was honoured at all: a vimrc nvim
+    // never sourced would leave the guard standing for the wrong reason
+    std::fs::write(&vimrc, "autocmd!\nlet g:vimrc_ran = 1\n").unwrap();
+    crash_with_unsaved_edit(&dir, &file, "never written to disk");
+
+    let engine = Engine::spawn(
+        session(&dir)
+            .with_arg("-u")
+            .with_arg(&vimrc)
+            .with_arg(&file),
+    )
+    .unwrap();
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    let sourced = engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from("get(g:, 'vimrc_ran', 0)")],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval")
+        .as_u64();
+    assert_eq!(
+        sourced,
+        Some(1),
+        "nvim never sourced the vimrc, so this test cleared no autocommands"
+    );
+    assert!(
+        swap_guard_live(&engine),
+        "the vimrc's autocmd! deleted the swap guard"
+    );
+    assert_eq!(
+        first_line(&engine),
+        "never written to disk",
+        "the session came up on the file as it is on disk, discarding what \
+         the swap held"
+    );
+    assert_eq!(
+        swap_events(&engine),
+        1,
+        "the swap file this test left was not met as a SwapExists event"
+    );
+    assert!(
+        !blocking(&engine),
+        "the engine is parked at a swap prompt nobody can answer"
     );
 }
 
