@@ -911,7 +911,7 @@ own gate) become measured, gated facts rather than design intentions.
 spec_row = "Engine supervision: time to notice a read-side hang"
 scenario = "supervision"
 metric = "wedge_detect_p99_ms"
-max = 12000.0   # HEARTBEAT_WEDGE_THRESHOLD (10s) + HEARTBEAT_PROBE_INTERVAL (2s) ceiling
+max = 12500.0   # landed: detection bound (10s threshold + 2s interval) + 500ms observation slack, per the oracle detection_deadline() arithmetic (review W1)
 
 [[budget]]
 scenario = "supervision"
