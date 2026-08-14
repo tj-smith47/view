@@ -154,6 +154,20 @@ fn set_cloexec_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
     Ok(rustix::fs::fcntl_setfl(fd, status_flags)?)
 }
 
+/// How many zero-timeout crossterm polls one
+/// [`InputSource::has_buffered`] answer may spend before it gives up.
+///
+/// crossterm's poll returns as soon as it has parsed one event, leaving the
+/// rest of the same read in its own queue, and reports nothing at all for an
+/// event its public filter rejects. Three such events exist -- a cursor
+/// position report, the keyboard-enhancement flags, and the primary device
+/// attributes, every one of them a terminal's answer to a query -- so at
+/// most three can sit ahead of a keystroke and a fourth poll always reaches
+/// it. The bound is what keeps this off the shape where an endlessly
+/// answering source could hold the loop here.
+#[cfg(unix)]
+const BUFFERED_POLL_LIMIT: usize = 4;
+
 /// The pollable input handle: the terminal read fd plus a SIGWINCH
 /// self-pipe, both exposed as borrowed fds for the runtime loop's
 /// readiness poll, with all reading and decoding kept behind
@@ -248,9 +262,28 @@ impl InputSource {
     /// accounts for. An error reads as "nothing to hand over" -- liveness is
     /// [`drain`](Self::drain)'s call to make, and it makes it as soon as the
     /// fd itself reports the hangup.
+    ///
+    /// One such poll answers for at most one newly parsed event, so a reply
+    /// crossterm parses but never hands out -- a terminal answering a
+    /// capability query after the prober that asked has stopped listening --
+    /// spends that answer while the keys parsed behind it, out of the very
+    /// same read, stay invisible. Repeating the poll walks past those
+    /// replies one at a time, up to `BUFFERED_POLL_LIMIT`, which is what
+    /// makes the answer describe the whole buffer rather than its first
+    /// entry.
     #[must_use]
     pub fn has_buffered(&self) -> bool {
-        !self.dead && crossterm::event::poll(Duration::ZERO).unwrap_or(false)
+        if self.dead {
+            return false;
+        }
+        for _ in 0..BUFFERED_POLL_LIMIT {
+            match crossterm::event::poll(Duration::ZERO) {
+                Ok(true) => return true,
+                Ok(false) => {}
+                Err(_) => return false,
+            }
+        }
+        false
     }
 
     /// Drains everything ready without blocking: empties the SIGWINCH

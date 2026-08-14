@@ -23,18 +23,26 @@ use view_core::theme::Theme;
 use view_engine::process::EngineConfig;
 use view_tui::terminal::Term;
 
-/// What this build calls itself in its own startup diagnostics.
+/// What this build calls itself, in `--version` and in its own startup
+/// diagnostics.
 ///
 /// Plain for the shipped editor; suffixed for the paired campaign's
 /// counterfactual arm, whose engine runs no heartbeat prober and therefore
 /// notices no read-side hang. The compile guard in `view-engine` is what
 /// keeps such a build from being made by accident; this is what makes one
-/// that exists say so wherever it is read from.
+/// that exists say so wherever it is read from -- including from a shell,
+/// without a session to start or a log to enable.
 const VERSION: &str = if cfg!(feature = "bench-no-heartbeat") {
     concat!(env!("CARGO_PKG_VERSION"), "+bench-no-heartbeat")
 } else {
     env!("CARGO_PKG_VERSION")
 };
+
+/// What a session with no terminal on any descriptor tells the log and the
+/// user, in one place so the two cannot come to say different things.
+#[cfg(unix)]
+const NO_TERMINAL_NOTICE: &str = "no terminal on stdin, stdout, stderr or /dev/tty: \
+     this session takes no input; start view with a terminal on one of them";
 
 /// `--tier`'s value vocabulary. A separate `clap`-derived enum rather than
 /// deriving `ValueEnum` on `view_core::model::Tier` directly: `clap` is a
@@ -61,6 +69,7 @@ impl From<TierArg> for Tier {
 #[derive(Parser)]
 #[command(
     name = "view",
+    version = VERSION,
     about = "A modern terminal editor powered by Neovim",
     after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, ...) \
                   must appear before the first argument meant for nvim: once a token does \
@@ -311,10 +320,12 @@ fn main() -> Result<()> {
     // `InputSource` each go looking for a terminal of their own
     #[cfg(unix)]
     if !view_tui::input::adopt_terminal_stdin() {
-        vlog::log(
-            "startup",
-            "no terminal on stdin, stdout, stderr or /dev/tty: this session takes no input",
-        );
+        vlog::log("startup", NO_TERMINAL_NOTICE);
+        // also to stderr, and before the alternate screen exists: a session
+        // shaped this way has no terminal to read the log on, and stderr is
+        // exactly where its redirect puts the one file the user can still
+        // read afterwards
+        eprintln!("view: {NO_TERMINAL_NOTICE}");
     }
 
     let mut term =

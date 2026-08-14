@@ -68,6 +68,21 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # oracle's differential-testing machinery.
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
 
+# tests/input_buffered_reply.rs owns a pty of its own and puts it on
+# descriptor 0, so `has_buffered` can be asked about a real terminal
+# holding a real crossterm parse. `pty` and `event` are test-only feature
+# edges on the rustix dependency this crate already declares above: cargo
+# unions dev-dependency features only when building tests, so no shipping
+# build gains either module.
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { version = "1", default-features = false, features = [
+    "std",
+    "pty",
+    "event",
+    "termios",
+    "stdio",
+] }
+
 [[bench]]
 name = "paint_frame"
 harness = false

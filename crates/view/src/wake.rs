@@ -230,42 +230,6 @@ pub struct Readiness {
     pub timed_out: bool,
 }
 
-/// Polls the terminal's fds and the wake pipe for readiness, sleeping up
-/// to `timeout` (`None` sleeps until something is ready). A readiness
-/// poll, not a read: every byte the kernel holds stays where it is until
-/// the owning side drains it -- and not an RPC await: no nvim reply is
-/// ever waited on here, only readiness, so the paint loop's
-/// never-awaits-RPC rule holds by construction.
-///
-/// Readiness describes the whole input state, not just the descriptor's
-/// share of it: the terminal handle is asked for an already-decoded event
-/// (`InputSource::has_buffered`) before this ever sleeps. Bytes crossterm
-/// has already lifted out of the kernel queue produce no fd readiness of
-/// their own, so a sleep entered without that question is a sleep on a
-/// terminal whose input has been read but never delivered -- and nothing
-/// short of a further, unrelated keystroke would end it.
-///
-/// A terminal handle already marked dead keeps its fds out of the set
-/// (a hung-up descriptor reports ready forever); the wake pipe alone then
-/// still delivers every channel wakeup. `EINTR` retries internally rather
-/// than surfacing as a phantom wake or error.
-///
-/// `POLLNVAL` is the one revent that is not a fact about the terminal at
-/// all: it says `poll(2)` cannot describe this descriptor, which macOS
-/// answers for a `/dev/tty` fallback fd whose terminal is otherwise
-/// perfectly alive. Reading it as input-ready would drain a queue nothing
-/// put bytes in; reading it as not-ready would spin, since it is
-/// level-triggered and returns instantly on every call. The handle is
-/// marked lost instead, which is the only answer that terminates -- and
-/// `view_tui::input::adopt_terminal_stdin` is what keeps a descriptor that
-/// answers this way out of the set to begin with. `POLLHUP` and `POLLERR`
-/// keep reporting ready: those do describe the terminal, and the drain is
-/// where this session decides a terminal has ended.
-///
-/// # Errors
-///
-/// Returns the underlying `std::io::Error` for any poll failure other
-/// than `EINTR`.
 /// What the terminal fds' revents say, split into the two facts the caller
 /// acts on separately.
 #[cfg(unix)]
@@ -305,6 +269,42 @@ fn classify_terminal_revents(
     verdict
 }
 
+/// Polls the terminal's fds and the wake pipe for readiness, sleeping up
+/// to `timeout` (`None` sleeps until something is ready). A readiness
+/// poll, not a read: every byte the kernel holds stays where it is until
+/// the owning side drains it -- and not an RPC await: no nvim reply is
+/// ever waited on here, only readiness, so the paint loop's
+/// never-awaits-RPC rule holds by construction.
+///
+/// Readiness describes the whole input state, not just the descriptor's
+/// share of it: the terminal handle is asked for an already-decoded event
+/// (`InputSource::has_buffered`) before this ever sleeps. Bytes crossterm
+/// has already lifted out of the kernel queue produce no fd readiness of
+/// their own, so a sleep entered without that question is a sleep on a
+/// terminal whose input has been read but never delivered -- and nothing
+/// short of a further, unrelated keystroke would end it.
+///
+/// A terminal handle already marked dead keeps its fds out of the set
+/// (a hung-up descriptor reports ready forever); the wake pipe alone then
+/// still delivers every channel wakeup. `EINTR` retries internally rather
+/// than surfacing as a phantom wake or error.
+///
+/// `POLLNVAL` is the one revent that is not a fact about the terminal at
+/// all: it says `poll(2)` cannot describe this descriptor, which macOS
+/// answers for a `/dev/tty` fallback fd whose terminal is otherwise
+/// perfectly alive. Reading it as input-ready would drain a queue nothing
+/// put bytes in; reading it as not-ready would spin, since it is
+/// level-triggered and returns instantly on every call. The handle is
+/// marked lost instead, which is the only answer that terminates -- and
+/// `view_tui::input::adopt_terminal_stdin` is what keeps a descriptor that
+/// answers this way out of the set to begin with. `POLLHUP` and `POLLERR`
+/// keep reporting ready: those do describe the terminal, and the drain is
+/// where this session decides a terminal has ended.
+///
+/// # Errors
+///
+/// Returns the underlying `std::io::Error` for any poll failure other
+/// than `EINTR`.
 #[cfg(unix)]
 pub fn poll_readiness(
     input: &mut view_tui::input::InputSource,
