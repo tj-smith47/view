@@ -38,11 +38,27 @@ pub fn spawn_with_pump(
     cfg: EngineConfig,
     channel_capacity: usize,
 ) -> (Engine, DamagePump, Receiver<Msg>) {
+    let (engine, pump, _tx, rx) = spawn_with_wired_pump(cfg, channel_capacity);
+    (engine, pump, rx)
+}
+
+/// [`spawn_with_pump`] with the sending half handed back as well, for a
+/// caller that needs to put its own message into the loop's queue --
+/// `supervision_live`'s watchdog, whose whole job is to end a wait that a
+/// wedged engine would otherwise leave running forever. Every clone of that
+/// sender is a clone of the one the engine's own pump writes through, so a
+/// watchdog message arrives on the same channel and in the same order as
+/// engine traffic rather than through a second wakeup path the runtime loop
+/// does not have.
+pub fn spawn_with_wired_pump(
+    cfg: EngineConfig,
+    channel_capacity: usize,
+) -> (Engine, DamagePump, SyncSender<Msg>, Receiver<Msg>) {
     let mut engine = Engine::spawn(cfg).unwrap();
     let (tx, rx): (SyncSender<Msg>, Receiver<Msg>) =
         std::sync::mpsc::sync_channel(channel_capacity);
-    let (pump, _cutover) = engine.start_pump(tx);
-    (engine, pump, rx)
+    let (pump, _cutover) = engine.start_pump(tx.clone());
+    (engine, pump, tx, rx)
 }
 
 /// Spawns `cfg`'s engine with its pump drained on a background thread for

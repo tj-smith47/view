@@ -688,10 +688,19 @@ fn a_restart_never_inherits_the_dead_engines_wedge() {
         view_engine::Liveness::Alive,
         "the restarted engine inherited its predecessor's wedge"
     );
-    assert_eq!(
-        engine.heartbeat.poll_deadline(),
-        None,
-        "the restarted engine owes an answer to a probe it was never sent"
+    // an armed watch always names a deadline, so the reading that separates
+    // a fresh cadence from an inherited wedge is which one: nothing
+    // outstanding arms the whole prospective window (one probe interval
+    // before the next probe is even owed, plus the threshold it would then
+    // have to go unanswered for), while a carried-over wedge would arm the
+    // threshold's own look-again and nothing longer
+    let armed = engine
+        .heartbeat
+        .poll_deadline()
+        .expect("an armed watch owes the loop a wakeup");
+    assert!(
+        armed > view_engine::HEARTBEAT_WEDGE_THRESHOLD,
+        "the restarted engine owes an answer to a probe it was never sent: {armed:?}"
     );
 }
 

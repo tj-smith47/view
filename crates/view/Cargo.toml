@@ -88,3 +88,10 @@ view-engine = { version = "0.0.1", path = "../view-engine", features = [
 # this crate's own unit tests (src/native.rs) and its integration tests
 # (tests/cli_live.rs, tests/supersede_live.rs).
 view-test-support = { version = "0.0.1", path = "../view-test-support" }
+# The supervision bounds a live wedge is asserted against
+# (tests/supervision_live.rs). view-oracle owns `DETECTION_BOUND` and the
+# host-scaling slack around it precisely so every consumer asserts the same
+# number; a second derivation of "one probe interval plus one threshold"
+# here would agree with the oracle's corpus only until one of the two moved.
+# A dev edge only: nothing in the shipped binary depends on the oracle.
+view-oracle = { version = "0.0.1", path = "../view-oracle" }

@@ -17,6 +17,8 @@ use view_core::model::Model;
 use view_core::msg::{Effect, Key, Msg, RpcCall};
 use view_core::native::supervision::{WedgeKind, ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION};
 use view_core::update::update;
+use view_engine::{wedge_kind, OutboxStallWatch};
+use view_oracle::hang::detection_deadline;
 
 /// How long the engine is told to stay busy for. Far longer than any budget
 /// below, so a probe that answers cannot be the busy work finishing on its
@@ -27,6 +29,16 @@ const BUSY_SECS: u64 = 60;
 /// interrupted engine answers in about a millisecond; this is slack for a
 /// loaded box, still an order of magnitude short of `BUSY_SECS`.
 const INTERRUPTED: Duration = Duration::from_secs(5);
+
+/// How long past the detection bound the idle wait is left running before a
+/// message is put on its channel to end it.
+///
+/// Not slack on the bound and never a wakeup the loop may rely on: it exists
+/// so a wait that the watch failed to bound ends with a verdict about that
+/// failure instead of hanging the test binary. Wide enough that a host slow
+/// enough to need it has already failed the assertion it would otherwise
+/// hide.
+const WATCHDOG_MARGIN: Duration = Duration::from_secs(5);
 
 /// How long the engine is given to get inside the loop it was told to run.
 /// A budget, not a wait: the wait below ends the moment the engine actually
@@ -44,6 +56,33 @@ const ENTERS_LOOP: Duration = Duration::from_secs(30);
 fn busy_engine(label: &str, busy: &str) -> view_engine::process::Engine {
     let dir = common::fixture(&format!("supervision-live-{label}"), "");
     let engine = common::spawn_with_drained_pump(common::isolated_reading(&dir.join("init.lua")));
+    put_to_work(label, &engine, busy);
+    engine
+}
+
+/// [`busy_engine`] with the pump's channel handed to the caller instead of
+/// to a background drain, plus a sender for putting a message of its own on
+/// it. The wait a wedge is timed against is a wait on this channel, so a
+/// caller proving something about that wait needs the channel itself rather
+/// than only the engine behind it.
+fn busy_session(
+    label: &str,
+    busy: &str,
+) -> (
+    view_engine::process::Engine,
+    std::sync::mpsc::SyncSender<Msg>,
+    std::sync::mpsc::Receiver<Msg>,
+) {
+    let dir = common::fixture(&format!("supervision-live-{label}"), "");
+    let (engine, _pump, tx, rx) =
+        common::spawn_with_wired_pump(common::isolated_reading(&dir.join("init.lua")), 64);
+    put_to_work(label, &engine, busy);
+    (engine, tx, rx)
+}
+
+/// Attaches a UI, types `busy`, and returns once the engine has stopped
+/// answering -- the readiness condition both spawns above share.
+fn put_to_work(label: &str, engine: &view_engine::process::Engine, busy: &str) {
     engine.handle.ui_attach(80, 24).unwrap();
     // typed rather than requested: `nvim_command` is a blocking request, and
     // a caller waiting on the reply to work that never returns could not go
@@ -59,7 +98,6 @@ fn busy_engine(label: &str, busy: &str) -> view_engine::process::Engine {
             "{label}: the engine kept answering for {ENTERS_LOOP:?} after being              told to run a {BUSY_SECS}s loop, so it never entered it"
         );
     }
-    engine
 }
 
 /// A Vimscript `while`, whose break check pumps the event loop and so sees
@@ -127,6 +165,127 @@ fn a_synchronous_lua_loop_answers_neither_the_liveness_probe_nor_the_interrupt()
         answered.is_err(),
         "the interrupt reached a synchronous Lua loop, so INTERRUPT_NOTATION's doc \
          comment understates what it can do: {answered:?}"
+    );
+}
+
+/// The wedge that opens while nobody is at the keyboard, timed end to end
+/// against a live engine.
+///
+/// Detection here is the loop's own doing and nothing else's: a wedged
+/// engine answers no probe and emits no redraw, so from the moment the
+/// engine goes quiet the only thing that can wake this wait is a wakeup the
+/// read-side watch asked for. Nothing is typed, nothing is sent, and the
+/// only other message that can arrive is the watchdog's -- which exists to
+/// end a wait that would otherwise run forever, and whose arrival is itself
+/// the failure being guarded against, since being woken by a message is
+/// exactly the keystroke a user should not have to type.
+///
+/// The shape is the runtime loop's own: read both sides of the connection,
+/// fold them into a verdict, then sleep for exactly as long as the watches
+/// allow. A loop that bounded its sleep only while a probe happened to be
+/// outstanding at the moment it went to sleep would sleep through this
+/// entire window.
+#[test]
+fn a_wedge_that_opens_while_the_session_is_idle_still_raises_the_notice() {
+    let (mut engine, watchdog, rx) = busy_session("lua-idle-wedge", &lua_loop());
+    let bound = detection_deadline();
+
+    // the state a healthy idle session sits in: every probe issued has been
+    // answered, and the next one has not gone out yet. Arming here forgives
+    // the probes the readiness wait above already left outstanding, so the
+    // window below opens where a user's own idle session opens it rather
+    // than partway into a silence that had already started.
+    engine.heartbeat.resume();
+    while rx.try_recv().is_ok() {}
+    let mut write = OutboxStallWatch::default();
+    let quiet_since = Instant::now();
+    assert_eq!(
+        wedge_kind(
+            write.observe(&engine.handle),
+            engine.heartbeat.observe(engine.handle.is_closed()),
+            false
+        ),
+        None,
+        "the verdict was already reached before any waiting happened, so nothing \
+         below is evidence about the wait"
+    );
+
+    std::thread::spawn(move || {
+        std::thread::sleep(bound + WATCHDOG_MARGIN);
+        let _ = watchdog.send(Msg::RedrawReady);
+    });
+
+    let noticed = loop {
+        let stalled = write.observe(&engine.handle);
+        assert!(
+            !stalled,
+            "the write side stalled, so the verdict below would name it rather than \
+             the read side this is timing"
+        );
+        let verdict = wedge_kind(
+            stalled,
+            engine.heartbeat.observe(engine.handle.is_closed()),
+            false,
+        );
+        if let Some(kind) = verdict {
+            break Some((kind, quiet_since.elapsed()));
+        }
+        if quiet_since.elapsed() >= bound + WATCHDOG_MARGIN {
+            break None;
+        }
+        assert_eq!(
+            write.poll_deadline(),
+            None,
+            "the write side armed the wakeup, so this proves nothing about the read side"
+        );
+        let received = match engine.heartbeat.poll_deadline() {
+            Some(deadline) => rx.recv_timeout(deadline).ok(),
+            // what the runtime loop does with "wait as long as you like":
+            // there is no timer of its own anywhere in this loop
+            None => rx.recv().ok(),
+        };
+        if let Some(Msg::HeartbeatReply { generation }) = received {
+            engine.heartbeat.record_ack(generation);
+        }
+    };
+
+    let Some((kind, after)) = noticed else {
+        panic!(
+            "the wedge was never noticed at all, {:?} after the engine went quiet",
+            quiet_since.elapsed()
+        );
+    };
+    assert_eq!(
+        kind,
+        WedgeKind::ReadSide,
+        "a live engine spinning in synchronous Lua was classified as something else"
+    );
+    assert!(
+        after <= bound,
+        "the wedge was noticed only after {after:?}, past the {bound:?} detection \
+         bound: with nothing sent and nothing arriving, the wait ran on past the \
+         deadline the watch owed it and ended at the watchdog instead"
+    );
+
+    // and the verdict the wait reached is the one the user is shown
+    let mut model = Model::with_term_size(80, 24);
+    let _ = update(
+        &mut model,
+        Msg::EngineLiveness {
+            wedge: Some(kind),
+            observed_for: after,
+        },
+    );
+    assert_eq!(
+        model
+            .engine
+            .messages
+            .visible_lines(4)
+            .into_iter()
+            .map(|spans| spans.into_iter().map(|span| span.text).collect::<String>())
+            .collect::<Vec<_>>(),
+        vec![WedgeKind::ReadSide.notice().to_string()],
+        "the verdict never reached the notice a waiting user reads"
     );
 }
 

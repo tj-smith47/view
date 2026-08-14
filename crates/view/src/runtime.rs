@@ -1033,20 +1033,25 @@ impl SupervisionFold {
 /// that lock is held by a thread parked inside a write), one acquire load of
 /// the connection's closed flag ([`EngineHandle::is_closed`]), and the pair
 /// [`HeartbeatWatch::observe`] reads to answer whether any probe is
-/// outstanding at all. Two more follow in the same pass from
-/// [`watch_deadline`], which asks the same watch for a deadline.
+/// outstanding at all. Four more follow in the same pass from
+/// [`watch_deadline`], which asks the same watch for a deadline: that same
+/// pair again, plus the paused flag and the cadence anchor the prospective
+/// deadline is dated from.
 ///
 /// The steady state named here is the exact one all four of those questions
 /// short-circuit on: nothing queued for the writer and no probe owed an
-/// answer. The whole pass costs no clock read, no lock, no allocation, no
-/// walk of the message log and no dispatch -- the deadline questions decline
-/// the clock on the same evidence the observations do
-/// ([`OutboxStallWatch::poll_deadline`], [`HeartbeatWatch::poll_deadline`]),
-/// so a healthy session pays for no reading any of them could use. A pass
-/// with output pending pays one `Instant::now()` on the write side, and a
-/// pass with a probe outstanding reads the send-time log and takes one of
-/// its own -- both bought by a connection that is demonstrably
-/// mid-something rather than by every keystroke.
+/// answer. It costs no lock, no allocation, no walk of the message log and
+/// no dispatch. The one reading it does pay for is the clock, once, in
+/// [`HeartbeatWatch::poll_deadline`]: a session whose heartbeat cadence is
+/// running is always owed another probe, and the deadline that catches an
+/// engine wedging between two passes is an instant in the future whether or
+/// not a probe happens to be outstanding at this one. The write side still
+/// declines the clock on the same evidence its observation does
+/// ([`OutboxStallWatch::poll_deadline`]), and pays one `Instant::now()` only
+/// on a pass with output pending; a pass with a probe outstanding reads the
+/// send-time log instead of the cadence anchor and takes the same single
+/// reading -- both bought by a connection that is demonstrably mid-something
+/// rather than by every keystroke.
 ///
 /// Nothing is sent from here at all: the send lives on the engine's own
 /// prober thread, so this call cannot await RPC however wedged the engine
@@ -1104,15 +1109,17 @@ struct Wakeups<'a> {
 /// deadline. `None` means the wait expired with nothing delivered and the
 /// caller should re-read both sides of the connection.
 ///
-/// Unbounded whenever neither watch asks for a wakeup, which is the entire
-/// idle steady state: an editor with nothing queued and nothing owed an
-/// answer sleeps until a keystroke, a redraw or an engine request wakes it,
-/// and pays no periodic wakeup for a condition that cannot be true. A
-/// deadline exists only while output is pending or a probe is unanswered --
-/// moving or wedged, the watches cannot know yet, and for the wedged case
-/// the wakeup is the point: a wedged engine emits no redraws, so an
-/// operator who types once and then waits would otherwise be told nothing
-/// at all.
+/// Unbounded whenever neither watch asks for a wakeup, which is a session
+/// whose engine connection is gone or whose heartbeat is paused: with no
+/// probe coming there is no silence either watch could report on, so the
+/// loop sleeps until a keystroke, a redraw or an engine request wakes it.
+/// A live cadence always bounds the wait, and for the wedged case that
+/// bound is the entire point: a wedged engine emits no redraws, so an
+/// operator who stops typing -- or who never typed at all, since a wedge
+/// can open while the session is idle -- would otherwise be told nothing at
+/// all. The bound is not a periodic wakeup a healthy session pays: the
+/// engine's own answer arrives first on every pass and the next wait is
+/// recomputed from the tick that answer belongs to.
 #[cfg(any(not(unix), test))]
 fn wait_for_msg(
     msg_rx: &mpsc::Receiver<Msg>,
@@ -1338,10 +1345,14 @@ pub struct MsgChannel {
 /// [`HEARTBEAT_PROBE_INTERVAL`](view_engine::heartbeat::HEARTBEAT_PROBE_INTERVAL),
 /// so a session with nobody typing wakes at that cadence, records the
 /// acknowledgement in [`intake`], marks nothing dirty and paints nothing.
-/// Between those wakeups the block is unbounded unless a watch asks
-/// otherwise: engine-bound output pending on the write side, or a probe
-/// still unanswered on the read side, each bound the sleep by its own
-/// deadline (see [`watch_deadline`]).
+/// Those wakeups are what the read side's deadline is measured against
+/// rather than something it sits beside: the block is bounded by whichever
+/// watch asks for the sooner look -- engine-bound output pending on the
+/// write side, a probe still unanswered on the read side, or, with neither
+/// true, the instant the next probe could itself have gone unanswered for a
+/// threshold (see [`watch_deadline`]). The last of those is the one an idle
+/// user's session runs on, and an engine that keeps answering never reaches
+/// it.
 ///
 /// # Latency
 ///
@@ -1367,14 +1378,15 @@ pub struct MsgChannel {
 /// already runs on (see [`crate::recovery::restart_engine`]).
 ///
 /// The read-side liveness watch runs on this thread too, and costs this
-/// loop five atomic loads per steady-state pass: three in
-/// [`note_engine_liveness`] (the connection's closed flag, plus the sent
-/// and acknowledged generations) and two more when [`watch_deadline`] asks
-/// the same watch what deadline to arm. No clock read, no lock and no send
-/// in that state -- it cannot block on the very connection it is asking
-/// about. Its recurring cost is the wakeup rather than the fold: one extra
-/// pass every probe interval, ending in a dispatch that produces no effect
-/// and no paint.
+/// loop seven atomic loads and one monotonic clock read per steady-state
+/// pass: three in [`note_engine_liveness`] (the connection's closed flag,
+/// plus the sent and acknowledged generations) and four more when
+/// [`watch_deadline`] asks the same watch what deadline to arm -- that
+/// generation pair again, the paused flag, and the cadence anchor the
+/// reading is dated against. No lock and no send in that state -- it cannot
+/// block on the very connection it is asking about. Its recurring cost is
+/// the wakeup rather than the fold: one extra pass every probe interval,
+/// ending in a dispatch that produces no effect and no paint.
 ///
 /// # Errors
 ///
@@ -3219,8 +3231,13 @@ mod tests {
         peer.release();
     }
 
+    /// An idle session's only armed wakeup is the read side's prospective
+    /// one -- the instant a probe not yet sent could have gone unanswered
+    /// for a threshold -- and nothing shortens it: the write side, with its
+    /// backlog drained, asks for nothing at all, and the wait itself
+    /// delivers only what is sent to it.
     #[test]
-    fn an_idle_session_arms_no_deadline_and_is_never_woken_early() {
+    fn an_idle_session_arms_only_the_wedge_deadline_and_is_never_woken_early() {
         let mut peer = WedgedPeer::new();
         // a peer that reads normally, expressed through the same sink as
         // the wedged one: healthy and wedged differ by this one call
@@ -3228,8 +3245,9 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let mut watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
         let mut fold = SupervisionFold::default();
-        // armed, but nothing has probed it, so neither side of the
-        // connection is owed anything that a wakeup could report on
+        // armed, and nothing has probed it: the state a session sits in
+        // between one answered probe and the next tick, which is where a
+        // wedge that nobody is typing at begins
         let mut heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
         heartbeat.resume();
 
@@ -3245,14 +3263,20 @@ mod tests {
             &peer.handle
         ));
         assert_eq!(
-            watch_deadline(Wakeups {
-                write: &watch,
-                read: &heartbeat,
-                supervision: &fold,
-            }),
+            watch.poll_deadline(),
             None,
-            "an idle session armed a deadline, so the loop would wake on a \
-             schedule it has never paid for"
+            "the write side armed a deadline, so nothing below is about the read side"
+        );
+        let armed = watch_deadline(Wakeups {
+            write: &watch,
+            read: &heartbeat,
+            supervision: &fold,
+        })
+        .expect("an idle session must still arm the wakeup a silent engine needs");
+        assert!(
+            armed > TEST_STALL_THRESHOLD,
+            "the idle wait was cut to {armed:?}, which is sooner than the silence it \
+             would take to prove anything"
         );
 
         // and the wait itself delivers only what is sent, when it is sent
@@ -3278,7 +3302,7 @@ mod tests {
         assert!(
             start.elapsed() >= quiet,
             "the idle wait returned before its only message was sent: the loop was \
-             woken by a deadline an idle session must not arm"
+             woken by a deadline shorter than the silence that would justify one"
         );
     }
 

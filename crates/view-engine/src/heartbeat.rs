@@ -141,6 +141,17 @@ struct Probe {
     /// Send times in nanoseconds since `origin`, indexed by generation
     /// modulo [`SEND_LOG`].
     sent_at: [AtomicU64; SEND_LOG as usize],
+    /// When the cadence last did anything, in nanoseconds since `origin`:
+    /// the moment a probe went out, or the moment the watch was armed
+    /// before the first one ever did.
+    ///
+    /// Relaxed at both ends, unlike the send log beside it, because nothing
+    /// is published through it and no verdict is read from it. It dates a
+    /// deadline for a probe that has not been sent yet
+    /// ([`HeartbeatWatch::poll_deadline`]), so a reading a millisecond
+    /// stale arms a wakeup a millisecond off, on a pass that then re-reads
+    /// the generations this is not part of.
+    cadence_at: AtomicU64,
     paused: AtomicBool,
 }
 
@@ -153,6 +164,7 @@ impl Probe {
             sent_generation: AtomicU64::new(0),
             acked_generation: AtomicU64::new(0),
             sent_at: std::array::from_fn(|_| AtomicU64::new(0)),
+            cadence_at: AtomicU64::new(0),
             paused: AtomicBool::new(true),
         }
     }
@@ -301,7 +313,13 @@ impl HeartbeatProber {
             return Ok(());
         }
         let generation = self.probe.sent_generation.load(Ordering::Relaxed) + 1;
-        self.probe.sent_at[Probe::slot(generation)].store(self.probe.stamp(now), Ordering::Relaxed);
+        let sent_at = self.probe.stamp(now);
+        self.probe.sent_at[Probe::slot(generation)].store(sent_at, Ordering::Relaxed);
+        // the same stamp, kept where a reader that finds nothing
+        // outstanding can still date the cadence from it: that reader is
+        // asking when the *next* probe is owed, and this tick is what the
+        // answer counts forward from
+        self.probe.cadence_at.store(sent_at, Ordering::Relaxed);
         // published after its send time is stamped, and with a release, so
         // an observer that sees this generation outstanding is guaranteed
         // the time it went out rather than whatever the slot held a lap
@@ -430,23 +448,39 @@ impl HeartbeatWatch {
     /// How long a caller may wait for its own next wakeup before this watch
     /// would have something new to say, or `None` when it would not.
     ///
-    /// `None` means "wait as long as you like": with nothing outstanding
-    /// there is no silence to time, so no wakeup this watch asked for could
-    /// tell the caller anything. A duration is returned only while a probe
-    /// is unanswered, which is the one window in which a caller that never
-    /// woke again would sit on an unreported wedge -- and while the engine
-    /// is healthy its own answer arrives first and wakes the caller before
-    /// this deadline ever expires, so the wakeup is paid for only by a
-    /// connection that has actually gone quiet.
+    /// `None` means "wait as long as you like", and only a paused watch is
+    /// ever told it: with the cadence stopped no probe is coming, so no
+    /// silence can begin that a wakeup could report on.
+    ///
+    /// An armed watch always names a deadline, including while every probe
+    /// it has issued is answered. The window it exists to detect opens
+    /// between two passes of the caller's loop -- an engine wedges while
+    /// nobody is typing, the next probe goes out into it, and nothing
+    /// answers -- and a caller that slept unbounded on "nothing is
+    /// outstanding right now" would sleep straight through it: a wedged
+    /// engine emits no redraws, so the traffic that would otherwise wake
+    /// the caller is exactly the traffic that stops.
+    ///
+    /// While a probe is outstanding the deadline times that probe's own
+    /// silence. While none is, it is the same arithmetic against the probe
+    /// that has not gone out yet: the next one is owed within one
+    /// [`HEARTBEAT_PROBE_INTERVAL`] of whatever the cadence last did, and
+    /// the earliest it could cross the threshold is one threshold after
+    /// that. A healthy engine never reaches that instant, because its own
+    /// answer wakes the caller first and every pass recomputes this from
+    /// the tick that answer belongs to, so the wakeup is still paid for
+    /// only by a connection that has actually gone quiet.
     ///
     /// Never zero, since a zero wait is a spin. Past the threshold the
     /// window has already said what it had to say, and its remaining job --
     /// noticing that the engine started answering again -- is served by
     /// looking again one threshold later.
     ///
-    /// Reads no clock while nothing is outstanding: the absence of a window
-    /// is answerable from the prober's own memory, and a healthy loop asks
-    /// this question once per pass.
+    /// Costs one clock read and two relaxed loads on an idle pass with a
+    /// live cadence. There is no answer to give without a clock: the
+    /// question is when an instant in the future arrives, and a loop that
+    /// declined to read one here would be declining to arm the deadline at
+    /// all.
     #[must_use]
     pub fn poll_deadline(&self) -> Option<Duration> {
         self.deadline_with(Instant::now)
@@ -456,8 +490,38 @@ impl HeartbeatWatch {
     /// source rather than a value, so a test can prove which questions reach
     /// for it.
     fn deadline_with(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
-        self.probe.oldest_outstanding()?;
+        if self.probe.oldest_outstanding().is_none() {
+            return self.prospective_deadline(clock);
+        }
         Self::deadline(self.probe.outstanding_for(clock()), self.threshold)
+    }
+
+    /// How long the caller may wait while no probe is outstanding at all.
+    ///
+    /// The cadence's own anchor stands in for the send time the window
+    /// would otherwise be measured from: one interval past it is the latest
+    /// the next probe can go out, and a wedge starting the moment this is
+    /// called cannot be provable before that probe has then gone unanswered
+    /// for a threshold. Anchoring on `now` instead would arm the same
+    /// deadline against a cadence that already ticked, and the pass that
+    /// woke would find the probe younger than it expected.
+    fn prospective_deadline(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
+        if self.probe.paused.load(Ordering::Acquire) {
+            return None;
+        }
+        let now = Duration::from_nanos(self.probe.stamp(clock()));
+        let owed = Duration::from_nanos(self.probe.cadence_at.load(Ordering::Relaxed))
+            + HEARTBEAT_PROBE_INTERVAL;
+        let overdue = now.saturating_sub(owed);
+        if overdue.is_zero() {
+            return Some(owed.saturating_sub(now) + self.threshold);
+        }
+        // the anchor is older than the cadence should ever leave it, which
+        // is a prober that has retired (its connection refused a tick)
+        // rather than one running late. Same arithmetic as an outstanding
+        // probe past its threshold: look again one threshold later, never
+        // sooner and never in a spin
+        Self::deadline(Outstanding::For(overdue), self.threshold)
     }
 
     /// Stops [`HeartbeatProber::tick`] from issuing any *new* probe.
@@ -484,8 +548,20 @@ impl HeartbeatWatch {
     /// strictly below any generation a post-resume tick produces, so it can
     /// never satisfy a later wedge check and mask a genuine hang.
     pub fn resume(&mut self) {
+        self.resume_at(Instant::now());
+    }
+
+    /// [`resume`](Self::resume) against an exact clock.
+    fn resume_at(&mut self, now: Instant) {
         let sent = self.probe.sent_generation.load(Ordering::Acquire);
         self.probe.acked_generation.store(sent, Ordering::Relaxed);
+        // the arming is itself a cadence event, and the only one there is
+        // until the first tick lands: a probe is owed one interval from
+        // here, so the window before that tick is dated rather than
+        // unbounded
+        self.probe
+            .cadence_at
+            .store(self.probe.stamp(now), Ordering::Relaxed);
         // released after the forgiveness above, so the first tick to see
         // this connection armed also sees the acknowledgement that came
         // with the arming rather than a run it should not reopen
@@ -591,9 +667,12 @@ mod tests {
     use super::*;
 
     const THRESHOLD: Duration = Duration::from_secs(10);
-    /// The shipped probe-to-threshold ratio, so the timelines below drive
-    /// the cadence production actually runs at rather than a rounder one.
-    const INTERVAL: Duration = Duration::from_secs(2);
+    /// The shipped cadence itself rather than a copy of its current value:
+    /// the timelines below drive the interval production runs at, and the
+    /// prospective deadline is built from this exact constant, so a test
+    /// asserting against a second spelling of it would agree with the
+    /// deadline only until one of the two moved.
+    const INTERVAL: Duration = HEARTBEAT_PROBE_INTERVAL;
 
     /// An armed watch and its prober over a connection whose peer neither
     /// answers nor hangs up, so a probe genuinely goes unanswered rather
@@ -611,7 +690,11 @@ mod tests {
         let (source, keep_open) = crate::test_peer::IdleSource::new();
         let (handle, notifs) = EngineHandle::start(source, std::io::sink());
         let mut watch = HeartbeatWatch::new(THRESHOLD);
-        watch.resume();
+        // armed at the origin every timeline below is expressed against, so
+        // the cadence anchor a deadline is dated from is `t0` exactly
+        // rather than however long the spawn above took
+        let origin = watch.probe.origin;
+        watch.resume_at(origin);
         let prober = watch.prober();
         (watch, prober, handle, (keep_open, notifs))
     }
@@ -634,7 +717,8 @@ mod tests {
         let err = handle.request("nvim_get_mode", vec![]).unwrap_err();
         assert!(matches!(err, EngineError::Closed), "{err:?}");
         let mut watch = HeartbeatWatch::new(THRESHOLD);
-        watch.resume();
+        let origin = watch.probe.origin;
+        watch.resume_at(origin);
         let prober = watch.prober();
         (watch, prober, handle)
     }
@@ -777,11 +861,15 @@ mod tests {
         );
     }
 
+    /// An answered connection is not one that can be slept on: the probe
+    /// that has not gone out yet is the one a wedge starting now would go
+    /// unanswered, so the wakeup an armed watch asks for is dated from the
+    /// cadence rather than declined.
     #[test]
-    fn nothing_outstanding_asks_for_no_wakeup_at_all() {
+    fn an_answered_connection_asks_to_look_again_when_the_next_probe_could_be_late() {
         let (mut watch, prober, handle, _guards) = watched_connection();
         let t0 = watch.probe.origin;
-        assert_eq!(watch.deadline_at(t0), None);
+        assert_eq!(watch.deadline_at(t0), Some(INTERVAL + THRESHOLD));
         prober.tick_at(&handle, t0).unwrap();
         assert_eq!(watch.deadline_at(t0), Some(THRESHOLD));
         assert_eq!(
@@ -789,16 +877,72 @@ mod tests {
             Some(THRESHOLD / 4 * 3)
         );
         watch.record_ack(1);
+        // the window that answer closed is replaced by the next one, dated
+        // from the tick rather than from the answer: the cadence is what
+        // decides when the engine is next asked anything
+        assert_eq!(watch.deadline_at(t0), Some(INTERVAL + THRESHOLD));
+        assert_eq!(
+            watch.deadline_at(t0 + INTERVAL / 2),
+            Some(INTERVAL / 2 + THRESHOLD)
+        );
+    }
+
+    /// The one state with genuinely nothing to say: no probe is coming, so
+    /// no silence can begin, so no wakeup could report on one.
+    #[test]
+    fn a_paused_watch_asks_for_no_wakeup_at_all() {
+        let (mut watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        prober.tick_at(&handle, t0).unwrap();
+        watch.pause();
+        // a pause is not forgiveness: the probe already on the wire is
+        // still owed an answer, and the window timing it is unaffected
+        assert_eq!(watch.deadline_at(t0), Some(THRESHOLD));
+        watch.record_ack(1);
         assert_eq!(watch.deadline_at(t0), None);
     }
 
-    /// A loop asks this every pass, so the answer it already knows must be
-    /// free: with no probe outstanding there is no silence to time, and a
-    /// clock read taken before discovering that is one a healthy session
-    /// pays for nothing.
+    /// The window before the first tick: a watch armed and then left alone
+    /// is owed a probe one interval later, and dates its deadline from the
+    /// arming because there is no send time yet to date it from.
     #[test]
-    fn nothing_outstanding_answers_without_reading_the_clock() {
-        let (watch, prober, handle, _guards) = watched_connection();
+    fn arming_anchors_the_window_before_the_first_tick_lands() {
+        let (mut watch, _prober, _handle, _guards) = watched_connection();
+        let armed = watch.probe.origin + THRESHOLD * 3;
+        watch.resume_at(armed);
+        assert_eq!(watch.deadline_at(armed), Some(INTERVAL + THRESHOLD));
+        assert_eq!(watch.deadline_at(armed + INTERVAL), Some(THRESHOLD));
+    }
+
+    /// A cadence that stopped without the watch being paused -- a prober
+    /// retired by a connection that refused its tick -- leaves an anchor
+    /// older than any live cadence produces. The answer is the same one a
+    /// crossed window gives, and never a spin.
+    #[test]
+    fn a_cadence_that_stopped_keeps_asking_rather_than_spinning() {
+        let (watch, _prober, _handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        for (late, expected) in [
+            (INTERVAL + THRESHOLD / 2, THRESHOLD / 2),
+            (INTERVAL + THRESHOLD, THRESHOLD),
+            (THRESHOLD * 100, THRESHOLD),
+        ] {
+            let asked = watch.deadline_at(t0 + late);
+            assert_eq!(asked, Some(expected), "{late:?} after the anchor");
+            assert!(
+                asked.is_some_and(|wait| !wait.is_zero()),
+                "a zero wait is a spin"
+            );
+        }
+    }
+
+    /// A loop asks this every pass, so what it costs is a shipped number. A
+    /// paused watch answers from the prober's own memory; an armed one pays
+    /// one reading whether or not a probe is outstanding, because either
+    /// answer is an instant in the future and no clock means no deadline.
+    #[test]
+    fn an_armed_watch_pays_one_clock_read_a_pass_and_a_paused_one_pays_none() {
+        let (mut watch, prober, handle, _guards) = watched_connection();
         let t0 = watch.probe.origin;
         let reads = std::cell::Cell::new(0_u32);
         let clock = |at: Instant| {
@@ -809,18 +953,27 @@ mod tests {
             }
         };
 
+        watch.pause();
         assert_eq!(watch.deadline_with(clock(t0)), None);
         assert_eq!(
             reads.get(),
             0,
-            "an idle watch paid for a reading its answer cannot use"
+            "a paused watch paid for a reading its answer cannot use"
+        );
+
+        watch.resume_at(t0);
+        assert_eq!(watch.deadline_with(clock(t0)), Some(INTERVAL + THRESHOLD));
+        assert_eq!(
+            reads.get(),
+            1,
+            "an armed watch must date the probe it is still owed"
         );
 
         prober.tick_at(&handle, t0).unwrap();
         assert_eq!(watch.deadline_with(clock(t0)), Some(THRESHOLD));
         assert_eq!(
             reads.get(),
-            1,
+            2,
             "an outstanding probe must time its own window"
         );
     }

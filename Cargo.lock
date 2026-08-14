@@ -2340,6 +2340,7 @@ dependencies = [
  "view-core",
  "view-engine",
  "view-native",
+ "view-oracle",
  "view-surface",
  "view-test-support",
  "view-tui",
