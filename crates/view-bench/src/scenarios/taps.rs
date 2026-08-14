@@ -1730,13 +1730,40 @@ mod tests {
     }
 
     #[test]
-    fn a_paced_characterization_delivers_every_write() {
+    fn the_default_pace_either_delivers_in_full_or_refuses_by_name() {
+        // The unescalated constant, whose whole point is that it is only a
+        // starting guess: `characterize_overhead_adaptive` documents it as a
+        // dev-linux calibration that macOS misses by roughly one write in a
+        // thousand, and every production caller reaches the pace through
+        // that escalation rather than trusting this value. So "the default
+        // pace always delivers" is a claim about the host, not about the
+        // harness, and asserting it fails whenever the reader thread loses a
+        // scheduling slice to the rest of a parallel suite.
+        //
+        // What holds on every host is the guard itself: a run at this pace
+        // either delivered every write, in which case the distribution has
+        // its full shape, or it is refused by name. What it must never do is
+        // hand back a percentile measured through a lossy pipe, since a
+        // dropped write costs nothing and would understate the very
+        // instrumentation the rows measure through. Full delivery at a pace
+        // the host can actually sustain is
+        // `a_pace_too_fast_for_the_host_is_escalated_until_every_write_lands`.
         let path = scratch_root().join(format!("paced-{}.fifo", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let pipe = TapPipe::create(&path).expect("tap pipe");
-        let dist = characterize_overhead(&pipe, 2_000, OVERHEAD_PACE)
-            .expect("a paced characterization delivers every write");
-        assert_eq!(dist.len(), 2_000 - 2_000 / 10);
+        match characterize_overhead(&pipe, 2_000, OVERHEAD_PACE) {
+            Ok(dist) => assert_eq!(dist.len(), 2_000 - 2_000 / 10),
+            Err(err) => {
+                assert!(
+                    matches!(err, BenchError::Desync { .. }),
+                    "a lossy characterization is a harness fault, not a latency reading: {err:?}"
+                );
+                assert!(
+                    err.to_string().contains("the reader received"),
+                    "the refusal must name the delivery shortfall, got: {err}"
+                );
+            }
+        }
         let _ = std::fs::remove_file(&path);
     }
 

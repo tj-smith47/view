@@ -155,7 +155,25 @@ fn tabline_session(paths: &common::ScratchPaths) -> PtySession {
     plant_scheme(&paths.isolated_home);
 
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.arg(&paths.scratch);
+    // the file's own name, from its own directory, rather than the absolute
+    // path: nvim labels the first tab with the buffer's name, and an
+    // absolute one is exactly as long as this checkout's location happens to
+    // be. A deeper one (`/Users/<name>/repos/view` against `/opt/repos/view`
+    // is enough) pushes the second tab's label off the right edge of an
+    // 80-column row, leaving the wait below nothing to find on a host that
+    // differs from this test's author's in nothing but its home directory.
+    cmd.cwd(
+        paths
+            .scratch
+            .parent()
+            .expect("the scratch file always sits inside the scratch root"),
+    );
+    cmd.arg(
+        paths
+            .scratch
+            .file_name()
+            .expect("the scratch file always has a file name"),
+    );
     common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
 
     let mut session = PtySession::spawn_configured(cmd, COLS, ROWS)
