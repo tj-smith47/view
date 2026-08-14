@@ -185,6 +185,13 @@ enum Command {
     /// Drives `view_oracle::hang`'s reproduced hang schedules against a real
     /// pinned engine: a read-side wedge, a killed connection, and the
     /// key-wait control the first two are only meaningful against.
+    ///
+    /// Each schedule is bounded by what the supervision stack promises, plus
+    /// half a second for the cost of reading a verdict. On a host that
+    /// deschedules an observer for longer than that, set
+    /// `VIEW_ORACLE_SLACK_SCALE` to the whole number to multiply that half
+    /// second by; it moves nothing else, and anything unparseable or zero
+    /// leaves the shipped bound alone.
     Hang {
         /// One schedule by name (`read-side-wedge`, `dead-connection`,
         /// `blocked-on-key`) instead of all three.
