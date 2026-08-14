@@ -140,19 +140,47 @@ pub fn spawn_live_grep_scan(
     cancel: Arc<AtomicBool>,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        #[cfg(test)]
+        scan_probe::note(&needle, "scan thread started".to_string());
         let Ok(matcher) = RegexMatcher::new(&escape_literal(&needle)) else {
+            #[cfg(test)]
+            scan_probe::note(&needle, "regex build failed; scan abandoned".to_string());
             return;
         };
         let mut searcher = Searcher::new();
         let mut matched = 0usize;
+        #[cfg(test)]
+        let mut visited = 0usize;
         for entry in ignore::WalkBuilder::new(&root).build() {
             if cancel.load(Ordering::Acquire) || matched >= LIVE_GREP_MATCH_LIMIT {
+                #[cfg(test)]
+                scan_probe::note(
+                    &needle,
+                    format!(
+                        "scan stopped early (cancelled={}, matched={matched}, visited={visited})",
+                        cancel.load(Ordering::Acquire)
+                    ),
+                );
                 return;
             }
-            let Ok(entry) = entry else { continue };
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(_err) => {
+                    #[cfg(test)]
+                    scan_probe::note(&needle, format!("walk entry error: {_err}"));
+                    continue;
+                }
+            };
             let is_file = entry.file_type().is_some_and(|ft| ft.is_file());
             if !is_file {
                 continue;
+            }
+            #[cfg(test)]
+            {
+                visited += 1;
+                if visited == 1 {
+                    scan_probe::note(&needle, format!("first file visited: {:?}", entry.path()));
+                }
             }
             let rel = entry
                 .path()
@@ -174,7 +202,7 @@ pub fn spawn_live_grep_scan(
             // picker's `<CR>`-open flow re-resolves through the live buffer
             // regardless, so a stale grep result never writes anything; it
             // can only mislead the label shown before that.
-            let _ = searcher.search_path(
+            let result = searcher.search_path(
                 &matcher,
                 entry.path(),
                 UTF8(|line_number, line| {
@@ -185,6 +213,10 @@ pub fn spawn_live_grep_scan(
                         cols[0] = item.label[match_start..].into();
                     });
                     matched += 1;
+                    #[cfg(test)]
+                    if matched == 1 {
+                        scan_probe::note(&needle, format!("first push: {rel}:{line_number}"));
+                    }
                     // stopping the sink here (rather than only the outer
                     // walk loop, checked next iteration) means the ceiling
                     // is exact: the file currently being searched stops
@@ -198,8 +230,71 @@ pub fn spawn_live_grep_scan(
                     Ok(matched < LIVE_GREP_MATCH_LIMIT && !cancel.load(Ordering::Acquire))
                 }),
             );
+            #[cfg(test)]
+            if let Err(_err) = &result {
+                scan_probe::note(&needle, format!("search error on {rel}: {_err}"));
+            }
+            let _ = result;
         }
+        #[cfg(test)]
+        scan_probe::note(
+            &needle,
+            format!("walk finished (visited={visited}, matched={matched})"),
+        );
     })
+}
+
+/// Per-needle event log the live-grep scan thread appends to, keyed by the
+/// scan's own needle. Exists because the starvation class this diagnoses
+/// reads identically from the worker channel's receiving end no matter
+/// which leg stalled -- results stay empty whether the scan thread was
+/// never scheduled, the walker filtered the fixture out, a read stalled,
+/// or the matcher never digested a successful push -- and the
+/// discriminating facts are only observable from inside the scan thread
+/// while the failure window is still open. A timed-out matcher test
+/// attaches [`scan_probe::report`] for its needle to its panic, so a
+/// one-in-many CI starvation self-reports instead of demanding another
+/// blind reproduction hunt. Keyed by needle so concurrent scans from other
+/// tests never interleave their events into the failing test's report;
+/// tests that read a report use needles unique to themselves.
+#[cfg(test)]
+pub(crate) mod scan_probe {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    use std::time::Instant;
+
+    fn events() -> &'static Mutex<HashMap<String, Vec<String>>> {
+        static EVENTS: OnceLock<Mutex<HashMap<String, Vec<String>>>> = OnceLock::new();
+        EVENTS.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    /// Timestamps are relative to the first probe event in the process --
+    /// only the gaps between one needle's events carry meaning.
+    fn epoch() -> Instant {
+        static EPOCH: OnceLock<Instant> = OnceLock::new();
+        *EPOCH.get_or_init(Instant::now)
+    }
+
+    pub(crate) fn note(needle: &str, event: String) {
+        let elapsed = epoch().elapsed().as_millis();
+        events()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(needle.to_string())
+            .or_default()
+            .push(format!("t={elapsed}ms {event}"));
+    }
+
+    pub(crate) fn report(needle: &str) -> String {
+        events()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(needle)
+            .map_or_else(
+                || "<no scan events recorded for this needle>".to_string(),
+                |log| log.join("; "),
+            )
+    }
 }
 
 /// Truncates `line` to [`LIVE_GREP_LINE_CHAR_LIMIT`] `char`s (not bytes --

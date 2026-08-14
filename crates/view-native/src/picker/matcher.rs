@@ -1071,14 +1071,20 @@ mod tests {
     /// gets away without because its fixture is small enough to settle in
     /// one tick.
     ///
-    /// Panics rather than returning an empty `Vec` once `budget` runs out:
-    /// a silent empty return read identically to "the query genuinely
-    /// matched nothing", which is exactly the ambiguity a flaky run of
-    /// either caller left no way to tell apart. The panic names the elapsed
-    /// wait and the last (possibly empty) batch actually seen, so a caller
-    /// with results that just never grew non-empty reads differently from
-    /// one where nothing arrived on the channel at all.
-    fn wait_for_non_empty_results(msg_rx: &mpsc::Receiver<Msg>, budget: Duration) -> Vec<String> {
+    /// Returns `Err` with a timeout report rather than an empty `Vec` once
+    /// `budget` runs out: a silent empty return read identically to "the
+    /// query genuinely matched nothing", which is exactly the ambiguity a
+    /// flaky run of either caller left no way to tell apart. The report
+    /// names the elapsed wait and the last (possibly empty) batch actually
+    /// seen, so results that just never grew non-empty read differently
+    /// from nothing arriving on the channel at all -- and each caller
+    /// panics with `sources::scan_probe::report` for its own needle
+    /// attached, because which leg starved (the scan thread, the walk, or
+    /// the matcher) is only recorded on the scan's side of the injector.
+    fn wait_for_non_empty_results(
+        msg_rx: &mpsc::Receiver<Msg>,
+        budget: Duration,
+    ) -> Result<Vec<String>, String> {
         let start = Instant::now();
         let deadline = start + budget;
         let mut last_batch: Option<Vec<String>> = None;
@@ -1089,16 +1095,16 @@ mod tests {
             if let Msg::PickerResults { items, .. } = msg {
                 let labels: Vec<String> = items.into_iter().map(|item| item.label).collect();
                 if !labels.is_empty() {
-                    return labels;
+                    return Ok(labels);
                 }
                 last_batch = Some(labels);
             }
         }
-        panic!(
+        Err(format!(
             "wait_for_non_empty_results timed out after {:?} waiting for a non-empty \
              Msg::PickerResults; last batch seen: {last_batch:?}",
             start.elapsed()
-        );
+        ))
     }
 
     /// Before `handle_query` escaped a `LiveGrep` needle for nucleo,
@@ -1152,7 +1158,13 @@ mod tests {
         // bounded matcher session already in place, since a shared host
         // already past its CPU budget can starve the walker thread
         // regardless of how few matcher threads this session opens.
-        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(60));
+        let labels =
+            wait_for_non_empty_results(&msg_rx, Duration::from_secs(60)).unwrap_or_else(|report| {
+                panic!(
+                    "{report}\nscan-side events for this needle: {}",
+                    sources::scan_probe::report("!=")
+                )
+            });
         assert!(
             labels.iter().any(|label| label.contains("!=")),
             "expected a result matching the literal `!=` query, got {labels:?}"
@@ -1204,7 +1216,13 @@ mod tests {
         // 60s rather than this file's usual 30s -- see the bang-equals
         // test above for why a real on-disk grep test needs more headroom
         // than a synthetic producer under host CPU contention.
-        let labels = wait_for_non_empty_results(&msg_rx, Duration::from_secs(60));
+        let labels =
+            wait_for_non_empty_results(&msg_rx, Duration::from_secs(60)).unwrap_or_else(|report| {
+                panic!(
+                    "{report}\nscan-side events for this needle: {}",
+                    sources::scan_probe::report("cost$")
+                )
+            });
         assert!(
             labels.iter().any(|label| label.contains("cost$")),
             "expected a result matching the literal trailing-`$` query, got {labels:?}"
@@ -1251,7 +1269,11 @@ mod tests {
             .join("../../target/tmp")
             .join(format!("picker-grep-starvation-{nonce}"));
         std::fs::create_dir_all(&root).expect("create test root");
-        std::fs::write(root.join("fixture.txt"), "let price = cost$;\n")
+        // `diag$` rather than the regression tests' own `cost$`: the scan
+        // probe's event log is keyed by needle, and sharing a key would
+        // interleave this scan's events into a failing regression test's
+        // report
+        std::fs::write(root.join("fixture.txt"), "let price = diag$;\n")
             .expect("write test fixture");
 
         let start = Instant::now();
@@ -1259,10 +1281,10 @@ mod tests {
         // that would fail them is fully inside this window
         let deadline = start + Duration::from_secs(75);
         let (_serial, mut session) = new_bounded_serial(Source::LiveGrep { root: root.clone() }, 1);
-        restart_live_grep(&mut session, root.clone(), "cost$");
+        restart_live_grep(&mut session, root.clone(), "diag$");
         session.nucleo.pattern.reparse(
             0,
-            &escape_nucleo_atom_syntax("cost$"),
+            &escape_nucleo_atom_syntax("diag$"),
             CaseMatching::Smart,
             Normalization::Smart,
             false,
@@ -1307,9 +1329,10 @@ mod tests {
                 .collect();
             let fixture = std::fs::read_to_string(root.join("fixture.txt"));
             panic!(
-                "live-grep starved after {:?};\nwalker re-run sees: {walked:?}\nfixture read: \
-                 {fixture:?}\ntimeline:\n{}",
+                "live-grep starved after {:?};\nscan-side events: {}\nwalker re-run sees: \
+                 {walked:?}\nfixture read: {fixture:?}\ntimeline:\n{}",
                 start.elapsed(),
+                sources::scan_probe::report("diag$"),
                 timeline.join("\n")
             );
         }
