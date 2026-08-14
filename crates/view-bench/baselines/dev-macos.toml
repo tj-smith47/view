@@ -67,3 +67,7 @@ staleness_p99_ms = 8.833459
 ratio_p50 = 2.381585467443348
 ratio_p99 = 1.6683195297774573
 staleness_p99_ms = 6.354875000000001
+
+[supervision.minimal]
+restart_rehydrate_p99_ms = 57.50425
+wedge_detect_p99_ms = 11541.929584
