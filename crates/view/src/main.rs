@@ -70,6 +70,7 @@ impl From<TierArg> for Tier {
 #[command(
     name = "view",
     version = VERSION,
+    disable_version_flag = true,
     about = "A modern terminal editor powered by Neovim",
     after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, ...) \
                   must appear before the first argument meant for nvim: once a token does \
@@ -109,6 +110,17 @@ struct Cli {
     /// no-clipboard-available case).
     #[arg(long, hide = true)]
     print_clipboard: Option<char>,
+    /// Print version
+    ///
+    /// Long form only: nvim spends `-V` on its own `-V[N][file]` verbose
+    /// flag, so view leaves the short form to `passthrough` rather than
+    /// having a bare `view -V` print a version string where the same nvim
+    /// invocation would have started a verbose session. Declared by hand
+    /// because that is the only way to drop the short form clap's own
+    /// generated version flag always carries (`disable_version_flag` on the
+    /// command above suppresses it).
+    #[arg(long, action = clap::ArgAction::Version)]
+    version: Option<bool>,
     /// Everything not claimed by a flag above, forwarded to the engine
     /// exactly as typed: `+42`, `-c 'set nu'`, `-R`, `-d`, `-O`, `-u NONE`,
     /// file paths, `-` for stdin. clap must not try to interpret any of
@@ -881,6 +893,64 @@ mod tests {
         assert!(
             err.to_string().contains('-'),
             "the error must name the flag it is refusing, got {err}"
+        );
+    }
+
+    // nvim's `-V[N][file]` and clap's generated short version flag both want
+    // `-V`, and the passthrough contract says the nvim reading wins: a user
+    // with `view -V` in their fingers wants a verbose engine session, not a
+    // version string. `-V` bare (nvim's own "verbose level 10") is the shape
+    // that regresses silently if the short form is ever reclaimed -- the
+    // attached-value shapes below never matched a clap short flag anyway.
+    #[test]
+    fn nvims_verbose_flag_reaches_the_engine_rather_than_printing_views_version() {
+        for argv in [
+            &["view", "-V"][..],
+            &["view", "-V1"],
+            &["view", "-V10", "notes.md"],
+            &["view", "-V2/tmp/nvim.log"],
+        ] {
+            let cli = Cli::try_parse_from(argv.iter().copied())
+                .map_err(|err| format!("{argv:?} was rejected or claimed by clap: {err}"))
+                .expect("nvim's verbose flag must survive view's own parse");
+            let expected: Vec<OsString> = argv[1..].iter().map(OsString::from).collect();
+            assert_eq!(
+                engine_config(&cli).extra_args,
+                expected,
+                "{argv:?} must reach nvim verbatim"
+            );
+        }
+    }
+
+    // The long form is the whole version surface, so it keeps working
+    // unchanged after the short form was released to nvim.
+    #[test]
+    fn the_long_version_flag_still_reports_this_builds_version() {
+        let err = Cli::try_parse_from(["view", "--version"])
+            .err()
+            .expect("--version exits through clap rather than returning a parsed Cli");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(
+            err.to_string().contains(VERSION),
+            "--version must print this build's version, got {err}"
+        );
+    }
+
+    // A short form left declared anywhere on the version argument is the
+    // regression this pins: `--help` rendering it as `-V, --version` is the
+    // user-visible tell, and it means clap claims the token before
+    // `passthrough` can.
+    #[test]
+    fn no_short_form_is_declared_for_the_version_flag() {
+        let version = Cli::command()
+            .get_arguments()
+            .find(|arg| arg.get_id().as_str() == "version")
+            .map(|arg| arg.get_short())
+            .expect("the CLI must still carry a version argument");
+        assert_eq!(
+            version, None,
+            "the version flag reclaimed a short form; nvim's -V passthrough \
+             breaks the moment it does"
         );
     }
 
