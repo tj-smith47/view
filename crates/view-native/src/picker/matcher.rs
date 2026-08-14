@@ -96,12 +96,15 @@ struct Session {
     /// The still-running background scan/search thread for this session's
     /// corpus, if any (`None` for `Buffers`, whose corpus arrives
     /// pre-gathered -- see `seed_or_scan`). `stream_until_preempted` checks
-    /// `is_finished()` on this rather than trusting nucleo's own
+    /// this thread's liveness rather than trusting nucleo's own
     /// `Status::running` alone: nucleo's tick can legitimately report no
     /// work pending the instant after a query restarts, before this thread
     /// has pushed even its first item into the injector, which would
     /// otherwise make the worker give up and block on the next request
-    /// forever while a real match is still moments away on disk.
+    /// forever while a real match is still moments away on disk. Set back
+    /// to `None` by [`reap_finished_scan`] once the thread has finished and
+    /// been joined, so a `None` here means "no scan thread can still be
+    /// pushing into this session's injector" whether or not one ever ran.
     scan_handle: Option<JoinHandle<()>>,
     /// When set, [`stream_until_preempted`] mirrors its tick-state
     /// transitions and exit reason into `sources::scan_probe` under this
@@ -112,6 +115,15 @@ struct Session {
     /// path leaves it `None`.
     #[cfg(test)]
     probe_key: Option<String>,
+    /// When set, [`stream_until_preempted`] calls it once per pass, in the
+    /// window between that pass's `tick` and its scan-liveness check --
+    /// exactly where a scan thread's final `Injector::push` has to land for
+    /// the stale-`running` race to bite. A cfg(test)-only seam so the
+    /// regression for that race can place a push there deterministically
+    /// instead of waiting for the interleaving to occur on its own; the
+    /// field does not exist in a production build.
+    #[cfg(test)]
+    scan_race_window: Option<Box<dyn Fn() + Send>>,
 }
 
 impl Session {
@@ -128,6 +140,8 @@ impl Session {
             scan_handle: None,
             #[cfg(test)]
             probe_key: None,
+            #[cfg(test)]
+            scan_race_window: None,
         }
     }
 
@@ -150,6 +164,7 @@ impl Session {
             cancel: Arc::new(AtomicBool::new(false)),
             scan_handle: None,
             probe_key: None,
+            scan_race_window: None,
         }
     }
 }
@@ -373,10 +388,22 @@ fn stream_until_preempted<S: MsgSink>(
 ) -> Option<WorkerRequest> {
     #[cfg(test)]
     let mut probe_last = String::new();
+    // Whether a *previous* pass already established that no scan thread can
+    // still be feeding this session's injector, which is what makes the
+    // tick below safe to believe (see that exit arm for the race this
+    // guards). A session holding no scan thread at all on entry -- a
+    // `Buffers` seed, an empty live-grep needle, a `Files` walk an earlier
+    // request already reaped -- starts out satisfying it: every item in its
+    // injector was pushed by this same worker thread ahead of the loop.
+    let mut scan_reaped_before_tick = active.scan_handle.is_none();
     loop {
         let status = active.nucleo.tick(TICK_BUDGET_MS);
         if status.changed {
             send_results(active, generation, tx);
+        }
+        #[cfg(test)]
+        if let Some(hook) = &active.scan_race_window {
+            hook();
         }
         // nucleo's own `running` can go false the instant after a restart,
         // before a freshly spawned scan thread has pushed even its first
@@ -384,10 +411,7 @@ fn stream_until_preempted<S: MsgSink>(
         // about to be. Trusting `!status.running` alone here would let the
         // worker fall back to `rx.recv()` with a real on-disk match still
         // moments away and nothing left to wake this loop up to find it.
-        let scan_finished = active
-            .scan_handle
-            .as_ref()
-            .is_none_or(std::thread::JoinHandle::is_finished);
+        let scan_finished = reap_finished_scan(active);
         // transitions only: this loop spins hot, and an unconditional note
         // per pass would swamp the event log without adding information
         #[cfg(test)]
@@ -404,7 +428,28 @@ fn stream_until_preempted<S: MsgSink>(
                 probe_last = state;
             }
         }
-        if !status.running && scan_finished {
+        // `status.running` answers "is there matcher work left" from an item
+        // count nucleo loaded *before* `tick` returned (`Nucleo::tick`
+        // compares the injector's `items.count()` against the count its
+        // worker has already processed), while the scan's own liveness is
+        // read after it. A scan thread's final `Injector::push` landing
+        // between those two reads satisfies both -- no work pending as of
+        // the count load, thread gone as of the liveness load -- while a
+        // real match sits in the injector that no tick has ever seen. The
+        // arm below would then return, the worker would block on
+        // `rx.recv()`, and the query would stream empty batches until the
+        // next keystroke: a live-grep whose only match was that last push
+        // shows "no results" for text that is plainly on disk.
+        //
+        // Demanding that the reap happened before the tick, rather than
+        // after it, closes the window for good and needs no timeout or
+        // retry budget: reaping *joins* the finished scan thread, so every
+        // push that thread made happens-before the join returns, hence
+        // before this pass's tick began, hence before that tick's own count
+        // load. A tick under that condition reporting `!running` therefore
+        // proves the injector holds nothing unmatched, and one further tick
+        // is provably enough.
+        if !status.running && scan_reaped_before_tick {
             #[cfg(test)]
             if let Some(key) = &active.probe_key {
                 sources::scan_probe::note(
@@ -414,6 +459,7 @@ fn stream_until_preempted<S: MsgSink>(
             }
             return None;
         }
+        scan_reaped_before_tick = scan_finished;
         // a newer query or a close has already arrived: stop ticking the
         // superseded request and let the caller pick it up, rather than
         // spending the rest of this pass's budget on results
@@ -427,6 +473,34 @@ fn stream_until_preempted<S: MsgSink>(
             return Some(next);
         }
     }
+}
+
+/// Reports whether any scan/search thread can still be pushing into
+/// `active`'s injector, joining that thread the moment it reports finished
+/// so a later `None` in `scan_handle` means it for the rest of the session.
+///
+/// Joining, rather than only asking `is_finished`, is what earns
+/// [`stream_until_preempted`]'s no-work exit its ordering guarantee: a
+/// successful join synchronizes with the joined thread's completion, so
+/// every item that thread pushed is visible to anything the worker thread
+/// does afterwards -- an `is_finished` poll alone establishes no such edge.
+/// It cannot stall the worker: only a thread already reporting finished is
+/// joined (the non-blocking-join shape `JoinHandle::is_finished` documents),
+/// so `Session::drop`'s signal-never-join teardown rule still holds for a
+/// walker that is genuinely still walking. A panicked scan thread's `Err` is
+/// dropped: the scan's own failure handling already degraded to "no further
+/// items", and the picker keeps whatever it streamed before that.
+fn reap_finished_scan(active: &mut Session) -> bool {
+    let Some(handle) = &active.scan_handle else {
+        return true;
+    };
+    if !handle.is_finished() {
+        return false;
+    }
+    if let Some(handle) = active.scan_handle.take() {
+        let _ = handle.join();
+    }
+    true
 }
 
 /// Copies the top-ranked entries off `active`'s current snapshot and sends
@@ -1380,6 +1454,126 @@ mod tests {
         }
         eprintln!("live-grep timeline settled:\n{}", timeline.join("\n"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The starvation class above, forced rather than waited for: an
+    /// injector push that lands after a tick has already computed
+    /// `Status::running` from a stale item count, with the scan thread
+    /// gone by the time the loop reads its liveness. Both halves of
+    /// `stream_until_preempted`'s no-work exit then read true while a real
+    /// match sits unmatched in the injector, which is how a one-line
+    /// fixture streamed empty batches for a whole 60s budget on the two-core
+    /// Windows mirror.
+    ///
+    /// Deterministic where the on-disk regressions are roughly 1-in-4 on a
+    /// cold rebuild, because both sides of the window are pinned instead of
+    /// raced: the scan handle is a thread that has already run to
+    /// completion, so the liveness read cannot come out any other way, and
+    /// the push is placed in the `scan_race_window` seam, which runs
+    /// between the tick and that read. Pushing from the loop's own thread
+    /// makes the reproduction stronger, not weaker: even with the push
+    /// perfectly visible in program order, the exit arm still fires on the
+    /// pre-push count `tick` captured, which is the whole defect. Letting
+    /// the exit arm consult the liveness read from its own pass (instead of
+    /// a reap that preceded the tick) makes this fail by name, with no
+    /// results ever streamed.
+    #[test]
+    fn a_scan_push_landing_after_the_tick_still_reaches_the_picker() {
+        // bounded (see `spawn_bounded`'s doc): one synthetic item needs no
+        // matching throughput, and the session stays out of the pool
+        // contention a --test-threads-parallel run of this module creates
+        let (_serial, mut session) = new_bounded_serial(
+            Source::LiveGrep {
+                root: std::path::PathBuf::from("/synthetic"),
+            },
+            1,
+        );
+        session.nucleo.pattern.reparse(
+            0,
+            "needle",
+            CaseMatching::Smart,
+            Normalization::Smart,
+            false,
+        );
+        // settle the pattern against the still-empty corpus first, so the
+        // pass that fires the seam below is one whose tick has already
+        // reported no work left. That is the exact state the exit arm
+        // mishandles, and pinning it keeps the reproduction independent of
+        // how quickly the host schedules nucleo's first pattern pass.
+        let settle_deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = session.nucleo.tick(TICK_BUDGET_MS);
+            if !status.running {
+                break;
+            }
+            assert!(
+                Instant::now() < settle_deadline,
+                "nucleo never settled against the empty corpus"
+            );
+        }
+
+        let scan = std::thread::spawn(|| {});
+        let finish_deadline = Instant::now() + Duration::from_secs(10);
+        while !scan.is_finished() {
+            assert!(
+                Instant::now() < finish_deadline,
+                "the empty stand-in scan thread never finished"
+            );
+            std::thread::yield_now();
+        }
+        session.scan_handle = Some(scan);
+
+        let injector = session.nucleo.injector();
+        let pushed = AtomicBool::new(false);
+        session.scan_race_window = Some(Box::new(move || {
+            if pushed.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            injector.push(
+                PickerItem::new("src/lib.rs:1: let needle = 1;"),
+                |item, cols| {
+                    cols[0] = item.label.as_str().into();
+                },
+            );
+        }));
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(64);
+        // a stuck loop must fail this test, never hang the suite: the only
+        // other way out of `stream_until_preempted` is a request arriving,
+        // so the guard sends one rather than sleeping in the test body
+        let (done_tx, done_rx) = mpsc::channel::<()>();
+        let guard = std::thread::spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) =
+                done_rx.recv_timeout(Duration::from_secs(30))
+            {
+                let _ = req_tx.send(WorkerRequest::Close);
+            }
+        });
+
+        let outcome = stream_until_preempted(&mut session, 9, &req_rx, &msg_tx);
+        drop(done_tx);
+        guard.join().expect("stream loop guard thread panicked");
+
+        let labels: Vec<String> = msg_rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                Msg::PickerResults { items, .. } => Some(items),
+                _ => None,
+            })
+            .flatten()
+            .map(|item| item.label)
+            .collect();
+        assert!(
+            outcome.is_none(),
+            "the stream loop never settled on its own, got {}",
+            labels.len()
+        );
+        assert!(
+            labels.iter().any(|label| label.contains("needle")),
+            "expected the item pushed between the tick and the scan-liveness \
+             read to be matched and streamed, got {labels:?}"
+        );
     }
 
     /// The highlight-attribution half of the colon-path fix: the fixture's
