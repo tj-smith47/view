@@ -35,24 +35,31 @@ fn handshake_failure_reaps_child() {
     let cfg = EngineConfig::default()
         .with_nvim_bin(env!("CARGO_BIN_EXE_view-engine-hang-fixture"))
         .with_env("VIEW_ENGINE_HANG_MARKER", &marker)
-        .with_handshake_timeout(Duration::from_millis(500));
+        // long enough that a host's own process startup fits inside it: a
+        // debug binary on macOS pays dyld and codesign validation before its
+        // main runs at all, which has been measured in this tree at over
+        // half a second, and a handshake that gave up first would kill the
+        // fixture before it could ever report itself
+        .with_handshake_timeout(Duration::from_secs(2));
 
-    // spawn() blocks for ~500ms waiting on the handshake; watch for the
+    // spawn() blocks waiting on a handshake that never comes; watch for the
     // fixture's marker on this thread meanwhile, to prove the fake process
     // was actually alive mid-handshake rather than absent for never having
     // started -- without which the reap assertion below passes vacuously.
-    // The watch repeats rather than probing once at a fixed offset: how
-    // long fork and exec take varies by host and platform, so a single
-    // probe races the very startup it means to observe.
+    // The watch runs for exactly as long as spawn() itself does, rather than
+    // for a constant fraction of its timeout: how long fork and exec take is
+    // a property of the host, so any constant here races the very startup it
+    // means to observe, and loses that race whenever the machine is busy.
     let spawn_thread = std::thread::spawn(move || Engine::spawn(cfg));
-    let deadline = std::time::Instant::now() + Duration::from_millis(400);
-    let mut fixture_pid = None;
-    while std::time::Instant::now() < deadline {
-        if let Some(pid) = std::fs::read_to_string(&marker)
+    let read_marker = || {
+        std::fs::read_to_string(&marker)
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
-        {
-            fixture_pid = Some(pid);
+    };
+    let mut fixture_pid = None;
+    while !spawn_thread.is_finished() {
+        fixture_pid = read_marker();
+        if fixture_pid.is_some() {
             break;
         }
         std::thread::sleep(Duration::from_millis(10));
@@ -64,7 +71,10 @@ fn handshake_failure_reaps_child() {
         matches!(err, Some(EngineError::Timeout { .. })),
         "expected Some(EngineError::Timeout {{ .. }}), got {err:?}"
     );
-    let fixture_pid = fixture_pid.expect(
+    // a last read for the fixture that wrote its marker in the same instant
+    // spawn() gave up: the file outlives the process it names, so finding it
+    // here still proves the process ran
+    let fixture_pid = fixture_pid.or_else(read_marker).expect(
         "fake nvim process never wrote its marker, so it was never observed \
          running; the test does not exercise the reap path",
     );
