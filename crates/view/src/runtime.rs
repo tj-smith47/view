@@ -1110,9 +1110,13 @@ struct Wakeups<'a> {
 /// caller should re-read both sides of the connection.
 ///
 /// Unbounded whenever neither watch asks for a wakeup, which is a session
-/// whose engine connection is gone or whose heartbeat is paused: with no
-/// probe coming there is no silence either watch could report on, so the
-/// loop sleeps until a keystroke, a redraw or an engine request wakes it.
+/// whose heartbeat is paused: with no probe coming and none owed there is no
+/// silence either watch could report on, so the loop sleeps until a
+/// keystroke, a redraw or an engine request wakes it. A session whose engine
+/// connection is gone is not that case -- its prober retires on the first
+/// tick the connection refuses, and the watch it leaves behind keeps asking
+/// to be read again one threshold later, which is the cadence a recovery or
+/// a resolution is noticed on rather than a wait to be slept through.
 /// A live cadence always bounds the wait, and for the wedged case that
 /// bound is the entire point: a wedged engine emits no redraws, so an
 /// operator who stops typing -- or who never typed at all, since a wedge

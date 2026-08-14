@@ -102,6 +102,23 @@ check_dev_only() { # usage: check_dev_only <crate>
 }
 check_dev_only view-test-support
 
+# view -> view-oracle exists so the bin crate's live supervision test
+# (crates/view/tests/supervision_live.rs) asserts against the oracle's own
+# DETECTION_BOUND instead of re-deriving it, and nothing in the shipped
+# binary may reach the oracle. check_dev_only above cannot say that: it is a
+# statement about every consumer of a crate, and view-bench and view-harness
+# hold sanctioned normal edges to view-oracle. This is the same `kind` test
+# narrowed to one edge, so the day that dev-dependency is promoted to a
+# normal one the audit says so instead of shipping the oracle in the editor.
+check_edge_dev_only() { # usage: check_edge_dev_only <crate> <dep>
+  if jq -e --arg c "$1" --arg d "$2" \
+    '.packages[] | select(.name == $c) | .dependencies[] | select(.name == $d and .kind != "dev")' \
+    <<<"$meta" >/dev/null; then
+    echo "AUDIT FAIL: $1 may depend on $2 only as a dev-dependency, never a normal or build one"; fail=1
+  fi
+}
+check_edge_dev_only view view-oracle
+
 # view-harness is bin-only (the corpus loader + oracle/bench runner CLIs);
 # the dependency graph only ever points into it (view-harness ->
 # view-oracle, view-harness -> view-bench -- the bench bin drives

@@ -430,6 +430,10 @@ const _: () = assert!(
 /// measurement arm that binary exists for has to be the absence of this
 /// cadence, not a paused copy of it, so the counterfactual is a compilation
 /// without the prober rather than one that still wakes on the interval.
+/// [`Engine::start_pump`] leaves the watch paused to match, since an armed
+/// watch whose anchor nothing advances asks the runtime loop for a wakeup
+/// every threshold forever -- a periodic wakeup on the arm whose whole
+/// premise is that it has none.
 fn spawn_prober(prober: HeartbeatProber, handle: EngineHandle) {
     // consumed rather than returned around: the arm below is compiled out
     // in this configuration, so nothing follows this to skip
@@ -659,6 +663,14 @@ impl Engine {
         // between the two would have its reply staged rather than sunk, and
         // that generation would stay outstanding for the session's life.
         let attached = self.pump.attach_sink(sink);
+        // and not armed at all under `bench-no-heartbeat`, where no prober
+        // was spawned to advance the cadence: an armed watch over a frozen
+        // anchor reads as a cadence that stopped and keeps asking the
+        // runtime loop to look again one threshold later, forever. The
+        // counterfactual arm is the absence of the cadence including the
+        // wakeups it costs, so the watch that measures it stays paused and
+        // the loop's wait stays unbounded (see `spawn_prober`).
+        #[cfg(not(feature = "bench-no-heartbeat"))]
         self.heartbeat.resume();
         attached
     }

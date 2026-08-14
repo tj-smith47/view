@@ -145,12 +145,19 @@ struct Probe {
     /// the moment a probe went out, or the moment the watch was armed
     /// before the first one ever did.
     ///
-    /// Relaxed at both ends, unlike the send log beside it, because nothing
-    /// is published through it and no verdict is read from it. It dates a
-    /// deadline for a probe that has not been sent yet
-    /// ([`HeartbeatWatch::poll_deadline`]), so a reading a millisecond
-    /// stale arms a wakeup a millisecond off, on a pass that then re-reads
-    /// the generations this is not part of.
+    /// Release/acquire at both ends, unlike the relaxed send log beside it,
+    /// because the ordering between this and `sent_generation` is what keeps
+    /// a wakeup honest rather than merely close. A reading a millisecond
+    /// stale is harmless -- it arms a wakeup a millisecond early
+    /// ([`HeartbeatWatch::poll_deadline`]) -- but a reading a whole *tick*
+    /// fresh than the generation pair that found nothing outstanding is not:
+    /// the anchor it hands back belongs to a probe already on the wire, and
+    /// the deadline dated from it lands one interval past the instant that
+    /// probe's own silence crosses the threshold. A tick stores this after
+    /// publishing its generation ([`HeartbeatProber::tick_at`]) and a reader
+    /// loads it before reading that generation
+    /// ([`HeartbeatWatch::deadline_with`]), so the only reading either side
+    /// can produce is one no newer than the pair it is judged against.
     cadence_at: AtomicU64,
     paused: AtomicBool,
 }
@@ -315,11 +322,6 @@ impl HeartbeatProber {
         let generation = self.probe.sent_generation.load(Ordering::Relaxed) + 1;
         let sent_at = self.probe.stamp(now);
         self.probe.sent_at[Probe::slot(generation)].store(sent_at, Ordering::Relaxed);
-        // the same stamp, kept where a reader that finds nothing
-        // outstanding can still date the cadence from it: that reader is
-        // asking when the *next* probe is owed, and this tick is what the
-        // answer counts forward from
-        self.probe.cadence_at.store(sent_at, Ordering::Relaxed);
         // published after its send time is stamped, and with a release, so
         // an observer that sees this generation outstanding is guaranteed
         // the time it went out rather than whatever the slot held a lap
@@ -334,6 +336,23 @@ impl HeartbeatProber {
         self.probe
             .sent_generation
             .fetch_max(generation, Ordering::Release);
+        // the same stamp, kept where a reader that finds nothing outstanding
+        // can still date the cadence from it: that reader is asking when the
+        // *next* probe is owed, and this tick is what the answer counts
+        // forward from.
+        //
+        // Stored after the generation above rather than before it, and with
+        // a release of its own, because a reader takes the two in the
+        // opposite order: it loads this anchor first and the generation pair
+        // second (see `HeartbeatWatch::deadline_with`). Between those two
+        // orders the anchor a reader can obtain is never newer than the pair
+        // it judges against -- an anchor read that returned this store
+        // synchronizes with it, so the generation the same reader goes on to
+        // load is at least this one and it takes the outstanding branch
+        // instead. Storing this first would allow the inverse reading, whose
+        // wakeup lands one whole interval past the moment this probe's own
+        // silence crosses the threshold.
+        self.probe.cadence_at.store(sent_at, Ordering::Release);
         // sent after the bump, never before: a generation handed to the
         // wire before it is on record could be answered before the observer
         // could tell it was ever owed
@@ -476,8 +495,11 @@ impl HeartbeatWatch {
     /// noticing that the engine started answering again -- is served by
     /// looking again one threshold later.
     ///
-    /// Costs one clock read and two relaxed loads on an idle pass with a
-    /// live cadence. There is no answer to give without a clock: the
+    /// Costs one clock read and four atomic loads on an idle pass with a
+    /// live cadence -- the cadence anchor, the generation pair, and the
+    /// paused flag, three of them acquire loads and the acknowledged
+    /// generation relaxed behind its own publisher. There is no answer to
+    /// give without a clock: the
     /// question is when an instant in the future arrives, and a loop that
     /// declined to read one here would be declining to arm the deadline at
     /// all.
@@ -490,8 +512,17 @@ impl HeartbeatWatch {
     /// source rather than a value, so a test can prove which questions reach
     /// for it.
     fn deadline_with(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
+        // the anchor before the generation pair, never after: a tick landing
+        // anywhere in this call would otherwise be half-seen, its probe
+        // absent from the pair that found nothing outstanding but its anchor
+        // present in the arithmetic below, and the wakeup that arms would sit
+        // one interval past that probe's own crossing. Read first, the worst
+        // this can be is one tick stale, which arms the wakeup a cadence
+        // interval early -- a pass that looks again and finds the probe it
+        // missed
+        let anchor = self.probe.cadence_at.load(Ordering::Acquire);
         if self.probe.oldest_outstanding().is_none() {
-            return self.prospective_deadline(clock);
+            return self.prospective_deadline(anchor, clock);
         }
         Self::deadline(self.probe.outstanding_for(clock()), self.threshold)
     }
@@ -505,13 +536,20 @@ impl HeartbeatWatch {
     /// for a threshold. Anchoring on `now` instead would arm the same
     /// deadline against a cadence that already ticked, and the pass that
     /// woke would find the probe younger than it expected.
-    fn prospective_deadline(&self, clock: impl FnOnce() -> Instant) -> Option<Duration> {
+    ///
+    /// `anchor` is handed in already read rather than loaded here, because
+    /// when it is read relative to the generation pair decides whether the
+    /// answer can oversleep a probe -- see [`Self::deadline_with`].
+    fn prospective_deadline(
+        &self,
+        anchor: u64,
+        clock: impl FnOnce() -> Instant,
+    ) -> Option<Duration> {
         if self.probe.paused.load(Ordering::Acquire) {
             return None;
         }
         let now = Duration::from_nanos(self.probe.stamp(clock()));
-        let owed = Duration::from_nanos(self.probe.cadence_at.load(Ordering::Relaxed))
-            + HEARTBEAT_PROBE_INTERVAL;
+        let owed = Duration::from_nanos(anchor) + HEARTBEAT_PROBE_INTERVAL;
         let overdue = now.saturating_sub(owed);
         if overdue.is_zero() {
             return Some(owed.saturating_sub(now) + self.threshold);
@@ -561,7 +599,7 @@ impl HeartbeatWatch {
         // unbounded
         self.probe
             .cadence_at
-            .store(self.probe.stamp(now), Ordering::Relaxed);
+            .store(self.probe.stamp(now), Ordering::Release);
         // released after the forgiveness above, so the first tick to see
         // this connection armed also sees the acknowledgement that came
         // with the arming rather than a run it should not reopen
@@ -912,6 +950,38 @@ mod tests {
         watch.resume_at(armed);
         assert_eq!(watch.deadline_at(armed), Some(INTERVAL + THRESHOLD));
         assert_eq!(watch.deadline_at(armed + INTERVAL), Some(THRESHOLD));
+    }
+
+    /// The interleaving the anchor's read order exists for, pinned through
+    /// the clock seam: the deadline read finds nothing outstanding, a tick
+    /// lands while it is still deciding, and the wakeup it arms has to time
+    /// the probe that tick put on the wire rather than the one after it.
+    /// Dating the answer from the anchor that tick left behind would sleep
+    /// a whole interval past the moment this probe's silence crosses the
+    /// threshold, which is the window a wedge opening into an idle session
+    /// hides in.
+    #[test]
+    fn a_tick_landing_inside_a_deadline_read_is_never_slept_past() {
+        let (watch, prober, handle, _guards) = watched_connection();
+        let t0 = watch.probe.origin;
+        let sent_at = t0 + INTERVAL;
+        let armed = watch.deadline_with(|| {
+            prober.tick_at(&handle, sent_at).unwrap();
+            sent_at
+        });
+        assert_eq!(
+            armed,
+            Some(THRESHOLD),
+            "the wakeup was dated from the anchor the mid-read tick stored, not from \
+             the probe it sent"
+        );
+        // the same instant the outstanding branch times that probe's own
+        // window to, which is what "never slept past" means here
+        assert_eq!(watch.deadline_at(sent_at), Some(THRESHOLD));
+        assert_eq!(
+            watch.observe_at(false, sent_at + THRESHOLD),
+            Liveness::Wedged
+        );
     }
 
     /// A cadence that stopped without the watch being paused -- a prober
