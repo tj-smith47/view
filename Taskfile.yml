@@ -81,6 +81,16 @@ tasks:
     # never contend for the same machine
     cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
 
+  acceptance:
+    desc: Engine-supervision conformance against a real terminal session — every detection path, its recovery, and the measured time to each (~2.5 min; needs tmux)
+    # its own target rather than a step of `task ci`, on the same terms as
+    # oracle, compat and bench: it drives a real pty through tmux and most
+    # of its runtime is spent waiting out the very thresholds it measures,
+    # which is minutes a per-commit gate cannot spend
+    cmds:
+      - cargo build --release -p view
+      - bash scripts/acceptance/supervision.sh
+
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
     cmds:
