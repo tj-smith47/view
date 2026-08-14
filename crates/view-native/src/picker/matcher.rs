@@ -1213,6 +1213,110 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Diagnostic timeline for the starvation class the two live-grep
+    /// regression tests above intermittently hit on a cold two-core Windows
+    /// host: a one-line fixture streams zero results for a full 60s budget,
+    /// then the identical rerun passes. Their shared timeout panic cannot
+    /// separate the three mechanisms that all read as "empty forever" from
+    /// the receiving end, so this drives the same session pipeline
+    /// (`restart_live_grep`, the escaped reparse, a tick loop as hot as
+    /// `stream_until_preempted`'s) with the internals in view, recording a
+    /// transition whenever the item count, match count or scan liveness
+    /// changes:
+    ///
+    /// - `scan_done` never turning true: the scan thread is stalled in the
+    ///   walk or a read.
+    /// - `scan_done=true` with `items` still zero: the walker filtered the
+    ///   fixture out or the searcher missed it, and the walker re-run in
+    ///   the panic message shows what the walk sees after the fact.
+    /// - `items` nonzero with `matched` stuck at zero: nucleo's own tick
+    ///   pipeline stalled after the injector was fed.
+    ///
+    /// Ignored by default because a green run proves nothing about an
+    /// intermittent class -- run it explicitly, repeatedly, on the host
+    /// under suspicion (`--include-ignored` inside the full suite
+    /// reproduces the contention the regression tests fail under).
+    #[test]
+    #[ignore = "diagnostic for the live-grep starvation class; run explicitly on the host under suspicion"]
+    fn live_grep_starvation_timeline() {
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("picker-grep-starvation-{nonce}"));
+        std::fs::create_dir_all(&root).expect("create test root");
+        std::fs::write(root.join("fixture.txt"), "let price = cost$;\n")
+            .expect("write test fixture");
+
+        let start = Instant::now();
+        // 75s: past the regression tests' own 60s budget, so any starvation
+        // that would fail them is fully inside this window
+        let deadline = start + Duration::from_secs(75);
+        let (_serial, mut session) = new_bounded_serial(Source::LiveGrep { root: root.clone() }, 1);
+        restart_live_grep(&mut session, root.clone(), "cost$");
+        session.nucleo.pattern.reparse(
+            0,
+            &escape_nucleo_atom_syntax("cost$"),
+            CaseMatching::Smart,
+            Normalization::Smart,
+            false,
+        );
+
+        let mut timeline: Vec<String> = Vec::new();
+        let mut last_state = String::new();
+        let mut last_entry = start;
+        let mut matched = 0u32;
+        while Instant::now() < deadline {
+            let status = session.nucleo.tick(TICK_BUDGET_MS);
+            let items = session.nucleo.snapshot().item_count();
+            matched = session.nucleo.snapshot().matched_item_count();
+            let scan_done = session
+                .scan_handle
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished);
+            let state = format!(
+                "items={items} matched={matched} changed={} running={} scan_done={scan_done}",
+                status.changed, status.running
+            );
+            let now = Instant::now();
+            // transitions plus a 5s heartbeat: the loop spins as hot as
+            // `stream_until_preempted` (no sleep -- a sleep here would
+            // hide a starvation caused by the spin itself), so recording
+            // every pass would swamp the output
+            if state != last_state || now.duration_since(last_entry) >= Duration::from_secs(5) {
+                timeline.push(format!("t={:>6}ms {state}", start.elapsed().as_millis()));
+                last_state = state;
+                last_entry = now;
+            }
+            if matched > 0 {
+                break;
+            }
+        }
+
+        if matched == 0 {
+            let walked: Vec<String> = ignore::WalkBuilder::new(&root)
+                .build()
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().display().to_string())
+                .collect();
+            let fixture = std::fs::read_to_string(root.join("fixture.txt"));
+            panic!(
+                "live-grep starved after {:?};\nwalker re-run sees: {walked:?}\nfixture read: \
+                 {fixture:?}\ntimeline:\n{}",
+                start.elapsed(),
+                timeline.join("\n")
+            );
+        }
+        eprintln!("live-grep timeline settled:\n{}", timeline.join("\n"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The highlight-attribution half of the colon-path fix: the fixture's
     /// directory name itself contains the query text, so before
     /// `spawn_live_grep_scan` restricted the matcher column to
