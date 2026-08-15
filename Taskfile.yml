@@ -31,6 +31,14 @@ tasks:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
     cmd: cargo test --workspace
 
+  test-focus:
+    desc: Run one crate or one filter's tests (task test-focus -- -p view-core speculate)
+    # a target of its own rather than an argument to `test`, because CLI_ARGS
+    # reaches every task in a chain: `task commit -- -m msg` calls ci, which
+    # calls test, and a test target that read CLI_ARGS would hand the commit
+    # message to cargo as a manifest path
+    cmd: cargo test {{.CLI_ARGS}}
+
   audit:
     desc: Enforce crate dependency direction and the pinned engine version
     cmds:
