@@ -808,9 +808,47 @@ fn cursor_spec(model: &Model, offset: u16) -> Option<CursorSpec> {
         }
     } else {
         let (row, col) = model.engine.grid().cursor();
-        (row.saturating_add(offset), col)
+        (
+            row.saturating_add(offset),
+            speculated_col(model, (width, height), row, col),
+        )
     };
     Some(CursorSpec { row, col, shape })
+}
+
+/// The column the cursor is shown at while predictions are painted on its
+/// own row: one past the rightmost of them, or the engine's own column when
+/// there are none.
+///
+/// Display-only and stateless, exactly as the predicted glyphs are, and
+/// derived from the same pending list on every frame -- so the engine's
+/// cursor is authoritative again the instant that list empties, whether it
+/// emptied by reconciliation, by invalidation or by the age bound.
+///
+/// Without it the feature would hide half the latency it was built to hide:
+/// the eye tracks the caret, and a caret parked on the first glyph of a
+/// burst -- inverted under it, with a block cursor -- advertises the round
+/// trip the glyphs to its right have already skipped, then jumps by the
+/// whole burst when the redraw lands.
+///
+/// Predictions the [`LayerKind::Speculated`] layer would drop as off-grid
+/// are skipped here too, so the caret never advances past a glyph nothing
+/// painted; a caret that would land past the last column stays on it, since
+/// a cursor outside the grid is not a wrong guess a redraw corrects but a
+/// position no terminal has.
+fn speculated_col(model: &Model, grid: (u16, u16), row: u16, col: u16) -> u16 {
+    let (grid_w, grid_h) = grid;
+    model
+        .speculate
+        .pending()
+        .iter()
+        .filter(|cell| cell.row == row && cell.row < grid_h && cell.col < grid_w)
+        .map(|cell| cell.col)
+        .filter(|predicted| *predicted >= col)
+        .max()
+        .map_or(col, |last| {
+            last.saturating_add(1).min(grid_w.saturating_sub(1))
+        })
 }
 
 /// The palette's own cursor position: past its box's frame and pad (see
@@ -2067,6 +2105,119 @@ mod tests {
                 .predict("insert", key, cursor, stamp)
                 .is_some(),
             "{key:?} at {cursor:?} is a plain insert-mode character"
+        );
+    }
+
+    /// The caret leads the burst it belongs to: with three glyphs painted
+    /// ahead of the engine's own cursor, the cursor is shown one past the
+    /// last of them, which is where the next character will land.
+    #[test]
+    fn a_pending_burst_carries_the_cursor_past_its_last_predicted_cell() {
+        let mut model = model_with_grid(40, 12);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 6 });
+        for (i, key) in ['a', 'b', 'c'].into_iter().enumerate() {
+            predict(&mut model, key, (4, 6), 10 + i as u64);
+        }
+
+        let cursor = render(&model).cursor.expect("a sized grid places a cursor");
+
+        assert_eq!(cursor.row, 4);
+        assert_eq!(
+            cursor.col, 9,
+            "the caret sat on the burst instead of leading it"
+        );
+    }
+
+    /// And gives it straight back: once the redraw the burst was waiting for
+    /// retires the last prediction, the engine's own cursor is authoritative
+    /// again on the very next frame.
+    #[test]
+    fn the_engine_cursor_is_authoritative_again_the_frame_after_the_burst_settles() {
+        let mut model = model_with_grid(40, 12);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 6 });
+        predict(&mut model, 'a', (4, 6), 10);
+        predict(&mut model, 'b', (4, 6), 11);
+
+        model.speculate.reconcile(&[UiEvent::GridLine {
+            grid: 1,
+            row: 4,
+            col_start: 6,
+            cells: vec![
+                view_core::events::GridCell {
+                    text: "a".to_string(),
+                    hl_id: 0,
+                    repeat: 1,
+                },
+                view_core::events::GridCell {
+                    text: "b".to_string(),
+                    hl_id: 0,
+                    repeat: 1,
+                },
+            ],
+        }]);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 8 });
+
+        let cursor = render(&model).cursor.expect("a sized grid places a cursor");
+        assert!(model.speculate.pending().is_empty());
+        assert_eq!((cursor.row, cursor.col), (4, 8));
+    }
+
+    /// A prediction on some other row says nothing about where this row's
+    /// caret belongs: a burst that wrapped, or one left over from a cursor
+    /// the engine has since moved, must not drag the caret across the
+    /// screen.
+    #[test]
+    fn a_prediction_on_another_row_leaves_the_cursor_where_the_engine_put_it() {
+        let mut model = model_with_grid(40, 12);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 6 });
+        predict(&mut model, 'a', (7, 20), 10);
+
+        let cursor = render(&model).cursor.expect("a sized grid places a cursor");
+
+        assert_eq!((cursor.row, cursor.col), (4, 6));
+    }
+
+    /// Nor does a prediction the engine's cursor has already moved past --
+    /// the caret only ever leads, never rewinds.
+    #[test]
+    fn a_prediction_behind_the_engine_cursor_never_pulls_the_caret_back() {
+        let mut model = model_with_grid(40, 12);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 20 });
+        predict(&mut model, 'a', (4, 6), 10);
+
+        let cursor = render(&model).cursor.expect("a sized grid places a cursor");
+
+        assert_eq!((cursor.row, cursor.col), (4, 20));
+    }
+
+    /// The caret is a position on the terminal, not a guess about content,
+    /// so the off-grid prediction a painter drops cannot push it past the
+    /// last column either.
+    #[test]
+    fn the_caret_never_leaves_the_grid_for_a_prediction_at_its_edge() {
+        let mut model = model_with_grid(40, 12);
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 4, col: 38 });
+        predict(&mut model, 'a', (4, 38), 10);
+        predict(&mut model, 'b', (4, 38), 11);
+
+        let cursor = render(&model).cursor.expect("a sized grid places a cursor");
+
+        assert_eq!(
+            (cursor.row, cursor.col),
+            (4, 39),
+            "the caret must stay on the grid the terminal actually has"
         );
     }
 

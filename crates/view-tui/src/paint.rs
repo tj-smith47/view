@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use view_core::grid::{Grid, GridDamage};
 pub use view_core::hl::{HlAttr, HlTable};
 use view_core::model::{CmdlineState, Model, PopupmenuState, TablineState};
+use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{Span, StyleRole};
 use view_core::theme::{ChromeGroup, ResolvedStyle, Theme};
 use view_surface::{Layer, LayerKind, Rect, Surface};
@@ -518,6 +519,9 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
             LayerKind::Tabline(state) => paint_tabline(state, &theme, area, buf),
             LayerKind::Popupmenu(state) => paint_popupmenu(state, &theme, area, buf),
             LayerKind::Shell => paint_shell(&theme, area, buf),
+            LayerKind::Speculated(cells) => {
+                paint_speculated(cells, &theme, model.engine.hl(), model.chrome_rows(), buf)
+            }
             LayerKind::Picker(_)
             | LayerKind::Tree(_)
             | LayerKind::Statusline(_)
@@ -1332,6 +1336,49 @@ fn paint_grid(
     }
 }
 
+/// nvim's own id for the default highlight -- the style a grid cell carries
+/// when no `hl_attr_define` applies to it.
+const DEFAULT_HL_ID: u64 = 0;
+
+/// Paints the display-only predicted glyphs over the cells they were
+/// predicted for.
+///
+/// Their coordinates are the engine grid's own, not the layer rect's (see
+/// `LayerKind::Speculated`), so they are offset past the reserved chrome rows
+/// exactly as the grid layer's placement already is -- one coordinate space
+/// for both grid-content layers, and one fewer place the two could disagree
+/// about where a cell is.
+///
+/// Styled as a default grid cell, deliberately, with no marker of any kind: a
+/// prediction that announced itself would advertise the latency this exists
+/// to hide, and restyling each cell again the moment the authoritative redraw
+/// confirms it would flicker at typing cadence.
+///
+/// A cell outside the buffer is skipped rather than clamped, per
+/// `PredictedCell`'s own contract: a clamped prediction paints a glyph the
+/// user did not type at the last real column.
+fn paint_speculated(
+    cells: &[PredictedCell],
+    theme: &Theme,
+    hl: &HlTable,
+    offset: u16,
+    buf: &mut Buffer,
+) {
+    let style = style_for(theme, DEFAULT_HL_ID, hl);
+    for cell in cells {
+        let row = cell.row.saturating_add(offset);
+        let Some(out) = buf.cell_mut((cell.col, row)) else {
+            continue;
+        };
+        // every predicted glyph is one ASCII column wide (see `predict`), so
+        // it needs neither the grid's width fitting nor its control-character
+        // sanitization
+        let mut encoded = [0u8; 4];
+        out.set_symbol(cell.glyph.encode_utf8(&mut encoded));
+        out.set_style(style);
+    }
+}
+
 /// Like [`sanitized_char`], but over a whole grid cell's (possibly
 /// multi-char grapheme) text, and substituting a single space for an empty
 /// cell the same way the pre-sanitization code always did. Only allocates
@@ -1464,6 +1511,100 @@ mod tests {
         let buf = terminal.backend().buffer().clone();
         assert_eq!(&buf[(0, 0)].symbol(), &"h");
         assert_eq!(&buf[(1, 0)].symbol(), &"i");
+    }
+
+    /// A tabline with two entries, which is what reserves the one chrome row
+    /// a speculated cell's grid coordinates have to be offset past.
+    fn two_tabs() -> view_core::events::UiEvent {
+        view_core::events::UiEvent::TablineUpdate {
+            current: view_core::events::TabHandle(1),
+            tabs: vec![
+                view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(1),
+                    name: "one".into(),
+                },
+                view_core::events::TabEntry {
+                    tab: view_core::events::TabHandle(2),
+                    name: "two".into(),
+                },
+            ],
+        }
+    }
+
+    /// The whole point of the feature at the painter: a prediction the model
+    /// is holding reaches the terminal cell it names, offset past the chrome
+    /// the grid itself is offset past. `PredictedCell` coordinates are the
+    /// engine grid's own, not the layer rect's, so an arm that treated them
+    /// as rect-relative would paint this glyph a row and five columns from
+    /// where it belongs.
+    #[test]
+    fn a_pending_prediction_paints_its_glyph_at_the_engine_cell_it_names() {
+        let mut model = Model::new();
+        apply(&mut model, two_tabs());
+        model.engine.apply_grid(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        assert_eq!(model.chrome_rows(), 1, "the fixture must reserve a row");
+        let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
+        assert!(model
+            .speculate
+            .predict("insert", 'z', (2, 5), stamp)
+            .is_some());
+        let surface = view_surface::render(&model);
+
+        let backend = TestBackend::new(10, 4);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(
+            &buf[(5, 3)].symbol(),
+            &"z",
+            "grid row 2 sits on terminal row 3 behind one chrome row"
+        );
+    }
+
+    /// The other half: once the authoritative redraw has answered the
+    /// prediction, the model stops holding it and the painter has nothing
+    /// left to put over the engine's own cell.
+    #[test]
+    fn a_reconciled_prediction_leaves_the_authoritative_cell_showing() {
+        let mut model = Model::new();
+        model.engine.apply_grid(GridOp::Resize {
+            width: 10,
+            height: 3,
+        });
+        let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
+        assert!(model
+            .speculate
+            .predict("insert", 'z', (1, 4), stamp)
+            .is_some());
+        let answer = view_core::events::UiEvent::GridLine {
+            grid: 1,
+            row: 1,
+            col_start: 4,
+            cells: vec![view_core::events::GridCell {
+                text: "q".to_string(),
+                hl_id: 0,
+                repeat: 1,
+            }],
+        };
+        model.speculate.reconcile(std::slice::from_ref(&answer));
+        apply(&mut model, answer);
+        assert!(model.speculate.pending().is_empty());
+        let surface = view_surface::render(&model);
+
+        let backend = TestBackend::new(10, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| composite(&model, &surface, f)).unwrap();
+
+        let buf = terminal.backend().buffer().clone();
+        assert_eq!(
+            &buf[(4, 1)].symbol(),
+            &"q",
+            "the engine's own glyph is what remains once the guess is retired"
+        );
     }
 
     /// End-to-end regression at the rendering layer: once a probe reply

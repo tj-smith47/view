@@ -61,8 +61,9 @@ pub fn screen_rows(surface: &Surface, grid: &Grid) -> Vec<String> {
         return Vec::new();
     }
     let mut canvas = vec![vec![Cow::Borrowed(" "); usize::from(width)]; usize::from(height)];
+    let offset = chrome_offset(surface);
     for layer in &surface.layers {
-        paint_layer(&mut canvas, layer, grid);
+        paint_layer(&mut canvas, layer, grid, offset);
     }
     canvas.into_iter().map(|row| row.concat()).collect()
 }
@@ -160,9 +161,39 @@ fn joined_content(content: &[(u64, String)]) -> String {
     content.iter().map(|(_, text)| text.as_str()).collect()
 }
 
-fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid) {
+/// The terminal row the engine grid's own row 0 sits on, read off the layer
+/// that is placed there rather than from a `Model` this pure function never
+/// sees. Zero when no engine grid layer is present, which is a surface with
+/// no grid-space content to offset in the first place.
+fn chrome_offset(surface: &Surface) -> u16 {
+    surface
+        .layers
+        .iter()
+        .find(|layer| matches!(layer.kind, LayerKind::EngineGrid))
+        .map_or(0, |layer| layer.rect.row)
+}
+
+/// Writes one layer into `canvas`. `offset` is frame context rather than
+/// layer state -- where the engine grid's row 0 sits, which only the
+/// grid-space arms need -- and it is resolved once per frame by the caller
+/// because computing it per arm would re-scan the layer list. A second such
+/// parameter belongs in a frame-context struct instead of beside this one.
+fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offset: u16) {
     match &layer.kind {
         LayerKind::EngineGrid => paint_grid(canvas, layer, grid),
+        // painted here, and identically to `view-tui`'s own arm, because a
+        // raster that skipped what the user is looking at would let the
+        // differential battery pass on frames the terminal shows differently
+        LayerKind::Speculated(cells) => {
+            for cell in cells {
+                paint_text(
+                    canvas,
+                    cell.row.saturating_add(offset),
+                    cell.col,
+                    cell.glyph.encode_utf8(&mut [0u8; 4]),
+                );
+            }
+        }
         // vertically centred, matching view-tui's paint_shell; the layer's
         // own row would put it at the top of the frame, where the real
         // painter never writes it. The painter's other output, a statusline
@@ -338,6 +369,47 @@ mod tests {
 
     fn apply(model: &mut Model, ev: UiEvent) {
         let _ = update(model, Msg::Redraw(vec![ev]));
+    }
+
+    /// The raster's mirror of `view-tui`'s own speculated arm: a pending
+    /// prediction reaches the same canvas cell the painter puts it in,
+    /// engine-grid coordinates offset past the reserved chrome row. A raster
+    /// that painted nothing here would let the differential battery pass on
+    /// frames whose terminals differ.
+    #[test]
+    fn a_pending_prediction_rasters_at_the_engine_cell_it_names() {
+        let mut model = model_with_grid(5, 2);
+        apply(
+            &mut model,
+            UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "one".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "two".into(),
+                    },
+                ],
+            },
+        );
+        assert_eq!(model.chrome_rows(), 1, "the fixture must reserve a row");
+        let stamp = view_core::native::speculate::SpecStamp::new(std::time::Duration::ZERO);
+        assert!(model
+            .speculate
+            .predict("insert", 'z', (1, 3), stamp)
+            .is_some());
+        let surface = view_surface::render(&model);
+
+        let rows = screen_rows(&surface, model.engine.grid());
+
+        assert_eq!(
+            rows[2].chars().nth(3),
+            Some('z'),
+            "grid row 1 rasters on canvas row 2 behind one chrome row: {rows:?}"
+        );
     }
 
     #[test]

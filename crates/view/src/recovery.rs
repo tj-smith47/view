@@ -240,7 +240,11 @@ mod tests {
         native: &'a mut crate::native::NativeSession,
         theme: &'a mut crate::bridge::ThemeBridge,
     ) -> FollowUps<'a> {
-        FollowUps { native, theme }
+        FollowUps {
+            native,
+            theme,
+            speculate: crate::speculate::SpeculationClock::default(),
+        }
     }
 
     /// The stop an engine that said it was leaving reports: `:q` / `:cq`.

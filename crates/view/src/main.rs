@@ -8,6 +8,7 @@ mod clipboard;
 mod native;
 mod recovery;
 mod runtime;
+mod speculate;
 mod startup;
 mod theme_cache;
 mod vlog;
@@ -519,6 +520,7 @@ fn main() -> Result<()> {
     let mut follow_ups = runtime::FollowUps {
         native: &mut native,
         theme: &mut theme_bridge,
+        speculate: crate::speculate::SpeculationClock::default(),
     };
     // Resolves the presink messages, the pending redraw, and the pre-attach
     // input buffer directly through update()/Executor -- never by touching

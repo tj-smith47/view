@@ -26,6 +26,9 @@
 use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
 use crate::recovery::{restart_engine, step, EngineSession, LoopChannels, LoopState};
+use crate::speculate::{
+    expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
+};
 use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{
@@ -877,6 +880,13 @@ pub struct FollowUps<'a> {
     pub native: &'a mut NativeSession,
     /// The cold-start theme cache's mid-session writer.
     pub theme: &'a mut ThemeBridge,
+    /// The session's one speculation clock, carried here so the keystroke
+    /// that makes a prediction and the loop pass that ages it out read the
+    /// same origin. Travels with the reactors because it is attached to the
+    /// session in exactly the way they are, and because a second origin
+    /// taken anywhere else would produce stamps the first one's readings
+    /// cannot be compared against.
+    pub speculate: SpeculationClock,
 }
 
 /// Applies `msg` to `model` through the ordinary `update()` -> `Executor`
@@ -914,8 +924,20 @@ pub(crate) fn dispatch<E: EngineOps>(
     crate::vlog::log_msg(&msg);
     let stage = crate::native::stage(&msg);
     let trigger = follow_ups.theme.classify(&msg);
+    // the one call site that legitimately needs redraw content: what the
+    // engine just said is the only thing a prediction can be judged against
+    if let Msg::Redraw(events) = &msg {
+        reconcile_speculation(model, events);
+    }
     let mut flow = Flow::Continue;
     for eff in update(model, msg) {
+        // read off what is actually going to the engine rather than off the
+        // message that produced it: a key a native overlay claimed never
+        // reaches nvim at all, and a glyph predicted for one would stand
+        // over a buffer nobody typed into
+        if let Effect::Rpc(call) = &eff {
+            note_engine_call(model, call, follow_ups.speculate);
+        }
         match executor.run(eff) {
             Flow::Continue => {}
             other => {
@@ -1088,31 +1110,46 @@ fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
         (Some(a), Some(b)) => Some(a.min(b)),
         (only, None) | (None, only) => only,
     };
-    match (watches, wakeups.supervision.readout_deadline()) {
+    let supervised = match (watches, wakeups.supervision.readout_deadline()) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (only, None) | (None, only) => only,
+    };
+    match (supervised, wakeups.speculation) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (only, None) | (None, only) => only,
     }
 }
 
 /// Everything that can ask the loop to wake itself up rather than be woken
-/// by traffic. All three are read together on every pass, so they travel
-/// together: a caller holding two of them and forgetting the third gets a
+/// by traffic. All four are read together on every pass, so they travel
+/// together: a caller holding three of them and forgetting the fourth gets a
 /// loop that sleeps through the one condition it was arming for.
+///
+/// The three watches are borrowed and asked for their own deadlines here;
+/// speculation's arrives already resolved because it is the one deadline
+/// read off the model rather than off a watch, and the model is borrowed
+/// mutably everywhere else on the pass.
 #[derive(Clone, Copy)]
 struct Wakeups<'a> {
     write: &'a OutboxStallWatch,
     read: &'a HeartbeatWatch,
     supervision: &'a SupervisionFold,
+    speculation: Option<std::time::Duration>,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
 /// deadline. `None` means the wait expired with nothing delivered and the
 /// caller should re-read both sides of the connection.
 ///
-/// Unbounded whenever neither watch asks for a wakeup, which is a session
-/// whose heartbeat is paused: with no probe coming and none owed there is no
-/// silence either watch could report on, so the loop sleeps until a
-/// keystroke, a redraw or an engine request wakes it. A session whose engine
+/// Unbounded whenever nothing asks for a wakeup, which is a session whose
+/// heartbeat is paused with no prediction pending: with no probe coming and
+/// none owed there is no silence either watch could report on, and with
+/// nothing painted ahead of the engine there is no age bound to keep, so the
+/// loop sleeps until a keystroke, a redraw or an engine request wakes it. A
+/// prediction is what turns that same silence into a bounded wait: it is
+/// painted over the authoritative grid on a promise about wall-clock time,
+/// and the pass that keeps the promise has to be a pass the loop takes. A
+/// session whose engine
 /// connection is gone is not that case -- its prober retires on the first
 /// tick the connection refuses, and the watch it leaves behind keeps asking
 /// to be read again one threshold later, which is the cadence a recovery or
@@ -1362,7 +1399,11 @@ pub struct MsgChannel {
 /// true, the instant the next probe could itself have gone unanswered for a
 /// threshold (see [`watch_deadline`]). The last of those is the one an idle
 /// user's session runs on, and an engine that keeps answering never reaches
-/// it.
+/// it. A pending prediction adds a fourth and much shorter look, because
+/// its age bound is a promise about wall-clock time that only a pass can
+/// keep (see [`crate::speculate::next_expiry`]); it is armed only while
+/// something is painted ahead of the engine, so an idle session's wait is
+/// exactly the wait it always was.
 ///
 /// # Latency
 ///
@@ -1397,6 +1438,16 @@ pub struct MsgChannel {
 /// block on the very connection it is asking about. Its recurring cost is
 /// the wakeup rather than the fold: one extra pass every probe interval,
 /// ending in a dispatch that produces no effect and no paint.
+///
+/// Speculation's own deadline costs the steady-state pass one length read
+/// on an empty list -- [`crate::speculate::next_expiry`] returns before any
+/// clock is read, exactly as the per-pass expiry site does. Inside a typing
+/// burst it costs one monotonic clock read and one saturating subtraction
+/// per pending prediction, and the list is bounded by what a person can
+/// type inside [`SPECULATION_MAX_AGE`]: single digits of cells, a walk far
+/// shorter than the frame it precedes.
+///
+/// [`SPECULATION_MAX_AGE`]: view_core::native::speculate::SPECULATION_MAX_AGE
 ///
 /// # Errors
 ///
@@ -1516,6 +1567,10 @@ pub fn run(
                 }
             }
         }
+        // every pass, whatever the engine has or has not sent: an age bound
+        // reachable only when a redraw arrives could never fire during the
+        // total redraw stall it exists to bound
+        expire_speculation(&mut model, follow_ups.speculate);
         // drained at the top of every pass rather than right after the
         // dispatch that queued it: nothing blocks between here and the
         // bottom of the previous pass's own dispatch loop, so this is
@@ -1584,6 +1639,9 @@ pub fn run(
             term.draw_surface(&model, surface, &damage)?; // a frame's own terminal I/O error aborts; engine errors never do, and neither does the OSC52 drain above (fire-and-forget, see its own comment)
             model.dirty = false;
         }
+        // resolved here rather than inside the wait because it is the one
+        // deadline read off the model, which the wait does not hold
+        let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,
@@ -1591,6 +1649,7 @@ pub fn run(
                 write: &write_stall,
                 read: &engine.heartbeat,
                 supervision: &supervision,
+                speculation,
             },
             input,
             &waker,
@@ -1604,6 +1663,7 @@ pub fn run(
                 write: &write_stall,
                 read: &engine.heartbeat,
                 supervision: &supervision,
+                speculation,
             },
         );
         let Some(received) = received else {
@@ -2740,6 +2800,7 @@ mod tests {
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
         };
         let flow = dispatch(
             &mut model,
@@ -2753,6 +2814,112 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "input(x)");
     }
 
+    /// The keystroke path that makes speculation reach the screen at all: a
+    /// plain character typed in insert mode is predicted at the cursor the
+    /// engine last reported, and the frame is marked so the glyph paints
+    /// without waiting for the redraw that confirms it.
+    #[test]
+    fn dispatch_predicts_the_glyph_for_the_key_it_sent_to_the_engine() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        model
+            .engine
+            .apply_grid(view_core::grid::GridOp::CursorGoto { row: 3, col: 5 });
+        model.engine.mode.current = "insert".to_string();
+        model.dirty = false;
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Key(view_core::msg::Key {
+                notation: "x".into(),
+            }),
+        );
+
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(
+            ops.calls.borrow()[0],
+            "input(x)",
+            "the keystroke still reaches nvim by the path it always did"
+        );
+        let pending: Vec<(u16, u16, char)> = model
+            .speculate
+            .pending()
+            .iter()
+            .map(|cell| (cell.row, cell.col, cell.glyph))
+            .collect();
+        assert_eq!(pending, vec![(3, 5, 'x')]);
+        assert!(
+            model.dirty,
+            "a prediction nobody paints accelerates nothing"
+        );
+    }
+
+    /// The other half of the same path: the engine's own answer retires the
+    /// prediction it confirms, so nothing keeps painting over a cell the
+    /// authoritative grid has already filled.
+    #[test]
+    fn dispatch_reconciles_predictions_against_the_redraw_it_folds() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        model
+            .engine
+            .apply_grid(view_core::grid::GridOp::CursorGoto { row: 3, col: 5 });
+        model.engine.mode.current = "insert".to_string();
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Key(view_core::msg::Key {
+                notation: "x".into(),
+            }),
+        );
+        assert_eq!(model.speculate.pending().len(), 1);
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Redraw(vec![view_core::events::UiEvent::GridLine {
+                grid: 1,
+                row: 3,
+                col_start: 5,
+                cells: vec![view_core::events::GridCell {
+                    text: "x".to_string(),
+                    hl_id: 0,
+                    repeat: 1,
+                }],
+            }]),
+        );
+
+        assert!(model.speculate.pending().is_empty());
+    }
+
     #[test]
     fn dispatch_reports_engine_lost_without_a_second_send_when_the_write_fails() {
         let ops = FakeOps::default();
@@ -2764,6 +2931,7 @@ mod tests {
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
         };
         let flow = dispatch(
             &mut model,
@@ -2787,6 +2955,7 @@ mod tests {
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
         };
         let flow = dispatch(
             &mut model,
@@ -2815,6 +2984,7 @@ mod tests {
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
         };
         let resize = Msg::Resized {
             width: 100,
@@ -2921,6 +3091,7 @@ mod tests {
         let mut follow_ups = FollowUps {
             native: &mut native,
             theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
         };
         let start = std::time::Instant::now();
         for i in 0..1000 {
@@ -3223,6 +3394,7 @@ mod tests {
                         write: &watch,
                         read: &heartbeat,
                         supervision: &fold,
+                        speculation: None,
                     },
                 )
                 .is_none(),
@@ -3281,6 +3453,7 @@ mod tests {
             write: &watch,
             read: &heartbeat,
             supervision: &fold,
+            speculation: None,
         })
         .expect("an idle session must still arm the wakeup a silent engine needs");
         assert!(
@@ -3303,6 +3476,7 @@ mod tests {
                 write: &watch,
                 read: &heartbeat,
                 supervision: &fold,
+                speculation: None,
             },
         );
         assert!(
@@ -3313,6 +3487,120 @@ mod tests {
             start.elapsed() >= quiet,
             "the idle wait returned before its only message was sent: the loop was \
              woken by a deadline shorter than the silence that would justify one"
+        );
+    }
+
+    /// The same silent session, with one prediction painted over the grid:
+    /// the wait that was unbounded a line earlier is now bounded by the age
+    /// bound itself, and the pass it returns for retires the prediction and
+    /// marks the frame that takes the glyph off the terminal.
+    ///
+    /// This is the reachability the per-pass expiry site cannot supply on
+    /// its own. Every other wakeup this loop arms is an order of magnitude
+    /// coarser than one second -- and a paused heartbeat arms none -- so
+    /// without the speculation deadline in this fold a glyph painted on a
+    /// one-second promise would stand until something unrelated happened to
+    /// wake the loop.
+    #[test]
+    fn a_silent_session_with_a_prediction_pending_cannot_sleep_past_the_age_bound() {
+        use view_core::native::speculate::SPECULATION_MAX_AGE;
+
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        model.engine.mode.current = "insert".to_string();
+        // the silent session in full: nothing queued for the writer, a
+        // heartbeat that has never been resumed, and no wedge to report on
+        let watch = OutboxStallWatch::new(TEST_STALL_THRESHOLD);
+        let fold = SupervisionFold::default();
+        let heartbeat = HeartbeatWatch::new(TEST_STALL_THRESHOLD);
+        assert_eq!(
+            watch_deadline(Wakeups {
+                write: &watch,
+                read: &heartbeat,
+                supervision: &fold,
+                speculation: None,
+            }),
+            None,
+            "the session this test is about must be one nothing else wakes"
+        );
+
+        let origin = std::time::Instant::now();
+        crate::speculate::note_engine_call(
+            &mut model,
+            &view_core::msg::RpcCall::Input {
+                notation: "x".to_string(),
+            },
+            crate::speculate::SpeculationClock::started_at(origin),
+        );
+        assert_eq!(model.speculate.pending().len(), 1);
+        model.dirty = false;
+
+        // the same session a hair before the bound, modelled by moving the
+        // clock's origin back rather than by sleeping out most of a second
+        let grace = std::time::Duration::from_millis(50);
+        let nearly_due = crate::speculate::SpeculationClock::started_at(
+            origin
+                .checked_sub(SPECULATION_MAX_AGE.saturating_sub(grace))
+                .unwrap_or(origin),
+        );
+        let speculation = crate::speculate::next_expiry(&model, nearly_due);
+        let armed = watch_deadline(Wakeups {
+            write: &watch,
+            read: &heartbeat,
+            supervision: &fold,
+            speculation,
+        })
+        .expect("a pending prediction must bound a wait nothing else bounds");
+        assert!(
+            armed <= grace,
+            "the armed wait was {armed:?}, which is past the bound the glyph was \
+             painted on"
+        );
+
+        let (msg_tx, msg_rx) = mpsc::channel::<Msg>();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(WAIT_WATCHDOG_SECS));
+            let _ = msg_tx.send(Msg::RedrawReady);
+        });
+        let start = std::time::Instant::now();
+        assert!(
+            wait_for_msg(
+                &msg_rx,
+                Wakeups {
+                    write: &watch,
+                    read: &heartbeat,
+                    supervision: &fold,
+                    speculation,
+                },
+            )
+            .is_none(),
+            "the wait outlasted the age bound and returned the watchdog's message: \
+             a prediction made just before the engine went silent would stand"
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(WAIT_WATCHDOG_SECS),
+            "the wait ran to the watchdog rather than to the prediction's own deadline"
+        );
+
+        // and the pass that wait returns for is the one that retires it
+        crate::speculate::expire_speculation(
+            &mut model,
+            crate::speculate::SpeculationClock::started_at(
+                origin
+                    .checked_sub(SPECULATION_MAX_AGE + grace)
+                    .unwrap_or(origin),
+            ),
+        );
+        assert!(
+            model.speculate.pending().is_empty(),
+            "the pass the deadline bought retired nothing"
+        );
+        assert!(
+            model.dirty,
+            "the retirement marked no frame, so the glyph stays on the terminal"
         );
     }
 
@@ -3361,6 +3649,7 @@ mod tests {
                     write: &watch,
                     read: &heartbeat,
                     supervision: &fold,
+                    speculation: None,
                 },
             )
             .is_none(),

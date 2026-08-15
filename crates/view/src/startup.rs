@@ -941,6 +941,7 @@ mod tests {
                 &mut crate::runtime::FollowUps {
                     native: &mut crate::native::NativeSession::inert(),
                     theme: &mut crate::bridge::ThemeBridge::new(None),
+                    speculate: crate::speculate::SpeculationClock::default(),
                 },
                 CutoverInput {
                     presink,
@@ -1008,6 +1009,7 @@ mod tests {
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
                 theme: &mut crate::bridge::ThemeBridge::new(None),
+                speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
                 presink: vec![Msg::EngineStopped {
@@ -1052,6 +1054,7 @@ mod tests {
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
                 theme: &mut crate::bridge::ThemeBridge::new(None),
+                speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
                 presink: vec![Msg::EngineStopped {
@@ -1093,6 +1096,7 @@ mod tests {
             &mut crate::runtime::FollowUps {
                 native: &mut crate::native::NativeSession::inert(),
                 theme: &mut crate::bridge::ThemeBridge::new(None),
+                speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {
@@ -1134,6 +1138,7 @@ mod tests {
             &mut crate::runtime::FollowUps {
                 native: &mut native,
                 theme: &mut crate::bridge::ThemeBridge::new(None),
+                speculate: crate::speculate::SpeculationClock::default(),
             },
             CutoverInput {
                 presink: vec![Msg::EngineRequest(EngineRequest::VimEnter {

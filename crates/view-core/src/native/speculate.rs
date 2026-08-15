@@ -30,6 +30,8 @@
 
 use std::time::Duration;
 
+use crate::events::{GridCell, UiEvent};
+
 /// When a prediction was made, as elapsed time from one fixed origin the
 /// host chose once and keeps for the whole session.
 ///
@@ -262,6 +264,53 @@ impl SpeculateState {
             .retain(|cell| now.age_since(cell.predicted_at) < SPECULATION_MAX_AGE);
     }
 
+    /// Retires every prediction one authoritative redraw batch has answered,
+    /// and every prediction that batch is no longer about at all.
+    ///
+    /// Three readings, in the order they are taken:
+    ///
+    /// - A batch carrying a `mode_change` ends the context every pending
+    ///   prediction was made in, so the whole epoch turns over
+    ///   ([`Self::reset_epoch`]) and nothing else is read. This is the half
+    ///   of that method's caller contract no keystroke can deliver: leaving
+    ///   insert mode is something the engine announces, not something the
+    ///   user types at this frontend.
+    /// - A prediction not tagged with the current epoch is dropped
+    ///   unconditionally, whatever the batch says about its cell and whether
+    ///   or not the glyph would have matched. Nothing here reaches that
+    ///   branch today: [`Self::reset_epoch`] is what advances the epoch, and
+    ///   it clears every pending prediction in the same call, so `pending`
+    ///   is epoch-homogeneous by construction and the compare can only ever
+    ///   be true. It is kept as the second, independent enforcement of that
+    ///   invariant -- one `u64` compare per pending cell -- because it is
+    ///   what would still make a late or reordered redraw safe if some
+    ///   future path ever superseded an epoch without clearing what the old
+    ///   one left behind. As a conjunction operand it also costs nothing to
+    ///   order: the glyph comparison beside it has no side effects, so
+    ///   neither reading can change the other's outcome.
+    /// - A prediction whose cell the batch answers is dropped. Confirmed and
+    ///   mispredicted alike: the authoritative content is on that cell
+    ///   either way, so the two differ in what they say about the guess, not
+    ///   in what is left to paint over the grid. A prediction the batch
+    ///   never reaches survives, for a later batch or for
+    ///   [`Self::expire_stale`] to retire.
+    ///
+    /// Reads the redraw, never the grid the redraw is about to be applied
+    /// to, so it is indifferent to whether the caller runs it before or
+    /// after that application.
+    pub fn reconcile(&mut self, redraw: &[UiEvent]) {
+        if redraw
+            .iter()
+            .any(|ev| matches!(ev, UiEvent::ModeChange { .. }))
+        {
+            self.reset_epoch();
+            return;
+        }
+        let epoch = self.epoch;
+        self.pending
+            .retain(|cell| cell.epoch == epoch && !answered_by(redraw, cell));
+    }
+
     /// The predictions currently on screen ahead of the engine, in the order
     /// they were made.
     #[must_use]
@@ -290,6 +339,75 @@ fn is_plain(key: char) -> bool {
     key.is_ascii_graphic() || key == ' '
 }
 
+/// Whether `redraw` has put authoritative content in `cell`'s own cell, or
+/// moved whatever was there out from under it.
+///
+/// Matched variant by variant rather than through a wildcard, the same
+/// discipline [`UiEvent`]'s own doc asks of every exhaustive match over it: a
+/// redraw kind added later must be classified here by whoever adds it, since
+/// the two wrong answers are a prediction painted over content that moved and
+/// a prediction retired for an event that never touched it.
+fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
+    redraw.iter().any(|ev| match ev {
+        // every event's `grid` id is deliberately unread: view attaches
+        // `ext_linegrid` without `ext_multigrid`, so nvim sends one grid and
+        // a prediction can only ever be about that one. The day a second
+        // grid arrives, this is what has to read the id first -- until then
+        // reading it would only add a comparison whose answer is fixed
+        UiEvent::GridLine {
+            row,
+            col_start,
+            cells,
+            ..
+        } => *row == u64::from(cell.row) && covers_column(*col_start, cells, cell.col),
+        // content relocated, dropped or reshaped without the cells it moved
+        // being re-sent: the coordinates a prediction holds no longer name
+        // the place its glyph was predicted for, and no later batch is
+        // obliged to say so cell by cell
+        UiEvent::GridScroll { .. } | UiEvent::GridClear { .. } | UiEvent::GridResize { .. } => true,
+        // everything else moves no grid content: chrome, highlights,
+        // overlays, and the cursor's own position (which is read at predict
+        // time, never re-read here)
+        UiEvent::GridCursorGoto { .. }
+        | UiEvent::HlAttrDefine { .. }
+        | UiEvent::DefaultColorsSet { .. }
+        | UiEvent::HlGroupSet { .. }
+        | UiEvent::Flush
+        | UiEvent::ModeInfoSet { .. }
+        | UiEvent::ModeChange { .. }
+        | UiEvent::CmdlineShow { .. }
+        | UiEvent::CmdlinePos { .. }
+        | UiEvent::CmdlineHide
+        | UiEvent::MsgShow { .. }
+        | UiEvent::MsgClear
+        | UiEvent::MsgShowmode { .. }
+        | UiEvent::MsgShowcmd { .. }
+        | UiEvent::MsgRuler { .. }
+        | UiEvent::TablineUpdate { .. }
+        | UiEvent::PopupmenuShow { .. }
+        | UiEvent::PopupmenuSelect { .. }
+        | UiEvent::PopupmenuHide
+        | UiEvent::MouseOn
+        | UiEvent::MouseOff
+        | UiEvent::Unknown { .. } => false,
+    })
+}
+
+/// Whether a `grid_line` run starting at `col_start` reaches `col`.
+///
+/// A run's width is the sum of its cells' `repeat` counts, not its cell
+/// count: nvim collapses a stretch of identical cells into one entry, and
+/// reading the entry count instead would leave every prediction past the
+/// first collapsed run un-answered until the age bound caught it.
+fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
+    let width = cells
+        .iter()
+        .map(|cell| cell.repeat)
+        .fold(0, u64::saturating_add);
+    let col = u64::from(col);
+    col >= col_start && col < col_start.saturating_add(width)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -297,6 +415,24 @@ mod tests {
 
     fn stamp(millis: u64) -> SpecStamp {
         SpecStamp::new(Duration::from_millis(millis))
+    }
+
+    /// One `grid_line` run of single-width cells, the shape nvim sends for a
+    /// freshly typed character.
+    fn grid_line(row: u64, col_start: u64, text: &str) -> UiEvent {
+        UiEvent::GridLine {
+            grid: 1,
+            row,
+            col_start,
+            cells: text
+                .chars()
+                .map(|ch| GridCell {
+                    text: ch.to_string(),
+                    hl_id: 0,
+                    repeat: 1,
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -475,6 +611,178 @@ mod tests {
 
         assert_eq!(state.epoch(), Epoch(u64::MAX));
         assert!(state.pending().is_empty());
+    }
+
+    /// The ordinary case: the engine catches up and says the predicted glyph
+    /// is really there, so there is nothing left to paint ahead of it.
+    #[test]
+    fn a_redraw_that_confirms_a_prediction_retires_it() {
+        let mut state = SpeculateState::default();
+        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+
+        state.reconcile(&[grid_line(2, 4, "a"), UiEvent::Flush]);
+
+        assert!(state.pending().is_empty());
+    }
+
+    /// A wrong guess costs a corrected cell and nothing else: the
+    /// authoritative redraw wins, exactly as it would have with no
+    /// speculation at all, and no glyph is left painted over it.
+    #[test]
+    fn a_redraw_that_contradicts_a_prediction_retires_it_just_the_same() {
+        let mut state = SpeculateState::default();
+        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+
+        state.reconcile(&[grid_line(2, 4, "z")]);
+
+        assert!(state.pending().is_empty());
+    }
+
+    /// The reordering case, and the one that says which property is load
+    /// bearing: a prediction from a superseded epoch goes even when the
+    /// redraw would have confirmed it glyph for glyph, and even when the
+    /// redraw never reaches its cell at all. Epoch, not glyph match, is what
+    /// makes a late or reordered redraw safe.
+    #[test]
+    fn a_prediction_from_a_superseded_epoch_is_dropped_whatever_the_redraw_says() {
+        let matching = PredictedCell {
+            row: 2,
+            col: 4,
+            glyph: 'a',
+            epoch: Epoch(1),
+            predicted_at: stamp(0),
+        };
+        let untouched = PredictedCell {
+            row: 7,
+            col: 0,
+            glyph: 'b',
+            ..matching
+        };
+        let mut state = SpeculateState {
+            epoch: Epoch(2),
+            pending: vec![matching, untouched],
+        };
+
+        state.reconcile(&[grid_line(2, 4, "a")]);
+
+        assert!(
+            state.pending().is_empty(),
+            "a superseded epoch retires a prediction whether or not the redraw speaks to its cell"
+        );
+    }
+
+    /// The window per-cell matching cannot close on its own: a partial
+    /// update that never reaches the predicted cell leaves the prediction
+    /// standing, and only the age bound retires it.
+    #[test]
+    fn a_redraw_that_never_reaches_a_predicted_cell_leaves_it_for_the_age_bound() {
+        let mut state = SpeculateState::default();
+        let cell = state
+            .predict("insert", 'a', (2, 40), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[grid_line(2, 0, "hello"), grid_line(9, 40, "elsewhere")]);
+        assert_eq!(
+            state.pending(),
+            &[cell],
+            "neither run covers row 2 column 40"
+        );
+
+        state.expire_stale(stamp(1_000));
+        assert!(state.pending().is_empty());
+    }
+
+    /// A run is as wide as its repeat counts say, not as wide as its entry
+    /// count: nvim collapses a stretch of identical cells into one entry,
+    /// and a prediction inside that stretch has been answered.
+    #[test]
+    fn a_run_answers_every_column_its_repeat_counts_cover() {
+        let mut state = SpeculateState::default();
+        assert!(state.predict("insert", 'a', (0, 6), stamp(0)).is_some());
+
+        state.reconcile(&[UiEvent::GridLine {
+            grid: 1,
+            row: 0,
+            col_start: 0,
+            cells: vec![GridCell {
+                text: " ".to_string(),
+                hl_id: 0,
+                repeat: 10,
+            }],
+        }]);
+
+        assert!(state.pending().is_empty());
+    }
+
+    /// A scroll, a clear and a resize each relocate, drop or reshape
+    /// content without re-sending the cells they moved, so every prediction
+    /// they passed over names a place its glyph was never predicted for --
+    /// and no later batch is obliged to say so cell by cell.
+    #[test]
+    fn content_moved_without_being_resent_retires_every_prediction_it_passed_over() {
+        for event in [
+            UiEvent::GridScroll {
+                grid: 1,
+                top: 0,
+                bot: 10,
+                left: 0,
+                right: 80,
+                rows: 1,
+            },
+            UiEvent::GridClear { grid: 1 },
+            UiEvent::GridResize {
+                grid: 1,
+                width: 100,
+                height: 30,
+            },
+        ] {
+            let mut state = SpeculateState::default();
+            assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+
+            state.reconcile(std::slice::from_ref(&event));
+
+            assert!(state.pending().is_empty(), "{event:?}");
+        }
+    }
+
+    /// The half of `predict`'s caller contract no keystroke can deliver:
+    /// leaving insert mode is something the engine announces in a redraw
+    /// batch, so that batch is where the epoch turns over.
+    #[test]
+    fn a_mode_change_in_the_batch_supersedes_the_epoch() {
+        let mut state = SpeculateState::default();
+        assert!(state.predict("insert", 'a', (2, 4), stamp(0)).is_some());
+        let before = state.epoch();
+
+        state.reconcile(&[UiEvent::ModeChange {
+            mode: "normal".to_string(),
+            mode_idx: 0,
+        }]);
+
+        assert!(state.pending().is_empty());
+        assert!(state.epoch() > before);
+    }
+
+    /// A batch that says nothing about the grid leaves speculation exactly
+    /// as it was: an unrelated highlight definition or message is not an
+    /// answer to a prediction.
+    #[test]
+    fn a_batch_that_touches_no_grid_content_retires_nothing() {
+        let mut state = SpeculateState::default();
+        let cell = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[
+            UiEvent::HlGroupSet {
+                name: "Normal".to_string(),
+                hl_id: 1,
+            },
+            UiEvent::MsgClear,
+            UiEvent::Flush,
+        ]);
+
+        assert_eq!(state.pending(), &[cell]);
     }
 
     /// The far edge of the column arithmetic: past the last representable
