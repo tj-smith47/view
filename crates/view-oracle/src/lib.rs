@@ -27,6 +27,10 @@
 //!   engine deliberately stopped from serving, on a schedule, so the
 //!   supervision stack's verdicts, escalation and recovery are measured
 //!   against a failure that actually happened rather than a simulated one.
+//! - [`speculate`]: the speculative-echo battery. Also not a fidelity level:
+//!   a real engine driven the way the runtime drives one, with display-only
+//!   predictions folded in, so that every cell view paints ahead of a redraw
+//!   is held against nvim's own screen at the settle point that answers it.
 //! - [`parity`]: the comparison layer a corpus runner drives -- state
 //!   probes ([`StateSnapshot`]/[`snapshot`]) plus a masked row-by-row grid
 //!   diff ([`compare`]/[`masked_rows`]) between any two [`Probe`] sources,
@@ -48,6 +52,7 @@ pub mod pty;
 pub mod raster;
 mod reference;
 mod settle;
+pub mod speculate;
 #[cfg(test)]
 mod testenv;
 
@@ -73,6 +78,44 @@ pub use pty::{
     kill_process_group, make_hermetic, PtySession, QueryPolicy, QueryResponder, SpawnEnv,
 };
 pub use reference::ReferenceSession;
+
+/// Forwards every [`Effect::Rpc`] in `effects` to `handle`, mirroring the
+/// production runtime's `Executor::run` dispatch
+/// (`crates/view/src/runtime.rs`) for the subset of [`RpcCall`] variants a
+/// headless driver can produce from [`update`].
+///
+/// A write failure is dropped rather than surfaced: a driver here has no
+/// `Flow::EngineLost`/`Msg::EngineDown` recovery path to hand it to, and
+/// every caller's own deadline already bounds a wedged connection.
+///
+/// Shared by every driver in this crate rather than reimplemented per
+/// session type: a second dispatch that mapped one call differently would
+/// leave two drivers closing the effect loop in two ways, which is exactly
+/// the disagreement a differential runner cannot see.
+fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) {
+    for effect in effects {
+        let Effect::Rpc(call) = effect else {
+            continue;
+        };
+        let _ = match call {
+            RpcCall::TryResize { width, height } => handle.try_resize(*width, *height),
+            RpcCall::Input { notation } => handle.input(notation),
+            RpcCall::Paste { text } => handle.paste(text),
+            RpcCall::InputMouse {
+                button,
+                action,
+                modifier,
+                row,
+                col,
+            } => handle.input_mouse(button, action, modifier, *row, *col),
+            RpcCall::GetDefaultHl { generation } => handle.probe_default_hl(*generation),
+            // RpcCall is #[non_exhaustive]: a future call kind degrades to a
+            // no-op here rather than fail to compile, matching
+            // Executor::run's own fallback arm.
+            _ => Ok(()),
+        };
+    }
+}
 
 /// Errors surfaced by the headless drivers.
 #[non_exhaustive]
@@ -371,35 +414,7 @@ impl EngineSession {
     /// hand it to, and the caller's own `deadline` bound already covers a
     /// wedged connection.
     fn apply_effects(&mut self, effects: Vec<Effect>) {
-        for effect in effects {
-            let Effect::Rpc(call) = effect else {
-                continue;
-            };
-            let _ = match call {
-                RpcCall::TryResize { width, height } => {
-                    self.engine.handle.try_resize(width, height)
-                }
-                RpcCall::Input { notation } => self.engine.handle.input(&notation),
-                RpcCall::Paste { text } => self.engine.handle.paste(&text),
-                RpcCall::InputMouse {
-                    button,
-                    action,
-                    modifier,
-                    row,
-                    col,
-                } => self
-                    .engine
-                    .handle
-                    .input_mouse(&button, &action, &modifier, row, col),
-                RpcCall::GetDefaultHl { generation } => {
-                    self.engine.handle.probe_default_hl(generation)
-                }
-                // RpcCall is #[non_exhaustive]: a future call kind degrades
-                // to a no-op here rather than fail to compile, matching
-                // Executor::run's own fallback arm.
-                _ => Ok(()),
-            };
-        }
+        apply_rpc(&self.engine.handle, &effects);
     }
 
     /// Captures the current [`Surface`] (leg (b): deterministic capture, at

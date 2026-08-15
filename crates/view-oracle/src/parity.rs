@@ -59,7 +59,7 @@ const FIELD_SEP: &str = "\u{1f}";
 /// per record). Vim's `nr2char(30)` (ASCII record separator), chosen
 /// alongside [`FIELD_SEP`] from the same control-byte range for the same
 /// collision-freedom reason.
-const RECORD_SEP: &str = "\u{1e}";
+pub(crate) const RECORD_SEP: &str = "\u{1e}";
 
 /// The fixed, printable register set every [`snapshot`] probes: unnamed
 /// (`"`), the two numbered yank/delete registers `view` scripts exercise
@@ -441,7 +441,7 @@ fn parse_marks(raw: &str) -> Result<Vec<(String, u64, u64)>, OracleError> {
 /// at different layers of the stack (see this module's own doc comment) and a
 /// caller triaging a failure needs to know immediately which kind it is
 /// looking at, not just that the two sides disagreed somewhere.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Divergence {
     /// A [`StateSnapshot`] field disagreed; `field` names which one
     /// (`"buffer_lines"`, `"cursor"`, `"mode"`, `"blocked"`, `"registers"`,
@@ -550,11 +550,11 @@ pub struct ReferenceSide<'a> {
 /// and a transposition there inverts the `view`/`reference` attribution of
 /// every [`Divergence::Grid`] and [`Divergence::Attr`] it produces.
 #[derive(Debug, Clone, Copy)]
-struct ViewRows<'a>(&'a [String]);
+pub(crate) struct ViewRows<'a>(pub(crate) &'a [String]);
 
 /// The reference applier's rows under diff. See [`ViewRows`].
 #[derive(Debug, Clone, Copy)]
-struct ReferenceRows<'a>(&'a [String]);
+pub(crate) struct ReferenceRows<'a>(pub(crate) &'a [String]);
 
 /// Diffs `view`'s state against `reference`'s, field by field, then the two
 /// screens' glyph rows, then their attribute rows, skipping any row index
@@ -668,7 +668,12 @@ pub fn compare(view: ViewSide<'_>, reference: ReferenceSide<'_>, mask: &[u16]) -
 /// mismatch (diffing against an empty string on the shorter side) and the
 /// mask identically -- the only thing that differs between the two passes is
 /// which [`Divergence`] variant a disagreement becomes.
-fn diff_rows(
+///
+/// Crate-visible rather than private to [`compare`]: the speculation battery
+/// diffs view's own screen against nvim's own screen instead of against a
+/// second applier's, and a second row-diff written for it would be a second
+/// place the mask and the row-count mismatch could be handled differently.
+pub(crate) fn diff_rows(
     view: ViewRows<'_>,
     reference: ReferenceRows<'_>,
     mask: &[u16],

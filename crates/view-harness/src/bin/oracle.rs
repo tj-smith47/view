@@ -12,7 +12,7 @@
 //! its input is not evidence of agreement, only of a race this run got
 //! lucky on.
 //!
-//! Two subcommands extend the runner past the bare pass/fail report:
+//! Further subcommands extend the runner past the bare pass/fail report:
 //! `minimize PATH` shrinks a corpus entry that already reproduces a
 //! divergence or timeout to a locally 1-minimal input (rewriting the entry
 //! in place), and `fuzz --seed N` drives seeded, reproducible random
@@ -198,6 +198,28 @@ enum Command {
         #[arg(long)]
         schedule: Option<String>,
     },
+    /// Drives `view_oracle::speculate`'s battery against a real pinned
+    /// engine: every shape a display-only prediction can be answered,
+    /// contradicted or invalidated in, each ending with view's own screen
+    /// diffed against nvim's own over the rows the settled frame does not
+    /// mask.
+    ///
+    /// A predicted glyph is a cell view paints that no redraw carried, so a
+    /// divergence found here is a parity failure rather than a latency
+    /// reading: the exit code is the corpus runner's own contract.
+    ///
+    /// The one case no redraw retires is bounded by the age bound plus half
+    /// a second for the cost of reading the retirement. On a host that
+    /// deschedules an observer for longer than that, set
+    /// `VIEW_ORACLE_SLACK_SCALE` to the whole number to multiply that half
+    /// second by -- the same knob, and the same claim about the host, as the
+    /// `hang` runner's.
+    Speculate {
+        /// One case by name (`burst-tail`, `mispredict`, `age-bound`, ...)
+        /// instead of all of them.
+        #[arg(long)]
+        case: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -212,6 +234,13 @@ fn main() -> Result<()> {
         Some(Command::Page) => page_command(),
         Some(Command::Hang { schedule }) => {
             if view_harness::hang::run(schedule.as_deref())? {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
+        Some(Command::Speculate { case }) => {
+            if view_harness::speculate::run(case.as_deref())? {
                 Ok(())
             } else {
                 std::process::exit(1)

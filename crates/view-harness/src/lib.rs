@@ -20,3 +20,4 @@ pub mod hang;
 pub mod page;
 pub mod results;
 pub mod scenario;
+pub mod speculate;
