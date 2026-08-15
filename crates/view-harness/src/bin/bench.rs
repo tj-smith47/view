@@ -48,6 +48,7 @@ use rows::run_cell;
 use view_bench::session::{NvimSpec, SpawnSpec, ViewSpec};
 use view_harness::baselines::{self, CellId, CellMetrics};
 use view_harness::budgets;
+use view_harness::builds::{self, scenarios_reading, view_bin_flag, VIEW_BIN_FLAGS};
 use view_harness::fixture::{
     cache_root, copy_dir_recursive, current_engine_pin, fixtures_root, lockfile_cache_key,
     verify_nvim_matches_pin, workspace_root,
@@ -204,11 +205,12 @@ struct Cli {
     #[arg(long)]
     gate: bool,
     /// Path to the release view binary. Scope: the rows that measure the
-    /// shipped build (startup, memory, scroll, engine cadence, picker,
+    /// shipped build (first_paint, scroll, memory, flood, picker,
     /// supervision). The rows that measure a bench arm take the flag naming
     /// that arm, and a run that passes this flag while one of them is
     /// selected without its own flag is refused rather than silently
-    /// leaving this one inert
+    /// leaving this one inert. Every one of these flags is refused when no
+    /// selected row reads it at all
     #[arg(long)]
     view_bin: Option<PathBuf>,
     /// Path to the nvim binary (must match .engine-pin)
@@ -849,71 +851,88 @@ fn known_scenarios() -> Vec<&'static str> {
     names
 }
 
-/// Which `--*-view-bin` flag names the build `scenario` measures, or
-/// `None` for a row that spawns no view binary at all.
-///
-/// One table rather than a check beside each row's own `Bins` accessor,
-/// because the question it answers is asked before any row runs: an
-/// operator who named a binary the selected rows do not read has to hear
-/// so at the top of the run, not from a number measured against a
-/// different build than the one on the command line.
-fn view_bin_flag(scenario: &str) -> Option<&'static str> {
-    match scenario {
-        "echo" => Some("--nospec-view-bin"),
-        "input_path" | "output_path" | "echo_speculated" => Some("--taps-view-bin"),
-        "echo_path" => Some("--taps-nospec-view-bin"),
-        // both sides are bare nvim: the control arm measures a remote UI
-        // attached to a headless server, with no view build in the pair
-        "echo_control" => None,
-        _ => Some("--view-bin"),
-    }
-}
-
 /// Whether `flag` was given a value on this command line.
-fn arm_flag_given(cli: &Cli, flag: &str) -> bool {
+fn bin_flag_given(cli: &Cli, flag: &str) -> bool {
     match flag {
+        builds::VIEW_BIN => cli.view_bin.is_some(),
         #[cfg(unix)]
-        "--taps-view-bin" => cli.taps_view_bin.is_some(),
+        builds::TAPS_VIEW_BIN => cli.taps_view_bin.is_some(),
         #[cfg(unix)]
-        "--taps-nospec-view-bin" => cli.taps_nospec_view_bin.is_some(),
-        "--nospec-view-bin" => cli.nospec_view_bin.is_some(),
+        builds::TAPS_NOSPEC_VIEW_BIN => cli.taps_nospec_view_bin.is_some(),
+        builds::NOSPEC_VIEW_BIN => cli.nospec_view_bin.is_some(),
         _ => false,
     }
 }
 
-/// Refuses a run whose `--view-bin` would not reach every selected row,
-/// naming the flag each unreached row takes instead.
-///
-/// `--view-bin` names the shipped build. Three row families deliberately
-/// measure a build that is not it, so a run that names a binary and then
-/// measures a different one for part of the matrix is reporting numbers
-/// about a build nobody asked for -- silently, since the flag is accepted
-/// either way. Passing the unreached row's own flag as well resolves it:
-/// then every selected row has been told which binary it measures.
-fn require_view_bin_reaches_every_row(cli: &Cli, cells: &[CellId]) -> Result<()> {
-    if cli.view_bin.is_none() {
-        return Ok(());
-    }
-    let mut unreached: Vec<String> = Vec::new();
+/// How the selected rows read, for a refusal that has to say which builds
+/// this run would actually have measured.
+fn selected_rows_with_flags(cells: &[CellId]) -> Vec<String> {
+    let mut rows: Vec<String> = Vec::new();
     for cell in cells {
-        let Some(flag) = view_bin_flag(&cell.scenario) else {
-            continue;
+        let entry = match view_bin_flag(&cell.scenario) {
+            Some(flag) => format!("{} ({flag})", cell.scenario),
+            None => format!("{} (no view build)", cell.scenario),
         };
-        if flag == "--view-bin" || arm_flag_given(cli, flag) {
-            continue;
-        }
-        let entry = format!("{} ({flag})", cell.scenario);
-        if !unreached.contains(&entry) {
-            unreached.push(entry);
+        if !rows.contains(&entry) {
+            rows.push(entry);
         }
     }
-    ensure!(
-        unreached.is_empty(),
-        "--view-bin names the shipped build, which these selected rows do not measure: {}. \
-         Pass each row's own flag beside it, or select only rows that measure the shipped \
-         build",
-        unreached.join(", ")
-    );
+    rows
+}
+
+/// Refuses a run whose named binaries the selected rows would not read,
+/// naming the flag and the rows.
+///
+/// Two ways a `--*-view-bin` flag goes inert, and both are refused, since
+/// every one of them is accepted either way. `--view-bin` names the
+/// shipped build, and three row families deliberately measure a build that
+/// is not it: a run naming a binary and then measuring a different one for
+/// part of the matrix reports numbers about a build nobody asked for.
+/// Passing the unreached row's own flag as well resolves that one, because
+/// then every selected row has been told which binary it measures. The
+/// other way round is the same defect from the far side -- a flag no
+/// selected row reads at all, where an operator named a binary, no row
+/// spawned it, and the run exits 0 having measured the default build.
+fn require_named_bins_reach_their_rows(cli: &Cli, cells: &[CellId]) -> Result<()> {
+    if cli.view_bin.is_some() {
+        let mut unreached: Vec<String> = Vec::new();
+        for cell in cells {
+            let Some(flag) = view_bin_flag(&cell.scenario) else {
+                continue;
+            };
+            if bin_flag_given(cli, flag) {
+                continue;
+            }
+            let entry = format!("{} ({flag})", cell.scenario);
+            if !unreached.contains(&entry) {
+                unreached.push(entry);
+            }
+        }
+        ensure!(
+            unreached.is_empty(),
+            "--view-bin names the shipped build, which these selected rows do not measure: {}. \
+             Pass each row's own flag beside it, or select only rows that measure the shipped \
+             build",
+            unreached.join(", ")
+        );
+    }
+    for flag in VIEW_BIN_FLAGS {
+        if !bin_flag_given(cli, flag) {
+            continue;
+        }
+        if cells
+            .iter()
+            .any(|cell| view_bin_flag(&cell.scenario) == Some(*flag))
+        {
+            continue;
+        }
+        bail!(
+            "{flag} names a build no selected row measures: the selected rows measure {}. The \
+             rows that read {flag} are {}; drop the flag, or select a row that reads it",
+            selected_rows_with_flags(cells).join(", "),
+            scenarios_reading(flag).join(", ")
+        );
+    }
     Ok(())
 }
 
@@ -1064,7 +1083,7 @@ fn main() -> Result<()> {
     // before any measurement, for the same reason the class and the
     // baseline path are resolved early: a binary the selected rows would
     // never have read is a run whose numbers describe a different build
-    require_view_bin_reaches_every_row(&cli, &cells)?;
+    require_named_bins_reach_their_rows(&cli, &cells)?;
 
     let protocol = Protocol {
         samples: cli.samples,
@@ -1828,20 +1847,46 @@ mod tests {
         );
     }
 
-    /// The flag-scope table has to name a binary for every row that spawns
-    /// one, or `--view-bin` goes back to being silently inert for whichever
-    /// row the table forgot.
+    /// The flag-scope table has to name a build for every scenario the
+    /// matrix can run, or the flag checks go back to being silently inert
+    /// for whichever row the table forgot -- which is why the assertion is
+    /// on the entry existing rather than on the flag it holds: a table that
+    /// answered for an unnamed scenario could not fail this.
     #[test]
     fn every_matrix_scenario_names_the_build_it_measures() {
         for scenario in known_scenarios() {
+            assert!(
+                builds::names_a_build(scenario),
+                "{scenario} has no entry in the flag-scope table, so a binary named on the \
+                 command line would go unread for it without saying so"
+            );
+        }
+        // the one row with no view build in its pair, spelled out here so
+        // the table cannot answer `None` for a row that does spawn one and
+        // still pass the loop above
+        assert_eq!(view_bin_flag("echo_control"), None);
+        for scenario in known_scenarios() {
             if scenario == "echo_control" {
-                assert_eq!(view_bin_flag(scenario), None);
                 continue;
             }
             let flag = view_bin_flag(scenario);
             assert!(
-                flag.is_some_and(|flag| flag.ends_with("view-bin")),
-                "{scenario} names {flag:?}, which is not the flag for a view build"
+                flag.is_some_and(|flag| VIEW_BIN_FLAGS.contains(&flag)),
+                "{scenario} names {flag:?}, which is not a flag the bench binary accepts"
+            );
+        }
+    }
+
+    /// Every scenario the table names has to be one the matrix can select,
+    /// or the table accumulates entries for rows that no longer exist and
+    /// the pin above passes over a stale answer.
+    #[test]
+    fn the_flag_scope_table_names_no_scenario_the_matrix_cannot_run() {
+        let known = known_scenarios();
+        for (scenario, _) in builds::MEASURED_BUILD {
+            assert!(
+                known.contains(scenario),
+                "the flag-scope table names {scenario}, which no matrix cell runs"
             );
         }
     }
@@ -1850,6 +1895,11 @@ mod tests {
     /// nothing else; a run that names it while an arm row is selected is
     /// refused with that row's own flag in the message, rather than
     /// measuring a build nobody named.
+    ///
+    /// The accepted case is a real shipped-build cell of the matrix, not a
+    /// name only this test knows: a fictional row would be accepted by any
+    /// table that answered for an unnamed scenario, so the branch would
+    /// prove nothing about the rows a run can select.
     #[test]
     fn view_bin_is_refused_where_it_would_not_be_read() {
         let shipped_only = |cells: &[(&str, &str)]| {
@@ -1861,11 +1911,12 @@ mod tests {
                 "--view-bin",
                 VIEW_BIN_FOR_TEST,
             ]);
-            require_view_bin_reaches_every_row(&cli, &cells)
+            require_named_bins_reach_their_rows(&cli, &cells)
         };
-        assert!(shipped_only(&[("startup", "minimal")]).is_ok());
+        assert!(MATRIX.contains(&("picker", "minimal")));
+        assert!(shipped_only(&[("picker", "minimal")]).is_ok());
 
-        let refusal = shipped_only(&[("startup", "minimal"), ("echo", "minimal")])
+        let refusal = shipped_only(&[("picker", "minimal"), ("echo", "minimal")])
             .expect_err("an inert --view-bin must be refused, not accepted and ignored");
         let refusal = format!("{refusal:#}");
         assert!(
@@ -1884,10 +1935,10 @@ mod tests {
             "--nospec-view-bin",
             NOSPEC_VIEW_BIN_FOR_TEST,
         ]);
-        assert!(require_view_bin_reaches_every_row(
+        assert!(require_named_bins_reach_their_rows(
             &cli,
             &[
-                CellId::new("startup", "minimal"),
+                CellId::new("picker", "minimal"),
                 CellId::new("echo", "minimal")
             ]
         )
@@ -1897,7 +1948,94 @@ mod tests {
         // default names, which is what the whole matrix runs on
         let cli = Cli::parse_from(["bench", "--class", "dev-linux"]);
         assert!(
-            require_view_bin_reaches_every_row(&cli, &[CellId::new("echo", "minimal")]).is_ok()
+            require_named_bins_reach_their_rows(&cli, &[CellId::new("echo", "minimal")]).is_ok()
+        );
+    }
+
+    /// An arm flag no selected row reads is refused the same way
+    /// `--view-bin` is, naming the flag, what the selected rows do measure
+    /// and which rows would have read it. Otherwise the flag is accepted,
+    /// ignored, and the run reports numbers off the default build -- which
+    /// a nonexistent path proves, since a row that read it could not spawn.
+    #[test]
+    fn an_arm_flag_no_selected_row_reads_is_refused() {
+        let with_nospec = |cells: &[(&str, &str)]| {
+            let cells: Vec<CellId> = cells.iter().map(|(s, f)| CellId::new(s, f)).collect();
+            let cli = Cli::parse_from([
+                "bench",
+                "--class",
+                "dev-linux",
+                "--nospec-view-bin",
+                NOSPEC_VIEW_BIN_FOR_TEST,
+            ]);
+            require_named_bins_reach_their_rows(&cli, &cells)
+        };
+        let refusal = with_nospec(&[("picker", "minimal")])
+            .expect_err("an arm flag no row reads must be refused, not accepted and ignored");
+        let refusal = format!("{refusal:#}");
+        for expected in [
+            "--nospec-view-bin names a build no selected row measures",
+            "picker (--view-bin)",
+            "are echo",
+        ] {
+            assert!(
+                refusal.contains(expected),
+                "the refusal must name the flag, the selected rows and the rows that read it; \
+                 missing {expected:?} in: {refusal}"
+            );
+        }
+        assert!(with_nospec(&[("echo", "minimal")]).is_ok());
+
+        // the row with no view build at all still reads as a row that does
+        // not measure the named binary, rather than being skipped into an
+        // accepted run
+        let refusal = with_nospec(&[("echo_control", "minimal")])
+            .expect_err("a bare-nvim pair reads no named binary either");
+        assert!(
+            format!("{refusal:#}").contains("echo_control (no view build)"),
+            "the refusal must say the selected row spawns no view build, got: {refusal:#}"
+        );
+    }
+
+    /// The taps flags are refused on the same rule; separate from the
+    /// no-speculate case because they exist only where the tap channel
+    /// does, and a check that compiled them away on one platform would go
+    /// quiet there rather than fail.
+    #[cfg(unix)]
+    #[test]
+    fn a_taps_flag_no_selected_row_reads_is_refused() {
+        let cells = [CellId::new("picker", "minimal")];
+        for (flag, path, reader) in [
+            (
+                builds::TAPS_VIEW_BIN,
+                TAPS_VIEW_BIN_FOR_TEST,
+                "echo_speculated",
+            ),
+            (
+                builds::TAPS_NOSPEC_VIEW_BIN,
+                TAPS_NOSPEC_VIEW_BIN_FOR_TEST,
+                "echo_path",
+            ),
+        ] {
+            let cli = Cli::parse_from(["bench", "--class", "dev-linux", flag, path]);
+            let refusal = require_named_bins_reach_their_rows(&cli, &cells)
+                .expect_err("an inert taps flag must be refused");
+            let refusal = format!("{refusal:#}");
+            assert!(
+                refusal.contains(flag) && refusal.contains(reader),
+                "the refusal must name {flag} and the rows that read it, got: {refusal}"
+            );
+        }
+        let cli = Cli::parse_from([
+            "bench",
+            "--class",
+            "dev-linux",
+            builds::TAPS_NOSPEC_VIEW_BIN,
+            TAPS_NOSPEC_VIEW_BIN_FOR_TEST,
+        ]);
+        assert!(
+            require_named_bins_reach_their_rows(&cli, &[CellId::new("echo_path", "minimal")])
+                .is_ok()
         );
     }
 

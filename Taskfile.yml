@@ -36,10 +36,11 @@ tasks:
     # `task test` compiles the shipped feature set, so an arm's own tests
     # are never run by it -- and an arm the matrix measures two gated cells
     # with is a build whose behaviour is a measurement contract. The pin
-    # that matters here is negative (`only_the_shipped_build_leaves_a
-    # _keystroke_pending`'s twin): a wiring change that re-enabled
-    # prediction under the feature would put the echo rows back to timing
-    # the predicted paint, and nothing on screen would look wrong.
+    # that matters here is negative -- `the_arm_leaves_no_keystroke_pending`,
+    # twin of `a_shipped_build_leaves_a_keystroke_pending`: a wiring change
+    # that re-enabled prediction under the feature would put the echo rows
+    # back to timing the predicted paint, and nothing on screen would look
+    # wrong.
     #
     # bench-no-speculate adds no dependency features, so both legs rebuild
     # the `view` crate alone and cargo keeps each feature set's artifacts

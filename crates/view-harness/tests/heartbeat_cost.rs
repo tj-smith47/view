@@ -30,7 +30,33 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use view_harness::baselines::{declared_headroom, load_headroom, Headroom};
+use view_harness::builds::{view_bin_flag, NOSPEC_VIEW_BIN, TAPS_VIEW_BIN};
 use view_harness::fixture::workspace_root;
+
+/// The rows this campaign measures, in run order.
+///
+/// A function rather than a list built inside the measuring test, so the
+/// wiring pins below assert against the same rows the campaign drives
+/// instead of a second copy that could drift from them.
+fn campaign_rows() -> Vec<Row> {
+    let mut rows = vec![Row {
+        scenario: "echo",
+        fixture: "minimal",
+        metric: "ratio_p50",
+        build: Build::NoSpeculate,
+    }];
+    // the tap channel is a unix mechanism, so the input-path row and the
+    // instrumented build it reads exist only there
+    if cfg!(unix) {
+        rows.push(Row {
+            scenario: "input_path",
+            fixture: "minimal",
+            metric: "key_to_rpc_p99_us",
+            build: Build::Taps,
+        });
+    }
+    rows
+}
 
 /// Sampling for one arm of one row.
 ///
@@ -84,11 +110,11 @@ impl Build {
 
     /// The bench flag that names this build's binary. Each row family takes
     /// the flag for the build it measures, and the bench binary refuses a
-    /// run whose `--view-bin` would not reach a selected row.
+    /// run whose named binary a selected row would not read.
     fn flag(self) -> &'static str {
         match self {
-            Build::Taps => "--taps-view-bin",
-            Build::NoSpeculate => "--nospec-view-bin",
+            Build::Taps => TAPS_VIEW_BIN,
+            Build::NoSpeculate => NOSPEC_VIEW_BIN,
         }
     }
 }
@@ -240,6 +266,46 @@ fn tolerance(scenario: &str, metric: &str) -> f64 {
     }
 }
 
+/// Both arms of a build have to be two different binaries, or the campaign
+/// measures one binary twice and reports the prober costing nothing from an
+/// apparatus that never compared anything. Cheap enough to run in the
+/// per-commit gate, where the measuring test below never runs.
+#[test]
+fn each_build_measures_two_distinct_binaries() {
+    for build in [Build::Taps, Build::NoSpeculate] {
+        let arms = arms(build);
+        assert_ne!(
+            arms.armed,
+            arms.bare,
+            "both arms of {:?} resolve to the same binary",
+            build.dirs()
+        );
+        let (armed_dir, bare_dir) = build.dirs();
+        assert_ne!(armed_dir, bare_dir);
+    }
+}
+
+/// Each row has to be driven with the flag the bench binary reads that
+/// row's build from. A row driven with any other flag hands the bench
+/// binary a path no selected row reads: since the flag check was extended
+/// to every `--*-view-bin`, that run is refused rather than silently
+/// measuring the default build under both arms -- but the refusal arrives
+/// half an hour into a campaign, and this arrives in the gate.
+#[test]
+fn every_row_is_driven_with_the_flag_its_scenario_reads() {
+    let rows = campaign_rows();
+    assert!(!rows.is_empty(), "the campaign drives no rows at all");
+    for row in &rows {
+        assert_eq!(
+            view_bin_flag(row.scenario),
+            Some(row.build.flag()),
+            "{} is driven with {}, which is not the flag its build is named by",
+            row.scenario,
+            row.build.flag()
+        );
+    }
+}
+
 #[test]
 #[ignore = "drives four release binaries through two full bench rows; run via task heartbeat-ab"]
 fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
@@ -257,22 +323,7 @@ fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
         println!("::warning::heartbeat armed-vs-absent campaign skipped: {reason}");
         return;
     }
-    let mut rows = vec![Row {
-        scenario: "echo",
-        fixture: "minimal",
-        metric: "ratio_p50",
-        build: Build::NoSpeculate,
-    }];
-    // the tap channel is a unix mechanism, so the input-path row and the
-    // instrumented build it reads exist only there
-    if cfg!(unix) {
-        rows.push(Row {
-            scenario: "input_path",
-            fixture: "minimal",
-            metric: "key_to_rpc_p99_us",
-            build: Build::Taps,
-        });
-    }
+    let rows = campaign_rows();
 
     let mut report = Vec::new();
     let mut breaches = Vec::new();
