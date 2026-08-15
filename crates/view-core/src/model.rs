@@ -99,6 +99,16 @@ pub struct Model {
     /// dismissed while the banner behind it keeps re-asserting; see
     /// [`crate::native::supervision::SupervisionState`].
     pub supervision: crate::native::supervision::SupervisionState,
+    /// The display-only glyphs typing is predicted to produce before the
+    /// engine's own redraw confirms them; see
+    /// [`crate::native::speculate::SpeculateState`].
+    ///
+    /// Part of the model rather than state the painter keeps on the side,
+    /// because `view_surface::render` is defined as a function of this
+    /// struct alone: a speculated cell painted from anywhere else would make
+    /// an incrementally updated frame differ from a rebuilt one, which is
+    /// exactly what the surface cache's equivalence guard exists to catch.
+    pub speculate: crate::native::speculate::SpeculateState,
 }
 
 impl Model {
@@ -135,6 +145,7 @@ impl Model {
             palette_enabled: false,
             cwd: PathBuf::new(),
             supervision: crate::native::supervision::SupervisionState::default(),
+            speculate: crate::native::speculate::SpeculateState::default(),
         }
     }
 

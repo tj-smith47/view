@@ -9,6 +9,7 @@ pub mod palette;
 pub mod picker;
 pub mod prompt;
 pub mod registry;
+pub mod speculate;
 pub mod statusline;
 pub mod supervision;
 pub mod toast;
