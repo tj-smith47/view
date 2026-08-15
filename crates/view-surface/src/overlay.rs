@@ -483,6 +483,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         | LayerKind::Messages(_)
         | LayerKind::Tabline(_)
         | LayerKind::Popupmenu(_)
+        | LayerKind::Speculated(_)
         | LayerKind::Shell => None,
     }
 }

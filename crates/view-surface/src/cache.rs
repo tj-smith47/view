@@ -13,16 +13,17 @@
 
 use view_core::model::Model;
 
-use crate::{cursor_spec, render, Surface};
+use crate::{cursor_spec, render, speculated_layer, LayerKind, Surface, SPECULATED_LAYER_INDEX};
 
 /// Holds the previously rendered frame so the next one can reuse it.
 ///
 /// The paint path's dominant cost is cache and TLB residency -- proportional
 /// to memory touched per frame, not to instructions executed -- so the win
 /// here is touching almost nothing when almost nothing changed: a steady
-/// typing frame updates only the cursor (and the statusline bar's row when
-/// that feature is on) instead of re-cloning every chrome state into a
-/// fresh allocation.
+/// typing frame updates only the cursor (plus the statusline bar's row when
+/// that feature is on, and the speculated layer when a prediction is
+/// pending) instead of re-cloning every chrome state into a fresh
+/// allocation.
 #[derive(Debug, Default)]
 pub struct SurfaceCache {
     frame: Option<Frame>,
@@ -54,7 +55,8 @@ impl Frame {
 
 /// Everything [`crate::render`] reads that can change which layers exist,
 /// where they sit, or what they carry -- except the inputs the reuse path
-/// re-resolves itself every frame (the cursor, and the statusline view).
+/// re-resolves itself every frame (the cursor, the statusline view, and the
+/// speculated layer).
 ///
 /// The grid's cell content is deliberately absent: a `Surface` never
 /// carries grid cells (painters read them from the `Model` directly), so
@@ -136,9 +138,11 @@ impl SurfaceCache {
     /// keystroke and costs a few field reads), plus the statusline bar's
     /// view when that feature is on (its segments track the cursor too;
     /// the fresh view replaces the cached one only when it differs, so an
-    /// unchanged bar touches nothing). Any other change -- chrome state,
-    /// geometry, an overlay opening or closing -- rebuilds the whole frame
-    /// through [`crate::render`], which is the exact pre-cache cost.
+    /// unchanged bar touches nothing), plus the speculated layer (added,
+    /// replaced, or dropped to match what is pending). Any other change --
+    /// chrome state, geometry, an overlay opening or closing -- rebuilds the
+    /// whole frame through [`crate::render`], which is the exact pre-cache
+    /// cost.
     ///
     /// In debug builds the returned frame is asserted equal to a
     /// from-scratch [`crate::render`] of the same `model`, naming the frame
@@ -153,6 +157,12 @@ impl SurfaceCache {
                 if frame.inputs.statusline_rows > 0 {
                     refresh_statusline(&mut frame.surface, model, frame.inputs.grid.0);
                 }
+                refresh_speculated(
+                    &mut frame.surface,
+                    model,
+                    frame.inputs.grid,
+                    frame.inputs.offset,
+                );
             }
         } else {
             self.frame = None;
@@ -178,6 +188,40 @@ fn refresh_statusline(surface: &mut Surface, model: &Model, grid_w: u16) {
             }
             return;
         }
+    }
+}
+
+/// Re-resolves the speculated layer in place: adds it when a prediction is
+/// now pending, drops it when the last one is gone, replaces its cells when
+/// they moved.
+///
+/// Predictions turn over on every keystroke of a typing burst, so tracking
+/// them in [`Inputs`] instead would rebuild the whole frame on exactly the
+/// frames speculation exists to make faster. Reconciling in place keeps that
+/// frame at reuse cost, and the equivalence guard below is what proves the
+/// reconciled frame is the frame [`render`] would have built.
+fn refresh_speculated(surface: &mut Surface, model: &Model, grid: (u16, u16), offset: u16) {
+    let fresh = speculated_layer(model, grid, offset);
+    let at = surface
+        .layers
+        .iter()
+        .position(|layer| matches!(layer.kind, LayerKind::Speculated(_)));
+    match (at, fresh) {
+        (Some(at), Some(layer)) => {
+            if let Some(cached) = surface.layers.get_mut(at) {
+                if *cached != layer {
+                    *cached = layer;
+                }
+            }
+        }
+        (Some(at), None) => {
+            surface.layers.remove(at);
+        }
+        // render()'s own index, not one derived from this frame: an insert
+        // after a chrome layer would paint the prediction over chrome that
+        // render() puts on top of it.
+        (None, Some(layer)) => surface.layers.insert(SPECULATED_LAYER_INDEX, layer),
+        (None, None) => {}
     }
 }
 
@@ -241,6 +285,7 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
         crate::LayerKind::Statusline(_) => "Statusline",
         crate::LayerKind::Prompt(_) => "Prompt",
         crate::LayerKind::Palette(_) => "Palette",
+        crate::LayerKind::Speculated(_) => "Speculated",
     }
 }
 
@@ -248,10 +293,12 @@ fn kind_name(kind: &crate::LayerKind) -> &'static str {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::tests::predict;
     use crate::{CursorSpec, LayerKind};
     use view_core::events::UiEvent;
     use view_core::grid::GridOp;
     use view_core::msg::Msg;
+    use view_core::native::speculate::{SpecStamp, SPECULATION_MAX_AGE};
     use view_core::update::update;
 
     fn model_with_grid(width: u16, height: u16) -> Model {
@@ -423,6 +470,84 @@ mod tests {
         if let Some(frame) = cache.frame.as_mut() {
             frame.surface.layers[0].rect.width -= 1;
         }
+        let _ = cache.render(&model);
+    }
+
+    fn speculated(surface: &Surface) -> Option<(usize, Vec<char>)> {
+        surface
+            .layers
+            .iter()
+            .enumerate()
+            .find_map(|(i, l)| match &l.kind {
+                LayerKind::Speculated(cells) => Some((i, cells.iter().map(|c| c.glyph).collect())),
+                _ => None,
+            })
+    }
+
+    /// The frame speculation exists for: a keystroke predicted while nothing
+    /// else about the frame changed. The prediction must reach the surface
+    /// without paying for a from-scratch rebuild, which is what tracking it
+    /// as a cache input would have cost on every keystroke of a burst.
+    #[test]
+    fn a_prediction_reaches_the_reused_frame_without_a_rebuild() {
+        let mut model = model_with_grid(20, 6);
+        let mut cache = SurfaceCache::new();
+        let _ = cache.render(&model);
+
+        predict(&mut model, 'a', (1, 1), 0);
+        assert_eq!(speculated(cache.render(&model)), Some((1, vec!['a'])));
+
+        predict(&mut model, 'b', (1, 1), 5);
+        assert_eq!(
+            speculated(cache.render(&model)),
+            Some((1, vec!['a', 'b'])),
+            "the layer's cells track pending, and it stays directly above the engine grid"
+        );
+        assert_eq!(
+            (cache.frames, cache.rebuilds),
+            (3, 1),
+            "only the first frame may rebuild; a prediction refreshes in place"
+        );
+    }
+
+    /// The other direction, which a refresh that could only add would leave
+    /// on screen forever: the last prediction going away takes the layer
+    /// with it, on a reused frame.
+    #[test]
+    fn the_last_prediction_expiring_drops_the_layer_from_the_reused_frame() {
+        let mut model = model_with_grid(20, 6);
+        let mut cache = SurfaceCache::new();
+        predict(&mut model, 'a', (1, 1), 0);
+        assert!(speculated(cache.render(&model)).is_some());
+
+        model
+            .speculate
+            .expire_stale(SpecStamp::new(SPECULATION_MAX_AGE));
+        assert_eq!(speculated(cache.render(&model)), None);
+        assert_eq!(
+            (cache.frames, cache.rebuilds),
+            (2, 1),
+            "dropping the layer is a refresh too, not a rebuild"
+        );
+    }
+
+    /// The equivalence guard is what makes the in-place refresh above safe
+    /// to have at all, so it must be seen to still fire on a frame with
+    /// predictions pending -- the frames where the reuse path now does the
+    /// most work.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "diverged from a from-scratch rebuild")]
+    fn a_corrupted_frame_with_predictions_pending_still_trips_the_guard() {
+        let mut model = model_with_grid(20, 6);
+        let mut cache = SurfaceCache::new();
+        predict(&mut model, 'a', (1, 1), 0);
+        let _ = cache.render(&model);
+
+        if let Some(frame) = cache.frame.as_mut() {
+            frame.surface.layers[0].rect.width -= 1;
+        }
+        predict(&mut model, 'b', (1, 1), 5);
         let _ = cache.render(&model);
     }
 }

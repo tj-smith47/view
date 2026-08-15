@@ -17,6 +17,7 @@ use view_core::model::{
 };
 use view_core::native::geometry::OverlayBox;
 use view_core::native::palette::PaletteState;
+use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{
     PaletteView, PickerView, PromptView, Span, StatuslineView, TreeView,
 };
@@ -129,6 +130,36 @@ pub enum LayerKind {
     Prompt(PromptView),
     /// A command palette's prompt line, commands, and their bindings.
     Palette(PaletteView),
+    /// The display-only glyphs
+    /// [`view_core::native::speculate::SpeculateState::pending`] is holding
+    /// ahead of the engine, painted over [`LayerKind::EngineGrid`] at the
+    /// cells they are predicted for.
+    ///
+    /// Absent -- not merely empty -- from a `Surface` whenever nothing is
+    /// pending, which is every frame outside a typing burst. A frame with no
+    /// prediction to show therefore hands a painter and damage tracking
+    /// nothing to do and forces no rebuild; what it does still spend is a
+    /// frame builder re-asking an empty pending list and finding no layer to
+    /// reconcile.
+    ///
+    /// Each cell's `row`/`col` stay in the engine grid's own coordinate
+    /// space, the space `SpeculateState` produced them in, rather than being
+    /// rebased onto the layer's rect: a painter already resolves the chrome
+    /// offset for [`LayerKind::EngineGrid`], and one coordinate space for
+    /// both grid-content layers is one fewer place the two can disagree
+    /// about where a cell is. The rect is the bounding box of these cells in
+    /// terminal space -- what the layer covers, for damage tracking and
+    /// clipping -- never the whole grid: a full-grid rect would mark every
+    /// row dirty on every keystroke of exactly the fast-typing burst
+    /// speculation exists to accelerate.
+    ///
+    /// Every cell here is inside the live grid. A prediction that named a
+    /// cell the grid does not have is dropped by [`render`] rather than
+    /// clamped into range, per [`PredictedCell`]'s own contract: a clamped
+    /// prediction paints a glyph the user never typed at the last real
+    /// column and leaves it there until an authoritative redraw touches that
+    /// exact cell.
+    Speculated(Vec<PredictedCell>),
 }
 
 /// The exact indicator text a [`LayerKind::Shell`] layer puts on screen.
@@ -190,6 +221,7 @@ impl LayerKind {
             | Self::Messages(_)
             | Self::Tabline(_)
             | Self::Popupmenu(_)
+            | Self::Speculated(_)
             | Self::Shell => false,
         }
     }
@@ -280,6 +312,15 @@ pub fn render(model: &Model) -> Surface {
         LayerKind::EngineGrid,
         model.caps.tier,
     )];
+
+    // directly above the grid it predicts and below everything else: a
+    // prediction is a guess about buffer content, so it belongs where buffer
+    // content is, and an overlay that opened over it (a prompt, a picker,
+    // the cmdline) is authoritative chrome that must never be shown through
+    // a stale glyph underneath it
+    if let Some(layer) = speculated_layer(model, (grid_w, grid_h), offset) {
+        layers.insert(SPECULATED_LAYER_INDEX, layer);
+    }
 
     if !model.content_painted {
         // sized from the real terminal, not the (still 0x0 pre-attach)
@@ -607,6 +648,53 @@ fn overlay_layer(
         kind,
         tier,
     )
+}
+
+/// Where both frame builders place the [`LayerKind::Speculated`] layer:
+/// immediately above the [`LayerKind::EngineGrid`] layer that is always this
+/// list's first entry.
+///
+/// A constant rather than a rule each builder re-derives, because
+/// [`cache::SurfaceCache`] inserts this layer into an already-built frame and
+/// a position that disagreed with [`render`]'s by one would be a z-order the
+/// equivalence guard reports as a whole-frame divergence. Both sides insert
+/// *at* this index, so neither can drift from the other by growing the
+/// layers around it; the engine grid layer every frame opens with is what
+/// keeps the index inside the list for `Vec::insert`.
+pub(crate) const SPECULATED_LAYER_INDEX: usize = 1;
+
+/// The [`LayerKind::Speculated`] layer for whatever `model` currently has
+/// pending, or `None` when nothing is pending, or when every pending
+/// prediction names a cell outside the live `grid`.
+///
+/// Off-grid predictions are dropped here, one by one, rather than the layer
+/// being clamped as a whole: predictions on a wrapped line are a mix of
+/// cells the grid has and cells it does not, and clamping the rect around
+/// all of them would drag the survivors' glyphs to the grid edge (see
+/// [`PredictedCell`]).
+fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Layer> {
+    let (grid_w, grid_h) = grid;
+    let cells: Vec<PredictedCell> = model
+        .speculate
+        .pending()
+        .iter()
+        .copied()
+        .filter(|cell| cell.row < grid_h && cell.col < grid_w)
+        .collect();
+    let top = cells.iter().map(|cell| cell.row).min()?;
+    let bottom = cells.iter().map(|cell| cell.row).max()?;
+    let left = cells.iter().map(|cell| cell.col).min()?;
+    let right = cells.iter().map(|cell| cell.col).max()?;
+    Some(Layer::new(
+        Rect::new(
+            top.saturating_add(offset),
+            left,
+            right.saturating_sub(left).saturating_add(1),
+            bottom.saturating_sub(top).saturating_add(1),
+        ),
+        LayerKind::Speculated(cells),
+        model.caps.tier,
+    ))
 }
 
 /// The framed [`Layer`] for one open native overlay, or `None` for an
@@ -1965,6 +2053,166 @@ mod tests {
                 .iter()
                 .all(|l| !matches!(l.kind, LayerKind::Statusline(_))),
             "the feature off means no layer at all, not an empty one"
+        );
+    }
+
+    /// Queues one prediction, shared with `cache`'s tests so both sides of
+    /// the frame-builder pair drive speculation through the same fixture.
+    pub(crate) fn predict(model: &mut Model, key: char, cursor: (u16, u16), millis: u64) {
+        let stamp =
+            view_core::native::speculate::SpecStamp::new(std::time::Duration::from_millis(millis));
+        assert!(
+            model
+                .speculate
+                .predict("insert", key, cursor, stamp)
+                .is_some(),
+            "{key:?} at {cursor:?} is a plain insert-mode character"
+        );
+    }
+
+    fn speculated_cells(surface: &Surface) -> Option<(Rect, Vec<PredictedCell>)> {
+        surface.layers.iter().find_map(|l| match &l.kind {
+            LayerKind::Speculated(cells) => Some((l.rect, cells.clone())),
+            _ => None,
+        })
+    }
+
+    /// The resting frame, which is every frame outside a typing burst: no
+    /// prediction pending means no layer at all, not an empty one, so a
+    /// painter and damage tracking have nothing to do with the feature.
+    #[test]
+    fn nothing_pending_emits_no_speculated_layer() {
+        let model = model_with_grid(40, 12);
+
+        assert!(
+            speculated_cells(&render(&model)).is_none(),
+            "an empty pending list must not reach the surface as an empty layer"
+        );
+    }
+
+    /// The predicted glyphs reach the surface at the cells they were
+    /// predicted for, and the layer's rect is the terminal-space box around
+    /// them -- chrome offset included, and never the whole grid, since the
+    /// rect is what a painter treats as dirty.
+    #[test]
+    fn pending_predictions_emit_one_speculated_layer_over_their_own_cells() {
+        let mut model = model_with_grid(40, 11);
+        model.term_width = 40;
+        model.term_height = 12;
+        apply(
+            &mut model,
+            UiEvent::TablineUpdate {
+                current: view_core::events::TabHandle(1),
+                tabs: vec![
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(1),
+                        name: "a".into(),
+                    },
+                    view_core::events::TabEntry {
+                        tab: view_core::events::TabHandle(2),
+                        name: "b".into(),
+                    },
+                ],
+            },
+        );
+        assert_eq!(model.chrome_rows(), 1, "two tabs reserve the tabline row");
+        for key in ['h', 'i'] {
+            predict(&mut model, key, (4, 7), 0);
+        }
+
+        let (rect, cells) = speculated_cells(&render(&model)).expect("two predictions are pending");
+        assert_eq!(
+            cells
+                .iter()
+                .map(|c| (c.row, c.col, c.glyph))
+                .collect::<Vec<_>>(),
+            vec![(4, 7, 'h'), (4, 8, 'i')],
+            "cells stay in grid coordinates, the space they were predicted in"
+        );
+        assert_eq!(
+            rect,
+            Rect::new(5, 7, 2, 1),
+            "the rect is the cells' own box, shifted down by the reserved chrome row"
+        );
+    }
+
+    /// The drop-never-clamp contract `PredictedCell` states: a prediction
+    /// that ran off the grid (a wrapped line, a `textwidth` break, a resize
+    /// under a pending burst) must vanish, because clamping it into the last
+    /// real column paints a glyph the user typed somewhere else and leaves
+    /// it there for up to `SPECULATION_MAX_AGE`.
+    #[test]
+    fn a_prediction_past_the_grid_edge_is_dropped_rather_than_clamped() {
+        let mut model = model_with_grid(10, 4);
+        predict(&mut model, 'a', (1, 9), 0);
+        predict(&mut model, 'b', (1, 9), 0);
+        predict(&mut model, 'c', (3, 2), 0);
+        predict(&mut model, 'd', (9, 0), 0);
+
+        let (rect, cells) = speculated_cells(&render(&model)).expect("two predictions are on-grid");
+        assert_eq!(
+            cells
+                .iter()
+                .map(|c| (c.row, c.col, c.glyph))
+                .collect::<Vec<_>>(),
+            vec![(1, 9, 'a'), (3, 2, 'c')],
+            "the column past the last one and the row past the last one are both gone; \
+             neither is clamped onto a cell the grid does have"
+        );
+        assert_eq!(
+            rect,
+            Rect::new(1, 2, 8, 3),
+            "the rect boxes the surviving cells, not the dropped ones"
+        );
+    }
+
+    /// Every pending prediction being off-grid is the same case as nothing
+    /// pending: a layer with no cells has nothing to paint, and its rect
+    /// would dirty rows for no reason.
+    #[test]
+    fn predictions_entirely_off_the_grid_emit_no_layer_at_all() {
+        let mut model = model_with_grid(10, 4);
+        predict(&mut model, 'a', (7, 0), 0);
+
+        assert!(speculated_cells(&render(&model)).is_none());
+    }
+
+    /// Z-order, both halves: above the grid it predicts, and below chrome
+    /// that opened over it. A prediction painted over an open picker would
+    /// show a glyph from the buffer underneath, inside a box the user is
+    /// typing a query into.
+    #[test]
+    fn the_speculated_layer_sits_above_the_grid_and_below_every_overlay() {
+        use view_core::native::geometry::{Anchor, OverlayBox};
+        use view_core::native::tree::TreeState;
+
+        let mut model = model_with_grid(40, 12);
+        model.term_width = 40;
+        model.term_height = 12;
+        model.content_painted = true;
+        predict(&mut model, 'a', (2, 3), 0);
+        model.push_overlay(
+            OverlayBox::new(30, 100).with_anchor(Anchor::Left),
+            OverlayKind::Tree(TreeState::open(std::path::PathBuf::from("/tmp/example"))),
+        );
+
+        let surface = render(&model);
+        let kinds: Vec<&LayerKind> = surface.layers.iter().map(|l| &l.kind).collect();
+        assert_eq!(kinds.len(), 3, "grid, prediction, overlay -- nothing else");
+        assert!(
+            matches!(kinds[0], LayerKind::EngineGrid),
+            "the engine grid is the bottom layer, got {:?}",
+            kinds[0]
+        );
+        assert!(
+            matches!(kinds[1], LayerKind::Speculated(_)),
+            "the prediction paints over the grid, not under it, got {:?}",
+            kinds[1]
+        );
+        assert!(
+            matches!(kinds[2], LayerKind::Tree(_)),
+            "the overlay stays above both, got {:?}",
+            kinds[2]
         );
     }
 }
