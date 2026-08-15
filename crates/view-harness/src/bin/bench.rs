@@ -203,16 +203,31 @@ struct Cli {
     /// any breach, and refuses to start if the class has no baseline
     #[arg(long)]
     gate: bool,
-    /// Path to the release view binary
+    /// Path to the release view binary. Scope: the rows that measure the
+    /// shipped build (startup, memory, scroll, engine cadence, picker,
+    /// supervision). The rows that measure a bench arm take the flag naming
+    /// that arm, and a run that passes this flag while one of them is
+    /// selected without its own flag is refused rather than silently
+    /// leaving this one inert
     #[arg(long)]
     view_bin: Option<PathBuf>,
     /// Path to the nvim binary (must match .engine-pin)
     #[arg(long)]
     nvim_bin: Option<PathBuf>,
-    /// Path to the bench-taps build of view (internal-boundary rows)
+    /// Path to the bench-taps build of view. Scope: input_path,
+    /// output_path, echo_speculated
     #[cfg(unix)]
     #[arg(long)]
     taps_view_bin: Option<PathBuf>,
+    /// Path to the bench-no-speculate build of view. Scope: the echo rows
+    #[arg(long)]
+    nospec_view_bin: Option<PathBuf>,
+    /// Path to the bench-taps + bench-no-speculate build of view. Scope:
+    /// echo_path, which decomposes an echo row and so must run the arm
+    /// that row runs
+    #[cfg(unix)]
+    #[arg(long)]
+    taps_nospec_view_bin: Option<PathBuf>,
     /// Measured samples per side per trial
     #[arg(long, default_value_t = 1000)]
     samples: usize,
@@ -492,10 +507,21 @@ struct PairedSpecs {
 /// Builds one cell's paired view/nvim spawn specs against its hermetic
 /// world.
 fn paired_specs(world: &CellWorld, fixture: &str, bins: &Bins) -> Result<PairedSpecs> {
+    paired_specs_with(world, fixture, bins.view_bins(), bins)
+}
+
+/// A pair whose view side is built from `editor` rather than from the
+/// shipped binary, for a row that measures a counterfactual arm.
+fn paired_specs_with(
+    world: &CellWorld,
+    fixture: &str,
+    editor: EditorBins<'_>,
+    bins: &Bins,
+) -> Result<PairedSpecs> {
     let view_side = world.side(fixture, "view")?;
     let nvim_side = world.side(fixture, "nvim")?;
     Ok(PairedSpecs {
-        view: view_spec_from(view_side, bins.view_bins()),
+        view: view_spec_from(view_side, editor),
         nvim: nvim_spec_from(nvim_side, &bins.nvim),
     })
 }
@@ -595,6 +621,19 @@ struct Bins {
     /// taps row actually runs.
     #[cfg(unix)]
     taps_view: PathBuf,
+    /// The bench-no-speculate build, which the echo rows measure so their
+    /// boundary keeps meaning the engine round trip; see [`Bins::echo_bins`].
+    ///
+    /// Unconditional where `taps_view` is unix-only: the tap channel is a
+    /// unix mechanism, while the echo rows and the feature that arms them
+    /// run on every platform this matrix measures.
+    nospec_view: PathBuf,
+    /// Both arms at once, for the one row that needs both: `echo_path`
+    /// decomposes the echo round trip through the taps, so it needs the tap
+    /// channel of `taps_view` and the silent glyph of `nospec_view`; see
+    /// [`Bins::echo_path_bins`].
+    #[cfg(unix)]
+    taps_nospec_view: PathBuf,
     nvim: PathBuf,
 }
 
@@ -629,11 +668,83 @@ impl Bins {
     /// The bench-taps build of the editor and its engine, for the rows
     /// that measure an internal boundary rather than the terminal.
     #[cfg(unix)]
-    fn taps_bins(&self) -> EditorBins<'_> {
-        EditorBins {
+    fn taps_bins(&self) -> Result<EditorBins<'_>> {
+        ensure!(
+            self.taps_view.exists(),
+            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass \
+             --taps-view-bin",
+            self.taps_view.display()
+        );
+        Ok(EditorBins {
             view: &self.taps_view,
             nvim: &self.nvim,
-        }
+        })
+    }
+
+    /// The build the `echo_path` decomposition measures: the echo rows' arm
+    /// with the tap channel compiled in.
+    ///
+    /// The decomposition splits the echo row's own interval into the stages
+    /// the tap chain resolves, so it has to open and close that interval on
+    /// the same events the row does. On a build that predicts, the glyph the
+    /// chain's last tag waits for is on screen before the engine answers, the
+    /// authoritative write falls outside the window, and every stage resolves
+    /// over nothing -- which is why the row refuses a run that resolved no
+    /// chain at all rather than printing zeros (see
+    /// `taps_rows::unresolved_chain_refusal`).
+    #[cfg(unix)]
+    fn echo_path_bins(&self) -> Result<EditorBins<'_>> {
+        ensure!(
+            self.taps_nospec_view.exists(),
+            "the echo_path decomposition's bench-taps + bench-no-speculate build {} does not \
+             exist; run via `task bench` (which builds it) or pass --taps-nospec-view-bin. \
+             Decomposing on a build that predicts leaves every stage resolving over zero \
+             samples, because the glyph the chain closes on is painted before the engine \
+             answers",
+            self.taps_nospec_view.display()
+        );
+        Ok(EditorBins {
+            view: &self.taps_nospec_view,
+            nvim: &self.nvim,
+        })
+    }
+
+    /// The build the echo rows measure: identical to the shipped one except
+    /// that it predicts nothing.
+    ///
+    /// The echo row's boundary is the typed glyph appearing in the cursor's
+    /// cell, and a predicted glyph is the same character in the same cell as
+    /// the authoritative one -- so on the shipped build this row stops
+    /// timing the round trip it is defined as (spec 3.1) and times the
+    /// predicted paint instead, silently, reporting a several-fold
+    /// improvement it did not make to the quantity it names. No screen
+    /// boundary can tell the two apart; an arm that never writes the first
+    /// one can. What the shipped build does here is a row of its own,
+    /// `echo_speculated`, under metric names of its own.
+    ///
+    /// One other row shares that boundary and therefore that arm:
+    /// `echo_path`, which decomposes this round trip stage by stage and
+    /// takes it with the tap channel added ([`Bins::echo_path_bins`]). The
+    /// rest keep the shipped binary, because their boundaries are startup,
+    /// resident size, scroll staleness, engine output cadence, view's own
+    /// picker and a restart the supervisor drives, none of which a
+    /// prediction can answer. The tap rows keep the instrumented build:
+    /// `input_path` and `output_path` close inside view before anything
+    /// reaches the terminal, and `echo_speculated` is the row the predicted
+    /// paint is the subject of.
+    fn echo_bins(&self) -> Result<EditorBins<'_>> {
+        ensure!(
+            self.nospec_view.exists(),
+            "the echo rows' bench-no-speculate build {} does not exist; run via `task bench` \
+             (which builds it) or pass --nospec-view-bin. Measuring these rows with the shipped \
+             binary instead would time the predicted paint under the round trip's own metric \
+             names",
+            self.nospec_view.display()
+        );
+        Ok(EditorBins {
+            view: &self.nospec_view,
+            nvim: &self.nvim,
+        })
     }
 }
 
@@ -738,6 +849,74 @@ fn known_scenarios() -> Vec<&'static str> {
     names
 }
 
+/// Which `--*-view-bin` flag names the build `scenario` measures, or
+/// `None` for a row that spawns no view binary at all.
+///
+/// One table rather than a check beside each row's own `Bins` accessor,
+/// because the question it answers is asked before any row runs: an
+/// operator who named a binary the selected rows do not read has to hear
+/// so at the top of the run, not from a number measured against a
+/// different build than the one on the command line.
+fn view_bin_flag(scenario: &str) -> Option<&'static str> {
+    match scenario {
+        "echo" => Some("--nospec-view-bin"),
+        "input_path" | "output_path" | "echo_speculated" => Some("--taps-view-bin"),
+        "echo_path" => Some("--taps-nospec-view-bin"),
+        // both sides are bare nvim: the control arm measures a remote UI
+        // attached to a headless server, with no view build in the pair
+        "echo_control" => None,
+        _ => Some("--view-bin"),
+    }
+}
+
+/// Whether `flag` was given a value on this command line.
+fn arm_flag_given(cli: &Cli, flag: &str) -> bool {
+    match flag {
+        #[cfg(unix)]
+        "--taps-view-bin" => cli.taps_view_bin.is_some(),
+        #[cfg(unix)]
+        "--taps-nospec-view-bin" => cli.taps_nospec_view_bin.is_some(),
+        "--nospec-view-bin" => cli.nospec_view_bin.is_some(),
+        _ => false,
+    }
+}
+
+/// Refuses a run whose `--view-bin` would not reach every selected row,
+/// naming the flag each unreached row takes instead.
+///
+/// `--view-bin` names the shipped build. Three row families deliberately
+/// measure a build that is not it, so a run that names a binary and then
+/// measures a different one for part of the matrix is reporting numbers
+/// about a build nobody asked for -- silently, since the flag is accepted
+/// either way. Passing the unreached row's own flag as well resolves it:
+/// then every selected row has been told which binary it measures.
+fn require_view_bin_reaches_every_row(cli: &Cli, cells: &[CellId]) -> Result<()> {
+    if cli.view_bin.is_none() {
+        return Ok(());
+    }
+    let mut unreached: Vec<String> = Vec::new();
+    for cell in cells {
+        let Some(flag) = view_bin_flag(&cell.scenario) else {
+            continue;
+        };
+        if flag == "--view-bin" || arm_flag_given(cli, flag) {
+            continue;
+        }
+        let entry = format!("{} ({flag})", cell.scenario);
+        if !unreached.contains(&entry) {
+            unreached.push(entry);
+        }
+    }
+    ensure!(
+        unreached.is_empty(),
+        "--view-bin names the shipped build, which these selected rows do not measure: {}. \
+         Pass each row's own flag beside it, or select only rows that measure the shipped \
+         build",
+        unreached.join(", ")
+    );
+    Ok(())
+}
+
 fn resolve_view_bin(cli: &Cli) -> Result<PathBuf> {
     let path = cli
         .view_bin
@@ -792,6 +971,21 @@ fn main() -> Result<()> {
             workspace_root()
                 .join("target")
                 .join("taps")
+                .join("release")
+                .join("view")
+        }),
+        nospec_view: cli.nospec_view_bin.clone().unwrap_or_else(|| {
+            workspace_root()
+                .join("target")
+                .join("nospec")
+                .join("release")
+                .join("view")
+        }),
+        #[cfg(unix)]
+        taps_nospec_view: cli.taps_nospec_view_bin.clone().unwrap_or_else(|| {
+            workspace_root()
+                .join("target")
+                .join("taps-nospec")
                 .join("release")
                 .join("view")
         }),
@@ -866,6 +1060,11 @@ fn main() -> Result<()> {
         }
         vec![CellId { scenario, fixture }]
     };
+
+    // before any measurement, for the same reason the class and the
+    // baseline path are resolved early: a binary the selected rows would
+    // never have read is a run whose numbers describe a different build
+    require_view_bin_reaches_every_row(&cli, &cells)?;
 
     let protocol = Protocol {
         samples: cli.samples,
@@ -1458,6 +1657,9 @@ mod tests {
     const VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view";
     #[cfg(unix)]
     const TAPS_VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view-taps";
+    const NOSPEC_VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view-nospec";
+    #[cfg(unix)]
+    const TAPS_NOSPEC_VIEW_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/view-taps-nospec";
     const NVIM_BIN_FOR_TEST: &str = "/nonexistent/never-spawned/nvim";
 
     fn bins_for_test() -> Bins {
@@ -1465,6 +1667,9 @@ mod tests {
             view: PathBuf::from(VIEW_BIN_FOR_TEST),
             #[cfg(unix)]
             taps_view: PathBuf::from(TAPS_VIEW_BIN_FOR_TEST),
+            nospec_view: PathBuf::from(NOSPEC_VIEW_BIN_FOR_TEST),
+            #[cfg(unix)]
+            taps_nospec_view: PathBuf::from(TAPS_NOSPEC_VIEW_BIN_FOR_TEST),
             nvim: PathBuf::from(NVIM_BIN_FOR_TEST),
         }
     }
@@ -1524,11 +1729,24 @@ mod tests {
         // measures the uninstrumented editor and records it under the
         // boundary metric's name
         let world = CellWorld::create("minimal").unwrap();
-        let bins = bins_for_test();
-        let spec = view_spec_from(world.side("minimal", "view").unwrap(), bins.taps_bins());
+        let bins = Bins {
+            taps_view: world.hermetic_dir.join("view-taps"),
+            ..bins_for_test()
+        };
+        assert!(
+            bins.taps_bins().is_err(),
+            "a missing instrumented build must be named, not silently swapped for the shipped \
+             binary"
+        );
+
+        std::fs::write(&bins.taps_view, b"").unwrap();
+        let spec = view_spec_from(
+            world.side("minimal", "view").unwrap(),
+            bins.taps_bins().unwrap(),
+        );
         assert_eq!(
             spec.program,
-            PathBuf::from(TAPS_VIEW_BIN_FOR_TEST),
+            bins.taps_view,
             "a taps row spawned {} instead of the bench-taps build",
             spec.program.display()
         );
@@ -1537,6 +1755,149 @@ mod tests {
             Some(PathBuf::from(NVIM_BIN_FOR_TEST)),
             "got args {:?}",
             spec.args
+        );
+    }
+
+    /// The echo rows' arm, pinned by the same reasoning as the taps one: a
+    /// pair written wrong here reports several-fold "improvements" that are
+    /// the predicted paint being timed under the round trip's metric names,
+    /// and nothing about the resulting number looks wrong.
+    #[test]
+    fn the_echo_rows_measure_the_build_that_predicts_nothing() {
+        let world = CellWorld::create("minimal").unwrap();
+        let bins = Bins {
+            nospec_view: world.hermetic_dir.join("view-nospec"),
+            ..bins_for_test()
+        };
+        assert!(
+            bins.echo_bins().is_err(),
+            "a missing arm must be named, not silently swapped for the shipped binary"
+        );
+
+        std::fs::write(&bins.nospec_view, b"").unwrap();
+        let spec = view_spec_from(
+            world.side("minimal", "view").unwrap(),
+            bins.echo_bins().unwrap(),
+        );
+        assert_eq!(
+            spec.program,
+            bins.nospec_view,
+            "the echo row spawned {} instead of the bench-no-speculate build",
+            spec.program.display()
+        );
+        assert_eq!(
+            nvim_bin_argument(&spec),
+            Some(PathBuf::from(NVIM_BIN_FOR_TEST))
+        );
+    }
+
+    /// The decomposition has to run the build the row it decomposes runs,
+    /// with the taps added. On a predicting build the chain's closing tag
+    /// waits for a glyph that was already on screen, so every stage
+    /// resolves over nothing while the row still prints a ratio and exits
+    /// clean -- the same silent-contamination shape the echo row's arm
+    /// exists to prevent, one row over.
+    #[cfg(unix)]
+    #[test]
+    fn the_echo_path_decomposition_measures_the_tapped_arm_that_predicts_nothing() {
+        let world = CellWorld::create("minimal").unwrap();
+        let bins = Bins {
+            taps_nospec_view: world.hermetic_dir.join("view-taps-nospec"),
+            ..bins_for_test()
+        };
+        assert!(
+            bins.echo_path_bins().is_err(),
+            "a missing arm must be named, not silently swapped for a build that predicts"
+        );
+
+        std::fs::write(&bins.taps_nospec_view, b"").unwrap();
+        let spec = view_spec_from(
+            world.side("minimal", "view").unwrap(),
+            bins.echo_path_bins().unwrap(),
+        );
+        assert_eq!(
+            spec.program,
+            bins.taps_nospec_view,
+            "the echo_path row spawned {} instead of the bench-taps + bench-no-speculate build",
+            spec.program.display()
+        );
+        assert_ne!(
+            spec.program,
+            PathBuf::from(TAPS_VIEW_BIN_FOR_TEST),
+            "the plain taps build predicts, which leaves the chain unresolvable"
+        );
+    }
+
+    /// The flag-scope table has to name a binary for every row that spawns
+    /// one, or `--view-bin` goes back to being silently inert for whichever
+    /// row the table forgot.
+    #[test]
+    fn every_matrix_scenario_names_the_build_it_measures() {
+        for scenario in known_scenarios() {
+            if scenario == "echo_control" {
+                assert_eq!(view_bin_flag(scenario), None);
+                continue;
+            }
+            let flag = view_bin_flag(scenario);
+            assert!(
+                flag.is_some_and(|flag| flag.ends_with("view-bin")),
+                "{scenario} names {flag:?}, which is not the flag for a view build"
+            );
+        }
+    }
+
+    /// `--view-bin` reaches the rows that measure the shipped build and
+    /// nothing else; a run that names it while an arm row is selected is
+    /// refused with that row's own flag in the message, rather than
+    /// measuring a build nobody named.
+    #[test]
+    fn view_bin_is_refused_where_it_would_not_be_read() {
+        let shipped_only = |cells: &[(&str, &str)]| {
+            let cells: Vec<CellId> = cells.iter().map(|(s, f)| CellId::new(s, f)).collect();
+            let cli = Cli::parse_from([
+                "bench",
+                "--class",
+                "dev-linux",
+                "--view-bin",
+                VIEW_BIN_FOR_TEST,
+            ]);
+            require_view_bin_reaches_every_row(&cli, &cells)
+        };
+        assert!(shipped_only(&[("startup", "minimal")]).is_ok());
+
+        let refusal = shipped_only(&[("startup", "minimal"), ("echo", "minimal")])
+            .expect_err("an inert --view-bin must be refused, not accepted and ignored");
+        let refusal = format!("{refusal:#}");
+        assert!(
+            refusal.contains("echo (--nospec-view-bin)"),
+            "the refusal must name the flag the unreached row takes, got: {refusal}"
+        );
+
+        // both flags given: every selected row has been told which binary
+        // it measures, so there is nothing inert left to refuse
+        let cli = Cli::parse_from([
+            "bench",
+            "--class",
+            "dev-linux",
+            "--view-bin",
+            VIEW_BIN_FOR_TEST,
+            "--nospec-view-bin",
+            NOSPEC_VIEW_BIN_FOR_TEST,
+        ]);
+        assert!(require_view_bin_reaches_every_row(
+            &cli,
+            &[
+                CellId::new("startup", "minimal"),
+                CellId::new("echo", "minimal")
+            ]
+        )
+        .is_ok());
+
+        // no --view-bin at all: every row falls back to the build its own
+        // default names, which is what the whole matrix runs on
+        let cli = Cli::parse_from(["bench", "--class", "dev-linux"]);
+        assert!(
+            require_view_bin_reaches_every_row(&cli, &[CellId::new("echo", "minimal")]).is_ok()
         );
     }
 

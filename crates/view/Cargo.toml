@@ -25,6 +25,16 @@ bench-taps = ["view-engine/bench-taps", "view-tui/bench-taps"]
 # binary that does carry it names itself in its own startup diagnostics
 # (src/main.rs `VERSION`).
 bench-no-heartbeat = ["view-engine/bench-no-heartbeat"]
+# The echo row's arm: an otherwise identical binary that predicts nothing,
+# so that row keeps measuring the engine round trip it has always measured
+# (spec 3.1) instead of the predicted paint speculation puts on screen
+# first. On screen the two are the same character in the same cell, so no
+# boundary the harness can parse tells them apart -- the row's arm has to
+# be a binary that never writes the first one. The speculated paint has a
+# row and metric names of its own (`echo_speculated`); this feature is what
+# keeps the honest row from silently reporting it. Never shipped, and a
+# binary carrying it names itself (src/main.rs `VERSION`).
+bench-no-speculate = []
 
 [dependencies]
 anyhow = "1.0.103"

@@ -1,8 +1,9 @@
 //! The paired campaign that keeps the read-side heartbeat off the latency
-//! rows: the same two rows measured twice, once against the shipped binary
-//! and once against one whose engine runs no prober at all
-//! (`bench-no-heartbeat`), with the difference held to what this machine
-//! class has published about the statistic's own run-to-run spread.
+//! rows: the same two rows measured twice, once against the build the bench
+//! matrix measures that row with and once against the same build with no
+//! prober in its engine at all (`bench-no-heartbeat`), with the difference
+//! held to what this machine class has published about the statistic's own
+//! run-to-run spread.
 //!
 //! Why a test rather than a budget row. A budget bounds a number; the claim
 //! here is about a *difference* between two binaries measured back to back,
@@ -18,8 +19,10 @@
 //! last, so it cannot answer the question the row exists to answer.
 //!
 //! Ignored by default and driven by `task heartbeat-ab`, which builds the
-//! four binaries it needs first: two arms times plain and tap-instrumented,
-//! each in its own target directory so no build can overwrite another's.
+//! binaries it needs first: two arms times each build a row measures --
+//! tap-instrumented for the internal-boundary row, prediction-free for the
+//! echo row -- each in its own target directory so no build can overwrite
+//! another's.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -42,29 +45,65 @@ const WARMUP: usize = 40;
 const TRIALS: usize = 3;
 
 /// One row of the campaign: which cell to measure, which statistic to read
-/// out of it, and whether the arm needs the tap-instrumented build.
+/// out of it, and which build of view the row measures.
 struct Row {
     scenario: &'static str,
     fixture: &'static str,
     metric: &'static str,
-    taps: bool,
+    build: Build,
+}
+
+/// The build each row measures, in both of this campaign's arms.
+///
+/// Neither row measures the plain binary. The bench matrix gives a row the
+/// build its own boundary needs, and a campaign that measured some other
+/// one would be reading a number the matrix never reports.
+#[derive(Clone, Copy)]
+enum Build {
+    /// The tap-instrumented build, which the internal-boundary rows
+    /// measure: their intervals are read off the tap channel.
+    Taps,
+    /// The arm that predicts nothing, which the echo rows measure. Their
+    /// boundary is the typed glyph reaching the screen, and a build that
+    /// predicts puts it there before the engine answers -- so on the plain
+    /// binary both of this campaign's arms would time the same painted
+    /// prediction and the comparison would report the prober costing
+    /// nothing from an apparatus that never measured the round trip.
+    NoSpeculate,
+}
+
+impl Build {
+    /// The target directories `task heartbeat-ab` fills for this build:
+    /// prober armed, prober compiled out.
+    fn dirs(self) -> (&'static str, &'static str) {
+        match self {
+            Build::Taps => ("target/taps", "target/taps-no-heartbeat"),
+            Build::NoSpeculate => ("target/nospec", "target/nospec-no-heartbeat"),
+        }
+    }
+
+    /// The bench flag that names this build's binary. Each row family takes
+    /// the flag for the build it measures, and the bench binary refuses a
+    /// run whose `--view-bin` would not reach a selected row.
+    fn flag(self) -> &'static str {
+        match self {
+            Build::Taps => "--taps-view-bin",
+            Build::NoSpeculate => "--nospec-view-bin",
+        }
+    }
 }
 
 /// The build directories `task heartbeat-ab` fills, by arm.
 struct Arms {
-    /// The shipped binary: prober armed.
+    /// The prober armed.
     armed: PathBuf,
     /// The same code with the prober compiled out.
     bare: PathBuf,
 }
 
-fn arms(taps: bool) -> Arms {
+fn arms(build: Build) -> Arms {
     let root = workspace_root();
-    let (armed, bare) = if taps {
-        ("target/taps", "target/taps-no-heartbeat")
-    } else {
-        ("target", "target/no-heartbeat")
-    };
+    let (armed, bare) = build.dirs();
     Arms {
         armed: root.join(armed).join("release").join(view_bin_name()),
         bare: root.join(bare).join("release").join(view_bin_name()),
@@ -141,11 +180,7 @@ fn measure(row: &Row, view_bin: &Path) -> f64 {
         .arg(WARMUP.to_string())
         .arg("--trials")
         .arg(TRIALS.to_string());
-    if row.taps {
-        cmd.arg("--taps-view-bin").arg(view_bin);
-    } else {
-        cmd.arg("--view-bin").arg(view_bin);
-    }
+    cmd.arg(row.build.flag()).arg(view_bin);
     let out = cmd.output().expect("running the bench binary");
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     assert!(
@@ -226,7 +261,7 @@ fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
         scenario: "echo",
         fixture: "minimal",
         metric: "ratio_p50",
-        taps: false,
+        build: Build::NoSpeculate,
     }];
     // the tap channel is a unix mechanism, so the input-path row and the
     // instrumented build it reads exist only there
@@ -235,14 +270,14 @@ fn the_heartbeat_prober_costs_nothing_this_class_can_measure() {
             scenario: "input_path",
             fixture: "minimal",
             metric: "key_to_rpc_p99_us",
-            taps: true,
+            build: Build::Taps,
         });
     }
 
     let mut report = Vec::new();
     let mut breaches = Vec::new();
     for row in &rows {
-        let arms = arms(row.taps);
+        let arms = arms(row.build);
         // armed first, bare second, back to back on one host state: a
         // campaign that measured every armed arm and then every bare one
         // would put the whole cell loop between the two halves of each

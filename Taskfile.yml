@@ -31,6 +31,24 @@ tasks:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)
     cmd: cargo test --workspace
 
+  test-arms:
+    desc: Run the tests of the bench feature arms the matrix measures with (bench-no-speculate and its tapped combination)
+    # `task test` compiles the shipped feature set, so an arm's own tests
+    # are never run by it -- and an arm the matrix measures two gated cells
+    # with is a build whose behaviour is a measurement contract. The pin
+    # that matters here is negative (`only_the_shipped_build_leaves_a
+    # _keystroke_pending`'s twin): a wiring change that re-enabled
+    # prediction under the feature would put the echo rows back to timing
+    # the predicted paint, and nothing on screen would look wrong.
+    #
+    # bench-no-speculate adds no dependency features, so both legs rebuild
+    # the `view` crate alone and cargo keeps each feature set's artifacts
+    # side by side; the tapped combination is the echo_path decomposition's
+    # arm and pulls in view-engine/view-tui's tap code as well.
+    cmds:
+      - cargo test -p view --features bench-no-speculate
+      - cargo test -p view --features bench-taps,bench-no-speculate
+
   test-focus:
     desc: Run one crate or one filter's tests (task test-focus -- -p view-core speculate)
     # a target of its own rather than an argument to `test`, because CLI_ARGS
@@ -72,6 +90,7 @@ tasks:
       - task: style
       - task: loc
       - task: test
+      - task: test-arms
 
   oracle:
     desc: Run the differential oracle corpus against the pinned nvim (task oracle -- corpus/insert-basic.toml for one entry)
@@ -101,11 +120,27 @@ tasks:
 
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)
+    # the ship guard on the no-speculate arm refuses an optimized build that
+    # does not name the campaign it is for (crates/view/src/speculate.rs),
+    # and this is the campaign: the echo rows measure that arm, so this is
+    # the one target that legitimately wants an optimized binary with the
+    # prediction compiled out of it
+    env:
+      VIEW_BENCH_NO_SPECULATE: "1"
     cmds:
       - cargo build --release -p view
       # separate target dir so the instrumented build can never overwrite
       # the plain binary the e2e rows measure
       - cargo build --release -p view --features bench-taps --target-dir target/taps
+      # the echo rows' arm, in a third target dir for the same reason: it
+      # predicts nothing, so those rows keep timing the engine round trip
+      # they are defined as rather than the predicted paint the shipped
+      # binary answers a keystroke with first (see Bins::echo_bins)
+      - cargo build --release -p view --features bench-no-speculate --target-dir target/nospec
+      # the echo_path decomposition splits the echo row's own interval, so
+      # it runs that row's arm with the tap channel added; a fourth target
+      # dir for the same reason as the third
+      - cargo build --release -p view --features bench-taps,bench-no-speculate --target-dir target/taps-nospec
       # the exit code is echoed as this target's own final log line, on
       # every path (pass, gate breach, refusal), so a tee'd gate log is
       # self-describing without a reader having to interpret the bench
@@ -130,22 +165,33 @@ tasks:
     # the ship guard on the no-heartbeat arm refuses an optimized build that
     # does not name the campaign it is for (view-engine/src/process.rs), and
     # this is the campaign: the variable is set here, in the one target that
-    # legitimately wants a binary with no read-side supervision in it
+    # legitimately wants a binary with no read-side supervision in it. The
+    # echo row measures the no-speculate arm, so this target builds that one
+    # too and carries its guard variable for the same reason
     env:
       VIEW_BENCH_NO_HEARTBEAT: "1"
+      VIEW_BENCH_NO_SPECULATE: "1"
     cmds:
+      # the plain binary is not measured by either row, but the bench binary
+      # resolves it before any row runs and refuses a run without it
       - cargo build --release -p view
-      - cargo build --release -p view --features bench-taps --target-dir target/taps
       # one target dir per arm: the counterfactual binary must never be able
-      # to overwrite the shipped one the other arm measures, and a shared dir
-      # would rebuild both on every feature flip
-      - cargo build --release -p view --features bench-no-heartbeat --target-dir target/no-heartbeat
+      # to overwrite the one the other arm measures, and a shared dir would
+      # rebuild both on every feature flip
+      - cargo build --release -p view --features bench-taps --target-dir target/taps
       - cargo build --release -p view --features bench-taps,bench-no-heartbeat --target-dir target/taps-no-heartbeat
+      # the echo row's two arms. Its boundary is the typed glyph on screen,
+      # which a predicting build answers before the engine does, so measuring
+      # the heartbeat's cost there means measuring it on the pair of builds
+      # that predict nothing -- otherwise both arms time the same painted
+      # glyph and the campaign reports a difference it never measured
+      - cargo build --release -p view --features bench-no-speculate --target-dir target/nospec
+      - cargo build --release -p view --features bench-no-speculate,bench-no-heartbeat --target-dir target/nospec-no-heartbeat
       - cargo build --release -p view-harness --bin bench
       - cargo test -p view-harness --release --test heartbeat_cost -- --ignored --nocapture
 
   perf-audit:
-    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class (~28 min), then the heartbeat armed-vs-absent campaign (four release builds plus four 400-sample cells; AB=skip drops it), then every hot-path micro-bench (task perf-audit CLASS=dev-linux AB=skip)
+    desc: Pre-release / post-strangle gate — full bench matrix gated on the local dev class (~28 min), then the heartbeat armed-vs-absent campaign (five release builds plus four 400-sample cells; AB=skip drops it), then every hot-path micro-bench (task perf-audit CLASS=dev-linux AB=skip)
     vars:
       CLASS: '{{.CLASS | default "dev-linux"}}'
       AB: '{{.AB | default "run"}}'

@@ -114,7 +114,7 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             Ok(metrics)
         }
         "echo" => {
-            let pair = paired_specs(&world, fixture, bins)?;
+            let pair = paired_specs_with(&world, fixture, bins.echo_bins()?, bins)?;
             let outcome = echo::run(
                 ViewSpec(&pair.view),
                 NvimSpec(&pair.nvim),

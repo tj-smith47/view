@@ -99,7 +99,7 @@ pub(crate) fn run_taps_row(
     controlled: bool,
 ) -> Result<RowOutcome> {
     let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
-    let (pipe, spec, _cwd) = taps_side(fixture, world, bins)?;
+    let (pipe, spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?)?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {
         "input_path" => (
@@ -214,7 +214,7 @@ pub(crate) fn run_echo_speculated_row(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<RowOutcome> {
-    let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins)?;
+    let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = echo_speculated::run(
         ViewSpec(&view_spec),
@@ -265,23 +265,22 @@ pub(crate) fn run_echo_speculated_row(
 
 /// Prepares one instrumented-build side: the tap FIFO and the shimmed
 /// spawn spec.
+///
+/// `editor` rather than a build chosen here: the tap channel is compiled
+/// into more than one arm, and which of them a row measures is the row's
+/// own decision (see [`Bins::echo_path_bins`]). Each accessor checks its
+/// own binary and names its own flag, so a missing arm is reported as the
+/// arm it is.
 fn taps_side(
     fixture: &str,
     world: &CellWorld,
-    bins: &Bins,
+    editor: EditorBins<'_>,
 ) -> Result<(taps::TapPipe, SpawnSpec, PathBuf)> {
-    if !bins.taps_view.exists() {
-        bail!(
-            "taps view binary {} does not exist; run via `task bench` (which builds it) or pass \
-             --taps-view-bin",
-            bins.taps_view.display()
-        );
-    }
     let side = world.side(fixture, "view")?;
     let cwd = side.cwd.clone();
     let tap_path = cwd.join("tap.fifo");
     let pipe = taps::TapPipe::create(&tap_path)?;
-    let spec = shim_taps_spec(view_spec_from(side, bins.taps_bins()), &tap_path);
+    let spec = shim_taps_spec(view_spec_from(side, editor), &tap_path);
     Ok((pipe, spec, cwd))
 }
 
@@ -326,6 +325,33 @@ fn unexplained_paint_bound(keystrokes: usize) -> usize {
     share.max(1)
 }
 
+/// Why a resolved-nothing decomposition disqualifies the `echo_path` row,
+/// when it does.
+///
+/// Zero of N is the only count refused, for the reason the chrome-paint
+/// bound is floored at one event: any bar above zero would be a share
+/// invented before a campaign has published what a healthy run resolves,
+/// and the discipline this tree holds to is that a bar comes from a
+/// recording. Zero needs no recording -- a decomposition that resolved no
+/// chain at all explains none of its own total, and every stage it prints
+/// is a zero standing where a measurement should be.
+///
+/// The build arm is named in the reason because it is the cause that has
+/// actually occurred: the chain closes on the typed glyph reaching the
+/// terminal, and a view that predicts puts that glyph there before the
+/// engine answers, leaving the authoritative write outside every window.
+fn unresolved_chain_refusal(unresolved: usize, samples: usize) -> Option<String> {
+    (samples > 0 && unresolved == samples).then(|| {
+        format!(
+            "the tag chain resolved on 0 of {samples} measured view samples, so every stage \
+             below is zero over zero samples and the decomposition explains none of its own \
+             total. The suspected cause is a view build that predicts: echo_path decomposes the \
+             echo round trip and must run the bench-taps + bench-no-speculate arm \
+             (target/taps-nospec, which `task bench` builds, or --taps-nospec-view-bin)"
+        )
+    })
+}
+
 /// Why the counted chrome paints disqualify the output-path row, when
 /// they do.
 ///
@@ -353,7 +379,7 @@ pub(crate) fn run_echo_path_row(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
-    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins)?;
+    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.echo_path_bins()?)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = taps::run_echo_path(
         ViewSpec(&view_spec),
@@ -400,6 +426,9 @@ pub(crate) fn run_echo_path_row(
         outcome.ambiguous_input_wakes,
         outcome.ambiguous_output_wakes
     );
+    if let Some(reason) = unresolved_chain_refusal(outcome.unresolved, outcome.view_total.samples) {
+        bail!("{reason}");
+    }
     let per_tag = outcome
         .repeated_round_tags
         .iter()
@@ -484,6 +513,32 @@ mod tests {
         // admits the single stray paint the rate produces
         assert_eq!(unexplained_paint_bound(30), 1);
         assert_eq!(unexplained_paint_refusal(1, 30), None);
+    }
+
+    /// The decomposition's own floor: nothing resolved is refused and
+    /// names the arm, one sample resolved is reported as the thin
+    /// attribution it is, and an empty run has no verdict to give.
+    #[test]
+    fn a_decomposition_that_resolved_nothing_refuses_and_names_the_arm() {
+        let reason = unresolved_chain_refusal(40, 40)
+            .expect("a chain that resolved on no sample at all must refuse");
+        assert!(
+            reason.contains("0 of 40") && reason.contains("bench-no-speculate"),
+            "the reason must carry the count and the build arm it suspects, got: {reason}"
+        );
+
+        assert_eq!(
+            unresolved_chain_refusal(39, 40),
+            None,
+            "one resolved sample is a thin attribution, not an unmeasured row: the share is \
+             printed and the bar it would take has to come from a recording"
+        );
+        assert_eq!(
+            unresolved_chain_refusal(0, 0),
+            None,
+            "an empty run resolved nothing because it measured nothing; the run's own sampling \
+             refusals are what speak to that"
+        );
     }
 
     /// A view answering keystrokes from its own chrome is what the bar

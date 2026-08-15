@@ -58,8 +58,10 @@ impl SpeculationClock {
     ///
     /// A session takes its origin from [`Default`] and never names one; this
     /// exists so a test can model the passage of `SPECULATION_MAX_AGE` by
-    /// moving an origin back rather than by sleeping through it.
-    #[cfg(test)]
+    /// moving an origin back rather than by sleeping through it. Under the
+    /// arm that predicts nothing there is no prediction to age, so no test
+    /// there names an origin at all.
+    #[cfg(all(test, not(feature = "bench-no-speculate")))]
     #[must_use]
     pub fn started_at(origin: std::time::Instant) -> Self {
         Self { origin }
@@ -102,10 +104,48 @@ pub(crate) fn next_expiry(model: &Model, clock: SpeculationClock) -> Option<Dura
         .min()
 }
 
+/// Whether this build predicts anything at all.
+///
+/// False only under `bench-no-speculate`, the bench matrix's arm for the
+/// `echo` row. That row's boundary is the typed glyph appearing on screen,
+/// and a predicted glyph is the same character in the same cell as the
+/// authoritative one, so nothing the harness parses out of a pty can keep
+/// the row measuring the round trip it is defined as. An arm that never
+/// writes the predicted glyph can, and the speculated paint is measured by
+/// `echo_speculated` under names of its own.
+///
+/// One flag at the one site that creates a prediction, rather than a
+/// `cfg` at each of the loop's four call sites: with nothing ever pending,
+/// reconciliation, expiry and the expiry deadline are already the no-ops
+/// they are outside a typing burst, so the arm differs from the shipped
+/// binary in exactly one branch that a release build folds away.
+const PREDICTS: bool = !cfg!(feature = "bench-no-speculate");
+
+// `task bench` and `task heartbeat-ab` set VIEW_BENCH_NO_SPECULATE for the
+// arm binaries they build, and nothing else in the tree sets it, so every
+// other optimized build with the prediction compiled out fails to compile
+// instead of becoming an artifact that types like the shipped editor and
+// answers slower. `debug_assertions` is what separates the two cases: a
+// debug build cannot be mistaken for a shipped editor, so a lint or test
+// leg may compile the arm with no ceremony, while the builds that could
+// plausibly leave the machine must be deliberate. `option_env!` is tracked
+// by cargo, so flipping the variable rebuilds rather than reusing a cached
+// verdict. Mirrors the same guard on the no-heartbeat arm
+// (view-engine/src/process.rs).
+#[cfg(all(feature = "bench-no-speculate", not(debug_assertions)))]
+const _: () = assert!(
+    option_env!("VIEW_BENCH_NO_SPECULATE").is_some(),
+    "bench-no-speculate compiles out speculative echo and must never ship: set \
+     VIEW_BENCH_NO_SPECULATE=1 in the build environment (as `task bench` does) if this optimized \
+     build really is the echo rows' arm"
+);
+
 /// Folds one call the loop is sending the engine into what speculation may
 /// still claim.
 pub(crate) fn note_engine_call(model: &mut Model, call: &RpcCall, clock: SpeculationClock) {
-    fold_engine_call(model, call, clock.now());
+    if PREDICTS {
+        fold_engine_call(model, call, clock.now());
+    }
 }
 
 /// The loop's per-pass age check on what speculation is still holding.
@@ -119,6 +159,7 @@ pub(crate) fn expire_speculation(model: &mut Model, clock: SpeculationClock) {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    #[cfg(not(feature = "bench-no-speculate"))]
     use std::time::Instant;
     use view_core::grid::GridOp;
 
@@ -138,11 +179,20 @@ mod tests {
         model
     }
 
+    // Every case past the twin pair below asserts what happens to a
+    // prediction once one exists -- it is reconciled, it expires, it bounds
+    // the loop's wait -- so under the arm they would be assertions about a
+    // prediction never made. Configured out there rather than given a
+    // conditional expectation, so the arm's suite states only what the arm
+    // itself owes and `task test-arms` runs a green suite rather than an
+    // adapted one.
+
     /// One clock's reading `elapsed` later, modelled by moving its origin
     /// back rather than by sleeping: the difference between two stamps is
     /// the only thing anything reads, and a test that waits out
     /// `SPECULATION_MAX_AGE` in real time buys nothing for the second it
     /// spends.
+    #[cfg(not(feature = "bench-no-speculate"))]
     fn clock_reading(origin: Instant, elapsed: Duration) -> SpeculationClock {
         SpeculationClock::started_at(origin.checked_sub(elapsed).unwrap_or(origin))
     }
@@ -158,10 +208,53 @@ mod tests {
         );
     }
 
+    /// The shipped half of the one behavioural difference the `echo` row's
+    /// arm has: a typed character leaves a prediction pending.
+    ///
+    /// Twinned with the arm's own case below rather than written once
+    /// against [`PREDICTS`], because a test that reads the constant it
+    /// guards moves its expectation with the code: forcing `PREDICTS` true
+    /// under the feature would mutate both halves of such an assertion and
+    /// it would still pass. Each twin states the outcome its configuration
+    /// owes outright, so neither can be satisfied by the other's build.
+    #[cfg(not(feature = "bench-no-speculate"))]
+    #[test]
+    fn a_shipped_build_leaves_a_keystroke_pending() {
+        let mut model = typing_model();
+
+        typed(&mut model, "x", SpeculationClock::default());
+
+        assert_eq!(
+            model.speculate.pending().len(),
+            1,
+            "the shipped build predicts the typed glyph, and the echo_speculated row measures \
+             the paint it produces"
+        );
+    }
+
+    /// The arm's half: under `bench-no-speculate` the same keystroke leaves
+    /// nothing pending, which is the whole property the `echo` row's
+    /// boundary depends on.
+    #[cfg(feature = "bench-no-speculate")]
+    #[test]
+    fn the_arm_leaves_no_keystroke_pending() {
+        let mut model = typing_model();
+
+        typed(&mut model, "x", SpeculationClock::default());
+
+        assert!(
+            model.speculate.pending().is_empty(),
+            "a prediction under this feature puts the typed glyph on screen before the engine \
+             answers, and the echo row would time that paint under the round trip's own metric \
+             names"
+        );
+    }
+
     /// The wiring case the age bound exists for: a session in which **no**
     /// redraw arrives at all -- not one that misses the predicted cell, but
     /// none -- still retires the prediction, because the pass that checks is
     /// the loop's own and not one a redraw has to reach.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_pass_with_no_redraw_at_all_still_retires_a_prediction_past_the_bound() {
         let origin = Instant::now();
@@ -187,6 +280,7 @@ mod tests {
 
     /// The same pass, one instant earlier: a prediction still inside the
     /// bound is left alone, and nothing is repainted for it.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_pass_inside_the_bound_retires_nothing_and_marks_nothing() {
         let origin = Instant::now();
@@ -214,6 +308,7 @@ mod tests {
 
     /// The wait the loop takes has to end before the oldest prediction is
     /// past the bound, and has to be absent entirely outside a burst.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn the_next_expiry_is_what_is_left_of_the_bound_and_nothing_outside_a_burst() {
         let origin = Instant::now();
@@ -235,6 +330,7 @@ mod tests {
     /// is what has to invalidate for it -- and it must, since `<Left>` moves
     /// the cursor out from under everything pending. The frame is marked
     /// because the glyph it retires is already on the terminal.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_notation_key_retires_a_painted_prediction_and_marks_the_frame() {
         let clock = SpeculationClock::default();
@@ -255,6 +351,7 @@ mod tests {
 
     /// A redraw batch that answers a predicted cell retires it and marks the
     /// frame, so the layer painting over that cell goes with it.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_redraw_that_answers_a_prediction_retires_it_and_marks_the_frame() {
         let mut model = typing_model();
@@ -282,6 +379,7 @@ mod tests {
     /// A batch that answers nothing pending leaves the frame unmarked: a
     /// repaint nobody needs is a frame the loop pays for on every redraw of
     /// every session.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_redraw_that_answers_nothing_marks_no_frame() {
         let mut model = typing_model();

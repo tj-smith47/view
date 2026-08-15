@@ -27,16 +27,29 @@ use view_tui::terminal::Term;
 /// What this build calls itself, in `--version` and in its own startup
 /// diagnostics.
 ///
-/// Plain for the shipped editor; suffixed for the paired campaign's
-/// counterfactual arm, whose engine runs no heartbeat prober and therefore
-/// notices no read-side hang. The compile guard in `view-engine` is what
-/// keeps such a build from being made by accident; this is what makes one
-/// that exists say so wherever it is read from -- including from a shell,
-/// without a session to start or a log to enable.
-const VERSION: &str = if cfg!(feature = "bench-no-heartbeat") {
-    concat!(env!("CARGO_PKG_VERSION"), "+bench-no-heartbeat")
-} else {
-    env!("CARGO_PKG_VERSION")
+/// Plain for the shipped editor; suffixed for either of the bench matrix's
+/// counterfactual arms -- the one whose engine runs no heartbeat prober and
+/// therefore notices no read-side hang, and the one that predicts nothing
+/// so the echo row keeps measuring the round trip rather than the predicted
+/// paint. The compile guard in `view-engine` is what keeps the first from
+/// being made by accident; this is what makes either one that exists say so
+/// wherever it is read from -- including from a shell, without a session to
+/// start or a log to enable.
+///
+/// Both at once is representable and named as such: a build stripped of two
+/// behaviours must not read as either single arm, since each row's number
+/// would then be attributed to the wrong absence.
+const VERSION: &str = match (
+    cfg!(feature = "bench-no-heartbeat"),
+    cfg!(feature = "bench-no-speculate"),
+) {
+    (true, true) => concat!(
+        env!("CARGO_PKG_VERSION"),
+        "+bench-no-heartbeat+bench-no-speculate"
+    ),
+    (true, false) => concat!(env!("CARGO_PKG_VERSION"), "+bench-no-heartbeat"),
+    (false, true) => concat!(env!("CARGO_PKG_VERSION"), "+bench-no-speculate"),
+    (false, false) => env!("CARGO_PKG_VERSION"),
 };
 
 /// What a session with no terminal on any descriptor tells the log and the

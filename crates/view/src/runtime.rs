@@ -2818,6 +2818,7 @@ mod tests {
     /// plain character typed in insert mode is predicted at the cursor the
     /// engine last reported, and the frame is marked so the glyph paints
     /// without waiting for the redraw that confirms it.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn dispatch_predicts_the_glyph_for_the_key_it_sent_to_the_engine() {
         let ops = FakeOps::default();
@@ -2871,6 +2872,7 @@ mod tests {
     /// The other half of the same path: the engine's own answer retires the
     /// prediction it confirms, so nothing keeps painting over a cell the
     /// authoritative grid has already filled.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn dispatch_reconciles_predictions_against_the_redraw_it_folds() {
         let ops = FakeOps::default();
@@ -3501,6 +3503,7 @@ mod tests {
     /// without the speculation deadline in this fold a glyph painted on a
     /// one-second promise would stand until something unrelated happened to
     /// wake the loop.
+    #[cfg(not(feature = "bench-no-speculate"))]
     #[test]
     fn a_silent_session_with_a_prediction_pending_cannot_sleep_past_the_age_bound() {
         use view_core::native::speculate::SPECULATION_MAX_AGE;
