@@ -6,6 +6,19 @@
 //! module is a keystroke somebody else decoded, a cursor position somebody
 //! else read off the authoritative grid, and a stamp somebody else measured.
 //!
+//! # Where the state machine ends and the folds begin
+//!
+//! [`SpeculateState`] is the decision -- what may be claimed, and what a
+//! redraw takes back. [`fold_engine_call`], [`fold_redraw`] and
+//! [`fold_expiry`] are the three places a host drives it from, and they live
+//! here rather than in the host for one reason: every consumer that drives a
+//! real engine (the runtime loop, and the differential battery that has to
+//! answer whether the runtime is right) must classify a call, a batch and a
+//! pass identically, and two copies of that classification can only be
+//! pinned against each other, never made equal. They take a stamp instead of
+//! reading a clock, which is what keeps them as pure as the state machine
+//! they fold.
+//!
 //! # What a prediction claims, and what it must not
 //!
 //! nvim owns all buffer text, and a [`PredictedCell`] is not text: it is a
@@ -30,7 +43,9 @@
 
 use std::time::Duration;
 
-use crate::events::{GridCell, UiEvent};
+use crate::events::{GridCell, UiEvent, WinHandle};
+use crate::model::Model;
+use crate::msg::RpcCall;
 
 /// When a prediction was made, as elapsed time from one fixed origin the
 /// host chose once and keeps for the whole session.
@@ -83,13 +98,33 @@ const INSERT_MODE: &str = "insert";
 ///
 /// Bounds the case per-cell reconciliation against a redraw cannot close on
 /// its own: a redraw batch that never happens to re-send the exact predicted
-/// cell -- a partial update, or a scroll that moves content without
-/// resending it -- would otherwise leave a stale glyph on screen
-/// indefinitely. Sized well above the slowest round trip a healthy remote
-/// session is expected to take, so a legitimately slow but working link is
+/// cell -- a partial repaint that misses the predicted columns, a batch
+/// carrying only an overlay (a popup, a highlight) with no grid content at
+/// all, or a `win_viewport` too short to decode and so read as
+/// [`UiEvent::Unknown`] instead of the topline move it was -- would
+/// otherwise leave a stale glyph on screen indefinitely. Sized well above
+/// the slowest round trip a healthy remote session is expected to take, so
+/// a legitimately slow but working link is
 /// never mistaken for staleness; at a second, a user who somehow reaches it
 /// is already looking at an editor that has stopped answering.
 pub const SPECULATION_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// How many windows' `topline` this session tracks before the least
+/// recently touched one is pruned to keep [`SpeculateState::viewports`]
+/// bounded.
+///
+/// A floating window nvim mints for a completion popup or a preview is
+/// closed within the same session that opened it, and without a cap each
+/// one would leave its entry behind forever, growing the list -- and the
+/// per-viewport scan every reconcile does over it -- without limit for a
+/// session that opens enough of them. Pruning is safe to be wrong in the
+/// direction it is: a pruned handle's next `win_viewport` reads as
+/// first-seen (see [`SpeculateState::note_viewport`]), which never retires
+/// by itself, so at worst a shift this cap evicted is left for
+/// [`SPECULATION_MAX_AGE`] to catch instead of `reconcile` catching it
+/// immediately. Sized well past any split or popup layout a real session
+/// has open at once.
+const MAX_TRACKED_VIEWPORTS: usize = 64;
 
 /// Monotonic epoch, advanced on every mode change and on every keystroke
 /// this module refuses to predict.
@@ -161,6 +196,20 @@ pub struct PredictedCell {
 pub struct SpeculateState {
     epoch: Epoch,
     pending: Vec<PredictedCell>,
+    /// The last `topline` each window reported, so a viewport that moves can
+    /// be told from one that merely re-reported itself (nvim sends
+    /// `win_viewport` whenever the cursor moves within a window, which is
+    /// every keystroke of a typing burst).
+    ///
+    /// Per window rather than one number for the frame: a split has several
+    /// windows reporting viewports of their own, and a single slot would
+    /// read every alternation between two of them as a shift and retire the
+    /// burst that is being typed into one of them. Bounded at
+    /// [`MAX_TRACKED_VIEWPORTS`], least-recently-touched entry evicted first,
+    /// so a session that opens and closes many transient floating windows
+    /// cannot grow this past its cap or the per-reconcile scan over it past
+    /// a fixed size; see that constant's doc for what an eviction costs.
+    viewports: Vec<(WinHandle, u64)>,
 }
 
 impl SpeculateState {
@@ -267,8 +316,18 @@ impl SpeculateState {
     /// Retires every prediction one authoritative redraw batch has answered,
     /// and every prediction that batch is no longer about at all.
     ///
-    /// Three readings, in the order they are taken:
+    /// Four readings, in the order they are taken:
     ///
+    /// - A batch in which a window's `topline` moved is showing different
+    ///   buffer lines at the same screen rows, so every prediction is now
+    ///   over content it was never made for, and all of them are retired.
+    ///   This is the relocation `grid_scroll` does not cover: nvim repaints
+    ///   a jumped viewport line by line, and those lines need not reach the
+    ///   predicted columns, so a per-cell reading sees nothing and a glyph
+    ///   would stand over moved text until [`Self::expire_stale`]. Typing
+    ///   never triggers it -- a burst that does not scroll the window keeps
+    ///   `topline` exactly where it was, and one that does scroll the window
+    ///   has moved its own predictions and is right to lose them.
     /// - A batch carrying a `mode_change` ends the context every pending
     ///   prediction was made in, so the whole epoch turns over
     ///   ([`Self::reset_epoch`]) and nothing else is read. This is the half
@@ -298,17 +357,73 @@ impl SpeculateState {
     /// Reads the redraw, never the grid the redraw is about to be applied
     /// to, so it is indifferent to whether the caller runs it before or
     /// after that application.
+    ///
+    /// Must be called for every batch, not only for batches arriving while
+    /// something is pending: the viewport reading above is a comparison
+    /// against what the last batch reported, and a caller that skips the
+    /// quiet batches would compare a burst's first viewport against one from
+    /// before the last time the user scrolled.
     pub fn reconcile(&mut self, redraw: &[UiEvent]) {
-        if redraw
-            .iter()
-            .any(|ev| matches!(ev, UiEvent::ModeChange { .. }))
-        {
+        let mut mode_changed = false;
+        let mut shifted = false;
+        for event in redraw {
+            match event {
+                UiEvent::ModeChange { .. } => mode_changed = true,
+                UiEvent::WinViewport { win, topline, .. } => {
+                    shifted |= self.note_viewport(*win, *topline);
+                }
+                _ => {}
+            }
+        }
+        if mode_changed {
             self.reset_epoch();
+            return;
+        }
+        if shifted {
+            // the epoch is deliberately left alone, exactly as
+            // `expire_stale` leaves it: a shift says the cells these
+            // predictions named are showing something else, not that the
+            // mode ended. Every pending prediction is cleared, not only the
+            // shifted window's, because without ext_multigrid a prediction
+            // carries no window of its own to tell a mover's cells from a
+            // bystander's -- only the grid row and column shared by every
+            // window on screen. Retiring a bystander's prediction over one
+            // unaccelerated character is the safe direction to be wrong in;
+            // painting a bystander's glyph over a mover's relocated content
+            // is not.
+            self.pending.clear();
             return;
         }
         let epoch = self.epoch;
         self.pending
             .retain(|cell| cell.epoch == epoch && !answered_by(redraw, cell));
+    }
+
+    /// Records `win`'s current `topline`, reporting whether it moved.
+    ///
+    /// A window seen for the first time never counts as moved: an unknown
+    /// viewport is not a viewport that changed, and reading it as one would
+    /// retire the first burst of every session for a window nvim had simply
+    /// not reported yet.
+    ///
+    /// A window already tracked is moved to the back of `viewports` on
+    /// every touch, so the front is always the least recently reported --
+    /// what [`MAX_TRACKED_VIEWPORTS`] evicts when a new window arrives at
+    /// the cap. A window mid-burst is touched every keystroke (nvim resends
+    /// its viewport on every cursor move), which keeps it off the front for
+    /// as long as it is actually the one being typed into.
+    fn note_viewport(&mut self, win: WinHandle, topline: u64) -> bool {
+        if let Some(index) = self.viewports.iter().position(|(seen, _)| *seen == win) {
+            let (_, last) = self.viewports.remove(index);
+            let moved = last != topline;
+            self.viewports.push((win, topline));
+            return moved;
+        }
+        if self.viewports.len() >= MAX_TRACKED_VIEWPORTS {
+            self.viewports.remove(0);
+        }
+        self.viewports.push((win, topline));
+        false
     }
 
     /// The predictions currently on screen ahead of the engine, in the order
@@ -365,6 +480,11 @@ fn answered_by(redraw: &[UiEvent], cell: &PredictedCell) -> bool {
         // the place its glyph was predicted for, and no later batch is
         // obliged to say so cell by cell
         UiEvent::GridScroll { .. } | UiEvent::GridClear { .. } | UiEvent::GridResize { .. } => true,
+        // a viewport that moved is read by `reconcile` itself, one reading
+        // earlier and against the last one this window reported -- the event
+        // on its own says nothing, since nvim sends it for every cursor move
+        // inside an unmoved window
+        UiEvent::WinViewport { .. } => false,
         // everything else moves no grid content: chrome, highlights,
         // overlays, and the cursor's own position (which is read at predict
         // time, never re-read here)
@@ -406,6 +526,118 @@ fn covers_column(col_start: u64, cells: &[GridCell], col: u16) -> bool {
         .fold(0, u64::saturating_add);
     let col = u64::from(col);
     col >= col_start && col < col_start.saturating_add(width)
+}
+
+/// Folds one call the host is sending the engine into what speculation may
+/// still claim, marking the frame when that changed what is pending.
+///
+/// Three calls can touch a prediction, and they are the three that reach the
+/// buffer or the cursor: the keystroke a prediction is made from, and the
+/// paste and mouse events that move one or the other without any character
+/// ever reaching [`SpeculateState::predict`] -- the caller obligation that
+/// method states, for the two paths that are not keys. Everything else a
+/// frontend sends nvim (an option, a resize, a reply, a registration) leaves
+/// both the buffer and the cursor where the prediction found them; a resize
+/// additionally comes back as a `grid_resize` that [`fold_redraw`] reads for
+/// itself.
+///
+/// `now` is a stamp the host took from its own fixed origin, since nothing
+/// in this module reads a clock.
+pub fn fold_engine_call(model: &mut Model, call: &RpcCall, now: SpecStamp) {
+    match call {
+        RpcCall::Input { notation } => fold_keystroke(model, notation, now),
+        RpcCall::Paste { .. } | RpcCall::InputMouse { .. } => fold_invalidation(model),
+        // `RpcCall` is `#[non_exhaustive]`: a call added later is assumed to
+        // touch neither the buffer nor the cursor until someone decides
+        // otherwise, which is the reading that costs an unaccelerated
+        // character rather than a wrong one
+        _ => {}
+    }
+}
+
+/// Judges every pending prediction against the redraw batch that just
+/// arrived, and marks the frame when that retired one.
+///
+/// Runs for every batch, including the batches arriving with nothing pending:
+/// [`SpeculateState::reconcile`] is where a window's viewport is read, and
+/// that reading is only worth what the batch before it recorded.
+pub fn fold_redraw(model: &mut Model, redraw: &[UiEvent]) {
+    let before = model.speculate.pending().len();
+    model.speculate.reconcile(redraw);
+    mark_retirement(model, before);
+}
+
+/// The host's per-pass age check on what speculation is still holding.
+///
+/// Belongs at a call site reached whether or not a redraw arrived: a redraw
+/// that never comes is the condition [`SPECULATION_MAX_AGE`] exists for.
+pub fn fold_expiry(model: &mut Model, now: SpecStamp) {
+    // the pending list is read before anything else so a steady-state pass
+    // costs one length compare: expiring an empty list is a no-op, and a
+    // session outside a typing burst takes that pass forever
+    if model.speculate.pending().is_empty() {
+        return;
+    }
+    let before = model.speculate.pending().len();
+    model.speculate.expire_stale(now);
+    mark_retirement(model, before);
+}
+
+/// Folds one engine-bound keystroke into the display-only prediction it is
+/// expected to produce.
+fn fold_keystroke(model: &mut Model, notation: &str, now: SpecStamp) {
+    let Some(key) = lone_char(notation) else {
+        // the caller obligation `predict` states: a notation key moves the
+        // cursor or changes what typing means without ever reaching it as a
+        // character, so nothing pending can survive one
+        fold_invalidation(model);
+        return;
+    };
+    let cursor = model.engine.grid().cursor();
+    let mode = model.engine.mode.current.as_str();
+    let before = model.speculate.pending().len();
+    // the refusal path is why the answer is read off the pending list rather
+    // than off this `Option`: a character `predict` declines discards
+    // everything pending inside `predict` itself, and the caller sees only
+    // the `None` it shares with a mode that was never predicting at all
+    let _ = model.speculate.predict(mode, key, cursor, now);
+    mark_retirement(model, before);
+}
+
+/// Discards everything pending because something that is not a predictable
+/// keystroke has reached the buffer or the cursor.
+fn fold_invalidation(model: &mut Model) {
+    let before = model.speculate.pending().len();
+    model.speculate.reset_epoch();
+    mark_retirement(model, before);
+}
+
+/// Marks the frame when a fold has changed what speculation is holding since
+/// `before`.
+///
+/// Every fold here ends in this call, and that is the point: a frame is
+/// painted only once something has marked it, so a fold that retires an
+/// already-painted prediction without marking one leaves the glyph on the
+/// terminal with nothing left to take it off -- the age bound cannot rescue
+/// it either, since it has nothing pending left to find stale. Marking on any
+/// change rather than on a shrink covers the appearing prediction with the
+/// same rule; marking on no change at all is what keeps every `<Esc>`, click
+/// and normal-mode key of a session outside a typing burst from buying a
+/// repaint.
+fn mark_retirement(model: &mut Model, before: usize) {
+    model.dirty |= model.speculate.pending().len() != before;
+}
+
+/// The one character `notation` is, or `None` when it is a notation key.
+///
+/// nvim notation writes every key that is not a single printable character as
+/// a bracketed name -- `<Esc>`, `<C-w>`, `<S-Tab>`, and `<lt>` for a literal
+/// `<` -- so "exactly one char" separates the two with no table of key names
+/// to keep in step with the encoder that produced them.
+fn lone_char(notation: &str) -> Option<char> {
+    let mut chars = notation.chars();
+    let first = chars.next()?;
+    chars.next().is_none().then_some(first)
 }
 
 #[cfg(test)]
@@ -603,7 +835,7 @@ mod tests {
     fn the_epoch_saturates_instead_of_wrapping_onto_an_epoch_already_used() {
         let mut state = SpeculateState {
             epoch: Epoch(u64::MAX),
-            pending: Vec::new(),
+            ..SpeculateState::default()
         };
         assert!(state.predict("insert", 'a', (0, 0), stamp(0)).is_some());
 
@@ -661,6 +893,7 @@ mod tests {
         let mut state = SpeculateState {
             epoch: Epoch(2),
             pending: vec![matching, untouched],
+            ..SpeculateState::default()
         };
 
         state.reconcile(&[grid_line(2, 4, "a")]);
@@ -785,6 +1018,115 @@ mod tests {
         assert_eq!(state.pending(), &[cell]);
     }
 
+    /// One window's viewport report.
+    fn viewport(win: u64, topline: u64) -> UiEvent {
+        UiEvent::WinViewport {
+            grid: 1,
+            win: WinHandle(win),
+            topline,
+            botline: topline + 12,
+            curline: topline,
+            curcol: 0,
+        }
+    }
+
+    /// The gap a per-cell reading cannot close: a window that jumps is
+    /// repainted line by line, and those lines need not carry the predicted
+    /// columns, so the only thing that says the glyph is now over different
+    /// content is the viewport itself.
+    #[test]
+    fn a_window_whose_topline_moved_retires_every_prediction() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport(1, 10)]);
+        let _ = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport(1, 13), UiEvent::Flush]);
+
+        assert!(state.pending().is_empty());
+    }
+
+    /// And the reason it cannot simply retire on the event: nvim reports a
+    /// viewport for every cursor move inside an unmoved window, which is
+    /// every keystroke of the burst the feature exists for.
+    #[test]
+    fn a_viewport_reported_again_at_the_same_topline_retires_nothing() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport(1, 10)]);
+        let cell = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport(1, 10), UiEvent::Flush]);
+
+        assert_eq!(state.pending(), &[cell]);
+    }
+
+    /// A split reports a viewport per window, and two windows parked at
+    /// different toplines alternate on the wire. Reading that alternation as
+    /// movement would retire every burst typed in either of them.
+    #[test]
+    fn a_second_windows_viewport_never_reads_as_the_first_one_moving() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport(1, 10), viewport(2, 80)]);
+        let cell = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport(2, 80)]);
+        state.reconcile(&[viewport(1, 10)]);
+
+        assert_eq!(state.pending(), &[cell]);
+    }
+
+    /// A window nobody has heard from yet has not moved: an unknown viewport
+    /// is not a changed one, and reading it as one would cost the first
+    /// burst typed into every newly opened window.
+    #[test]
+    fn a_window_seen_for_the_first_time_is_not_a_window_that_moved() {
+        let mut state = SpeculateState::default();
+        let cell = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        state.reconcile(&[viewport(7, 42)]);
+
+        assert_eq!(state.pending(), &[cell]);
+    }
+
+    /// A session that opens and closes many transient floating windows --
+    /// one per completion popup, say -- must not grow the viewport map
+    /// without bound, and a window that is genuinely still being typed into
+    /// (touched between every churn event, exactly as a real burst's
+    /// `win_viewport` reports would) must keep tracking correctly the whole
+    /// time: the LRU eviction has to be evicting the transient handles, not
+    /// the live one, for that to hold.
+    #[test]
+    fn transient_window_churn_stays_bounded_and_a_live_window_still_retires() {
+        let mut state = SpeculateState::default();
+        state.reconcile(&[viewport(1, 10)]);
+        let _ = state
+            .predict("insert", 'a', (2, 4), stamp(0))
+            .expect("plain insert-mode character");
+
+        for handle in 0..u64::try_from(MAX_TRACKED_VIEWPORTS * 4).unwrap() {
+            state.reconcile(&[viewport(1000 + handle, 0)]);
+            state.reconcile(&[viewport(1, 10)]);
+            assert!(
+                state.viewports.len() <= MAX_TRACKED_VIEWPORTS,
+                "viewport map grew past its bound during churn"
+            );
+        }
+
+        state.reconcile(&[viewport(1, 13), UiEvent::Flush]);
+
+        assert!(
+            state.pending().is_empty(),
+            "a live window kept off the eviction front by every touch should still retire on a real shift"
+        );
+    }
+
     /// The far edge of the column arithmetic: past the last representable
     /// column two predictions share a cell. Pinned rather than defended
     /// against, since a grid that wide does not exist -- and a consumer that
@@ -801,5 +1143,173 @@ mod tests {
 
         assert_eq!(first.col, u16::MAX);
         assert_eq!(second.col, u16::MAX);
+    }
+
+    // -- the folds a host drives the state machine from --------------------
+
+    /// A model mid-typing-burst: a grid, the cursor where the engine last
+    /// reported it, and insert mode active.
+    fn typing_model() -> Model {
+        use crate::grid::GridOp;
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        model
+            .engine
+            .apply_grid(GridOp::CursorGoto { row: 3, col: 5 });
+        model.engine.mode.current = "insert".to_string();
+        model.dirty = false;
+        model
+    }
+
+    /// One engine-bound keystroke.
+    fn input(notation: &str) -> RpcCall {
+        RpcCall::Input {
+            notation: notation.to_string(),
+        }
+    }
+
+    /// Why [`fold_redraw`] runs on every batch and not only on the batches
+    /// arriving mid-burst: the viewport comparison is against what the last
+    /// batch reported, so a host that skipped the quiet ones would judge a
+    /// burst's first viewport against one from before the user last
+    /// scrolled -- and retire the burst for a move that already happened.
+    #[test]
+    fn a_batch_arriving_with_nothing_pending_still_records_the_viewport() {
+        let mut model = typing_model();
+        fold_redraw(&mut model, &[viewport(1, 10), UiEvent::Flush]);
+        fold_redraw(&mut model, &[viewport(1, 40), UiEvent::Flush]);
+        model.dirty = false;
+
+        fold_engine_call(&mut model, &input("x"), stamp(0));
+        fold_redraw(&mut model, &[viewport(1, 40), UiEvent::Flush]);
+
+        assert_eq!(
+            model.speculate.pending().len(),
+            1,
+            "a viewport that never moved retired the burst"
+        );
+    }
+
+    /// A paste and a mouse click both move the cursor or the text under a
+    /// prediction without any character reaching `predict`, so both owe the
+    /// invalidation a notation key owes -- and both owe the mark, since the
+    /// glyph they retire is already on the terminal.
+    #[test]
+    fn a_paste_or_a_click_retires_a_painted_prediction_and_marks_the_frame() {
+        for call in [
+            RpcCall::Paste {
+                text: "pasted".to_string(),
+            },
+            RpcCall::InputMouse {
+                button: "left".to_string(),
+                action: "press".to_string(),
+                modifier: String::new(),
+                row: 9,
+                col: 9,
+            },
+        ] {
+            let mut model = typing_model();
+            fold_engine_call(&mut model, &input("x"), stamp(0));
+            assert_eq!(model.speculate.pending().len(), 1, "{call:?}");
+            model.dirty = false;
+
+            fold_engine_call(&mut model, &call, stamp(1));
+
+            assert!(model.speculate.pending().is_empty(), "{call:?}");
+            assert!(
+                model.dirty,
+                "{call:?} retired a painted prediction and marked no frame"
+            );
+        }
+    }
+
+    /// The same obligation for the character `predict` itself refuses: the
+    /// refusal clears what is pending inside `predict`, so the fold sees
+    /// only a `None` and has to read the pending list to notice.
+    #[test]
+    fn a_refused_character_that_retires_a_painted_prediction_marks_the_frame() {
+        let mut model = typing_model();
+        fold_engine_call(&mut model, &input("x"), stamp(0));
+        model.engine.mode.current = "normal".to_string();
+        model.dirty = false;
+
+        fold_engine_call(&mut model, &input("j"), stamp(1));
+
+        assert!(model.speculate.pending().is_empty());
+        assert!(
+            model.dirty,
+            "a refused character retired a painted prediction and marked no frame"
+        );
+    }
+
+    /// Nothing pending is the steady state for all three invalidation
+    /// classes, and none of them may mark a frame there: a repaint bought by
+    /// every `<Esc>`, every click and every normal-mode key of every session
+    /// is a cost the feature never earns back.
+    #[test]
+    fn an_invalidation_with_nothing_pending_marks_no_frame() {
+        let mut model = typing_model();
+
+        fold_engine_call(&mut model, &input("<Left>"), stamp(0));
+        fold_engine_call(
+            &mut model,
+            &RpcCall::Paste {
+                text: "pasted".to_string(),
+            },
+            stamp(1),
+        );
+        model.engine.mode.current = "normal".to_string();
+        fold_engine_call(&mut model, &input("j"), stamp(2));
+
+        assert!(model.speculate.pending().is_empty());
+        assert!(
+            !model.dirty,
+            "an invalidation with nothing to retire repainted"
+        );
+    }
+
+    /// A call that reaches neither the buffer nor the cursor leaves a
+    /// prediction standing: invalidating on one would cost an accelerated
+    /// character for nothing.
+    #[test]
+    fn a_call_that_reaches_neither_the_buffer_nor_the_cursor_retires_nothing() {
+        let mut model = typing_model();
+        fold_engine_call(&mut model, &input("x"), stamp(0));
+
+        fold_engine_call(
+            &mut model,
+            &RpcCall::GetDefaultHl { generation: 1 },
+            stamp(1),
+        );
+
+        assert_eq!(model.speculate.pending().len(), 1);
+    }
+
+    /// `<lt>` is nvim's notation for a typed `<`, and it is three characters
+    /// on the wire: predicting one glyph per character would put a `<`, a
+    /// `l` and a `t` on the grid.
+    #[test]
+    fn a_bracketed_notation_is_never_mistaken_for_the_characters_that_spell_it() {
+        for notation in ["<lt>", "<Esc>", "<C-w>", "<S-Tab>"] {
+            assert_eq!(lone_char(notation), None, "{notation}");
+        }
+        assert_eq!(lone_char("x"), Some('x'));
+        assert_eq!(lone_char(" "), Some(' '));
+    }
+
+    /// Speculation is mode-gated at the model, so a key typed outside insert
+    /// mode reaches nvim exactly as before and leaves nothing behind.
+    #[test]
+    fn a_key_folded_outside_insert_mode_predicts_nothing() {
+        let mut model = typing_model();
+        model.engine.mode.current = "normal".to_string();
+
+        fold_engine_call(&mut model, &input("j"), stamp(0));
+
+        assert!(model.speculate.pending().is_empty());
+        assert!(!model.dirty, "an unpredicted key repaints nothing");
     }
 }

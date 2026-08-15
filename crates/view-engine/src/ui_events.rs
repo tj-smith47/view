@@ -6,7 +6,7 @@
 
 use crate::wire::map_find;
 use rmpv::Value;
-pub use view_core::events::{GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent};
+pub use view_core::events::{GridCell, ModeInfo, PmItem, TabEntry, TabHandle, UiEvent, WinHandle};
 
 /// Decodes a `redraw` notification's params into typed [`UiEvent`]s.
 ///
@@ -48,6 +48,7 @@ fn decode_event(name: &str, tuple: &Value) -> UiEvent {
         "grid_cursor_goto" => decode_grid_cursor_goto(args).unwrap_or_else(unknown),
         "grid_scroll" => decode_grid_scroll(args).unwrap_or_else(unknown),
         "grid_clear" => decode_grid_clear(args).unwrap_or_else(unknown),
+        "win_viewport" => decode_win_viewport(args).unwrap_or_else(unknown),
         "hl_attr_define" => decode_hl_attr_define(args).unwrap_or_else(unknown),
         "default_colors_set" => decode_default_colors_set(args).unwrap_or_else(unknown),
         "hl_group_set" => decode_hl_group_set(args).unwrap_or_else(unknown),
@@ -125,6 +126,23 @@ fn decode_grid_clear(args: &[Value]) -> Option<UiEvent> {
     let [grid, ..] = args else { return None };
     Some(UiEvent::GridClear {
         grid: as_u64(grid)?,
+    })
+}
+
+fn decode_win_viewport(args: &[Value]) -> Option<UiEvent> {
+    // nvim grew `line_count` and `scroll_delta` onto the end of this tuple
+    // after the six fields below; `..` takes whatever a build sends rather
+    // than making arity part of the match, the same way `grid_line` does
+    let [grid, win, topline, botline, curline, curcol, ..] = args else {
+        return None;
+    };
+    Some(UiEvent::WinViewport {
+        grid: as_u64(grid)?,
+        win: WinHandle(decode_ext_handle(win)?),
+        topline: as_u64(topline)?,
+        botline: as_u64(botline)?,
+        curline: as_u64(curline)?,
+        curcol: as_u64(curcol)?,
     })
 }
 
@@ -357,16 +375,20 @@ fn decode_msg_ruler(args: &[Value]) -> Option<UiEvent> {
     })
 }
 
-// Tabpage/Buffer handles arrive as msgpack-RPC Ext values whose payload is
-// itself a msgpack-encoded integer; unwrapping it here keeps that Ext detail
-// out of view-core, which stays rmpv-free.
-fn decode_tab_handle(v: &Value) -> Option<TabHandle> {
+// Tabpage/Window/Buffer handles arrive as msgpack-RPC Ext values whose
+// payload is itself a msgpack-encoded integer; unwrapping it here keeps that
+// Ext detail out of view-core, which stays rmpv-free.
+fn decode_ext_handle(v: &Value) -> Option<u64> {
     let Value::Ext(_, data) = v else {
         return None;
     };
     let mut cursor = &data[..];
     let inner = rmpv::decode::read_value(&mut cursor).ok()?;
-    Some(TabHandle(inner.as_u64()?))
+    inner.as_u64()
+}
+
+fn decode_tab_handle(v: &Value) -> Option<TabHandle> {
+    Some(TabHandle(decode_ext_handle(v)?))
 }
 
 fn decode_tabline_update(args: &[Value]) -> Option<UiEvent> {
@@ -532,7 +554,59 @@ mod tests {
 
     #[test]
     fn unknown_events_are_preserved_not_dropped() {
-        let params = vec![arr(vec![Value::from("win_viewport"), arr(vec![])])];
+        let params = vec![arr(vec![Value::from("set_title"), arr(vec![])])];
+        let evs = decode_redraw(&params);
+        assert!(matches!(&evs[0], UiEvent::Unknown { name } if name == "set_title"));
+    }
+
+    /// The viewport event carries the one relocation nvim announces without
+    /// resending the relocated cells, so it has to decode to a variant that
+    /// still holds `topline` -- and it has to keep decoding on a build that
+    /// appends fields to the tuple, which nvim has already done twice.
+    #[test]
+    fn decodes_win_viewport_including_a_longer_tuple() {
+        let six = arr(vec![
+            Value::from(1u64),
+            Value::Ext(1, vec![7]),
+            Value::from(10u64),
+            Value::from(34u64),
+            Value::from(12u64),
+            Value::from(3u64),
+        ]);
+        let eight = arr(vec![
+            Value::from(1u64),
+            Value::Ext(1, vec![7]),
+            Value::from(10u64),
+            Value::from(34u64),
+            Value::from(12u64),
+            Value::from(3u64),
+            Value::from(200u64),
+            Value::from(0u64),
+        ]);
+        let params = vec![arr(vec![Value::from("win_viewport"), six, eight])];
+
+        let evs = decode_redraw(&params);
+
+        let expected = UiEvent::WinViewport {
+            grid: 1,
+            win: WinHandle(7),
+            topline: 10,
+            botline: 34,
+            curline: 12,
+            curcol: 3,
+        };
+        assert_eq!(evs, vec![expected.clone(), expected]);
+    }
+
+    /// A tuple too short to carry a topline is worth nothing to the reader
+    /// that needs one, so it degrades to `Unknown` rather than to a viewport
+    /// with a fabricated value.
+    #[test]
+    fn a_truncated_win_viewport_decodes_to_unknown() {
+        let params = vec![arr(vec![
+            Value::from("win_viewport"),
+            arr(vec![Value::from(1u64), Value::Ext(1, vec![7])]),
+        ])];
         let evs = decode_redraw(&params);
         assert!(matches!(&evs[0], UiEvent::Unknown { name } if name == "win_viewport"));
     }

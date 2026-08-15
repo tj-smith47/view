@@ -39,6 +39,26 @@ pub enum UiEvent {
     },
     /// `grid` was cleared to the default background.
     GridClear { grid: u64 },
+    /// A window's visible region: `topline` and `botline` are the first and
+    /// last buffer lines `win` is showing (`topline` zero-based, `botline`
+    /// exclusive, as nvim sends them), and `curline`/`curcol` are the
+    /// cursor's position in that buffer.
+    ///
+    /// Carries no cell content -- nvim sends the cells themselves as
+    /// `grid_line` -- so nothing that paints reads this. What does read it is
+    /// [`speculate`](crate::native::speculate): a window whose `topline`
+    /// moved is showing different buffer lines at the same screen rows, which
+    /// is the one relocation nvim announces without ever resending the
+    /// relocated cells, and so the one a per-cell reconciliation cannot see.
+    /// `botline`, `curline` and `curcol` are decoded for wire completeness.
+    WinViewport {
+        grid: u64,
+        win: WinHandle,
+        topline: u64,
+        botline: u64,
+        curline: u64,
+        curcol: u64,
+    },
     /// A highlight attribute id was (re)defined.
     HlAttrDefine {
         id: u64,
@@ -174,6 +194,13 @@ pub struct ModeInfo {
 /// into a plain integer so `view-core` never has to model `Ext` itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TabHandle(pub u64);
+
+/// A `Window` handle, unwrapped from the same `Ext` encoding [`TabHandle`]
+/// is, and compared rather than dereferenced: it is what tells one window's
+/// [`UiEvent::WinViewport`] from another's when a split has several of them
+/// reporting viewports of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WinHandle(pub u64);
 
 /// One entry in [`UiEvent::TablineUpdate`]'s `tabs` list.
 #[derive(Debug, Clone, PartialEq, Eq)]

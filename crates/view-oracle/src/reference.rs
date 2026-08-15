@@ -263,7 +263,6 @@ const KNOWN_UNMODELED_EVENTS: &[&str] = &[
     "set_icon",
     "set_title",
     "update_menu",
-    "win_viewport",
 ];
 
 /// Engine-attached headless driver applying the decoded redraw stream with
@@ -504,7 +503,7 @@ impl ReferenceSession {
     /// *not* in [`KNOWN_UNMODELED_EVENTS`], in arrival order. A real
     /// `--clean` nvim session emits several event names view-engine's
     /// decoder does not model as structured `UiEvent` variants on every
-    /// healthy run (`option_set`, `win_viewport`, `set_title`, and the rest
+    /// healthy run (`option_set`, `chdir`, `set_title`, and the rest
     /// of `KNOWN_UNMODELED_EVENTS`); returning those unfiltered here would
     /// make this accessor permanently non-empty and so operationally inert
     /// as a novelty signal. Filtering them out means a genuinely new event
@@ -653,6 +652,7 @@ impl ReferenceSession {
             // ext_tabline/ext_popupmenu are attached (see this fn's doc
             // comment's ext-event policy paragraph)
             UiEvent::DefaultColorsSet { .. }
+            | UiEvent::WinViewport { .. }
             | UiEvent::HlGroupSet { .. }
             | UiEvent::Flush
             | UiEvent::ModeInfoSet { .. }
