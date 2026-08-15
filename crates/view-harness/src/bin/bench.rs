@@ -57,6 +57,7 @@ use view_harness::fixture::{
 const MATRIX: &[(&str, &str)] = &[
     ("echo", "minimal"),
     ("echo", "heavy"),
+    ("echo_speculated", "minimal"),
     ("echo_control", "minimal"),
     ("echo_control", "heavy"),
     ("scroll", "minimal"),
@@ -695,11 +696,15 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
         return Some("no memory metric is defined for this platform (spec 3.4 defines pss_mb on Linux and phys_footprint_mb on macOS)");
     }
     // The tap channel is FIFO + raw-CLOCK_MONOTONIC based and exists only on
-    // unix (see scenarios::taps); the internal-boundary rows and the echo_path
-    // decomposition built on it cannot run where the channel is absent.
+    // unix (see scenarios::taps); the internal-boundary rows, the echo_path
+    // decomposition and the speculated-echo row's per-sample attribution are
+    // all built on it and cannot run where the channel is absent.
     #[cfg(not(unix))]
-    if matches!(scenario, "input_path" | "output_path" | "echo_path") {
-        return Some("the tap channel (FIFO + raw CLOCK_MONOTONIC) is a unix-only mechanism; the internal-boundary and echo_path rows built on it are not measured off unix");
+    if matches!(
+        scenario,
+        "input_path" | "output_path" | "echo_path" | "echo_speculated"
+    ) {
+        return Some("the tap channel (FIFO + raw CLOCK_MONOTONIC) is a unix-only mechanism; the internal-boundary, echo_path and speculated-echo rows built on it are not measured off unix");
     }
     // The control arm reaches its headless server over a unix socket path.
     #[cfg(not(unix))]
@@ -1792,7 +1797,7 @@ mod tests {
         // the tap channel is a unix-only mechanism, so the internal-boundary
         // rows and the echo_path decomposition it drives run on unix and are
         // skipped on every other platform
-        for scenario in ["input_path", "output_path", "echo_path"] {
+        for scenario in ["input_path", "output_path", "echo_path", "echo_speculated"] {
             assert_eq!(
                 platform_block(scenario).is_some(),
                 cfg!(not(unix)),

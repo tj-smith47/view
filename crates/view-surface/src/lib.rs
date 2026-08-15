@@ -277,6 +277,40 @@ impl Surface {
             cursor: None,
         }
     }
+
+    /// Whether this frame carries anything a live prediction put there: the
+    /// question a measurement asks of a terminal write it has to attribute.
+    ///
+    /// Answered from the built frame rather than from
+    /// [`SpeculateState::pending`](view_core::native::speculate::SpeculateState::pending)
+    /// directly, and the two are not the same question. The pending list is
+    /// what the reconciler holds; this layer is what survived
+    /// [`render`]'s off-grid filter and reached the painter, so a prediction
+    /// naming a cell the grid does not have -- pending, never painted --
+    /// answers `false` here, which is what a write-attribution needs.
+    ///
+    /// # A caret-only frame counts
+    ///
+    /// The predicted glyphs are written once and then sit unchanged in the
+    /// painter's shadow, so a later frame taken while the same prediction is
+    /// still pending emits no glyph bytes for it at all -- only the cursor
+    /// escape, which [`cursor_spec`] has standing one past the last predicted
+    /// cell. That write is still the prediction's doing (it names a column
+    /// the engine's own cursor is not at), it still reaches the terminal, and
+    /// it is counted: an attribution that ignored it would report a paint
+    /// nothing explains on exactly the frames speculation is holding the
+    /// caret out ahead.
+    ///
+    /// It needs no test of its own here because the caret cannot be advanced
+    /// without this layer being present: `speculated_col` advances only for a
+    /// pending cell that is on-grid, and every on-grid pending cell is in
+    /// this layer (see `a_caret_advance_cannot_happen_without_the_layer`).
+    #[must_use]
+    pub fn carries_speculation(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(&layer.kind, LayerKind::Speculated(cells) if !cells.is_empty()))
+    }
 }
 
 /// Builds the [`Surface`] for one frame from `model`.
@@ -2326,6 +2360,92 @@ mod tests {
         predict(&mut model, 'a', (7, 0), 0);
 
         assert!(speculated_cells(&render(&model)).is_none());
+    }
+
+    /// The resting frame carries nothing to attribute, and the burst frame
+    /// does: the two answers a write-attribution is built on.
+    #[test]
+    fn only_a_frame_that_paints_a_prediction_carries_speculation() {
+        let mut model = model_with_grid(40, 12);
+        assert!(
+            !render(&model).carries_speculation(),
+            "a frame with nothing pending must not be attributable to speculation"
+        );
+
+        predict(&mut model, 'a', (2, 3), 0);
+        assert!(
+            render(&model).carries_speculation(),
+            "a painted predicted glyph is exactly what the counter attributes a write to"
+        );
+    }
+
+    /// [`Surface::from_layers`] lets a consumer outside this crate describe
+    /// a frame directly, so a layer holding no cells is a state the type
+    /// admits even though [`render`] never builds one. It paints nothing,
+    /// so it attributes nothing.
+    #[test]
+    fn a_speculated_layer_with_no_cells_attributes_no_write() {
+        let surface = Surface::from_layers(vec![Layer::new(
+            Rect::new(0, 0, 1, 1),
+            LayerKind::Speculated(Vec::new()),
+            Tier::Standard,
+        )]);
+
+        assert!(!surface.carries_speculation());
+    }
+
+    /// The narrow half of the contract: pending is not painted. A prediction
+    /// the grid cannot hold is dropped before the painter sees it, so the
+    /// write that frame carries owes nothing to speculation and must fall
+    /// back to the counter that catches paints nothing explains.
+    #[test]
+    fn a_prediction_the_painter_dropped_is_not_a_speculated_paint() {
+        let mut model = model_with_grid(10, 4);
+        predict(&mut model, 'a', (7, 0), 0);
+
+        assert!(
+            !model.speculate.pending().is_empty(),
+            "the fixture needs a prediction that is pending but off-grid"
+        );
+        assert!(
+            !render(&model).carries_speculation(),
+            "reading the pending list instead of the built frame would attribute a write to a \
+             glyph no painter ever wrote"
+        );
+    }
+
+    /// What makes the caret-only frame need no separate attribution: the
+    /// caret cannot stand at a predicted column on a frame this layer is
+    /// absent from, so counting the layer counts every write the prediction
+    /// positioned.
+    #[test]
+    fn a_caret_advance_cannot_happen_without_the_layer() {
+        let mut checked = 0;
+        for cursor_col in [0_u16, 5, 9] {
+            for predicted in [(1_u16, cursor_col), (1, 9), (1, 12), (7, 0)] {
+                let mut model = model_with_grid(10, 4);
+                model.engine.apply_grid(GridOp::CursorGoto {
+                    row: 1,
+                    col: cursor_col,
+                });
+                predict(&mut model, 'a', predicted, 0);
+                let surface = render(&model);
+                let caret = surface.cursor.expect("a sized grid places a cursor");
+                if caret.col != cursor_col {
+                    checked += 1;
+                    assert!(
+                        surface.carries_speculation(),
+                        "the caret moved to {} for a prediction at {predicted:?} on a frame the \
+                         attribution calls unspeculated",
+                        caret.col
+                    );
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "no case in the sweep advanced the caret; the implication was proven over nothing"
+        );
     }
 
     /// Z-order, both halves: above the grid it predicts, and below chrome

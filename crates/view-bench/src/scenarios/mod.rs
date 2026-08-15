@@ -11,6 +11,12 @@ pub mod echo;
 // rather than recording a number nobody has validated.
 #[cfg(unix)]
 pub mod echo_control;
+// Paired against bare nvim like `echo`, but attributed through the tap
+// channel: the announcements that say which write a sample watched appear
+// are a unix-only mechanism (see taps.rs), so the row and the scenario go
+// where that channel does.
+#[cfg(unix)]
+pub mod echo_speculated;
 pub mod first_paint;
 pub mod flood;
 pub mod memory;

@@ -34,6 +34,13 @@ pub(super) fn run_cell(
             let world = CellWorld::create(fixture)?;
             taps_rows::run_taps_row(cell, &world, bins, protocol, controlled)?
         }
+        // dispatched here for the same reason the two rows above are: it
+        // can refuse its own number, which measure_cell has no lane for
+        #[cfg(unix)]
+        "echo_speculated" => {
+            let world = CellWorld::create(fixture)?;
+            taps_rows::run_echo_speculated_row(fixture, &world, bins, protocol)?
+        }
         _ => RowOutcome::trusted(measure_cell(cell, bins, protocol)?),
     };
     let undeclared = baselines::undeclared_metrics(&outcome.metrics);

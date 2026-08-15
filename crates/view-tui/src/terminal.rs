@@ -425,6 +425,10 @@ impl Term {
     ) -> std::io::Result<()> {
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_DRAW_START);
+        #[cfg(all(unix, feature = "bench-taps"))]
+        if surface.carries_speculation() {
+            crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
+        }
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_reporting != Some(model.engine.mouse_on) {
             if model.engine.mouse_on {

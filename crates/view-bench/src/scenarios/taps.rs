@@ -49,7 +49,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 /// Every tap tag, grouped by the crate whose sequence counter numbers it.
 /// A tag missing from this table is a tag whose loss no drop check can
 /// see, so the chain walkers below assert their own tags against it.
-const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGC")];
+const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGCD")];
 
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
 /// two tags share one counter and the tui's tags share their own, so the
@@ -297,15 +297,23 @@ pub struct TapsOutcome {
     /// the base pace was tuned on, and that is worth seeing in the row.
     pub overhead_pace: Duration,
     /// Terminal writes that landed after a keypress and before the redraw
-    /// answering it, summed over every sample of every trial. Zero for a
-    /// row whose boundary cannot produce them.
+    /// answering it, summed over every sample of every trial and split by
+    /// what explains them. Both counts are zero for a row whose boundary
+    /// cannot produce them.
     ///
-    /// Report-only. The row measures redraw-parsed to terminal-write, and
-    /// a paint with no redraw behind it is outside that interval by
-    /// construction; the count is here so a change in how often view
-    /// paints on its own shows up in the row instead of being absorbed
-    /// silently by the pairing.
-    pub unexplained_paints: usize,
+    /// Report-only, both halves. The row measures redraw-parsed to
+    /// terminal-write, and a paint before that redraw is outside the
+    /// interval by construction; the counts are here so a change in how
+    /// often view paints on its own shows up in the row instead of being
+    /// absorbed silently by the pairing.
+    ///
+    /// Split because the two halves mean opposite things. Speculation puts
+    /// a predicted glyph on screen between the keypress and its
+    /// authoritative redraw deliberately, on every accelerated keystroke;
+    /// counting those as unexplained would fire the row's refusal on the
+    /// feature working, and would leave the count that catches view
+    /// answering keystrokes from its own chrome unable to see anything.
+    pub paints: PaintSplit,
 }
 
 /// One observed sub-interval of a taps row.
@@ -470,7 +478,7 @@ pub fn run_input_path(
         overhead,
         overhead_pace,
         // the input row closes at the RPC write, before any paint
-        unexplained_paints: 0,
+        paints: PaintSplit::default(),
     })
 }
 
@@ -508,19 +516,84 @@ fn measured_frame(records: &[TapRecord], t0: i64) -> Option<(TapRecord, TapRecor
     Some((parsed, paint))
 }
 
-/// How many terminal writes landed after the keypress but before the
-/// redraw that answers it -- paints view produced without an engine redraw
-/// behind them.
+/// The terminal writes that landed after a keypress but before the redraw
+/// answering it, split by whether anything explains them.
 ///
-/// Not a measurement fault and not gated: it is the count of frames the
-/// row's boundary deliberately steps over, reported so that a change in
-/// how often view paints on its own is visible in the row rather than
-/// silently absorbed by the pairing.
-fn paints_before_redraw(records: &[TapRecord], t0: i64, parsed: i64) -> usize {
-    records
+/// Neither count is a measurement fault and neither is gated: both count
+/// frames the row's boundary deliberately steps over. The split is what
+/// keeps the unexplained half meaning what it always meant -- see
+/// [`classify_paints_before_redraw`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PaintSplit {
+    /// Writes carrying a cell the reconciler had a live prediction for: the
+    /// predicted paint, which speculation produces between the keypress and
+    /// its authoritative redraw by design.
+    pub speculated: usize,
+    /// Writes with neither a redraw nor a live prediction behind them --
+    /// view answering the keystroke from its own chrome, the regression the
+    /// output-path row's floor-1 refusal exists to catch.
+    pub unexplained: usize,
+}
+
+/// Splits the writes in `[t0, parsed)` into the ones a live prediction
+/// explains and the ones nothing does.
+///
+/// A speculated paint announces itself before it happens: the painter taps
+/// `D` at the head of a frame carrying a predicted cell, and that frame's
+/// own `T` follows it on the same thread, so the pairing is "the next write
+/// after each announcement" rather than a timestamp window that would have
+/// to guess how long a frame takes. Announcements are consumed one per
+/// write, so a second write behind one announcement is unexplained, which
+/// is what keeps a stuck or duplicated `D` from laundering real chrome
+/// paints.
+///
+/// Records are ordered by their own stamps rather than by arrival: `D` and
+/// `T` are stamped on the paint thread but reach the harness through a pipe
+/// the engine's threads write to as well.
+pub fn classify_paints_before_redraw(records: &[TapRecord], t0: i64, parsed: i64) -> PaintSplit {
+    let mut window: Vec<&TapRecord> = records
         .iter()
-        .filter(|r| r.tag == b'T' && r.nanos >= t0 && r.nanos < parsed)
-        .count()
+        .filter(|r| matches!(r.tag, b'T' | b'D') && r.nanos >= t0 && r.nanos < parsed)
+        .collect();
+    window.sort_by_key(|r| (r.nanos, r.seq));
+    let mut split = PaintSplit::default();
+    let mut announced = false;
+    for record in window {
+        if record.tag == b'D' {
+            announced = true;
+        } else if announced {
+            split.speculated += 1;
+            announced = false;
+        } else {
+            split.unexplained += 1;
+        }
+    }
+    split
+}
+
+/// Whether the glyph a sample watched appear between `start` and `seen`
+/// was put there by a prediction rather than by the engine's own answer.
+///
+/// True when a write the painter announced as carrying a predicted cell
+/// landed inside the sample's window and ahead of the redraw answering the
+/// keystroke -- which is the whole claim a speculated-echo number makes,
+/// and the only evidence for it that exists: on screen the predicted glyph
+/// and the authoritative one are the same character in the same cell, so
+/// nothing the harness parses out of the pty can tell them apart.
+///
+/// Conservative in both directions it can be wrong. A redraw stamped after
+/// `start` that belongs to the previous keystroke closes the window early
+/// and reads as unattributed, and a window with no redraw in it at all is
+/// bounded by `seen` rather than assumed to be all prediction.
+#[must_use]
+pub fn answered_by_prediction(records: &[TapRecord], start: i64, seen: i64) -> bool {
+    let parsed = records
+        .iter()
+        .filter(|r| r.tag == b'R' && r.nanos >= start)
+        .map(|r| r.nanos)
+        .min()
+        .unwrap_or(seen);
+    classify_paints_before_redraw(records, start, parsed.min(seen)).speculated > 0
 }
 
 /// Measures the redraw-parsed-to-terminal-write path: per keypress, the
@@ -550,7 +623,7 @@ pub fn run_output_path(
         "flush-start->term-written",
     ];
     let mut pools: Vec<Vec<f64>> = vec![Vec::new(); labels.len()];
-    let mut chrome_paints = 0;
+    let mut paints = PaintSplit::default();
     for _ in 0..protocol.trials {
         let mut deltas_ms = Vec::with_capacity(protocol.warmup + protocol.samples);
         for index in 0..(protocol.warmup + protocol.samples) {
@@ -603,7 +676,9 @@ pub fn run_output_path(
                         .to_string(),
                 });
             };
-            chrome_paints += paints_before_redraw(&all_records, t0, parsed.nanos);
+            let split = classify_paints_before_redraw(&all_records, t0, parsed.nanos);
+            paints.speculated += split.speculated;
+            paints.unexplained += split.unexplained;
             #[allow(clippy::cast_precision_loss)]
             deltas_ms.push((paint.nanos - parsed.nanos) as f64 / 1_000_000.0);
             if index >= protocol.warmup {
@@ -639,7 +714,7 @@ pub fn run_output_path(
         segments: summarize_segments(&labels, &pools),
         overhead,
         overhead_pace,
-        unexplained_paints: chrome_paints,
+        paints,
     })
 }
 
@@ -1254,7 +1329,13 @@ mod tests {
             measured_frame(&records, 100),
             Some((tap(b'R', 2, 180), tap(b'T', 2, 200)))
         );
-        assert_eq!(paints_before_redraw(&records, 100, 180), 1);
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit {
+                speculated: 0,
+                unexplained: 1
+            }
+        );
     }
 
     #[test]
@@ -1293,7 +1374,144 @@ mod tests {
             tap(b'R', 1, 180),
             tap(b'T', 4, 200),
         ];
-        assert_eq!(paints_before_redraw(&records, 100, 180), 2);
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit {
+                speculated: 0,
+                unexplained: 2
+            }
+        );
+    }
+
+    /// The shape every accelerated keystroke produces: the painter
+    /// announces a frame carrying a predicted cell, writes it, and the
+    /// engine's redraw arrives afterwards. Nothing here is unexplained, or
+    /// the output-path row would refuse itself on the feature working.
+    #[test]
+    fn a_predicted_paint_is_explained_and_a_chrome_paint_beside_it_is_not() {
+        let records = [
+            tap(b'D', 1, 110),
+            tap(b'T', 2, 120),
+            tap(b'T', 3, 140),
+            tap(b'R', 1, 180),
+            tap(b'T', 4, 200),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit {
+                speculated: 1,
+                unexplained: 1
+            },
+            "one announcement explains one write; the second write has nothing behind it"
+        );
+    }
+
+    /// An announcement is consumed by the write it precedes, never by one
+    /// that already happened: a `D` arriving after a paint cannot reach
+    /// back and explain it, which is what stops a mis-timed or duplicated
+    /// announcement from laundering the paints this row exists to catch.
+    #[test]
+    fn an_announcement_never_explains_a_write_that_preceded_it() {
+        let records = [tap(b'T', 1, 110), tap(b'D', 2, 120), tap(b'R', 1, 180)];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit {
+                speculated: 0,
+                unexplained: 1
+            }
+        );
+
+        // and a repeated announcement still explains only one write
+        let doubled = [
+            tap(b'D', 1, 105),
+            tap(b'D', 2, 106),
+            tap(b'T', 3, 120),
+            tap(b'T', 4, 130),
+            tap(b'R', 1, 180),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&doubled, 100, 180),
+            PaintSplit {
+                speculated: 1,
+                unexplained: 1
+            }
+        );
+    }
+
+    /// The window is the same one the unexplained count always used: an
+    /// announcement or a write outside `[t0, parsed)` belongs to another
+    /// sample, and neither half may pick it up.
+    #[test]
+    fn the_split_ignores_records_outside_the_keypress_to_redraw_window() {
+        let records = [
+            tap(b'D', 1, 50),
+            tap(b'T', 2, 60),
+            tap(b'D', 3, 190),
+            tap(b'T', 4, 200),
+            tap(b'R', 1, 180),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit::default()
+        );
+    }
+
+    /// The two shapes a speculated-echo sample can have, told apart by the
+    /// only evidence that distinguishes them: an announced write ahead of
+    /// the redraw is the prediction answering, and a screen change that
+    /// only follows the redraw is the engine answering.
+    #[test]
+    fn a_samples_glyph_is_attributed_to_the_prediction_only_when_one_wrote_it() {
+        let predicted = [
+            tap(b'D', 1, 110),
+            tap(b'T', 2, 120),
+            tap(b'R', 1, 600),
+            tap(b'T', 3, 620),
+        ];
+        assert!(answered_by_prediction(&predicted, 100, 150));
+
+        let authoritative = [tap(b'R', 1, 600), tap(b'T', 2, 620)];
+        assert!(
+            !answered_by_prediction(&authoritative, 100, 650),
+            "a keystroke the engine answered must not be counted as a speculated one"
+        );
+
+        let chrome_only = [tap(b'T', 1, 120), tap(b'R', 1, 600), tap(b'T', 2, 620)];
+        assert!(
+            !answered_by_prediction(&chrome_only, 100, 650),
+            "an unannounced early write is the chrome-paint case, not a prediction"
+        );
+    }
+
+    /// A sample whose window closed before any redraw arrived is bounded by
+    /// its own observation, so a prediction inside it still counts and a
+    /// later frame outside it cannot.
+    #[test]
+    fn attribution_without_a_redraw_in_the_window_is_bounded_by_the_observation() {
+        let inside = [tap(b'D', 1, 110), tap(b'T', 2, 120)];
+        assert!(answered_by_prediction(&inside, 100, 150));
+
+        let after = [tap(b'D', 1, 200), tap(b'T', 2, 210)];
+        assert!(
+            !answered_by_prediction(&after, 100, 150),
+            "a write later than the glyph the sample saw cannot be the write that made it"
+        );
+    }
+
+    /// Records reach the harness through one pipe several threads write to,
+    /// so arrival order is not stamp order; the pairing has to read the
+    /// stamps or an out-of-order delivery turns a predicted paint into an
+    /// unexplained one.
+    #[test]
+    fn the_split_pairs_by_stamp_rather_than_by_arrival() {
+        let records = [tap(b'T', 9, 120), tap(b'D', 1, 110), tap(b'R', 1, 180)];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 180),
+            PaintSplit {
+                speculated: 1,
+                unexplained: 0
+            }
+        );
     }
 
     #[test]

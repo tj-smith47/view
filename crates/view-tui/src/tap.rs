@@ -72,6 +72,17 @@ pub const TAG_FRAME_PREPARED: u8 = b'P';
 /// became a plain `Rect` construction, and still marks that boundary so a
 /// syscall reappearing there shows up as a stage regression.
 pub const TAG_AREA_RESOLVED: u8 = b'G';
+/// The frame now being drawn carries at least one cell a live prediction
+/// put there, so the [`TAG_TERM_WRITTEN`] that closes this frame is a write
+/// speculation explains rather than one nothing does.
+///
+/// Emitted at the head of the frame instead of beside the write it
+/// qualifies, for two reasons: the answer is already known there (the
+/// surface handed to the painter is the frame), and the write's own bracket
+/// ([`TAG_FLUSH_START`] to [`TAG_TERM_WRITTEN`]) isolates the pty write
+/// cost, which a tap landing inside it would inflate. A reader pairs it
+/// with the next terminal write, which is this frame's.
+pub const TAG_SPECULATED_PAINT: u8 = b'D';
 /// This frame's damaged rows are composited into the shadow. With
 /// [`TAG_AREA_RESOLVED`] this brackets damage resolution and compositing,
 /// and with [`TAG_FLUSH_START`] the backend diff and escape encode, so

@@ -263,6 +263,32 @@ pub fn run(
     protocol: &Protocol,
     settle_deadline: Duration,
 ) -> Result<EchoOutcome, BenchError> {
+    run_observed(view_spec, nvim_spec, protocol, settle_deadline, &mut |_| {})
+}
+
+/// The echo scenario with every measured view sample's monotonic window
+/// handed to `observe_view` as it is taken.
+///
+/// The window is the same `(start, seen)` pair the row's own milliseconds
+/// are derived from, so a caller reading a second source about the same
+/// sample -- the tap stream, for a row that has to say *what* answered the
+/// keystroke -- intersects it against the identical interval this row
+/// timed, rather than against a window measured a second time.
+///
+/// Warmup samples are not offered: they are excluded from every statistic
+/// the row reports, and an observer counting them would describe a
+/// population the numbers beside it were not taken from.
+///
+/// # Errors
+///
+/// As [`run`].
+pub(crate) fn run_observed(
+    view_spec: ViewSpec<'_>,
+    nvim_spec: NvimSpec<'_>,
+    protocol: &Protocol,
+    settle_deadline: Duration,
+    observe_view: &mut dyn FnMut((i64, i64)),
+) -> Result<EchoOutcome, BenchError> {
     let ViewSpec(view) = view_spec;
     let NvimSpec(nvim) = nvim_spec;
     let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
@@ -285,15 +311,22 @@ pub fn run(
             Side::Nvim
         };
         let per_side = protocol.warmup + protocol.samples;
+        let mut view_taken = 0;
         for block in interleave_schedule(per_side, protocol.block, start) {
             let (state, side_name) = match block.side {
                 Side::View => (&mut view_state, "view"),
                 Side::Nvim => (&mut nvim_state, "nvim"),
             };
             for _ in 0..block.count {
-                state
+                let window = state
                     .sample_one(protocol)
                     .map_err(|e| label(side_name, e))?;
+                if block.side == Side::View {
+                    view_taken += 1;
+                    if view_taken > protocol.warmup {
+                        observe_view(window);
+                    }
+                }
             }
         }
         trials.push(paired_summary(

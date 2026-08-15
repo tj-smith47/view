@@ -5,7 +5,7 @@
 //! loud-skips these rows off unix through `platform_block`.
 
 use super::*;
-use view_bench::scenarios::taps;
+use view_bench::scenarios::{echo_speculated, taps};
 
 /// Sampling for the pty floor control that runs alongside the `echo_path`
 /// row: a bare round trip has no editor in it, so a few hundred samples
@@ -49,6 +49,15 @@ const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 /// `--trials` are operator-set and a count would silently change meaning
 /// with them; and floored at one event, so that no run length can be
 /// short enough for a single stray paint to fail it.
+///
+/// The rate above is what this counter measures *now* as well, because the
+/// predicted paint speculation produces between a keypress and its
+/// authoritative redraw is counted separately
+/// ([`taps::PaintSplit`](view_bench::scenarios::taps::PaintSplit)) rather
+/// than here. It is a per-keystroke event by design, so counting it here
+/// would refuse the row on every accelerated burst -- and would raise the
+/// bar so far that the chrome-answered regime this share exists to catch
+/// could hide underneath it.
 const UNEXPLAINED_PAINT_SHARE: f64 = 0.01;
 
 /// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
@@ -131,16 +140,26 @@ pub(crate) fn run_taps_row(
         );
     }
     let keystrokes = protocol.trials * (protocol.warmup + protocol.samples);
-    if outcome.unexplained_paints > 0 {
+    if outcome.paints.speculated > 0 {
+        println!(
+            "      predicted paints before the answering redraw: {} across {keystrokes} \
+             keystrokes (speculation put the typed glyph on screen on view's own tick); a count \
+             and not a share, since one keystroke's prediction can reach the terminal in more \
+             than one write. Outside this row's boundary by the same construction, and explained \
+             -- no bar",
+            outcome.paints.speculated
+        );
+    }
+    if outcome.paints.unexplained > 0 {
         println!(
             "      paints with no redraw behind them: {} of {keystrokes} keystrokes (view \
              answered the keystroke from its own chrome before the engine's redraw was parsed); \
              outside this row's boundary, bar {}",
-            outcome.unexplained_paints,
+            outcome.paints.unexplained,
             unexplained_paint_bound(keystrokes)
         );
     }
-    if let Some(reason) = unexplained_paint_refusal(outcome.unexplained_paints, keystrokes) {
+    if let Some(reason) = unexplained_paint_refusal(outcome.paints.unexplained, keystrokes) {
         if controlled {
             bail!(
                 "{reason}; the row's interval opens at the parsed redraw, so these keystrokes \
@@ -178,6 +197,69 @@ pub(crate) fn run_taps_row(
     );
     let mut metrics = CellMetrics::new();
     metrics.insert(metric_key.to_string(), outcome.gated_p99);
+    Ok(RowOutcome::trusted(metrics))
+}
+
+/// Runs the speculated-echo row: view's predicted paint against bare
+/// nvim's round trip, each sample attributed through the tap channel.
+///
+/// Both of this row's metrics carry the `speculated_` prefix rather than
+/// the `echo` row's names. They are a different event measured over the
+/// same protocol, and a shared name would let one be read against a
+/// recorded value taken from the other -- the confusion the whole row
+/// exists to keep out of the baseline.
+pub(crate) fn run_echo_speculated_row(
+    fixture: &str,
+    world: &CellWorld,
+    bins: &Bins,
+    protocol: &Protocol,
+) -> Result<RowOutcome> {
+    let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins)?;
+    let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
+    let outcome = echo_speculated::run(
+        ViewSpec(&view_spec),
+        NvimSpec(&nvim_spec),
+        &pipe,
+        protocol,
+        settle_deadline(fixture),
+    )
+    .with_context(|| format!("echo_speculated/{fixture} run failed"))?;
+
+    for summary in &outcome.echo.trials {
+        println!(
+            "{}",
+            report::paired_cell("echo_speculated", fixture, "view", summary, protocol.warmup)
+        );
+    }
+    println!(
+        "      keystrokes a prediction answered: {} of {} measured samples ({:.1}%); the rest \
+         timed the engine round trip and can only understate this row",
+        outcome.attributed,
+        outcome.samples,
+        100.0 * outcome.attributed_share()
+    );
+    if let Some(reason) = outcome.refusal() {
+        println!(
+            "      SPECULATED ECHO REFUSED [echo_speculated.{fixture}]: {reason}; the row records \
+             and compares nothing this run rather than publishing the round trip under a name \
+             that claims it was hidden"
+        );
+        return Ok(RowOutcome {
+            metrics: CellMetrics::new(),
+            refused: Some(reason),
+        });
+    }
+    let mut metrics = CellMetrics::new();
+    for (metric, value) in [
+        ("speculated_ratio_p50", outcome.echo.gated_ratio_p50),
+        ("speculated_paint_p99_ms", outcome.echo.gated_view_p99_ms),
+    ] {
+        println!(
+            "{}",
+            report::aggregate_line(metric, value, outcome.echo.trials.len())
+        );
+        metrics.insert(metric.to_string(), value);
+    }
     Ok(RowOutcome::trusted(metrics))
 }
 
@@ -369,6 +451,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use view_bench::sampling::Distribution;
+    use view_bench::scenarios::taps::TapRecord;
 
     #[test]
     fn the_overhead_bar_admits_at_the_bar_and_refuses_above_it() {
@@ -420,6 +503,87 @@ mod tests {
         assert!(
             unexplained_paint_refusal(2, 30).is_some(),
             "a short run refuses at two, the first count its floor does not admit"
+        );
+    }
+
+    /// The whole seam, composed: tap records in, refusal verdict out. A
+    /// speculated keystroke must not consume the budget the chrome-paint
+    /// refusal holds, and the refusal must still fire for a paint nothing
+    /// explains, at exactly the count it always fired at.
+    ///
+    /// Driven through the classifier rather than through hand-written
+    /// counts because the mistake this guards against lives between the two
+    /// pieces: an attribution that credited any pre-redraw write to
+    /// speculation would leave both these assertions passing on the same
+    /// numbers while the safety net caught nothing.
+    #[test]
+    fn speculated_paints_leave_the_chrome_paint_refusal_exactly_where_it_was() {
+        let default_run = Protocol::default();
+        let keystrokes = default_run.trials * (default_run.warmup + default_run.samples);
+        let mut split = taps::PaintSplit::default();
+        for keystroke in 0..keystrokes {
+            // one sample's window: the predicted paint on view's own tick,
+            // then the engine's redraw; every keystroke of a burst has this
+            // shape and none of them is a chrome paint
+            let base = i64::try_from(keystroke).unwrap() * 1_000;
+            let sample = [
+                TapRecord {
+                    tag: b'D',
+                    seq: 0,
+                    nanos: base + 10,
+                },
+                TapRecord {
+                    tag: b'T',
+                    seq: 0,
+                    nanos: base + 20,
+                },
+                TapRecord {
+                    tag: b'R',
+                    seq: 0,
+                    nanos: base + 600,
+                },
+            ];
+            let one = taps::classify_paints_before_redraw(&sample, base, base + 600);
+            split.speculated += one.speculated;
+            split.unexplained += one.unexplained;
+        }
+        assert_eq!(split.speculated, keystrokes);
+        assert_eq!(
+            unexplained_paint_refusal(split.unexplained, keystrokes),
+            None,
+            "a fully speculated run must not refuse: every one of its pre-redraw paints is \
+             explained"
+        );
+
+        // the same run with one chrome paint per keystroke on top: the
+        // regression the counter exists to catch, unchanged by the split
+        let chrome = [
+            TapRecord {
+                tag: b'D',
+                seq: 0,
+                nanos: 10,
+            },
+            TapRecord {
+                tag: b'T',
+                seq: 0,
+                nanos: 20,
+            },
+            TapRecord {
+                tag: b'T',
+                seq: 0,
+                nanos: 30,
+            },
+            TapRecord {
+                tag: b'R',
+                seq: 0,
+                nanos: 600,
+            },
+        ];
+        let one = taps::classify_paints_before_redraw(&chrome, 0, 600);
+        assert_eq!(one.unexplained, 1, "the second write has nothing behind it");
+        assert!(
+            unexplained_paint_refusal(one.unexplained * keystrokes, keystrokes).is_some(),
+            "a chrome paint per keystroke must still refuse the row, speculation or not"
         );
     }
 }

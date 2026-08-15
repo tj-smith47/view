@@ -219,6 +219,30 @@ scenario = "supervision"
 metric = "wedge_detect_p99_ms"
 max = 12500.0
 
+# 1.0 is the ceiling the speculated-echo row exists to beat, stated before
+# anything measured it: at 1.0 view shows the typed glyph exactly as fast as
+# bare nvim does, and a prediction that does not get under that bought
+# nothing. It is a promise rather than a restatement of a recording, which is
+# what the input-path row's withdrawn 232 and the first-paint row's withdrawn
+# cold_ms bar were.
+#
+# dev-linux only, on the same terms as the input-path row above: it is the
+# one class this row has ever run on, and a bar published for classes nobody
+# has measured is a guess wearing a gate's clothes.
+#
+# The row's second metric, speculated_paint_p99_ms, deliberately has no entry
+# here, for the reason supervision's restart_rehydrate_p99_ms has none:
+# nothing in the spec bounds how long a predicted paint may take. It is also
+# a p99, so a shared class records it and never gates it
+# (`view_harness::baselines::gate_headroom`) -- the recording is the seed a
+# controlled class would ratchet from.
+[[budget]]
+spec_row = "Speculative echo: keypress -> predicted glyph visible, RTT hidden"
+scenario = "echo_speculated"
+metric = "speculated_ratio_p50"
+max = 1.0
+classes = ["dev-linux"]
+
 # Metrics measured outside their budget today.
 #
 # A shortfall is how an unmet budget is allowed to exist: it must be written
