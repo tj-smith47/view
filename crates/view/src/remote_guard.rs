@@ -101,6 +101,37 @@ enum Presence {
     Undetermined,
 }
 
+/// How a client was looked for, which decides what a message about not
+/// finding it is entitled to say.
+///
+/// The three cases are not interchangeable prose: telling a user their
+/// client is missing from `PATH` when a path named it directly, or when no
+/// `PATH` existed to search, sends them to fix something that was never
+/// consulted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ClientLookup {
+    /// A bare program name, searched across the entries of a `PATH` this
+    /// process could read.
+    SearchedPath,
+    /// A bare program name with no `PATH` set to search. Whatever default
+    /// list the platform's own exec fallback consulted is not a list view
+    /// saw, so nothing may be claimed about its contents.
+    NoPathToSearch,
+    /// A path, which is checked where it points and nowhere else.
+    NamedPath,
+}
+
+/// Which of the three [`ClientLookup`] cases `program` falls under.
+fn client_lookup(program: &Path, path_var: Option<&OsStr>) -> ClientLookup {
+    if program.components().count() > 1 {
+        ClientLookup::NamedPath
+    } else if path_var.is_some() {
+        ClientLookup::SearchedPath
+    } else {
+        ClientLookup::NoPathToSearch
+    }
+}
+
 /// What a diagnostic connection to the destination found.
 ///
 /// Separate from the prose that reports it: a `doctor` row wants the
@@ -143,13 +174,18 @@ enum Reachability {
 /// The absent-client refusal itself, carrying the platform's own
 /// remediation.
 pub(crate) fn deny_absent_ssh(remote: &RemoteSpec) -> Result<()> {
+    let path_var = std::env::var_os("PATH");
     let presence = resolve_client(
         &remote.ssh_bin,
-        std::env::var_os("PATH").as_deref(),
+        path_var.as_deref(),
         std::env::var_os("PATHEXT").as_deref(),
     );
     if presence == Presence::Absent {
-        anyhow::bail!(absent_client_message(remote, ClientPlatform::current()));
+        anyhow::bail!(absent_client_message(
+            remote,
+            ClientPlatform::current(),
+            client_lookup(&remote.ssh_bin, path_var.as_deref()),
+        ));
     }
     Ok(())
 }
@@ -167,9 +203,11 @@ pub(crate) fn spawn_failure_context(remote: &RemoteSpec, err: &EngineError) -> S
         // the client was resolved before the spawn, so reaching this means
         // it went away in between, or it sits somewhere the pre-spawn
         // search deliberately does not claim to cover
-        EngineError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => {
-            absent_client_message(remote, ClientPlatform::current())
-        }
+        EngineError::Io(io) if io.kind() == std::io::ErrorKind::NotFound => absent_client_message(
+            remote,
+            ClientPlatform::current(),
+            client_lookup(&remote.ssh_bin, std::env::var_os("PATH").as_deref()),
+        ),
         // the client started and its stdout reached end of file without a
         // handshake response: the process behind the RPC channel is gone.
         // For a remote session that process is the client, and a client
@@ -207,8 +245,8 @@ pub(crate) fn attach_failure_context(remote: &RemoteSpec, failure: &AttachFailur
     match failure {
         AttachFailure::Spawn(err) => spawn_failure_context(remote, err),
         AttachFailure::Attach(_) => format!(
-            "the remote editor on {} started and then failed to attach or \
-             answer in time (the connection itself is up: it carried the \
+            "view: the remote editor on {} started and then failed to attach \
+             or answer in time (the connection itself is up: it carried the \
              handshake). Check what the far side's own nvim configuration \
              does at startup -- a config that prompts or blocks there leaves \
              an embedded editor with a question no UI can answer.",
@@ -217,16 +255,48 @@ pub(crate) fn attach_failure_context(remote: &RemoteSpec, failure: &AttachFailur
     }
 }
 
-/// The absent-client refusal, in the remediation terms `platform` has.
-fn absent_client_message(remote: &RemoteSpec, platform: ClientPlatform) -> String {
+/// The absent-client refusal: what was looked for and where, then the
+/// remediation for that combination of `lookup` and `platform`.
+///
+/// The message claims exactly what `lookup` says was consulted. A client
+/// named by path was never searched for on `PATH`, and a process with no
+/// `PATH` set searched nothing at all; sending either of those users to
+/// their `PATH` or their package manager points at something that had no
+/// part in the failure, which is the kind of confident wrong answer a
+/// generic spawn error at least does not give.
+fn absent_client_message(
+    remote: &RemoteSpec,
+    platform: ClientPlatform,
+    lookup: ClientLookup,
+) -> String {
     let program = remote.ssh_bin.display();
+    let missing = match lookup {
+        ClientLookup::SearchedPath => {
+            format!("no `{program}` was found on this host's PATH")
+        }
+        ClientLookup::NoPathToSearch => format!(
+            "no `{program}` could be started, and this process has no PATH \
+             set to look for one on"
+        ),
+        ClientLookup::NamedPath => {
+            format!("nothing could be started at `{program}`, the client this session names")
+        }
+    };
     let opening = format!(
-        "view: `--remote {}` needs the system ssh client, and no `{program}` \
-         was found on this host's PATH. view opens a remote session by \
-         running that client -- it speaks no ssh protocol of its own -- so \
-         there is nothing here to connect with.",
+        "view: `--remote {}` needs the system ssh client, and {missing}. view \
+         opens a remote session by running that client -- it speaks no ssh \
+         protocol of its own -- so there is nothing here to connect with.",
         remote.target
     );
+    // a named path is a client this session chose, so the remediation is
+    // that choice and not the host's packaging: an install that puts `ssh`
+    // on PATH changes nothing for a spawn pointed somewhere else
+    if lookup == ClientLookup::NamedPath {
+        return format!(
+            "{opening} Name a client that exists at that path, or name none \
+             and let the `ssh` on this host's PATH be the one that runs."
+        );
+    }
     match platform {
         ClientPlatform::Posix => format!(
             "{opening} Install the OpenSSH client (`apt install \
@@ -300,8 +370,8 @@ fn reachability_message(remote: &RemoteSpec, found: Reachability) -> String {
 /// The fallback for a failure nothing above classified.
 fn general_message(remote: &RemoteSpec) -> String {
     format!(
-        "failed to start the remote engine on {} (check the ssh client, the \
-         destination, and nvim on the far side)",
+        "view: failed to start the remote engine on {} (check the ssh client, \
+         the destination, and nvim on the far side)",
         remote.target
     )
 }
@@ -382,9 +452,22 @@ fn probe_connection_within(remote: &RemoteSpec, limit: Duration) -> Reachability
 /// One attributed line, not the client's whole stderr: a raw dump buries
 /// the guidance it is attached to under a verbose banner or a `-v` trace,
 /// and the line the client ends on is the one carrying its diagnosis.
-/// Control characters are dropped rather than escaped -- this text is
-/// printed to a terminal that has just been handed back to a shell, and a
-/// remote host's banner is not a source this process lets move a cursor.
+///
+/// What the returned line guarantees, exactly: no C0 or C1 control
+/// character and no bidirectional formatting character
+/// ([`reorders_display`]) survives it, so nothing a remote host wrote can
+/// move the cursor of, or reverse the reading order of, the message it is
+/// quoted into -- this text prints to a terminal that has just been handed
+/// back to a shell, and the host that wrote it is exactly the host that
+/// just refused the connection.
+///
+/// What it does not guarantee: byte fidelity. The line is decoded lossily,
+/// so a banner that is not UTF-8 arrives with replacement characters where
+/// its undecodable bytes were. That is the right trade here and the
+/// opposite of the rule for a value crossing to the far side (see
+/// `view_engine`'s `token_bytes`): this text is prose for a human to read,
+/// never a name anything is resolved by, and a message that cannot be
+/// rendered at all quotes nothing.
 fn last_line(stderr: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(stderr);
     let line: String = text
@@ -392,7 +475,7 @@ fn last_line(stderr: &[u8]) -> Option<String> {
         .map(str::trim)
         .rfind(|line| !line.is_empty())?
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !reorders_display(*c))
         .collect();
     let line = line.trim();
     if line.is_empty() {
@@ -402,6 +485,23 @@ fn last_line(stderr: &[u8]) -> Option<String> {
         Some((cut, _)) => format!("{}...", &line[..cut]),
         None => line.to_string(),
     })
+}
+
+/// Whether `c` is one of Unicode's bidirectional formatting characters,
+/// which reorder the display of the text around them without being
+/// control characters (`char::is_control` covers C0 and C1 only, and none
+/// of these are in either range).
+///
+/// Enumerated rather than derived from a character-property table: the set
+/// is fixed and small, and a dependency on a Unicode-tables crate would be
+/// a whole new supply chain for one filter in one error message. The marks
+/// (`U+061C`, `U+200E`, `U+200F`), the embedding and override controls
+/// (`U+202A`-`U+202E`) and the isolates (`U+2066`-`U+2069`) are the
+/// complete set as of Unicode 16.
+fn reorders_display(c: char) -> bool {
+    matches!(c, '\u{61c}' | '\u{200e}' | '\u{200f}')
+        || ('\u{202a}'..='\u{202e}').contains(&c)
+        || ('\u{2066}'..='\u{2069}').contains(&c)
 }
 
 /// Whether `program` resolves, searching `path_var` when it is a bare name
@@ -541,7 +641,8 @@ mod tests {
     /// no guidance at all: it sends them somewhere that cannot work.
     #[test]
     fn the_windows_absent_client_message_names_the_optional_feature() {
-        let message = absent_client_message(&spec(), ClientPlatform::Windows);
+        let message =
+            absent_client_message(&spec(), ClientPlatform::Windows, ClientLookup::SearchedPath);
         assert!(
             message.contains("Add-WindowsCapability -Online -Name OpenSSH.Client~~~~0.0.1.0"),
             "the Windows remediation must name the capability command: {message}"
@@ -564,7 +665,8 @@ mod tests {
     /// Windows optional feature.
     #[test]
     fn the_posix_absent_client_message_names_a_package_not_a_windows_feature() {
-        let message = absent_client_message(&spec(), ClientPlatform::Posix);
+        let message =
+            absent_client_message(&spec(), ClientPlatform::Posix, ClientLookup::SearchedPath);
         assert!(
             message.contains("openssh-client"),
             "the POSIX remediation must name the package: {message}"
@@ -581,7 +683,7 @@ mod tests {
     #[test]
     fn every_absent_client_message_names_the_destination_and_the_client() {
         for platform in [ClientPlatform::Posix, ClientPlatform::Windows] {
-            let message = absent_client_message(&spec(), platform);
+            let message = absent_client_message(&spec(), platform, ClientLookup::SearchedPath);
             assert!(
                 message.contains("view-test-host") && message.contains("`ssh`"),
                 "{platform:?}: {message}"
@@ -671,18 +773,139 @@ mod tests {
     /// caught it before the spawn or the spawn itself reported it: a client
     /// that disappeared between the two is the same problem with the same
     /// fix.
+    ///
+    /// Asserted on content rather than against a second call of the
+    /// function under test, which would agree with it however wrong both
+    /// were. A test binary always runs with a `PATH`, so the searched-path
+    /// wording is the one this must render.
     #[test]
     fn a_spawn_that_could_not_find_the_client_reports_the_absent_client() {
         let missing = EngineError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,
             "No such file or directory",
         ));
-        assert_eq!(
-            spawn_failure_context(&spec(), &missing),
-            absent_client_message(&spec(), ClientPlatform::current()),
+        let message = spawn_failure_context(&spec(), &missing);
+        assert!(
+            message.contains("needs the system ssh client")
+                && message.contains("no `ssh` was found on this host's PATH"),
             "a NotFound spawn error is the client missing, not the far side \
-             refusing"
+             refusing: {message}"
         );
+    }
+
+    /// A client named by path was never looked for on `PATH`, so the
+    /// message about not finding it must not send the user to their `PATH`
+    /// or their package manager: both had no part in it.
+    #[test]
+    fn a_client_named_by_path_is_not_reported_as_missing_from_path() {
+        let pinned = RemoteSpec::new("view-test-host").with_ssh_bin("/opt/pinned/ssh");
+        let message =
+            absent_client_message(&pinned, ClientPlatform::Posix, ClientLookup::NamedPath);
+        assert!(
+            message.contains("nothing could be started at `/opt/pinned/ssh`"),
+            "the message must name the path it actually checked: {message}"
+        );
+        assert!(
+            !message.contains("was found on this host's PATH") && !message.contains("apt install"),
+            "a path-named client was never searched for on PATH and needs no \
+             package installed: {message}"
+        );
+    }
+
+    /// And a process with no `PATH` at all searched nothing, so it claims
+    /// nothing about one.
+    #[test]
+    fn a_client_with_no_path_to_search_says_so_instead_of_blaming_one() {
+        let message =
+            absent_client_message(&spec(), ClientPlatform::Posix, ClientLookup::NoPathToSearch);
+        assert!(
+            message.contains("no PATH set to look for one on"),
+            "the message must say the search never happened: {message}"
+        );
+        assert!(
+            !message.contains("was found on this host's PATH"),
+            "a claim about the contents of a PATH this process does not \
+             have: {message}"
+        );
+    }
+
+    /// Which lookup a spec falls under, since the wording above rests
+    /// entirely on it.
+    #[test]
+    fn a_lookup_is_keyed_on_how_the_client_is_named_and_whether_a_path_exists() {
+        let path = OsString::from("/usr/bin");
+        assert_eq!(
+            client_lookup(Path::new("ssh"), Some(&path)),
+            ClientLookup::SearchedPath
+        );
+        assert_eq!(
+            client_lookup(Path::new("ssh"), None),
+            ClientLookup::NoPathToSearch
+        );
+        assert_eq!(
+            client_lookup(Path::new("/opt/pinned/ssh"), Some(&path)),
+            ClientLookup::NamedPath,
+            "a path is checked where it points, whatever PATH holds"
+        );
+    }
+
+    /// Which branch a host renders is the half a parameterised message
+    /// cannot prove on its own: both texts are correct, and only one of
+    /// them belongs on this machine. The `cfg!` here is a second,
+    /// independent read of the same condition, so an inverted
+    /// `ClientPlatform::current` fails this on both CI legs rather than
+    /// shipping Windows users a package manager they do not have.
+    #[test]
+    fn a_host_renders_its_own_platforms_remediation() {
+        let rendered = absent_client_message(
+            &spec(),
+            ClientPlatform::current(),
+            ClientLookup::SearchedPath,
+        );
+        if cfg!(windows) {
+            assert!(
+                rendered.contains("Add-WindowsCapability") && !rendered.contains("apt install"),
+                "a Windows host must render the Windows remediation: {rendered}"
+            );
+        } else {
+            assert!(
+                rendered.contains("openssh-client") && !rendered.contains("WindowsCapability"),
+                "a POSIX host must render the package remediation: {rendered}"
+            );
+        }
+    }
+
+    /// One family, one prefix. All six render at the same call site and in
+    /// the same position, so a user (or a wrapper script, or a doc example)
+    /// separating view's own refusals from a propagated engine error by
+    /// that prefix must not get a different answer depending on which arm
+    /// of the same failure family fired.
+    #[test]
+    fn every_message_in_the_family_opens_the_way_views_own_refusals_do() {
+        let spec = spec();
+        let mut family = vec![
+            absent_client_message(&spec, ClientPlatform::Posix, ClientLookup::SearchedPath),
+            absent_client_message(&spec, ClientPlatform::Windows, ClientLookup::NamedPath),
+            general_message(&spec),
+            reachability_message(&spec, Reachability::Rejected { detail: None }),
+            reachability_message(&spec, Reachability::Reached),
+            reachability_message(&spec, Reachability::ShellRefused { code: 127 }),
+            attach_failure_context(&spec, &AttachFailure::Attach(EngineError::Closed)),
+        ];
+        family.push(spawn_failure_context(
+            &spec,
+            &EngineError::Timeout {
+                method: String::from("nvim_get_api_info"),
+                timeout: Duration::from_secs(5),
+            },
+        ));
+        for message in family {
+            assert!(
+                message.starts_with("view: "),
+                "every message in this family is view's own prose and opens \
+                 the way the rest of view's refusals do: {message}"
+            );
+        }
     }
 
     /// A handshake that timed out is a client still working, not a client
@@ -811,6 +1034,38 @@ mod tests {
             long.chars().count(),
             DETAIL_LIMIT + 3,
             "a long line is cut to the limit plus its ellipsis: {long}"
+        );
+    }
+
+    /// A refusing host's banner is quoted into prose the user reads after
+    /// the terminal has been handed back. A bidirectional override there
+    /// reverses the rendering of the text it is quoted into -- the
+    /// remediation the user is being given -- without ever being a control
+    /// character, which is the filter it slips past.
+    #[test]
+    fn a_bidi_override_from_a_remote_banner_cannot_reorder_the_message() {
+        let hostile = "denied \u{202e}drowssap si yek\u{202c} here";
+        let quoted = last_line(hostile.as_bytes()).unwrap();
+        assert!(
+            !quoted.contains('\u{202e}') && !quoted.contains('\u{202c}'),
+            "a bidi control survived into the quoted line: {quoted:?}"
+        );
+        assert_eq!(
+            quoted, "denied drowssap si yek here",
+            "only the reordering characters are dropped; the client's own \
+             words stay exactly as it wrote them"
+        );
+        for reorderer in [
+            '\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{2066}', '\u{2069}',
+        ] {
+            assert!(
+                reorders_display(reorderer),
+                "{reorderer:?} reorders display and must be filtered"
+            );
+        }
+        assert!(
+            !reorders_display('e') && !reorders_display('\u{2070}'),
+            "the filter must not reach past the bidi controls"
         );
     }
 
