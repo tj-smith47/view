@@ -351,6 +351,32 @@ fn main() -> Result<()> {
         }
     }
 
+    // Same resolution bound, applied between --tiers entries themselves, not
+    // just against the implicit RTT 0ms floor above: a duplicate or
+    // near-duplicate pair (e.g. `25,25`) is exactly as indistinguishable to
+    // a probe median as a tier too close to 0 is, and left unchecked here it
+    // reaches the tier loop below and collides on that value's own
+    // `tier-{rtt_ms}` scratch path instead of getting this preflight's named
+    // refusal. Sorting first means checking only adjacent gaps still catches
+    // every pair: if every adjacent gap in sorted order clears `min_gap_ms`,
+    // every non-adjacent gap (a sum of adjacent ones) clears it too.
+    let mut sorted_tiers = tiers.clone();
+    sorted_tiers.sort_unstable();
+    for pair in sorted_tiers.windows(2) {
+        let (a, b) = (pair[0], pair[1]);
+        let gap_ms = (b - a) as f64;
+        if gap_ms < min_gap_ms {
+            bail!(
+                "--tiers pair ({a}ms, {b}ms) is only {gap_ms:.0}ms apart, closer than this \
+                 host's measured probe resolution allows: a probe median cannot reliably tell \
+                 these two tiers apart (median-of-{PROBE_TRIALS} noise spread \
+                 ~{MEDIAN_NOISE_SPREAD_MS}ms, {RESOLUTION_SAFETY_MARGIN}x safety margin requires \
+                 at least {min_gap_ms:.0}ms between any two --tiers entries); space --tiers \
+                 entries at least {min_gap_ms:.0}ms apart"
+            );
+        }
+    }
+
     let cat = echo_speculated_rtt::cat_path()
         .with_context(|| "no cat binary found to probe the delay relay's own round trip")?;
     // Calibrated once, against RTT 0ms specifically, regardless of whether
