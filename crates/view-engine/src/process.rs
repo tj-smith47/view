@@ -265,6 +265,11 @@ impl EngineConfig {
     /// client hands the remote shell, rather than the local child's own
     /// environment, which is the `ssh` process itself and forwards nothing.
     ///
+    /// Mutually exclusive with [`isolated`](Self::isolated)'s hermetic
+    /// plan, which describes a *local* isolation a remote host does not
+    /// receive: the two together are refused by [`Engine::spawn`] before
+    /// any process starts, never silently reconciled.
+    ///
     /// A stdin relay armed by [`with_stdin_relay`](Self::with_stdin_relay)
     /// reaches the local `ssh` process only. The client forwards its own
     /// standard input as the remote command's, which `--embed` has already
@@ -274,6 +279,17 @@ impl EngineConfig {
     pub fn with_remote(mut self, remote: RemoteSpec) -> Self {
         self.remote = Some(remote);
         self
+    }
+
+    /// The remote target a caller armed with [`with_remote`](Self::with_remote),
+    /// or `None` for a local spawn.
+    ///
+    /// Readable so a caller can report what was resolved (which client,
+    /// which destination, which port) when a spawn fails, without keeping a
+    /// second copy of the spec alongside the config that owns it.
+    #[must_use]
+    pub fn remote(&self) -> Option<&RemoteSpec> {
+        self.remote.as_ref()
     }
 
     /// The handshake timeout, replacing the 5 second default.
@@ -599,6 +615,10 @@ impl Engine {
     /// after a successful process spawn, the child is killed and reaped
     /// before the error is returned; no zombie survives a failed `spawn`.
     ///
+    /// A `cfg` that is both hermetic and remote returns `EngineError::Io`
+    /// before anything is prepared or started: the two describe
+    /// incompatible spawns (see [`EngineConfig::with_remote`]).
+    ///
     /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
     /// search path cannot be established empty (see
     /// [`crate::env::prepare_empty_search_path`]) or the hermetic home holds
@@ -607,6 +627,18 @@ impl Engine {
     /// planted a plugin or credential file in is not isolated, and refusing
     /// the spawn is the only way that says so.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
+        // refused ahead of every other check, and ahead of any process: a
+        // hermetic plan names local directories this host prepares and
+        // guards, none of which exist on the far side, so a spawn carrying
+        // both would connect to a remote nvim while reporting an isolation
+        // nothing established. Reconciling them silently either way leaves
+        // a child that looks isolated and is not.
+        if cfg.hermetic && cfg.remote.is_some() {
+            return Err(EngineError::Io(std::io::Error::other(
+                "a hermetic config describes a local isolation a remote host \
+                 does not receive; spawn one or the other, not both",
+            )));
+        }
         if cfg.hermetic {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
@@ -1884,6 +1916,58 @@ mod config_tests {
         assert!(
             !line.contains("VIMINIT"),
             "a removal was forwarded as if it were an assignment; line {line}"
+        );
+    }
+
+    /// The same guarantee the local path pins, on the branch that builds its
+    /// command line as text: nvim runs `--cmd` commands before it opens any
+    /// file, so the swap answer must precede the caller's own arguments.
+    #[test]
+    fn a_remote_spawn_carries_the_swap_answer_ahead_of_the_files_it_opens() {
+        let cfg = EngineConfig::default()
+            .with_arg("notes.md")
+            .with_remote(RemoteSpec::new("host"));
+        let line = remote_line(&cfg);
+        let answer = line
+            .find(&shell_quote(SWAP_RECOVERY_CMD))
+            .expect("the swap answer must ride a remote spawn too");
+        let file = line
+            .find("'notes.md'")
+            .expect("the caller's file must reach the far side");
+        assert!(
+            answer < file,
+            "an autocommand registered after the file it guards is already \
+             open guards nothing; line {line}"
+        );
+    }
+
+    #[test]
+    fn with_remote_records_the_target_a_caller_armed() {
+        let cfg = EngineConfig::default().with_remote(RemoteSpec::new("user@host").with_port(2222));
+        let remote = cfg.remote().expect("with_remote must record the spec");
+        assert_eq!(remote.target, "user@host");
+        assert_eq!(remote.port, Some(2222));
+        assert_eq!(remote.remote_nvim_bin, "nvim");
+        assert!(
+            EngineConfig::default().remote().is_none(),
+            "a config nobody armed must stay local"
+        );
+    }
+
+    /// The refusal is the whole point: a hermetic plan names local
+    /// directories this host prepares and guards, and a remote child that
+    /// silently received none of them looks exactly like one that did.
+    #[test]
+    fn a_hermetic_config_cannot_also_be_remote() {
+        let refused = Engine::spawn(EngineConfig::isolated().with_remote(RemoteSpec::new("host")));
+        let outcome = match refused {
+            Ok(_) => String::from("the spawn was accepted"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            outcome.contains("hermetic"),
+            "a config that is both hermetic and remote must be refused \
+             before anything is prepared or started, got: {outcome}"
         );
     }
 }
