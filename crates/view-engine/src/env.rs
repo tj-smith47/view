@@ -214,10 +214,11 @@ pub const REMOTE_UNPLANTABLE_PATH: &str = "/dev/null";
 /// process's own: sweeping every non-allowlisted name here leaves the
 /// allowlist and nothing else. A remote child inherits the *far side's*
 /// login environment instead -- what its sshd, PAM and non-interactive shell
-/// startup files export -- and an `ssh` client forwards no environment of
-/// its own by default, so a name enumerated from this host is mostly a name
-/// that does not exist there. Carrying the inversion across therefore buys
-/// no coverage and costs two things worth keeping: the remote command line
+/// startup files export -- and of this host's own names only the handful in
+/// [`CLIENT_FORWARDED_VARS`] can cross at all, so a name enumerated here is
+/// almost always a name that does not exist there. Carrying the inversion
+/// across therefore buys no coverage and costs two things worth keeping: the
+/// remote command line
 /// stops being a function of the invoking shell (the same
 /// `view --remote host:path` builds a different string on two machines, so a
 /// user's bug report cannot be reproduced from it), and the complete list of
@@ -225,14 +226,24 @@ pub const REMOTE_UNPLANTABLE_PATH: &str = "/dev/null";
 /// vendor token's name -- crosses to the remote account and sits in its `ps`
 /// output for the life of the exec.
 ///
-/// What is enumerated here instead is the family this module opens by
-/// naming: the four standard-path variables, which a remote login profile
-/// does set and which redirect every `stdpath()` lookup the far-side editor
-/// makes, out from under the directories a caller pointed at private ones.
-/// Removal is their neutralizer for the reason it is locally -- unset, the
-/// editor derives all four from the home it was given, and the remote
-/// child's home is the one place the far side's own state legitimately
-/// lives.
+/// What is enumerated here instead comes from the two directions a variable
+/// can arrive at the far-side child by:
+///
+/// - The family this module opens by naming: the four standard-path
+///   variables, which a remote login profile does set and which redirect
+///   every `stdpath()` lookup the far-side editor makes, out from under the
+///   directories a caller pointed at private ones. Removal is their
+///   neutralizer for the reason it is locally -- unset, the editor derives
+///   all four from the home it was given, and the remote child's home is
+///   the one place the far side's own state legitimately lives.
+/// - Whatever [`CLIENT_FORWARDED_VARS`] can carry *from this host* that a
+///   local hermetic child would not receive. Only `NO_COLOR` is in that
+///   position: it is not passthrough, so a local hermetic child never sees
+///   the host's, and a forwarded one would change what the far-side editor
+///   renders. The rest of that list is passthrough, so a client forwarding
+///   it makes the same decision the local plan already made, and removing
+///   it here would leave a remote child with a *different* locale from the
+///   local child it is supposed to be indistinguishable from.
 ///
 /// The list is deliberately short of an inversion, and
 /// [`crate::process::EngineConfig::env_plan`] states what that leaves live
@@ -242,6 +253,48 @@ pub const REMOTE_SWEEP_VARS: &[&str] = &[
     "XDG_DATA_HOME",
     "XDG_STATE_HOME",
     "XDG_CACHE_HOME",
+    "NO_COLOR",
+];
+
+/// The variables an `ssh` client can carry from this host to the far side
+/// on its own, before any plan of this module's reaches the command line.
+///
+/// The client sends nothing it is not configured to send, but stock
+/// configurations do configure some: this host's own
+/// `/etc/ssh/ssh_config` carries `SendEnv LANG LC_* COLORTERM NO_COLOR`, and
+/// a server admits exactly what its `AcceptEnv` names (a stock `sshd`
+/// admits `LANG` and `LC_*`; `AcceptEnv *` is common in CI images). So the
+/// premise that a remote child's environment is purely the far side's is
+/// false for this handful, and every name here is either hermetic
+/// passthrough -- in which case forwarding it is the same decision
+/// [`HERMETIC_PASSTHROUGH_VARS`] already made -- or listed in
+/// [`REMOTE_SWEEP_VARS`] so the plan removes it on arrival.
+///
+/// The `LC_` names are the POSIX categories plus the glibc extensions,
+/// enumerated rather than derived: `SendEnv LC_*` is a glob over whatever
+/// this host exports, and a list built by asking the local client
+/// (`ssh -G`) would put the invoking machine's configuration back into the
+/// remote command line, which is the property [`REMOTE_SWEEP_VARS`] exists
+/// to hold. A locally-configured `SendEnv` naming something exotic is the
+/// residual, and `EngineConfig::env_plan` says so.
+pub const CLIENT_FORWARDED_VARS: &[&str] = &[
+    "LANG",
+    "LANGUAGE",
+    "COLORTERM",
+    "NO_COLOR",
+    "LC_ALL",
+    "LC_COLLATE",
+    "LC_CTYPE",
+    "LC_MESSAGES",
+    "LC_MONETARY",
+    "LC_NUMERIC",
+    "LC_TIME",
+    "LC_ADDRESS",
+    "LC_IDENTIFICATION",
+    "LC_MEASUREMENT",
+    "LC_NAME",
+    "LC_PAPER",
+    "LC_TELEPHONE",
 ];
 
 /// The host environment variables a hermetic child keeps. Every other
@@ -728,6 +781,37 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Every name a client can carry across on its own is accounted for: it
+    /// is either something a hermetic child is meant to receive anyway, or
+    /// something the remote plan removes on arrival.
+    ///
+    /// The gap this closes is silent by construction. A forwarded name that
+    /// is neither reaches an `isolated` remote child carrying the invoking
+    /// host's value, while the local child of the same config never sees it
+    /// -- one machine's environment deciding what the far side does, with
+    /// nothing failing.
+    #[test]
+    fn every_name_a_client_forwards_is_kept_on_purpose_or_removed_on_arrival() {
+        for name in CLIENT_FORWARDED_VARS {
+            let kept = is_hermetic_passthrough(OsStr::new(name));
+            let removed = REMOTE_SWEEP_VARS
+                .iter()
+                .any(|swept| env_names_eq(OsStr::new(swept), OsStr::new(name)));
+            assert!(
+                kept != removed,
+                "{name} is {}: a client can forward it, so it must either be \
+                 passthrough (a hermetic child is meant to have it) or on the \
+                 remote removal list (the plan takes it back), and exactly one \
+                 of those",
+                if kept {
+                    "both passthrough and removed remotely"
+                } else {
+                    "neither passthrough nor removed remotely"
+                }
+            );
+        }
     }
 
     #[test]

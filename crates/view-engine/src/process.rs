@@ -487,6 +487,16 @@ impl EngineConfig {
     ///   a command line built here cannot be one: it can only name what
     ///   somebody enumerated, and no enumeration written on this host can be
     ///   complete about a shell it has never seen.
+    /// - A name this host exports that the local client is configured to
+    ///   forward and the remote server to accept, beyond the standard set
+    ///   [`crate::env::CLIENT_FORWARDED_VARS`] enumerates. That set is
+    ///   accounted for -- each of its names is either hermetic passthrough
+    ///   or on [`crate::env::REMOTE_SWEEP_VARS`] -- but a `SendEnv` line
+    ///   somebody added locally, met by an `AcceptEnv *` server, carries a
+    ///   name no list here knows, and it arrives *before* this plan runs.
+    ///   That direction is the mirror of the one above: the value is this
+    ///   host's rather than the far side's, and it is equally out of reach
+    ///   of a command line.
     /// - The layer `HOME` closes locally -- everything a subprocess resolves
     ///   through it without an environment variable of its own (`.netrc`,
     ///   `.ssh/`, the `core.excludesFile` default) -- still resolves out of
