@@ -21,7 +21,7 @@ use std::time::Instant;
 use view_core::model::{Model, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
-use view_engine::process::EngineConfig;
+use view_engine::process::{EngineConfig, RemoteSpec};
 use view_tui::terminal::Term;
 
 /// What this build calls itself, in `--version` and in its own startup
@@ -86,15 +86,52 @@ impl From<TierArg> for Tier {
     version = VERSION,
     disable_version_flag = true,
     about = "A modern terminal editor powered by Neovim",
-    after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, ...) \
+    after_help = "view's own flags (--tier, --clean, --appname, --config, --nvim-bin, --remote, ...) \
                   must appear before the first argument meant for nvim: once a token does \
                   not match one of view's flags, every remaining token -- including a later \
                   view flag -- is forwarded to nvim verbatim."
 )]
 struct Cli {
     /// Path to the nvim binary (defaults to PATH lookup)
+    ///
+    /// With `--remote`, this names the editor on the far side instead, and
+    /// is resolved against the remote user's own `PATH` rather than this
+    /// host's: a remote session runs no local nvim at all, so a value read
+    /// here as a local path would name a binary nothing ever executes. It
+    /// must be valid UTF-8 in that case, since the remote command line
+    /// crosses to the far side as text.
     #[arg(long)]
     nvim_bin: Option<std::path::PathBuf>,
+    /// `[user@]host[:path]`, ssh's own syntax. Spawns the engine on `host`
+    /// over SSH instead of locally; `path` opens the same way a bare `view
+    /// path` would locally, defaulting to the remote `$HOME` when omitted --
+    /// matching plain `ssh host` + `nvim` with no arguments.
+    ///
+    /// The destination reaches the ssh client unparsed, so an alias from the
+    /// user's own `~/.ssh/config` resolves exactly as it does on their
+    /// command line. Only the first colon that follows the destination
+    /// separates it from the path, and colons inside a bracketed address
+    /// literal (`[2001:db8::1]:notes.md`) belong to the address.
+    ///
+    /// `path` is passed to the remote editor exactly as typed, with no local
+    /// resolution: a relative path is relative to the remote login
+    /// directory, which is the only host where the question has an answer.
+    #[arg(long, value_name = "[USER@]HOST[:PATH]")]
+    remote: Option<String>,
+    /// Overrides the port `~/.ssh/config` would otherwise resolve for
+    /// `--remote`'s host. Only meaningful with `--remote`.
+    #[arg(long, requires = "remote", value_name = "PORT")]
+    ssh_port: Option<u16>,
+    /// `-o KEY=VALUE`, forwarded verbatim to the underlying `ssh`
+    /// invocation. Repeatable. The generic escape hatch for any SSH option
+    /// this flag set does not name directly -- `ProxyJump`, `IdentityFile`,
+    /// `ConnectTimeout`, and anything future.
+    ///
+    /// These follow view's own options, and an ssh client keeps the first
+    /// value it obtains for an option, so an entry naming one view already
+    /// sets for itself is accepted and has no effect.
+    #[arg(long, requires = "remote", value_name = "KEY=VALUE")]
+    ssh_opt: Vec<String>,
     /// Override auto-detected terminal capabilities instead of probing
     #[arg(long)]
     tier: Option<TierArg>,
@@ -181,6 +218,131 @@ fn print_clipboard(register: char) -> Result<()> {
     Ok(())
 }
 
+/// A `--remote` value split at the one colon that separates ssh's own
+/// `[user@]host` destination from the path the remote editor opens.
+///
+/// Borrowed rather than owned: both halves are substrings of the value as
+/// typed, which is what keeps the pass-through guarantee checkable -- there
+/// is no owned copy anywhere on this path for a resolution step to have
+/// rewritten.
+struct RemoteTarget<'a> {
+    /// `[user@]host`, handed to the ssh client exactly as typed.
+    destination: &'a str,
+    /// The path the remote editor opens, or `None` when the value named no
+    /// path at all (`host`) or named an empty one (`host:`, scp's own
+    /// spelling of the remote login directory). Both mean the remote
+    /// `$HOME`, which is where an editor started with no file argument
+    /// already opens.
+    path: Option<&'a str>,
+}
+
+/// Splits `[user@]host[:path]` at the first colon that follows the
+/// destination.
+///
+/// Not a hostname parser, and deliberately not one: the destination is ssh's
+/// to interpret (an alias, an address, a name), and every syntax it accepts
+/// must survive this function unchanged. Only two ambiguities are resolved,
+/// both structural rather than syntactic:
+///
+/// - an `@` after the first colon belongs to the path (`host:/srv/a@b`), so
+///   it never shifts where the destination is looked for;
+/// - a bracketed address literal owns the colons inside it, so the scan for
+///   the separator resumes after the closing bracket (`[2001:db8::1]:x`),
+///   matching how scp reads the same syntax.
+fn split_remote_target(value: &str) -> RemoteTarget<'_> {
+    let host_start = match value.find('@') {
+        Some(at) if !value[..at].contains(':') => at + 1,
+        _ => 0,
+    };
+    let scan_from = if value[host_start..].starts_with('[') {
+        value[host_start..]
+            .find(']')
+            .map_or(host_start, |close| host_start + close + 1)
+    } else {
+        host_start
+    };
+    match value[scan_from..].find(':') {
+        Some(rel) => {
+            let (destination, rest) = value.split_at(scan_from + rel);
+            let path = &rest[1..];
+            RemoteTarget {
+                destination,
+                path: (!path.is_empty()).then_some(path),
+            }
+        }
+        None => RemoteTarget {
+            destination: value,
+            path: None,
+        },
+    }
+}
+
+/// The [`RemoteSpec`] `cli`'s remote flags describe, for a `target` already
+/// split out of `--remote`'s value.
+///
+/// The destination is not validated here beyond the split: an empty one, or
+/// one a client reads as its own option, is refused by `Engine::spawn`
+/// before a connection is attempted, and everything else is the client's own
+/// to resolve and to report on.
+fn remote_spec(cli: &Cli, target: &RemoteTarget<'_>) -> RemoteSpec {
+    let mut spec = RemoteSpec::new(target.destination);
+    // a non-UTF-8 path cannot cross to the far side as text and is refused
+    // by `deny_incoherent_remote` before this runs; falling back to the
+    // remote `PATH` lookup keeps this total without inventing a name
+    if let Some(bin) = cli.nvim_bin.as_deref().and_then(std::path::Path::to_str) {
+        spec = spec.with_remote_nvim_bin(bin);
+    }
+    if let Some(port) = cli.ssh_port {
+        spec = spec.with_port(port);
+    }
+    for opt in &cli.ssh_opt {
+        spec = spec.with_ssh_opt(opt.clone());
+    }
+    spec
+}
+
+/// Refuses the `--remote` combinations that cannot be honoured, ahead of the
+/// terminal setup and the spawn, with a message naming both halves of the
+/// conflict.
+///
+/// `-` is refused whatever stdin happens to be, unlike
+/// [`deny_unsupported_stdin_relay`]'s local check: the ssh client's own
+/// standard input is the RPC channel a remote session talks to the editor
+/// over, so there is no second descriptor to carry piped content, and a `-`
+/// left in the arguments would have the remote editor read that channel as
+/// buffer text rather than merely open an empty buffer.
+fn deny_incoherent_remote(cli: &Cli) -> Result<()> {
+    let Some(remote) = &cli.remote else {
+        return Ok(());
+    };
+    if cli.passthrough.iter().any(|arg| arg == "-") {
+        anyhow::bail!(
+            "view: `--remote {remote}` and `-` (read piped stdin into the \
+             first buffer) cannot be combined: the ssh client's own standard \
+             input is already the RPC channel this session talks to the \
+             remote editor over, so there is no descriptor left to carry the \
+             piped content to the far side. Pipe into a local session \
+             (`... | view -`), or send the content over first (`... | ssh \
+             {remote} 'cat > /tmp/piped'`) and open it with `view --remote \
+             {remote}:/tmp/piped`."
+        );
+    }
+    if let Some(bin) = &cli.nvim_bin {
+        if bin.to_str().is_none() {
+            anyhow::bail!(
+                "view: `--nvim-bin {}` is not valid UTF-8, and `--remote \
+                 {remote}` sends the editor's name to the far side as text: \
+                 an ssh command line carries no encoding a byte sequence \
+                 like this survives. Name the remote editor with a UTF-8 \
+                 path, or drop --nvim-bin to run the `nvim` on the remote \
+                 PATH.",
+                bin.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The engine config `cli` asks for: the ordinary spawn, every passthrough
 /// argument forwarded verbatim, and `--clean`/`--appname` layered on top of
 /// it. A pure constructor of `cli` alone -- it dups no file descriptor and
@@ -201,8 +363,17 @@ fn print_clipboard(register: char) -> Result<()> {
 /// distinction.
 fn engine_config(cli: &Cli) -> EngineConfig {
     let mut cfg = EngineConfig::default();
-    if let Some(bin) = &cli.nvim_bin {
-        cfg = cfg.with_nvim_bin(bin.clone());
+    let target = cli.remote.as_deref().map(split_remote_target);
+    match &target {
+        // `--nvim-bin` names the remote editor here and the local
+        // `nvim_bin` is left at its default: a remote spawn runs no local
+        // binary, so a path applied there would be a setting nothing reads
+        Some(target) => cfg = cfg.with_remote(remote_spec(cli, target)),
+        None => {
+            if let Some(bin) = &cli.nvim_bin {
+                cfg = cfg.with_nvim_bin(bin.clone());
+            }
+        }
     }
     if cli.clean {
         cfg = cfg.with_arg("--clean");
@@ -212,6 +383,12 @@ fn engine_config(cli: &Cli) -> EngineConfig {
     }
     for arg in &cli.passthrough {
         cfg = cfg.with_arg(arg.clone());
+    }
+    // last, in the file position an ordinary `nvim [options] file`
+    // invocation puts it: an option from `passthrough` that takes a value
+    // (`-c 'set nu'`, `-u NONE`) would otherwise consume the path as its own
+    if let Some(path) = target.as_ref().and_then(|target| target.path) {
+        cfg = cfg.with_arg(path);
     }
     cfg
 }
@@ -339,6 +516,7 @@ fn main() -> Result<()> {
     if let Some(register) = cli.print_clipboard {
         return print_clipboard(register);
     }
+    deny_incoherent_remote(&cli)?;
     deny_unsupported_stdin_relay(&cli.passthrough)?;
     let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
     // strictly after the relay, which is the one consumer of the piped fd 0
@@ -481,8 +659,15 @@ fn main() -> Result<()> {
         Err(failure) => vlog::log_with("engine", || format!("attach failed: {failure:?}")),
     }
     let mut engine = attach_result.map_err(|failure| match failure {
-        startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
-            .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
+        // a remote session never runs a local nvim, so the local hint would
+        // send the user to a binary and a PATH that had no part in it
+        startup::AttachFailure::Spawn(err) => anyhow::Error::new(err).context(match &cli.remote {
+            Some(remote) => format!(
+                "failed to start the remote engine on {remote} (check the ssh \
+                 client, the destination, and nvim on the far side)"
+            ),
+            None => "failed to spawn the nvim process (check --nvim-bin / PATH)".to_string(),
+        }),
         startup::AttachFailure::Attach(err) => {
             anyhow::Error::new(err).context("engine attach failed or timed out after nvim started")
         }
@@ -967,6 +1152,369 @@ mod tests {
             "the version flag reclaimed a short form; nvim's -V passthrough \
              breaks the moment it does"
         );
+    }
+
+    /// The remote surface's own helper: the spec a parsed `Cli` produced,
+    /// or a failure naming what was missing, so every assertion below reads
+    /// as one line about the flags rather than three about `Option`.
+    fn spec_of(argv: &[&str]) -> RemoteSpec {
+        let cli = Cli::try_parse_from(argv.iter().copied())
+            .map_err(|err| format!("{argv:?} was rejected by clap: {err}"))
+            .expect("the flags under test must parse");
+        engine_config(&cli)
+            .remote()
+            .ok_or_else(|| format!("{argv:?} armed no remote spawn"))
+            .expect("a destination must arm a remote spawn")
+            .clone()
+    }
+
+    // A destination with no path is the whole value, and it opens no file:
+    // an editor started with no file argument already opens the remote
+    // login directory, which is what `view --remote host` promises.
+    #[test]
+    fn a_bare_destination_targets_the_host_and_opens_no_file() {
+        let cli = Cli::parse_from(["view", "--remote", "prod-box"]);
+        let cfg = engine_config(&cli);
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("prod-box")
+        );
+        assert!(
+            cfg.extra_args.is_empty(),
+            "a bare destination named no file, so none may be forwarded: {:?}",
+            cfg.extra_args
+        );
+    }
+
+    #[test]
+    fn a_user_and_an_absolute_path_split_at_the_destinations_own_colon() {
+        let cli = Cli::parse_from(["view", "--remote", "deploy@prod-box:/etc/app.conf"]);
+        let cfg = engine_config(&cli);
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("deploy@prod-box"),
+            "the user belongs to the destination ssh resolves, not to the path"
+        );
+        assert_eq!(cfg.extra_args, vec![OsString::from("/etc/app.conf")]);
+    }
+
+    // The pass-through guarantee: "relative to what" has an answer only on
+    // the remote host, so a relative path must reach the remote editor
+    // exactly as typed. Any local resolution shows up here as an absolute
+    // path or one carrying this process's own cwd.
+    #[test]
+    fn a_relative_remote_path_is_never_resolved_against_the_local_cwd() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:relative.txt",
+        ]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![OsString::from("relative.txt")],
+            "the remote path must reach the far side byte-for-byte"
+        );
+        let forwarded = std::path::Path::new(&cfg.extra_args[0]);
+        assert!(
+            forwarded.is_relative(),
+            "a relative remote path was made absolute locally: {}",
+            forwarded.display()
+        );
+        let cwd = std::env::current_dir().unwrap_or_default();
+        assert!(
+            !forwarded.starts_with(&cwd),
+            "the remote path was resolved against this host's cwd ({}): {}",
+            cwd.display(),
+            forwarded.display()
+        );
+    }
+
+    // A dotted relative path is the shape a local resolution step would
+    // normalize away rather than merely prefix, so it is asserted
+    // separately from the bare-filename case above.
+    #[test]
+    fn a_dotted_relative_remote_path_keeps_every_component_it_was_given() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:../src/./main.rs",
+        ]));
+        assert_eq!(cfg.extra_args, vec![OsString::from("../src/./main.rs")]);
+    }
+
+    #[test]
+    fn ssh_port_and_repeated_ssh_opts_reach_the_spec_in_order() {
+        let spec = spec_of(&[
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-port",
+            "2222",
+            "--ssh-opt",
+            "ProxyJump=bastion",
+            "--ssh-opt",
+            "ConnectTimeout=4",
+        ]);
+        assert_eq!(spec.port, Some(2222));
+        assert_eq!(
+            spec.extra_ssh_opts,
+            vec![
+                String::from("ProxyJump=bastion"),
+                String::from("ConnectTimeout=4"),
+            ],
+            "each --ssh-opt is its own -o, and order decides which value a \
+             client keeps"
+        );
+    }
+
+    // Silently ignoring a connection flag on a local session would let a
+    // user believe a proxy or a port applied to a spawn that never opened a
+    // connection at all.
+    #[test]
+    fn the_ssh_flags_are_a_parse_error_without_a_destination_to_apply_them_to() {
+        for argv in [
+            &["view", "--ssh-port", "2222"][..],
+            &["view", "--ssh-opt", "ProxyJump=bastion"],
+        ] {
+            let err = Cli::try_parse_from(argv.iter().copied())
+                .err()
+                .ok_or_else(|| format!("{argv:?} was accepted with no --remote to apply it to"))
+                .expect("a connection flag must be refused without a destination");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument,
+                "{argv:?} must fail as a missing --remote, got {err}"
+            );
+            assert!(
+                err.to_string().contains("--remote"),
+                "the error must name the flag that is missing, got {err}"
+            );
+        }
+    }
+
+    // A local session must stay exactly what it was: `remote()` is the one
+    // switch between the two spawn paths, and a default-armed one would
+    // route every ordinary `view notes.md` through an ssh client.
+    #[test]
+    fn a_session_without_the_flag_arms_no_remote_spawn() {
+        assert!(engine_config(&Cli::parse_from(["view", "notes.md"]))
+            .remote()
+            .is_none());
+    }
+
+    // Colons inside a bracketed address literal belong to the address, the
+    // same reading scp gives the same syntax. Without that, the first colon
+    // of an IPv6 literal splits the destination mid-address.
+    #[test]
+    fn a_bracketed_address_literal_keeps_its_own_colons() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "[2001:db8::1]:notes.md",
+        ]));
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("[2001:db8::1]")
+        );
+        assert_eq!(cfg.extra_args, vec![OsString::from("notes.md")]);
+
+        let bare = engine_config(&Cli::parse_from(["view", "--remote", "deploy@[::1]"]));
+        assert_eq!(
+            bare.remote().map(|remote| remote.target.as_str()),
+            Some("deploy@[::1]"),
+            "a bracketed literal with no path is the whole destination"
+        );
+        assert!(bare.extra_args.is_empty(), "{:?}", bare.extra_args);
+    }
+
+    // An `@` after the separating colon is part of the path, not a user
+    // delimiter: reading it as one would look for the destination's colon
+    // past the path's own.
+    #[test]
+    fn an_at_sign_inside_the_path_does_not_move_the_destination() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:/srv/a@b.txt",
+        ]));
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("prod-box")
+        );
+        assert_eq!(cfg.extra_args, vec![OsString::from("/srv/a@b.txt")]);
+    }
+
+    // `host:` is scp's own spelling of the remote login directory. Passing
+    // the empty string on to the editor instead would open a nameless
+    // buffer no write can ever complete.
+    #[test]
+    fn an_empty_path_opens_the_remote_home_rather_than_a_nameless_buffer() {
+        let cfg = engine_config(&Cli::parse_from(["view", "--remote", "prod-box:"]));
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("prod-box")
+        );
+        assert!(cfg.extra_args.is_empty(), "{:?}", cfg.extra_args);
+    }
+
+    // The remote path takes the file position, after every passthrough
+    // token: an option that takes a value would otherwise swallow it.
+    #[test]
+    fn the_remote_path_follows_the_passthrough_options_it_is_opened_under() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:notes.md",
+            "-c",
+            "set nu",
+        ]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("-c"),
+                OsString::from("set nu"),
+                OsString::from("notes.md"),
+            ]
+        );
+    }
+
+    // --clean is view's own triage tool and stays available remotely: it is
+    // a plain argument to the editor, unlike the hermetic environment plan
+    // a remote spawn refuses outright.
+    #[test]
+    fn clean_reaches_the_remote_editor_as_an_ordinary_argument() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--clean",
+            "--remote",
+            "prod-box:notes.md",
+        ]));
+        assert!(cfg.remote().is_some());
+        assert_eq!(
+            cfg.extra_args,
+            vec![OsString::from("--clean"), OsString::from("notes.md")]
+        );
+    }
+
+    // The far side is the only host running an editor, so the flag that
+    // names one must name that editor. Applying it to the local `nvim_bin`
+    // instead is a setting a remote spawn never reads.
+    #[test]
+    fn nvim_bin_names_the_remote_editor_when_a_destination_is_given() {
+        let cli = Cli::parse_from([
+            "view",
+            "--nvim-bin",
+            "/opt/nvim/bin/nvim",
+            "--remote",
+            "prod-box",
+        ]);
+        let cfg = engine_config(&cli);
+        assert_eq!(
+            cfg.remote().map(|remote| remote.remote_nvim_bin.as_str()),
+            Some("/opt/nvim/bin/nvim")
+        );
+        assert_eq!(
+            cfg.nvim_bin,
+            EngineConfig::default().nvim_bin,
+            "a remote spawn runs no local binary, so the local one must stay \
+             at its default rather than carry a value nothing reads"
+        );
+    }
+
+    #[test]
+    fn without_nvim_bin_the_remote_path_lookup_stands() {
+        assert_eq!(
+            spec_of(&["view", "--remote", "prod-box"]).remote_nvim_bin,
+            "nvim",
+            "the default must stay the remote PATH's own nvim"
+        );
+    }
+
+    // A replacement engine reconnects to the same host and reopens the same
+    // file: the remote spec and its path are part of what the session is,
+    // not of the spawn that died.
+    #[test]
+    fn a_replacement_engine_reconnects_to_the_same_destination_and_file() {
+        let cli = Cli::parse_from(["view", "--remote", "deploy@prod-box:/etc/app.conf"]);
+        let cfg = respawn_config(&cli);
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("deploy@prod-box")
+        );
+        assert_eq!(cfg.extra_args, vec![OsString::from("/etc/app.conf")]);
+    }
+
+    // Handing a remote session a `-` would have the remote editor read the
+    // ssh client's standard input, which is the RPC channel itself, as
+    // buffer text. The engine refuses an armed relay of its own, but the
+    // user-facing refusal is owed here: it is the only one that can name
+    // the flags as typed and say what to do instead.
+    #[test]
+    fn a_piped_stdin_and_a_destination_are_refused_together_by_name() {
+        let cli = Cli::parse_from(["view", "--remote", "prod-box", "-"]);
+        let err = deny_incoherent_remote(&cli)
+            .expect_err("a remote session has no descriptor to carry piped content");
+        let text = err.to_string();
+        for expected in ["--remote", "prod-box", "`-`", "| view -"] {
+            assert!(
+                text.contains(expected),
+                "the refusal must name {expected}, got: {text}"
+            );
+        }
+    }
+
+    // The local guard fires only against a non-tty stdin, since a `-` typed
+    // at a terminal reads that terminal. A remote session has no such
+    // reading: the descriptor is the RPC channel whatever stdin is here.
+    #[test]
+    fn a_local_session_is_still_free_to_take_a_dash() {
+        let cli = Cli::parse_from(["view", "-"]);
+        assert!(
+            deny_incoherent_remote(&cli).is_ok(),
+            "the remote refusal must not touch a local piped session"
+        );
+    }
+
+    // A remote command line crosses as text, so a name that is not text has
+    // nothing to cross as. Refused by name rather than transcoded: a lossy
+    // conversion would run some other binary and report success.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_editor_name_is_refused_rather_than_transcoded() {
+        use std::os::unix::ffi::OsStringExt;
+        let bin = OsString::from_vec(vec![b'/', b'o', b'p', b't', b'/', 0xff, b'v']);
+        let cli = Cli::parse_from([OsString::from("view"), OsString::from("--nvim-bin"), bin]);
+        let cli = Cli {
+            remote: Some(String::from("prod-box")),
+            ..cli
+        };
+        let err = deny_incoherent_remote(&cli)
+            .expect_err("a name that is not text cannot cross to the far side");
+        assert!(
+            err.to_string().contains("--nvim-bin"),
+            "the refusal must name the flag it refuses, got {err}"
+        );
+        assert_eq!(
+            engine_config(&cli)
+                .remote()
+                .map(|remote| remote.remote_nvim_bin.as_str()),
+            Some("nvim"),
+            "the fallback behind the refusal must be the remote PATH lookup, \
+             never a transcoded name"
+        );
+    }
+
+    // The value syntax is the whole surface of --remote, and a user reads
+    // it in --help before anywhere else.
+    #[test]
+    fn rendered_help_states_the_remote_value_syntax_and_the_ssh_flags() {
+        let help = Cli::command().render_long_help().to_string();
+        for expected in ["[USER@]HOST[:PATH]", "--ssh-port", "KEY=VALUE"] {
+            assert!(
+                help.contains(expected),
+                "--help must show {expected}, got:\n{help}"
+            );
+        }
     }
 
     #[test]
