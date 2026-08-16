@@ -19,6 +19,7 @@ pub mod fixture;
 pub mod fuzz;
 pub mod hang;
 pub mod page;
+pub mod remote;
 pub mod results;
 pub mod scenario;
 pub mod speculate;

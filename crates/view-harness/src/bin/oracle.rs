@@ -173,6 +173,26 @@ enum Command {
         #[arg(long)]
         case: Option<String>,
     },
+    /// Drives `view_oracle::remote`'s battery against the committed
+    /// stand-in ssh client: the stand-in's own fidelity, and the remote
+    /// spawn path held against the local one it must be
+    /// indistinguishable from.
+    ///
+    /// The broadest form of that same claim is not here but in the bare
+    /// `oracle [PATH]` run, which drives the whole corpus through the
+    /// remote path as a second leg. This subcommand is the narrow one, for
+    /// reproducing a single case.
+    ///
+    /// A host with no POSIX shell to re-parse a joined command line reports
+    /// the leg as SKIPPED and exits 0: the remote path's contract is a
+    /// POSIX one, and a host that cannot make the claim must say so rather
+    /// than fail for a leg it never drove.
+    Remote {
+        /// One case by name (`stub-flattening`, `parentless-open`) instead
+        /// of all of them.
+        #[arg(long)]
+        case: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -187,6 +207,13 @@ fn main() -> Result<()> {
         Some(Command::Page) => page_command(),
         Some(Command::Hang { schedule }) => {
             if view_harness::hang::run(schedule.as_deref())? {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
+        }
+        Some(Command::Remote { case }) => {
+            if view_harness::remote::run(case.as_deref())? {
                 Ok(())
             } else {
                 std::process::exit(1)
@@ -276,6 +303,32 @@ struct EngineSettled(bool);
 #[derive(Debug, Clone, Copy)]
 struct ReferenceSettled(bool);
 
+/// Where a run's engine side is spawned. The reference applier is always
+/// local: it is the side that exists to be trusted, and routing it through
+/// the same transport as the side under test would leave a transport fault
+/// common to both and invisible to the diff.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EngineRoute {
+    /// A local `nvim --embed`, the way every entry has always run.
+    Local,
+    /// The same engine reached through the committed stand-in ssh client
+    /// (`view_oracle::remote`), which joins its trailing arguments and hands
+    /// them to a shell exactly as a real client does.
+    StubRemote,
+}
+
+impl EngineRoute {
+    /// What a report line calls this route. The local route says nothing,
+    /// so every line a run has ever printed keeps its shape and only the
+    /// second leg's lines are marked.
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Local => "",
+            Self::StubRemote => " (remote)",
+        }
+    }
+}
+
 /// Derives the report-line status word from both sides' settle results and
 /// whether any divergence was found. A free function rather than inlined in
 /// [`print_outcome`] so the merge decision -- an unsettled side always wins
@@ -313,15 +366,27 @@ fn settle_status(
 /// depends on the fusion (see `ReferenceSession::arm_and_input`), so a
 /// script split across several calls would leave a window for the marker to
 /// fire between them and prove nothing.
+///
+/// `route` decides where the engine side runs, and nothing else about the
+/// comparison: the reference applier stays local either way, so a remote
+/// route asks whether reaching the same engine over an `ssh` client changed
+/// any answer it gives. The minimizer and the fuzz runner always pass the
+/// local route -- both reduce toward, or generate against, a failure
+/// signature, and a transport that can fail on its own would put a second
+/// variable inside that predicate.
 fn run_tokens(
     tokens: &[String],
     cols: u16,
     rows: u16,
     silence: Duration,
     deadline: Duration,
+    route: EngineRoute,
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
     let start = Instant::now();
-    let mut engine = EngineSession::spawn(cols, rows)?;
+    let mut engine = match route {
+        EngineRoute::Local => EngineSession::spawn(cols, rows)?,
+        EngineRoute::StubRemote => view_oracle::remote::spawn_stub_session(cols, rows)?,
+    };
     let mut reference = ReferenceSession::spawn(cols, rows)?;
 
     // startup quiescence is drained, not gated on: a slow-starting nvim's
@@ -392,20 +457,24 @@ fn run_tokens(
 /// Tokenizes `entry.input` and drives it through [`run_tokens`] at
 /// `entry`'s own quiesce overrides -- the plain corpus-run path `Command`'s
 /// `None` (bare `oracle [PATH]`) arm uses.
-fn run_entry(entry: &CorpusEntry) -> Result<EntryOutcome, view_oracle::OracleError> {
+fn run_entry(
+    entry: &CorpusEntry,
+    route: EngineRoute,
+) -> Result<EntryOutcome, view_oracle::OracleError> {
     run_tokens(
         &tokenize(&entry.input),
         COLS,
         ROWS,
         Duration::from_millis(entry.quiesce_silence_ms),
         Duration::from_millis(entry.quiesce_deadline_ms),
+        route,
     )
 }
 
 /// Prints one entry's report line plus, on anything but clean PARITY,
 /// every [`Divergence`] found -- the exit-contract report shape the corpus
 /// runner's own interface (see this crate's module docs) commits to.
-fn print_outcome(name: &str, outcome: &EntryOutcome) {
+fn print_outcome(name: &str, outcome: &EntryOutcome, route: EngineRoute) {
     let status = settle_status(
         EngineSettled(outcome.engine_settled),
         ReferenceSettled(outcome.reference_settled),
@@ -417,7 +486,8 @@ fn print_outcome(name: &str, outcome: &EntryOutcome) {
         "unsettled"
     };
     println!(
-        "oracle: {name} ... {status} ({COLS}x{ROWS}, {settle_word}, {}ms)",
+        "oracle: {name}{} ... {status} ({COLS}x{ROWS}, {settle_word}, {}ms)",
+        route.label(),
         outcome.elapsed_ms
     );
     for divergence in &outcome.divergences {
@@ -427,6 +497,15 @@ fn print_outcome(name: &str, outcome: &EntryOutcome) {
 
 /// The bare `oracle [PATH]` run: every entry under `path`, reported and
 /// exit-coded per this crate's own module docs.
+///
+/// Two legs, not one. The corpus runs first against a local engine, then
+/// again with the engine side reached over the committed stand-in ssh
+/// client. A remote session is supposed to differ from a local one in
+/// nothing but its transport, and the corpus is the broadest statement of
+/// that this tree has -- narrower cases can only assert what somebody
+/// thought to assert, while a second full pass fails on anything the whole
+/// corpus already covers. The second leg is skipped, with a line saying so,
+/// on a host that cannot run a POSIX stand-in.
 fn run_command(path: &Path) -> Result<()> {
     let entries = collect_entries(path)?;
     if entries.is_empty() {
@@ -439,7 +518,7 @@ fn run_command(path: &Path) -> Result<()> {
     let pin = current_engine_pin()?;
     verify_nvim_matches_pin(Path::new("nvim"), &pin)?;
     let mut any_failed = false;
-    for (entry_path, entry) in entries {
+    for (entry_path, entry) in &entries {
         if entry.engine_pin != pin {
             eprintln!(
                 "oracle: WARNING: {} ({}) was authored against engine pin {} but the current \
@@ -449,16 +528,27 @@ fn run_command(path: &Path) -> Result<()> {
                 entry.engine_pin,
             );
         }
-        match run_entry(&entry) {
-            Ok(outcome) => {
-                print_outcome(&entry.name, &outcome);
-                if !outcome.is_success() {
+    }
+    for route in [EngineRoute::Local, EngineRoute::StubRemote] {
+        if route == EngineRoute::StubRemote && !view_oracle::remote::stub_available() {
+            println!(
+                "oracle: remote leg ... SKIPPED (no POSIX stand-in client at {})",
+                view_oracle::remote::stub_client().display()
+            );
+            continue;
+        }
+        for (_, entry) in &entries {
+            match run_entry(entry, route) {
+                Ok(outcome) => {
+                    print_outcome(&entry.name, &outcome, route);
+                    if !outcome.is_success() {
+                        any_failed = true;
+                    }
+                }
+                Err(err) => {
+                    println!("oracle: {}{} ... ERROR: {err}", entry.name, route.label());
                     any_failed = true;
                 }
-            }
-            Err(err) => {
-                println!("oracle: {} ... ERROR: {err}", entry.name);
-                any_failed = true;
             }
         }
     }
@@ -546,7 +636,7 @@ fn minimize_tokens(
     deadline: Duration,
 ) -> Vec<String> {
     ddmin(tokens, |candidate| {
-        run_tokens(candidate, cols, rows, silence, deadline)
+        run_tokens(candidate, cols, rows, silence, deadline, EngineRoute::Local)
             .is_ok_and(|outcome| target.matches(&outcome))
     })
 }
@@ -588,7 +678,7 @@ fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<
     let tokens = build_tokens(&entry, inject_divergence_at);
     let original_len = tokens.len();
 
-    let baseline = run_tokens(&tokens, COLS, ROWS, silence, deadline)
+    let baseline = run_tokens(&tokens, COLS, ROWS, silence, deadline, EngineRoute::Local)
         .with_context(|| format!("running baseline for {}", entry.name))?;
     let Some(target) = FailureSignature::from_outcome(&baseline) else {
         bail!(
@@ -773,7 +863,16 @@ fn fuzz_command(seed: u64, rounds: u32, keys: usize) -> Result<()> {
         &pin,
         Path::new("corpus/quarantine"),
         quiesce,
-        |tokens| run_tokens(tokens, COLS, ROWS, quiesce.silence, quiesce.deadline),
+        |tokens| {
+            run_tokens(
+                tokens,
+                COLS,
+                ROWS,
+                quiesce.silence,
+                quiesce.deadline,
+                EngineRoute::Local,
+            )
+        },
     )?;
 
     println!(

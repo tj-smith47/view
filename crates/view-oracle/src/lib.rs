@@ -31,6 +31,11 @@
 //!   a real engine driven the way the runtime drives one, with display-only
 //!   predictions folded in, so that every cell view paints ahead of a redraw
 //!   is held against nvim's own screen at the settle point that answers it.
+//! - [`remote`]: the same engine, reached over an `ssh` client instead of
+//!   started here. Also not a fidelity level: the transport changes and
+//!   nothing else is supposed to, so what it holds is a stand-in client
+//!   faithful enough to break a caller a real one would break, and the
+//!   cases that hold the remote path against the local one.
 //! - [`parity`]: the comparison layer a corpus runner drives -- state
 //!   probes ([`StateSnapshot`]/[`snapshot`]) plus a masked row-by-row grid
 //!   diff ([`compare`]/[`masked_rows`]) between any two [`Probe`] sources,
@@ -51,6 +56,7 @@ mod parity;
 pub mod pty;
 pub mod raster;
 mod reference;
+pub mod remote;
 mod settle;
 pub mod speculate;
 #[cfg(test)]
@@ -287,7 +293,50 @@ impl EngineSession {
     /// `ui_attach` handshake fails or times out, or the quiesce-protocol
     /// setup commands cannot be written to the connection.
     pub fn spawn(cols: u16, rows: u16) -> Result<Self, OracleError> {
-        let mut engine = Engine::spawn(EngineConfig::isolated())?;
+        Self::spawn_configured(EngineConfig::isolated(), cols, rows)
+    }
+
+    /// [`spawn`](Self::spawn), with the engine reached over the system `ssh`
+    /// client `remote` names instead of started on this host. The isolation
+    /// contract is the same one and it crosses with the spawn; what it means
+    /// on the far side is stated entry by entry on
+    /// [`EngineConfig::env_plan`].
+    ///
+    /// The session that comes back is the same type the local path returns,
+    /// which is the point: a corpus entry driven through this one is
+    /// comparing the remote path against the same reference applier, over
+    /// the same protocol, with only the transport changed.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn), plus whatever the client reports for a
+    /// connection it could not make -- surfaced as a spawn or handshake
+    /// failure, since a client that cannot connect exits without ever
+    /// carrying a byte of RPC.
+    pub fn spawn_remote(
+        cols: u16,
+        rows: u16,
+        remote: view_engine::process::RemoteSpec,
+    ) -> Result<Self, OracleError> {
+        Self::spawn_configured(EngineConfig::isolated().with_remote(remote), cols, rows)
+    }
+
+    /// The body both front doors above share, open to a caller that needs an
+    /// argument neither of them takes -- a file for the session to open,
+    /// most of all.
+    ///
+    /// `cfg` owes the isolation [`spawn`](Self::spawn) documents: build on
+    /// [`EngineConfig::isolated`] and add to it, never assemble one from
+    /// [`EngineConfig::default`]. A session spawned against the host's own
+    /// editor configuration is not a differential driver, it is the
+    /// developer's editor with a probe attached, and every comparison made
+    /// through it describes their machine.
+    ///
+    /// # Errors
+    ///
+    /// As [`spawn`](Self::spawn).
+    pub fn spawn_configured(cfg: EngineConfig, cols: u16, rows: u16) -> Result<Self, OracleError> {
+        let mut engine = Engine::spawn(cfg)?;
         engine.handle.ui_attach(cols, rows)?;
         // no consumer ever drains this channel: EngineSession polls
         // DamagePump::take_damage directly instead (leg (c) is
