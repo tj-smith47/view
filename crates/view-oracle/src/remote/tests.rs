@@ -12,7 +12,12 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use super::{run_case, stub_available, stub_client, RemoteCase, RemoteReport};
+use std::ffi::OsString;
+
+use view_engine::env::HERMETIC_HOME_VAR;
+use view_engine::process::EngineConfig;
+
+use super::{run_case, stub_available, stub_client, stub_config, RemoteCase, RemoteReport};
 
 /// Runs `case` and returns its report, failing with the report's own line
 /// and every divergence it carries rather than a bare boolean.
@@ -56,6 +61,38 @@ fn the_stand_in_client_flattens_its_trailing_arguments_as_the_real_one_does() {
 #[test]
 fn a_nonexistent_parent_directory_fails_identically_on_both_paths() {
     report(RemoteCase::ParentlessOpen);
+}
+
+/// The stand-in route's own contract: a session on it differs from a local
+/// one in its transport and in nothing else, which for `HOME` means the same
+/// prepared hermetic directory on both.
+///
+/// Read off the plans rather than off a running child so the two are
+/// compared by construction: an isolated remote config takes the exemption
+/// `EngineConfig::env_plan` documents, and a route that silently stopped
+/// undoing it would leave the engine side of every comparison under the
+/// invoking account's real home while the reference side stayed hermetic --
+/// visible only once some entry probed a home-shaped thing.
+#[test]
+fn the_stand_in_route_hands_its_far_side_the_same_home_the_local_route_gets() {
+    let local = EngineConfig::isolated().env_plan();
+    let expected = local
+        .iter()
+        .find(|(name, _)| name == OsString::from(HERMETIC_HOME_VAR).as_os_str())
+        .map(|(_, value)| value.clone())
+        .expect("a local hermetic plan points HOME at the prepared home");
+    let remote = stub_config()
+        .expect("the stub client and a preparable hermetic home")
+        .env_plan();
+    assert_eq!(
+        remote
+            .iter()
+            .find(|(name, _)| name == OsString::from(HERMETIC_HOME_VAR).as_os_str())
+            .map(|(_, value)| value.clone()),
+        Some(expected),
+        "the stand-in route's far side no longer gets the hermetic home; plan \
+         {remote:?}"
+    );
 }
 
 /// A case's label is its selector on the runner, and every case must be

@@ -107,6 +107,48 @@ fn the_stub_client_flattens_and_reparses_exactly_as_the_real_one_does() {
     );
 }
 
+/// The stub's option parser against the real client's own. Real `ssh` reads
+/// a dash argument with `getopt`, one character at a time: `-Tfoo` is
+/// `-T -f -o o`, where the value-taking flag consumes the rest of its own
+/// cluster and no following argument (confirmed against the installed
+/// client, which reports the cluster's tail as `-o`'s value). A double that
+/// matched the whole cluster with a glob would shift it away, promote the
+/// next argument to destination, and run a shifted command.
+#[test]
+fn the_stub_client_cluster_parses_its_flags_the_way_getopt_does() {
+    let run = |args: &[&str]| {
+        std::process::Command::new(fake_ssh())
+            .args(args)
+            .output()
+            .expect("the stub client runs")
+    };
+
+    let clustered = run(&["-Tfoo", "view-test-host", "echo", "parsed"]);
+    assert_eq!(
+        String::from_utf8_lossy(&clustered.stdout).trim(),
+        "parsed",
+        "the cluster's own tail must be `-o`'s value, leaving the destination \
+         and command where the caller put them. stderr: {}",
+        String::from_utf8_lossy(&clustered.stderr)
+    );
+
+    let refused = run(&["-Tz", "view-test-host", "echo", "parsed"]);
+    assert!(
+        !refused.status.success(),
+        "an unrecognized flag inside a cluster was accepted, where the real \
+         client reports `unknown option -- z` and exits; stdout: {}",
+        String::from_utf8_lossy(&refused.stdout)
+    );
+
+    let starved = run(&["-T", "-o"]);
+    assert!(
+        !starved.status.success(),
+        "a value-taking flag with nothing to take it from was accepted; \
+         stdout: {}",
+        String::from_utf8_lossy(&starved.stdout)
+    );
+}
+
 /// The whole path end to end: `Engine::spawn` completes its handshake and
 /// serves requests through a child reached over the client, with no change
 /// to the spawn sequence beyond which program it starts.

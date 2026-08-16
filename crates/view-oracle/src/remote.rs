@@ -29,6 +29,11 @@
 //! opt-in variant that covers those against a real target, and its own doc
 //! comment says which of them it proves.
 //!
+//! That the far side is this host is also what lets [`stub_config`] do the
+//! one thing a config aimed at a real destination cannot: prepare a hermetic
+//! home and point the far-side child at it, so a session on this route
+//! differs from a local one in its transport and in nothing else.
+//!
 //! # What is compared
 //!
 //! Nothing about a remote session is supposed to differ from a local one
@@ -107,18 +112,47 @@ pub fn stub_spec() -> RemoteSpec {
     RemoteSpec::new(STUB_TARGET).with_ssh_bin(stub_client())
 }
 
-/// An [`EngineSession`] reached through [`stub_spec`], for a caller driving
+/// The config every session on the stand-in route spawns from: an isolated
+/// config aimed at [`stub_spec`], with `HOME` pointed back at the prepared
+/// hermetic home.
+///
+/// [`EngineConfig::isolated`] exempts `HOME` on a remote target, because a
+/// hermetic home has to be *prepared* and a command string cannot prepare
+/// one on a machine it has never seen. The stand-in's far side is this host,
+/// as this user, so that preparation is one this process can simply perform:
+/// the exemption buys nothing here and costs the route its own contract,
+/// which is that it changes the transport and nothing else.
+///
+/// Without it, the engine side of every comparison runs under the invoking
+/// account's real home while the reference side runs under the hermetic one,
+/// and the first corpus entry to probe anything home-shaped -- `expand('~')`,
+/// `stdpath('state')`, `&undodir` -- diverges on the remote leg alone, on the
+/// machine that runs it, with a report line pointing at the transport.
+///
+/// # Errors
+///
+/// [`OracleError::Io`] if this host has no stub to run (see
+/// [`stub_available`]), or if the hermetic home cannot be prepared -- which
+/// is a refusal naming the entry that made it unsafe, never a spawn against
+/// a home something else can plant.
+pub fn stub_config() -> Result<EngineConfig, OracleError> {
+    refuse_without_stub()?;
+    let home = view_engine::env::prepare_hermetic_home()?;
+    Ok(EngineConfig::isolated()
+        .with_remote(stub_spec())
+        .with_env(view_engine::env::HERMETIC_HOME_VAR, home))
+}
+
+/// An [`EngineSession`] reached through [`stub_config`], for a caller driving
 /// its own script (the corpus runner's remote leg) rather than one of the
 /// cases below.
 ///
 /// # Errors
 ///
-/// [`OracleError::Io`] if this host has no stub to run (see
-/// [`stub_available`]), and otherwise whatever
-/// [`EngineSession::spawn_remote`] reports.
+/// Whatever [`stub_config`] reports, and otherwise whatever
+/// [`EngineSession::spawn_configured`] reports.
 pub fn spawn_stub_session(cols: u16, rows: u16) -> Result<EngineSession, OracleError> {
-    refuse_without_stub()?;
-    EngineSession::spawn_remote(cols, rows, stub_spec())
+    EngineSession::spawn_configured(stub_config()?, cols, rows)
 }
 
 /// One case of the remote battery.
@@ -304,7 +338,7 @@ fn parentless_open() -> Result<Vec<Divergence>, OracleError> {
     let opening = |cfg: EngineConfig| -> Result<EngineSession, OracleError> {
         EngineSession::spawn_configured(cfg.with_arg(OsStr::new(PARENTLESS_FILE)), COLS, ROWS)
     };
-    let mut remote = opening(EngineConfig::isolated().with_remote(stub_spec()))?;
+    let mut remote = opening(stub_config()?)?;
     let mut local = opening(EngineConfig::isolated())?;
 
     let mut divergences = Vec::new();

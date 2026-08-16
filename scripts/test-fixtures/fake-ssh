@@ -16,35 +16,54 @@
 # this host, as this user.
 set -eu
 
-# The client's own options, stripped the way the real one does: a value
-# either follows in the next argument or is attached to the flag.
+# The client's own options, stripped the way the real one does. Real ssh
+# parses them with getopt(3), so a dash argument is a CLUSTER of flags read
+# one character at a time, not one opaque token: the first character in it
+# that takes a value consumes the REST of the cluster as that value, and the
+# characters before it are no-argument flags in their own right. `-Tfoo` is
+# therefore `-T -f -o o`, and a glob matching the whole cluster would accept
+# spellings the real client rejects -- the direction a double must never
+# take. The two character sets below are the ones the real client's own
+# usage line prints, so an option it takes a value for is never read here as
+# a flag that does not.
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        -o | -p | -i | -l | -F | -b | -c | -D | -E | -e | -I | -J | -L | -m | -O | -Q | -R | -S | -W | -w)
-            if [ "$#" -lt 2 ]; then
-                echo "fake-ssh: $1 needs a value" >&2
-                exit 255
-            fi
-            shift 2
-            ;;
         --)
             shift
             break
             ;;
-        # flags that carry no value, alone or clustered, plus the attached
-        # value forms of the two options this caller ever emits
-        -[46AaCfGgKkMNnqsTtVvXxYy]* | -o?* | -p?*)
+        -?*)
+            cluster="${1#-}"
             shift
-            ;;
-        # anything else beginning with a dash is refused rather than
-        # shifted away. Swallowing it would promote the NEXT argument to
-        # destination and run a shifted command, which is more permissive
-        # than the real client (OpenSSH rejects a destination like this
-        # outright), and a double must never accept what the real one
-        # would reject.
-        -*)
-            echo "fake-ssh: unrecognized option $1" >&2
-            exit 255
+            while [ -n "$cluster" ]; do
+                flag="$(printf '%.1s' "$cluster")"
+                cluster="${cluster#?}"
+                case "$flag" in
+                    [46AaCfGgKkMNnqsTtVvXxYy]) ;;
+                    [BbcDEeFIiJLlmOoPpQRSWw])
+                        # the value is the rest of the cluster when there is
+                        # one, and the next argument otherwise
+                        if [ -n "$cluster" ]; then
+                            cluster=''
+                        elif [ "$#" -lt 1 ]; then
+                            echo "fake-ssh: -$flag needs a value" >&2
+                            exit 255
+                        else
+                            shift
+                        fi
+                        ;;
+                    # an unrecognized flag is refused rather than shifted
+                    # away. Swallowing it would promote the NEXT argument to
+                    # destination and run a shifted command, which is more
+                    # permissive than the real client (OpenSSH rejects the
+                    # option outright), and a double must never accept what
+                    # the real one would reject.
+                    *)
+                        echo "fake-ssh: unrecognized option -$flag" >&2
+                        exit 255
+                        ;;
+                esac
+            done
             ;;
         *)
             break

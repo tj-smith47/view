@@ -314,6 +314,15 @@ enum EngineRoute {
     /// The same engine reached through the committed stand-in ssh client
     /// (`view_oracle::remote`), which joins its trailing arguments and hands
     /// them to a shell exactly as a real client does.
+    ///
+    /// The transport is the whole of the difference, which
+    /// `view_oracle::remote::stub_config` is what keeps true: it hands the
+    /// far-side child the same prepared hermetic home the local route gets,
+    /// rather than the exemption a config aimed at a real destination has to
+    /// take (`view_engine::process::EngineConfig::env_plan` says why that
+    /// exemption exists). An entry that probes anything home-shaped
+    /// therefore reads the same on both legs, and a divergence marked
+    /// `(remote)` is about the transport.
     StubRemote,
 }
 
