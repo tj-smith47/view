@@ -19,6 +19,95 @@ use std::time::{Duration, Instant};
 use view_core::msg::ExitInfo;
 use view_core::sink::MsgSink;
 
+/// A remote target an engine spawn is routed to over the system `ssh`
+/// client, resolved from the CLI's remote flags into the arguments the
+/// spawn path needs.
+///
+/// Kept as a small, explicit struct rather than a pre-built argument vector
+/// so a caller can inspect what was resolved (auth-failure guidance, a
+/// remote-session introspector) without re-parsing an argument vector.
+///
+/// Assumes a POSIX remote shell: the constructed command line is
+/// POSIX-shell-shaped and is not designed for a `cmd.exe` or PowerShell
+/// remote target.
+///
+/// `#[non_exhaustive]`: cross-crate callers build one from
+/// [`new`](Self::new) and the `with_*` methods below, so a field added here
+/// arrives with a default rather than breaking every construction site.
+#[non_exhaustive]
+#[derive(Debug, Clone)]
+pub struct RemoteSpec {
+    /// The destination, in ssh's own `[user@]host` syntax verbatim: it is
+    /// handed to the client unparsed, so an alias defined in the user's own
+    /// `~/.ssh/config` resolves exactly as it does on their command line.
+    pub target: String,
+    /// The `nvim` binary on the far side, resolved against the remote
+    /// user's own `PATH`. `"nvim"` by default.
+    pub remote_nvim_bin: String,
+    /// The port passed to the client as `-p`, or `None` to leave the
+    /// client's own resolution (`~/.ssh/config`, the default 22) alone.
+    pub port: Option<u16>,
+    /// `KEY=VALUE` pairs, each passed to the client as its own `-o`
+    /// argument, in the order given.
+    pub extra_ssh_opts: Vec<String>,
+    /// The local ssh client to run. `"ssh"` by default, resolved on the
+    /// spawning process's own `PATH`.
+    ///
+    /// A field rather than a hardcoded program name because the search that
+    /// resolves it cannot be redirected any other way: `execvp` and
+    /// `posix_spawnp` read the *calling* process's `PATH`, never the one a
+    /// [`Command`] was configured with, so a `PATH` entry pushed into the
+    /// child's environment would silently fail to select the client it
+    /// names. A test double standing in for the client, or an operator
+    /// pinning one build of it, both go here.
+    pub ssh_bin: PathBuf,
+}
+
+impl RemoteSpec {
+    /// A spec for `target`, in ssh's own `[user@]host` syntax, with every
+    /// other setting at the client's own default.
+    #[must_use]
+    pub fn new(target: impl Into<String>) -> Self {
+        Self {
+            target: target.into(),
+            remote_nvim_bin: String::from("nvim"),
+            port: None,
+            extra_ssh_opts: vec![],
+            ssh_bin: PathBuf::from("ssh"),
+        }
+    }
+
+    /// The `nvim` binary to run on the far side, replacing the remote
+    /// `PATH` lookup of `nvim`.
+    #[must_use]
+    pub fn with_remote_nvim_bin(mut self, bin: impl Into<String>) -> Self {
+        self.remote_nvim_bin = bin.into();
+        self
+    }
+
+    /// The port the client connects to, replacing its own resolution.
+    #[must_use]
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Appends one `KEY=VALUE` client option, passed through as `-o`.
+    #[must_use]
+    pub fn with_ssh_opt(mut self, opt: impl Into<String>) -> Self {
+        self.extra_ssh_opts.push(opt.into());
+        self
+    }
+
+    /// The local ssh client to run, replacing the `PATH` lookup of `ssh`
+    /// (see the [`ssh_bin`](Self::ssh_bin) field).
+    #[must_use]
+    pub fn with_ssh_bin(mut self, bin: impl Into<PathBuf>) -> Self {
+        self.ssh_bin = bin.into();
+        self
+    }
+}
+
 /// Configuration for spawning an embedded Neovim process.
 ///
 /// `#[non_exhaustive]`: the hermetic environment plan an isolated spawn
@@ -72,6 +161,13 @@ pub struct EngineConfig {
     /// touch it directly.
     #[cfg(unix)]
     stdin_relay: Option<std::os::fd::OwnedFd>,
+    /// The remote target [`build_command`] routes the spawn through, or
+    /// `None` for a local child. Private for the same reason `hermetic` is:
+    /// where the child runs decides what its whole environment plan means,
+    /// and a caller that could set this field directly on a config built by
+    /// [`isolated`](Self::isolated) would produce one describing a local
+    /// isolation the far side never receives.
+    remote: Option<RemoteSpec>,
 }
 
 impl Default for EngineConfig {
@@ -86,6 +182,7 @@ impl Default for EngineConfig {
             hermetic: false,
             #[cfg(unix)]
             stdin_relay: None,
+            remote: None,
         }
     }
 }
@@ -159,6 +256,23 @@ impl EngineConfig {
     #[must_use]
     pub fn with_env_remove(mut self, name: impl Into<OsString>) -> Self {
         self.env_remove.push(name.into());
+        self
+    }
+
+    /// Arms a remote spawn: [`Engine::spawn`] routes through the system
+    /// `ssh` client instead of the local [`nvim_bin`](Self::nvim_bin), and
+    /// [`env_plan`](Self::env_plan) rides the single command string that
+    /// client hands the remote shell, rather than the local child's own
+    /// environment, which is the `ssh` process itself and forwards nothing.
+    ///
+    /// A stdin relay armed by [`with_stdin_relay`](Self::with_stdin_relay)
+    /// reaches the local `ssh` process only. The client forwards its own
+    /// standard input as the remote command's, which `--embed` has already
+    /// claimed for the RPC channel, so there is no second descriptor for a
+    /// relay to arrive on at the far end.
+    #[must_use]
+    pub fn with_remote(mut self, remote: RemoteSpec) -> Self {
+        self.remote = Some(remote);
         self
     }
 
@@ -977,9 +1091,15 @@ fn takes_no_value(arg: &str) -> bool {
         || arg.starts_with('+')
 }
 
-/// Builds the `nvim --embed` command `cfg` describes, applying
-/// [`EngineConfig::env_plan`] entry by entry so the environment the child
-/// gets is the plan a caller can inspect, never a second derivation of it.
+/// Builds the command `cfg` describes: the local `nvim --embed` child, or
+/// the `ssh` client that starts that same child on a remote host when
+/// [`EngineConfig::with_remote`] armed one.
+///
+/// The stdio shape is one shape for both, set here rather than in either
+/// branch: two pipes and a discarded stderr, which is what the RPC channel
+/// needs and all it needs. An `ssh` client's own standard input and output
+/// are the remote command's, so the branch that wraps one hands back a
+/// child indistinguishable from a local `nvim` to everything downstream.
 ///
 /// # The one `--cmd` this spends
 ///
@@ -993,22 +1113,10 @@ fn takes_no_value(arg: &str) -> bool {
 /// the RPC channel exists, which a caller sees as a handshake that never
 /// happens. Nine `--cmd` arguments are what a config may still spend.
 fn build_command(cfg: &EngineConfig) -> Command {
-    let mut command = Command::new(&cfg.nvim_bin);
-    // ahead of `extra_args`, which is where a caller's file arguments live:
-    // nvim runs `--cmd` commands before it opens any of them, and an
-    // autocommand registered after the file it is meant to guard is already
-    // open guards nothing
-    command
-        .arg("--embed")
-        .arg("--cmd")
-        .arg(SWAP_RECOVERY_CMD)
-        .args(&cfg.extra_args);
-    for (name, value) in cfg.env_plan() {
-        match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+    let mut command = match &cfg.remote {
+        None => local_command(cfg),
+        Some(remote) => remote_command(remote, cfg),
+    };
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -1032,6 +1140,131 @@ fn build_command(cfg: &EngineConfig) -> Command {
         }
     }
     command
+}
+
+/// The local half of [`build_command`]: `nvim --embed` run on this host,
+/// with [`EngineConfig::env_plan`] applied entry by entry so the environment
+/// the child gets is the plan a caller can inspect, never a second
+/// derivation of it.
+fn local_command(cfg: &EngineConfig) -> Command {
+    let mut command = Command::new(&cfg.nvim_bin);
+    // ahead of `extra_args`, which is where a caller's file arguments live:
+    // nvim runs `--cmd` commands before it opens any of them, and an
+    // autocommand registered after the file it is meant to guard is already
+    // open guards nothing
+    command
+        .arg("--embed")
+        .arg("--cmd")
+        .arg(SWAP_RECOVERY_CMD)
+        .args(&cfg.extra_args);
+    for (name, value) in cfg.env_plan() {
+        match value {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+}
+
+/// The remote half of [`build_command`]: the system `ssh` client, carrying
+/// its own connection options and then the one string the far side's shell
+/// re-parses into the same `nvim --embed` invocation the local half runs
+/// directly.
+///
+/// The environment plan is deliberately *not* applied to this `Command`.
+/// `Command::env` would set it on the local `ssh` process, which is not the
+/// process the plan describes and does not forward it: an override landing
+/// there is at best inert and at worst a redirection of the client's own
+/// key and configuration lookup (`HOME`, `PATH`). It rides the remote
+/// command line instead (see [`remote_command_line`]).
+///
+/// `BatchMode=yes` is the transport analogue of the rule that no paint ever
+/// waits on RPC. An embedded, headless client has no way to render a
+/// password or host-key prompt and no keyboard to answer one with, so a
+/// client permitted to ask would hang the handshake with the question
+/// invisible. Batch mode turns every such prompt into an immediate refusal
+/// the spawn reports as an error instead.
+///
+/// `-T` for the same reason from the other direction: a pty allocated on
+/// the far side would put a terminal discipline (echo, newline
+/// translation) in the middle of a binary msgpack stream.
+fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Command {
+    let mut command = Command::new(&remote.ssh_bin);
+    command.arg("-T").arg("-o").arg("BatchMode=yes");
+    if let Some(port) = remote.port {
+        command.arg("-p").arg(port.to_string());
+    }
+    for opt in &remote.extra_ssh_opts {
+        command.arg("-o").arg(opt);
+    }
+    // every argument from here on is the client's to send, not to read:
+    // the destination first, then the single command string
+    command.arg(&remote.target);
+    command.arg(remote_command_line(remote, cfg));
+    command
+}
+
+/// Builds the single string `ssh` hands to the remote shell for re-parsing.
+///
+/// `ssh` does not preserve [`Command::arg`] boundaries across the wire:
+/// every argument trailing the destination is joined with spaces into one
+/// string before the remote side ever sees it, so the string is constructed
+/// here rather than left to an argv passthrough that does not exist. A
+/// value carrying a space would otherwise word-split into extra remote
+/// shell tokens, and one carrying `$`, a backtick or `;` would run as
+/// remote shell syntax. Path-shaped variables that plausibly contain spaces
+/// ([`crate::env::HOST_REDIRECT_VARS`]) are exactly what an engine forwards,
+/// so both are reachable rather than theoretical.
+///
+/// Every token is single-quote-escaped uniformly, not only the ones judged
+/// to need it: classifying which tokens are safe is the mistake that leaves
+/// the one space-, quote- or `$`-bearing value unescaped.
+///
+/// A `None` entry in the plan (an `env_remove`) is not forwarded. Its
+/// subject is what the local host's own shell exported into this process,
+/// and a remote host that never inherited that environment has nothing of
+/// the kind to unset.
+fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> String {
+    // `--` ends `env`'s own option parsing, so a remote nvim path beginning
+    // with a dash is a program name rather than a flag. It goes here, ahead
+    // of the assignments, and not between them and the program: every `env`
+    // implementation measured (GNU, uutils, the BSD one macOS ships) reads
+    // an operand after the assignments as the utility to run, and rejects
+    // this one with `--: No such file or directory`.
+    let mut tokens = vec![String::from("env"), String::from("--")];
+    for (name, value) in cfg.env_plan() {
+        if let Some(value) = value {
+            tokens.push(format!(
+                "{}={}",
+                name.to_string_lossy(),
+                value.to_string_lossy()
+            ));
+        }
+    }
+    tokens.push(remote.remote_nvim_bin.clone());
+    // same order and the same reason as the local half: the swap answer
+    // rides every spawn, ahead of the files it opens
+    tokens.push(String::from("--embed"));
+    tokens.push(String::from("--cmd"));
+    tokens.push(String::from(SWAP_RECOVERY_CMD));
+    tokens.extend(
+        cfg.extra_args
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned()),
+    );
+    tokens
+        .iter()
+        .map(|token| shell_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// POSIX single-quote escaping: wraps `token` in `'...'` and replaces every
+/// literal `'` inside it with `'\''` (close the quote, escape the quote,
+/// reopen), the standard rule for a string a POSIX shell parses back as
+/// exactly one word whatever its contents.
+fn shell_quote(token: &str) -> String {
+    format!("'{}'", token.replace('\'', "'\\''"))
 }
 
 /// Duplicates `source` onto the child's fd
@@ -1469,6 +1702,188 @@ mod config_tests {
             plan.contains(&(host.clone(), Some(OsString::from("caller-chose-this")))),
             "the sweep dropped {host:?} though the caller set it deliberately; \
              plan {plan:?}"
+        );
+    }
+
+    /// The program and argument vector the spawn path would hand the
+    /// operating system, read back off the built `Command` for the same
+    /// reason [`spawned_env`] reads the environment off it.
+    fn built(cfg: &EngineConfig) -> (OsString, Vec<OsString>) {
+        let command = build_command(cfg);
+        (
+            command.get_program().to_os_string(),
+            command.get_args().map(OsStr::to_os_string).collect(),
+        )
+    }
+
+    /// The one string the client joins everything trailing the destination
+    /// into, which is the whole of what the remote shell re-parses.
+    fn remote_line(cfg: &EngineConfig) -> String {
+        let (_, args) = built(cfg);
+        args.last()
+            .expect("a remote command carries at least the command string")
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn osv(items: &[&str]) -> Vec<OsString> {
+        items.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn a_remote_config_spawns_the_ssh_client_instead_of_the_local_nvim() {
+        let cfg = EngineConfig::default()
+            .with_nvim_bin("/local/bin/nvim")
+            .with_remote(RemoteSpec::new("user@host"));
+        let (program, args) = built(&cfg);
+        assert_eq!(
+            program,
+            OsString::from("ssh"),
+            "a remote config must run the ssh client; running the local nvim \
+             instead edits this host's files while reporting the remote's"
+        );
+        assert!(
+            args.contains(&OsString::from("user@host")),
+            "the destination never reached the client; args {args:?}"
+        );
+        assert!(
+            !args.iter().any(|arg| arg == OsStr::new("/local/bin/nvim")),
+            "the local nvim path leaked into the remote command; args {args:?}"
+        );
+    }
+
+    /// Everything the client parses for itself comes before the
+    /// destination, and exactly one argument comes after it: the client
+    /// joins every trailing argument into one string regardless, so a
+    /// second one here would be a boundary the far side never sees.
+    #[test]
+    fn a_remote_spawn_carries_the_clients_own_options_ahead_of_the_destination() {
+        let spec = RemoteSpec::new("host")
+            .with_port(2222)
+            .with_ssh_opt("ConnectTimeout=4")
+            .with_ssh_opt("StrictHostKeyChecking=yes");
+        let cfg = EngineConfig::default().with_remote(spec);
+        let (_, args) = built(&cfg);
+        let destination = args
+            .iter()
+            .position(|arg| arg == OsStr::new("host"))
+            .expect("the destination must appear in the argument vector");
+        assert_eq!(
+            args[..destination],
+            osv(&[
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-p",
+                "2222",
+                "-o",
+                "ConnectTimeout=4",
+                "-o",
+                "StrictHostKeyChecking=yes",
+            ])[..],
+            "a pty on the far side would corrupt a binary msgpack stream, \
+             and a client permitted to prompt hangs a handshake nothing can \
+             answer; args {args:?}"
+        );
+        assert_eq!(
+            args.len(),
+            destination + 2,
+            "everything trailing the destination is joined into one string \
+             by the client, so a second trailing argument is an argv \
+             boundary the remote shell never receives; args {args:?}"
+        );
+    }
+
+    /// The environment plan reaches the far side on the command line, ahead
+    /// of the binary it applies to.
+    #[test]
+    fn a_planned_environment_override_rides_the_single_remote_command_line() {
+        let cfg = EngineConfig::default()
+            .with_env("NVIM_APPNAME", "work")
+            .with_remote(RemoteSpec::new("host").with_remote_nvim_bin("/opt/nvim/bin/nvim"));
+        let line = remote_line(&cfg);
+        let planned = line
+            .find("'NVIM_APPNAME=work'")
+            .expect("the override must ride the remote command line");
+        let binary = line
+            .find("'/opt/nvim/bin/nvim'")
+            .expect("the remote binary must appear in the command line");
+        assert!(
+            planned < binary,
+            "an assignment after the program name is an argument to it, not \
+             an environment entry; line {line}"
+        );
+        let end_of_options = line
+            .find("'--'")
+            .expect("the command line must end env's own option parsing");
+        assert!(
+            end_of_options < planned,
+            "every env implementation measured reads an operand after the \
+             assignments as the program to run, and refuses this one with \
+             `--: No such file or directory`; line {line}"
+        );
+    }
+
+    /// `Command::env` on the remote branch would configure the local client,
+    /// not the editor: at best inert, at worst a redirection of the client's
+    /// own key and configuration lookup.
+    #[test]
+    fn a_remote_spawn_leaves_the_local_ssh_clients_own_environment_alone() {
+        let cfg = EngineConfig::default()
+            .with_env("HOME", "/planted")
+            .with_remote(RemoteSpec::new("host"));
+        assert!(
+            spawned_env(&cfg).is_empty(),
+            "the plan was applied to the ssh client's own environment, which \
+             is not the process it describes; env {:?}",
+            spawned_env(&cfg)
+        );
+        assert!(
+            remote_line(&cfg).contains("'HOME=/planted'"),
+            "the plan reached neither the client nor the far side; line {}",
+            remote_line(&cfg)
+        );
+    }
+
+    /// Uniform escaping, asserted on the values that break a design which
+    /// escapes only what it judges to need it: the client hands the remote
+    /// shell one string, so a bare space word-splits and bare shell syntax
+    /// runs.
+    #[test]
+    fn every_remote_token_is_escaped_whatever_it_carries() {
+        let cfg = EngineConfig::default()
+            .with_env("SPACED", "/home/a user/init.lua")
+            .with_env("QUOTED", "it's here")
+            .with_env("SHELLY", "$(id); `id`; rm -rf /")
+            .with_remote(RemoteSpec::new("host"));
+        let line = remote_line(&cfg);
+        assert!(
+            line.contains("'SPACED=/home/a user/init.lua'"),
+            "a space-bearing value must survive as one word; line {line}"
+        );
+        assert!(
+            line.contains(r"'QUOTED=it'\''s here'"),
+            "a quote-bearing value must close, escape and reopen the quote; \
+             line {line}"
+        );
+        assert!(
+            line.contains("'SHELLY=$(id); `id`; rm -rf /'"),
+            "shell syntax in a value must reach the far side as text, never \
+             as syntax; line {line}"
+        );
+    }
+
+    /// A removal's subject is what this host's own shell exported into this
+    /// process. A remote host never inherited it and has nothing to unset.
+    #[test]
+    fn a_removal_is_not_forwarded_to_a_host_that_never_inherited_it() {
+        let cfg = EngineConfig::default()
+            .with_env_remove("VIMINIT")
+            .with_remote(RemoteSpec::new("host"));
+        let line = remote_line(&cfg);
+        assert!(
+            !line.contains("VIMINIT"),
+            "a removal was forwarded as if it were an assignment; line {line}"
         );
     }
 }

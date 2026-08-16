@@ -1,0 +1,61 @@
+#!/bin/sh
+# A stand-in for the OpenSSH client, for tests that must exercise the remote
+# spawn path on a host with no reachable sshd and no network egress.
+#
+# It reproduces the one client behaviour those tests are about, rather than a
+# more forgiving version of it: real ssh parses its own connection options
+# locally, then joins EVERYTHING trailing the destination with spaces into a
+# single string and hands that string to the remote user's shell to re-parse.
+# A double that exec'd its trailing arguments directly, preserving them as a
+# normal argv, would happily run a caller whose quoting is wrong and a real
+# remote host would reject, so the re-parse is reproduced here, never
+# bypassed.
+#
+# What it does not reproduce: authentication, host-key verification,
+# ~/.ssh/config resolution, and the network hop itself. The command runs on
+# this host, as this user.
+set -eu
+
+# The client's own options, stripped the way the real one does: a value
+# either follows in the next argument or is attached to the flag.
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -o | -p | -i | -l | -F | -b | -c | -D | -E | -e | -I | -J | -L | -m | -O | -Q | -R | -S | -W | -w)
+            if [ "$#" -lt 2 ]; then
+                echo "fake-ssh: $1 needs a value" >&2
+                exit 255
+            fi
+            shift 2
+            ;;
+        --)
+            shift
+            break
+            ;;
+        -*)
+            shift
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ "$#" -lt 1 ]; then
+    echo "fake-ssh: no destination argument" >&2
+    exit 255
+fi
+# the destination is parsed by the client and never sent; everything after it
+# belongs to the remote side
+shift
+
+if [ "$#" -lt 1 ]; then
+    echo "fake-ssh: no remote command" >&2
+    exit 255
+fi
+
+# "$*" joins with the first character of IFS (a space), which is the join the
+# real client performs before the remote shell ever sees the request. `exec`
+# so the remote command inherits this process's own stdin and stdout: those
+# are the pipes the caller opened, and the RPC channel runs over them exactly
+# as it would over a real connection.
+exec sh -c "$*"
