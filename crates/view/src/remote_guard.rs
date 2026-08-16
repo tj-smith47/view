@@ -413,7 +413,14 @@ fn probe_connection(remote: &RemoteSpec) -> Reachability {
 /// the connection runs with its stderr discarded, so the exit status is
 /// still read and only the quoted line is lost.
 fn probe_connection_within(remote: &RemoteSpec, limit: Duration) -> Reachability {
-    let capture = Capture::open();
+    probe_capturing(remote, limit, Capture::open())
+}
+
+/// [`probe_connection_within`] with the capture handed in rather than
+/// opened, so what a host that cannot offer one is told is exercisable from
+/// a host that can. `None` is that host: the client's output is discarded
+/// and the classification is the exit status alone.
+fn probe_capturing(remote: &RemoteSpec, limit: Duration, capture: Option<Capture>) -> Reachability {
     let sink = match capture.as_ref().map(Capture::sink) {
         Some(Ok(sink)) => Stdio::from(sink),
         Some(Err(_)) | None => Stdio::null(),
@@ -477,13 +484,20 @@ struct Capture {
 }
 
 impl Capture {
-    /// A capture directory of this process's own, or `None` when the
-    /// system scratch directory cannot hold one.
+    /// A capture directory of this process's own under the system scratch
+    /// directory, or `None` when that directory cannot hold one.
     fn open() -> Option<Self> {
+        Self::open_in(&std::env::temp_dir())
+    }
+
+    /// [`open`](Self::open) under a named parent, so the failure of a parent
+    /// that cannot hold a directory is reachable without planting a name in
+    /// the environment of a process running many diagnoses at once.
+    fn open_in(base: &Path) -> Option<Self> {
         // two probes in one process would otherwise collide on the name,
         // and the counter alone repeats across runs of the same binary
         static NONCE: AtomicU64 = AtomicU64::new(0);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = base.join(format!(
             "view-probe-{}-{}",
             std::process::id(),
             NONCE.fetch_add(1, Ordering::Relaxed)
@@ -1182,6 +1196,38 @@ mod tests {
                 ))
             }
         );
+    }
+
+    /// A host whose scratch directory cannot hold a capture still gets a
+    /// diagnosis: the connection runs with its output discarded and is
+    /// classified on the exit status alone, which is the whole of what the
+    /// fallback promises. Reporting `Unknown` here would throw away a
+    /// refusal the client did make, over a file this host could not offer.
+    #[test]
+    fn a_probe_that_cannot_open_its_capture_still_names_the_rejection() {
+        let spec = RemoteSpec::new("view-test-host").with_ssh_bin(refusing_client());
+        assert_eq!(
+            probe_capturing(&spec, PROBE_LIMIT, None),
+            Reachability::Rejected { detail: None },
+            "the rejection is the client's exit status, which no scratch \
+             directory is needed to read"
+        );
+    }
+
+    /// The state that fallback stands for is a real one: a parent that
+    /// cannot hold a directory yields no capture rather than a capture
+    /// nothing can be written into.
+    ///
+    /// The parent here is a regular file, which refuses `create_dir` for
+    /// every user including the one this suite often runs as; a refusal
+    /// spelled with permissions would be bypassed by root.
+    #[test]
+    fn a_capture_under_a_parent_that_cannot_hold_one_is_never_opened() {
+        let scratch = Scratch::new("unusable-capture-parent");
+        let blocker = scratch.0.join("blocker-file");
+        std::fs::write(&blocker, b"").unwrap();
+        assert!(Capture::open_in(&blocker).is_none());
+        assert!(Capture::open_in(&blocker.join("sub")).is_none());
     }
 
     /// A capture is one diagnosis's own, and outlives none of them: the
