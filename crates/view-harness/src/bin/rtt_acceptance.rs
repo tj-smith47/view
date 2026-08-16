@@ -97,6 +97,43 @@ impl Drop for ScratchRoot {
     }
 }
 
+/// How many independent round trips [`median_probe`] takes through the
+/// relay before reducing to a median. Sized from measured data, not
+/// guessed: 150 raw single-sample trials at `DELAY_RELAY_MS=0` on this
+/// host ranged 28.4-52.0ms (a 23.6ms single-sample spread); bucketing that
+/// same pool into medians-of-N narrowed the spread to 11.1ms at N=7,
+/// 9.0ms at N=9, 8.2ms at N=11.
+const PROBE_TRIALS: usize = 11;
+
+/// The probe payload every [`median_probe`] round trip must read back
+/// unchanged.
+const PROBE_LINE: &str = "hello from the jitter-tolerance test";
+
+/// Median round-trip time through the delay relay at `rtt_ms`, over
+/// [`PROBE_TRIALS`] independent trials wrapping `cat`.
+///
+/// # Errors
+///
+/// Whatever [`echo_speculated_rtt::round_trip_through_relay`] reports, or
+/// [`BenchError::Desync`]'s anyhow-wrapped equivalent if any trial's probe
+/// line comes back altered.
+fn median_probe(cat: &str, rtt_ms: u64, trials: usize) -> Result<Duration> {
+    let mut samples = Vec::with_capacity(trials);
+    for _ in 0..trials {
+        let (elapsed, line) = echo_speculated_rtt::round_trip_through_relay(rtt_ms, cat)
+            .with_context(|| format!("probing the delay relay's round trip at RTT {rtt_ms}ms"))?;
+        if line.trim_end() != PROBE_LINE {
+            bail!(
+                "RTT {rtt_ms}ms: the delay relay's probe echoed {line:?} instead of the probe \
+                 line unchanged"
+            );
+        }
+        samples.push(elapsed);
+    }
+    samples.sort_unstable();
+    Ok(samples[trials / 2])
+}
+
 fn budgets_path() -> PathBuf {
     workspace_root()
         .join("crates")
@@ -248,8 +285,30 @@ fn main() -> Result<()> {
 
     let tiers: Vec<u64> = cli.tiers.clone().unwrap_or_else(|| RTT_TIERS_MS.to_vec());
 
+    let cat = echo_speculated_rtt::cat_path()
+        .with_context(|| "no cat binary found to probe the delay relay's own round trip")?;
+    // Calibrated once, against RTT 0ms specifically, regardless of whether
+    // 0 is itself in `tiers`: the one stable reference every other tier's
+    // expected round trip is built from below.
+    let floor_ms = median_probe(cat, 0, PROBE_TRIALS)
+        .with_context(|| "calibrating the delay relay's own round-trip floor at RTT 0ms")?
+        .as_secs_f64()
+        * 1000.0;
+
+    // Lower-bound slack for the per-tier floor check below: generous
+    // enough that a genuinely working relay's own median-of-PROBE_TRIALS
+    // noise (measured spread ~8-10ms at N=11, see PROBE_TRIALS) never
+    // trips it, comfortably tight enough that a relay which stopped
+    // injecting delay -- whose every tier's actual round trip stays near
+    // `floor_ms` regardless of `rtt_ms` -- still falls short of even the
+    // smallest advertised tier gap's expected floor by a wide margin: at
+    // the smallest default/advertised gap (RTT 25ms, a 50ms round-trip
+    // separation from the floor since one probe crosses the relay twice),
+    // a broken relay's expected-vs-floor shortfall is `50 - 20 = 30ms`,
+    // roughly 3-4x that measured noise spread.
+    const FLOOR_SLACK_MS: f64 = 20.0;
+
     let mut all_pass = true;
-    let mut prev_tracked: Option<(u64, Duration)> = None;
     for &rtt_ms in &tiers {
         // one sample's wait crosses the relay twice (input notify out,
         // redraw back), so the default 5s budget -- sized for a local,
@@ -292,29 +351,34 @@ fn main() -> Result<()> {
         // through the same relay binary at the same configured `rtt_ms`,
         // outside the scenario entirely, so its round trip has nothing to
         // hide behind.
-        let cat = echo_speculated_rtt::cat_path()
-            .with_context(|| "no cat binary found to probe the delay relay's own round trip")?;
-        let (probe_elapsed, probe_line) =
-            echo_speculated_rtt::round_trip_through_relay(rtt_ms, cat).with_context(|| {
-                format!("probing the delay relay's round trip at RTT {rtt_ms}ms")
-            })?;
-        if probe_line.trim_end() != "hello from the jitter-tolerance test" {
+        //
+        // Checked against `floor_ms` (an absolute, once-calibrated
+        // reference), not against the *previous* tier's own probe: an
+        // earlier version compared each tier's median only to its
+        // immediate predecessor's, which is a coin flip a broken relay
+        // wins roughly half the time no matter how large that predecessor
+        // gap is, or how many trials each median is built from -- when the
+        // relay is broken, every tier's actual round trip is an
+        // independent draw from the *same* flat floor distribution, so two
+        // such draws are equally likely to come back either order,
+        // regardless of sample count (mutation-tested directly: 5 of 10
+        // `--tiers 0,25` runs against a broken relay still falsely passed
+        // under the pairwise design, even at PROBE_TRIALS=11). Comparing
+        // against a fixed target instead breaks that symmetry: a broken
+        // relay's actual value stays near `floor_ms` for every tier, while
+        // the expected value grows with `rtt_ms`, so the shortfall widens
+        // rather than staying a coin flip.
+        let expected_min_ms = floor_ms + 2.0 * rtt_ms as f64 - FLOOR_SLACK_MS;
+        let probe_elapsed = median_probe(cat, rtt_ms, PROBE_TRIALS)?;
+        let probe_ms = probe_elapsed.as_secs_f64() * 1000.0;
+        if probe_ms < expected_min_ms {
             bail!(
-                "RTT {rtt_ms}ms: the delay relay's probe echoed {probe_line:?} instead of the \
-                 probe line unchanged"
+                "RTT {rtt_ms}ms tier's direct relay-probe round trip {probe_ms:.2}ms fell short of \
+                 the {expected_min_ms:.2}ms this tier's configured delay requires (calibrated \
+                 floor {floor_ms:.2}ms + 2x{rtt_ms}ms round trip - {FLOOR_SLACK_MS}ms slack); the \
+                 relay may have stopped injecting the configured delay"
             );
         }
-        if let Some((prev_rtt, prev_probe)) = prev_tracked {
-            if rtt_ms > prev_rtt && probe_elapsed <= prev_probe {
-                bail!(
-                    "RTT {rtt_ms}ms tier's direct relay-probe round trip {probe_elapsed:?} did not \
-                     exceed the {prev_rtt}ms tier's {prev_probe:?}; a higher configured RTT must \
-                     make the relay's own round trip strictly longer, or the relay may have \
-                     stopped injecting the configured delay"
-                );
-            }
-        }
-        prev_tracked = Some((rtt_ms, probe_elapsed));
 
         let tier_root = root.join(format!("tier-{rtt_ms}"));
         let view_side = side_setup(&cli.fixture, "view", &tier_root)?;
@@ -378,7 +442,7 @@ fn main() -> Result<()> {
                     cli.class
                 ),
             };
-            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {honest_column}  view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
+            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {honest_column}  probe {probe_elapsed:?} view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
         } else {
             let equivalent_column = match honest_view_p99_ms {
                 Some(honest_ms) => {
@@ -388,7 +452,7 @@ fn main() -> Result<()> {
                 }
                 None => format!("unspeculated equivalent unrecorded on class {}", cli.class),
             };
-            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {equivalent_column}  view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
+            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {equivalent_column}  probe {probe_elapsed:?} view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
         }
     }
 
