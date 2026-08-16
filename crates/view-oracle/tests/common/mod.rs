@@ -1,5 +1,5 @@
-//! Scaffolding shared by this crate's integration test binaries
-//! (`smoke.rs`, `driver_legs.rs`): locating the `view` binary, isolating a
+//! Scaffolding shared by every integration test binary in this crate that
+//! spawns a real `view` process: locating the `view` binary, isolating a
 //! spawned `view` process's `XDG_*_HOME` from the host's real nvim config,
 //! and a scratch-file/isolated-home pair that cleans itself up on drop.
 //!

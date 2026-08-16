@@ -6,7 +6,7 @@
 //! `Effect::ClipboardWrite` on every copy, unconditionally
 //! (`crates/view-core/src/update/mod.rs`'s `EngineRequest::ClipboardSet`
 //! arm) -- never gated on a local display being present -- and
-//! `Term::write_osc52` (`crates/view-tui/src/terminal.rs:205-212,538-540`)
+//! `crates/view-tui/src/terminal.rs`'s `write_osc52_bytes`/`Term::write_osc52`
 //! is a pure function of the register and yanked text it is handed. Nothing
 //! in that path reads the transport the engine was reached over, so the
 //! escape a real `view` process writes to its own pty is exactly what this
@@ -50,11 +50,11 @@ const REMOTE_TARGET: &str = "view-oracle-osc52-stub-host";
 const MARKER: &str = "view-osc52-oracle-marker";
 
 /// Symlinks a directory's `ssh` at [`view_oracle::remote::stub_client`] under
-/// `scratch`, and returns a `PATH` value with that directory leading the
+/// `home`, and returns a `PATH` value with that directory leading the
 /// caller's own -- see this file's module doc for why a `PATH` lead is the
 /// substitution the CLI's own remote flags leave room for.
-fn stub_ssh_path(scratch: &std::path::Path) -> std::ffi::OsString {
-    let dir = scratch.join("stub-ssh-bin");
+fn stub_ssh_path(home: &std::path::Path) -> std::ffi::OsString {
+    let dir = home.join("stub-ssh-bin");
     std::fs::create_dir_all(&dir).expect("the stub ssh bin directory must be creatable");
     let link = dir.join("ssh");
     if link.symlink_metadata().is_err() {
@@ -183,6 +183,18 @@ fn osc52_clipboard_escape_is_byte_identical_local_vs_stub_remote() {
         local_osc52.starts_with(REGISTER_PREFIX),
         "a `\"+yy` yank must select OSC 52's clipboard code 'c' \
          (`write_osc52_bytes`'s register mapping), got {local_osc52:?}"
+    );
+    // pins the payload itself, not just its prefix: a mutation that severs
+    // the base64 encode (e.g. `write_base64(writer, b"")`) still satisfies
+    // the prefix check and the equality assert below (both legs would drop
+    // the payload identically), so only a full-sequence pin catches it.
+    // `dmlldy1vc2M1Mi1vcmFjbGUtbWFya2VyCg==` is base64 of `{MARKER}\n`
+    // (linewise, per `view_native::clipboard::lines_to_text`).
+    const EXPECTED_LOCAL: &[u8] = b"\x1b]52;c;dmlldy1vc2M1Mi1vcmFjbGUtbWFya2VyCg==\x1b\\";
+    assert_eq!(
+        local_osc52, EXPECTED_LOCAL,
+        "the local yank's OSC 52 payload must carry base64 of `{MARKER}\\n` \
+         (linewise, per `view_native::clipboard::lines_to_text`), got {local_osc52:?}"
     );
 
     // the same yank through the stub-ssh remote path, held against the
