@@ -642,9 +642,9 @@ impl Engine {
     /// before the error is returned; no zombie survives a failed `spawn`.
     ///
     /// A remote `cfg` returns `EngineError::Io` before anything is prepared
-    /// or started when it also carries a setting a remote spawn cannot
-    /// honour, or a destination that is not one (see
-    /// [`refuse_incoherent_remote`]).
+    /// or started when it carries a setting a remote spawn cannot honour (a
+    /// hermetic plan, a stdin relay) or a destination that does not name a
+    /// host (empty, or beginning with a dash).
     ///
     /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
     /// search path cannot be established empty (see
