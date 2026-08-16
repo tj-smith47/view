@@ -38,7 +38,10 @@
 //! target.
 
 use std::ffi::{OsStr, OsString};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::scenarios::taps;
 use crate::session::SpawnSpec;
@@ -50,8 +53,12 @@ use crate::BenchError;
 pub const STUB_TARGET: &str = "view-rtt-acceptance-stub-host";
 
 /// The four RTT tiers the acceptance proof brackets: same-region SSH
-/// (tens of ms), cross-region (low hundreds), and a zero-delay control
-/// that isolates the relay's own overhead from an injected figure.
+/// (tens of ms), cross-region (low hundreds), and a `0` row that is a
+/// floor-only control, not a zero-latency one -- the relay's own
+/// coalescing window and interpreter overhead still apply at `0`, so this
+/// row isolates *that* fixed floor (measured ~28ms round trip over `cat`)
+/// from the configured delay the other three add on top of it, rather
+/// than measuring an actual zero-transport-latency spawn.
 pub const RTT_TIERS_MS: [u64; 4] = [0, 25, 100, 300];
 
 /// The committed userspace byte relay (`scripts/test-fixtures/delay-relay`)
@@ -71,13 +78,67 @@ pub fn delay_relay_client() -> PathBuf {
         .join("delay-relay")
 }
 
+/// Resolves a working Python interpreter for the delay relay's own
+/// `#!/usr/bin/env python3` shebang, trying the same names in the same
+/// order `scripts/crosscheck-god-files.sh` already does for its own
+/// Python dependency (a Windows runner ships `python`, not `python3`).
+/// "Working" means the candidate actually runs, not merely that a file by
+/// that name sits on `PATH` -- a stub or a broken alias would otherwise
+/// pass and fail later, opaquely, inside the relay's own exec.
+fn python_interpreter() -> Option<&'static str> {
+    ["python3", "python", "py"].into_iter().find(|candidate| {
+        Command::new(candidate)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    })
+}
+
+/// Why this host cannot run the RTT-tiered leg, checked in the order a
+/// spawn would actually fail on each precondition -- so the first one that
+/// fails is the one reported, instead of a spawn that fails opaquely
+/// inside the relay's own exec (a missing interpreter looks identical to a
+/// broken `view` spawn from the pty's side) and a contributor re-deriving
+/// which precondition was missing by hand. `None` means the leg can run.
+#[must_use]
+pub fn delay_relay_unavailable_reason() -> Option<String> {
+    if !cfg!(unix) {
+        return Some("the RTT-tiered leg is unix-only".to_string());
+    }
+    if !delay_relay_client().is_file() {
+        return Some(format!(
+            "no delay relay fixture at {}",
+            delay_relay_client().display()
+        ));
+    }
+    if !view_oracle::remote::stub_available() {
+        return Some(format!(
+            "no stub ssh client at {}",
+            view_oracle::remote::stub_client().display()
+        ));
+    }
+    if python_interpreter().is_none() {
+        return Some(
+            "no python3 interpreter on PATH (tried python3, python, py); the delay relay's \
+             `#!/usr/bin/env python3` shebang needs one"
+                .to_string(),
+        );
+    }
+    None
+}
+
 /// Whether this host can run the RTT-tiered leg at all: the relay is a
 /// Python script wrapping a POSIX-shell stand-in client, so both need to
-/// be present and executable, and the whole leg is unix-only for the same
-/// reason [`crate::scenarios::remote_memory`]'s stub leg is.
+/// be present and executable (with a working interpreter to run the
+/// former), and the whole leg is unix-only for the same reason
+/// [`crate::scenarios::remote_memory`]'s stub leg is. See
+/// [`delay_relay_unavailable_reason`] for which precondition failed when
+/// this is `false`.
 #[must_use]
 pub fn delay_relay_available() -> bool {
-    cfg!(unix) && delay_relay_client().is_file() && view_oracle::remote::stub_available()
+    delay_relay_unavailable_reason().is_none()
 }
 
 /// Prepares `dir` to stand in for a `PATH` entry whose `ssh` resolves to
@@ -92,22 +153,22 @@ pub fn delay_relay_available() -> bool {
 ///
 /// # Errors
 ///
-/// [`BenchError::Desync`] if this host has no delay relay or no stub
-/// client to wrap (a `PATH` entry pointing at nothing is a spawn that
-/// fails opaquely at the client, not here), or if `dir` cannot be created
-/// or the symlink cannot be placed.
+/// [`BenchError::Desync`] for any reason [`delay_relay_unavailable_reason`]
+/// names (no delay relay, no stub client to wrap, or no Python interpreter
+/// to run the relay's own shebang -- a `PATH` entry pointing at nothing or
+/// at an unrunnable script is a spawn that fails opaquely at the client,
+/// not here), or if `dir` cannot be created or the symlink cannot be
+/// placed.
 pub fn arm_delay_relay_path(
     dir: &Path,
     existing: Option<&OsStr>,
     rtt_ms: u64,
 ) -> Result<(OsString, Vec<(OsString, OsString)>), BenchError> {
-    if !delay_relay_available() {
+    if let Some(reason) = delay_relay_unavailable_reason() {
         return Err(BenchError::Desync {
             context: format!(
-                "no delay relay and stub ssh client pair on this host ({} / {} is not an \
-                 executable pair), so a PATH entry in {} would point ssh at nothing",
-                delay_relay_client().display(),
-                view_oracle::remote::stub_client().display(),
+                "{reason}, so a PATH entry in {} would point ssh at nothing or fail opaquely at \
+                 exec",
                 dir.display()
             ),
         });
@@ -188,43 +249,126 @@ pub fn remote_rtt_view_spec(
     Ok(taps::shim_taps_spec(inner, tap_path))
 }
 
+/// `cat` on every unix this module already requires (see the crate-wide
+/// `#[cfg(unix)]` on this module): a plain, dependency-free passthrough to
+/// wrap, decoupled from the stub `ssh` client's own argv-reparsing
+/// contract, which a relay-latency probe has no reason to exercise.
+#[must_use]
+pub fn cat_path() -> Option<&'static str> {
+    ["/bin/cat", "/usr/bin/cat"]
+        .into_iter()
+        .find(|p| Path::new(p).is_file())
+}
+
+/// One there-and-back trip through a delay relay wrapping `cat`, configured
+/// with `delay_ms`: writes a fixed probe line to the relay's stdin, reads
+/// it back off the relay's stdout, and returns the wall time alongside the
+/// line read back so a caller can check payload integrity and timing
+/// separately.
+///
+/// The one latency figure in the RTT-tiered leg that speculation cannot
+/// hide: nothing here goes anywhere near
+/// [`crate::scenarios::echo_speculated`], whose own metrics are, by
+/// design, largely insensitive to transport RTT (that insensitivity is the
+/// feature under test) -- so a relay that silently stops adding delay
+/// collapses this probe's result across tiers where a working relay's
+/// still scales with `delay_ms`, giving a caller a falsifiable per-tier
+/// signal the scenario's own outcome cannot.
+///
+/// # Errors
+///
+/// [`BenchError::Desync`] if the relay cannot be spawned, its piped stdio
+/// cannot be taken, or the probe write/read-back fails.
+pub fn round_trip_through_relay(
+    delay_ms: u64,
+    cat: &str,
+) -> Result<(Duration, String), BenchError> {
+    let mut child = Command::new(delay_relay_client())
+        .env("DELAY_RELAY_MS", delay_ms.to_string())
+        .env("DELAY_RELAY_INNER", cat)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|source| BenchError::Desync {
+            context: format!(
+                "spawning the delay relay over {cat} at DELAY_RELAY_MS={delay_ms}: {source}"
+            ),
+        })?;
+    let mut stdin = child.stdin.take().ok_or_else(|| BenchError::Desync {
+        context: "the delay relay's stdin was not piped".to_string(),
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| BenchError::Desync {
+        context: "the delay relay's stdout was not piped".to_string(),
+    })?;
+    let mut reader = BufReader::new(stdout);
+
+    let start = Instant::now();
+    stdin
+        .write_all(b"hello from the jitter-tolerance test\n")
+        .map_err(|source| BenchError::Desync {
+            context: format!("writing the relay probe line: {source}"),
+        })?;
+    stdin.flush().map_err(|source| BenchError::Desync {
+        context: format!("flushing the relay probe line: {source}"),
+    })?;
+    let mut line = String::new();
+    reader
+        .read_line(&mut line)
+        .map_err(|source| BenchError::Desync {
+            context: format!("reading the relayed probe line back: {source}"),
+        })?;
+    let elapsed = start.elapsed();
+    drop(stdin);
+    let _ = child.wait();
+    Ok((elapsed, line))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use std::io::{BufRead, BufReader, Write};
-    use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
     use view_test_support::ScratchDir;
 
-    /// `cat` on every unix this module already requires (see the crate-wide
-    /// `#[cfg(unix)]` on this module): a plain, dependency-free passthrough
-    /// to wrap, decoupled from the stub `ssh` client's own argv-reparsing
-    /// contract, which this test has no reason to exercise.
-    fn cat_path() -> Option<&'static str> {
-        ["/bin/cat", "/usr/bin/cat"]
-            .into_iter()
-            .find(|p| Path::new(p).is_file())
-    }
-
-    /// The delay relay's own falsifiable contract: it adds the configured
-    /// delay deterministically, within a stated tolerance band -- this is
-    /// a scripted proof of the fixture's own behavior, not a bench-grade
-    /// latency measurement, so the band is wide on purpose.
+    /// The delay relay's own falsifiable contract: it adds a delay that
+    /// *tracks the configuration*, not a constant sleep and not an
+    /// environment variable it silently ignores. A single measurement
+    /// inside a wide tolerance band cannot tell "adds 40ms" apart from
+    /// "adds a fixed ~40ms no matter what `DELAY_RELAY_MS` says" -- both
+    /// land inside the same band -- so this measures at two settings and
+    /// asserts on the *difference* between them, which only a relay that
+    /// actually reads and applies the configuration produces.
     ///
-    /// One message makes a there-and-back trip through the relay (write to
-    /// the relay's stdin, read its stdout), crossing two relayed hops --
-    /// caller-to-`cat` and `cat`-to-caller -- each sleeping the configured
-    /// delay once. The band is `[2 * DELAY_MS - 5ms, 2 * DELAY_MS +
-    /// 500ms]`: the lower bound is causal (minus a 5ms guard for the clock
-    /// resolution the test's own timer and Python's `time.sleep` rounding
-    /// can differ by), and the fixed 500ms upper slack is a
-    /// scheduler-jitter allowance sized for a shared, possibly loaded
-    /// dev/CI host running Python threads under contention -- a fixed
-    /// floor of noise rather than a multiple of the configured delay,
-    /// which is why it does not scale with `DELAY_MS` below.
+    /// `LOW_MS = 0` and `HIGH_MS = 80`: `0` is reused rather than picking
+    /// two arbitrary nonzero points because it is also this crate's own
+    /// zero-delay tier ([`RTT_TIERS_MS`]), one fewer magic number, and the
+    /// relay's own fixed overhead (interpreter startup, thread scheduling,
+    /// the coalescing window -- a measured ~28ms round trip even at `0`,
+    /// see the module doc) is present at both settings and cancels out of
+    /// a difference regardless of which two points are chosen.
+    ///
+    /// Medians, not single points, on each side of the difference: this
+    /// test runs under `cargo test --workspace`, sharing the host with
+    /// every other test binary `task ci` runs in parallel, and a single
+    /// trial's relay-subprocess spawn can be delayed by scheduler
+    /// contention that has nothing to do with `DELAY_RELAY_MS` at all --
+    /// observed in practice, where a single `LOW_MS` trial came back at
+    /// 62ms against an idle-host baseline of ~28ms, pulling the diff below
+    /// a single-trial band's floor on an otherwise-correct relay. A median
+    /// of [`TRIALS`] independent trials per side cancels one-off spikes
+    /// the same way this crate's own scenarios reduce to `_p50` medians
+    /// rather than trusting a single sample.
+    ///
+    /// The band is `[2 * (HIGH_MS - LOW_MS) - 5ms, 2 * (HIGH_MS - LOW_MS) +
+    /// 1000ms]`: the lower bound is causal minus the same 5ms
+    /// clock-resolution guard the single-point band this test replaces
+    /// used. The upper slack is doubled to 1000ms rather than the
+    /// single-point band's 500ms, because a *difference* of two
+    /// independent medians can still carry up to two independent
+    /// scheduler-jitter excursions instead of one -- still a fixed floor of
+    /// noise, not a multiple of the configured difference, for the same
+    /// reason the single-point band's slack was fixed rather than scaled.
     #[test]
-    fn delay_relay_adds_the_configured_delay_within_a_stated_tolerance() {
+    fn delay_relay_scales_the_added_delay_with_the_configured_value() {
         if !delay_relay_client().is_file() {
             eprintln!("skipped: no delay relay fixture on this host");
             return;
@@ -234,42 +378,50 @@ mod tests {
             return;
         };
 
-        const DELAY_MS: u64 = 40;
-        let mut child = Command::new(delay_relay_client())
-            .env("DELAY_RELAY_MS", DELAY_MS.to_string())
-            .env("DELAY_RELAY_INNER", cat)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .expect("spawning the delay relay over cat must succeed");
-        let mut stdin = child.stdin.take().expect("relay stdin must be piped");
-        let stdout = child.stdout.take().expect("relay stdout must be piped");
-        let mut reader = BufReader::new(stdout);
+        const LOW_MS: u64 = 0;
+        const HIGH_MS: u64 = 80;
+        const TRIALS: usize = 5;
 
-        let start = Instant::now();
-        stdin
-            .write_all(b"hello from the jitter-tolerance test\n")
-            .expect("writing the probe line must succeed");
-        stdin.flush().expect("flushing the probe line must succeed");
-        let mut line = String::new();
-        reader
-            .read_line(&mut line)
-            .expect("reading the relayed line back must succeed");
-        let elapsed = start.elapsed();
-        drop(stdin);
-        let _ = child.wait();
+        let mut low_elapsed = Vec::with_capacity(TRIALS);
+        let mut high_elapsed = Vec::with_capacity(TRIALS);
+        for _ in 0..TRIALS {
+            let (elapsed, line) =
+                round_trip_through_relay(LOW_MS, cat).expect("low-tier relay round trip");
+            assert_eq!(
+                line.trim_end(),
+                "hello from the jitter-tolerance test",
+                "the relay must pass bytes through unchanged, not just delayed (at \
+                 DELAY_RELAY_MS={LOW_MS})"
+            );
+            low_elapsed.push(elapsed);
 
-        assert_eq!(
-            line.trim_end(),
-            "hello from the jitter-tolerance test",
-            "the relay must pass bytes through unchanged, not just delayed"
-        );
-        let floor = Duration::from_millis(2 * DELAY_MS).saturating_sub(Duration::from_millis(5));
-        let ceiling = Duration::from_millis(2 * DELAY_MS) + Duration::from_millis(500);
+            let (elapsed, line) =
+                round_trip_through_relay(HIGH_MS, cat).expect("high-tier relay round trip");
+            assert_eq!(
+                line.trim_end(),
+                "hello from the jitter-tolerance test",
+                "the relay must pass bytes through unchanged, not just delayed (at \
+                 DELAY_RELAY_MS={HIGH_MS})"
+            );
+            high_elapsed.push(elapsed);
+        }
+        low_elapsed.sort_unstable();
+        high_elapsed.sort_unstable();
+        let low_median = low_elapsed[TRIALS / 2];
+        let high_median = high_elapsed[TRIALS / 2];
+
+        let diff = high_median.saturating_sub(low_median);
+        let floor =
+            Duration::from_millis(2 * (HIGH_MS - LOW_MS)).saturating_sub(Duration::from_millis(5));
+        let ceiling = Duration::from_millis(2 * (HIGH_MS - LOW_MS)) + Duration::from_millis(1000);
         assert!(
-            elapsed >= floor && elapsed <= ceiling,
-            "a there-and-back trip through a {DELAY_MS}ms relay took {elapsed:?}, outside the \
-             stated tolerance band [{floor:?}, {ceiling:?}]"
+            diff >= floor && diff <= ceiling,
+            "a {HIGH_MS}ms relay's median round trip ({high_median:?} across {TRIALS} trials) \
+             minus a {LOW_MS}ms relay's ({low_median:?} across {TRIALS} trials) was {diff:?}, \
+             outside the stated tolerance band [{floor:?}, \
+             {ceiling:?}] for the *difference* the configured delay must produce -- a relay that \
+             ignores DELAY_RELAY_MS or adds a constant delay instead of scaling with it would \
+             fail this the same way a relay that scales correctly would pass it"
         );
     }
 

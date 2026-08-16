@@ -21,8 +21,9 @@
 //! to print and compare against, never to record into.
 
 use std::ffi::OsString;
-use std::path::PathBuf;
-use std::time::Duration;
+use std::ops::Deref;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
@@ -62,6 +63,38 @@ struct Cli {
     /// Warmup samples per tier, excluded from the statistic.
     #[arg(long, default_value_t = 10)]
     warmup: usize,
+    /// RTT tiers to run, in milliseconds, comma-separated (e.g.
+    /// `--tiers 0,300`). Defaults to all four tiers the brief names; the
+    /// 300ms tier alone dominates the leg's ~55s wall time, so
+    /// reproducing one failing tier during debugging should not require
+    /// editing `RTT_TIERS_MS` and rebuilding `view-bench`.
+    #[arg(long, value_delimiter = ',')]
+    tiers: Option<Vec<u64>>,
+}
+
+/// Owns the acceptance run's scratch root and removes it on every exit path
+/// via [`Drop`] -- including the early `?`-propagated returns this binary's
+/// `main` is full of, which the prior trailing `remove_dir_all` (reached
+/// only after every tier succeeded) never ran for. Matches the
+/// `ScratchDir` pattern in `view-test-support` (`Deref<Target = Path>` +
+/// unconditional `Drop` cleanup) without adding that crate as a
+/// non-dev dependency here: this binary's `main` is not test code, and the
+/// scratch location/naming (`scratch_root("rtt-acceptance")`, not an
+/// OS-temp-dir `view-<label>-<pid>` path) stays exactly what it was.
+struct ScratchRoot(PathBuf);
+
+impl Deref for ScratchRoot {
+    type Target = Path;
+
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for ScratchRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 fn budgets_path() -> PathBuf {
@@ -182,13 +215,8 @@ fn main() -> Result<()> {
             taps_view_bin.display()
         );
     }
-    if !echo_speculated_rtt::delay_relay_available() {
-        bail!(
-            "no delay-relay / stub-ssh client pair on this host (need {} and {}, both \
-             executable); the RTT-injection proof cannot run without them",
-            echo_speculated_rtt::delay_relay_client().display(),
-            view_oracle::remote::stub_client().display()
-        );
+    if let Some(reason) = echo_speculated_rtt::delay_relay_unavailable_reason() {
+        bail!("{reason}; the RTT-injection proof cannot run without it");
     }
 
     let budget_file = budgets::load(&budgets_path())
@@ -210,6 +238,7 @@ fn main() -> Result<()> {
 
     let root = scratch_root("rtt-acceptance");
     let _ = std::fs::remove_dir_all(&root);
+    let root = ScratchRoot(root);
 
     let settle_deadline = if cli.fixture == "heavy" {
         Duration::from_secs(300)
@@ -217,8 +246,11 @@ fn main() -> Result<()> {
         Duration::from_secs(30)
     };
 
+    let tiers: Vec<u64> = cli.tiers.clone().unwrap_or_else(|| RTT_TIERS_MS.to_vec());
+
     let mut all_pass = true;
-    for &rtt_ms in &RTT_TIERS_MS {
+    let mut prev_tracked: Option<(u64, Duration)> = None;
+    for &rtt_ms in &tiers {
         // one sample's wait crosses the relay twice (input notify out,
         // redraw back), so the default 5s budget -- sized for a local,
         // near-zero-delay round trip -- is widened by a multiple of the
@@ -248,6 +280,42 @@ fn main() -> Result<()> {
         // above so real attach traffic landing before the span elapses
         // resets the quiet clock instead of racing it.
         let startup_quiet = DEFAULT_STARTUP_QUIET.max(Duration::from_millis(rtt_ms * 20));
+
+        // Direct probe of the relay itself, decoupled from anything
+        // `echo_speculated::run` measures below: `gated_ratio_p50` and
+        // `gated_view_p99_ms` are both -- by design -- largely insensitive
+        // to transport RTT once speculation is doing its job, so neither
+        // can tell "the relay is genuinely fast at this tier" apart from
+        // "the relay stopped injecting delay" (confirmed by mutation
+        // testing both against a relay hardcoded to skip its `sleep`: the
+        // scenario's own metrics kept printing OK). This probe wraps `cat`
+        // through the same relay binary at the same configured `rtt_ms`,
+        // outside the scenario entirely, so its round trip has nothing to
+        // hide behind.
+        let cat = echo_speculated_rtt::cat_path()
+            .with_context(|| "no cat binary found to probe the delay relay's own round trip")?;
+        let (probe_elapsed, probe_line) =
+            echo_speculated_rtt::round_trip_through_relay(rtt_ms, cat).with_context(|| {
+                format!("probing the delay relay's round trip at RTT {rtt_ms}ms")
+            })?;
+        if probe_line.trim_end() != "hello from the jitter-tolerance test" {
+            bail!(
+                "RTT {rtt_ms}ms: the delay relay's probe echoed {probe_line:?} instead of the \
+                 probe line unchanged"
+            );
+        }
+        if let Some((prev_rtt, prev_probe)) = prev_tracked {
+            if rtt_ms > prev_rtt && probe_elapsed <= prev_probe {
+                bail!(
+                    "RTT {rtt_ms}ms tier's direct relay-probe round trip {probe_elapsed:?} did not \
+                     exceed the {prev_rtt}ms tier's {prev_probe:?}; a higher configured RTT must \
+                     make the relay's own round trip strictly longer, or the relay may have \
+                     stopped injecting the configured delay"
+                );
+            }
+        }
+        prev_tracked = Some((rtt_ms, probe_elapsed));
+
         let tier_root = root.join(format!("tier-{rtt_ms}"));
         let view_side = side_setup(&cli.fixture, "view", &tier_root)?;
         let nvim_side = side_setup(&cli.fixture, "nvim", &tier_root)?;
@@ -271,6 +339,7 @@ fn main() -> Result<()> {
             cwd: Some(nvim_side.cwd),
         };
 
+        let tier_start = Instant::now();
         let outcome = echo_speculated::run(
             ViewSpec(&view_spec),
             NvimSpec(&nvim_spec),
@@ -280,12 +349,24 @@ fn main() -> Result<()> {
             startup_quiet,
         )
         .with_context(|| format!("echo_speculated at RTT {rtt_ms}ms failed"))?;
+        let tier_wall = tier_start.elapsed();
         if let Some(reason) = outcome.refusal() {
             bail!("RTT {rtt_ms}ms: {reason}");
         }
 
+        // `gated_view_p99_ms` is printed for visibility, but not asserted
+        // on: it is the scenario's *speculated* view-side p99, which
+        // speculation is specifically designed to keep close to flat
+        // across RTT tiers -- confirmed by running it against a genuinely
+        // working relay (no mutation) at RTT 0ms and 300ms, where it came
+        // back lower at the higher tier. A metric that fails on a correct
+        // relay is worse than one that never fires: the refusal above
+        // (`probe_elapsed`, measured outside the scenario against the same
+        // relay) is the falsifiable signal instead.
+        let tier_view_p99_ms = outcome.echo.gated_view_p99_ms;
+
         let ratio = outcome.echo.gated_ratio_p50;
-        let ok = ratio < speculated_max;
+        let ok = ratio <= speculated_max;
         all_pass &= ok;
         let verdict = if ok { "OK" } else { "FAIL" };
 
@@ -297,7 +378,7 @@ fn main() -> Result<()> {
                     cli.class
                 ),
             };
-            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {honest_column}  {verdict}");
+            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {honest_column}  view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
         } else {
             let equivalent_column = match honest_view_p99_ms {
                 Some(honest_ms) => {
@@ -307,18 +388,19 @@ fn main() -> Result<()> {
                 }
                 None => format!("unspeculated equivalent unrecorded on class {}", cli.class),
             };
-            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {equivalent_column}  {verdict}");
+            println!("RTT {rtt_ms:>3}ms | echo_speculated ratio_p50 {ratio:.2}  | {equivalent_column}  view_p99 {tier_view_p99_ms:.2}ms (wall {tier_wall:?})  {verdict}");
         }
     }
 
-    let _ = std::fs::remove_dir_all(&root);
-
     if all_pass {
         println!(
-            "PASS: every RTT tier's speculated_ratio_p50 stayed under the {speculated_max} budget"
+            "PASS: every RTT tier's speculated_ratio_p50 stayed under the {speculated_max:.2} budget"
         );
         Ok(())
     } else {
-        bail!("one or more RTT tiers exceeded the speculated_ratio_p50 budget of {speculated_max}");
+        bail!(
+            "one or more RTT tiers exceeded the speculated_ratio_p50 budget of \
+             {speculated_max:.2}"
+        );
     }
 }

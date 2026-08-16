@@ -30,6 +30,9 @@
 # baseline; committing one would put unratcheted numbers in the repo
 *.partial.toml
 
-# cpython's own bytecode cache for the test-fixtures run directly by their
-# interpreter (delay-relay, fake-ssh's siblings); regenerates every run
+# cpython's own bytecode cache. Running scripts/test-fixtures/delay-relay
+# (this tree's only Python fixture; its siblings are /bin/sh) directly as
+# __main__ writes none, so this is a safety net for anyone who later
+# imports it as a module or byte-compiles it by hand (`python3 -m
+# py_compile`), not a cache this tree's own test runs generate.
 __pycache__/

@@ -54,8 +54,15 @@ import time
 # How long a burst-drain waits for one more chunk before giving up and
 # treating what it has as the whole logical message. Wide enough to fold
 # in a redraw burst's back-to-back writes (each lands within microseconds
-# of the last on a real kernel pipe/pty), narrow enough that it never
-# reads as a second RTT hop on top of the configured delay.
+# of the last on a real kernel pipe/pty). It is NOT free: this window
+# (paid once per direction per logical message) plus interpreter/thread
+# overhead gives the relay a measured fixed round-trip floor of roughly
+# 27ms even at `DELAY_RELAY_MS=0` (`cat` wrapped directly: 0ms configured
+# -> ~27ms observed, 40ms -> ~100ms, 200ms -> ~420ms -- the ~20ms of
+# overhead beyond the coalesce window itself is interpreter/scheduling,
+# not this constant). A caller comparing a `DELAY_RELAY_MS=0` run against
+# a genuinely zero-transport-latency spawn is comparing against this
+# floor, not against zero.
 _COALESCE_WINDOW_S = 0.005
 
 
