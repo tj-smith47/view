@@ -109,6 +109,51 @@ const PROBE_TRIALS: usize = 11;
 /// unchanged.
 const PROBE_LINE: &str = "hello from the jitter-tolerance test";
 
+/// Lower-bound slack for the per-tier floor check in `main`: generous
+/// enough that a genuinely working relay's own [`PROBE_TRIALS`]-median
+/// noise (measured spread ~8-10ms at N=11, see [`PROBE_TRIALS`]'s own doc
+/// comment) never trips it, comfortably tight enough that a relay which
+/// stopped injecting delay -- whose every tier's actual round trip stays
+/// near `floor_ms` regardless of `rtt_ms` -- still falls short of the
+/// expected floor by a wide margin once `rtt_ms` clears
+/// [`min_distinguishable_rtt_ms`]'s own line, drawn from this exact
+/// constant below.
+const FLOOR_SLACK_MS: f64 = 20.0;
+
+/// The conservative (larger) end of [`PROBE_TRIALS`]'s own measured
+/// median-of-11 noise spread (8-10ms, from bucketing a 150-trial pool at
+/// `DELAY_RELAY_MS=0`), reused rather than re-measured: this is the noise
+/// floor a `--tiers`-supplied gap's structural margin must clear before
+/// this binary trusts it.
+const MEDIAN_NOISE_SPREAD_MS: f64 = 10.0;
+
+/// How many multiples of [`MEDIAN_NOISE_SPREAD_MS`] a tier's structural
+/// margin must clear before `main` accepts a `--tiers`-supplied `rtt_ms`
+/// at all -- not a fresh guess, but the exact ratio the per-tier floor
+/// check's own mutation testing already validated as reliable at RTT
+/// 25ms: structural margin `2*25 - FLOOR_SLACK_MS = 30ms` against this
+/// same 10ms spread is 3x, and 25ms is the smallest gap in the shipped
+/// default tier set, which must keep passing.
+const RESOLUTION_SAFETY_MARGIN: f64 = 3.0;
+
+/// The smallest `--tiers`-supplied `rtt_ms` (other than `0` itself, which
+/// always trivially clears its own check) `main`'s per-tier floor check
+/// can tell apart from the RTT 0ms calibration floor at all.
+///
+/// Derived, not chosen independently, from the exact arithmetic the
+/// per-tier check enforces: that check requires `probe_ms >= floor_ms +
+/// 2*rtt_ms - FLOOR_SLACK_MS`, i.e. a structural margin of
+/// `2*rtt_ms - FLOOR_SLACK_MS` between `expected_min_ms` and `floor_ms`.
+/// Requiring that margin to clear
+/// `RESOLUTION_SAFETY_MARGIN * MEDIAN_NOISE_SPREAD_MS` and solving for
+/// `rtt_ms` gives the line below, so raising `FLOOR_SLACK_MS` or lowering
+/// `RESOLUTION_SAFETY_MARGIN` in one place moves both the per-tier check
+/// and this preflight refusal together, instead of two numbers that can
+/// drift apart.
+fn min_distinguishable_rtt_ms() -> f64 {
+    (FLOOR_SLACK_MS + RESOLUTION_SAFETY_MARGIN * MEDIAN_NOISE_SPREAD_MS) / 2.0
+}
+
 /// Median round-trip time through the delay relay at `rtt_ms`, over
 /// [`PROBE_TRIALS`] independent trials wrapping `cat`.
 ///
@@ -285,6 +330,27 @@ fn main() -> Result<()> {
 
     let tiers: Vec<u64> = cli.tiers.clone().unwrap_or_else(|| RTT_TIERS_MS.to_vec());
 
+    // Preflight, relay-state-independent: every non-zero tier is compared
+    // against the fixed RTT 0ms calibration floor below, so a tier closer
+    // to 0 than `min_distinguishable_rtt_ms()` cannot be told apart from
+    // that floor by the per-tier check no matter what the relay does --
+    // refuse it here, loudly and before any relay probing starts, rather
+    // than let the per-tier check's own arithmetic silently degenerate
+    // into the coin-flip it exists to avoid.
+    let min_gap_ms = min_distinguishable_rtt_ms();
+    for &rtt_ms in &tiers {
+        if rtt_ms > 0 && (rtt_ms as f64) < min_gap_ms {
+            bail!(
+                "--tiers pair (0ms calibration floor, {rtt_ms}ms) is closer than this host's \
+                 measured probe resolution allows: the per-tier floor check cannot reliably \
+                 distinguish a {rtt_ms}ms tier from RTT 0ms (median-of-{PROBE_TRIALS} noise \
+                 spread ~{MEDIAN_NOISE_SPREAD_MS}ms, {RESOLUTION_SAFETY_MARGIN}x safety margin \
+                 requires at least {min_gap_ms:.0}ms); pick a --tiers value at least \
+                 {min_gap_ms:.0}ms away from 0, or drop --tiers to run the full default set"
+            );
+        }
+    }
+
     let cat = echo_speculated_rtt::cat_path()
         .with_context(|| "no cat binary found to probe the delay relay's own round trip")?;
     // Calibrated once, against RTT 0ms specifically, regardless of whether
@@ -294,19 +360,6 @@ fn main() -> Result<()> {
         .with_context(|| "calibrating the delay relay's own round-trip floor at RTT 0ms")?
         .as_secs_f64()
         * 1000.0;
-
-    // Lower-bound slack for the per-tier floor check below: generous
-    // enough that a genuinely working relay's own median-of-PROBE_TRIALS
-    // noise (measured spread ~8-10ms at N=11, see PROBE_TRIALS) never
-    // trips it, comfortably tight enough that a relay which stopped
-    // injecting delay -- whose every tier's actual round trip stays near
-    // `floor_ms` regardless of `rtt_ms` -- still falls short of even the
-    // smallest advertised tier gap's expected floor by a wide margin: at
-    // the smallest default/advertised gap (RTT 25ms, a 50ms round-trip
-    // separation from the floor since one probe crosses the relay twice),
-    // a broken relay's expected-vs-floor shortfall is `50 - 20 = 30ms`,
-    // roughly 3-4x that measured noise spread.
-    const FLOOR_SLACK_MS: f64 = 20.0;
 
     let mut all_pass = true;
     for &rtt_ms in &tiers {
