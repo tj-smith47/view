@@ -123,3 +123,28 @@ ratio_p50 = 1.06
 # any repeat of their scale still fail as new findings; "rerun quiet" stays
 # the operative mitigation.
 "input_path.key_to_rpc_p99_us" = 1.15
+
+# 8 report-only replicates plus the record draw, 2026-08-16, host loads
+# 0.07 to 0.50, one unchanged binary pair, echo_speculated/minimal (gated
+# statistic per replicate, median speculated_ratio_p50 of 3 trials):
+# 0.412, 0.392, 0.385, 0.429, 0.418, 0.419, 0.414, 0.422; record draw
+# 0.3943. Nine-draw median 0.414, half-width 0.022 (5.3% of median).
+# Worst excursion above the recorded value 1.088x (0.429 against 0.3943);
+# the 2x half-width rule asks 1.162x (0.414 + 2 x 0.022 against 0.3943,
+# which sits low in the band). 1.17 clears both. Wider than the host-wide
+# ratio_p50 factor (1.06) because the numerator is a sub-millisecond
+# predicted paint, so run-to-run scheduler noise is proportionally larger
+# than on the engine-round-trip ratios that factor characterizes.
+"echo_speculated.speculated_ratio_p50" = 1.17
+
+# Same nine draws, speculated_paint_p99_ms: 0.301, 0.335, 0.328, 0.299,
+# 0.298, 0.299, 0.299, 0.306; record draw 0.370. The record draw sits
+# above all eight campaign draws, so the recorded value is the nine-draw
+# median 0.301, hand-recorded -- anchoring at the tail draw would put the
+# record floor above the class's whole honest band and every later honest
+# record would refuse. Half-width 0.036 (12.0% of median); worst excursion
+# above the recorded value 1.229x (0.370 against 0.301); the 2x half-width
+# rule asks 1.239x. 1.25 clears both. A tail absolute never gates on this
+# shared class (recorded here, gated on controlled classes); this entry
+# exists to bound record-time moves in both directions.
+"echo_speculated.speculated_paint_p99_ms" = 1.25
