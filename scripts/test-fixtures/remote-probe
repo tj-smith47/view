@@ -1,0 +1,19 @@
+#!/bin/sh
+# Stands in for the remote editor and records what the executed process
+# actually received: the value of VIEW_PROBE_VALUE first, then one line per
+# argument, written to the path VIEW_PROBE_OUT names.
+#
+# For assertions about what crossed the ssh boundary that an argument vector
+# built on this side cannot make. It speaks no msgpack-RPC, so a spawn
+# through it never completes its handshake; what it wrote before exiting is
+# the whole point of it.
+#
+# `printf` rather than `echo`, which mangles a value beginning with `-` or
+# containing a backslash on some shells; the bytes must survive here as
+# exactly as they did over the wire.
+set -eu
+
+printf '%s\n' "$VIEW_PROBE_VALUE" > "$VIEW_PROBE_OUT"
+for arg in "$@"; do
+    printf '%s\n' "$arg" >> "$VIEW_PROBE_OUT"
+done

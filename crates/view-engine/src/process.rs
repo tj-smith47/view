@@ -40,6 +40,9 @@ pub struct RemoteSpec {
     /// The destination, in ssh's own `[user@]host` syntax verbatim: it is
     /// handed to the client unparsed, so an alias defined in the user's own
     /// `~/.ssh/config` resolves exactly as it does on their command line.
+    ///
+    /// This is the binary the far side runs; the local
+    /// [`EngineConfig::nvim_bin`] has no bearing on a remote spawn.
     pub target: String,
     /// The `nvim` binary on the far side, resolved against the remote
     /// user's own `PATH`. `"nvim"` by default.
@@ -49,17 +52,26 @@ pub struct RemoteSpec {
     pub port: Option<u16>,
     /// `KEY=VALUE` pairs, each passed to the client as its own `-o`
     /// argument, in the order given.
+    ///
+    /// They follow view's own options rather than preceding them, and a
+    /// client takes the *first* value it obtains for an option. An entry
+    /// here that names an option view already set is therefore accepted and
+    /// has no effect: `BatchMode=no` cannot re-arm the interactive prompt an
+    /// embedded editor has no way to answer, and a `-o Port=` entry does not
+    /// displace [`port`](Self::port). Everything else applies normally.
     pub extra_ssh_opts: Vec<String>,
     /// The local ssh client to run. `"ssh"` by default, resolved on the
     /// spawning process's own `PATH`.
     ///
-    /// A field rather than a hardcoded program name because the search that
-    /// resolves it cannot be redirected any other way: `execvp` and
-    /// `posix_spawnp` read the *calling* process's `PATH`, never the one a
-    /// [`Command`] was configured with, so a `PATH` entry pushed into the
-    /// child's environment would silently fail to select the client it
-    /// names. A test double standing in for the client, or an operator
-    /// pinning one build of it, both go here.
+    /// A field rather than a hardcoded program name because a remote spawn
+    /// applies no environment to the local client at all (its plan belongs
+    /// to the editor on the far side, and an override such as `HOME` or
+    /// `PATH` applied here would redirect the client's own key and
+    /// configuration lookup instead). With no environment to configure,
+    /// there is nothing to select a different client through short of the
+    /// spawning process's own `PATH`, which is process-global. An operator
+    /// pinning one build of the client, and a test double standing in for
+    /// it, both go here.
     pub ssh_bin: PathBuf,
 }
 
@@ -92,7 +104,9 @@ impl RemoteSpec {
         self
     }
 
-    /// Appends one `KEY=VALUE` client option, passed through as `-o`.
+    /// Appends one `KEY=VALUE` client option, passed through as `-o`. An
+    /// option view sets for itself wins over one appended here (see
+    /// [`extra_ssh_opts`](Self::extra_ssh_opts)).
     #[must_use]
     pub fn with_ssh_opt(mut self, opt: impl Into<String>) -> Self {
         self.extra_ssh_opts.push(opt.into());
@@ -119,6 +133,9 @@ impl RemoteSpec {
 pub struct EngineConfig {
     /// Path to the `nvim` binary. Defaults to `"nvim"`, resolved via `PATH`;
     /// release packaging replaces this default with a bundled binary path.
+    ///
+    /// A remote spawn does not use it: the editor runs on the far side, and
+    /// [`RemoteSpec::remote_nvim_bin`] names it there.
     pub nvim_bin: PathBuf,
     /// Additional arguments passed to `nvim` after `--embed`.
     pub extra_args: Vec<OsString>,
@@ -229,7 +246,9 @@ impl EngineConfig {
         }
     }
 
-    /// The `nvim` binary to spawn, replacing the `PATH` lookup.
+    /// The `nvim` binary to spawn, replacing the `PATH` lookup. A remote
+    /// spawn resolves its editor through
+    /// [`RemoteSpec::remote_nvim_bin`] instead and ignores this one.
     #[must_use]
     pub fn with_nvim_bin(mut self, bin: impl Into<PathBuf>) -> Self {
         self.nvim_bin = bin.into();
@@ -270,11 +289,9 @@ impl EngineConfig {
     /// receive: the two together are refused by [`Engine::spawn`] before
     /// any process starts, never silently reconciled.
     ///
-    /// A stdin relay armed by [`with_stdin_relay`](Self::with_stdin_relay)
-    /// reaches the local `ssh` process only. The client forwards its own
-    /// standard input as the remote command's, which `--embed` has already
-    /// claimed for the RPC channel, so there is no second descriptor for a
-    /// relay to arrive on at the far end.
+    /// The local [`nvim_bin`](Self::nvim_bin) is unused once this is armed:
+    /// the editor runs on the far side, and
+    /// [`RemoteSpec::remote_nvim_bin`] names it there.
     #[must_use]
     pub fn with_remote(mut self, remote: RemoteSpec) -> Self {
         self.remote = Some(remote);
@@ -615,9 +632,10 @@ impl Engine {
     /// after a successful process spawn, the child is killed and reaped
     /// before the error is returned; no zombie survives a failed `spawn`.
     ///
-    /// A `cfg` that is both hermetic and remote returns `EngineError::Io`
-    /// before anything is prepared or started: the two describe
-    /// incompatible spawns (see [`EngineConfig::with_remote`]).
+    /// A remote `cfg` returns `EngineError::Io` before anything is prepared
+    /// or started when it also carries a setting a remote spawn cannot
+    /// honour, or a destination that is not one (see
+    /// [`refuse_incoherent_remote`]).
     ///
     /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
     /// search path cannot be established empty (see
@@ -627,23 +645,12 @@ impl Engine {
     /// planted a plugin or credential file in is not isolated, and refusing
     /// the spawn is the only way that says so.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
-        // refused ahead of every other check, and ahead of any process: a
-        // hermetic plan names local directories this host prepares and
-        // guards, none of which exist on the far side, so a spawn carrying
-        // both would connect to a remote nvim while reporting an isolation
-        // nothing established. Reconciling them silently either way leaves
-        // a child that looks isolated and is not.
-        if cfg.hermetic && cfg.remote.is_some() {
-            return Err(EngineError::Io(std::io::Error::other(
-                "a hermetic config describes a local isolation a remote host \
-                 does not receive; spawn one or the other, not both",
-            )));
-        }
+        refuse_incoherent_remote(&cfg)?;
         if cfg.hermetic {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
         }
-        let mut command = build_command(&cfg);
+        let mut command = build_command(&cfg)?;
         // read back off the `Command` that is about to be spawned rather than
         // re-derived from `cfg`: a second derivation is free to drift from
         // what the child actually receives, and the whole point of exposing
@@ -1144,10 +1151,16 @@ fn takes_no_value(arg: &str) -> bool {
 /// "+command", "-c command" or "--cmd command" arguments` and exits 1 before
 /// the RPC channel exists, which a caller sees as a handshake that never
 /// happens. Nine `--cmd` arguments are what a config may still spend.
-fn build_command(cfg: &EngineConfig) -> Command {
+///
+/// # Errors
+///
+/// Only the remote branch can fail, and only over a token it cannot forward
+/// without altering it (see [`token_bytes`]). The local branch is
+/// infallible: `Command` carries an `OsStr` to the child verbatim.
+fn build_command(cfg: &EngineConfig) -> Result<Command, EngineError> {
     let mut command = match &cfg.remote {
         None => local_command(cfg),
-        Some(remote) => remote_command(remote, cfg),
+        Some(remote) => remote_command(remote, cfg)?,
     };
     command
         .stdin(Stdio::piped())
@@ -1171,7 +1184,32 @@ fn build_command(cfg: &EngineConfig) -> Command {
             command.pre_exec(move || relay_stdin_fd(source));
         }
     }
-    command
+    Ok(command)
+}
+
+/// Refuses a remote config whose other settings describe a spawn that
+/// cannot happen, before anything is prepared and before any process runs.
+///
+/// Every case here is one that is otherwise accepted and silently
+/// ineffective, and a remote editor that quietly lost a setting looks
+/// exactly like one that kept it.
+///
+/// A hermetic plan names local directories this host prepares and guards,
+/// none of which exist on the far side, so a spawn carrying both would
+/// connect to a remote editor while reporting an isolation nothing
+/// established.
+fn refuse_incoherent_remote(cfg: &EngineConfig) -> Result<(), EngineError> {
+    if cfg.remote.is_none() {
+        return Ok(());
+    }
+    let refuse = |reason: &str| Err(EngineError::Io(std::io::Error::other(reason.to_string())));
+    if cfg.hermetic {
+        return refuse(
+            "a hermetic config describes a local isolation a remote host \
+             does not receive; spawn one or the other, not both",
+        );
+    }
+    Ok(())
 }
 
 /// The local half of [`build_command`]: `nvim --embed` run on this host,
@@ -1220,8 +1258,11 @@ fn local_command(cfg: &EngineConfig) -> Command {
 /// `-T` for the same reason from the other direction: a pty allocated on
 /// the far side would put a terminal discipline (echo, newline
 /// translation) in the middle of a binary msgpack stream.
-fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Command {
+fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<Command, EngineError> {
     let mut command = Command::new(&remote.ssh_bin);
+    // view's own options lead, and a client takes the first value it
+    // obtains for an option: a caller's `BatchMode=no` therefore cannot
+    // re-arm the interactive prompt an embedded editor has no way to answer
     command.arg("-T").arg("-o").arg("BatchMode=yes");
     if let Some(port) = remote.port {
         command.arg("-p").arg(port.to_string());
@@ -1232,8 +1273,8 @@ fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Command {
     // every argument from here on is the client's to send, not to read:
     // the destination first, then the single command string
     command.arg(&remote.target);
-    command.arg(remote_command_line(remote, cfg));
-    command
+    command.arg(remote_command_line(remote, cfg)?);
+    Ok(command)
 }
 
 /// Builds the single string `ssh` hands to the remote shell for re-parsing.
@@ -1252,51 +1293,140 @@ fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Command {
 /// to need it: classifying which tokens are safe is the mistake that leaves
 /// the one space-, quote- or `$`-bearing value unescaped.
 ///
-/// A `None` entry in the plan (an `env_remove`) is not forwarded. Its
-/// subject is what the local host's own shell exported into this process,
-/// and a remote host that never inherited that environment has nothing of
-/// the kind to unset.
-fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> String {
+/// Both halves of the plan cross. A `Some` entry becomes a `KEY=value`
+/// assignment; a `None` entry becomes `env -u KEY`. A removal names a
+/// variable that must be absent from the *child*, which is not the same
+/// claim as undoing this host's own export: a remote editor started over
+/// `ssh` inherits the remote user's login environment (sshd and PAM, then
+/// the login shell's non-interactive startup files), and a redirect
+/// variable set there reaches it exactly as one set here would.
+///
+/// # Errors
+///
+/// Off Unix, a token that is not valid Unicode has no byte view to forward
+/// and is refused by name rather than transcoded (see [`token_bytes`]).
+fn remote_command_line(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<OsString, EngineError> {
+    let mut tokens: Vec<Vec<u8>> = vec![b"env".to_vec()];
+    let mut assignments: Vec<Vec<u8>> = Vec::new();
+    for (name, value) in cfg.env_plan() {
+        match value {
+            Some(value) => {
+                let mut assignment = token_bytes(&name)?;
+                assignment.push(b'=');
+                assignment.extend_from_slice(&token_bytes(&value)?);
+                assignments.push(assignment);
+            }
+            // ahead of the `--` below, because `-u` is one of `env`'s own
+            // options and `--` is what ends its option parsing
+            None => {
+                tokens.push(b"-u".to_vec());
+                tokens.push(token_bytes(&name)?);
+            }
+        }
+    }
     // `--` ends `env`'s own option parsing, so a remote nvim path beginning
     // with a dash is a program name rather than a flag. It goes here, ahead
     // of the assignments, and not between them and the program: every `env`
     // implementation measured (GNU, uutils, the BSD one macOS ships) reads
     // an operand after the assignments as the utility to run, and rejects
     // this one with `--: No such file or directory`.
-    let mut tokens = vec![String::from("env"), String::from("--")];
-    for (name, value) in cfg.env_plan() {
-        if let Some(value) = value {
-            tokens.push(format!(
-                "{}={}",
-                name.to_string_lossy(),
-                value.to_string_lossy()
-            ));
-        }
-    }
-    tokens.push(remote.remote_nvim_bin.clone());
+    tokens.push(b"--".to_vec());
+    tokens.append(&mut assignments);
+    tokens.push(remote.remote_nvim_bin.clone().into_bytes());
     // same order and the same reason as the local half: the swap answer
     // rides every spawn, ahead of the files it opens
-    tokens.push(String::from("--embed"));
-    tokens.push(String::from("--cmd"));
-    tokens.push(String::from(SWAP_RECOVERY_CMD));
-    tokens.extend(
-        cfg.extra_args
-            .iter()
-            .map(|arg| arg.to_string_lossy().into_owned()),
-    );
-    tokens
-        .iter()
-        .map(|token| shell_quote(token))
-        .collect::<Vec<_>>()
-        .join(" ")
+    tokens.push(b"--embed".to_vec());
+    tokens.push(b"--cmd".to_vec());
+    tokens.push(SWAP_RECOVERY_CMD.as_bytes().to_vec());
+    for arg in &cfg.extra_args {
+        tokens.push(token_bytes(arg)?);
+    }
+    let mut line: Vec<u8> = Vec::new();
+    for token in &tokens {
+        if !line.is_empty() {
+            line.push(b' ');
+        }
+        line.extend_from_slice(&shell_quote(token));
+    }
+    line_into_os_string(line)
+}
+
+/// The bytes `token` contributes to a remote command line.
+///
+/// On Unix this is the `OsStr`'s own byte content, so a path or value the
+/// local child would receive byte for byte crosses to the remote one
+/// unchanged. Encoding is a property of the far side's filesystem and
+/// locale, and a byte sequence that is not valid UTF-8 is an ordinary
+/// filename there, not an error: decoding it lossily would silently point
+/// the remote editor at a *different* path than the caller named, and
+/// creating a file under that path on write is the same defect with a
+/// permanent result.
+///
+/// # Errors
+///
+/// Off Unix there is no byte view of an `OsStr` at all, so a token that is
+/// not valid Unicode is refused by name. A remote spawn from such a host is
+/// rejected rather than silently altered.
+fn token_bytes(token: &OsStr) -> Result<Vec<u8>, EngineError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        Ok(token.as_bytes().to_vec())
+    }
+    #[cfg(not(unix))]
+    {
+        match token.to_str() {
+            Some(text) => Ok(text.as_bytes().to_vec()),
+            None => Err(EngineError::Io(std::io::Error::other(format!(
+                "a remote command line cannot carry {token:?}: it is not valid \
+                 Unicode, and this platform offers no byte view of it to \
+                 forward unchanged"
+            )))),
+        }
+    }
+}
+
+/// Wraps the assembled command line back up as the single argument `ssh`
+/// receives.
+///
+/// # Errors
+///
+/// Off Unix the bytes came from `str` and reassemble infallibly; the error
+/// arm exists so no platform reaches for a lossy conversion.
+fn line_into_os_string(line: Vec<u8>) -> Result<OsString, EngineError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        Ok(OsString::from_vec(line))
+    }
+    #[cfg(not(unix))]
+    {
+        String::from_utf8(line)
+            .map(OsString::from)
+            .map_err(|err| EngineError::Io(std::io::Error::other(err)))
+    }
 }
 
 /// POSIX single-quote escaping: wraps `token` in `'...'` and replaces every
 /// literal `'` inside it with `'\''` (close the quote, escape the quote,
 /// reopen), the standard rule for a string a POSIX shell parses back as
 /// exactly one word whatever its contents.
-fn shell_quote(token: &str) -> String {
-    format!("'{}'", token.replace('\'', "'\\''"))
+///
+/// Byte-wise, never over `str`: single quoting is byte-transparent, and a
+/// token that is not valid UTF-8 must survive it unchanged rather than be
+/// decoded on the way through.
+fn shell_quote(token: &[u8]) -> Vec<u8> {
+    let mut quoted = Vec::with_capacity(token.len() + 2);
+    quoted.push(b'\'');
+    for byte in token {
+        if *byte == b'\'' {
+            quoted.extend_from_slice(br"'\''");
+        } else {
+            quoted.push(*byte);
+        }
+    }
+    quoted.push(b'\'');
+    quoted
 }
 
 /// Duplicates `source` onto the child's fd
@@ -1456,6 +1586,7 @@ mod config_tests {
     /// reaching `Command` at all would satisfy every one of them.
     fn spawned_env(cfg: &EngineConfig) -> Vec<(OsString, Option<OsString>)> {
         build_command(cfg)
+            .expect("a local config always builds a command")
             .get_envs()
             .map(|(name, value)| (name.to_os_string(), value.map(OsStr::to_os_string)))
             .collect()
@@ -1741,7 +1872,7 @@ mod config_tests {
     /// operating system, read back off the built `Command` for the same
     /// reason [`spawned_env`] reads the environment off it.
     fn built(cfg: &EngineConfig) -> (OsString, Vec<OsString>) {
-        let command = build_command(cfg);
+        let command = build_command(cfg).expect("this config must build a command");
         (
             command.get_program().to_os_string(),
             command.get_args().map(OsStr::to_os_string).collect(),
@@ -1756,6 +1887,12 @@ mod config_tests {
             .expect("a remote command carries at least the command string")
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// `token` as it appears in the assembled command line: the quoting
+    /// under test, rendered back as text the assertions can search for.
+    fn quoted(token: &str) -> String {
+        String::from_utf8_lossy(&shell_quote(token.as_bytes())).into_owned()
     }
 
     fn osv(items: &[&str]) -> Vec<OsString> {
@@ -1905,17 +2042,70 @@ mod config_tests {
         );
     }
 
-    /// A removal's subject is what this host's own shell exported into this
-    /// process. A remote host never inherited it and has nothing to unset.
+    /// A removal names a variable that must be absent from the child, which
+    /// is a different claim from undoing this host's own export: a remote
+    /// editor inherits the remote user's login environment, so a redirect
+    /// variable set in an `~/.zshenv` there reaches it exactly as one set
+    /// here would.
     #[test]
-    fn a_removal_is_not_forwarded_to_a_host_that_never_inherited_it() {
+    fn a_removal_reaches_the_remote_editor_as_an_unset() {
         let cfg = EngineConfig::default()
             .with_env_remove("VIMINIT")
             .with_remote(RemoteSpec::new("host"));
         let line = remote_line(&cfg);
+        let unset = line
+            .find("'-u' 'VIMINIT'")
+            .expect("a removal must cross as an unset, not be dropped");
+        let end_of_options = line
+            .find("'--'")
+            .expect("the command line must end env's own option parsing");
         assert!(
-            !line.contains("VIMINIT"),
-            "a removal was forwarded as if it were an assignment; line {line}"
+            unset < end_of_options,
+            "`-u` is one of env's own options, so an unset placed after the \
+             `--` that ends option parsing is read as a program to run; line \
+             {line}"
+        );
+    }
+
+    /// The remote path must be as faithful as the local one, which carries
+    /// an `OsStr` to the child untouched. A filename or a path-shaped value
+    /// that is not valid UTF-8 is ordinary on a POSIX filesystem, and
+    /// decoding it lossily would point the remote editor at a different
+    /// path than the caller named, silently, and create a file there on
+    /// write.
+    #[cfg(unix)]
+    #[test]
+    fn every_byte_of_a_token_crosses_unchanged() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+        // a latin-1 e-acute: a filename on countless real filesystems, and
+        // not valid UTF-8
+        let raw = b"caf\xe9.md";
+        let value = OsString::from_vec(b"/home/caf\xe9/init.lua".to_vec());
+        let cfg = EngineConfig::default()
+            .with_env("VIEW_PROBE", &value)
+            .with_arg(OsString::from_vec(raw.to_vec()))
+            .with_remote(RemoteSpec::new("host"));
+        let (_, args) = built(&cfg);
+        let line = args
+            .last()
+            .expect("a remote command carries at least the command string")
+            .as_bytes()
+            .to_vec();
+        for needle in [raw.as_slice(), value.as_bytes()] {
+            assert!(
+                line.windows(needle.len()).any(|window| window == needle),
+                "{:?} did not survive into the command line, so the remote \
+                 editor is pointed somewhere the caller did not name; line \
+                 {:?}",
+                OsStr::from_bytes(needle),
+                OsStr::from_bytes(&line)
+            );
+        }
+        assert!(
+            !line.windows(3).any(|window| window == [0xef, 0xbf, 0xbd]),
+            "a replacement character reached the command line, which is the \
+             lossy decode this forbids; line {:?}",
+            OsStr::from_bytes(&line)
         );
     }
 
@@ -1929,7 +2119,7 @@ mod config_tests {
             .with_remote(RemoteSpec::new("host"));
         let line = remote_line(&cfg);
         let answer = line
-            .find(&shell_quote(SWAP_RECOVERY_CMD))
+            .find(&quoted(SWAP_RECOVERY_CMD))
             .expect("the swap answer must ride a remote spawn too");
         let file = line
             .find("'notes.md'")
@@ -2202,7 +2392,8 @@ mod tests {
     /// autocommand must precede whatever the caller put in `extra_args`.
     #[test]
     fn every_spawn_carries_the_swap_answer_ahead_of_the_files_it_opens() {
-        let command = build_command(&EngineConfig::default().with_arg("notes.md"));
+        let command = build_command(&EngineConfig::default().with_arg("notes.md"))
+            .expect("a local config always builds a command");
         let spawned: Vec<OsString> = command
             .get_args()
             .map(std::ffi::OsStr::to_os_string)
@@ -2237,7 +2428,8 @@ mod tests {
     /// and a second one spent here would come out of the caller's own budget.
     #[test]
     fn a_spawn_spends_exactly_one_cmd_argument() {
-        let command = build_command(&EngineConfig::isolated());
+        let command = build_command(&EngineConfig::isolated())
+            .expect("a local config always builds a command");
         assert_eq!(
             command
                 .get_args()

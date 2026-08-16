@@ -1,0 +1,17 @@
+#!/bin/sh
+# `fake-ssh` with one addition: a variable exported into the environment the
+# remote command inherits, standing in for the remote user's login
+# environment.
+#
+# That environment is the one part of a real connection the plain stub does
+# not reproduce. A remote editor started over ssh inherits what sshd and PAM
+# export (`/etc/environment`, `~/.ssh/environment`) plus whatever the login
+# shell's non-interactive startup file sets, and a variable that redirects an
+# editor's configuration is ordinary in one. A test asserting that a removal
+# reaches the far side needs something there to remove.
+set -eu
+
+VIEW_REMOTE_PLANTED=from-the-remote-login-shell
+export VIEW_REMOTE_PLANTED
+
+exec "$(dirname "$0")/fake-ssh" "$@"
