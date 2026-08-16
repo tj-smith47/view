@@ -44,12 +44,12 @@ pub struct RemoteSpec {
     /// It must name a host: an empty destination, or one beginning with a
     /// dash (which a client reads as one of its own options), is refused by
     /// [`Engine::spawn`].
-    ///
-    /// This is the binary the far side runs; the local
-    /// [`EngineConfig::nvim_bin`] has no bearing on a remote spawn.
     pub target: String,
     /// The `nvim` binary on the far side, resolved against the remote
     /// user's own `PATH`. `"nvim"` by default.
+    ///
+    /// This is the binary a remote spawn runs; the local
+    /// [`EngineConfig::nvim_bin`] has no bearing on one.
     pub remote_nvim_bin: String,
     /// The port passed to the client as `-p`, or `None` to leave the
     /// client's own resolution (`~/.ssh/config`, the default 22) alone.
