@@ -20,9 +20,10 @@
 use crate::startup::AttachFailure;
 use anyhow::Result;
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
-use std::path::Path;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use view_engine::handle::EngineError;
 use view_engine::process::RemoteSpec;
@@ -403,17 +404,26 @@ fn probe_connection(remote: &RemoteSpec) -> Reachability {
 /// an exiting editor. That case reports nothing: a connection that has
 /// neither succeeded nor failed is not evidence about the one that did fail.
 ///
-/// The client's stderr is read after it exits, not while it runs. A client
-/// that wrote more than a pipe buffer's worth without exiting would block on
-/// its own write and be killed at the bound, which costs the diagnosis of a
-/// client that is already misbehaving and keeps this free of a second thread.
+/// The client's stderr is captured into a file and read after it exits,
+/// never through a pipe: see [`Capture`] for the client that does not finish
+/// against one. Reading afterwards also keeps this free of a second thread,
+/// and a file has no buffer for a chatty client to fill and block on.
+///
+/// A host with no writable scratch directory still gets a classification:
+/// the connection runs with its stderr discarded, so the exit status is
+/// still read and only the quoted line is lost.
 fn probe_connection_within(remote: &RemoteSpec, limit: Duration) -> Reachability {
+    let capture = Capture::open();
+    let sink = match capture.as_ref().map(Capture::sink) {
+        Some(Ok(sink)) => Stdio::from(sink),
+        Some(Err(_)) | None => Stdio::null(),
+    };
     let Ok(mut child) = Command::new(&remote.ssh_bin)
         .args(remote.connection_args())
         .arg(PROBE_COMMAND)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(sink)
         .spawn()
     else {
         return Reachability::Unknown;
@@ -432,10 +442,7 @@ fn probe_connection_within(remote: &RemoteSpec, limit: Duration) -> Reachability
         }
         std::thread::sleep(PROBE_POLL_INTERVAL);
     };
-    let mut stderr = Vec::new();
-    if let Some(mut pipe) = child.stderr.take() {
-        let _ = pipe.read_to_end(&mut stderr);
-    }
+    let stderr = capture.as_ref().map(Capture::read).unwrap_or_default();
     match status.code() {
         Some(0) => Reachability::Reached,
         Some(SSH_CLIENT_FAILURE) => Reachability::Rejected {
@@ -443,6 +450,65 @@ fn probe_connection_within(remote: &RemoteSpec, limit: Duration) -> Reachability
         },
         Some(code) => Reachability::ShellRefused { code },
         None => Reachability::Unknown,
+    }
+}
+
+/// A private directory holding one diagnostic connection's captured
+/// stderr, removed when the capture is dropped -- including the path where
+/// the client is killed at the bound and nothing is ever read.
+///
+/// A file rather than a pipe because a pipe is not a shape every ssh client
+/// finishes writing to. OpenSSH for Windows (9.5p2, the client shipped in
+/// `%SystemRoot%\System32\OpenSSH`) does not exit while its stderr is a
+/// pipe: measured against a host that rejects it, the same connection ends
+/// in 83ms with a file-backed stderr and was still running after 20s with a
+/// pipe-backed one, with pipes on stdin and stdout making no difference
+/// either way. Through a pipe that client outlives every bound this module
+/// would be willing to wait, so the refusal it did diagnose is never read
+/// and the user gets the generic message instead. A file costs one
+/// directory per diagnosis and behaves the same on every platform.
+///
+/// The directory is created, never opened: a name that already exists is an
+/// error here rather than a file this process would write a client's output
+/// into.
+struct Capture {
+    dir: PathBuf,
+    path: PathBuf,
+}
+
+impl Capture {
+    /// A capture directory of this process's own, or `None` when the
+    /// system scratch directory cannot hold one.
+    fn open() -> Option<Self> {
+        // two probes in one process would otherwise collide on the name,
+        // and the counter alone repeats across runs of the same binary
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "view-probe-{}-{}",
+            std::process::id(),
+            NONCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir(&dir).ok()?;
+        let path = dir.join("stderr");
+        Some(Self { dir, path })
+    }
+
+    /// The handle the client writes its stderr into.
+    fn sink(&self) -> std::io::Result<File> {
+        File::create(&self.path)
+    }
+
+    /// Everything the client wrote, or nothing when it wrote nothing and
+    /// when the capture cannot be read back.
+    fn read(&self) -> Vec<u8> {
+        std::fs::read(&self.path).unwrap_or_default()
+    }
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }
 
@@ -573,7 +639,7 @@ fn is_file(path: &Path) -> bool {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use std::path::PathBuf;
+    use std::io::Write as _;
 
     /// A scratch directory of this test's own, removed when the guard
     /// drops. Directories only: an executable written by a test and then
@@ -624,6 +690,16 @@ mod tests {
             fixture("fake-ssh-reject.cmd")
         } else {
             fixture("fake-ssh-reject")
+        }
+    }
+
+    /// The same, for a client that refuses only after a banner larger than
+    /// a pipe will hold.
+    fn chatty_client() -> PathBuf {
+        if cfg!(windows) {
+            fixture("fake-ssh-chatty.cmd")
+        } else {
+            fixture("fake-ssh-chatty")
         }
     }
 
@@ -1084,6 +1160,60 @@ mod tests {
                 ))
             }
         );
+    }
+
+    /// A client's answer is read from a file, so a client that writes more
+    /// than a pipe would hold before refusing is still diagnosed. Through a
+    /// pipe nobody drains this client blocks on its own write and never
+    /// exits, and the diagnosis read after exit never arrives.
+    ///
+    /// Given its own generous bound rather than the shipped one: the
+    /// fixture's banner takes a batch interpreter a while to write, and what
+    /// is under test is whether the whole of it is captured, never how long
+    /// this module is willing to wait.
+    #[test]
+    fn a_chatty_client_is_still_diagnosed_after_writing_more_than_a_pipe_will_hold() {
+        let spec = RemoteSpec::new("view-test-host").with_ssh_bin(chatty_client());
+        assert_eq!(
+            probe_connection_within(&spec, Duration::from_secs(30)),
+            Reachability::Rejected {
+                detail: Some(String::from(
+                    "view-test-host: Permission denied (publickey)."
+                ))
+            }
+        );
+    }
+
+    /// A capture is one diagnosis's own, and outlives none of them: the
+    /// directory it wrote into is gone once the capture is dropped, on the
+    /// path where the client answered and on the path where it never did.
+    #[test]
+    fn a_capture_is_removed_with_the_diagnosis_that_owns_it() {
+        let (dir, path) = {
+            let capture = Capture::open().expect("a capture directory");
+            let mut sink = capture
+                .sink()
+                .expect("a handle to write the client's answer into");
+            sink.write_all(b"view-test-host: Permission denied (publickey).\n")
+                .expect("the capture accepts what a client writes");
+            drop(sink);
+            assert_eq!(
+                last_line(&capture.read()).as_deref(),
+                Some("view-test-host: Permission denied (publickey).")
+            );
+            (capture.dir.clone(), capture.path.clone())
+        };
+        assert!(!path.exists(), "{path:?} outlived the capture that owns it");
+        assert!(!dir.exists(), "{dir:?} outlived the capture that owns it");
+    }
+
+    /// Two diagnoses in one process do not share a capture: a second one
+    /// would otherwise read, and then remove, the first one's answer.
+    #[test]
+    fn a_capture_is_never_shared_between_two_diagnoses() {
+        let first = Capture::open().expect("a capture directory");
+        let second = Capture::open().expect("a second capture directory");
+        assert_ne!(first.path, second.path);
     }
 
     /// And a client that connects is not: the stub that stands in for a

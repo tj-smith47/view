@@ -1,0 +1,19 @@
+#!/bin/sh
+# A stand-in for an OpenSSH client whose connection is refused behind a very
+# long banner, for tests about how a caller captures what a client wrote.
+#
+# The banner is deliberately larger than a pipe buffer (roughly 128 KiB): a
+# client whose output is captured through a pipe nobody drains blocks on its
+# own write at that size and never reaches its exit, so a diagnosis read
+# after exit would never arrive. Everything here is written before the
+# refusal, so the line that matters is the last one -- which is also what
+# the far side of a real login banner looks like.
+set -eu
+
+i=0
+while [ "$i" -lt 2000 ]; do
+    echo "view-test-host: banner line $i, padded so this fixture writes more than a pipe will hold" >&2
+    i=$((i + 1))
+done
+echo "view-test-host: Permission denied (publickey)." >&2
+exit 255
