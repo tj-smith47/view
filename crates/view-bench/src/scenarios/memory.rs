@@ -363,7 +363,16 @@ fn run_with_reader(
     let mut raw_mb = Vec::with_capacity(total);
     let pace = Duration::from_millis(2);
     for _ in 0..total {
-        raw_mb.push(reader(pid)?);
+        // a settled screen only proves the screen stopped changing, never
+        // that the process is still alive to read from: a spawn that exits
+        // right after settling (a remote attach failure printed once and
+        // then a quiet exit, say) passes settle() and dies before the first
+        // sample, so the reader's own error carries no clue why. The screen
+        // at the moment of failure is that clue -- the same diagnostic the
+        // settle-timeout branch above already prints.
+        raw_mb.push(reader(pid).map_err(|source| BenchError::Desync {
+            context: format!("{source}; screen at failure:\n{}", session.screen_text()),
+        })?);
         let next = Instant::now() + pace;
         while Instant::now() < next {
             std::thread::yield_now();

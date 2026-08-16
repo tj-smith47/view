@@ -41,6 +41,12 @@ use view_bench::scenarios::{
 #[path = "bench/taps_rows.rs"]
 mod taps_rows;
 
+// The stub-arming machinery this row needs is a unix mechanism, the same
+// reason taps_rows.rs above is split out.
+#[cfg(unix)]
+#[path = "bench/remote_rows.rs"]
+mod remote_rows;
+
 #[path = "bench/rows.rs"]
 mod rows;
 use rows::run_cell;
@@ -66,6 +72,7 @@ const MATRIX: &[(&str, &str)] = &[
     ("first_paint", "minimal"),
     ("first_paint", "heavy"),
     ("memory", "minimal"),
+    ("remote_memory", "minimal"),
     ("flood", "minimal"),
     ("input_path", "minimal"),
     ("output_path", "minimal"),
@@ -819,10 +826,12 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
     ) {
         return Some("the tap channel (FIFO + raw CLOCK_MONOTONIC) is a unix-only mechanism; the internal-boundary, echo_path and speculated-echo rows built on it are not measured off unix");
     }
-    // The control arm reaches its headless server over a unix socket path.
+    // The control arm reaches its headless server over a unix socket path;
+    // remote_memory arms PATH against the stub ssh double with a unix
+    // symlink (remote_rows.rs). Neither has a validated off-unix path.
     #[cfg(not(unix))]
-    if scenario == "echo_control" {
-        return Some("the out-of-process control arm attaches its remote UI over a unix socket path; the named-pipe equivalent is unvalidated, so the row is not measured off unix");
+    if matches!(scenario, "echo_control" | "remote_memory") {
+        return Some("this row depends on a unix-only mechanism (echo_control's control socket, remote_memory's stub-ssh PATH symlink) with no validated equivalent off unix");
     }
     None
 }

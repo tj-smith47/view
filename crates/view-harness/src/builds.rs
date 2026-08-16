@@ -53,6 +53,7 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     ("first_paint", Some(VIEW_BIN)),
     ("scroll", Some(VIEW_BIN)),
     ("memory", Some(VIEW_BIN)),
+    ("remote_memory", Some(VIEW_BIN)),
     ("flood", Some(VIEW_BIN)),
     ("picker", Some(VIEW_BIN)),
     ("supervision", Some(VIEW_BIN)),

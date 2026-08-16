@@ -21,6 +21,11 @@ pub mod first_paint;
 pub mod flood;
 pub mod memory;
 pub mod picker;
+// The stub-arming trick this row needs (a symlink so PATH resolves `ssh`
+// to the committed stand-in client) is a unix mechanism, matching how
+// `view_oracle::remote` itself gates its own stub coverage.
+#[cfg(unix)]
+pub mod remote_memory;
 pub mod scroll;
 pub mod supervision;
 // The tap channel is FIFO + raw-CLOCK_MONOTONIC based (see taps.rs); neither

@@ -392,6 +392,10 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
             }
             Ok(metrics)
         }
+        #[cfg(unix)]
+        "remote_memory" => {
+            super::remote_rows::run_remote_memory_row(&world, fixture, bins, scenario, protocol)
+        }
         "flood" => {
             let pair = paired_specs(&world, fixture, bins)?;
             let outcome = flood::run(&flood::RunSpec {
