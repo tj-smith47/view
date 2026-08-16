@@ -87,11 +87,14 @@ struct Cli {
     /// (`minimize`, `fuzz`) is given.
     #[arg(default_value = "corpus")]
     path: PathBuf,
-    /// Which transport legs a corpus run drives. `both` is the gate's own
-    /// value; `local` is the one to reach for when iterating on a single
-    /// divergent entry, which pays a stub spawn per round otherwise.
-    #[arg(long, value_enum, default_value_t = RouteArg::Both)]
-    route: RouteArg,
+    /// Which transport legs a corpus run drives (default `both`, which is
+    /// the gate's own value). `local` is the one to reach for when iterating
+    /// on a single divergent entry, which pays a stub spawn per round
+    /// otherwise. Refused rather than ignored when a subcommand is given:
+    /// every subcommand drives a transport of its own choosing and none of
+    /// them reads this.
+    #[arg(long, value_enum)]
+    route: Option<RouteArg>,
 }
 
 /// The `--route` selector's surface. A separate type from [`EngineRoute`]
@@ -116,6 +119,44 @@ impl RouteArg {
             Self::Remote => &[EngineRoute::StubRemote],
             Self::Both => &[EngineRoute::Local, EngineRoute::StubRemote],
         }
+    }
+
+    /// How this value is spelled on the command line, for a refusal to quote
+    /// back what it refused.
+    const fn spelling(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+            Self::Both => "both",
+        }
+    }
+}
+
+/// The legs to drive, refusing a `--route` that named something no
+/// subcommand can honour.
+///
+/// A flag accepted and then discarded is the failure this whole path exists
+/// to refuse: `oracle --route local remote` would parse, print remote-battery
+/// lines, and leave whoever ran it believing they had narrowed something. No
+/// subcommand can honour the flag -- each drives a transport its own case
+/// list decides -- so the combination is a mistake with no correct reading,
+/// and the refusal names both halves so the reader can see which one to drop.
+fn routes_for(
+    command: Option<&Command>,
+    route: Option<RouteArg>,
+) -> Result<&'static [EngineRoute]> {
+    match (command, route) {
+        (Some(command), Some(route)) => bail!(
+            "--route {} was given with the `{}` subcommand, which drives its \
+             own transport and never reads it. Drop one: `oracle --route {}` \
+             runs the corpus on that leg, `oracle {}` runs the subcommand.",
+            route.spelling(),
+            command.spelling(),
+            route.spelling(),
+            command.spelling(),
+        ),
+        (Some(_), None) => Ok(&[]),
+        (None, route) => Ok(route.unwrap_or(RouteArg::Both).routes()),
     }
 }
 
@@ -225,8 +266,25 @@ enum Command {
     },
 }
 
+impl Command {
+    /// This subcommand's name on the command line, for a refusal to quote
+    /// back what it refused.
+    const fn spelling(&self) -> &'static str {
+        match self {
+            Self::Minimize { .. } => "minimize",
+            Self::Fuzz { .. } => "fuzz",
+            Self::Compat { .. } => "compat",
+            Self::Page => "page",
+            Self::Hang { .. } => "hang",
+            Self::Speculate { .. } => "speculate",
+            Self::Remote { .. } => "remote",
+        }
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let routes = routes_for(cli.command.as_ref(), cli.route)?;
     match cli.command {
         Some(Command::Minimize {
             path,
@@ -256,7 +314,7 @@ fn main() -> Result<()> {
                 std::process::exit(1)
             }
         }
-        None => run_command(&cli.path, cli.route.routes()),
+        None => run_command(&cli.path, routes),
     }
 }
 
@@ -345,14 +403,16 @@ enum EngineRoute {
     /// (`view_oracle::remote`), which joins its trailing arguments and hands
     /// them to a shell exactly as a real client does.
     ///
-    /// The transport is the whole of the difference, which
-    /// `view_oracle::remote::stub_config` is what keeps true: it hands the
-    /// far-side child the same prepared hermetic home the local route gets,
-    /// rather than the exemption a config aimed at a real destination has to
-    /// take (`view_engine::process::EngineConfig::env_plan` says why that
-    /// exemption exists). An entry that probes anything home-shaped
-    /// therefore reads the same on both legs, and a divergence marked
-    /// `(remote)` is about the transport.
+    /// The transport is the whole of the difference, and
+    /// `view_oracle::remote::stub_config` is what keeps that true. A config
+    /// aimed at a real destination plans from named constants and exempts
+    /// `HOME`, because it cannot see the far side; this route's far side is
+    /// this host, so the same prepared hermetic home and the same host
+    /// sweep the local leg gets are applied to it as well. An entry that
+    /// probes anything home-shaped, or that a host variable would reach,
+    /// therefore reads the same on both legs -- and a divergence marked
+    /// `(remote)` is about the transport, which is the only reason that
+    /// label is worth printing.
     StubRemote,
 }
 
@@ -1014,16 +1074,42 @@ mod tests {
         );
         assert_eq!(RouteArg::Local.routes(), [EngineRoute::Local]);
         assert_eq!(RouteArg::Remote.routes(), [EngineRoute::StubRemote]);
+        let bare = Cli::parse_from(["oracle"]);
         assert_eq!(
-            Cli::parse_from(["oracle"]).route.routes(),
+            routes_for(bare.command.as_ref(), bare.route).unwrap(),
             RouteArg::Both.routes(),
             "a bare invocation must be the gate's own run"
         );
+        let narrowed = Cli::parse_from(["oracle", "--route", "local"]);
         assert_eq!(
-            Cli::parse_from(["oracle", "--route", "local"])
-                .route
-                .routes(),
+            routes_for(narrowed.command.as_ref(), narrowed.route).unwrap(),
             RouteArg::Local.routes()
+        );
+    }
+
+    /// A flag accepted and then discarded is the defect class this runner
+    /// refuses everywhere else, and `--route` sits on the top-level parser
+    /// where every subcommand can be handed one. The refusal has to name
+    /// both halves: a message saying only "unsupported" leaves the reader
+    /// guessing which of the two words they typed is the wrong one.
+    #[test]
+    fn a_route_no_subcommand_can_honour_is_refused_rather_than_ignored() {
+        let cli = Cli::parse_from(["oracle", "--route", "local", "remote"]);
+        let refused = routes_for(cli.command.as_ref(), cli.route)
+            .expect_err("a route given to a subcommand must not be silently dropped")
+            .to_string();
+        assert!(
+            refused.contains("--route local") && refused.contains("`remote`"),
+            "the refusal names neither the flag it refused nor the subcommand \
+             it was given with: {refused}"
+        );
+        let alone = Cli::parse_from(["oracle", "remote"]);
+        assert!(
+            routes_for(alone.command.as_ref(), alone.route)
+                .unwrap()
+                .is_empty(),
+            "a subcommand with no --route drives its own transport and must \
+             not inherit the corpus run's default"
         );
     }
 

@@ -12,12 +12,15 @@
 #![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 
 use view_engine::env::HERMETIC_HOME_VAR;
 use view_engine::process::EngineConfig;
 
-use super::{run_case, stub_available, stub_client, stub_config, RemoteCase, RemoteReport};
+use super::{
+    run_case, stub_available, stub_client, stub_config, RemoteCase, RemoteReport, COLS, ROWS,
+};
+use crate::EngineSession;
 
 /// Runs `case` and returns its report, failing with the report's own line
 /// and every divergence it carries rather than a bare boolean.
@@ -93,6 +96,101 @@ fn the_stand_in_route_hands_its_far_side_the_same_home_the_local_route_gets() {
         "the stand-in route's far side no longer gets the hermetic home; plan \
          {remote:?}"
     );
+}
+
+/// The rest of that same contract: every host variable the local route's
+/// plan drops is dropped on this route too.
+///
+/// The stand-in execs a shell as a child of this process, so its far side
+/// inherits this process's environment -- which a plan built from named
+/// constants alone leaves almost entirely intact, while the local reference
+/// it is compared against has been swept clean. A developer with
+/// `LD_PRELOAD` or `LD_LIBRARY_PATH` exported would then be running two
+/// differently-linked editors against each other and reading the result as
+/// a transport fault.
+///
+/// The sweep is asserted name by name against the same call the local plan
+/// is built from, so the two cannot drift: whatever this host exports is the
+/// witness, and a host exporting nothing outside the allowlist would leave
+/// nothing to check, which the emptiness guard refuses rather than passes.
+#[test]
+fn the_stand_in_route_sweeps_every_host_variable_the_local_route_sweeps() {
+    let swept = view_engine::env::hermetic_sweep();
+    assert!(
+        swept.len() > 1,
+        "this host exports nothing outside the hermetic allowlist, so there is \
+         no variable here for either route to drop and this proves nothing"
+    );
+    let plan = stub_config()
+        .expect("the stub client and a preparable hermetic home")
+        .env_plan();
+    for (name, host_value) in &swept {
+        if view_engine::env::env_names_eq(name, OsStr::new(HERMETIC_HOME_VAR)) {
+            continue;
+        }
+        // removed, or overridden with something that is not the host's: the
+        // two search-path variables are swept by name locally and replaced
+        // by a neutralizer rather than dropped, on both routes
+        let neutralized = plan
+            .iter()
+            .find(|(planned, _)| view_engine::env::env_names_eq(planned, name))
+            .is_some_and(|(_, value)| value.as_ref() != Some(host_value));
+        assert!(
+            neutralized,
+            "{name:?} is swept out of a local hermetic child but reaches the \
+             stand-in route's far side with this host's own value, and that \
+             far side inherits this process's environment; plan {plan:?}"
+        );
+    }
+}
+
+/// The same claim read out of two started editors rather than off a plan:
+/// a variable this host exports reaches neither leg of the comparison.
+///
+/// The plan assertion above is about the config; this is about what a shell
+/// on the far side actually did with it, which is the layer the whole
+/// stand-in exists to exercise. The witness is taken from the sweep rather
+/// than planted, because planting means mutating this process's environment
+/// while sibling tests read it.
+#[test]
+fn a_host_variable_reaches_neither_side_of_the_stand_in_comparison() {
+    let witness = view_engine::env::hermetic_sweep()
+        .into_iter()
+        .filter_map(|(name, value)| name.into_string().ok().map(|name| (name, value)))
+        .find(|(name, value)| {
+            !value.is_empty()
+                && !name.is_empty()
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !opens_with_a_digit(name)
+        })
+        .map(|(name, _)| name)
+        .expect("this host exports at least one swept variable a shell can name");
+
+    let probe = format!("string(getenv('{witness}'))");
+    let mut remote = EngineSession::spawn_configured(
+        stub_config().expect("the stub client and a preparable hermetic home"),
+        COLS,
+        ROWS,
+    )
+    .expect("a stand-in route session must start");
+    let mut local = EngineSession::spawn_configured(EngineConfig::isolated(), COLS, ROWS)
+        .expect("a local session must start");
+
+    for (side, session) in [("stand-in route", &mut remote), ("local", &mut local)] {
+        assert_eq!(
+            session.eval_str(&probe).unwrap(),
+            "v:null",
+            "{witness} reached the {side} editor: the two sides of every \
+             comparison must be swept by the same rule, or a host variable \
+             decides one of them and the report line blames the transport"
+        );
+    }
+}
+
+/// Whether a name opens with a digit, which no environment variable a shell
+/// can read back does.
+fn opens_with_a_digit(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_ascii_digit())
 }
 
 /// A case's label is its selector on the runner, and every case must be

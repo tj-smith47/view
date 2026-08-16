@@ -30,9 +30,12 @@
 //! comment says which of them it proves.
 //!
 //! That the far side is this host is also what lets [`stub_config`] do the
-//! one thing a config aimed at a real destination cannot: prepare a hermetic
-//! home and point the far-side child at it, so a session on this route
-//! differs from a local one in its transport and in nothing else.
+//! two things a config aimed at a real destination cannot: prepare a
+//! hermetic home and point the far-side child at it, and enumerate the
+//! environment that child inherits so the same sweep the local route applies
+//! applies here too. Those two are what make "a session on this route
+//! differs from a local one in its transport and in nothing else" a claim
+//! rather than a hope.
 //!
 //! # What is compared
 //!
@@ -113,21 +116,34 @@ pub fn stub_spec() -> RemoteSpec {
 }
 
 /// The config every session on the stand-in route spawns from: an isolated
-/// config aimed at [`stub_spec`], with `HOME` pointed back at the prepared
-/// hermetic home.
+/// config aimed at [`stub_spec`], carrying the two things a config aimed at
+/// a *real* destination cannot -- the prepared hermetic home, and a removal
+/// for every host variable the local hermetic sweep drops.
 ///
-/// [`EngineConfig::isolated`] exempts `HOME` on a remote target, because a
-/// hermetic home has to be *prepared* and a command string cannot prepare
-/// one on a machine it has never seen. The stand-in's far side is this host,
-/// as this user, so that preparation is one this process can simply perform:
-/// the exemption buys nothing here and costs the route its own contract,
-/// which is that it changes the transport and nothing else.
+/// [`EngineConfig::isolated`] plans a remote child from named constants and
+/// exempts `HOME`, because a command string cannot prepare a directory on a
+/// machine it has never seen and cannot enumerate a login environment it has
+/// never seen either (`view_engine::process::EngineConfig::env_plan` and
+/// `view_engine::env::REMOTE_SWEEP_VARS` carry that reasoning). Both limits
+/// are about a far side this process cannot see. The stand-in's far side is
+/// *this host, as this user*: `fake-ssh` execs a shell as a child of this
+/// process, so the environment the far-side editor inherits is this
+/// process's own, and every name in it is enumerable by
+/// [`view_engine::env::hermetic_sweep`] -- the same call the local route's
+/// own plan is built from.
 ///
-/// Without it, the engine side of every comparison runs under the invoking
-/// account's real home while the reference side runs under the hermetic one,
-/// and the first corpus entry to probe anything home-shaped -- `expand('~')`,
-/// `stdpath('state')`, `&undodir` -- diverges on the remote leg alone, on the
-/// machine that runs it, with a report line pointing at the transport.
+/// Leaving either out is the same defect wearing two sizes. Without the
+/// home, the engine side of every comparison runs under the invoking
+/// account's real home while the reference side runs under the hermetic one.
+/// Without the sweep, roughly a hundred host variables reach the far-side
+/// editor and not the local one -- a developer with `LD_PRELOAD` or
+/// `LD_LIBRARY_PATH` exported gets a remote editor linked against different
+/// libraries than the local one, and any difference that follows reports as
+/// `DIVERGENCE (remote)` with the route's own name pointing at the
+/// transport. Host dependence is acceptable here in a way it is not on the
+/// remote command line, and for the reason that decides everything else in
+/// this module: this transport exists only inside this tree's own tests, and
+/// the host it depends on is the one running them.
 ///
 /// # Errors
 ///
@@ -138,9 +154,19 @@ pub fn stub_spec() -> RemoteSpec {
 pub fn stub_config() -> Result<EngineConfig, OracleError> {
     refuse_without_stub()?;
     let home = view_engine::env::prepare_hermetic_home()?;
-    Ok(EngineConfig::isolated()
+    let mut cfg = EngineConfig::isolated()
         .with_remote(stub_spec())
-        .with_env(view_engine::env::HERMETIC_HOME_VAR, home))
+        .with_env(view_engine::env::HERMETIC_HOME_VAR, home);
+    for (name, _) in view_engine::env::hermetic_sweep() {
+        // the sweep drops `HOME` too, and a removal outranks an override of
+        // the same name: taking this one would undo the line above and leave
+        // the far side with no home at all
+        if view_engine::env::env_names_eq(&name, OsStr::new(view_engine::env::HERMETIC_HOME_VAR)) {
+            continue;
+        }
+        cfg = cfg.with_env_remove(name);
+    }
+    Ok(cfg)
 }
 
 /// An [`EngineSession`] reached through [`stub_config`], for a caller driving
