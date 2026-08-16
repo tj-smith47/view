@@ -353,10 +353,14 @@ fn deny_inert_ssh_opts(cli: &Cli) -> Result<()> {
     for opt in &cli.ssh_opt {
         // ssh_config keywords take their argument separated by `=` or by
         // whitespace; splitting on `=` alone lets `-o 'BatchMode no'` walk
-        // straight past this refusal with the same effect as `=no`.
-        let key = opt
+        // straight past this refusal with the same effect as `=no`. Leading
+        // whitespace must be stripped before that split, not just after it:
+        // splitting first would read the leading space itself as the
+        // separator and leave an empty key that matches nothing.
+        let trimmed = opt.trim_start();
+        let key = trimmed
             .split_once(|c: char| c == '=' || c.is_ascii_whitespace())
-            .map_or(opt.as_str(), |(key, _)| key)
+            .map_or(trimmed, |(key, _)| key)
             .trim();
         if let Some((_, reason)) = RESERVED_SSH_OPTS
             .iter()
@@ -1410,6 +1414,39 @@ mod tests {
         assert_eq!(spec.extra_ssh_opts, vec![String::from("ProxyJump bastion")]);
     }
 
+    // Trimming decides only whether the refusal fires; it must never rewrite
+    // the value a passing entry hands to the client, leading whitespace
+    // included.
+    #[test]
+    fn a_leading_whitespace_ssh_opt_outside_the_refusal_set_is_forwarded_with_its_whitespace_intact(
+    ) {
+        let cli = Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-opt",
+            " ProxyJump bastion",
+        ]);
+        assert!(
+            deny_incoherent_remote(&cli).is_ok(),
+            "a leading-whitespace option outside the reserved set is an \
+             ordinary client option and applies normally"
+        );
+        let spec = spec_of(&[
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-opt",
+            " ProxyJump bastion",
+        ]);
+        assert_eq!(
+            spec.extra_ssh_opts,
+            vec![String::from(" ProxyJump bastion")],
+            "trimming for the refusal comparison must not rewrite the \
+             forwarded value"
+        );
+    }
+
     // Silently ignoring a connection flag on a local session would let a
     // user believe a proxy or a port applied to a spawn that never opened a
     // connection at all.
@@ -1729,6 +1766,10 @@ mod tests {
                 "BatchMode no",
             ),
             (
+                &["view", "--remote", "prod-box", "--ssh-opt", " BatchMode no"],
+                " BatchMode no",
+            ),
+            (
                 &[
                     "view",
                     "--remote",
@@ -1737,6 +1778,16 @@ mod tests {
                     "RequestTTY=yes",
                 ],
                 "RequestTTY=yes",
+            ),
+            (
+                &[
+                    "view",
+                    "--remote",
+                    "prod-box",
+                    "--ssh-opt",
+                    "\tRequestTTY=yes",
+                ],
+                "\tRequestTTY=yes",
             ),
         ] {
             let cli = Cli::parse_from(argv.iter().copied());
@@ -1751,7 +1802,7 @@ mod tests {
 
     #[test]
     fn a_port_entry_is_refused_only_against_the_flag_that_would_outrank_it() {
-        for port_opt in ["Port=1234", "Port 1234"] {
+        for port_opt in ["Port=1234", "Port 1234", " Port 1234"] {
             let clash = Cli::parse_from([
                 "view",
                 "--remote",
