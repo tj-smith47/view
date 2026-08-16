@@ -53,7 +53,13 @@ pub fn run(
     // hold separate config directories and probe-socket addresses, and a
     // client resolving the bare arm's paths would contend for both
     let client = server.client_spec(control);
-    let outcome = echo::run(ViewSpec(&client), nvim_spec, protocol, settle_deadline);
+    let outcome = echo::run(
+        ViewSpec(&client),
+        nvim_spec,
+        protocol,
+        settle_deadline,
+        echo::DEFAULT_STARTUP_QUIET,
+    );
     // the server outlives the sampling deliberately: dropping it mid-run
     // would tear the client's buffer out from under a sample in flight and
     // report the resulting desync as a latency reading

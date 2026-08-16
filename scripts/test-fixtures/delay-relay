@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Userspace byte-relay standing in for the network latency a real `tc
+netem` would inject, for hosts (CI included) that cannot be assumed to hold
+the network-namespace privileges `netem` needs.
+
+It is invoked exactly as `ssh` would be -- the same connection options, the
+same destination, the same joined remote-command string -- because it is
+armed as a `PATH` entry's `ssh` in front of the committed stand-in client
+(`scripts/test-fixtures/fake-ssh`), never in place of it. Every argument
+this process receives is handed to the inner client unchanged; nothing here
+parses an ssh-style option, because that parsing is `fake-ssh`'s own
+carefully-scoped job and a second implementation of it would drift from the
+one callers actually depend on.
+
+What it adds: two threads, one per direction of the inherited stdio pair,
+each sleeping `DELAY_RELAY_MS` milliseconds per relayed chunk before
+writing that chunk on to the other side. Bytes are read and written whole
+and in the order they arrive -- no reassembly, no reordering -- so a
+msgpack-rpc stream framed on either side of the relay stays framed the same
+way on the other, just later. Raw file descriptors (`os.read`/`os.write`)
+rather than Python's buffered `sys.stdin`/`sys.stdout` objects, so a chunk
+this process sees is a chunk the kernel actually delivered in one read, not
+one Python's own read-ahead buffering reshaped first.
+
+A "chunk" is a short-window coalescing of whatever the kernel currently has
+buffered, not one raw `os.read` return. A msgpack-rpc writer flushes one
+`write(2)` per outbound message rather than batching a burst into one
+syscall, so a startup redraw (routinely dozens of grid/highlight
+notifications sent back-to-back within microseconds of each other) arrives
+as many separate kernel reads if this loop delayed each one it saw: an
+otherwise-single round trip would then pay `DELAY_MS` once per message
+instead of once for the burst, which no real network -- TCP coalesces
+back-to-back writes that land within its own send window into one segment
+-- would do either. Each first read is followed by a bounded drain
+(`_COALESCE_WINDOW_S`) that keeps folding in whatever arrives within that
+short window before the sleep and the single write; two messages spaced
+further apart than the window (a real gap, not flush fragmentation) still
+pay the delay once each.
+
+Configuration is environment-only (`DELAY_RELAY_MS`, `DELAY_RELAY_INNER`)
+rather than extra argv, because every argv position here belongs to ssh's
+own invocation shape and a caller inserting a relay-specific flag ahead of
+the connection options would have to know it is talking to a relay at all --
+defeating the point of a client a caller can drop in unmodified.
+"""
+
+import os
+import select
+import subprocess
+import sys
+import threading
+import time
+
+# How long a burst-drain waits for one more chunk before giving up and
+# treating what it has as the whole logical message. Wide enough to fold
+# in a redraw burst's back-to-back writes (each lands within microseconds
+# of the last on a real kernel pipe/pty), narrow enough that it never
+# reads as a second RTT hop on top of the configured delay.
+_COALESCE_WINDOW_S = 0.005
+
+
+def _relay(src, dst, delay_s: float) -> None:
+    # reads/writes go through the raw fd (never src.read()/dst.write()) so a
+    # chunk this loop sees is exactly one kernel read, not Python's own
+    # read-ahead buffering reshaping it first; the close at the end goes
+    # through the file object instead of a raw `os.close`, because that
+    # close is idempotent (a second close from the object's own shutdown
+    # path is a no-op) where a raw fd close is not (a second close on an
+    # already-closed fd number raises)
+    src_fd = src.fileno()
+    dst_fd = dst.fileno()
+    while True:
+        try:
+            chunk = os.read(src_fd, 65536)
+        except OSError:
+            break
+        if not chunk:
+            break
+        # Fold in whatever else the source has ready within the coalescing
+        # window before charging the delay once: a msgpack-rpc writer emits
+        # one write(2) per message, so an unstitched relay would otherwise
+        # charge one RTT per message in a burst instead of one per burst,
+        # unlike the TCP segment coalescing a real network hop applies.
+        while True:
+            ready, _, _ = select.select([src_fd], [], [], _COALESCE_WINDOW_S)
+            if not ready:
+                break
+            try:
+                more = os.read(src_fd, 65536)
+            except OSError:
+                more = b""
+            if not more:
+                break
+            chunk += more
+        if delay_s > 0:
+            time.sleep(delay_s)
+        try:
+            os.write(dst_fd, chunk)
+        except OSError:
+            break
+    try:
+        dst.close()
+    except OSError:
+        pass
+
+
+def main() -> int:
+    raw_delay = os.environ.get("DELAY_RELAY_MS", "0")
+    try:
+        delay_ms = float(raw_delay)
+    except ValueError:
+        print(f"delay-relay: DELAY_RELAY_MS={raw_delay!r} is not a number", file=sys.stderr)
+        return 2
+    if delay_ms < 0:
+        print(f"delay-relay: DELAY_RELAY_MS must be >= 0, got {delay_ms}", file=sys.stderr)
+        return 2
+    delay_s = delay_ms / 1000.0
+
+    # the sibling `fake-ssh` by default, since arming a delay-relay PATH
+    # entry ahead of the stand-in client is this fixture's whole reason to
+    # exist; DELAY_RELAY_INNER lets a test wrap a different program (the
+    # unit test below wraps `cat`) without a second copy of this file
+    inner = os.environ.get("DELAY_RELAY_INNER") or os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "fake-ssh"
+    )
+    if not os.path.isfile(inner) or not os.access(inner, os.X_OK):
+        print(
+            f"delay-relay: inner client {inner!r} is not an executable file "
+            "(set DELAY_RELAY_INNER to point at one)",
+            file=sys.stderr,
+        )
+        return 2
+
+    child = subprocess.Popen([inner, *sys.argv[1:]], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    assert child.stdin is not None
+    assert child.stdout is not None
+
+    to_child = threading.Thread(target=_relay, args=(sys.stdin.buffer, child.stdin, delay_s))
+    from_child = threading.Thread(target=_relay, args=(child.stdout, sys.stdout.buffer, delay_s))
+    to_child.start()
+    from_child.start()
+
+    code = child.wait()
+    to_child.join()
+    from_child.join()
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())

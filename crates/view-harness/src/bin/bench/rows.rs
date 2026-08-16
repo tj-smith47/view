@@ -120,6 +120,7 @@ fn measure_cell(cell: &CellId, bins: &Bins, protocol: &Protocol) -> Result<CellM
                 NvimSpec(&pair.nvim),
                 protocol,
                 settle_deadline(fixture),
+                echo::DEFAULT_STARTUP_QUIET,
             )
             .with_context(|| format!("echo/{fixture} run failed"))?;
             for summary in &outcome.trials {

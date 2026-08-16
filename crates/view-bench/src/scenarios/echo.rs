@@ -23,6 +23,15 @@ const LINE_LIMIT: usize = 100;
 /// own in insert mode.
 const SAMPLE_CHAR: &str = "x";
 
+/// The first settle's quiet span for a spawn with no injected transport
+/// latency: right for a local attach, which finishes well inside it. A
+/// caller measuring under injected latency (the RTT-acceptance harness)
+/// must widen this the same way it widens `probe_timeout`, since a fixed
+/// span this small is satisfied by the pre-attach shell frame's own static
+/// paint before a slow attach's real content ever lands; see
+/// [`SideState::prepare`]'s doc comment.
+pub const DEFAULT_STARTUP_QUIET: Duration = Duration::from_millis(500);
+
 /// One side's typing state: where the next character will land.
 pub(crate) struct SideState {
     session: BenchSession,
@@ -37,10 +46,35 @@ impl SideState {
     /// mode, then locate the buffer origin by typing and erasing a probe
     /// character (the one observation that works identically across both
     /// editors and any chrome/gutter layout).
-    pub(crate) fn prepare(spec: &SpawnSpec, settle_deadline: Duration) -> Result<Self, BenchError> {
+    ///
+    /// `probe_timeout` bounds the probe's own two round trips (type, then
+    /// erase) the same way `protocol.sample_timeout` bounds a regular
+    /// sample: a caller measuring under injected transport latency passes
+    /// the same widened bound here, since the probe pays that latency too.
+    ///
+    /// `startup_quiet` is the first settle's own quiet span -- see its note
+    /// below for why it cannot share `probe_timeout`'s value.
+    pub(crate) fn prepare(
+        spec: &SpawnSpec,
+        settle_deadline: Duration,
+        probe_timeout: Duration,
+        startup_quiet: Duration,
+    ) -> Result<Self, BenchError> {
         let mut session = BenchSession::spawn(spec)?;
+        // a fixed 500ms quiet span (right for a local spawn, where the
+        // engine attach that replaces the pre-attach shell frame finishes
+        // well inside it) is satisfied by that same shell frame BEFORE the
+        // attach it is waiting on completes once the transport carrying
+        // attach's own handshake/register/ui_attach round trips is
+        // injected-latency: the frame paints once, holds bit-for-bit
+        // static while attach is still in flight, and 500ms of "no change"
+        // reads as settled on a screen that has not attached yet. The
+        // caller passes a quiet span already widened for its transport
+        // (the same shape as `probe_timeout`'s), so real attach traffic
+        // landing before the span elapses resets the quiet clock instead
+        // of racing it.
         if !session.settle(SettleBound {
-            quiet: Duration::from_millis(500),
+            quiet: startup_quiet,
             deadline: settle_deadline,
         }) {
             return Err(BenchError::Desync {
@@ -66,7 +100,7 @@ impl SideState {
                 ),
             });
         }
-        let at = probe_origin(&mut session)?;
+        let at = probe_origin(&mut session, probe_timeout)?;
         Ok(Self {
             session,
             at,
@@ -155,12 +189,12 @@ impl SideState {
     /// Clears the buffer between trials so cell positions and line count
     /// reset; keeps a trial's screen state identical to the first
     /// trial's.
-    pub(crate) fn reset_buffer(&mut self) -> Result<(), BenchError> {
+    pub(crate) fn reset_buffer(&mut self, probe_timeout: Duration) -> Result<(), BenchError> {
         self.session.send(b"\x1b:%d _\r")?;
         std::thread::sleep(Duration::from_millis(200));
         self.session.send(b"i")?;
         std::thread::sleep(Duration::from_millis(100));
-        self.at = probe_origin(&mut self.session)?;
+        self.at = probe_origin(&mut self.session, probe_timeout)?;
         self.origin_col = self.at.col;
         self.line_len = 0;
         Ok(())
@@ -172,11 +206,14 @@ impl SideState {
 /// the pre-probe screen, then erasing the probe again. A whole-screen
 /// uniqueness search would race chrome: a statusline rendering
 /// `scratch.txt` already holds an `x` cell before the probe ever paints.
-fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos, BenchError> {
+fn probe_origin(
+    session: &mut BenchSession,
+    probe_timeout: Duration,
+) -> Result<crate::boundaries::CellPos, BenchError> {
     let baseline =
         session.with_screen(|screen| crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR));
     session.send(SAMPLE_CHAR.as_bytes())?;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + probe_timeout;
     let position = loop {
         let now = session
             .with_screen(|screen| crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR));
@@ -192,7 +229,13 @@ fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos
                 ),
             });
         }
-        std::thread::yield_now();
+        // a real sleep, not `yield_now`: this wait can run for the whole
+        // probe timeout under an injected-latency spawn (a startup
+        // handshake stretched by transport RTT, not a fixed few hundred
+        // ms), and a tight single-thread busy-spin held that long starves
+        // the pty's own reader of scheduling time on a host without cores
+        // to spare, which starves the very screen state this loop reads
+        std::thread::sleep(Duration::from_millis(5));
     };
     session.send(b"\x7f")?;
     // erased means the probed cell no longer holds the sample character,
@@ -202,7 +245,7 @@ fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos
     // statusline the moment the probe types), so baseline equality can
     // become permanently unreachable on a host slow enough for a toast
     // to outlive the settle window
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + probe_timeout;
     loop {
         let cleared = session.with_screen(|screen| {
             !crate::boundaries::char_cell_positions(screen, SAMPLE_CHAR).contains(&position)
@@ -220,7 +263,9 @@ fn probe_origin(session: &mut BenchSession) -> Result<crate::boundaries::CellPos
                 ),
             });
         }
-        std::thread::yield_now();
+        // see the identical note on the wait above: a real sleep, not a
+        // busy-spin, for a wait that can run the full probe timeout
+        std::thread::sleep(Duration::from_millis(5));
     }
 }
 
@@ -253,6 +298,10 @@ pub struct EchoOutcome {
 /// `protocol.trials` interleaved trials of `warmup + samples` keypresses
 /// per side, buffer reset between trials.
 ///
+/// `startup_quiet` is [`SideState::prepare`]'s first-settle quiet span; see
+/// its doc comment for why a caller under injected transport latency must
+/// widen it rather than pass the local-spawn default.
+///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if either editor stops responding to
@@ -262,8 +311,16 @@ pub fn run(
     nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
     settle_deadline: Duration,
+    startup_quiet: Duration,
 ) -> Result<EchoOutcome, BenchError> {
-    run_observed(view_spec, nvim_spec, protocol, settle_deadline, &mut |_| {})
+    run_observed(
+        view_spec,
+        nvim_spec,
+        protocol,
+        settle_deadline,
+        startup_quiet,
+        &mut |_| {},
+    )
 }
 
 /// The echo scenario with every measured view sample's monotonic window
@@ -287,18 +344,35 @@ pub(crate) fn run_observed(
     nvim_spec: NvimSpec<'_>,
     protocol: &Protocol,
     settle_deadline: Duration,
+    startup_quiet: Duration,
     observe_view: &mut dyn FnMut((i64, i64)),
 ) -> Result<EchoOutcome, BenchError> {
     let ViewSpec(view) = view_spec;
     let NvimSpec(nvim) = nvim_spec;
-    let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
-    let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
+    let mut view_state = SideState::prepare(
+        view,
+        settle_deadline,
+        protocol.sample_timeout,
+        startup_quiet,
+    )
+    .map_err(|e| label("view", e))?;
+    let mut nvim_state = SideState::prepare(
+        nvim,
+        settle_deadline,
+        protocol.sample_timeout,
+        startup_quiet,
+    )
+    .map_err(|e| label("nvim", e))?;
 
     let mut trials = Vec::with_capacity(protocol.trials);
     for trial in 0..protocol.trials {
         if trial > 0 {
-            view_state.reset_buffer().map_err(|e| label("view", e))?;
-            nvim_state.reset_buffer().map_err(|e| label("nvim", e))?;
+            view_state
+                .reset_buffer(protocol.sample_timeout)
+                .map_err(|e| label("view", e))?;
+            nvim_state
+                .reset_buffer(protocol.sample_timeout)
+                .map_err(|e| label("nvim", e))?;
         }
         view_state.clear_samples();
         nvim_state.clear_samples();

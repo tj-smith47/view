@@ -13,6 +13,10 @@ path = "src/bin/oracle.rs"
 name = "bench"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "rtt-acceptance"
+path = "src/bin/rtt_acceptance.rs"
+
 [lints]
 workspace = true
 

@@ -29,3 +29,7 @@
 # a diagnostic a failed matrix run leaves for hand-diffing against the
 # baseline; committing one would put unratcheted numbers in the repo
 *.partial.toml
+
+# cpython's own bytecode cache for the test-fixtures run directly by their
+# interpreter (delay-relay, fake-ssh's siblings); regenerates every run
+__pycache__/

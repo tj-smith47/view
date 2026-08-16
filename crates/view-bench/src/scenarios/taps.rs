@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side};
 use crate::scenarios::clock::monotonic_nanos;
-use crate::scenarios::echo::{label, SideState};
+use crate::scenarios::echo::{label, SideState, DEFAULT_STARTUP_QUIET};
 use crate::scenarios::Protocol;
 use crate::session::{
     BenchSession, NvimSpec, SettleBound, SpawnSpec, ViewSpec, GRID_COLS, GRID_ROWS,
@@ -107,6 +107,44 @@ fn create_fifo(path: &std::path::Path) -> std::io::Result<()> {
         nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
     )
     .map_err(std::io::Error::from)
+}
+
+/// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
+/// descriptor before exec'ing the real binary. The pty spawn path closes
+/// every inherited fd above stdio in the child, so the descriptor
+/// `VIEW_BENCH_TAP_FD` names must be (re)opened after that point; the
+/// shell's own `exec 9>` runs post-exec, exactly late enough.
+///
+/// Public rather than kept beside the one caller that used to hold it: the
+/// tap-FD-opening contract (`VIEW_BENCH_TAP_PATH`, `VIEW_BENCH_TAP_FD`) is
+/// this module's own, so a second caller building a tap-instrumented spawn
+/// spec composes it here instead of re-deriving the same shell shim.
+#[must_use]
+pub fn shim_taps_spec(
+    inner: crate::session::SpawnSpec,
+    tap_path: &Path,
+) -> crate::session::SpawnSpec {
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    let mut args = vec![
+        OsString::from("-c"),
+        OsString::from("exec 9>\"$VIEW_BENCH_TAP_PATH\"; exec \"$0\" \"$@\""),
+        inner.program.into_os_string(),
+    ];
+    args.extend(inner.args);
+    let mut env = inner.env;
+    env.push((
+        OsString::from("VIEW_BENCH_TAP_PATH"),
+        tap_path.as_os_str().to_os_string(),
+    ));
+    env.push((OsString::from("VIEW_BENCH_TAP_FD"), OsString::from("9")));
+    crate::session::SpawnSpec {
+        program: PathBuf::from("sh"),
+        args,
+        env,
+        cwd: inner.cwd,
+    }
 }
 
 /// The harness end of the tap channel: a FIFO plus a reader thread
@@ -919,10 +957,22 @@ pub fn run_echo_path(
 ) -> Result<EchoPathOutcome, BenchError> {
     let ViewSpec(view) = view_spec;
     let NvimSpec(nvim) = nvim_spec;
-    let mut view_state = SideState::prepare(view, settle_deadline).map_err(|e| label("view", e))?;
+    let mut view_state = SideState::prepare(
+        view,
+        settle_deadline,
+        protocol.sample_timeout,
+        DEFAULT_STARTUP_QUIET,
+    )
+    .map_err(|e| label("view", e))?;
     let (overhead, overhead_pace) =
         characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
-    let mut nvim_state = SideState::prepare(nvim, settle_deadline).map_err(|e| label("nvim", e))?;
+    let mut nvim_state = SideState::prepare(
+        nvim,
+        settle_deadline,
+        protocol.sample_timeout,
+        DEFAULT_STARTUP_QUIET,
+    )
+    .map_err(|e| label("nvim", e))?;
     let _ = pipe.drain();
 
     let mut trials = Vec::with_capacity(protocol.trials);
@@ -938,8 +988,12 @@ pub fn run_echo_path(
 
     for trial in 0..protocol.trials {
         if trial > 0 {
-            view_state.reset_buffer().map_err(|e| label("view", e))?;
-            nvim_state.reset_buffer().map_err(|e| label("nvim", e))?;
+            view_state
+                .reset_buffer(protocol.sample_timeout)
+                .map_err(|e| label("view", e))?;
+            nvim_state
+                .reset_buffer(protocol.sample_timeout)
+                .map_err(|e| label("nvim", e))?;
         }
         view_state.clear_samples();
         nvim_state.clear_samples();

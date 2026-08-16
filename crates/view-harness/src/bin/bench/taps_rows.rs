@@ -60,32 +60,6 @@ const TAP_OVERHEAD_BAR_US: f64 = 5.0;
 /// could hide underneath it.
 const UNEXPLAINED_PAINT_SHARE: f64 = 0.01;
 
-/// Wraps a view spawn in a `sh` shim that opens the tap FIFO at a fixed
-/// descriptor before exec'ing the real binary. The pty spawn path closes
-/// every inherited fd above stdio in the child, so the descriptor
-/// `VIEW_BENCH_TAP_FD` names must be (re)opened after that point; the
-/// shell's own `exec 9>` runs post-exec, exactly late enough.
-fn shim_taps_spec(inner: SpawnSpec, tap_path: &Path) -> SpawnSpec {
-    let mut args = vec![
-        OsString::from("-c"),
-        OsString::from("exec 9>\"$VIEW_BENCH_TAP_PATH\"; exec \"$0\" \"$@\""),
-        inner.program.into_os_string(),
-    ];
-    args.extend(inner.args);
-    let mut env = inner.env;
-    env.push((
-        OsString::from("VIEW_BENCH_TAP_PATH"),
-        tap_path.as_os_str().to_os_string(),
-    ));
-    env.push((OsString::from("VIEW_BENCH_TAP_FD"), OsString::from("9")));
-    SpawnSpec {
-        program: PathBuf::from("sh"),
-        args,
-        env,
-        cwd: inner.cwd,
-    }
-}
-
 /// Runs one taps row (`input_path` or `output_path`) end to end, then
 /// refuses to report through taps that would distort the row's own
 /// budget. `controlled` selects what that refusal does -- fail the run
@@ -222,6 +196,7 @@ pub(crate) fn run_echo_speculated_row(
         &pipe,
         protocol,
         settle_deadline(fixture),
+        echo::DEFAULT_STARTUP_QUIET,
     )
     .with_context(|| format!("echo_speculated/{fixture} run failed"))?;
 
@@ -280,7 +255,7 @@ fn taps_side(
     let cwd = side.cwd.clone();
     let tap_path = cwd.join("tap.fifo");
     let pipe = taps::TapPipe::create(&tap_path)?;
-    let spec = shim_taps_spec(view_spec_from(side, editor), &tap_path);
+    let spec = taps::shim_taps_spec(view_spec_from(side, editor), &tap_path);
     Ok((pipe, spec, cwd))
 }
 

@@ -104,12 +104,16 @@ impl SpeculatedEchoOutcome {
 /// Returns [`BenchError::Desync`] on a dropped tap record (the
 /// announcements a sample was attributed by cannot be trusted with a hole
 /// in the stream), and anything the echo protocol itself raises.
+///
+/// `startup_quiet` is [`echo::run`]'s own parameter of the same name,
+/// passed through unchanged; see its doc comment.
 pub fn run(
     view_spec: ViewSpec<'_>,
     nvim_spec: NvimSpec<'_>,
     pipe: &TapPipe,
     protocol: &Protocol,
     settle_deadline: Duration,
+    startup_quiet: Duration,
 ) -> Result<SpeculatedEchoOutcome, BenchError> {
     let mut windows: Vec<(i64, i64)> = Vec::new();
     let echo = echo::run_observed(
@@ -117,6 +121,7 @@ pub fn run(
         nvim_spec,
         protocol,
         settle_deadline,
+        startup_quiet,
         &mut |window| {
             windows.push(window);
         },

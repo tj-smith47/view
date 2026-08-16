@@ -405,6 +405,7 @@ fn null_calibration(bins: &Bins) -> Result<f64> {
         NvimSpec(&spec_b),
         &protocol,
         settle_deadline("minimal"),
+        echo::DEFAULT_STARTUP_QUIET,
     )
     .context("null-pair calibration run failed")?;
     Ok(outcome.gated_ratio_p50)

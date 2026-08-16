@@ -17,6 +17,11 @@ pub mod echo_control;
 // where that channel does.
 #[cfg(unix)]
 pub mod echo_speculated;
+// The RTT-injection variant of the row above: same tap channel, so it is
+// gated the same way, plus the delay-relay/stub-ssh arming machinery
+// `remote_memory` already gates unix-only.
+#[cfg(unix)]
+pub mod echo_speculated_rtt;
 pub mod first_paint;
 pub mod flood;
 pub mod memory;
