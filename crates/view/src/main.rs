@@ -7,6 +7,7 @@ mod bridge;
 mod clipboard;
 mod native;
 mod recovery;
+mod remote_guard;
 mod runtime;
 mod speculate;
 mod startup;
@@ -638,7 +639,18 @@ fn main() -> Result<()> {
     }
     deny_incoherent_remote(&cli)?;
     deny_unsupported_stdin_relay(&cli.passthrough)?;
-    let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
+    let cfg = engine_config(&cli);
+    // read off the config rather than re-derived from `cli`: the client this
+    // resolves is the client the spawn below runs, and the spec is gone once
+    // `attach_in_background` consumes the config it belongs to
+    let remote = cfg.remote().cloned();
+    if let Some(remote) = &remote {
+        // ahead of `Term::init`: a session with no client to run has nothing
+        // to show, and a refusal printed after the alternate screen has been
+        // entered and left is a refusal the user watches flash past
+        remote_guard::deny_absent_ssh(remote)?;
+    }
+    let cfg = maybe_relay_stdin(cfg, &cli.passthrough);
     // strictly after the relay, which is the one consumer of the piped fd 0
     // this replaces, and strictly before the capability probe, crossterm and
     // `InputSource` each go looking for a terminal of their own
@@ -778,18 +790,23 @@ fn main() -> Result<()> {
         }),
         Err(failure) => vlog::log_with("engine", || format!("attach failed: {failure:?}")),
     }
-    let mut engine = attach_result.map_err(|failure| match failure {
-        // a remote session never runs a local nvim, so the local hint would
-        // send the user to a binary and a PATH that had no part in it
-        startup::AttachFailure::Spawn(err) => anyhow::Error::new(err).context(match &cli.remote {
-            Some(remote) => format!(
-                "failed to start the remote engine on {remote} (check the ssh \
-                 client, the destination, and nvim on the far side)"
-            ),
-            None => "failed to spawn the nvim process (check --nvim-bin / PATH)".to_string(),
-        }),
-        startup::AttachFailure::Attach(err) => {
-            anyhow::Error::new(err).context("engine attach failed or timed out after nvim started")
+    let mut engine = attach_result.map_err(|failure| {
+        // a remote session never runs a local nvim, so the local hints would
+        // send the user to a binary and a PATH that had no part in it; what
+        // it gets instead names the client, the connection, or the far
+        // side's editor, whichever the failure was actually about
+        if let Some(remote) = &remote {
+            let context = remote_guard::attach_failure_context(remote, &failure);
+            let err = match failure {
+                startup::AttachFailure::Spawn(err) | startup::AttachFailure::Attach(err) => err,
+            };
+            return anyhow::Error::new(err).context(context);
+        }
+        match failure {
+            startup::AttachFailure::Spawn(err) => anyhow::Error::new(err)
+                .context("failed to spawn the nvim process (check --nvim-bin / PATH)"),
+            startup::AttachFailure::Attach(err) => anyhow::Error::new(err)
+                .context("engine attach failed or timed out after nvim started"),
         }
     })?;
 

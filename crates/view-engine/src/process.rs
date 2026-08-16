@@ -124,6 +124,51 @@ impl RemoteSpec {
         self.ssh_bin = bin.into();
         self
     }
+
+    /// The arguments the client receives ahead of the remote command: view's
+    /// own two connection options, the port when one was resolved, every
+    /// entry from [`extra_ssh_opts`](Self::extra_ssh_opts), and finally the
+    /// destination. Everything the client reads for itself, and nothing it
+    /// sends.
+    ///
+    /// `BatchMode=yes` is the transport analogue of the rule that no paint
+    /// ever waits on RPC: an embedded, headless client has no way to render
+    /// a password or host-key prompt and no keyboard to answer one with, so
+    /// a client permitted to ask would hang the handshake with the question
+    /// invisible. `-T` is the same reason from the other direction -- a pty
+    /// on the far side would put a terminal discipline in the middle of a
+    /// binary msgpack stream.
+    ///
+    /// Public because a caller that must open a *second* connection to the
+    /// same destination -- diagnosing why the spawn's own connection failed
+    /// -- has to configure it exactly as the spawn's was configured, and a
+    /// second derivation of these arguments is free to drift from the one
+    /// the spawn actually used. It answers a different question than the
+    /// spawn's if it connects on a different port, under different options,
+    /// or with prompting re-armed.
+    #[must_use]
+    pub fn connection_args(&self) -> Vec<String> {
+        // view's own options lead, and a client takes the first value it
+        // obtains for an option: a caller's `BatchMode=no` therefore cannot
+        // re-arm the interactive prompt an embedded editor has no way to
+        // answer
+        let mut args = vec![
+            String::from("-T"),
+            String::from("-o"),
+            String::from("BatchMode=yes"),
+        ];
+        if let Some(port) = self.port {
+            args.push(String::from("-p"));
+            args.push(port.to_string());
+        }
+        for opt in &self.extra_ssh_opts {
+            args.push(String::from("-o"));
+            args.push(opt.clone());
+        }
+        // every argument from here on is the client's to send, not to read
+        args.push(self.target.clone());
+        args
+    }
 }
 
 /// Configuration for spawning an embedded Neovim process.
@@ -1323,31 +1368,15 @@ fn local_command(cfg: &EngineConfig) -> Command {
 /// key and configuration lookup (`HOME`, `PATH`). It rides the remote
 /// command line instead (see [`remote_command_line`]).
 ///
-/// `BatchMode=yes` is the transport analogue of the rule that no paint ever
-/// waits on RPC. An embedded, headless client has no way to render a
-/// password or host-key prompt and no keyboard to answer one with, so a
-/// client permitted to ask would hang the handshake with the question
-/// invisible. Batch mode turns every such prompt into an immediate refusal
-/// the spawn reports as an error instead.
-///
-/// `-T` for the same reason from the other direction: a pty allocated on
-/// the far side would put a terminal discipline (echo, newline
-/// translation) in the middle of a binary msgpack stream.
+/// The connection half comes from [`RemoteSpec::connection_args`], which
+/// documents `BatchMode=yes` and `-T` and is the one place either is
+/// spelled: a diagnostic connection opened after this one fails has to
+/// carry the same options to be describing the same connection at all.
 fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<Command, EngineError> {
     let mut command = Command::new(&remote.ssh_bin);
-    // view's own options lead, and a client takes the first value it
-    // obtains for an option: a caller's `BatchMode=no` therefore cannot
-    // re-arm the interactive prompt an embedded editor has no way to answer
-    command.arg("-T").arg("-o").arg("BatchMode=yes");
-    if let Some(port) = remote.port {
-        command.arg("-p").arg(port.to_string());
-    }
-    for opt in &remote.extra_ssh_opts {
-        command.arg("-o").arg(opt);
-    }
-    // every argument from here on is the client's to send, not to read:
-    // the destination first, then the single command string
-    command.arg(&remote.target);
+    command.args(remote.connection_args());
+    // the destination ends the client's own arguments; the single command
+    // string the far side's shell re-parses follows it
     command.arg(remote_command_line(remote, cfg)?);
     Ok(command)
 }
@@ -2038,6 +2067,34 @@ mod config_tests {
         );
     }
 
+    /// What a caller opening a second connection to the same destination
+    /// builds it from is the spawn's own connection, argument for argument.
+    /// The two drifting apart is silent by construction: a diagnosis made
+    /// over a connection configured differently -- another port, without
+    /// the caller's own options, with prompting re-armed -- reads exactly
+    /// like a diagnosis of the connection that failed.
+    #[test]
+    fn a_diagnostic_connection_is_built_from_the_spawns_own_arguments() {
+        let spec = RemoteSpec::new("host")
+            .with_port(2222)
+            .with_ssh_opt("ConnectTimeout=4");
+        let cfg = EngineConfig::default().with_remote(spec.clone());
+        let (_, args) = built(&cfg);
+        let connection: Vec<OsString> =
+            spec.connection_args().into_iter().map(Into::into).collect();
+        assert_eq!(
+            args[..connection.len()],
+            connection[..],
+            "the client's own arguments must be the built command's own \
+             prefix; args {args:?}"
+        );
+        assert_eq!(
+            args.len(),
+            connection.len() + 1,
+            "only the single remote command string follows them; args {args:?}"
+        );
+    }
+
     /// The environment plan reaches the far side on the command line, ahead
     /// of the binary it applies to.
     #[test]
@@ -2181,6 +2238,38 @@ mod config_tests {
             "a replacement character reached the command line, which is the \
              lossy decode this forbids; line {:?}",
             OsStr::from_bytes(&line)
+        );
+    }
+
+    /// The other side of that guarantee, on a platform with no byte view of
+    /// an `OsStr` to forward: the token is refused by name rather than
+    /// transcoded. Windows filenames are UTF-16 sequences that need not be
+    /// well-formed, so a lone surrogate is a name a real file can carry and
+    /// no UTF-8 encoding exists for. Silently replacing it would send the
+    /// remote editor to a different path than the caller named -- the same
+    /// defect the Unix arm above forbids, reached from the opposite
+    /// direction.
+    #[cfg(windows)]
+    #[test]
+    fn a_token_with_no_byte_view_is_refused_rather_than_transcoded() {
+        use std::os::windows::ffi::OsStringExt;
+        // `s`, a lone high surrogate, `h`: well-formed UTF-16 it is not, a
+        // valid Windows filename it is
+        let lone = OsString::from_wide(&[0x0073, 0xD800, 0x0068]);
+        let cfg = EngineConfig::default()
+            .with_arg(lone)
+            .with_remote(RemoteSpec::new("host"));
+        let refused = build_command(&cfg)
+            .expect_err("a token with no byte view must be refused, not forwarded")
+            .to_string();
+        assert!(
+            refused.contains("not valid Unicode"),
+            "the refusal must say what it could not carry: {refused}"
+        );
+        assert!(
+            !refused.contains('\u{fffd}'),
+            "the refusal itself must not be the lossy decode it refuses: \
+             {refused}"
         );
     }
 

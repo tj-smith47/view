@@ -1,0 +1,15 @@
+#!/bin/sh
+# A stand-in for an OpenSSH client whose connection is refused, for tests
+# about what a caller is told when a remote session cannot authenticate.
+#
+# It reproduces the one behaviour those tests are about: under
+# `BatchMode=yes` the client answers a prompt it cannot ask (a passphrase, a
+# host key it has never seen) by giving up immediately, writing its own
+# diagnosis to stderr and exiting 255 -- the status OpenSSH reserves for its
+# own failures, as opposed to the exit status of whatever ran on the far
+# side. Nothing is run on the far side here, which is exactly the point: a
+# refused connection never gets that far.
+set -eu
+
+echo "view-test-host: Permission denied (publickey)." >&2
+exit 255

@@ -1,0 +1,13 @@
+#!/bin/sh
+# A stand-in for a client that neither connects nor fails: it sits there,
+# which is what one does against a port that silently drops packets rather
+# than refusing them, and what OpenSSH does until its own ConnectTimeout (or
+# the operating system's TCP timeout) finally elapses -- minutes, not
+# seconds.
+#
+# For the bound on a diagnostic connection. Without one, a caller that
+# already has a failed session to report waits on this instead of reporting
+# it, with nothing on screen to say why.
+set -eu
+
+sleep 30
