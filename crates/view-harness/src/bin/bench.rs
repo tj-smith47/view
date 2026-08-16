@@ -47,6 +47,14 @@ mod taps_rows;
 #[path = "bench/remote_rows.rs"]
 mod remote_rows;
 
+// The hermetic per-cell scratch world and spawn-spec builders every row
+// (including the two unix-gated modules above) composes from. Split out
+// for headroom under the god-file ceiling, not for a platform reason, so
+// it is unconditional like `rows` below.
+#[path = "bench/cell_world.rs"]
+mod cell_world;
+use cell_world::{nvim_spec_from, settle_deadline, view_spec_from, CellWorld, SideSetup};
+
 #[path = "bench/rows.rs"]
 mod rows;
 use rows::run_cell;
@@ -291,165 +299,6 @@ fn budgets_path() -> PathBuf {
         .join("crates")
         .join("view-bench")
         .join("budgets.toml")
-}
-
-/// Hermetic scratch world for one cell run: per-side XDG homes, scratch
-/// files, and sockets, removed on drop.
-struct CellWorld {
-    hermetic_dir: PathBuf,
-}
-
-impl Drop for CellWorld {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.hermetic_dir);
-    }
-}
-
-/// One side's resolved spawn inputs.
-struct SideSetup {
-    env: Vec<(OsString, OsString)>,
-    cwd: PathBuf,
-    scratch_file: PathBuf,
-}
-
-impl CellWorld {
-    fn create(fixture: &str) -> Result<Self> {
-        let id = format!(
-            "{}-{}",
-            std::process::id(),
-            SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed)
-        );
-        let hermetic_dir = scratch_root().join(format!("view-bench-{id}"));
-        std::fs::create_dir_all(&hermetic_dir)
-            .with_context(|| format!("creating {}", hermetic_dir.display()))?;
-        let world = Self { hermetic_dir };
-
-        let fixture_dir = fixtures_root().join(fixture);
-        if !fixture_dir.join("nvim").join("init.lua").exists() {
-            bail!(
-                "fixture {fixture:?} has no {}/nvim/init.lua",
-                fixture_dir.display()
-            );
-        }
-        Ok(world)
-    }
-
-    /// Resolves one side's hermetic environment: a private copy of the
-    /// fixture config (a plugin manager may rewrite its own lockfile in
-    /// place), private state/cache homes, and a data home pointed at the
-    /// shared lockfile-keyed plugin cache so both sides (and the compat
-    /// harness) reuse one plugin install instead of cloning per run.
-    ///
-    /// The four directories are all this resolves. Every environment
-    /// variable that redirects an editor's configuration from outside them
-    /// (`$NVIM_APPNAME` voids the config directory below even after it is
-    /// pointed at the fixture, `$VIMINIT` runs host commands inside the
-    /// measured process) is dropped by `PtySession::spawn_configured`,
-    /// which every spawn on both sides of a pair goes through.
-    fn side(&self, fixture: &str, side_tag: &str) -> Result<SideSetup> {
-        let side_dir = self.hermetic_dir.join(side_tag);
-        std::fs::create_dir_all(&side_dir)
-            .with_context(|| format!("creating {}", side_dir.display()))?;
-        let fixture_dir = fixtures_root().join(fixture);
-
-        let xdg_config_home = side_dir.join("xdg_config_home");
-        copy_dir_recursive(&fixture_dir, &xdg_config_home)
-            .with_context(|| format!("copying fixture {fixture:?} for the {side_tag} side"))?;
-
-        let lockfile_path = fixture_dir.join("nvim").join("lazy-lock.json");
-        let xdg_data_home = if lockfile_path.exists() {
-            let bytes = std::fs::read(&lockfile_path)
-                .with_context(|| format!("reading {}", lockfile_path.display()))?;
-            cache_root().join(lockfile_cache_key(&bytes))
-        } else {
-            side_dir.join("xdg_data_home")
-        };
-
-        let sock = side_dir.join("compat.sock");
-        let env: Vec<(OsString, OsString)> = [
-            ("XDG_CONFIG_HOME", xdg_config_home.as_os_str()),
-            ("XDG_DATA_HOME", xdg_data_home.as_os_str()),
-            (
-                "XDG_STATE_HOME",
-                side_dir.join("xdg_state_home").as_os_str(),
-            ),
-            (
-                "XDG_CACHE_HOME",
-                side_dir.join("xdg_cache_home").as_os_str(),
-            ),
-            ("VIEW_COMPAT_SOCK", sock.as_os_str()),
-            ("TERM", "xterm-256color".as_ref()),
-            // the only input to view's truecolor bit, and `Tier::Full` --
-            // the tier the budget rows name -- requires it, so a session
-            // without it measures a child that never reached the stated
-            // condition. Today only the sync bit changes emitted bytes, so
-            // this costs nothing measurable; it is set now because the
-            // alternative is a bench that starts measuring the cheap path
-            // silently on the day theming consumes the bit. Set on both
-            // sides of a pair, because the two arms must face one terminal
-            ("COLORTERM", "truecolor".as_ref()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (OsString::from(k), v.to_os_string()))
-        .collect();
-
-        Ok(SideSetup {
-            env,
-            cwd: side_dir.clone(),
-            scratch_file: side_dir.join("scratch.txt"),
-        })
-    }
-}
-
-/// Settle bound before sampling starts: the heavy fixture's first-ever
-/// run may clone plugins into the shared cache, which dwarfs any paint
-/// settle; a warm cache settles in a couple of seconds.
-fn settle_deadline(fixture: &str) -> Duration {
-    if fixture == "heavy" {
-        Duration::from_secs(300)
-    } else {
-        Duration::from_secs(30)
-    }
-}
-
-/// Builds the view-side spawn spec against one resolved side setup; the
-/// engine binary is always passed explicitly so both halves of a pair
-/// exercise the same pin-verified nvim.
-///
-/// Nothing here strips the measured editor down: the fixture config is the
-/// subject of the measurement, and `view` spawns its engine through
-/// `EngineConfig::default` precisely so that config survives into it. An
-/// argument such as `--clean` added on either side, or an isolated engine
-/// config swapped in below `view`, would measure a plugin-free editor
-/// against baselines recorded with the fixture's full plugin set, report it
-/// as a large improvement, and gate green.
-///
-/// `--nvim-bin` must precede the scratch-file positional: view's CLI
-/// forwards every token after the first positional to nvim verbatim
-/// (`trailing_var_arg`), so the reverse order hands `--nvim-bin <path>` to
-/// nvim itself, which exits on the unknown flag and fails every cell at
-/// engine attach.
-fn view_spec_from(side: SideSetup, bins: EditorBins<'_>) -> SpawnSpec {
-    SpawnSpec {
-        program: bins.view.to_path_buf(),
-        args: vec![
-            OsString::from("--nvim-bin"),
-            bins.nvim.as_os_str().to_os_string(),
-            side.scratch_file.into_os_string(),
-        ],
-        env: side.env,
-        cwd: Some(side.cwd),
-    }
-}
-
-/// Builds a bare-nvim spawn spec against one resolved side setup.
-fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
-    SpawnSpec {
-        program: nvim_bin.to_path_buf(),
-        args: vec![side.scratch_file.into_os_string()],
-        env: side.env,
-        cwd: Some(side.cwd),
-    }
 }
 
 /// Buffer content the first-paint boundary waits for.
