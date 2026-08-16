@@ -442,15 +442,18 @@ impl EngineConfig {
     ///
     /// # A hermetic plan for a child on another machine
     ///
-    /// Where the child runs decides what the second layer's value-bearing
-    /// entries are allowed to name, so a config that is both hermetic and
-    /// [`remote`](Self::remote) plans three of them differently. Nothing
-    /// about the removals changes: every name the first layer and
-    /// [`crate::env::HOST_REDIRECT_VARS`] drop crosses as its own `env -u`
-    /// on the remote command line, and each is a variable the remote user's
-    /// login environment (sshd and PAM, then the shell's non-interactive
-    /// startup files) sets exactly as a local host would.
+    /// Where the child runs decides both what the first layer may enumerate
+    /// and what the second layer's value-bearing entries may name, so a
+    /// config that is both hermetic and [`remote`](Self::remote) plans four
+    /// of them differently.
     ///
+    /// - The first layer is [`crate::env::REMOTE_SWEEP_VARS`], a named list,
+    ///   rather than [`crate::env::hermetic_sweep`]'s inversion of this
+    ///   host's own environment. That constant's documentation carries the
+    ///   reasoning; the consequence here is that the remote command line is
+    ///   the same string on every machine that builds it.
+    /// - [`crate::env::HOST_REDIRECT_VARS`] crosses unchanged, each name as
+    ///   its own `env -u` on the remote command line.
     /// - `XDG_CONFIG_DIRS`/`XDG_DATA_DIRS` and
     ///   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are pointed at
     ///   [`crate::env::REMOTE_UNPLANTABLE_PATH`] rather than at the two
@@ -465,16 +468,34 @@ impl EngineConfig {
     ///   command string handed to a far-side shell performs none. Removal
     ///   is not the fallback: unset, libc and LuaJIT resolve no home at all
     ///   and the child's own `expand('~')` fails (see
-    ///   [`crate::env::HERMETIC_HOME_VAR`]), so the sweep is held off this
-    ///   one name too rather than taking by omission what this layer
-    ///   deliberately does not replace.
+    ///   [`crate::env::HERMETIC_HOME_VAR`]).
     ///
-    /// What that exemption leaves open is stated rather than implied: the
-    /// layer `HOME` closes locally is everything a subprocess resolves
-    /// through it without an environment variable of its own -- `.netrc`,
-    /// `.ssh/`, the `core.excludesFile` default -- so on the far side those
-    /// still resolve out of the remote user's own home, and a fetch that
-    /// authenticates there is authenticating as that user.
+    /// ## What a remote hermetic plan does not reach
+    ///
+    /// Both directions are load-bearing, and only one of them is a list of
+    /// names. What crosses is stated above. What does not:
+    ///
+    /// - Everything the far side's own login environment exports that no
+    ///   list here enumerates. `LD_PRELOAD` or `LD_LIBRARY_PATH` from the
+    ///   remote `/etc/environment`, `SSH_AUTH_SOCK` from agent forwarding,
+    ///   an `XDG_*` name outside [`crate::env::REMOTE_SWEEP_VARS`] -- each
+    ///   reaches the far-side child intact, so the remote editor can link
+    ///   different libraries or a subprocess it spawns can authenticate
+    ///   against a forwarded agent while the config it started from says
+    ///   `isolated`. Closing that class needs the neutralization to *run on
+    ///   the far side* (an `env -i` plus an allowlist, executed there), and
+    ///   a command line built here cannot be one: it can only name what
+    ///   somebody enumerated, and no enumeration written on this host can be
+    ///   complete about a shell it has never seen.
+    /// - The layer `HOME` closes locally -- everything a subprocess resolves
+    ///   through it without an environment variable of its own (`.netrc`,
+    ///   `.ssh/`, the `core.excludesFile` default) -- still resolves out of
+    ///   the remote user's own home, so a fetch that authenticates there is
+    ///   authenticating as that user.
+    ///
+    /// Neither is a defect of the plan; both are the boundary of what a
+    /// single command string can do, and a caller relying on `isolated`
+    /// across a hop is relying on exactly this much.
     #[must_use]
     pub fn env_plan(&self) -> Vec<(OsString, Option<OsString>)> {
         let mut plan: Vec<(OsString, Option<OsString>)> = Vec::new();
@@ -486,12 +507,14 @@ impl EngineConfig {
         }
         if self.hermetic {
             let far_side = self.remote.is_some();
-            let home = OsStr::new(crate::env::HERMETIC_HOME_VAR);
-            for (name, _) in crate::env::hermetic_sweep() {
-                if far_side && crate::env::env_names_eq(&name, home) {
-                    continue;
+            if far_side {
+                for name in crate::env::REMOTE_SWEEP_VARS {
+                    plan_sweep(&mut plan, OsStr::new(name));
                 }
-                plan_sweep(&mut plan, &name);
+            } else {
+                for (name, _) in crate::env::hermetic_sweep() {
+                    plan_sweep(&mut plan, &name);
+                }
             }
             for name in crate::env::HOST_REDIRECT_VARS {
                 plan_set(&mut plan, OsStr::new(name), None);
@@ -514,7 +537,7 @@ impl EngineConfig {
             if !far_side {
                 plan_set(
                     &mut plan,
-                    home,
+                    OsStr::new(crate::env::HERMETIC_HOME_VAR),
                     Some(crate::env::hermetic_home().into_os_string()),
                 );
             }
@@ -2442,6 +2465,63 @@ mod config_tests {
         assert!(
             plan.contains(&(OsString::from(crate::env::HERMETIC_HOME_VAR), None)),
             "the exemption swallowed a removal the caller asked for; plan {plan:?}"
+        );
+    }
+
+    /// The far-side child's own standard paths, which a remote login profile
+    /// sets and which redirect every `stdpath()` lookup it makes.
+    #[test]
+    fn a_remote_hermetic_plan_removes_the_editors_own_standard_paths() {
+        let plan = EngineConfig::isolated()
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
+        for name in crate::env::REMOTE_SWEEP_VARS {
+            assert!(
+                plan.contains(&(OsString::from(*name), None)),
+                "{name} is not removed on the remote path, so a remote login \
+                 profile that exports it moves every standard path the far-side \
+                 editor resolves; plan {plan:?}"
+            );
+        }
+    }
+
+    /// The property the named list exists for: a remote plan is a function
+    /// of these constants and the caller's own entries alone, never of what
+    /// the machine building it happens to export.
+    ///
+    /// Asserted as a closed set rather than by planting a variable, because
+    /// planting one means mutating this process's environment while sibling
+    /// tests read it. Every name outside the union is a name the invoking
+    /// shell contributed, which is the whole failure: a command line that
+    /// differs between two machines running the same command, carrying this
+    /// host's list of variable names to somebody else's account.
+    #[test]
+    fn a_remote_hermetic_plan_names_only_what_this_module_enumerates() {
+        let plan = EngineConfig::isolated()
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
+        let enumerated: Vec<&str> = crate::env::REMOTE_SWEEP_VARS
+            .iter()
+            .chain(crate::env::HOST_REDIRECT_VARS)
+            .chain(crate::env::HOST_SEARCH_PATH_VARS)
+            .chain(crate::env::HOST_SUBPROCESS_CONFIG_VARS)
+            .copied()
+            .collect();
+        for (name, _) in &plan {
+            assert!(
+                enumerated
+                    .iter()
+                    .any(|known| crate::env::env_names_eq(name, OsStr::new(known))),
+                "{name:?} rode a remote plan without being named by any list \
+                 here, so the command line depends on the environment of the \
+                 machine that built it; plan {plan:?}"
+            );
+        }
+        assert_eq!(
+            plan.len(),
+            enumerated.len(),
+            "the remote plan and the lists it is built from no longer have one \
+             entry each; plan {plan:?}"
         );
     }
 }

@@ -290,6 +290,40 @@ fn an_isolated_remote_spawn_neutralizes_the_far_sides_login_environment() {
     );
 }
 
+/// The other direction of the same plan, asserted so it cannot be mistaken
+/// for coverage nobody checked: a variable the far side's login environment
+/// exports that no list in `view_engine::env` names reaches the remote
+/// editor intact.
+///
+/// A command line can only remove names somebody enumerated, and no
+/// enumeration written here can be complete about a shell this host has
+/// never seen -- `EngineConfig::env_plan` says so, and this is that sentence
+/// as an observation. A change that closed the class (neutralization running
+/// on the far side rather than riding a command line) fails here, which is
+/// the point: the boundary moves deliberately, not by accident.
+#[test]
+fn a_far_side_variable_no_list_names_survives_an_isolated_remote_spawn() {
+    let isolated = Engine::spawn(
+        EngineConfig::isolated()
+            .with_handshake_timeout(Duration::from_secs(10))
+            .with_remote(
+                RemoteSpec::new("view-test-host").with_ssh_bin(fixture("fake-ssh-login-env")),
+            ),
+    )
+    .expect("an isolated remote spawn must handshake");
+    assert_eq!(
+        isolated
+            .handle
+            .eval_str("getenv('VIEW_REMOTE_PLANTED')")
+            .unwrap(),
+        "from-the-remote-login-shell",
+        "a far-side variable outside every list here no longer reaches the \
+         remote editor: either the plan gained a way to neutralize what it \
+         cannot enumerate, in which case its documentation is now wrong, or \
+         the fixture stopped planting one"
+    );
+}
+
 /// The local path carries an `OsStr` to its child untouched, and the remote
 /// path must not be less faithful. A filename that is not valid UTF-8 is
 /// ordinary on a POSIX filesystem; a lossy decode would open, and on write

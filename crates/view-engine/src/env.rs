@@ -206,6 +206,44 @@ pub const HERMETIC_HOME_VAR: &str = "HOME";
 /// configuration instead of no configuration.
 pub const REMOTE_UNPLANTABLE_PATH: &str = "/dev/null";
 
+/// The names a hermetic plan removes from a child running on a *remote*
+/// host, in place of [`hermetic_sweep`]'s inversion of the passthrough
+/// allowlist.
+///
+/// The inversion is exhaustive for a local child, whose environment is this
+/// process's own: sweeping every non-allowlisted name here leaves the
+/// allowlist and nothing else. A remote child inherits the *far side's*
+/// login environment instead -- what its sshd, PAM and non-interactive shell
+/// startup files export -- and an `ssh` client forwards no environment of
+/// its own by default, so a name enumerated from this host is mostly a name
+/// that does not exist there. Carrying the inversion across therefore buys
+/// no coverage and costs two things worth keeping: the remote command line
+/// stops being a function of the invoking shell (the same
+/// `view --remote host:path` builds a different string on two machines, so a
+/// user's bug report cannot be reproduced from it), and the complete list of
+/// variable *names* this host exports -- `AWS_PROFILE`, `KUBECONFIG`, a
+/// vendor token's name -- crosses to the remote account and sits in its `ps`
+/// output for the life of the exec.
+///
+/// What is enumerated here instead is the family this module opens by
+/// naming: the four standard-path variables, which a remote login profile
+/// does set and which redirect every `stdpath()` lookup the far-side editor
+/// makes, out from under the directories a caller pointed at private ones.
+/// Removal is their neutralizer for the reason it is locally -- unset, the
+/// editor derives all four from the home it was given, and the remote
+/// child's home is the one place the far side's own state legitimately
+/// lives.
+///
+/// The list is deliberately short of an inversion, and
+/// [`crate::process::EngineConfig::env_plan`] states what that leaves live
+/// on the far side.
+pub const REMOTE_SWEEP_VARS: &[&str] = &[
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_STATE_HOME",
+    "XDG_CACHE_HOME",
+];
+
 /// The host environment variables a hermetic child keeps. Every other
 /// variable the host exports is dropped before the child sees it.
 ///
