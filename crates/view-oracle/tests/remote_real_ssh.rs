@@ -65,9 +65,19 @@ fn target() -> Option<String> {
 }
 
 /// A spec for the configured destination, with the far-side editor named
-/// when the environment names one.
+/// when the environment names one and connection multiplexing refused.
+///
+/// A destination whose `~/.ssh/config` sets `ControlMaster`/`ControlPersist`
+/// lets a connection ride a socket some earlier command opened, at which
+/// point none of these legs performs a key exchange and the leg that is
+/// specifically about a *cold* connection -- the batch-mode rejection, which
+/// is where a prompt would appear -- never sees one. Refusing the multiplex
+/// costs a second per leg and is what makes the timings here per-connection
+/// costs rather than per-socket-reuse costs.
 fn spec(host: &str) -> RemoteSpec {
-    let spec = RemoteSpec::new(host);
+    let spec = RemoteSpec::new(host)
+        .with_ssh_opt("ControlMaster=no")
+        .with_ssh_opt("ControlPath=none");
     match std::env::var("VIEW_REMOTE_TEST_NVIM") {
         Ok(bin) if !bin.is_empty() => spec.with_remote_nvim_bin(bin),
         _ => spec,
