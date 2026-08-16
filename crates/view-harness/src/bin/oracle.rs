@@ -87,6 +87,36 @@ struct Cli {
     /// (`minimize`, `fuzz`) is given.
     #[arg(default_value = "corpus")]
     path: PathBuf,
+    /// Which transport legs a corpus run drives. `both` is the gate's own
+    /// value; `local` is the one to reach for when iterating on a single
+    /// divergent entry, which pays a stub spawn per round otherwise.
+    #[arg(long, value_enum, default_value_t = RouteArg::Both)]
+    route: RouteArg,
+}
+
+/// The `--route` selector's surface. A separate type from [`EngineRoute`]
+/// because the two answer different questions: this one is a caller's
+/// request, which `both` is a legal answer to, and that one names a single
+/// leg a run is currently on.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum RouteArg {
+    /// A local `nvim --embed` only.
+    Local,
+    /// The stand-in ssh client only.
+    Remote,
+    /// Both, local first.
+    Both,
+}
+
+impl RouteArg {
+    /// The legs this selector asks for, in the order a run drives them.
+    fn routes(self) -> &'static [EngineRoute] {
+        match self {
+            Self::Local => &[EngineRoute::Local],
+            Self::Remote => &[EngineRoute::StubRemote],
+            Self::Both => &[EngineRoute::Local, EngineRoute::StubRemote],
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -226,7 +256,7 @@ fn main() -> Result<()> {
                 std::process::exit(1)
             }
         }
-        None => run_command(&cli.path),
+        None => run_command(&cli.path, cli.route.routes()),
     }
 }
 
@@ -504,18 +534,20 @@ fn print_outcome(name: &str, outcome: &EntryOutcome, route: EngineRoute) {
     }
 }
 
-/// The bare `oracle [PATH]` run: every entry under `path`, reported and
-/// exit-coded per this crate's own module docs.
+/// The bare `oracle [PATH]` run: every entry under `path`, on each leg of
+/// `routes`, reported and exit-coded per this crate's own module docs.
 ///
-/// Two legs, not one. The corpus runs first against a local engine, then
-/// again with the engine side reached over the committed stand-in ssh
-/// client. A remote session is supposed to differ from a local one in
-/// nothing but its transport, and the corpus is the broadest statement of
-/// that this tree has -- narrower cases can only assert what somebody
-/// thought to assert, while a second full pass fails on anything the whole
-/// corpus already covers. The second leg is skipped, with a line saying so,
-/// on a host that cannot run a POSIX stand-in.
-fn run_command(path: &Path) -> Result<()> {
+/// Two legs by default, not one. The corpus runs first against a local
+/// engine, then again with the engine side reached over the committed
+/// stand-in ssh client. A remote session is supposed to differ from a local
+/// one in nothing but its transport, and the corpus is the broadest
+/// statement of that this tree has -- narrower cases can only assert what
+/// somebody thought to assert, while a second full pass fails on anything
+/// the whole corpus already covers. `--route` narrows it for an iteration
+/// loop rather than for the gate, whose value is the default. The remote leg
+/// is skipped, with a line saying so, on a host that cannot run a POSIX
+/// stand-in.
+fn run_command(path: &Path, routes: &[EngineRoute]) -> Result<()> {
     let entries = collect_entries(path)?;
     if entries.is_empty() {
         bail!(
@@ -538,7 +570,7 @@ fn run_command(path: &Path) -> Result<()> {
             );
         }
     }
-    for route in [EngineRoute::Local, EngineRoute::StubRemote] {
+    for &route in routes {
         if route == EngineRoute::StubRemote && !view_oracle::remote::stub_available() {
             println!(
                 "oracle: remote leg ... SKIPPED (no POSIX stand-in client at {})",
@@ -968,6 +1000,32 @@ mod tests {
         clippy::panic
     )]
     use super::*;
+
+    /// The selector's default is the gate's value, and a narrowed one drives
+    /// exactly the leg it names. A default that quietly became `local` would
+    /// leave the remote path uncovered by the only two commands that ever
+    /// exercise it automatically, and nothing would report the loss.
+    #[test]
+    fn the_route_selector_defaults_to_every_leg_and_narrows_to_one() {
+        assert_eq!(
+            RouteArg::Both.routes(),
+            [EngineRoute::Local, EngineRoute::StubRemote],
+            "the default run must drive both legs, local first"
+        );
+        assert_eq!(RouteArg::Local.routes(), [EngineRoute::Local]);
+        assert_eq!(RouteArg::Remote.routes(), [EngineRoute::StubRemote]);
+        assert_eq!(
+            Cli::parse_from(["oracle"]).route.routes(),
+            RouteArg::Both.routes(),
+            "a bare invocation must be the gate's own run"
+        );
+        assert_eq!(
+            Cli::parse_from(["oracle", "--route", "local"])
+                .route
+                .routes(),
+            RouteArg::Local.routes()
+        );
+    }
 
     /// The scenario the merge logic exists for: an engine side that never
     /// saw a Flush must report TIMEOUT even when the reference side

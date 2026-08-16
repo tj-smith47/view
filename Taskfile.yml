@@ -94,7 +94,13 @@ tasks:
       - task: test-arms
 
   oracle:
-    desc: Run the differential oracle corpus against the pinned nvim (task oracle -- corpus/insert-basic.toml for one entry)
+    desc: Run the differential oracle corpus against the pinned nvim on every transport (task oracle -- corpus/insert-basic.toml --route local for one entry on one leg)
+    # every entry runs once per transport, so wall time scales with the
+    # number of legs and not just with corpus size. When this target crosses
+    # ~5 minutes -- from corpus growth or a third route -- split it into a
+    # default local-only leg and an all-routes leg CI runs, rather than
+    # letting a per-commit gate drift toward the CI budget. `--route` is
+    # already the mechanism that split would use.
     cmd: cargo run -p view-harness --bin oracle -- {{.CLI_ARGS}}
 
   compat:
