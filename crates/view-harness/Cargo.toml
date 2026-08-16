@@ -40,3 +40,8 @@ view-surface = { version = "0.0.1", path = "../view-surface" }
 view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
 view-native = { version = "0.0.1", path = "../view-native" }
+# The shared temp-dir fixture guard (see its own crate doc): the
+# remote_memory row's own test needs a real scratch directory and its
+# `Drop`-driven cleanup, matching how view-bench's tests for the same
+# stub-arming mechanism use it.
+view-test-support = { version = "0.0.1", path = "../view-test-support" }

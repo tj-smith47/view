@@ -54,56 +54,113 @@ pub(super) fn run_remote_memory_row(
 }
 
 /// Builds the view-side spawn spec for the row above: `--remote` armed
-/// against the committed stub-ssh double, unless
-/// [`remote_memory::REMOTE_HOST_ENV`] names a real target for the opt-in
-/// acceptance leg -- the same env var
-/// `crates/view-oracle/tests/remote_real_ssh.rs` reads, so one export
-/// configures both legs.
+/// against the committed stub-ssh double, unconditionally. The real-SSH leg
+/// lives exclusively in `remote_memory`'s own `#[ignore]`d test -- this
+/// function has no branch that could read
+/// [`remote_memory::REMOTE_HOST_ENV`] at all, by construction rather than
+/// by an early-return that happens not to fire today. A leftover export
+/// from an oracle real-SSH run reaching this row would measure a real
+/// network hop and let it silently ratchet into the dev-linux bar under a
+/// route no log line names, which is why the gated path is stub-only with
+/// no env branch to leave in.
 ///
-/// The stub leg points `--nvim-bin` at the pinned local binary, because the
-/// stub's far side is this host (see `view_oracle::remote`'s module doc):
-/// the same absolute path the local `memory` row resolves works unchanged
-/// there. The real-host leg instead defers to the far side's own `PATH`
-/// (or [`remote_memory::REMOTE_NVIM_ENV`] when that `PATH` does not carry
-/// it), mirroring `remote_real_ssh.rs`'s own `spec()`: a real remote
-/// account's `PATH` is not this host's, so a local absolute path would
-/// name a binary nothing on the far side can run.
+/// `--nvim-bin` points at the pinned local binary, because the stub's far
+/// side is this host (see `view_oracle::remote`'s module doc): the same
+/// absolute path the local `memory` row resolves works unchanged there.
+///
+/// The scratch-file positional is the same one [`super::view_spec_from`]
+/// opens for the paired `memory` row -- deliberately, so the two rows are a
+/// minimal pair differing only in transport: everything a paired comparison
+/// (spec 3.1's headroom claim) could otherwise attribute to "one row opens
+/// a file and the other does not" is closed off. It must come last: view's
+/// CLI forwards every token after the first positional to nvim verbatim
+/// (`trailing_var_arg`), so a flag placed after it would never reach view's
+/// own parser, and `--nvim-bin`/`--remote` must each keep their value as
+/// the immediately following token for the same reason.
 fn remote_memory_spec_from(side: SideSetup, bins: EditorBins<'_>) -> Result<SpawnSpec> {
     let mut env = side.env;
-    // `--nvim-bin`'s value must directly follow it, and so must
-    // `--remote`'s: view's CLI reads a flag's very next token as its
-    // value (`allow_hyphen_values` is off for both), so a flag/value pair
-    // can never be split apart by another flag landing between them.
-    let mut args = Vec::new();
-    let target = match std::env::var(remote_memory::REMOTE_HOST_ENV) {
-        Ok(host) if !host.is_empty() => {
-            if let Ok(nvim) = std::env::var(remote_memory::REMOTE_NVIM_ENV) {
-                if !nvim.is_empty() {
-                    args.push(OsString::from("--nvim-bin"));
-                    args.push(OsString::from(nvim));
-                }
-            }
-            OsString::from(host)
-        }
-        _ => {
-            args.push(OsString::from("--nvim-bin"));
-            args.push(bins.nvim.as_os_str().to_os_string());
-            let stub_dir = side.cwd.join("stub-ssh-path");
-            let path =
-                remote_memory::arm_stub_ssh_path(&stub_dir, std::env::var_os("PATH").as_deref())
-                    .with_context(|| {
-                        format!("arming the stub ssh double in {}", stub_dir.display())
-                    })?;
-            env.push((OsString::from("PATH"), path));
-            OsString::from(remote_memory::STUB_TARGET)
-        }
-    };
-    args.push(OsString::from("--remote"));
-    args.push(target);
+    let stub_dir = side.cwd.join("stub-ssh-path");
+    let path = remote_memory::arm_stub_ssh_path(&stub_dir, std::env::var_os("PATH").as_deref())
+        .with_context(|| format!("arming the stub ssh double in {}", stub_dir.display()))?;
+    env.push((OsString::from("PATH"), path));
+    let args = vec![
+        OsString::from("--nvim-bin"),
+        bins.nvim.as_os_str().to_os_string(),
+        OsString::from("--remote"),
+        OsString::from(remote_memory::STUB_TARGET),
+        side.scratch_file.clone().into_os_string(),
+    ];
     Ok(SpawnSpec {
         program: bins.view.to_path_buf(),
         args,
         env,
         cwd: Some(side.cwd),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::disallowed_methods)]
+    use super::*;
+
+    /// Serializes this module's `std::env::set_var`/`remove_var` calls
+    /// against each other: `cargo test` runs a module's tests on multiple
+    /// threads by default, and a second test added here that touches the
+    /// same name could otherwise interleave its plant with this one's
+    /// restore. One test uses it today; the guard exists so a second test
+    /// does not have to discover the hazard by flaking.
+    static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// An exported `VIEW_REMOTE_TEST_HOST` -- a plausible leftover from
+    /// running the oracle's real-SSH leg on the same shell -- must never
+    /// reach the gated spec's target. This test sets the var itself, so a
+    /// regression that re-adds an env read to the gated path fails it
+    /// directly rather than depending on a reviewer noticing the diff.
+    #[test]
+    fn the_gated_spec_stays_on_the_stub_target_even_with_the_real_host_var_exported() {
+        if !view_oracle::remote::stub_available() {
+            eprintln!("skipped: no stub ssh client on this host");
+            return;
+        }
+        let _guard = env_mutation_guard();
+        let scratch = view_test_support::ScratchDir::new("remote-memory-gated-path-ignores-env")
+            .expect("creating the scratch dir");
+        let prior = std::env::var_os(remote_memory::REMOTE_HOST_ENV);
+        std::env::set_var(
+            remote_memory::REMOTE_HOST_ENV,
+            "a-leftover-export-from-t12-testing",
+        );
+        let side = SideSetup {
+            env: Vec::new(),
+            cwd: scratch.to_path_buf(),
+            scratch_file: scratch.join("scratch.txt"),
+        };
+        let bins = EditorBins {
+            view: Path::new("/bin/true"),
+            nvim: Path::new("/bin/true"),
+        };
+        let result = remote_memory_spec_from(side, bins);
+        match prior {
+            Some(value) => std::env::set_var(remote_memory::REMOTE_HOST_ENV, value),
+            None => std::env::remove_var(remote_memory::REMOTE_HOST_ENV),
+        }
+        let spec = result.expect("stub arming must still succeed with an unrelated var exported");
+        // args end `["--remote", <target>, <scratch positional>]`
+        assert_eq!(
+            spec.args.get(spec.args.len() - 3).map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new("--remote")),
+            "the flag two tokens before the trailing positional must still be --remote"
+        );
+        assert_eq!(
+            spec.args.get(spec.args.len() - 2).map(OsString::as_os_str),
+            Some(std::ffi::OsStr::new(remote_memory::STUB_TARGET)),
+            "an exported VIEW_REMOTE_TEST_HOST must never reach the gated spec's target"
+        );
+    }
 }

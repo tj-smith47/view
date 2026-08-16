@@ -40,10 +40,23 @@ while IFS=$'\t' read -r spec_row max; do
     continue
   fi
 
-  # 232.0 in TOML is written 232 in the spec's prose; accept either
-  trimmed="${max%.0}"
-  if ! grep -qF "$trimmed" <<<"$row"; then
-    echo "BUDGET DRIFT FAIL: budgets.toml bounds \"$spec_row\" at $max, but that number does not appear in the spec row:" >&2
+  # 232.0 in TOML and 232 in the spec's prose are the same value, and so are
+  # 1.1 and 1.10 -- a plain substring match on the trimmed text handles
+  # neither correctly: it missed 1.1-written-as-1.10, and separately it
+  # accepted $max's digits appearing inside an unrelated larger number ("6"
+  # inside this very row's own "4.962" headroom citation). Extracting every
+  # number-shaped token from the row and comparing each to $max as a float
+  # fixes both: token boundaries stop the false match, and numeric (not
+  # string) equality stops the false miss.
+  found=0
+  while IFS= read -r num; do
+    if awk -v a="$num" -v b="$max" 'BEGIN{exit !(a+0==b+0)}'; then
+      found=1
+      break
+    fi
+  done < <(grep -oE '[0-9]+(\.[0-9]+)?' <<<"$row")
+  if [[ $found -ne 1 ]]; then
+    echo "BUDGET DRIFT FAIL: budgets.toml bounds \"$spec_row\" at $max, but that number does not appear as its own value in the spec row:" >&2
     echo "  ${row:0:200}" >&2
     fail=1
   fi

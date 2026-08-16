@@ -29,10 +29,18 @@
 //!
 //! The opt-in leg reads [`REMOTE_HOST_ENV`] -- the same env var
 //! `crates/view-oracle/tests/remote_real_ssh.rs` reads, so one exported
-//! name configures both legs' real-SSH coverage -- and is exercised only by
-//! this module's own `#[ignore]`d test, never by the gated bench matrix:
-//! a real target is local/acceptance infrastructure the CI host cannot be
-//! assumed to have, exactly as `remote_real_ssh.rs`'s own doc explains.
+//! name configures both legs' real-SSH coverage -- and is exercised
+//! **only** by this module's own `#[ignore]`d test. The gated bench matrix
+//! (`crates/view-harness/src/bin/bench/remote_rows.rs`) does not read
+//! [`REMOTE_HOST_ENV`] at all, unconditionally: a `--record`/`--gate` run
+//! that measured a real network hop whenever an operator's shell happened
+//! to carry a leftover export from an oracle acceptance run would silently
+//! ratchet this class's bar against a different transport, on no evidence
+//! any log line names. A real target is local/acceptance infrastructure the
+//! CI host cannot be assumed to have, exactly as `remote_real_ssh.rs`'s own
+//! doc explains, and it stays that way by construction: the gated path has
+//! no branch that could read the var, not a branch that happens not to
+//! today.
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -57,6 +65,12 @@ pub const REMOTE_HOST_ENV: &str = "VIEW_REMOTE_TEST_HOST";
 /// account's `PATH` is not this host's, so a value here is the only way to
 /// point at an `nvim` that PATH does not carry.
 pub const REMOTE_NVIM_ENV: &str = "VIEW_REMOTE_TEST_NVIM";
+
+/// Env var naming the `view` binary the opt-in leg's own test spawns,
+/// mirroring the other two: the test has no other way to locate a release
+/// build, since it is a `#[cfg(test)]` unit test rather than a bench-matrix
+/// row that already carries `--view-bin` on its own command line.
+pub const REMOTE_VIEW_BIN_ENV: &str = "VIEW_REMOTE_TEST_VIEW_BIN";
 
 /// Reads view's own process memory after the standard workload, the same
 /// way [`memory::run`] does, against whatever [`crate::session::SpawnSpec`]
@@ -128,6 +142,7 @@ mod tests {
     use super::*;
     use crate::session::SpawnSpec;
     use std::path::PathBuf;
+    use view_test_support::ScratchDir;
 
     /// `arm_stub_ssh_path`'s own claim: after arming, `dir/ssh` resolves
     /// (via a `PATH` built from its return value) to the same file
@@ -138,15 +153,8 @@ mod tests {
             eprintln!("skipped: no stub ssh client on this host");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "view-bench-remote-memory-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let path = arm_stub_ssh_path(&dir, std::env::var_os("PATH").as_deref())
+        let scratch = ScratchDir::new("remote-memory-test").expect("creating the scratch dir");
+        let path = arm_stub_ssh_path(&scratch, std::env::var_os("PATH").as_deref())
             .expect("arming a fresh scratch directory must succeed");
         let resolved = std::env::split_paths(&path)
             .find_map(|entry| {
@@ -162,7 +170,6 @@ mod tests {
             "the first ssh the armed PATH resolves must be the committed stub, not some other \
              ssh already on PATH"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Re-arming the same directory replaces a stale link rather than
@@ -174,28 +181,20 @@ mod tests {
             eprintln!("skipped: no stub ssh client on this host");
             return;
         }
-        let dir = std::env::temp_dir().join(format!(
-            "view-bench-remote-memory-restale-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).expect("creating the scratch dir");
-        let stale_target = dir.join("not-a-real-client");
+        let scratch = ScratchDir::new("remote-memory-restale").expect("creating the scratch dir");
+        let stale_target = scratch.join("not-a-real-client");
         std::fs::write(&stale_target, "#!/bin/sh\nexit 1\n").expect("writing a stale target");
-        std::os::unix::fs::symlink(&stale_target, dir.join("ssh")).expect("planting a stale link");
+        std::os::unix::fs::symlink(&stale_target, scratch.join("ssh"))
+            .expect("planting a stale link");
 
-        arm_stub_ssh_path(&dir, None).expect("re-arming an already-populated directory");
+        arm_stub_ssh_path(&scratch, None).expect("re-arming an already-populated directory");
         let resolved =
-            std::fs::read_link(dir.join("ssh")).expect("reading the link back after re-arming");
+            std::fs::read_link(scratch.join("ssh")).expect("reading the link back after re-arming");
         assert_eq!(
             resolved,
             view_oracle::remote::stub_client(),
             "re-arming must replace the stale link, not leave it pointing at the old target"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// [`REMOTE_HOST_ENV`]'s own module doc promises: a real remote target
@@ -224,8 +223,8 @@ mod tests {
             eprintln!("skipped: {REMOTE_HOST_ENV} is unset (see this module's doc)");
             return;
         };
-        let Some(view_bin) = env_var("VIEW_REMOTE_TEST_VIEW_BIN") else {
-            eprintln!("skipped: VIEW_REMOTE_TEST_VIEW_BIN is unset (see this module's doc)");
+        let Some(view_bin) = env_var(REMOTE_VIEW_BIN_ENV) else {
+            eprintln!("skipped: {REMOTE_VIEW_BIN_ENV} is unset (see this module's doc)");
             return;
         };
 

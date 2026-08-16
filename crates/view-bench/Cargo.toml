@@ -18,6 +18,13 @@ view-core = { version = "0.0.1", path = "../view-core" }
 view-oracle = { version = "0.0.1", path = "../view-oracle" }
 vt100 = "0.16.2"
 
+[dev-dependencies]
+# The shared temp-dir fixture guard (see its own crate doc): the
+# remote_memory stub-arming tests need a real filesystem object and its
+# `Drop`-driven cleanup, which a hand-rolled `std::env::temp_dir()` name
+# does not get on a failing assertion.
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
+
 # The tap channel is a Unix mechanism: raw CLOCK_MONOTONIC reads comparable
 # with the tap records the instrumented view binary emits (std's Instant is
 # opaque and cannot cross a process boundary), plus FIFO creation for the
