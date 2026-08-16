@@ -146,18 +146,16 @@ struct Cli {
     tier: Option<TierArg>,
     /// Spawns the bundled engine with no user config at all: `view.toml`
     /// and `init.lua` are both skipped, and every native feature stays on.
-    /// This is view's own triage tool, distinct from `nvim --clean` --
-    /// see `engine_config`'s doc comment for why the two must never share
-    /// a constructor.
+    /// This is view's own triage tool, and asks for something different from
+    /// `nvim --clean`.
     #[arg(long)]
     clean: bool,
     /// Sets `NVIM_APPNAME` in the spawned engine's own environment, so it
     /// reads `$XDG_CONFIG_HOME/<name>` instead of `$XDG_CONFIG_HOME/nvim`.
     #[arg(long)]
     appname: Option<String>,
-    /// An explicit `view.toml` path, replacing the platform default
-    /// [`view_native::paths::config_path`] would otherwise resolve. Feeds
-    /// `NativeConfig::load` directly.
+    /// An explicit `view.toml` path, replacing the one view would otherwise
+    /// resolve for this platform.
     #[arg(long)]
     config: Option<std::path::PathBuf>,
     /// Prints the system clipboard's current text for `register` ('+' or
@@ -170,32 +168,32 @@ struct Cli {
     /// no-clipboard-available case). Conflicts with `--remote`: this reads
     /// the clipboard of the host it runs on and starts no editor at all, so
     /// a destination combined with it would be accepted and never used.
+    ///
+    /// Hidden, so this whole comment stays maintainer-facing: nothing here
+    /// is rendered to a user typing `--help`.
     #[arg(long, hide = true, conflicts_with = "remote")]
     print_clipboard: Option<char>,
-    /// Print version
-    ///
-    /// Long form only: nvim spends `-V` on its own `-V[N][file]` verbose
-    /// flag, so view leaves the short form to `passthrough` rather than
-    /// having a bare `view -V` print a version string where the same nvim
-    /// invocation would have started a verbose session. Declared by hand
-    /// because that is the only way to drop the short form clap's own
-    /// generated version flag always carries (`disable_version_flag` on the
-    /// command above suppresses it).
+    /// Print version. Long form only: `-V` starts a verbose engine session,
+    /// the way it does for nvim itself.
+    // declared by hand because that is the only way to drop the short form
+    // clap's own generated version flag always carries: a bare `view -V`
+    // must reach the engine as its `-V[N][file]`, not print a version string
     #[arg(long, action = clap::ArgAction::Version)]
     version: Option<bool>,
     /// Everything not claimed by a flag above, forwarded to the engine
     /// exactly as typed: `+42`, `-c 'set nu'`, `-R`, `-d`, `-O`, `-u NONE`,
-    /// file paths, `-` for stdin. clap must not try to interpret any of
-    /// this; `allow_hyphen_values` is what lets an nvim short flag like
-    /// `-c` start this catch-all instead of erroring as an unrecognized
-    /// argument naming *view*. Enumerating each nvim flag here instead was
-    /// rejected as a maintenance treadmill that silently breaks on every
-    /// engine-pin bump that adds one.
+    /// file paths, `-` for stdin. Every nvim argument is accepted, including
+    /// ones this build has never heard of.
     ///
     /// Because this is a trailing var-arg, view's own long flags above must
     /// appear before the first passthrough token on the command line --
     /// once this field starts matching, it swallows every remaining token,
     /// `--tier`/`--clean` included.
+    // `allow_hyphen_values` is what lets an nvim short flag like `-c` start
+    // this catch-all instead of erroring as an unrecognized argument naming
+    // view itself. Enumerating each nvim flag as an argument of view's own
+    // instead was rejected as a maintenance treadmill that silently breaks
+    // on every engine-pin bump that adds one
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     passthrough: Vec<std::ffi::OsString>,
 }
@@ -1830,6 +1828,33 @@ mod tests {
             assert!(
                 help.contains(expected),
                 "--help must show {expected}, got:\n{help}"
+            );
+        }
+    }
+
+    // A field's doc comment is this CLI's help text, so it is read by people
+    // who will never open the source: a rustdoc intra-doc link renders to
+    // them as literal brackets around a path they cannot follow, and a
+    // parser knob or a private function name documents how view is built
+    // rather than how it is run. The rationale still exists, in ordinary
+    // comments and on the functions it belongs to; only the rendered surface
+    // is guarded here.
+    #[test]
+    fn rendered_help_documents_the_tool_and_never_its_implementation() {
+        let help = Cli::command().render_long_help().to_string();
+        for leak in [
+            "[`",
+            "`]",
+            "allow_hyphen_values",
+            "trailing_var_arg",
+            "clap",
+            "view_native::",
+            "constructor",
+            "doc comment",
+        ] {
+            assert!(
+                !help.contains(leak),
+                "--help leaks {leak:?} to a user who only wants to run view:\n{help}"
             );
         }
     }
