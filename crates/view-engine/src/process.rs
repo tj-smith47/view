@@ -333,10 +333,13 @@ impl EngineConfig {
     /// client hands the remote shell, rather than the local child's own
     /// environment, which is the `ssh` process itself and forwards nothing.
     ///
-    /// Mutually exclusive with [`isolated`](Self::isolated)'s hermetic
-    /// plan, which describes a *local* isolation a remote host does not
-    /// receive: the two together are refused by [`Engine::spawn`] before
-    /// any process starts, never silently reconciled.
+    /// Compatible with [`isolated`](Self::isolated), on terms
+    /// [`env_plan`](Self::env_plan) spells out entry by entry: the plan's
+    /// removals cross as they stand, two of its overrides name a substitute
+    /// that needs no local directory behind it, and `HOME` is exempt and
+    /// stays the remote user's own. The local directory preparation
+    /// [`Engine::spawn`] performs for an isolated child is skipped, since a
+    /// remote child is pointed at none of it.
     ///
     /// The local [`nvim_bin`](Self::nvim_bin) is unused once this is armed:
     /// the editor runs on the far side, and
@@ -436,6 +439,42 @@ impl EngineConfig {
     ///    sweep already covers a host that exports them; this layer also
     ///    covers the caller who set one deliberately, which is what an
     ///    isolated config must refuse whoever asks.
+    ///
+    /// # A hermetic plan for a child on another machine
+    ///
+    /// Where the child runs decides what the second layer's value-bearing
+    /// entries are allowed to name, so a config that is both hermetic and
+    /// [`remote`](Self::remote) plans three of them differently. Nothing
+    /// about the removals changes: every name the first layer and
+    /// [`crate::env::HOST_REDIRECT_VARS`] drop crosses as its own `env -u`
+    /// on the remote command line, and each is a variable the remote user's
+    /// login environment (sshd and PAM, then the shell's non-interactive
+    /// startup files) sets exactly as a local host would.
+    ///
+    /// - `XDG_CONFIG_DIRS`/`XDG_DATA_DIRS` and
+    ///   `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are pointed at
+    ///   [`crate::env::REMOTE_UNPLANTABLE_PATH`] rather than at the two
+    ///   prepared local directories, which name nothing on the far side.
+    ///   The substitute neutralizes the same lookups and needs no
+    ///   preparation to do it.
+    /// - `HOME` is the exemption: it is not planned at all, and the remote
+    ///   child keeps the one its own login environment gives it. A hermetic
+    ///   home is *written* by its holder -- an embedded Neovim creates
+    ///   `$HOME/.local/state/nvim` as it starts -- so the value has to be a
+    ///   writable directory that exists, which is a preparation, and a
+    ///   command string handed to a far-side shell performs none. Removal
+    ///   is not the fallback: unset, libc and LuaJIT resolve no home at all
+    ///   and the child's own `expand('~')` fails (see
+    ///   [`crate::env::HERMETIC_HOME_VAR`]), so the sweep is held off this
+    ///   one name too rather than taking by omission what this layer
+    ///   deliberately does not replace.
+    ///
+    /// What that exemption leaves open is stated rather than implied: the
+    /// layer `HOME` closes locally is everything a subprocess resolves
+    /// through it without an environment variable of its own -- `.netrc`,
+    /// `.ssh/`, the `core.excludesFile` default -- so on the far side those
+    /// still resolve out of the remote user's own home, and a fetch that
+    /// authenticates there is authenticating as that user.
     #[must_use]
     pub fn env_plan(&self) -> Vec<(OsString, Option<OsString>)> {
         let mut plan: Vec<(OsString, Option<OsString>)> = Vec::new();
@@ -446,25 +485,39 @@ impl EngineConfig {
             plan_set(&mut plan, name, None);
         }
         if self.hermetic {
+            let far_side = self.remote.is_some();
+            let home = OsStr::new(crate::env::HERMETIC_HOME_VAR);
             for (name, _) in crate::env::hermetic_sweep() {
+                if far_side && crate::env::env_names_eq(&name, home) {
+                    continue;
+                }
                 plan_sweep(&mut plan, &name);
             }
             for name in crate::env::HOST_REDIRECT_VARS {
                 plan_set(&mut plan, OsStr::new(name), None);
             }
-            let empty = crate::env::empty_search_path().into_os_string();
+            let (empty, absent) = if far_side {
+                let unplantable = OsString::from(crate::env::REMOTE_UNPLANTABLE_PATH);
+                (unplantable.clone(), unplantable)
+            } else {
+                (
+                    crate::env::empty_search_path().into_os_string(),
+                    crate::env::absent_config_file().into_os_string(),
+                )
+            };
             for name in crate::env::HOST_SEARCH_PATH_VARS {
                 plan_set(&mut plan, OsStr::new(name), Some(empty.clone()));
             }
-            let absent = crate::env::absent_config_file().into_os_string();
             for name in crate::env::HOST_SUBPROCESS_CONFIG_VARS {
                 plan_set(&mut plan, OsStr::new(name), Some(absent.clone()));
             }
-            plan_set(
-                &mut plan,
-                OsStr::new(crate::env::HERMETIC_HOME_VAR),
-                Some(crate::env::hermetic_home().into_os_string()),
-            );
+            if !far_side {
+                plan_set(
+                    &mut plan,
+                    home,
+                    Some(crate::env::hermetic_home().into_os_string()),
+                );
+            }
         }
         plan
     }
@@ -688,19 +741,23 @@ impl Engine {
     ///
     /// A remote `cfg` returns `EngineError::Io` before anything is prepared
     /// or started when it carries a setting a remote spawn cannot honour (a
-    /// hermetic plan, a stdin relay) or a destination that does not name a
-    /// host (empty, or beginning with a dash).
+    /// stdin relay) or a destination that does not name a host (empty, or
+    /// beginning with a dash).
     ///
-    /// An isolated `cfg` also returns `EngineError::Io` when the hermetic
-    /// search path cannot be established empty (see
+    /// An isolated `cfg` for a *local* child also returns `EngineError::Io`
+    /// when the hermetic search path cannot be established empty (see
     /// [`crate::env::prepare_empty_search_path`]) or the hermetic home holds
     /// a planted entry (see [`crate::env::prepare_hermetic_home`]), before
     /// any process is started: a child pointed at a directory somebody
     /// planted a plugin or credential file in is not isolated, and refusing
-    /// the spawn is the only way that says so.
+    /// the spawn is the only way that says so. An isolated remote `cfg`
+    /// prepares neither, because it points its child at neither: the plan
+    /// that crosses names what a far-side shell can be handed in one command
+    /// string, and [`EngineConfig::env_plan`] states which entries that
+    /// changes.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
         refuse_incoherent_remote(&cfg)?;
-        if cfg.hermetic {
+        if cfg.hermetic && cfg.remote.is_none() {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
         }
@@ -1281,11 +1338,6 @@ fn build_command(cfg: &EngineConfig) -> Result<Command, EngineError> {
 /// ineffective, and a remote editor that quietly lost a setting looks
 /// exactly like one that kept it.
 ///
-/// A hermetic plan names local directories this host prepares and guards,
-/// none of which exist on the far side, so a spawn carrying both would
-/// connect to a remote editor while reporting an isolation nothing
-/// established.
-///
 /// A stdin relay is a duplicate of this caller's own descriptor, handed to
 /// the child at a fixed fd number. A client's own standard input is already
 /// the remote command's, and `--embed` has claimed that for the RPC
@@ -1305,12 +1357,6 @@ fn refuse_incoherent_remote(cfg: &EngineConfig) -> Result<(), EngineError> {
         return Ok(());
     };
     let refuse = |reason: &str| Err(EngineError::Io(std::io::Error::other(reason.to_string())));
-    if cfg.hermetic {
-        return refuse(
-            "a hermetic config describes a local isolation a remote host \
-             does not receive; spawn one or the other, not both",
-        );
-    }
     if cfg.stdin_relay_requested() {
         return refuse(
             "a stdin relay hands the child a descriptor of this host's own, \
@@ -1397,7 +1443,10 @@ fn remote_command(remote: &RemoteSpec, cfg: &EngineConfig) -> Result<Command, En
 /// to need it: classifying which tokens are safe is the mistake that leaves
 /// the one space-, quote- or `$`-bearing value unescaped.
 ///
-/// Both halves of the plan cross. A `Some` entry becomes a `KEY=value`
+/// Both halves of the plan cross, whatever put them in it -- a caller's own
+/// overrides and removals, and a hermetic config's whole layer, which
+/// [`EngineConfig::env_plan`] shapes for a far-side child before it gets
+/// here. A `Some` entry becomes a `KEY=value`
 /// assignment; a `None` entry becomes `env -u KEY`. A removal names a
 /// variable that must be absent from the *child*, which is not the same
 /// claim as undoing this host's own export: a remote editor started over
@@ -2308,20 +2357,91 @@ mod config_tests {
         );
     }
 
-    /// The refusal is the whole point: a hermetic plan names local
-    /// directories this host prepares and guards, and a remote child that
-    /// silently received none of them looks exactly like one that did.
+    /// The hermetic plan a remote config carries, entry by entry: the two
+    /// override groups that name a local directory locally must name the
+    /// substitute instead, because the local paths mean nothing on the far
+    /// side and would point the child at whatever sits there.
     #[test]
-    fn a_hermetic_config_cannot_also_be_remote() {
-        let refused = Engine::spawn(EngineConfig::isolated().with_remote(RemoteSpec::new("host")));
-        let outcome = match refused {
-            Ok(_) => String::from("the spawn was accepted"),
-            Err(err) => err.to_string(),
-        };
+    fn a_remote_hermetic_plan_replaces_the_paths_only_this_host_prepares() {
+        let plan = EngineConfig::isolated()
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
+        for name in crate::env::HOST_SEARCH_PATH_VARS
+            .iter()
+            .chain(crate::env::HOST_SUBPROCESS_CONFIG_VARS)
+        {
+            let entry = plan
+                .iter()
+                .find(|(known, _)| crate::env::env_names_eq(known, OsStr::new(name)));
+            assert_eq!(
+                entry.map(|(_, value)| value.clone()),
+                Some(Some(OsString::from(crate::env::REMOTE_UNPLANTABLE_PATH))),
+                "{name} rode a remote plan pointing at a directory only this \
+                 host prepares; plan {plan:?}"
+            );
+        }
+    }
+
+    /// The exemption, pinned from both ends: the remote child keeps its own
+    /// login `HOME`, and the sweep must not take it either. Unset, the child
+    /// resolves no home at all -- and a plan that removed it would look
+    /// exactly like this one until somebody ran `expand('~')` on the far
+    /// side.
+    #[test]
+    fn a_remote_hermetic_plan_leaves_the_far_sides_own_home_alone() {
+        let plan = EngineConfig::isolated()
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
         assert!(
-            outcome.contains("hermetic"),
-            "a config that is both hermetic and remote must be refused \
-             before anything is prepared or started, got: {outcome}"
+            !plan.iter().any(|(name, _)| crate::env::env_names_eq(
+                name,
+                OsStr::new(crate::env::HERMETIC_HOME_VAR)
+            )),
+            "a remote hermetic plan carries an entry for {}, so the far side \
+             receives a home this host chose or no home at all; plan {plan:?}",
+            crate::env::HERMETIC_HOME_VAR
+        );
+        let local = EngineConfig::isolated().env_plan();
+        assert!(
+            local.contains(&(
+                OsString::from(crate::env::HERMETIC_HOME_VAR),
+                Some(crate::env::hermetic_home().into_os_string())
+            )),
+            "the local plan stopped pointing {} at the prepared home, so the \
+             exemption above is no longer an exemption from anything; plan \
+             {local:?}",
+            crate::env::HERMETIC_HOME_VAR
+        );
+    }
+
+    /// The removals are the half that crosses unchanged, and they are what
+    /// the far side's own login environment is neutralized by.
+    #[test]
+    fn a_remote_hermetic_plan_still_removes_every_redirect_variable() {
+        let plan = EngineConfig::isolated()
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
+        for name in crate::env::HOST_REDIRECT_VARS {
+            assert!(
+                plan.contains(&(OsString::from(*name), None)),
+                "{name} is not removed on the remote path, so a remote login \
+                 environment that exports it redirects the editor; plan {plan:?}"
+            );
+        }
+    }
+
+    /// A caller's own removal of the exempt name is still the caller's:
+    /// holding the sweep off `HOME` must not also override somebody who
+    /// asked for it to go.
+    #[test]
+    fn a_callers_own_home_removal_survives_the_remote_exemption() {
+        let plan = EngineConfig::isolated()
+            .with_env_remove(crate::env::HERMETIC_HOME_VAR)
+            .with_remote(RemoteSpec::new("host"))
+            .env_plan();
+        assert!(
+            plan.contains(&(OsString::from(crate::env::HERMETIC_HOME_VAR), None)),
+            "the exemption swallowed a removal the caller asked for; plan {plan:?}"
         );
     }
 }

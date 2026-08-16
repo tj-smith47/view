@@ -63,8 +63,12 @@ impl Drop for Scratch {
 }
 
 /// A config whose child ignores the host's own editor configuration without
-/// the hermetic plan, which a remote spawn refuses by construction: the
-/// plan's directories are local, and the far side never receives them.
+/// the hermetic plan. Plain `--clean` rather than
+/// [`EngineConfig::isolated`], because the tests below are about what a
+/// caller's own overrides do on the far side and the hermetic layer applies
+/// after them: it removes the redirect variables outright, which is the
+/// whole subject of the isolated test further down and would make an
+/// override test assert the wrong thing.
 fn remote_clean() -> EngineConfig {
     EngineConfig::default()
         .with_arg("--clean")
@@ -217,6 +221,72 @@ fn an_environment_removal_unsets_what_the_remote_login_environment_exported() {
         "v:null",
         "a removal was accepted and dropped: the remote editor still reads a \
          variable the caller asked to be rid of, and can be redirected by it"
+    );
+}
+
+/// An isolated config now reaches the far side, and this is what arrives
+/// there: the login environment's redirect variable gone, the two search
+/// paths pointed at something no plugin can be planted under, and the
+/// remote user's own home left standing.
+///
+/// Read out of the started editor rather than off the command line, for the
+/// reason every other test here does: the line looking right proves the
+/// caller's intent, not what survived a shell's re-parse.
+#[test]
+fn an_isolated_remote_spawn_neutralizes_the_far_sides_login_environment() {
+    let spec = || RemoteSpec::new("view-test-host").with_ssh_bin(fixture("fake-ssh-login-env"));
+    let planted = Engine::spawn(
+        EngineConfig::default()
+            .with_arg("--clean")
+            .with_arg("-n")
+            .with_handshake_timeout(Duration::from_secs(10))
+            .with_remote(spec()),
+    )
+    .expect("a remote spawn must handshake");
+    assert_eq!(
+        planted.handle.eval_str("getenv('NVIM_APPNAME')").unwrap(),
+        "from-the-remote-login-shell",
+        "the far side must actually export this, or the isolated spawn below \
+         proves nothing"
+    );
+
+    let isolated = Engine::spawn(
+        EngineConfig::isolated()
+            .with_handshake_timeout(Duration::from_secs(10))
+            .with_remote(spec()),
+    )
+    .expect("an isolated remote spawn must handshake");
+    assert_eq!(
+        isolated
+            .handle
+            .eval_str("string(getenv('NVIM_APPNAME'))")
+            .unwrap(),
+        "v:null",
+        "the hermetic plan's removals did not cross: the remote editor still \
+         reads a redirect variable the far side's own login shell exported"
+    );
+    for name in ["XDG_CONFIG_DIRS", "XDG_DATA_DIRS"] {
+        assert_eq!(
+            isolated
+                .handle
+                .eval_str(&format!("getenv('{name}')"))
+                .unwrap(),
+            view_engine::env::REMOTE_UNPLANTABLE_PATH,
+            "{name} reached the far side as something other than the \
+             substitute: a path this host prepared names an unknown directory \
+             there, and an unset value selects the remote system's own"
+        );
+    }
+    // the stub runs the "remote" command on this host, so the far side's
+    // login environment is this process's own, and its `HOME` is the value
+    // the exemption promises to leave alone
+    let login_home = std::env::var("HOME").expect("a unix test process has a home");
+    assert_eq!(
+        isolated.handle.eval_str("getenv('HOME')").unwrap(),
+        login_home,
+        "the far side did not keep its own home; removed or replaced, the \
+         remote editor resolves `~` to somewhere this host chose or to \
+         nothing at all"
     );
 }
 

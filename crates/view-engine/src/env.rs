@@ -180,6 +180,32 @@ pub const HOST_SUBPROCESS_CONFIG_VARS: &[&str] = &["GIT_CONFIG_GLOBAL", "GIT_CON
 /// profile-shaped lookups need them. That residual is accepted, not closed.
 pub const HERMETIC_HOME_VAR: &str = "HOME";
 
+/// What a hermetic spawn points [`HOST_SEARCH_PATH_VARS`] and
+/// [`HOST_SUBPROCESS_CONFIG_VARS`] at when the child runs on a *remote*
+/// host, in place of [`empty_search_path`] and [`absent_config_file`].
+///
+/// Those two are directories this host creates, empties and makes
+/// unwritable before every spawn ([`prepare_empty_search_path`]), which is
+/// a preparation a caller holding one command string for a far-side shell
+/// cannot perform. Naming them anyway would point the remote child at
+/// whatever happens to sit at those absolute paths *there*, which is the
+/// opposite of the guarantee their names carry.
+///
+/// The character device POSIX requires every host to have is the same
+/// neutralizer without the preparation: `XDG_CONFIG_DIRS=/dev/null` puts
+/// `/dev/null/nvim` on 'runtimepath', which is not a directory, so it
+/// contributes no `plugin/` script and no `mkdir` can ever make it
+/// contribute one -- unplantable by construction rather than by a
+/// permission bit somebody has to set. Git reads the same path as an empty
+/// configuration file, which selects none of the host's, exactly as a
+/// missing one does.
+///
+/// It is a path, not a removal, for the reason those two lists exist:
+/// unset, Neovim substitutes the remote system's own `/etc/xdg` and
+/// `/usr/share`, so clearing them would select the far side's system-wide
+/// configuration instead of no configuration.
+pub const REMOTE_UNPLANTABLE_PATH: &str = "/dev/null";
+
 /// The host environment variables a hermetic child keeps. Every other
 /// variable the host exports is dropped before the child sees it.
 ///

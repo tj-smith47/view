@@ -1,6 +1,6 @@
 #!/bin/sh
-# `fake-ssh` with one addition: a variable exported into the environment the
-# remote command inherits, standing in for the remote user's login
+# `fake-ssh` with one addition: two variables exported into the environment
+# the remote command inherits, standing in for the remote user's login
 # environment.
 #
 # That environment is the one part of a real connection the plain stub does
@@ -9,9 +9,17 @@
 # shell's non-interactive startup file sets, and a variable that redirects an
 # editor's configuration is ordinary in one. A test asserting that a removal
 # reaches the far side needs something there to remove.
+#
+# The second name is one such redirect variable rather than another
+# invented one, so a test can ask whether a hermetic plan neutralized the
+# far side's own login environment instead of only whether a caller's
+# explicit removal did.
 set -eu
 
 VIEW_REMOTE_PLANTED=from-the-remote-login-shell
 export VIEW_REMOTE_PLANTED
+
+NVIM_APPNAME=from-the-remote-login-shell
+export NVIM_APPNAME
 
 exec "$(dirname "$0")/fake-ssh" "$@"
