@@ -31,8 +31,20 @@ while [ "$#" -gt 0 ]; do
             shift
             break
             ;;
-        -*)
+        # flags that carry no value, alone or clustered, plus the attached
+        # value forms of the two options this caller ever emits
+        -[46AaCfGgKkMNnqsTtVvXxYy]* | -o?* | -p?*)
             shift
+            ;;
+        # anything else beginning with a dash is refused rather than
+        # shifted away. Swallowing it would promote the NEXT argument to
+        # destination and run a shifted command, which is more permissive
+        # than the real client (OpenSSH rejects a destination like this
+        # outright), and a double must never accept what the real one
+        # would reject.
+        -*)
+            echo "fake-ssh: unrecognized option $1" >&2
+            exit 255
             ;;
         *)
             break
@@ -44,6 +56,12 @@ if [ "$#" -lt 1 ]; then
     echo "fake-ssh: no destination argument" >&2
     exit 255
 fi
+case "$1" in
+    -*)
+        echo "fake-ssh: $1 is not a hostname" >&2
+        exit 255
+        ;;
+esac
 # the destination is parsed by the client and never sent; everything after it
 # belongs to the remote side
 shift

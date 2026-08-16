@@ -16,6 +16,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use view_engine::process::{Engine, EngineConfig, RemoteSpec};
+use view_engine::EngineError;
 
 fn fixture(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -288,16 +289,26 @@ fn a_missing_remote_editor_fails_loudly_instead_of_hanging() {
     let elapsed = started.elapsed();
     let outcome = match refused {
         Ok(_) => String::from("the spawn was accepted"),
+        // the variant, not its rendering: a timeout here means the failure
+        // was waited out rather than reported, which is the hang this
+        // disproves and is invisible in a message
+        Err(EngineError::Timeout { method, timeout }) => {
+            format!("the spawn waited out {timeout:?} for {method}")
+        }
         Err(err) => err.to_string(),
     };
-    assert_ne!(
-        outcome, "the spawn was accepted",
-        "a remote target with no editor on it must fail the spawn"
-    );
     assert!(
-        elapsed < handshake,
-        "the failure took {elapsed:?}, which is the handshake timeout rather \
-         than a reported error: the far side's own failure must reach the \
-         caller, not be waited out"
+        !outcome.starts_with("the spawn was accepted") && !outcome.starts_with("the spawn waited"),
+        "a remote target with no editor on it must fail the spawn, and fail \
+         by report rather than by timeout: {outcome}"
+    );
+    // bounded well below the handshake timeout on purpose: a bound of the
+    // timeout itself would pass a regression that hangs until just short of
+    // it, which is the failure this test exists to catch
+    let prompt = Duration::from_secs(2);
+    assert!(
+        elapsed < prompt && prompt < handshake,
+        "the failure took {elapsed:?}: the far side's own refusal must reach \
+         the caller immediately, not be waited for"
     );
 }

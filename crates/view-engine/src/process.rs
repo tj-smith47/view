@@ -41,6 +41,10 @@ pub struct RemoteSpec {
     /// handed to the client unparsed, so an alias defined in the user's own
     /// `~/.ssh/config` resolves exactly as it does on their command line.
     ///
+    /// It must name a host: an empty destination, or one beginning with a
+    /// dash (which a client reads as one of its own options), is refused by
+    /// [`Engine::spawn`].
+    ///
     /// This is the binary the far side runs; the local
     /// [`EngineConfig::nvim_bin`] has no bearing on a remote spawn.
     pub target: String,
@@ -292,6 +296,11 @@ impl EngineConfig {
     /// The local [`nvim_bin`](Self::nvim_bin) is unused once this is armed:
     /// the editor runs on the far side, and
     /// [`RemoteSpec::remote_nvim_bin`] names it there.
+    ///
+    /// Also mutually exclusive with
+    /// [`with_stdin_relay`](Self::with_stdin_relay), which describes a
+    /// descriptor of this host's own that a remote child cannot be handed,
+    /// and refused the same way.
     #[must_use]
     pub fn with_remote(mut self, remote: RemoteSpec) -> Self {
         self.remote = Some(remote);
@@ -1198,15 +1207,48 @@ fn build_command(cfg: &EngineConfig) -> Result<Command, EngineError> {
 /// none of which exist on the far side, so a spawn carrying both would
 /// connect to a remote editor while reporting an isolation nothing
 /// established.
+///
+/// A stdin relay is a duplicate of this caller's own descriptor, handed to
+/// the child at a fixed fd number. A client's own standard input is already
+/// the remote command's, and `--embed` has claimed that for the RPC
+/// channel, so there is no second descriptor at the far end for the relay
+/// to arrive on: the fd would reach the local client and die there while
+/// the remote editor was told to read its startup content from a
+/// descriptor belonging to whatever opened it on that host.
+///
+/// A destination beginning with a dash is read by a client as one of its
+/// own options rather than as a host, which turns a target into local
+/// option injection (`-o ProxyCommand=...` runs a command on this
+/// machine). OpenSSH refuses such a destination itself, but that refusal
+/// belongs to whichever client [`RemoteSpec::ssh_bin`] names, and this one
+/// does not.
 fn refuse_incoherent_remote(cfg: &EngineConfig) -> Result<(), EngineError> {
-    if cfg.remote.is_none() {
+    let Some(remote) = &cfg.remote else {
         return Ok(());
-    }
+    };
     let refuse = |reason: &str| Err(EngineError::Io(std::io::Error::other(reason.to_string())));
     if cfg.hermetic {
         return refuse(
             "a hermetic config describes a local isolation a remote host \
              does not receive; spawn one or the other, not both",
+        );
+    }
+    if cfg.stdin_relay_requested() {
+        return refuse(
+            "a stdin relay hands the child a descriptor of this host's own, \
+             which a remote spawn has no way to deliver: the ssh client's \
+             standard input is already the RPC channel. Relay stdin to a \
+             local engine, or open the remote one without it",
+        );
+    }
+    if remote.target.is_empty() {
+        return refuse("a remote spawn needs a destination, and this one is empty");
+    }
+    if remote.target.starts_with('-') {
+        return refuse(
+            "a remote destination beginning with a dash is read by the ssh \
+             client as one of its own options, not as a host, so it would \
+             configure the connection instead of naming its far end",
         );
     }
     Ok(())
@@ -2322,6 +2364,56 @@ mod tests {
 
     fn args(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    /// The outcome of a spawn, as text, so a refusal can be asserted on
+    /// without an `Engine` ever existing to unwrap.
+    fn spawn_outcome(cfg: EngineConfig) -> String {
+        match Engine::spawn(cfg) {
+            Ok(_) => String::from("the spawn was accepted"),
+            Err(err) => err.to_string(),
+        }
+    }
+
+    /// A relay is a descriptor of this host's own. The client's standard
+    /// input is already the remote command's, and `--embed` has claimed
+    /// that for the RPC channel, so there is no second descriptor at the
+    /// far end for one to arrive on: accepting the pair points the remote
+    /// editor at whatever happens to be open on that fd over there.
+    #[test]
+    fn a_remote_spawn_refuses_an_armed_stdin_relay() {
+        let dev_null = std::fs::File::open("/dev/null").expect("/dev/null always opens");
+        let outcome = spawn_outcome(
+            EngineConfig::default()
+                .with_stdin_relay(dev_null.into())
+                .with_remote(RemoteSpec::new("host")),
+        );
+        assert!(
+            outcome.contains("stdin relay"),
+            "a relay a remote spawn cannot deliver must be refused, not \
+             accepted and dropped, got: {outcome}"
+        );
+    }
+
+    /// A destination is a host, and a client reads a leading dash as one of
+    /// its own options: accepting one turns a target into local option
+    /// injection, and only the client's own validation would stand in the
+    /// way of it.
+    #[test]
+    fn a_remote_destination_that_is_not_a_hostname_is_refused() {
+        let injected = spawn_outcome(
+            EngineConfig::default().with_remote(RemoteSpec::new("-oProxyCommand=touch /tmp/view")),
+        );
+        assert!(
+            injected.contains("dash"),
+            "a destination the client would read as an option must be \
+             refused, got: {injected}"
+        );
+        let empty = spawn_outcome(EngineConfig::default().with_remote(RemoteSpec::new("")));
+        assert!(
+            empty.contains("destination"),
+            "an empty destination names no host and must be refused, got: {empty}"
+        );
     }
 
     /// The reading the recovery flag turns on: a plain word nvim would open.
