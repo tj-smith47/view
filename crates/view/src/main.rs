@@ -351,8 +351,11 @@ const RESERVED_SSH_OPTS: [(&str, &str); 2] = [
 /// ambiguous about which value the connection uses.
 fn deny_inert_ssh_opts(cli: &Cli) -> Result<()> {
     for opt in &cli.ssh_opt {
+        // ssh_config keywords take their argument separated by `=` or by
+        // whitespace; splitting on `=` alone lets `-o 'BatchMode no'` walk
+        // straight past this refusal with the same effect as `=no`.
         let key = opt
-            .split_once('=')
+            .split_once(|c: char| c == '=' || c.is_ascii_whitespace())
             .map_or(opt.as_str(), |(key, _)| key)
             .trim();
         if let Some((_, reason)) = RESERVED_SSH_OPTS
@@ -1380,6 +1383,33 @@ mod tests {
         );
     }
 
+    // ssh_config's whitespace spelling of an option is not one of the
+    // reserved keys, so it must clear the refusal untouched and reach the
+    // client byte-for-byte -- neither re-spelled with `=` nor split apart.
+    #[test]
+    fn a_whitespace_spelled_ssh_opt_outside_the_refusal_set_is_forwarded_intact() {
+        let cli = Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-opt",
+            "ProxyJump bastion",
+        ]);
+        assert!(
+            deny_incoherent_remote(&cli).is_ok(),
+            "a whitespace-spelled option outside the reserved set is an \
+             ordinary client option and applies normally"
+        );
+        let spec = spec_of(&[
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-opt",
+            "ProxyJump bastion",
+        ]);
+        assert_eq!(spec.extra_ssh_opts, vec![String::from("ProxyJump bastion")]);
+    }
+
     // Silently ignoring a connection flag on a local session would let a
     // user believe a proxy or a port applied to a spawn that never opened a
     // connection at all.
@@ -1695,6 +1725,10 @@ mod tests {
                 "batchmode=NO",
             ),
             (
+                &["view", "--remote", "prod-box", "--ssh-opt", "BatchMode no"],
+                "BatchMode no",
+            ),
+            (
                 &[
                     "view",
                     "--remote",
@@ -1717,22 +1751,24 @@ mod tests {
 
     #[test]
     fn a_port_entry_is_refused_only_against_the_flag_that_would_outrank_it() {
-        let clash = Cli::parse_from([
-            "view",
-            "--remote",
-            "prod-box",
-            "--ssh-port",
-            "2222",
-            "--ssh-opt",
-            "Port=1234",
-        ]);
-        let err = deny_incoherent_remote(&clash)
-            .expect_err("two ports, one of which the client would discard");
-        let text = err.to_string();
-        assert!(
-            text.contains("Port=1234") && text.contains("2222"),
-            "the refusal must name both values, got {text}"
-        );
+        for port_opt in ["Port=1234", "Port 1234"] {
+            let clash = Cli::parse_from([
+                "view",
+                "--remote",
+                "prod-box",
+                "--ssh-port",
+                "2222",
+                "--ssh-opt",
+                port_opt,
+            ]);
+            let err = deny_incoherent_remote(&clash)
+                .expect_err("two ports, one of which the client would discard");
+            let text = err.to_string();
+            assert!(
+                text.contains(port_opt) && text.contains("2222"),
+                "the refusal must name both values, got {text}"
+            );
+        }
 
         let alone = Cli::parse_from(["view", "--remote", "prod-box", "--ssh-opt", "Port=1234"]);
         assert!(
