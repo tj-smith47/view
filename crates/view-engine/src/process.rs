@@ -1091,12 +1091,48 @@ const OPTIONS_TAKING_NO_VALUE: [&str; 25] = [
 /// swap when the file is opened, while a value mistaken for a file costs the
 /// replacement engine its life.
 fn names_a_file(args: &[OsString]) -> bool {
+    !file_operands(args).is_empty()
+}
+
+/// The positions in `args` at which nvim reads `-` as a file operand -- the
+/// buffer fed from piped stdin -- rather than as some option's own value.
+///
+/// `-c -` names no such operand: the dash there is the command `-c` carries.
+/// A scan for a bare `-` that does not track option arity arms a stdin relay
+/// for a session that reads no stdin, and drops a value the engine still
+/// needs when the same scan is used to strip the operand back out.
+#[must_use]
+pub fn stdin_operands(args: &[OsString]) -> Vec<usize> {
+    file_operands(args)
+        .into_iter()
+        .filter(|(_, arg)| *arg == "-")
+        .map(|(index, _)| index)
+        .collect()
+}
+
+/// Every token in `args` nvim opens as a file, paired with its position, an
+/// option's own value never mistaken for one.
+///
+/// Errs towards naming fewer in every case this build cannot read
+/// confidently, and each caller's use of the answer is what makes that the
+/// safe direction: a missed file costs a restart the recovery flag, and the
+/// `SwapExists` autocommand every spawn carries ([`SWAP_RECOVERY_CMD`]) still
+/// recovers the swap when the file is opened, while a value mistaken for a
+/// file costs the replacement engine its life.
+fn file_operands(args: &[OsString]) -> Vec<(usize, &OsStr)> {
+    let mut operands: Vec<(usize, &OsStr)> = Vec::new();
     let mut expect_value = false;
     for (index, arg) in args.iter().enumerate() {
-        let arg = arg.to_string_lossy();
+        let text = arg.to_string_lossy();
         // nvim's own rule: only file names after this
-        if arg == "--" {
-            return index + 1 < args.len();
+        if text == "--" {
+            operands.extend(
+                args[index + 1..]
+                    .iter()
+                    .enumerate()
+                    .map(|(offset, arg)| (index + 1 + offset, arg.as_os_str())),
+            );
+            return operands;
         }
         if expect_value {
             expect_value = false;
@@ -1104,23 +1140,20 @@ fn names_a_file(args: &[OsString]) -> bool {
         }
         // `-l <script> [args...]` hands everything that follows to a Lua
         // script, so nothing after it is a file nvim opens
-        if arg == "-l" {
-            return false;
+        if text == "-l" {
+            return operands;
         }
         // nvim's `-` is an operand, not an option: it names the buffer fed
         // from piped stdin. Reading it as an option would consume whatever
         // followed it as that option's value, so `cmd | view - notes.md`
         // would lose the real file too
-        if arg == "-" {
-            return true;
-        }
-        if arg.starts_with('-') || arg.starts_with('+') {
-            expect_value = !takes_no_value(&arg);
+        if text == "-" || !(text.starts_with('-') || text.starts_with('+')) {
+            operands.push((index, arg.as_os_str()));
             continue;
         }
-        return true;
+        expect_value = !takes_no_value(&text);
     }
-    false
+    operands
 }
 
 /// Whether `arg` is an option this build knows carries its own value, or
@@ -2448,6 +2481,37 @@ mod tests {
         // an option this build has never heard of is assumed to consume the
         // next word, which is the reading that withholds the flag
         assert!(!names_a_file(&args(&["--future-option", "value"])));
+    }
+
+    /// The dash a caller may relay a descriptor for, told apart from the one
+    /// an option is carrying. A caller that armed a relay for `-c -` would
+    /// hand a live fd to a session that reads no stdin, and one that stripped
+    /// that dash back out on a restart would leave `-c` holding whatever word
+    /// came next.
+    #[test]
+    fn a_dash_is_an_operand_only_where_no_option_is_carrying_it() {
+        assert_eq!(stdin_operands(&args(&["-"])), vec![0]);
+        assert_eq!(stdin_operands(&args(&["--clean", "-"])), vec![1]);
+        assert_eq!(stdin_operands(&args(&["-", "notes.md"])), vec![0]);
+        assert_eq!(stdin_operands(&args(&["notes.md", "-"])), vec![1]);
+        assert_eq!(stdin_operands(&args(&["--", "-"])), vec![1]);
+
+        assert!(stdin_operands(&args(&[])).is_empty());
+        assert!(stdin_operands(&args(&["notes.md"])).is_empty());
+        assert!(
+            stdin_operands(&args(&["-c", "-"])).is_empty(),
+            "the dash is the command -c carries, not a buffer"
+        );
+        assert!(stdin_operands(&args(&["-u", "-"])).is_empty());
+        assert!(
+            stdin_operands(&args(&["-l", "script.lua", "-"])).is_empty(),
+            "-l hands everything after it to a Lua script"
+        );
+        assert_eq!(
+            stdin_operands(&args(&["-c", "-", "-"])),
+            vec![2],
+            "only the dash past the one -c consumed is an operand"
+        );
     }
 
     #[test]

@@ -21,7 +21,7 @@ use std::time::Instant;
 use view_core::model::{Model, Tier};
 use view_core::msg::Effect;
 use view_core::theme::Theme;
-use view_engine::process::{EngineConfig, RemoteSpec};
+use view_engine::process::{stdin_operands, EngineConfig, RemoteSpec};
 use view_tui::terminal::Term;
 
 /// What this build calls itself, in `--version` and in its own startup
@@ -116,10 +116,17 @@ struct Cli {
     /// `path` is passed to the remote editor exactly as typed, with no local
     /// resolution: a relative path is relative to the remote login
     /// directory, which is the only host where the question has an answer.
+    /// Every other file argument is opened there too -- a remote session
+    /// runs one editor, on the far side, and it can reach no file of this
+    /// host's. `--remote host:first.md second.md` opens both on `host`, with
+    /// `first.md` current.
     #[arg(long, value_name = "[USER@]HOST[:PATH]")]
     remote: Option<String>,
     /// Overrides the port `~/.ssh/config` would otherwise resolve for
-    /// `--remote`'s host. Only meaningful with `--remote`.
+    /// `--remote`'s host.
+    ///
+    /// Requires `--remote`: with no destination to apply it to, this is a
+    /// parse error rather than an ignored setting.
     #[arg(long, requires = "remote", value_name = "PORT")]
     ssh_port: Option<u16>,
     /// `-o KEY=VALUE`, forwarded verbatim to the underlying `ssh`
@@ -127,9 +134,11 @@ struct Cli {
     /// this flag set does not name directly -- `ProxyJump`, `IdentityFile`,
     /// `ConnectTimeout`, and anything future.
     ///
-    /// These follow view's own options, and an ssh client keeps the first
-    /// value it obtains for an option, so an entry naming one view already
-    /// sets for itself is accepted and has no effect.
+    /// Requires `--remote`, the same way `--ssh-port` does. An entry naming
+    /// an option view sets for itself (`BatchMode`, `RequestTTY`, and `Port`
+    /// alongside `--ssh-port`) is refused rather than silently discarded:
+    /// view's own value leads on the command line and a client keeps the
+    /// first it obtains, so such an entry could never have taken effect.
     #[arg(long, requires = "remote", value_name = "KEY=VALUE")]
     ssh_opt: Vec<String>,
     /// Override auto-detected terminal capabilities instead of probing
@@ -158,8 +167,10 @@ struct Cli {
     /// under test, but the system clipboard can only be checked
     /// independently of view's own claims by a second, freshly spawned
     /// process reading it directly (see `NO_DISPLAY_EXIT`'s doc for the
-    /// no-clipboard-available case).
-    #[arg(long, hide = true)]
+    /// no-clipboard-available case). Conflicts with `--remote`: this reads
+    /// the clipboard of the host it runs on and starts no editor at all, so
+    /// a destination combined with it would be accepted and never used.
+    #[arg(long, hide = true, conflicts_with = "remote")]
     print_clipboard: Option<char>,
     /// Print version
     ///
@@ -248,16 +259,25 @@ struct RemoteTarget<'a> {
 ///   it never shifts where the destination is looked for;
 /// - a bracketed address literal owns the colons inside it, so the scan for
 ///   the separator resumes after the closing bracket (`[2001:db8::1]:x`),
-///   matching how scp reads the same syntax.
+///   matching how scp reads the same syntax. A literal never closed
+///   (`[::1`) names no path at all, which is what both ssh and scp do with
+///   it: the whole value goes to the client, which reports the host it
+///   could not resolve as the user typed it.
 fn split_remote_target(value: &str) -> RemoteTarget<'_> {
     let host_start = match value.find('@') {
         Some(at) if !value[..at].contains(':') => at + 1,
         _ => 0,
     };
     let scan_from = if value[host_start..].starts_with('[') {
-        value[host_start..]
-            .find(']')
-            .map_or(host_start, |close| host_start + close + 1)
+        match value[host_start..].find(']') {
+            Some(close) => host_start + close + 1,
+            None => {
+                return RemoteTarget {
+                    destination: value,
+                    path: None,
+                }
+            }
+        }
     } else {
         host_start
     };
@@ -301,6 +321,65 @@ fn remote_spec(cli: &Cli, target: &RemoteTarget<'_>) -> RemoteSpec {
     spec
 }
 
+/// The ssh options view sets for itself on every remote spawn, each with
+/// what asking for it again would be asking for.
+///
+/// A client keeps the first value it obtains for an option and view's own
+/// lead the command line, so an entry naming one of these could never take
+/// effect. Refused rather than accepted-and-discarded: a connection flag
+/// that reads as applied and is not is worth more to a user as an error.
+const RESERVED_SSH_OPTS: [(&str, &str); 2] = [
+    (
+        "BatchMode",
+        "view sets `BatchMode=yes` so a connection that needs a password or a \
+         host-key answer fails fast: an embedded editor owns the terminal and \
+         has none to spare for a prompt. Arrange the credential the connection \
+         needs -- an agent, a key, a known_hosts entry -- rather than re-arming \
+         a prompt nothing can answer",
+    ),
+    (
+        "RequestTTY",
+        "view runs the client with `-T`, and the remote command's own standard \
+         input and output are the RPC channel this session talks to the editor \
+         over: a pty placed between them would rewrite those bytes in flight",
+    ),
+];
+
+/// Refuses a `--ssh-opt` entry that names an option view has already set for
+/// itself, and one that names the port `--ssh-port` is setting.
+///
+/// `Port` is refused only alongside `--ssh-port`: on its own it is an
+/// ordinary client option that applies normally, and only the pair is
+/// ambiguous about which value the connection uses.
+fn deny_inert_ssh_opts(cli: &Cli) -> Result<()> {
+    for opt in &cli.ssh_opt {
+        let key = opt
+            .split_once('=')
+            .map_or(opt.as_str(), |(key, _)| key)
+            .trim();
+        if let Some((_, reason)) = RESERVED_SSH_OPTS
+            .iter()
+            .find(|(name, _)| key.eq_ignore_ascii_case(name))
+        {
+            anyhow::bail!(
+                "view: `--ssh-opt {opt}` cannot take effect, and is refused \
+                 rather than accepted and discarded: {reason}."
+            );
+        }
+        if key.eq_ignore_ascii_case("Port") {
+            if let Some(port) = cli.ssh_port {
+                anyhow::bail!(
+                    "view: `--ssh-opt {opt}` and `--ssh-port {port}` both set \
+                     the port, and view's own `-p` leads the ssh command line, \
+                     so the client would keep {port} and discard this entry. \
+                     Set the port once, through either flag."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Refuses the `--remote` combinations that cannot be honoured, ahead of the
 /// terminal setup and the spawn, with a message naming both halves of the
 /// conflict.
@@ -315,7 +394,27 @@ fn deny_incoherent_remote(cli: &Cli) -> Result<()> {
     let Some(remote) = &cli.remote else {
         return Ok(());
     };
-    if cli.passthrough.iter().any(|arg| arg == "-") {
+    // the same two destinations `Engine::spawn` refuses, refused here as
+    // well because here is the only place they can be refused before the
+    // terminal is taken over: a spawn-time refusal is correct but arrives
+    // after a full alternate-screen enter and exit
+    if remote.is_empty() {
+        anyhow::bail!(
+            "view: `--remote` was given an empty destination, so there is no \
+             host to start the editor on. Name one as `[user@]host[:path]`."
+        );
+    }
+    if remote.starts_with('-') {
+        anyhow::bail!(
+            "view: `--remote {remote}` names no host: a destination beginning \
+             with a dash is read by the ssh client as one of its own options, \
+             so it would configure the connection instead of naming its far \
+             end. Give the destination as `[user@]host[:path]`, and pass \
+             client options through --ssh-opt."
+        );
+    }
+    deny_inert_ssh_opts(cli)?;
+    if !stdin_operands(&cli.passthrough).is_empty() {
         anyhow::bail!(
             "view: `--remote {remote}` and `-` (read piped stdin into the \
              first buffer) cannot be combined: the ssh client's own standard \
@@ -381,14 +480,18 @@ fn engine_config(cli: &Cli) -> EngineConfig {
     if let Some(appname) = &cli.appname {
         cfg = cfg.with_env("NVIM_APPNAME", appname.clone());
     }
-    for arg in &cli.passthrough {
-        cfg = cfg.with_arg(arg.clone());
-    }
-    // last, in the file position an ordinary `nvim [options] file`
-    // invocation puts it: an option from `passthrough` that takes a value
-    // (`-c 'set nu'`, `-u NONE`) would otherwise consume the path as its own
+    // ahead of `passthrough`, because the first file operand is the one nvim
+    // makes current (and the left-hand side of a `-d` diff), and `--remote
+    // host:path` promises that path opens the way a local `view path` would.
+    // Nothing is at risk in that position: nvim reads its options wherever
+    // they sit relative to the operands, verified against the pinned engine
+    // for `-c`, `-u`, `+cmd`, `-O` and `-d`, and one whole token inserted at
+    // the front of a whole token list can split no option from its value
     if let Some(path) = target.as_ref().and_then(|target| target.path) {
         cfg = cfg.with_arg(path);
+    }
+    for arg in &cli.passthrough {
+        cfg = cfg.with_arg(arg.clone());
     }
     cfg
 }
@@ -408,9 +511,21 @@ fn engine_config(cli: &Cli) -> EngineConfig {
 /// back only as far as nvim's own swap file holds it. view keeps no copy of
 /// buffer text to replay -- nvim owns it -- so there is nothing else to
 /// recover a `[No Name]` buffer from here.
+///
+/// Only a dash nvim reads as a file operand goes: one an option is carrying
+/// (`-c -`) is that option's value, and dropping it would leave the option
+/// holding whatever word came next.
 fn respawn_config(cli: &Cli) -> EngineConfig {
     let mut cfg = engine_config(cli);
-    cfg.extra_args.retain(|arg| arg != "-");
+    let dropped = stdin_operands(&cfg.extra_args);
+    if !dropped.is_empty() {
+        cfg.extra_args = std::mem::take(&mut cfg.extra_args)
+            .into_iter()
+            .enumerate()
+            .filter(|(index, _)| !dropped.contains(index))
+            .map(|(_, arg)| arg)
+            .collect();
+    }
     cfg
 }
 
@@ -430,7 +545,7 @@ fn maybe_relay_stdin(cfg: EngineConfig, passthrough: &[std::ffi::OsString]) -> E
     use std::io::IsTerminal;
     use std::os::fd::AsFd;
 
-    let wants_stdin = passthrough.iter().any(|arg| arg == "-");
+    let wants_stdin = !stdin_operands(passthrough).is_empty();
     if !wants_stdin || std::io::stdin().is_terminal() {
         return cfg;
     }
@@ -470,7 +585,7 @@ fn maybe_relay_stdin(cfg: EngineConfig, _passthrough: &[std::ffi::OsString]) -> 
 #[cfg(not(unix))]
 fn deny_unsupported_stdin_relay(passthrough: &[std::ffi::OsString]) -> Result<()> {
     use std::io::IsTerminal;
-    let wants_stdin = passthrough.iter().any(|arg| arg == "-");
+    let wants_stdin = !stdin_operands(passthrough).is_empty();
     if wants_stdin && !std::io::stdin().is_terminal() {
         anyhow::bail!(
             "view: `-` (read piped stdin into the first buffer) is not \
@@ -1357,10 +1472,12 @@ mod tests {
         assert!(cfg.extra_args.is_empty(), "{:?}", cfg.extra_args);
     }
 
-    // The remote path takes the file position, after every passthrough
-    // token: an option that takes a value would otherwise swallow it.
+    // nvim reads its options wherever they sit relative to the file
+    // operands, so the path costs nothing by leading them, and one whole
+    // token at the front of a whole token list splits no option from its
+    // value.
     #[test]
-    fn the_remote_path_follows_the_passthrough_options_it_is_opened_under() {
+    fn the_remote_path_leads_the_options_it_is_opened_under() {
         let cfg = engine_config(&Cli::parse_from([
             "view",
             "--remote",
@@ -1371,9 +1488,51 @@ mod tests {
         assert_eq!(
             cfg.extra_args,
             vec![
+                OsString::from("notes.md"),
                 OsString::from("-c"),
                 OsString::from("set nu"),
-                OsString::from("notes.md"),
+            ]
+        );
+    }
+
+    // `--remote host:path` promises the path opens the way a local `view
+    // path` would, and locally the first file operand is the buffer nvim
+    // makes current. Behind the passthrough it would be the other file that
+    // opened, making that promise untrue for every session naming two.
+    #[test]
+    fn the_destinations_own_path_is_the_buffer_the_session_opens_on() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:config.yaml",
+            "notes.md",
+        ]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![OsString::from("config.yaml"), OsString::from("notes.md")],
+            "the path --remote named must be the first file operand, which is \
+             the one nvim makes current"
+        );
+    }
+
+    // The same ordering decides which file a diff puts on the left, so the
+    // window layout follows the buffer identity rather than being a second
+    // thing to reason about.
+    #[test]
+    fn a_remote_diff_opens_the_destinations_own_path_on_the_left() {
+        let cfg = engine_config(&Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box:mine.conf",
+            "-d",
+            "theirs.conf",
+        ]));
+        assert_eq!(
+            cfg.extra_args,
+            vec![
+                OsString::from("mine.conf"),
+                OsString::from("-d"),
+                OsString::from("theirs.conf"),
             ]
         );
     }
@@ -1504,12 +1663,170 @@ mod tests {
         );
     }
 
+    // A destination with no closing bracket is handed to the client whole,
+    // which is what ssh and scp both do with it. Splitting at the literal's
+    // own first colon invents a file (`:1`) and a host (`[`) the user never
+    // typed, and buries the client's own "could not resolve" message.
+    #[test]
+    fn an_unterminated_bracket_names_no_path_and_reaches_the_client_whole() {
+        let cfg = engine_config(&Cli::parse_from(["view", "--remote", "[::1"]));
+        assert_eq!(
+            cfg.remote().map(|remote| remote.target.as_str()),
+            Some("[::1")
+        );
+        assert!(
+            cfg.extra_args.is_empty(),
+            "half the destination was invented as a file: {:?}",
+            cfg.extra_args
+        );
+    }
+
+    // An option view sets for itself leads the ssh command line and a client
+    // keeps the first value it obtains, so these entries could never apply.
+    // Accepting them silently is what makes a user believe a connection was
+    // configured the way they asked.
+    #[test]
+    fn an_ssh_opt_that_could_never_apply_is_refused_by_name() {
+        for (argv, named) in [
+            (
+                &["view", "--remote", "prod-box", "--ssh-opt", "BatchMode=no"][..],
+                "BatchMode=no",
+            ),
+            (
+                &["view", "--remote", "prod-box", "--ssh-opt", "batchmode=NO"],
+                "batchmode=NO",
+            ),
+            (
+                &[
+                    "view",
+                    "--remote",
+                    "prod-box",
+                    "--ssh-opt",
+                    "RequestTTY=yes",
+                ],
+                "RequestTTY=yes",
+            ),
+        ] {
+            let cli = Cli::parse_from(argv.iter().copied());
+            let err = deny_incoherent_remote(&cli)
+                .expect_err("an entry a client would discard must be refused");
+            assert!(
+                err.to_string().contains(named),
+                "the refusal must quote the entry it refuses, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_port_entry_is_refused_only_against_the_flag_that_would_outrank_it() {
+        let clash = Cli::parse_from([
+            "view",
+            "--remote",
+            "prod-box",
+            "--ssh-port",
+            "2222",
+            "--ssh-opt",
+            "Port=1234",
+        ]);
+        let err = deny_incoherent_remote(&clash)
+            .expect_err("two ports, one of which the client would discard");
+        let text = err.to_string();
+        assert!(
+            text.contains("Port=1234") && text.contains("2222"),
+            "the refusal must name both values, got {text}"
+        );
+
+        let alone = Cli::parse_from(["view", "--remote", "prod-box", "--ssh-opt", "Port=1234"]);
+        assert!(
+            deny_incoherent_remote(&alone).is_ok(),
+            "on its own a Port entry is an ordinary client option and applies \
+             normally, so refusing it would cost a working spelling"
+        );
+    }
+
+    // Both are knowable before the terminal is taken over. The engine
+    // refuses them too, but only after a full alternate-screen enter and
+    // exit has flashed past the message.
+    #[test]
+    fn a_destination_that_names_no_host_is_refused_before_the_terminal_is_taken() {
+        let empty = Cli::parse_from(["view", "--remote", ""]);
+        assert!(
+            deny_incoherent_remote(&empty)
+                .expect_err("an empty destination names no host")
+                .to_string()
+                .contains("--remote"),
+            "the refusal must name the flag"
+        );
+
+        let dashed = Cli::parse_from(["view", "--remote=-oProxyCommand=touch /tmp/pwn"]);
+        let err = deny_incoherent_remote(&dashed)
+            .expect_err("a dash-leading destination is read as a client option, not a host");
+        assert!(
+            err.to_string().contains("--ssh-opt"),
+            "the refusal must point at the flag that does carry client \
+             options, got {err}"
+        );
+    }
+
+    // --print-clipboard reads this host's clipboard and starts no editor at
+    // all, so a destination alongside it is accepted and never used.
+    #[test]
+    fn the_clipboard_probe_and_a_destination_are_refused_as_a_pair() {
+        let err = Cli::try_parse_from(["view", "--print-clipboard", "+", "--remote", "prod-box"])
+            .err()
+            .ok_or("a local clipboard read cannot serve a remote destination")
+            .expect("the combination must be refused at parse time");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    // A dash an option is carrying is that option's value, not a buffer:
+    // arming a relay for it hands a live descriptor to a session that reads
+    // no stdin, and refusing a remote session over it refuses a coherent
+    // command line.
+    #[test]
+    fn a_dash_an_option_carries_is_never_read_as_a_piped_buffer() {
+        let cli = Cli::parse_from(["view", "--remote", "prod-box", "-c", "-"]);
+        assert!(
+            deny_incoherent_remote(&cli).is_ok(),
+            "`-c -` names no stdin buffer, so a remote session over it is \
+             coherent"
+        );
+
+        let local = Cli::parse_from(["view", "-c", "-"]);
+        assert_eq!(
+            respawn_config(&local).extra_args,
+            vec![OsString::from("-c"), OsString::from("-")],
+            "stripping a dash the option carries leaves -c holding whatever \
+             word came next"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dash_an_option_carries_arms_no_stdin_relay() {
+        let cli = Cli::parse_from(["view", "-c", "-"]);
+        let cfg = maybe_relay_stdin(engine_config(&cli), &cli.passthrough);
+        assert!(
+            !cfg.stdin_relay_requested(),
+            "a relay was armed for a session that reads no stdin"
+        );
+    }
+
     // The value syntax is the whole surface of --remote, and a user reads
     // it in --help before anywhere else.
     #[test]
     fn rendered_help_states_the_remote_value_syntax_and_the_ssh_flags() {
         let help = Cli::command().render_long_help().to_string();
-        for expected in ["[USER@]HOST[:PATH]", "--ssh-port", "KEY=VALUE"] {
+        for expected in [
+            "[USER@]HOST[:PATH]",
+            "--ssh-port",
+            "KEY=VALUE",
+            // every file argument is a far-side path, and the ssh flags are
+            // a parse error rather than an ignored setting without a
+            // destination: both are surprises a user must not have to hit
+            "Every other file argument is opened there too",
+            "Requires `--remote`",
+        ] {
             assert!(
                 help.contains(expected),
                 "--help must show {expected}, got:\n{help}"
