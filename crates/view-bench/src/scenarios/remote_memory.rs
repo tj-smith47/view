@@ -13,10 +13,14 @@
 //! working sets) by as much as +/-20% across days on a shared box, which a
 //! within-window headroom sidecar cannot absorb -- a bar sized to one
 //! day's regime breaches on the next day's, with nothing about view having
-//! changed. The row's actual claim survives that noise: view's own local
-//! footprint with a remote engine, divided by its footprint with a local
-//! one, held a +1.2% delta across that regime (see "One leg at a time"
-//! below for the exact recording this is drawn from). So [`run_paired`]
+//! changed. The row's actual claim survives that noise: a single window
+//! put view's own local footprint with a remote engine, divided by its
+//! footprint with a local one, at a +1.2% delta (see "One leg at a time"
+//! below for that recording). Whether the delta holds across the regime
+//! itself -- not just within one window -- is tracked separately in
+//! `.claude/plans/2026-08-09-p5_5-remote.md:405-413`: the amendment there
+//! records the +/-20% across-day host-regime envelope and a +1.23% paired
+//! delta landing inside it. So [`run_paired`]
 //! gates [`RATIO_METRIC`] -- the remote/local ratio -- and records both
 //! absolutes for reference, record-only on a shared class the same way a
 //! tail statistic already is (see `view_harness::baselines::gate_headroom`).
@@ -41,8 +45,9 @@
 //! control (the same process read twice, alone); reproducible by spawning
 //! a second instance of any sufficiently large binary and re-reading
 //! `/proc/<pid>/smaps_rollup` for the first with and without the second
-//! alive. [`run_paired`] instead runs `protocol.trials` (rounded up to
-//! even -- see below) ABBA-alternating trial pairs ([`abba_trials`]): each
+//! alive. [`run_paired`] instead runs `protocol.trials` ABBA-alternating
+//! trial pairs ([`abba_trials`], which rounds an odd count up to even --
+//! see below): each
 //! trial spawns one leg through [`memory::prepare_workload_session`] and
 //! [`memory::sample_distribution`], tears it down synchronously
 //! ([`run_one_leg`]), then does the same for the other leg, so a second
@@ -59,9 +64,11 @@
 //! samples remote then local, trial 1 local then remote, and so on --
 //! spreads it across both legs in opposite trials instead. Alternation
 //! only fully cancels across an even number of trials (each leg samples
-//! first in exactly half of them), so [`run_paired`] rounds an odd
-//! `protocol.trials` up by one rather than running it uncancelled or
-//! silently dropping a trial. Each trial's ratio comes from that trial's
+//! first in exactly half of them), so [`abba_trials`] rounds an odd
+//! request up by one rather than running it uncancelled or silently
+//! dropping a trial -- a caller-side precondition would let some future
+//! caller forget it, so the rounding lives with the loop it protects
+//! instead. Each trial's ratio comes from that trial's
 //! own pair of readings ([`remote_local_ratio`]), and the three reported
 //! statistics -- both absolutes and the ratio -- are each the median
 //! across trials of that trial's own value, never a value pooled from
@@ -82,7 +89,7 @@
 //! `[headroom]` entry in `baselines/dev-linux.headroom.toml` (recorded
 //! 2026-08-16): an 8-report-plus-1-record replicate campaign put
 //! `remote_memory/minimal`'s 9-draw median PSS at 3.734 MB against
-//! `memory/minimal`'s own 9-draw median of 3.6885 MB, both solo,
+//! `memory/minimal`'s own paired-window median of 3.6885 MB, both solo,
 //! non-co-resident spawns under the row's pass-through driver at the
 //! time. That topology is exactly what [`run_paired`]'s sequential legs
 //! now automate one pair at a time, so the figure is directly comparable
@@ -250,12 +257,18 @@ fn remote_local_ratio(remote: &Distribution, local: &Distribution) -> f64 {
     remote.p50() / local.p50()
 }
 
-/// Runs `trials` ABBA-alternating trial pairs: trial 0 samples the remote
-/// leg then the local one, trial 1 samples local then remote, and so on.
-/// `remote_leg`/`local_leg` never run concurrently -- each is called to
-/// completion before the other starts -- so this function only decides
-/// their *order*, never their overlap; see this module's doc for why that
-/// ordering matters and what alternating it buys over a fixed order.
+/// Runs `trials` ABBA-alternating trial pairs, first rounded up to the
+/// nearest even number via [`even_trial_count`] (see that function's doc
+/// for why): trial 0 samples the remote leg then the local one, trial 1
+/// samples local then remote, and so on. `remote_leg`/`local_leg` never
+/// run concurrently -- each is called to completion before the other
+/// starts -- so this function only decides their *order*, never their
+/// overlap; see this module's doc for why that ordering matters and what
+/// alternating it buys over a fixed order.
+///
+/// The rounding lives here rather than at a call site so every caller gets
+/// a trial count alternation can fully cancel -- an odd `trials` is safe
+/// to pass in, not a precondition a caller must enforce first.
 ///
 /// Generic over the two legs' runners so the ordering discipline -- the
 /// property this module's tests break on purpose -- is exercised without
@@ -269,6 +282,7 @@ fn abba_trials(
     mut remote_leg: impl FnMut() -> Result<Distribution, BenchError>,
     mut local_leg: impl FnMut() -> Result<Distribution, BenchError>,
 ) -> Result<Vec<RemoteTrial>, BenchError> {
+    let trials = even_trial_count(trials);
     let mut pairs = Vec::with_capacity(trials);
     for trial in 0..trials {
         let (remote, local) = if trial.is_multiple_of(2) {
@@ -316,19 +330,14 @@ fn even_trial_count(requested: usize) -> usize {
     }
 }
 
-/// The paired driver: runs `protocol.trials` (rounded up to even --
-/// see below) ABBA-alternating trial pairs ([`abba_trials`]), each
-/// spawning [`RemoteLocalSpecs::remote`] and [`RemoteLocalSpecs::local`]
-/// one at a time ([`run_one_leg`]), and aggregates every reported
-/// statistic as the median across trials. See this module's doc for why
-/// the gated statistic is the ratio rather than either absolute, and for
-/// why no two `view` processes from this driver are ever alive at once.
-///
-/// An odd `protocol.trials` is rounded up by one rather than run exactly:
-/// alternation only fully cancels the positional bias it exists to cancel
-/// (see this module's doc) across an even count, and rounding up never
-/// gives a caller fewer trials than it asked for. `protocol.trials == 0`
-/// is left at 0 (already even), still refused below.
+/// The paired driver: runs `protocol.trials` ABBA-alternating trial pairs
+/// ([`abba_trials`], which rounds an odd count up to even itself -- see
+/// that function's doc), each spawning [`RemoteLocalSpecs::remote`] and
+/// [`RemoteLocalSpecs::local`] one at a time ([`run_one_leg`]), and
+/// aggregates every reported statistic as the median across trials. See
+/// this module's doc for why the gated statistic is the ratio rather than
+/// either absolute, and for why no two `view` processes from this driver
+/// are ever alive at once.
 ///
 /// # Errors
 ///
@@ -355,7 +364,7 @@ pub fn run_paired(
     let ViewSpec(local_spec) = local;
     let ViewSpec(remote_spec) = remote;
     let trials = abba_trials(
-        even_trial_count(protocol.trials),
+        protocol.trials,
         || run_one_leg(remote_spec, protocol),
         || run_one_leg(local_spec, protocol),
     )?;
@@ -545,17 +554,19 @@ mod tests {
     /// value), so this test is independent of alternation and isolates
     /// the pairing itself -- a bug that reused a stale value from the
     /// previous trial (an off-by-one on either leg) would move at least
-    /// one of these three ratios away from its expected value.
+    /// one of these four ratios away from its expected value. Requests an
+    /// already-even count so the pairing invariant stays isolated from the
+    /// rounding [`abba_trials_rounds_an_odd_request_up_to_even`] covers.
     #[test]
     fn each_trials_ratio_pairs_its_own_remote_and_local_reading() {
-        let remote_values = [10.0, 20.0, 30.0];
-        let local_values = [1.0, 4.0, 9.0];
-        let expected_ratios = [10.0, 5.0, 30.0 / 9.0];
+        let remote_values = [10.0, 20.0, 30.0, 40.0];
+        let local_values = [1.0, 4.0, 9.0, 16.0];
+        let expected_ratios = [10.0, 5.0, 30.0 / 9.0, 2.5];
 
         let mut remote_iter = remote_values.into_iter();
         let mut local_iter = local_values.into_iter();
         let pairs = abba_trials(
-            3,
+            4,
             || Ok(const_distribution(remote_iter.next().unwrap())),
             || Ok(const_distribution(local_iter.next().unwrap())),
         )
@@ -569,6 +580,27 @@ mod tests {
                  reading, got {ratios:?}, expected {expected_ratios:?}"
             );
         }
+    }
+
+    /// [`abba_trials`]' own rounding contract, now that it -- not
+    /// `run_paired` -- owns the [`even_trial_count`] call: an odd request
+    /// must still come back as an even number of trials, so a caller that
+    /// forgets to round first (or a future caller that never knew to)
+    /// still gets alternation's full positional-bias cancellation rather
+    /// than a silently uncancelled odd count.
+    #[test]
+    fn abba_trials_rounds_an_odd_request_up_to_even() {
+        let pairs = abba_trials(
+            3,
+            || Ok(const_distribution(1.0)),
+            || Ok(const_distribution(1.0)),
+        )
+        .unwrap();
+        assert_eq!(
+            pairs.len(),
+            4,
+            "an odd request of 3 must come back as 4 trials, matching even_trial_count(3)"
+        );
     }
 
     /// [`abba_trials`]' own contract: trial 0 spawns the remote leg first,

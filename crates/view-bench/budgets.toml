@@ -194,10 +194,14 @@ classes = ["controlled-macos"]
 # local-leg absolute, each drawn from one trial's own pair of sequential,
 # non-co-resident spawns (`view_bench::scenarios::remote_memory::run_paired`)
 # -- which is the row's actual claim ("view's own local footprint once the
-# engine runs remotely" costs ~nothing over a local engine) and the
-# statistic measured regime-invariant (a +1.2% delta against a host regime
-# swing that moved the absolutes +/-20%; see `remote_memory`'s module doc
-# for the recording). 1.10 is stated the way the input-path row's original
+# engine runs remotely" costs ~nothing over a local engine). A single
+# window measured that delta at +1.2% against a host regime swing that
+# moved the absolutes +/-20% (see `remote_memory`'s module doc for the
+# recording); a tracked amendment
+# (.claude/plans/2026-08-09-p5_5-remote.md:405-413) shows the delta
+# holding across the regime itself, which is why this statistic gates
+# everywhere rather than only on a controlled class. 1.10 is stated the
+# way the input-path row's original
 # 100 us and the echo row's 1.10 ratio bar were: a promise made before a
 # controlled class has measured this cell, not a number computed from a
 # recording -- the defect that made the withdrawn 232 us and cold_ms bars,

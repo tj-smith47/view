@@ -476,16 +476,21 @@ fn is_cold_start_absolute(metric: &str) -> bool {
 /// A third exemption family alongside [`derives_from_tail`] and
 /// [`is_cold_start_absolute`], for the same shape of reason: one unchanged
 /// `remote_memory` binary pair swung `pss_mb` +/-20% across days on shared
-/// dev-linux, while the paired remote-vs-local ratio held a +1.2% delta
-/// across that regime (`remote_memory.pss_mb`'s `[headroom]` entry in
+/// dev-linux, while a single window put the paired remote-vs-local ratio
+/// at a +1.2% delta (`remote_memory.pss_mb`'s `[headroom]` entry in
 /// `baselines/dev-linux.headroom.toml`, recorded 2026-08-16, both legs
 /// solo, non-co-resident spawns -- see `view_bench::scenarios::remote_memory`'s
-/// module doc for the full recording). A within-window headroom sidecar
-/// cannot absorb a cross-day regime shift any more than it can absorb the
-/// ambient load a tail percentile carries, so the absolute is recorded on
-/// a shared class and gated on a controlled one, and the ratio -- this
-/// row's actual claim, and the statistic the evidence above says is
-/// regime-invariant -- keeps gating everywhere
+/// module doc for the full recording). That the delta also holds across
+/// the +/-20% regime swing itself, rather than just within that one
+/// window, is a separate claim tracked in
+/// `.claude/plans/2026-08-09-p5_5-remote.md:405-413` (the +/-20%
+/// across-day envelope and a +1.23% paired delta landing inside it). A
+/// within-window headroom sidecar cannot absorb a cross-day regime shift
+/// any more than it can absorb the ambient load a tail percentile carries,
+/// so the absolute is recorded on a shared class and gated on a controlled
+/// one, and the ratio -- this row's actual claim, and the statistic the
+/// tracked amendment above shows holding across that regime -- keeps
+/// gating everywhere
 /// (see `remote_local_ratio`'s own doc for why its name earns that instead
 /// of falling into this exemption or the signed-delta one).
 ///
@@ -2049,11 +2054,14 @@ mod tests {
             ("marker_ratio_p50", ratio, ratio),
             ("control_ratio_p50", ratio, ratio),
             ("speculated_ratio_p50", ratio, ratio),
-            // remote_local_ratio: the paired remote-vs-local statistic
-            // measured regime-invariant (a +1.2% delta against a host
-            // regime swing that moved the two absolutes +/-20%), so it
-            // gates like ratio_p50 rather than falling into the tail
-            // exemption a `p99` component would carry
+            // remote_local_ratio: a single window measured the paired
+            // remote-vs-local statistic's delta at +1.2% against a host
+            // regime swing that moved the two absolutes +/-20%
+            // (baselines/dev-linux.headroom.toml); a tracked amendment
+            // (.claude/plans/2026-08-09-p5_5-remote.md:405-413) shows that
+            // delta holding across the regime itself, so it gates like
+            // ratio_p50 rather than falling into the tail exemption a
+            // `p99` component would carry
             ("remote_local_ratio", ratio, ratio),
             // pss_mb/phys_footprint_mb/local_pss_mb/local_phys_footprint_mb:
             // settled-process memory footprints move with the host's
