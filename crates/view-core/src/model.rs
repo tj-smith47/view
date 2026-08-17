@@ -875,6 +875,17 @@ impl MessageEntry {
         self.kind == "confirm"
     }
 
+    /// Whether view raised this entry itself rather than decoding it from
+    /// nvim's `msg_show`.
+    ///
+    /// The `"native"` kind is the marker, and it is reachable from outside
+    /// `model.rs` only through [`EngineModel::record_native_notice`] and
+    /// [`Messages::set_native_condition`], so no wire message can wear it.
+    #[must_use]
+    pub fn is_native(&self) -> bool {
+        self.kind == "native"
+    }
+
     /// Whether this entry keeps its rows when the toast box overflows.
     /// An unanswered question ranks with the errors: a burst of info
     /// messages must not push it off screen while the editor is blocked
@@ -948,9 +959,24 @@ impl Messages {
         id
     }
 
-    /// Drops every recorded message, per `msg_clear`.
+    /// Drops every message nvim showed, per `msg_clear`, and keeps every
+    /// locally-synthesized one.
+    ///
+    /// `msg_clear` states that the messages *nvim* put up are over, which is
+    /// a fact about nvim's own message state and says nothing about a line
+    /// view raised itself. A native notice's lifetime belongs to the
+    /// mechanism that raised it -- `Effect::ScheduleToastExpiry` for a
+    /// one-shot notice, the condition itself for a raised condition -- and
+    /// letting an unrelated engine redraw retract one is how a notice
+    /// vanishes before it was ever read.
+    ///
+    /// The distinction is load-bearing for the notice a swap recovery shows:
+    /// the redraw that takes nvim's recovery report off the buffer is
+    /// answered with exactly this event, so a wholesale clear would erase the
+    /// account of the recovery together with the report it was written to
+    /// replace.
     pub fn clear(&mut self) {
-        self.entries.clear();
+        self.entries.retain(MessageEntry::is_native);
     }
 
     /// Appends a locally-originated notice -- never from nvim's own

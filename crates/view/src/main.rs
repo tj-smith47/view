@@ -5,6 +5,7 @@
 
 mod bridge;
 mod clipboard;
+mod engine_ops;
 mod native;
 mod recovery;
 mod remote_guard;

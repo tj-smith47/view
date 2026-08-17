@@ -611,7 +611,7 @@ pub(crate) enum CutoverOutcome {
 /// rather than only into `runtime::run`: a config that sources quickly fires
 /// `VimEnter` before the sink attaches, so the presink is the ordinary place
 /// this session's takeover and key registration are triggered from.
-pub(crate) fn run_cutover<E: crate::runtime::EngineOps>(
+pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     model: &mut Model,
     executor: &crate::runtime::Executor<E>,
     follow_ups: &mut crate::runtime::FollowUps<'_>,
@@ -986,14 +986,15 @@ mod tests {
             content_painted,
             "the pending-damage Flush was not dispatched"
         );
-        // presink's VimEnter reply, then the resize, then every buffered
-        // key, in that exact order -- the arrival order run_cutover's doc
-        // comment claims
-        let expected_len = 2 + KEY_RING_CAPACITY;
+        // presink's VimEnter reply and the swap-recovery probe it carries,
+        // then the resize, then every buffered key, in that exact order --
+        // the arrival order run_cutover's doc comment claims
+        let expected_len = 3 + KEY_RING_CAPACITY;
         assert_eq!(calls.len(), expected_len);
         assert_eq!(calls[0], "reply(1,Nil)");
-        assert!(calls[1].starts_with("try_resize("));
-        assert_eq!(calls[2], "input(0)");
+        assert_eq!(calls[1], "probe_swap_recovery()");
+        assert!(calls[2].starts_with("try_resize("));
+        assert_eq!(calls[3], "input(0)");
         assert_eq!(
             calls[expected_len - 1],
             format!("input({})", KEY_RING_CAPACITY - 1)

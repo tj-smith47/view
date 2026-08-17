@@ -361,6 +361,16 @@ grep -qF -- 'Self::Restart => "Restart"' "$SUPERVISION_RS" || {
 # this is as fixed as the constants above, and a reconnect that recovered
 # nothing prints something else.
 SWAP_REPLAYED='Recovery completed'
+
+# The line view itself raises once its replacement engine has replayed a swap
+# file, and the whole reason the report above comes down without a keypress
+# (see `swap_recovery_notice`). Held to the source's own wording by the same
+# rule as everything else asserted here.
+RECOVERY_NOTICE='unsaved changes recovered from the swap file'
+grep -qF -- "$RECOVERY_NOTICE" "$SUPERVISION_RS" || {
+    printf 'FAIL: a recovery no longer reports "%s" in %s\n' "$RECOVERY_NOTICE" "$SUPERVISION_RS" >&2
+    exit 1
+}
 FIRST_BANNER=$(banner_for 1)
 SECOND_BANNER=$(banner_for 2)
 LAST_BANNER=$(banner_for "$MAX_ATTEMPTS")
@@ -427,14 +437,13 @@ assert_within "$first_gap" "$(minus "$FIRST_WAIT" "$POLL")" \
 second_gap=$(wait_gone "$SECOND_BANNER" 30 "the reconnect banner")
 assert_within "$second_gap" "$(minus "$SECOND_WAIT" "$POLL")" \
     "$(plus "$SECOND_WAIT" "$ATTEMPT_SLACK")" "the wait before the second attempt"
-# the replacement engine's own report that it replayed the swap, and equally
-# the first frame it paints: waiting on it is what keeps the redraw below
-# from being typed at an engine still coming up
-wait_for "$SWAP_REPLAYED" 30 "the swap-recovery report" >/dev/null
-# that report is several lines of engine message and it covers the top of the
-# buffer until something redraws over it, which is what the assertion below
-# has to read
-tmux send-keys -t "$SESSION" C-l
+# the session's own account of the recovery, and equally the first frame the
+# replacement paints: waiting on it is what keeps the assertion below from
+# reading a screen an engine is still coming up behind
+wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
+# and nvim's own multi-line report, which covers the top of the buffer the
+# assertion below has to read, goes with no keypress at all: the redraw that
+# retires it rides the same fold that raised the notice
 wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null
 wait_for "$UNSAVED" 30 "the unsaved text after the reconnect" >/dev/null
 if grep -qF -- "$UNSAVED" "$ROOT/scratch.txt"; then
@@ -475,8 +484,7 @@ pane | grep -qF -- "$RESTART_ROW" ||
 # reachable again, so nothing about the give-up is a dead end
 tmux send-keys -t "$SESSION" "$RESTART_KEY"
 wait_gone "$GONE_TITLE" 30 "the dead-engine modal" >/dev/null
-wait_for "$SWAP_REPLAYED" 30 "the swap-recovery report" >/dev/null
-tmux send-keys -t "$SESSION" C-l
+wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null
 wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null
 wait_for "$STRANDED" 30 "the unsaved text after the manual restart" >/dev/null
 if grep -qF -- "$STRANDED" "$ROOT/scratch.txt"; then

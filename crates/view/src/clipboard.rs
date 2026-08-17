@@ -27,7 +27,7 @@ use view_core::msg::{RegisterType, ReplyToken, ReplyValue};
 use view_engine::handle::EngineError;
 use view_native::clipboard::{lines_to_text, text_to_lines};
 
-use crate::runtime::EngineOps;
+use crate::engine_ops::EngineOps;
 
 /// One clipboard request the loop has handed off, carrying the token its
 /// reply must answer (see `Effect::ClipboardRead`/`Effect::ClipboardWrite`'s
@@ -574,6 +574,12 @@ mod tests {
             &self,
             _generation: u64,
         ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn probe_swap_recovery(&self) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn redraw(&self) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
         fn register_mappings(

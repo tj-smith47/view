@@ -98,10 +98,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 exit_code: exit.code.unwrap_or(1),
             }]
         }
-        Msg::EngineRequest(EngineRequest::VimEnter { token }) => vec![Effect::Reply {
-            token,
-            value: ReplyValue::Nil,
-        }],
+        Msg::EngineRequest(EngineRequest::VimEnter { token }) => vec![
+            Effect::Reply {
+                token,
+                value: ReplyValue::Nil,
+            },
+            // after the reply, never before it: nvim is blocked inside the
+            // `rpcrequest` this answers, and a probe queued ahead of the
+            // answer would be waiting on the engine that is waiting on view.
+            // This is also the first moment the reading is final -- nvim
+            // opens the files it was given, and replays their swap files,
+            // before `VimEnter` fires
+            Effect::Rpc(RpcCall::ProbeSwapRecovery),
+        ],
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
         // blocks on the system clipboard the way a direct Effect::Reply
@@ -227,6 +236,32 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             let notice = feature_invoke_notice(&feature, &verb, known);
             model.dirty = true;
             model.engine.record_native_notice(notice, false)
+        }
+        Msg::SwapRecovered { count, reported } => {
+            // a session that met no swap file has nothing to say and nothing
+            // on screen to take down, and a redraw issued for it would
+            // discard the grid reuse of a startup that went perfectly
+            if !reported {
+                return Vec::new();
+            }
+            let mut effects = match crate::native::supervision::swap_recovery_notice(count) {
+                Some(notice) => {
+                    model.dirty = true;
+                    model.engine.record_native_notice(notice, false)
+                }
+                // a recovery that replayed a swap holding nothing the file
+                // on disk did not already have took nothing back, so there
+                // is nothing to tell the user -- but nvim reported it all
+                // the same, and that report is still over their buffer
+                None => Vec::new(),
+            };
+            // the report nvim wrote about the recovery is view's own overlay
+            // by now (`ext_messages` puts no message in the grid), and only
+            // nvim can say it is over: the `msg_clear` this redraw answers
+            // with is what takes it off the buffer, leaving the notice above
+            // -- which `Messages::clear` keeps -- as the account of it
+            effects.push(Effect::Rpc(RpcCall::Redraw));
+            effects
         }
         Msg::MappingsClaimed { claimed } => {
             model.record_claimed_keys(claimed);

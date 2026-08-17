@@ -475,6 +475,32 @@ impl ReconnectProgress {
     }
 }
 
+/// What a session says once its replacement engine has replayed `count` swap
+/// files on the user's behalf.
+///
+/// A recovery view performed silently is a recovery the user cannot trust:
+/// the buffer comes back holding text the file on disk does not have, and
+/// nothing on screen says where that text came from. The engine's own
+/// multi-line report would have said it, but view answers the swap prompt
+/// before nvim can ask (see `view-engine`'s `SWAP_RECOVERY_CMD`) and then
+/// redraws that report away, so this line is the only account of it the user
+/// ever gets.
+///
+/// Says what came back, not what nvim did to bring it back: "swap file" is
+/// nvim's own vocabulary and belongs in the engine, while the fact the user
+/// needs is that the buffer holds unsaved work again.
+///
+/// Callers pass a count they have already established is nonzero; a zero is
+/// not a recovery to announce and this returns `None` for it rather than
+/// wording a notice about nothing.
+#[must_use]
+pub fn swap_recovery_notice(count: u64) -> Option<String> {
+    (count > 0).then(|| match count {
+        1 => "view: unsaved changes recovered from the swap file".to_string(),
+        n => format!("view: unsaved changes recovered from {n} swap files"),
+    })
+}
+
 /// How many times one session recovers a dead engine without asking before
 /// it starts asking.
 ///

@@ -5,6 +5,7 @@
 //! way for it to reach the same calls.
 
 use crate::handle::{EngineError, EngineHandle};
+use crate::process::SWAP_RECOVERY_PROBE;
 use crate::rpc::RpcError;
 use rmpv::Value;
 use std::time::Duration;
@@ -906,6 +907,53 @@ impl EngineHandle {
                 Value::from(col),
             ],
         )
+    }
+
+    /// Clears and redraws nvim's screen, which also retracts every message it
+    /// currently considers shown (a `msg_clear` on the redraw stream).
+    ///
+    /// The retraction is what callers want. With `ext_messages` attached
+    /// nvim draws no message into the grid at all, so a report the user did
+    /// not ask for -- a swap-recovery report, most of all -- is view's own
+    /// overlay from the moment it decodes, and stays up until nvim says it
+    /// is over.
+    ///
+    /// `:mode` rather than `:redraw!`, measured against the pinned engine
+    /// rather than assumed: both repaint, and only `:mode` retracts. A
+    /// `:redraw!` issued over this channel emits the fresh viewport and
+    /// nothing else, leaving every message nvim had shown still shown, while
+    /// `:mode` emits `grid_clear` + `msg_clear` -- the same pair the `<C-l>`
+    /// a user would otherwise have to type produces, which is the whole
+    /// point of issuing this for them. `redraw_live.rs`'s
+    /// `a_redraw_retracts_the_messages_nvim_had_shown` pins it.
+    ///
+    /// A notification, not a request, for the same reason
+    /// [`input`](Self::input) is one: this is issued from the runtime loop,
+    /// which must never block on nvim, and nothing here reads a result.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn redraw(&self) -> Result<(), EngineError> {
+        self.notify("nvim_command", vec![Value::from("mode")])
+    }
+
+    /// Reads [`SWAP_RECOVERY_PROBE`] -- what this engine replayed out of a
+    /// swap file while starting, and whether it wrote its own report about
+    /// doing so -- as an async request whose answer crosses back as
+    /// `Msg::SwapRecovered` through the connection's pump.
+    ///
+    /// Async by construction, like [`probe_default_hl`](Self::probe_default_hl):
+    /// the caller is the runtime loop and a synchronous `nvim_eval` there
+    /// would park the whole session on the engine it is asking.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn probe_swap_recovery(&self) -> Result<(), EngineError> {
+        self.request_swap_recovery("nvim_eval", vec![Value::from(SWAP_RECOVERY_PROBE)])
     }
 
     /// Sets option `name` to `value` via `nvim_set_option_value(String

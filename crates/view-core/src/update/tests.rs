@@ -1074,10 +1074,17 @@ fn loop_tokens_are_noops_and_engine_request_always_replies() {
     );
     assert!(matches!(
         &effects[..],
-        [Effect::Reply {
-            token: ReplyToken { msgid: 9 },
-            value: ReplyValue::Nil
-        }]
+        [
+            Effect::Reply {
+                token: ReplyToken { msgid: 9 },
+                value: ReplyValue::Nil
+            },
+            // what the engine is asked the moment it is answered, and the
+            // ordering between the two, is
+            // `vim_enter_is_answered_first_and_then_asked_what_it_recovered`'s
+            // subject
+            Effect::Rpc(RpcCall::ProbeSwapRecovery),
+        ]
     ));
 }
 
@@ -4590,4 +4597,114 @@ fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
             visible_texts(&m)
         );
     }
+}
+
+#[test]
+fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::EngineRequest(EngineRequest::VimEnter {
+            token: ReplyToken { msgid: 7 },
+        }),
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [
+                Effect::Reply {
+                    value: ReplyValue::Nil,
+                    ..
+                },
+                Effect::Rpc(RpcCall::ProbeSwapRecovery),
+            ]
+        ),
+        "a probe queued ahead of the reply waits on the engine that is \
+         waiting on view: {effects:?}"
+    );
+}
+
+#[test]
+fn a_session_that_recovered_nothing_neither_speaks_nor_redraws() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            count: 0,
+            reported: false,
+        },
+    );
+    assert!(effects.is_empty(), "{effects:?}");
+    assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+}
+
+#[test]
+fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            count: 1,
+            reported: true,
+        },
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
+        "nothing takes nvim's report off the buffer: {effects:?}"
+    );
+    let notice = crate::native::supervision::swap_recovery_notice(1).unwrap();
+    assert!(
+        visible_texts(&m).contains(&notice),
+        "the recovery went unannounced: {:?}",
+        visible_texts(&m)
+    );
+    assert!(
+        m.dirty,
+        "the notice was recorded without asking for a paint"
+    );
+}
+
+#[test]
+fn a_recovery_that_restored_nothing_still_redraws_and_stays_quiet() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            count: 0,
+            reported: true,
+        },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Redraw)]),
+        "a recovery that took nothing back owes the user no line, only the \
+         report off their buffer: {effects:?}"
+    );
+    assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+}
+
+#[test]
+fn msg_clear_retracts_what_nvim_showed_and_keeps_what_view_raised() {
+    let mut m = model();
+    m.engine.messages.push(
+        "echomsg".to_string(),
+        vec![(0, "nvim said this".into())],
+        false,
+    );
+    let _ = m
+        .engine
+        .record_native_notice("view said this".to_string(), false);
+
+    let _ = update(&mut m, Msg::Redraw(vec![UiEvent::MsgClear]));
+
+    let texts = visible_texts(&m);
+    assert!(
+        !texts.iter().any(|line| line == "nvim said this"),
+        "{texts:?}"
+    );
+    assert!(
+        texts.iter().any(|line| line == "view said this"),
+        "an engine redraw retracted a line it never wrote: {texts:?}"
+    );
 }

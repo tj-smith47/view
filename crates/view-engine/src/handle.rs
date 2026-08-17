@@ -83,6 +83,18 @@ enum Waiter {
     /// `msgid` either, and its `Response` carries every key the chunk
     /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
     MappingClaims,
+    /// An async read of the swap prompts this engine answered while starting
+    /// (see [`EngineHandle::probe_swap_recovery`]): nothing is blocked on
+    /// this `msgid`, so its `Response` is decoded into a count and routed to
+    /// `pump` as `Msg::SwapRecovered`.
+    ///
+    /// Untagged, unlike every generation-carrying waiter beside it. The
+    /// question is asked exactly once per connection, right after that
+    /// connection's own `VimEnter`, so there is no second reading for a
+    /// stale one to clobber -- and a connection that closes drains its
+    /// waiters without answering them, so no reply outlives the engine it
+    /// asked about.
+    SwapRecovery,
     /// An async buffer-list enumeration for a picker's `Source::Buffers`
     /// (see [`EngineHandle::request_buffer_list`]): nothing is blocked on
     /// this `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -439,6 +451,28 @@ impl EngineHandle {
                                         Vec::new()
                                     };
                                     pump.route_claims(Msg::MappingsClaimed { claimed });
+                                }
+                            }
+                            Some(Waiter::SwapRecovery) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "recovered
+                                    // nothing, reported nothing", the same
+                                    // safe default every decode beside this
+                                    // one takes: the expression is constant,
+                                    // so the only way here is an engine that
+                                    // could not answer at all, and both
+                                    // announcing a recovery and redrawing
+                                    // over a report would be claims about a
+                                    // session nobody read
+                                    let (count, reported) = if error == Value::Nil {
+                                        decode_swap_recovery_reply(&result)
+                                    } else {
+                                        (0, false)
+                                    };
+                                    pump.route_swap_recovery(Msg::SwapRecovered {
+                                        count,
+                                        reported,
+                                    });
                                 }
                             }
                             Some(Waiter::BufferList { generation }) => {
@@ -1053,6 +1087,24 @@ impl EngineHandle {
         self.request_async(method, params, Waiter::MappingClaims)
     }
 
+    /// Issues `method`/`params` as a request whose `Response` is decoded into
+    /// a swap-recovery count and routed to the connection's pump as
+    /// `Msg::SwapRecovered` (see [`Waiter::SwapRecovery`]). Async on the same
+    /// terms as [`request_probe`](Self::request_probe).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_swap_recovery(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::SwapRecovery)
+    }
+
     /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into the picker's buffer-list corpus and routed to the connection's
     /// pump as `Msg::PickerBufferList` (see [`Waiter::BufferList`]). Async
@@ -1385,6 +1437,28 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
             Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
         })
         .collect()
+}
+
+/// Decodes [`SWAP_RECOVERY_PROBE`]'s two-element answer into the count of
+/// buffers recovered out of a swap file and whether the engine reported a
+/// recovery on screen at all.
+///
+/// A shape this crate has never seen from the pinned engine degrades to
+/// `(0, false)` -- the same "absent or malformed is exactly as informative
+/// as an explicit nothing" precedent [`decode_hl_probe_reply`] follows, and
+/// the conservative direction for both halves: no notice claiming a recovery
+/// that was not read, and no redraw over a report that may not be there.
+///
+/// [`SWAP_RECOVERY_PROBE`]: crate::process::SWAP_RECOVERY_PROBE
+fn decode_swap_recovery_reply(result: &Value) -> (u64, bool) {
+    let Some(pair) = result.as_array() else {
+        return (0, false);
+    };
+    let count = pair.first().and_then(Value::as_u64).unwrap_or(0);
+    // vimscript has no boolean type: `||` and a comparison both answer with
+    // the numbers 0 and 1, which is what arrives here
+    let reported = pair.get(1).and_then(Value::as_u64).unwrap_or(0) != 0;
+    (count, reported)
 }
 
 /// Decodes a picker-preview reply's `loaded`/`lines` keys, live-verified

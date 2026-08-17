@@ -281,14 +281,13 @@ type_unsaved() {
 assert_restart_recovered() {
     local token="$1" live="$2" modal_title="$3"
     wait_gone "$modal_title" 30 "the modal" >/dev/null || return 1
-    # the replacement engine's own report that it replayed the swap, and
-    # equally the first frame it paints: waiting on it is what keeps the
-    # redraw below from being typed at an engine still coming up
-    wait_for "$SWAP_REPLAYED" 30 "the swap-recovery report" >/dev/null || return 1
-    # that report is several lines of engine message and it covers the top
-    # of the buffer until something redraws over it, which is what the
-    # assertions below have to read
-    tmux send-keys -t "$SESSION" C-l
+    # the session's own account of the recovery, and equally the first frame
+    # the replacement paints: waiting on it is what keeps the assertions
+    # below from reading a screen an engine is still coming up behind
+    wait_for "$RECOVERY_NOTICE" 30 "the swap-recovery notice" >/dev/null || return 1
+    # and nvim's own multi-line report, which covers the top of the buffer
+    # the assertions below have to read, goes with no keypress at all: the
+    # redraw that retires it rides the same fold that raised the notice
     wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null || return 1
     wait_for "$token" 30 "the unsaved text after the restart" >/dev/null || return 1
     if grep -qF -- "$token" "$ROOT/scratch.txt"; then
@@ -361,6 +360,16 @@ DEAD_MAX=2.5
 # this is as fixed as the constants above, and a restart that recovered
 # nothing prints something else.
 SWAP_REPLAYED='Recovery completed'
+
+# The line view itself raises once its replacement engine has replayed a swap
+# file, and the whole reason the report above comes down without a keypress
+# (see `swap_recovery_notice`). Held to the source's own wording by the same
+# rule as everything else asserted here.
+RECOVERY_NOTICE='unsaved changes recovered from the swap file'
+grep -qF -- "$RECOVERY_NOTICE" "$SUPERVISION_RS" || {
+    printf 'FAIL: a recovery no longer reports "%s" in %s\n' "$RECOVERY_NOTICE" "$SUPERVISION_RS" >&2
+    exit 1
+}
 
 # The clause the modal adds once an interrupt has gone unanswered for longer
 # than a reply could still be in flight. Held to the source's own wording by

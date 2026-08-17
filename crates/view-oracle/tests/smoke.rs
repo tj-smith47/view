@@ -634,16 +634,119 @@ fn view_recovers_its_own_engine_after_a_signal_death() {
          recovery must not wait on the readout timer"
     );
 
-    // and the replacement is painting through view: this text is nvim's
-    // own, produced by the swap recovery the restart asked for, and it can
-    // only be on this screen if the fresh engine's grid reached the pump
-    // the restart re-attached and the paint loop that drains it. What a
-    // user does at the prompt underneath it is nvim's own recovery flow;
-    // the affordance that answers it for them is not this test's subject.
+    // and the session is the user's again, driven end to end: the keystrokes
+    // reach the replacement's input path and its answer comes back through
+    // the pump the restart re-attached and the paint loop that drains it.
+    //
+    // An answer this test asks for rather than nvim's own recovery report,
+    // which used to serve here: the report is taken off the screen now
+    // without anyone typing anything
+    // (`a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress`),
+    // so reading it would be a race against the redraw that retires it.
+    session.send(b"\x1b:echo \"recovered\"\r").unwrap();
     assert!(
-        session.wait_for("swap", Duration::from_secs(15)),
+        session.wait_for("recovered", Duration::from_secs(15)),
         "the replacement engine never painted anything through view; screen:\n{}",
         session.screen()
+    );
+}
+
+/// nvim's own wording for a swap file it replayed. The engine is pinned, so
+/// this string is as fixed as any other screen text asserted here, and a
+/// restart that recovered nothing prints something else.
+#[cfg(target_os = "linux")]
+const SWAP_REPLAYED: &str = "Recovery completed";
+
+/// What a user sees after a crash they did not cause and did not answer: the
+/// buffer text the swap held, a line saying the recovery happened, and no
+/// engine report box left sitting over the top of the file.
+///
+/// The keypress is the whole subject. nvim's multi-line recovery report
+/// covers the buffer until something redraws over it, and until this chain
+/// existed the only thing that did was a `<C-l>` the user had to know to
+/// type. So nothing at all is sent between the kill and the assertions
+/// below: every reading here is of a screen the session painted on its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
+    let mut session = build_view_pty_with_content(
+        &[],
+        Some("on disk\n"),
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+    assert!(
+        session.wait_for("on disk", Duration::from_secs(15)),
+        "the session never painted the file it was given; screen:\n{}",
+        session.screen()
+    );
+
+    // never written to the file, so reading it back after the recovery can
+    // only have come through nvim's own swap file
+    const UNSAVED: &str = "zzunsavedzz";
+    session.send(format!("o{UNSAVED}\x1b").as_bytes()).unwrap();
+    assert!(
+        session.wait_for(UNSAVED, Duration::from_secs(15)),
+        "the unsaved line never reached the buffer; screen:\n{}",
+        session.screen()
+    );
+    // `:preserve` rather than a wait on nvim's idle swap flush: the swap is
+    // what a recovery replays, and a test that raced the flush would fail
+    // for the clock rather than for the recovery. The echo after it is the
+    // barrier: nvim runs one command line in order, so the flush is on disk
+    // by the time its own answer is readable, and killing on the send alone
+    // recovers a half-written swap (`E309`) instead
+    const PRESERVED: &str = "zzpreservedzz";
+    session
+        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
+        .unwrap();
+    assert!(
+        session.wait_for(PRESERVED, Duration::from_secs(15)),
+        "the swap was never flushed; screen:\n{}",
+        session.screen()
+    );
+
+    let view_pid = session.view_pid();
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+    let kill_status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(killed.to_string())
+        .status()
+        .unwrap();
+    assert!(kill_status.success(), "kill -KILL {killed} failed");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut replacement = None;
+    while Instant::now() < deadline && replacement.is_none() {
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
+            .filter(|pid| *pid != killed);
+    }
+    assert!(
+        replacement.is_some(),
+        "view never replaced the engine it lost within 30s; screen:\n{}",
+        session.screen()
+    );
+
+    let notice = view_core::native::supervision::swap_recovery_notice(1)
+        .expect("a recovery of one swap file is worth a notice");
+    let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
+        let text = screen.contents();
+        text.contains(UNSAVED) && text.contains(&notice) && !text.contains(SWAP_REPLAYED)
+    });
+    assert!(
+        settled,
+        "a recovery nobody answered left the screen wrong -- expected the \
+         swap text {UNSAVED:?} and the notice {notice:?} with no {SWAP_REPLAYED:?} \
+         report over them; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        !std::fs::read_to_string(&session.paths.scratch)
+            .unwrap()
+            .contains(UNSAVED),
+        "{UNSAVED} is in the file on disk, so its return proves a re-read and \
+         not a swap recovery"
     );
 }
 

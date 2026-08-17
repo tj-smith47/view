@@ -377,6 +377,15 @@ struct Route {
     /// One slot, on the same terms as [`Route::deferred_rename`]: the tree
     /// issues at most one delete confirmation at a time.
     deferred_delete_confirm: Option<Msg>,
+    /// The `Msg::SwapRecovered` an attached-but-full sink refused, held for
+    /// the next routing attempt to retry.
+    ///
+    /// One slot, and never superseded: the probe behind it is issued once
+    /// per connection, so a held answer is the only one this session will
+    /// ever get. Dropping it would leave a user editing text the file on
+    /// disk does not contain with nothing on screen saying where it came
+    /// from, and the report nvim wrote about it still covering the buffer.
+    deferred_swap_recovery: Option<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -391,6 +400,7 @@ enum Held {
     CreatePrompt,
     RenamePrompt,
     DeleteConfirm,
+    SwapRecovery,
 }
 
 impl Route {
@@ -405,6 +415,7 @@ impl Route {
             Held::CreatePrompt => &mut self.deferred_create_prompt,
             Held::RenamePrompt => &mut self.deferred_rename_prompt,
             Held::DeleteConfirm => &mut self.deferred_delete_confirm,
+            Held::SwapRecovery => &mut self.deferred_swap_recovery,
         }
     }
 
@@ -422,6 +433,7 @@ impl Route {
             Held::CreatePrompt,
             Held::RenamePrompt,
             Held::DeleteConfirm,
+            Held::SwapRecovery,
         ] {
             let Some(msg) = self.slot(which).take() else {
                 continue;
@@ -585,6 +597,18 @@ impl PumpShared {
     /// "lost".
     pub(crate) fn route_buffer_list(&self, msg: Msg) {
         self.route_held(msg, Held::BufferList);
+    }
+
+    /// Routes a `Msg::SwapRecovered` without ever dropping it on a full sink,
+    /// and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped answer is silent and permanent: the probe is issued once per
+    /// connection, off that connection's own `VimEnter`, so nothing re-asks.
+    /// What would be lost is both halves of the recovery's account of itself
+    /// -- the notice, and the redraw that takes nvim's report off the buffer.
+    pub(crate) fn route_swap_recovery(&self, msg: Msg) {
+        self.route_held(msg, Held::SwapRecovery);
     }
 
     /// Routes a `Msg::PickerPreviewReply` without ever dropping it on a full

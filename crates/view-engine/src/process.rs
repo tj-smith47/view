@@ -1218,6 +1218,52 @@ const SWAP_RECOVERY_CMD: &str = "lua vim.api.nvim_create_autocmd('SwapExists', {
      end, \
      })";
 
+/// Everything a started engine can say about a swap recovery it performed,
+/// as one vimscript expression answering `[recovered, reported]`.
+///
+/// Evaluated once per connection, at that connection's own `VimEnter`: nvim
+/// opens the files it was given -- and answers their swap prompts -- after
+/// config sourcing, so nothing here is final any earlier.
+///
+/// # Two recoveries, one reading
+///
+/// [`SWAP_RECOVERY_CMD`]'s counter alone cannot answer this. It counts
+/// `SwapExists` prompts, and the two ways a swap gets replayed reach it
+/// differently: an ordinary spawn over a stale swap meets the prompt and is
+/// counted, while a restart carries [`RECOVERY_ARG`] and nvim replays the
+/// swap directly, without ever asking. Measured against the pinned engine
+/// rather than assumed -- a `-r` restart of a crashed session reads the
+/// counter back as `0`.
+///
+/// So `-r`'s own recovery is read off two facts instead: that the argument
+/// is in `v:argv` at all, and that the buffer it produced is modified, which
+/// is nvim's own way of saying the swap held work the file on disk does not.
+/// `&modified` is the current buffer's, so a session recovering several
+/// files at once undercounts rather than overclaims.
+///
+/// `reported` is the wider question and the one the redraw hangs off: nvim
+/// writes its multi-line recovery report whenever it replays a swap, whether
+/// or not anything came back changed, so a recovery that restored nothing
+/// still leaves a report sitting over the buffer.
+///
+/// # The one report this deliberately cannot tell apart
+///
+/// `-r` given a file with no swap file left to read fails with nvim's own
+/// `E305` and an empty buffer, and reads here as `reported` with nothing
+/// recovered -- so the redraw takes that error off the screen along with the
+/// report. Unreachable from view's own restart paths, which reach a restart
+/// only through an engine that died or stopped answering and is therefore
+/// killed rather than shut down, leaving its swap file behind for the
+/// replacement to find.
+///
+/// Public because the counter's readers are not all in this crate: what a
+/// recovered session says to its user is decided in `view-core` off the
+/// value this produces, and a second hand-written copy of the variable name
+/// would be free to drift from the autocommand that writes it.
+pub const SWAP_RECOVERY_PROBE: &str = "[\
+     get(g:, 'view_swap_recovered', 0) + (index(v:argv, '-r') >= 0 && &modified), \
+     index(v:argv, '-r') >= 0 || get(g:, 'view_swap_recovered', 0) > 0]";
+
 /// nvim's own crash-recovery flag: the replacement engine opens each file it
 /// was given from that file's swap file instead of from disk.
 ///

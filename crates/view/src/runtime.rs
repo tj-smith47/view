@@ -24,6 +24,7 @@
 //! again once it has been handed to `run`.
 
 use crate::bridge::ThemeBridge;
+use crate::engine_ops::EngineOps;
 use crate::native::NativeSession;
 use crate::recovery::{
     reconnects, restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
@@ -34,253 +35,15 @@ use crate::speculate::{
 use std::sync::mpsc;
 use view_core::model::Model;
 use view_core::msg::{
-    Effect, ExitInfo, Msg, OptionValue, RegisterType, ReplyToken, ReplyValue, RpcCall,
-    OSC52_MAX_PAYLOAD_BYTES,
+    Effect, ExitInfo, Msg, RegisterType, ReplyValue, RpcCall, OSC52_MAX_PAYLOAD_BYTES,
 };
-use view_core::native::mappings::MappingSpec;
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
-use view_engine::handle::{EngineError, EngineHandle};
+use view_engine::handle::EngineHandle;
 use view_engine::heartbeat::{wedge_kind, HeartbeatWatch};
 use view_engine::process::Engine;
 use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
-
-/// The notify surface [`Executor`] drives, factored out from [`EngineHandle`]
-/// so its effect-to-call mapping is testable against a recording fake
-/// instead of a live nvim connection.
-pub trait EngineOps {
-    /// Forwards one encoded key notation via `nvim_input`.
-    fn input(&self, notation: &str) -> Result<(), EngineError>;
-    /// Notifies nvim of a terminal resize via `nvim_ui_try_resize`.
-    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError>;
-    /// Streams pasted text via `nvim_paste`.
-    fn paste(&self, text: &str) -> Result<(), EngineError>;
-    /// Forwards one mouse event via `nvim_input_mouse`.
-    fn input_mouse(
-        &self,
-        button: &str,
-        action: &str,
-        modifier: &str,
-        row: u16,
-        col: u16,
-    ) -> Result<(), EngineError>;
-    /// Sets one nvim option via `nvim_set_option_value`, the channel every
-    /// non-interactive option change rides (see `RpcCall::SetOption`).
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
-    /// Sets one nvim option and keeps it there for the session, the durable
-    /// takeover a superseded plugin cannot undo (see `RpcCall::HoldOption`).
-    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError>;
-    /// Answers a request nvim is blocked on.
-    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError>;
-    /// Issues an async `nvim_get_hl(0, {name = "Normal"})` probe tagged
-    /// with `generation`; never blocks, and never itself returns the reply
-    /// (see `Msg::HlProbeReply`).
-    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
-    /// Registers this session's default keys and the `:View` command in one
-    /// chunk; never blocks, and never itself returns the claims (see
-    /// `Msg::MappingsClaimed`).
-    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError>;
-    /// Registers the one `view_bridge` autocmd group carrying every editor
-    /// state change view reacts to; never blocks, and never itself returns an
-    /// event (see `RpcCall::RegisterBridge`).
-    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError>;
-    /// Injects view's `g:clipboard` provider, conditionally on the user's
-    /// own config leaving it unset; never blocks, and never itself answers
-    /// a paste or copy request (see `RpcCall::RegisterClipboard`).
-    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError>;
-    /// Enumerates listed, loaded buffers for `Source::Buffers`, tagged
-    /// `generation`; never blocks, and never itself returns the list (see
-    /// `Msg::PickerBufferList`).
-    fn list_buffers(&self, generation: u64) -> Result<(), EngineError>;
-    /// Resolves the picker preview pane's text for `path`, tagged
-    /// `generation`; never blocks, and never itself returns the answer (see
-    /// `Msg::PickerPreviewReply`).
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError>;
-    /// Opens `path` as `:edit` would, reusing an already-loaded buffer
-    /// rather than duplicating it; fire-and-forget, no reply (see
-    /// `RpcCall::OpenFile`).
-    fn open_file(&self, path: &str) -> Result<(), EngineError>;
-    /// Renames `old_path` to `new_path`, retargeting any open buffer along
-    /// with it, tagged `generation`; never blocks, and never itself returns
-    /// the answer (see `RpcCall::RenameFile`, `Msg::TreeRenameReply`).
-    fn rename_file(
-        &self,
-        old_path: &str,
-        new_path: &str,
-        generation: u64,
-    ) -> Result<(), EngineError>;
-    /// Asks nvim for a new file's name via a blocked `vim.fn.input()`,
-    /// tagged `generation`; never blocks, and never itself returns the
-    /// answer (see `RpcCall::TreeCreatePrompt`, `Msg::TreeCreatePromptReply`).
-    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError>;
-    /// Asks nvim for a rename target for `old_path`, pre-filled with
-    /// `current_name`, tagged `generation`; never blocks, and never itself
-    /// returns the answer (see `RpcCall::TreeRenamePrompt`,
-    /// `Msg::TreeRenamePromptReply`).
-    fn tree_rename_prompt(
-        &self,
-        old_path: &str,
-        current_name: &str,
-        generation: u64,
-    ) -> Result<(), EngineError>;
-    /// Asks nvim to confirm deleting `path`, tagged `generation`; never
-    /// blocks, and never itself returns the answer (see
-    /// `RpcCall::TreeDeleteConfirm`, `Msg::TreeDeleteConfirmReply`).
-    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError>;
-}
-
-impl EngineOps for EngineHandle {
-    fn input(&self, notation: &str) -> Result<(), EngineError> {
-        self.input(notation)
-    }
-    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        self.try_resize(width, height)
-    }
-    fn paste(&self, text: &str) -> Result<(), EngineError> {
-        self.paste(text)
-    }
-    fn input_mouse(
-        &self,
-        button: &str,
-        action: &str,
-        modifier: &str,
-        row: u16,
-        col: u16,
-    ) -> Result<(), EngineError> {
-        self.input_mouse(button, action, modifier, row, col)
-    }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.set_option(name, value)
-    }
-    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.hold_option(name, value)
-    }
-    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
-        self.reply(token, value)
-    }
-    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
-        self.probe_default_hl(generation)
-    }
-    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
-        self.register_mappings(specs, channel_id)
-    }
-    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
-        self.register_bridge(channel_id)
-    }
-    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
-        self.register_clipboard(channel_id)
-    }
-    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
-        self.list_buffers(generation)
-    }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.preview_buffer(path, generation)
-    }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        self.open_file(path)
-    }
-    fn rename_file(
-        &self,
-        old_path: &str,
-        new_path: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        self.rename_file(old_path, new_path, generation)
-    }
-    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
-        self.tree_create_prompt(generation)
-    }
-    fn tree_rename_prompt(
-        &self,
-        old_path: &str,
-        current_name: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        self.tree_rename_prompt(old_path, current_name, generation)
-    }
-    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.tree_delete_confirm(path, generation)
-    }
-}
-
-// blanket impl over `&T`: lets a test hold a `FakeOps` by reference (so it
-// can inspect recorded calls after `Executor::run` moves ownership) the same
-// way `Executor::new(engine.handle.clone())` holds an owned `EngineHandle` in
-// production, without needing two different construction paths.
-impl<T: EngineOps + ?Sized> EngineOps for &T {
-    fn input(&self, notation: &str) -> Result<(), EngineError> {
-        (**self).input(notation)
-    }
-    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        (**self).try_resize(width, height)
-    }
-    fn paste(&self, text: &str) -> Result<(), EngineError> {
-        (**self).paste(text)
-    }
-    fn input_mouse(
-        &self,
-        button: &str,
-        action: &str,
-        modifier: &str,
-        row: u16,
-        col: u16,
-    ) -> Result<(), EngineError> {
-        (**self).input_mouse(button, action, modifier, row, col)
-    }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        (**self).set_option(name, value)
-    }
-    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        (**self).hold_option(name, value)
-    }
-    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
-        (**self).reply(token, value)
-    }
-    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
-        (**self).probe_default_hl(generation)
-    }
-    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
-        (**self).register_mappings(specs, channel_id)
-    }
-    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
-        (**self).register_bridge(channel_id)
-    }
-    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
-        (**self).register_clipboard(channel_id)
-    }
-    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
-        (**self).list_buffers(generation)
-    }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        (**self).preview_buffer(path, generation)
-    }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        (**self).open_file(path)
-    }
-    fn rename_file(
-        &self,
-        old_path: &str,
-        new_path: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        (**self).rename_file(old_path, new_path, generation)
-    }
-    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
-        (**self).tree_create_prompt(generation)
-    }
-    fn tree_rename_prompt(
-        &self,
-        old_path: &str,
-        current_name: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        (**self).tree_rename_prompt(old_path, current_name, generation)
-    }
-    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        (**self).tree_delete_confirm(path, generation)
-    }
-}
 
 /// What the runtime loop does after one effect crosses [`Executor::run`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -534,6 +297,8 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
+                    RpcCall::ProbeSwapRecovery => self.ops.probe_swap_recovery(),
+                    RpcCall::Redraw => self.ops.redraw(),
                     RpcCall::RegisterMappings { specs, channel_id } => {
                         self.ops.register_mappings(&specs, channel_id)
                     }
@@ -1765,6 +1530,13 @@ pub fn run(
     }
 }
 
+#[cfg(test)]
+use view_core::msg::{OptionValue, ReplyToken};
+#[cfg(test)]
+use view_core::native::mappings::MappingSpec;
+#[cfg(test)]
+use view_engine::handle::EngineError;
+
 /// Records every call `Executor::run` makes through [`EngineOps`] instead of
 /// touching a real engine connection, so the executor's effect-to-call
 /// mapping is provable without a live nvim. `pub(crate)` (not confined to
@@ -1824,6 +1596,12 @@ impl EngineOps for FakeOps {
     }
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.record(format!("probe_default_hl({generation})"))
+    }
+    fn probe_swap_recovery(&self) -> Result<(), EngineError> {
+        self.record("probe_swap_recovery()".to_string())
+    }
+    fn redraw(&self) -> Result<(), EngineError> {
+        self.record("redraw()".to_string())
     }
     fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
         let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();

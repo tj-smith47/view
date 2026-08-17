@@ -152,6 +152,24 @@ pub enum Msg {
         feature: String,
         verb: String,
     },
+    /// The async answer to one [`RpcCall::ProbeSwapRecovery`]: what this
+    /// connection's engine replayed out of a swap file while it was
+    /// starting, and whether it wrote its own report about doing so.
+    ///
+    /// `count` is how many buffers came back holding work the file on disk
+    /// does not have -- the fact a user is owed a line about. `reported` is
+    /// the wider one: nvim writes its multi-line recovery report whenever it
+    /// replays a swap, so a recovery that restored nothing changed still
+    /// leaves a report over the buffer that only a redraw takes down.
+    ///
+    /// Both are zero/false for the ordinary session, which is the common case
+    /// and not an error: a session that met no swap file has nothing to
+    /// announce and nothing on its screen to clear. The arm that folds this
+    /// is what decides that, so the reading still arrives.
+    SwapRecovered {
+        count: u64,
+        reported: bool,
+    },
     /// The complete answer to one [`RpcCall::RegisterMappings`]: every
     /// default key the session registered, and whether it landed over a
     /// mapping the user's config had already made.
@@ -881,6 +899,33 @@ pub enum RpcCall {
     GetDefaultHl {
         generation: u64,
     },
+    /// Reads how many swap prompts this engine answered on the user's behalf
+    /// while starting, and answers with the count as [`Msg::SwapRecovered`].
+    ///
+    /// Issued off nvim's own `VimEnter` rather than off the attach that
+    /// preceded it: nvim opens the files it was given after config sourcing,
+    /// so the counter is not final until `VimEnter` fires, and a reading
+    /// taken at attach time races the recovery it is asking about.
+    ///
+    /// Fire-and-forget like every other `RpcCall`: the count crosses back
+    /// through the same dispatch seam other engine-originated traffic uses,
+    /// never by blocking the caller that emitted this effect.
+    ProbeSwapRecovery,
+    /// Asks nvim to clear and redraw its screen, which is also how it is
+    /// told that the messages it has shown are over.
+    ///
+    /// The retraction is the point, not the repaint. With `ext_messages`
+    /// attached nvim puts no message in the grid, so anything it reported --
+    /// a swap-recovery report a user never asked for, most of all -- is
+    /// view's own overlay until nvim retracts it with a `msg_clear`. Which
+    /// ex command actually produces one is `view-engine`'s to know and its
+    /// `redraw_live.rs` to pin; the two candidates do not behave alike.
+    ///
+    /// Not a substitute for damage-driven painting, and never issued per
+    /// frame: a full repaint discards every reuse the grid's own damage
+    /// tracking earns, so this belongs only where view knows the screen is
+    /// showing something the user did not ask for.
+    Redraw,
     /// Registers `specs` as real nvim mappings and the `:View` command, in
     /// one chunk, and answers with every claim as [`Msg::MappingsClaimed`].
     /// `channel_id` is view's own RPC channel: the registered right-hand

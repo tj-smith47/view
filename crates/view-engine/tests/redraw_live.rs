@@ -4,7 +4,7 @@
 //! and asserts its actual `redraw` traffic decodes to typed events instead
 //! of falling through to `Unknown`.
 //!
-//! All three tests here drain traffic through [`Engine::start_pump`], the
+//! Every test here drains traffic through [`Engine::start_pump`], the
 //! same production path the runtime loop uses: `Engine` routes every
 //! connection through its damage pump exclusively (see
 //! `view_engine::handle::EngineHandle::start_pumped`'s docs), so there is no
@@ -109,6 +109,65 @@ fn decodes_mode_change_and_cmdline_show_from_real_nvim_redraw() {
     assert!(
         saw_cmdline_show,
         "expected at least one decoded CmdlineShow after `nvim_input(\":\")`"
+    );
+}
+
+/// The wire fact the swap-recovery notice's auto-redraw stands on: the
+/// redraw [`EngineHandle::redraw`] issues makes the pinned engine retract
+/// the messages it had shown, as a `msg_clear` on the same channel.
+///
+/// Load-bearing rather than incidental. With `ext_messages` attached, nvim's
+/// multi-line swap-recovery report reaches view as `msg_show` and is view's
+/// own overlay from then on, so the report leaves the screen only when
+/// something empties that log -- and the only thing that does so without a
+/// keypress is nvim retracting it. If a future engine stopped emitting
+/// `msg_clear` here, the recovery notice would still appear and the report
+/// box would silently stay underneath it.
+///
+/// Which is also why the assertion is over `EngineHandle::redraw` rather
+/// than over an ex command spelled out here: the two redraw commands do not
+/// behave alike on this point (see that method), and a test that named its
+/// own would stop testing the one view actually sends.
+///
+/// [`EngineHandle::redraw`]: view_engine::handle::EngineHandle::redraw
+#[test]
+fn a_redraw_retracts_the_messages_nvim_had_shown() {
+    let mut engine = Engine::spawn(EngineConfig::isolated()).unwrap();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (pump, _cutover) = engine.start_pump(tx);
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    // a request, so the message is on screen before the redraw is asked for:
+    // a notified echo could still be queued behind the redraw and would make
+    // a passing `msg_clear` prove nothing about a message that had shown
+    engine
+        .handle
+        .command("echomsg 'a message that must be retracted'")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let [saw_msg_show] = drain_until(&rx, &pump, deadline, [false], |event, flags| {
+        if matches!(event, UiEvent::MsgShow { .. }) {
+            flags[0] = true;
+        }
+    });
+    assert!(
+        saw_msg_show,
+        "the engine never showed the message this test asks it to retract"
+    );
+
+    engine.handle.redraw().unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let [saw_msg_clear] = drain_until(&rx, &pump, deadline, [false], |event, flags| {
+        if matches!(event, UiEvent::MsgClear) {
+            flags[0] = true;
+        }
+    });
+    assert!(
+        saw_msg_clear,
+        "the pinned engine answered view's redraw without retracting the \
+         message it had shown, so nothing clears a swap-recovery report but \
+         a keypress"
     );
 }
 

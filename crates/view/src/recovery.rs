@@ -18,7 +18,8 @@ use view_core::native::supervision::ReconnectProgress;
 use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
 
-use crate::runtime::{dispatch, EngineOps, Executor, Flow, FollowUps, Osc52Job};
+use crate::engine_ops::EngineOps;
+use crate::runtime::{dispatch, Executor, Flow, FollowUps, Osc52Job};
 
 /// What the loop has resolved about its engine, carried between passes and
 /// between the three sites that dispatch into it.
