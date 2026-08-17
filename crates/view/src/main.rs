@@ -121,6 +121,12 @@ struct Cli {
     /// runs one editor, on the far side, and it can reach no file of this
     /// host's. `--remote host:first.md second.md` opens both on `host`, with
     /// `first.md` current.
+    ///
+    /// A connection that drops is reconnected on a doubling backoff, with the
+    /// attempt view is on named on screen while it waits, and the unsaved
+    /// work recovered from the remote editor's own swap file. After the last
+    /// attempt the session is handed back with the choice a dead engine has
+    /// always offered: restart, or quit.
     #[arg(long, value_name = "[USER@]HOST[:PATH]")]
     remote: Option<String>,
     /// Overrides the port `~/.ssh/config` would otherwise resolve for

@@ -1,0 +1,44 @@
+#!/bin/sh
+# A stand-in for an OpenSSH client whose connection is refused a bounded
+# number of times before it starts working, for tests about what a caller
+# does between one connection dropping and the next one succeeding.
+#
+# The two behaviours it composes already have their own fixtures, and this
+# one delegates to both rather than reimplementing either: while refusals
+# remain it is `fake-ssh-reject` (the exit 255 a client that could not
+# connect reports), and once they are spent it `exec`s the inner client
+# (`fake-ssh` by default, `VIEW_STUB_INNER` for callers that need the relay
+# in front of it), which is the connection that succeeds. Nothing here
+# parses an ssh-style option: every argument is handed on unchanged, because
+# that parsing is `fake-ssh`'s own carefully-scoped job and a second
+# implementation of it would drift from the one callers depend on.
+#
+# The countdown lives in the file `VIEW_STUB_REFUSALS` names rather than in
+# this process, because each connection attempt is a NEW client process: a
+# counter held in memory would reset on every attempt and refuse forever.
+# Each refusal decrements the file, so a caller arms "how many attempts
+# fail" once and the fixture spends them in order.
+set -eu
+
+FIXTURES=$(cd -- "$(dirname -- "$0")" && pwd)
+INNER=${VIEW_STUB_INNER:-$FIXTURES/fake-ssh}
+
+if [ -n "${VIEW_STUB_REFUSALS:-}" ] && [ -f "$VIEW_STUB_REFUSALS" ]; then
+    remaining=$(cat "$VIEW_STUB_REFUSALS")
+    case "$remaining" in
+        '' | *[!0-9]*)
+            echo "fake-ssh-flaky: $VIEW_STUB_REFUSALS holds '$remaining', not a count" >&2
+            exit 2
+            ;;
+    esac
+    if [ "$remaining" -gt 0 ]; then
+        printf '%s\n' "$((remaining - 1))" >"$VIEW_STUB_REFUSALS"
+        exec "$FIXTURES/fake-ssh-reject" "$@"
+    fi
+fi
+
+if [ ! -x "$INNER" ]; then
+    echo "fake-ssh-flaky: inner client $INNER is not executable" >&2
+    exit 2
+fi
+exec "$INNER" "$@"

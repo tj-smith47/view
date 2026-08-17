@@ -171,6 +171,38 @@ impl RemoteSpec {
     }
 }
 
+/// Backoff applied between successive `Engine::restart()` calls when the
+/// dead engine's config carries a `RemoteSpec`. A local engine restarts
+/// immediately since a crashed local process is not going to become
+/// reachable by waiting; a remote engine's unreachability is often
+/// transient (network blip, host reboot window), so retrying immediately
+/// every time would just spin `ssh` uselessly.
+pub const REMOTE_RECONNECT_BACKOFF_BASE: Duration = Duration::from_secs(1);
+
+/// How many reconnect attempts a dropped remote connection is given before
+/// the failure is handed back to the user. The waits double from
+/// [`REMOTE_RECONNECT_BACKOFF_BASE`], so five of them spend about 31s in
+/// total before giving up.
+pub const REMOTE_RECONNECT_MAX_ATTEMPTS: u32 = 5;
+
+/// The wait owed before reconnect attempt `attempt`, counted from one:
+/// `base` doubled once per attempt already spent.
+///
+/// `base` is a parameter rather than [`REMOTE_RECONNECT_BACKOFF_BASE`] read
+/// directly, so the doubling rule has one implementation and a caller
+/// proving the sequence against waits it can afford to wait out proves the
+/// shipped rule rather than a second copy of it.
+///
+/// Saturating rather than wrapping at the top: the cap is
+/// [`REMOTE_RECONNECT_MAX_ATTEMPTS`], and an attempt number past it is a
+/// caller's arithmetic error, which must read as a very long wait rather
+/// than as a zero-length one that spins.
+#[must_use]
+pub fn remote_reconnect_backoff(base: Duration, attempt: u32) -> Duration {
+    let doublings = attempt.saturating_sub(1);
+    base.saturating_mul(1u32.checked_shl(doublings).unwrap_or(u32::MAX))
+}
+
 /// Configuration for spawning an embedded Neovim process.
 ///
 /// `#[non_exhaustive]`: the hermetic environment plan an isolated spawn
@@ -675,6 +707,9 @@ pub struct Engine {
     /// all of `Engine` would forbid.
     pub heartbeat: HeartbeatWatch,
     command_line: Vec<OsString>,
+    /// Whether the child is an ssh client rather than a local editor (see
+    /// [`is_remote`](Self::is_remote)).
+    remote: bool,
 }
 
 // A comment saying the feature must never be shipped is not a mechanism, so
@@ -790,6 +825,7 @@ impl Engine {
     /// changes.
     pub fn spawn(cfg: EngineConfig) -> Result<Self, EngineError> {
         refuse_incoherent_remote(&cfg)?;
+        let remote = cfg.remote.is_some();
         if cfg.hermetic && cfg.remote.is_none() {
             crate::env::prepare_empty_search_path()?;
             crate::env::prepare_hermetic_home()?;
@@ -883,6 +919,7 @@ impl Engine {
             pump,
             heartbeat,
             command_line,
+            remote,
         })
     }
 
@@ -922,7 +959,39 @@ impl Engine {
         // would be a second copy free to drift from the one every other
         // shutdown takes
         drop(self);
+        Self::spawn_recovering(cfg)
+    }
+
+    /// The replacement half of [`restart`](Self::restart) on its own: a
+    /// fresh engine carrying nvim's own recovery flag, with nothing torn
+    /// down here.
+    ///
+    /// For the caller that has already resolved its own teardown and must
+    /// keep holding the connection it is replacing while the replacement is
+    /// attempted -- a reconnect over a transport that may refuse the
+    /// attempt, where the alternative is a session left with no engine at
+    /// all and nothing to report the failure through. The ownership rule
+    /// [`restart`](Self::restart) enforces is the caller's to keep here:
+    /// nothing may be brought up alongside a connection that is still live.
+    ///
+    /// # Errors
+    ///
+    /// The same shapes [`spawn`](Self::spawn) returns, for the same reasons.
+    pub fn spawn_recovering(cfg: EngineConfig) -> Result<Self, EngineError> {
         Self::spawn(with_recovery(cfg))
+    }
+
+    /// Whether this engine's child is the ssh client of a remote spawn
+    /// rather than a local editor, as resolved from the config it was
+    /// spawned with.
+    ///
+    /// Read off the spawn rather than re-derived from the command line: a
+    /// second derivation is free to drift from the config that actually
+    /// routed the spawn, and the question decides how a death is recovered
+    /// from.
+    #[must_use]
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 
     /// Attaches the runtime loop's bounded `Msg` channel and returns the

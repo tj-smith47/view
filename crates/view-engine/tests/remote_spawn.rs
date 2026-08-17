@@ -16,7 +16,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use view_engine::process::{Engine, EngineConfig, RemoteSpec};
-use view_engine::EngineError;
+use view_engine::{EngineError, Liveness, HEARTBEAT_PROBE_INTERVAL};
 
 fn fixture(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -34,6 +34,17 @@ fn fake_ssh() -> PathBuf {
 
 fn stub_spec() -> RemoteSpec {
     RemoteSpec::new("view-test-host").with_ssh_bin(fake_ssh())
+}
+
+/// The stand-in client behind a byte relay, which is the shape a caller's
+/// own descriptors take on a real connection: the client process holds both
+/// pipes and the editor on the far side holds neither of them.
+///
+/// The relay wraps [`fake_ssh`] rather than replacing it, so the argument
+/// handling every other test here asserts against is the same one this
+/// spawn goes through.
+fn relay_spec() -> RemoteSpec {
+    RemoteSpec::new("view-test-host").with_ssh_bin(fixture("delay-relay"))
 }
 
 /// A scratch directory of this test's own, removed when the guard drops.
@@ -457,4 +468,52 @@ fn a_missing_remote_editor_fails_loudly_instead_of_hanging() {
         "the failure took {elapsed:?}: the far side's own refusal must reach \
          the caller immediately, not be waited for"
     );
+}
+
+/// The failure mode a remote session actually meets: the connection drops
+/// mid-session. Nothing in the remote path special-cases it, and that is the
+/// claim under test -- a client process killed out from under a live session
+/// closes the pipes the RPC channel runs over, which the read side reads as
+/// ordinary EOF and reports as [`Liveness::Dead`], exactly as it does for a
+/// local child that died.
+///
+/// Driven through the byte-relay double rather than the plain stand-in
+/// client, and the difference is what makes the kill mean anything: a real
+/// client owns the caller's two pipes and reaches the editor over a socket
+/// no descriptor of the caller's crosses, while the plain stand-in `exec`s
+/// its remote command over its own inherited stdio -- so the editor there
+/// holds the very pipes the RPC channel runs over and killing the client
+/// closes nothing at all. The relay keeps the process boundary a real
+/// connection has.
+///
+/// Bounded by the probe interval rather than by the wedge threshold: a
+/// closed connection is not a silence to be waited out, so a verdict that
+/// took the threshold's patience would be one this path reached for the
+/// wrong reason.
+#[test]
+fn a_killed_client_process_reads_as_a_dead_connection() {
+    let engine = Engine::spawn(remote_clean().with_remote(relay_spec()))
+        .expect("a remote spawn must handshake");
+    assert_eq!(
+        engine.heartbeat.observe(engine.handle.is_closed()),
+        Liveness::Alive,
+        "the session must be live before the kill, or the verdict below \
+         reports a connection that was never up"
+    );
+
+    let killed = std::process::Command::new("kill")
+        .args(["-KILL", &engine.pid().to_string()])
+        .status()
+        .expect("kill must run for a dropped connection to be simulable");
+    assert!(killed.success(), "kill -KILL failed: {killed:?}");
+
+    let deadline = Instant::now() + HEARTBEAT_PROBE_INTERVAL;
+    while engine.heartbeat.observe(engine.handle.is_closed()) != Liveness::Dead {
+        assert!(
+            Instant::now() < deadline,
+            "the read side still reports a live connection {HEARTBEAT_PROBE_INTERVAL:?} \
+             after the client process was killed: a dropped connection no longer \
+             surfaces as EOF, and every recovery built on that verdict is unreachable"
+        );
+    }
 }

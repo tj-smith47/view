@@ -16,8 +16,9 @@ use crate::model::{OverlayId, OverlayKind};
 use crate::msg::{ExitInfo, RegisterType, ReplyToken};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
-    SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS, ENGINE_BUSY_MODAL_THRESHOLD,
-    INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION, RESTART_NOTATION,
+    ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
+    ENGINE_BUSY_MODAL_THRESHOLD, INTERRUPT_NOTATION, INTERRUPT_REACTION_WINDOW, QUIT_NOTATION,
+    RESTART_NOTATION,
 };
 use std::time::Duration;
 
@@ -3678,6 +3679,80 @@ fn a_dead_connection_is_recovered_without_asking_unless_the_user_said_otherwise(
         "a user who turned automatic recovery off must be asked first: {effects:?}"
     );
     assert!(attended.engine_busy().is_some(), "and asked on screen");
+}
+
+/// A reconnect the runtime already has scheduled owns the banner while it
+/// runs: the reading that keeps arriving every couple of seconds must not
+/// ask for a second replacement on top of the one already waiting out its
+/// backoff, or one outage would spend the session's whole unattended budget
+/// at the cadence the readout repaints on.
+#[test]
+fn a_scheduled_reconnect_counts_on_the_banner_and_asks_for_no_second_attempt() {
+    let mut m = model();
+    for attempt in 1..=5 {
+        assert!(m
+            .supervision
+            .note_reconnect(Some(ReconnectProgress::new(attempt, 5))));
+        let effects = update(
+            &mut m,
+            Msg::EngineLiveness {
+                wedge: Some(WedgeKind::Dead),
+                observed_for: Duration::ZERO,
+            },
+        );
+        assert!(
+            effects.is_empty(),
+            "attempt {attempt} is already owed, so the fold must ask for no other: {effects:?}"
+        );
+        assert_eq!(
+            visible_texts(&m),
+            vec![format!("connection lost -- reconnecting ({attempt}/5)")],
+            "the banner must name the attempt the reconnect is on"
+        );
+        assert!(
+            m.overlays().is_empty(),
+            "a recovery that is still running is not a question: {:?}",
+            m.overlays()
+        );
+    }
+}
+
+/// And once the attempts run out, the failure goes back to the user through
+/// supervision's own dead-engine annunciator -- the same banner and the same
+/// modal an unrecoverable engine has always raised, with no state of the
+/// reconnect's own left on screen.
+#[test]
+fn a_spent_reconnect_lands_on_the_dead_engine_banner_and_modal() {
+    let mut m = model();
+    assert!(m
+        .supervision
+        .note_reconnect(Some(ReconnectProgress::new(6, 5))));
+
+    let effects = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+
+    assert!(
+        effects.is_empty(),
+        "a sequence with evidence its recovery is not working must not start another: {effects:?}"
+    );
+    assert_eq!(
+        visible_texts(&m),
+        vec![WedgeKind::Dead.notice().to_string()],
+        "the banner must stop counting attempts nobody is going to make"
+    );
+    let busy = m
+        .engine_busy()
+        .expect("a spent reconnect must ask the user");
+    assert_eq!(busy.kind, WedgeKind::Dead);
+    assert_eq!(
+        busy.choices(),
+        vec![SupervisionChoice::Restart, SupervisionChoice::Quit]
+    );
 }
 
 /// A session whose engine dies every time it starts is not one automatic

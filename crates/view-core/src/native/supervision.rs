@@ -404,6 +404,61 @@ impl EngineBusyState {
     }
 }
 
+/// Where a reconnect sequence has got to, as the runtime that schedules it
+/// reports it: the attempt now owed, and the cap it is counted against.
+///
+/// Carried rather than computed here for the same reason [`SinceStamp`] is:
+/// the waits between attempts are wall-clock, this module holds no clock,
+/// and the transport that decides how long to wait is not this module's
+/// business either. What is this module's business is what the banner says
+/// while that is going on, and what happens when the attempts run out.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReconnectProgress {
+    /// The attempt now owed, counted from one. Past
+    /// [`max_attempts`](Self::max_attempts) it names no attempt at all: the
+    /// sequence is over (see [`exhausted`](Self::exhausted)).
+    pub attempt: u32,
+    /// How many attempts the sequence is allowed in total.
+    pub max_attempts: u32,
+}
+
+impl ReconnectProgress {
+    /// A sequence on `attempt` of `max_attempts`.
+    #[must_use]
+    pub const fn new(attempt: u32, max_attempts: u32) -> Self {
+        Self {
+            attempt,
+            max_attempts,
+        }
+    }
+
+    /// Whether every allowed attempt has been spent, so nothing further is
+    /// owed automatically and the failure belongs to the user.
+    #[must_use]
+    pub const fn exhausted(self) -> bool {
+        self.attempt > self.max_attempts
+    }
+
+    /// The banner's text while attempts remain, and `None` once they do not
+    /// -- an exhausted sequence has nothing left to announce that
+    /// [`WedgeKind::Dead`]'s own notice does not already say.
+    ///
+    /// Deliberately cause-neutral. A remote editor crashing and a network
+    /// connection dropping reach view as the identical signal, ordinary
+    /// read-side EOF, so naming either one would be a diagnosis nothing
+    /// here observed; the recovery is the same sequence either way.
+    #[must_use]
+    pub fn notice(self) -> Option<String> {
+        (!self.exhausted()).then(|| {
+            format!(
+                "connection lost -- reconnecting ({}/{})",
+                self.attempt, self.max_attempts
+            )
+        })
+    }
+}
+
 /// How many times one session recovers a dead engine without asking before
 /// it starts asking.
 ///
@@ -439,6 +494,9 @@ pub struct SupervisionState {
     /// answers a dead engine with [`SupervisionChoice::Quit`] leaves with
     /// the status nvim actually exited with rather than an invented one.
     exit_code: Option<i32>,
+    /// The reconnect sequence the runtime currently has scheduled for this
+    /// dead connection, or `None` when it has none.
+    reconnect: Option<ReconnectProgress>,
 }
 
 impl Default for SupervisionState {
@@ -450,6 +508,7 @@ impl Default for SupervisionState {
             offered: None,
             recovered: 0,
             exit_code: None,
+            reconnect: None,
         }
     }
 }
@@ -519,6 +578,25 @@ impl SupervisionState {
         exit.by_signal || !announced_exit
     }
 
+    /// The reconnect sequence currently scheduled for this connection, if
+    /// one is.
+    #[must_use]
+    pub fn reconnect(&self) -> Option<ReconnectProgress> {
+        self.reconnect
+    }
+
+    /// Records where the runtime's reconnect sequence has got to, answering
+    /// whether that changed anything a frame would show.
+    ///
+    /// The runtime owns the schedule and this owns what is said about it, so
+    /// this is written on every pass that reads one rather than only on the
+    /// transition -- the same shape the banner itself is re-asserted in.
+    pub fn note_reconnect(&mut self, progress: Option<ReconnectProgress>) -> bool {
+        let changed = self.reconnect != progress;
+        self.reconnect = progress;
+        changed
+    }
+
     /// The status view leaves with when a user answers a dead engine by
     /// quitting: nvim's own, or failure when nvim never reported one -- the
     /// same reading `Msg::EngineDown` has always applied.
@@ -532,6 +610,39 @@ impl SupervisionState {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The banner a user reads while a dropped connection is being retried,
+    /// asserted as the literal string it renders as: the count is the whole
+    /// point of it, and a wording that stopped naming which attempt this is
+    /// would leave the same unchanging sentence on screen for half a minute.
+    #[test]
+    fn a_scheduled_reconnect_names_the_attempt_it_is_on() {
+        assert_eq!(
+            ReconnectProgress::new(1, 5).notice().as_deref(),
+            Some("connection lost -- reconnecting (1/5)")
+        );
+        assert_eq!(
+            ReconnectProgress::new(5, 5).notice().as_deref(),
+            Some("connection lost -- reconnecting (5/5)")
+        );
+        for attempt in 1..=5 {
+            assert!(
+                !ReconnectProgress::new(attempt, 5).exhausted(),
+                "attempt {attempt} of 5 is one the sequence still owes"
+            );
+        }
+    }
+
+    /// Past the last attempt the sequence has nothing of its own left to
+    /// say, and what stays on screen is the dead engine's own notice: a
+    /// banner still counting attempts nobody is going to make would be
+    /// announcing a recovery that is not running.
+    #[test]
+    fn a_spent_reconnect_hands_the_banner_back_to_the_dead_connection() {
+        let spent = ReconnectProgress::new(6, 5);
+        assert!(spent.exhausted());
+        assert_eq!(spent.notice(), None);
+    }
 
     #[test]
     fn a_dead_connection_escalates_at_once_and_a_wedge_waits() {

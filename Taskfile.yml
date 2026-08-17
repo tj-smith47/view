@@ -116,7 +116,7 @@ tasks:
     cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
 
   acceptance:
-    desc: Engine-supervision conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~3 min; needs tmux)
+    desc: Engine-supervision and remote-reconnect conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~3 min; needs tmux)
     # its own target rather than a step of `task ci`, on the same terms as
     # oracle, compat and bench: it drives a real pty through tmux and most
     # of its runtime is spent waiting out the very thresholds it measures,
@@ -124,6 +124,7 @@ tasks:
     cmds:
       - cargo build --release -p view
       - bash scripts/acceptance/supervision.sh
+      - bash scripts/acceptance/remote-reconnect.sh
       # the bench-taps build the RTT-injection proof pairs against bare
       # nvim, in the same target dir `task bench` builds it in
       - cargo build --release -p view --features bench-taps --target-dir target/taps

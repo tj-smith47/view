@@ -4,7 +4,9 @@
 use crate::model::{Model, OverlayKind};
 use crate::msg::Effect;
 use crate::native::geometry::OverlayBox;
-use crate::native::supervision::{EngineBusyState, SinceStamp, SupervisionChoice, WedgeKind};
+use crate::native::supervision::{
+    EngineBusyState, ReconnectProgress, SinceStamp, SupervisionChoice, WedgeKind,
+};
 
 /// Folds one supervision reading into the banner and, past the escalation
 /// threshold, the interrupt/restart modal.
@@ -22,22 +24,40 @@ pub(super) fn note_engine_liveness(
         }
         return Vec::new();
     };
+    // a closed connection the runtime is already reconnecting reports the
+    // attempt it is on instead of the bare closure: the wording is the
+    // reconnect's, the condition is the same one, and there is still only
+    // the single condition notice
+    let reconnect = model
+        .supervision
+        .reconnect()
+        .filter(|_| kind == WedgeKind::Dead);
+    let counted = reconnect.and_then(ReconnectProgress::notice);
     // re-asserted on every reading rather than raised once on the way in:
     // `msg_clear` empties the log wholesale, and a notice raised only on the
     // transition would be gone for good while its condition is still true
     if model
         .engine
         .messages
-        .set_native_condition(Some(kind.notice()))
+        .set_native_condition(Some(counted.as_deref().unwrap_or(kind.notice())))
     {
         model.dirty = true;
+    }
+    // an attempt is already owed and already waiting out its backoff:
+    // asking for a second one here would spend the session's whole
+    // unattended-recovery budget on one outage, and would do it at the
+    // cadence the readout repaints on
+    if counted.is_some() {
+        return Vec::new();
     }
     // ahead of every escalation rule below, and answering none of them: a
     // connection that has closed has exactly one recovery, the user has
     // already said whether they want to be asked for it, and asking anyway
     // would leave a modal on screen while the engine it offers to replace
-    // is already being replaced
-    if kind == WedgeKind::Dead && model.supervision.recovers_unattended() {
+    // is already being replaced. A sequence that has run out of attempts is
+    // past that: what it has evidence of is a recovery that is not working,
+    // so the choice goes back to the user through the modal below
+    if kind == WedgeKind::Dead && reconnect.is_none() && model.supervision.recovers_unattended() {
         model.supervision.note_unattended_recovery();
         if model.close_engine_busy() {
             model.dirty = true;

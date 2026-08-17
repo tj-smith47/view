@@ -14,6 +14,7 @@ use std::sync::mpsc;
 
 use view_core::model::Model;
 use view_core::msg::{ExitInfo, Msg};
+use view_core::native::supervision::ReconnectProgress;
 use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
 
@@ -38,6 +39,140 @@ pub(crate) struct LoopState {
     /// off any effect batch, with nothing borrowed from the engine it
     /// replaces.
     pub(crate) restart_requested: bool,
+}
+
+/// When the loop's next replacement attempt is due, and how many of a
+/// dropped remote connection's attempts are left.
+///
+/// A dropped ssh connection is the failure a remote session actually meets,
+/// and it is the one where retrying at once is wrong: the host is often
+/// briefly unreachable (a laptop asleep, a VPN blip, a bastion recycling),
+/// and an unconditional retry spins the local client against it. So a dead
+/// remote connection's attempts are spaced by
+/// [`remote_reconnect_backoff`] and capped at
+/// [`REMOTE_RECONNECT_MAX_ATTEMPTS`], while every other replacement -- a
+/// local engine's, and a user's own restart of a connection that is still
+/// open -- stays due the moment it is asked for. A crashed local process is
+/// not going to become reachable by waiting.
+///
+/// Nothing here sleeps. The schedule answers *when*, and the loop's own
+/// bounded wait is what gets there: the paint loop is exactly the thread
+/// that must not be parked while a banner it owns is counting attempts.
+pub(crate) struct ReconnectSchedule {
+    /// The wait before the first attempt of a backoff sequence, doubled per
+    /// attempt already spent.
+    base: std::time::Duration,
+    /// How many attempts one sequence is allowed.
+    max_attempts: u32,
+    /// When the next attempt is due, or `None` when none is owed.
+    due: Option<std::time::Instant>,
+    /// How many attempts the current backoff sequence has already spent, or
+    /// `None` when the pending attempt is not part of one.
+    spent: Option<u32>,
+}
+
+impl Default for ReconnectSchedule {
+    /// The shipped backoff, with nothing scheduled.
+    fn default() -> Self {
+        Self::new(
+            view_engine::REMOTE_RECONNECT_BACKOFF_BASE,
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+        )
+    }
+}
+
+impl ReconnectSchedule {
+    /// A schedule with `base` and `max_attempts` in place of the shipped
+    /// ones, so a test can prove the sequence against waits it can afford to
+    /// actually wait out.
+    pub(crate) fn new(base: std::time::Duration, max_attempts: u32) -> Self {
+        Self {
+            base,
+            max_attempts,
+            due: None,
+            spent: None,
+        }
+    }
+
+    /// Records that a replacement has been asked for, and decides when it
+    /// happens: at once, or on the backoff a dropped remote connection is
+    /// owed.
+    ///
+    /// A request arriving while a sequence is still counting down changes
+    /// nothing -- the attempt it would ask for is already scheduled. One
+    /// arriving after a sequence has run out is the user's own restart from
+    /// the modal, and it is due immediately: they have waited out the whole
+    /// sequence already.
+    pub(crate) fn request(&mut self, backoff: bool, now: std::time::Instant) {
+        if !backoff {
+            self.spent = None;
+            self.due = Some(now);
+            return;
+        }
+        match self.spent {
+            None => {
+                self.spent = Some(0);
+                self.due = Some(now + self.wait_before(1));
+            }
+            Some(_) if self.due.is_none() => self.due = Some(now),
+            Some(_) => {}
+        }
+    }
+
+    /// Whether an attempt is due now, taking it: a caller that is told
+    /// `true` owes the attempt, and the sequence has already counted it.
+    pub(crate) fn take_due(&mut self, now: std::time::Instant) -> bool {
+        if !self.due.is_some_and(|due| now >= due) {
+            return false;
+        }
+        self.due = None;
+        self.spent = self.spent.map(|spent| spent.saturating_add(1));
+        true
+    }
+
+    /// Records an attempt that failed, answering whether the schedule
+    /// absorbed it.
+    ///
+    /// `false` for an attempt that was never part of a sequence: a local
+    /// engine that cannot be replaced leaves the session with nothing to run
+    /// and nothing to retry, which its caller reports rather than retries.
+    /// `true` either schedules the next attempt or ends the sequence, and
+    /// both are states the session keeps running in.
+    pub(crate) fn note_failure(&mut self, now: std::time::Instant) -> bool {
+        let Some(spent) = self.spent else {
+            return false;
+        };
+        self.due = (spent < self.max_attempts).then(|| now + self.wait_before(spent + 1));
+        true
+    }
+
+    /// Forgets the sequence, for a replacement that came up.
+    pub(crate) fn clear(&mut self) {
+        self.due = None;
+        self.spent = None;
+    }
+
+    /// How long the loop may wait before an attempt would be overdue, or
+    /// `None` when none is scheduled.
+    pub(crate) fn poll_deadline(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.due.map(|due| due.saturating_duration_since(now))
+    }
+
+    /// Where the sequence has got to, for the banner that announces it.
+    /// `None` outside a sequence, which is every immediate replacement.
+    pub(crate) fn progress(&self) -> Option<ReconnectProgress> {
+        self.spent.map(|spent| {
+            ReconnectProgress::new(
+                spent.saturating_add(1).min(self.max_attempts + 1),
+                self.max_attempts,
+            )
+        })
+    }
+
+    /// The wait owed before `attempt`, from this schedule's own base.
+    fn wait_before(&self, attempt: u32) -> std::time::Duration {
+        view_engine::remote_reconnect_backoff(self.base, attempt)
+    }
 }
 
 /// The worker channels the loop's executor is wired to.
@@ -106,10 +241,13 @@ pub(crate) struct Restarted {
 /// it replaced: the executor's connection, the clipboard worker's reply
 /// route, and the damage pump.
 ///
-/// The teardown happens inside [`Engine::restart`], so the two engines never
-/// exist at once and the fresh one opens the swap files the dead one left --
-/// which is the only state a restart recovers, since view holds no buffer
-/// text of its own.
+/// The teardown happens first, inside [`crate::startup::restart_and_attach`],
+/// so the two engines never exist at once and the fresh one opens the swap
+/// files the dead one left -- which is the only state a restart recovers,
+/// since view holds no buffer text of its own. `engine` is borrowed rather
+/// than consumed so a failure leaves the caller holding the connection it
+/// asked to replace: a dropped remote connection is retried, and a loop with
+/// no engine at all has nothing to paint the failure with.
 ///
 /// The grid is attached at [`Model::grid_target`], not at the terminal's own
 /// size: the chrome this session already reserved was reserved through a
@@ -124,7 +262,7 @@ pub(crate) struct Restarted {
 /// death, and never on a steady-state pass -- the same terms the bounded
 /// `wait_exit` teardown already runs on.
 pub(crate) fn restart_engine(
-    engine: Engine,
+    engine: &mut Engine,
     respawn: &dyn Fn() -> view_engine::EngineConfig,
     model: &Model,
     channels: &LoopChannels,
@@ -457,7 +595,7 @@ mod tests {
         );
 
         let mut model = Model::with_term_size(80, 24);
-        let fresh = restart_engine(engine, &respawn, &model, &channels, &route)
+        let fresh = restart_engine(&mut engine, &respawn, &model, &channels, &route)
             .expect("a crashed engine must be replaceable");
         // the same cutover the loop runs on the way back: a fresh engine
         // fires `VimEnter` as a blocked request, and one nobody answers
@@ -549,16 +687,249 @@ mod tests {
             picker,
             msg: crate::wake::LoopSender::new(msg_tx),
         };
-        let engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
+        let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
         let respawn =
             || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
         let model = Model::with_term_size(80, 24);
 
-        let failed = restart_engine(engine, &respawn, &model, &channels, &route);
+        let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
             "a restart that could not spawn must report it"
+        );
+    }
+
+    /// A base a test can afford to wait out, with the shipped doubling and
+    /// the shipped cap left alone: what the sequences below prove is the
+    /// sequence, and the shipped base would put half a minute of waiting in
+    /// the unit suite. The shipped base is proven against an injected clock
+    /// in `the_shipped_schedule_spends_its_documented_waits`.
+    #[cfg(unix)]
+    const TEST_BACKOFF_BASE: std::time::Duration = std::time::Duration::from_millis(80);
+
+    /// A committed stand-in ssh client, by name.
+    #[cfg(unix)]
+    fn ssh_fixture(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/test-fixtures")
+            .join(name)
+            .canonicalize()
+            .expect("the test fixtures are committed alongside the crate")
+    }
+
+    /// A remote config routed through the stand-in client `ssh` names.
+    #[cfg(unix)]
+    fn remote_through(ssh: &str) -> view_engine::EngineConfig {
+        view_engine::process::EngineConfig::isolated()
+            .with_remote(
+                view_engine::RemoteSpec::new("view-test-host").with_ssh_bin(ssh_fixture(ssh)),
+            )
+            .with_handshake_timeout(std::time::Duration::from_secs(10))
+    }
+
+    /// The waits a dropped remote connection's attempts are spaced by,
+    /// measured off the attempts themselves rather than read back out of the
+    /// schedule that computed them.
+    ///
+    /// The wait between two attempts is the loop's own bounded wait, so this
+    /// performs that wait the way the loop does -- `recv_timeout` against a
+    /// message channel -- rather than by sleeping: a schedule that armed a
+    /// deadline the loop had no way to wait on would pass a test that slept
+    /// and stall in the editor.
+    ///
+    /// The bounds are asymmetric on purpose. The lower one is exact: an
+    /// attempt that ran early is the client spin this whole mechanism exists
+    /// to prevent, and no tolerance is owed it. The upper one is loose,
+    /// because a scheduler on a loaded host may be late by whatever it likes
+    /// without anything here being wrong.
+    #[cfg(unix)]
+    #[test]
+    fn a_dropped_remote_connection_retries_on_a_doubling_backoff() {
+        let mut schedule = ReconnectSchedule::new(
+            TEST_BACKOFF_BASE,
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+        );
+        // nothing ever sends on it: this is the loop's wait, not its traffic
+        let (_tx, rx) = mpsc::channel::<Msg>();
+        let armed = std::time::Instant::now();
+        schedule.request(true, armed);
+
+        let mut ran: Vec<std::time::Instant> = Vec::new();
+        while let Some(wait) = schedule.poll_deadline(std::time::Instant::now()) {
+            assert!(
+                matches!(rx.recv_timeout(wait), Err(mpsc::RecvTimeoutError::Timeout)),
+                "the wait a reconnect arms must be one the loop can actually wait on"
+            );
+            if !schedule.take_due(std::time::Instant::now()) {
+                continue;
+            }
+            ran.push(std::time::Instant::now());
+            assert!(
+                schedule.note_failure(std::time::Instant::now()),
+                "a reconnect sequence must absorb its own failures"
+            );
+        }
+
+        assert_eq!(
+            u32::try_from(ran.len()).unwrap_or(u32::MAX),
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+            "the sequence ran {} attempts against a cap of {}",
+            ran.len(),
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS
+        );
+        let slack = std::time::Duration::from_secs(2);
+        let mut previous = armed;
+        for (index, at) in ran.iter().enumerate() {
+            let attempt = u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1);
+            let owed = view_engine::remote_reconnect_backoff(TEST_BACKOFF_BASE, attempt);
+            let waited = at.saturating_duration_since(previous);
+            assert!(
+                waited >= owed,
+                "attempt {attempt} ran {waited:?} after the one before it, inside the \
+                 {owed:?} it owes: an attempt that does not wait is the client spin \
+                 the backoff exists to prevent"
+            );
+            assert!(
+                waited < owed + slack,
+                "attempt {attempt} waited {waited:?}, far past the {owed:?} it owes"
+            );
+            previous = *at;
+        }
+    }
+
+    /// The shipped numbers, against an injected clock so the assertion costs
+    /// nothing to make: every attempt waits the wait it is owed, and the
+    /// sequence spends the documented total before giving up.
+    #[test]
+    fn the_shipped_schedule_spends_its_documented_waits() {
+        let base = view_engine::REMOTE_RECONNECT_BACKOFF_BASE;
+        let mut schedule = ReconnectSchedule::default();
+        let mut now = std::time::Instant::now();
+        schedule.request(true, now);
+        let mut total = std::time::Duration::ZERO;
+        for attempt in 1..=view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS {
+            let owed = view_engine::remote_reconnect_backoff(base, attempt);
+            assert!(
+                !schedule.take_due(now + owed - std::time::Duration::from_millis(1)),
+                "attempt {attempt} came due inside the {owed:?} it owes"
+            );
+            now += owed;
+            total += owed;
+            assert!(
+                schedule.take_due(now),
+                "attempt {attempt} never came due after the {owed:?} it owes"
+            );
+            assert!(schedule.note_failure(now));
+        }
+        assert_eq!(
+            total,
+            std::time::Duration::from_secs(31),
+            "the total the shipped base and cap spend before giving up"
+        );
+        assert_eq!(
+            schedule.poll_deadline(now),
+            None,
+            "the sequence must stop retrying once its attempts are spent"
+        );
+        assert!(
+            schedule
+                .progress()
+                .is_some_and(view_core::native::supervision::ReconnectProgress::exhausted),
+            "a spent sequence must report itself spent, or the banner keeps counting"
+        );
+    }
+
+    /// The give-up against spawns that really fail: a client refusing every
+    /// connection exhausts the cap exactly, stops retrying on its own, and
+    /// leaves the session still holding the connection it could not replace
+    /// -- which is what the dead-engine modal is then offered against.
+    #[cfg(unix)]
+    #[test]
+    fn a_remote_client_that_keeps_refusing_gives_up_at_the_cap_and_asks_the_user() {
+        let (msg_tx, _msg_rx) = std::sync::mpsc::sync_channel(64);
+        let (clipboard, _clipboard_jobs) = mpsc::channel();
+        let (osc52, _osc52_jobs) = mpsc::channel();
+        let (picker, _picker_requests) = mpsc::channel();
+        let channels = LoopChannels {
+            clipboard,
+            osc52,
+            picker,
+            msg: crate::wake::LoopSender::new(msg_tx),
+        };
+        // the relay double, so killing the client closes the pipes the way
+        // the loss of a real connection does: the plain stand-in hands its
+        // own stdio to the editor it starts, which would leave the channel
+        // open with the client gone
+        let mut engine = Engine::spawn(remote_through("delay-relay"))
+            .expect("a remote spawn must handshake through the stand-in client");
+        assert!(
+            engine.is_remote(),
+            "the engine under test must be a remote one"
+        );
+        let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let killed = std::process::Command::new("kill")
+            .args(["-KILL", &engine.pid().to_string()])
+            .status()
+            .expect("kill must run for a dropped connection to be simulable");
+        assert!(killed.success(), "kill -KILL failed: {killed:?}");
+        wait_until("the killed client's connection closes", || {
+            engine.handle.is_closed()
+        });
+
+        // every attempt from here on meets a client that refuses
+        let respawn = || remote_through("fake-ssh-reject");
+        let model = Model::with_term_size(80, 24);
+        let mut schedule = ReconnectSchedule::new(
+            TEST_BACKOFF_BASE,
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+        );
+        schedule.request(true, std::time::Instant::now());
+        let mut attempts = 0;
+        while let Some(wait) = schedule.poll_deadline(std::time::Instant::now()) {
+            std::thread::sleep(wait);
+            if !schedule.take_due(std::time::Instant::now()) {
+                continue;
+            }
+            attempts += 1;
+            let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
+            assert!(
+                matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
+                "a refused client must fail the attempt rather than produce an engine"
+            );
+            assert!(
+                schedule.note_failure(std::time::Instant::now()),
+                "a reconnect sequence must absorb its own failures"
+            );
+        }
+
+        assert_eq!(
+            attempts,
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+            "the sequence must stop at its own cap, neither early nor never"
+        );
+        // and what the user is left with is supervision's own dead-engine
+        // annunciator, not a state belonging to this sequence
+        let mut model = Model::with_term_size(80, 24);
+        assert!(model.supervision.note_reconnect(schedule.progress()));
+        let effects = update(
+            &mut model,
+            Msg::EngineLiveness {
+                wedge: Some(WedgeKind::Dead),
+                observed_for: std::time::Duration::ZERO,
+            },
+        );
+        assert!(
+            effects.is_empty(),
+            "a spent sequence must ask for no further attempt: {effects:?}"
+        );
+        let busy = model
+            .engine_busy()
+            .expect("the dead-engine modal must be offered once the attempts run out");
+        assert_eq!(busy.kind, WedgeKind::Dead);
+        assert!(
+            busy.offers(view_core::native::supervision::SupervisionChoice::Restart),
+            "the modal must still offer the one further attempt a user can ask for"
         );
     }
 

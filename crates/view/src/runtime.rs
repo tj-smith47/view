@@ -25,7 +25,9 @@
 
 use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
-use crate::recovery::{restart_engine, step, EngineSession, LoopChannels, LoopState};
+use crate::recovery::{
+    restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
+};
 use crate::speculate::{
     expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
 };
@@ -1106,15 +1108,18 @@ fn note_supervision(
 /// as "no wakeup" would sleep through the one condition that was actually
 /// arming a deadline.
 fn watch_deadline(wakeups: Wakeups<'_>) -> Option<std::time::Duration> {
-    let watches = match (wakeups.write.poll_deadline(), wakeups.read.poll_deadline()) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (only, None) | (None, only) => only,
-    };
-    let supervised = match (watches, wakeups.supervision.readout_deadline()) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (only, None) | (None, only) => only,
-    };
-    match (supervised, wakeups.speculation) {
+    let watches = sooner(wakeups.write.poll_deadline(), wakeups.read.poll_deadline());
+    let supervised = sooner(watches, wakeups.supervision.readout_deadline());
+    sooner(sooner(supervised, wakeups.speculation), wakeups.reconnect)
+}
+
+/// The nearer of two deadlines, where `None` is "as long as you like" and
+/// so never shortens the other.
+fn sooner(
+    a: Option<std::time::Duration>,
+    b: Option<std::time::Duration>,
+) -> Option<std::time::Duration> {
+    match (a, b) {
         (Some(a), Some(b)) => Some(a.min(b)),
         (only, None) | (None, only) => only,
     }
@@ -1135,6 +1140,11 @@ struct Wakeups<'a> {
     read: &'a HeartbeatWatch,
     supervision: &'a SupervisionFold,
     speculation: Option<std::time::Duration>,
+    /// When the next reconnect attempt comes due, resolved for the same
+    /// reason speculation's is: it is read off a schedule the loop owns
+    /// rather than off a watch, and a dead connection sends nothing that
+    /// would otherwise wake the loop to take the attempt.
+    reconnect: Option<std::time::Duration>,
 }
 
 /// Waits for the loop's next message, bounded by whichever watch has a
@@ -1508,6 +1518,7 @@ pub fn run(
     let mut write_stall = OutboxStallWatch::default();
     let mut supervision = SupervisionFold::default();
     let mut state = LoopState::default();
+    let mut reconnect = ReconnectSchedule::default();
     // frame-to-frame surface reuse; the paint site below is this loop's
     // only consumer, so the cache's previous-frame invariant holds by
     // construction (startup's pre-attach paints predate the loop and go
@@ -1521,8 +1532,19 @@ pub fn run(
         // happens once, with nothing borrowed from the engine it replaces.
         if state.restart_requested {
             state.restart_requested = false;
-            match restart_engine(engine, respawn, &model, &channels, &clipboard_route) {
+            // a dropped remote connection is the one replacement that waits:
+            // the far side is often briefly unreachable, and an immediate
+            // retry would spin the ssh client against a host that is still
+            // coming back (see `ReconnectSchedule`)
+            reconnect.request(
+                engine.is_remote() && state.connection_lost,
+                std::time::Instant::now(),
+            );
+        }
+        if reconnect.take_due(std::time::Instant::now()) {
+            match restart_engine(&mut engine, respawn, &model, &channels, &clipboard_route) {
                 Ok(fresh) => {
+                    reconnect.clear();
                     engine = fresh.engine;
                     pump = fresh.pump;
                     executor = fresh.executor;
@@ -1549,6 +1571,12 @@ pub fn run(
                         return Ok((model, code));
                     }
                 }
+                // a reconnect sequence absorbs its own failures: the next
+                // attempt is scheduled, or the sequence has run out and the
+                // choice goes back to the user through the dead-engine
+                // modal, and either way the session keeps running against
+                // the connection it still holds
+                Err(_) if reconnect.note_failure(std::time::Instant::now()) => {}
                 // no second engine and no way to ask for one: the modal
                 // that offered the restart is gone with the engine it
                 // offered it for, so this ends the session with the reason
@@ -1566,6 +1594,12 @@ pub fn run(
                     return Ok((model, 1));
                 }
             }
+        }
+        // what the banner says about that schedule, folded before the
+        // reading that raises it: the fold owns the text, this owns the
+        // count, and a pass that changed neither writes nothing
+        if model.supervision.note_reconnect(reconnect.progress()) {
+            model.dirty = true;
         }
         // every pass, whatever the engine has or has not sent: an age bound
         // reachable only when a redraw arrives could never fire during the
@@ -1642,6 +1676,7 @@ pub fn run(
         // resolved here rather than inside the wait because it is the one
         // deadline read off the model, which the wait does not hold
         let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);
+        let due = reconnect.poll_deadline(std::time::Instant::now());
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,
@@ -1650,6 +1685,7 @@ pub fn run(
                 read: &engine.heartbeat,
                 supervision: &supervision,
                 speculation,
+                reconnect: due,
             },
             input,
             &waker,
@@ -1664,6 +1700,7 @@ pub fn run(
                 read: &engine.heartbeat,
                 supervision: &supervision,
                 speculation,
+                reconnect: due,
             },
         );
         let Some(received) = received else {
@@ -3397,6 +3434,7 @@ mod tests {
                         read: &heartbeat,
                         supervision: &fold,
                         speculation: None,
+                        reconnect: None,
                     },
                 )
                 .is_none(),
@@ -3456,6 +3494,7 @@ mod tests {
             read: &heartbeat,
             supervision: &fold,
             speculation: None,
+            reconnect: None,
         })
         .expect("an idle session must still arm the wakeup a silent engine needs");
         assert!(
@@ -3479,6 +3518,7 @@ mod tests {
                 read: &heartbeat,
                 supervision: &fold,
                 speculation: None,
+                reconnect: None,
             },
         );
         assert!(
@@ -3525,6 +3565,7 @@ mod tests {
                 read: &heartbeat,
                 supervision: &fold,
                 speculation: None,
+                reconnect: None,
             }),
             None,
             "the session this test is about must be one nothing else wakes"
@@ -3555,6 +3596,7 @@ mod tests {
             read: &heartbeat,
             supervision: &fold,
             speculation,
+            reconnect: None,
         })
         .expect("a pending prediction must bound a wait nothing else bounds");
         assert!(
@@ -3577,6 +3619,7 @@ mod tests {
                     read: &heartbeat,
                     supervision: &fold,
                     speculation,
+                    reconnect: None,
                 },
             )
             .is_none(),
@@ -3653,6 +3696,7 @@ mod tests {
                     read: &heartbeat,
                     supervision: &fold,
                     speculation: None,
+                    reconnect: None,
                 },
             )
             .is_none(),

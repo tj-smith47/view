@@ -33,6 +33,9 @@ pub use heartbeat::{
 // handle.rs) since production always goes through the pumped, bounded path.
 #[cfg(any(test, feature = "test-support"))]
 pub use handle::EngineNotification;
-pub use process::{ApiInfo, Engine, EngineConfig, RemoteSpec, ShutdownOutcome, ShutdownPath};
+pub use process::{
+    remote_reconnect_backoff, ApiInfo, Engine, EngineConfig, RemoteSpec, ShutdownOutcome,
+    ShutdownPath, REMOTE_RECONNECT_BACKOFF_BASE, REMOTE_RECONNECT_MAX_ATTEMPTS,
+};
 pub use rpc::{RpcError, RpcMessage};
 pub use stall::{OutboxStallWatch, WRITER_STALL_THRESHOLD};
