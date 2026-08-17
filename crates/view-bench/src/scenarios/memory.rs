@@ -71,7 +71,12 @@ pub const METRIC: Option<&str> = if cfg!(target_os = "linux") {
 /// footprint for a running editor, and it is the one wrong value that
 /// gates green forever once recorded, since every later measurement is
 /// then a breach of a zero bar rather than a pass.
-fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
+///
+/// `pub(crate)`, not private: [`crate::scenarios::remote_memory`]'s paired
+/// driver reads through this same function for both its legs, since a
+/// remote-spawned `view` process's own memory is read exactly the way a
+/// local one is -- only the spec that spawned it differs.
+pub(crate) fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
     let mb = read_platform_memory_mb(pid)?;
     require_positive_mb(mb, pid)
 }
@@ -304,23 +309,24 @@ pub fn run_nvim(nvim_spec: NvimSpec<'_>, protocol: &Protocol) -> Result<MemoryOu
     run_with_reader(nvim, protocol, read_memory_mb)
 }
 
-/// Shared driver behind [`run`], [`run_view_tree`] and [`run_nvim`]:
-/// spawn `spec`, drive the standard 10-buffer workload to settle, then
-/// sample `reader(pid)` `protocol.warmup + protocol.samples` times. The
-/// three public entry points differ only in which spec they spawn and
-/// which reader they sample with, so the spawn/workload/settle/sample
-/// sequence -- the part a transposed argument or a skipped settle wait
-/// would silently corrupt -- exists exactly once.
-fn run_with_reader(
+/// Spawns `spec`, settles it, then drives the standard 10-buffer workload
+/// to a second settle and returns the live session plus its pid, ready for
+/// [`sample_reading`] to read from.
+///
+/// Split out of [`run_with_reader`] so [`crate::scenarios::remote_memory`]'s
+/// paired driver can prepare two sessions (a local spec and a remote one)
+/// through the identical spawn/workload/settle sequence before it starts
+/// alternating reads between them -- the only thing that may differ
+/// between a local and a remote leg of a paired comparison is which spec
+/// this spawns, never how the workload settles.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] if the session never settles or the
+/// platform exposes no pid for it.
+pub(crate) fn prepare_workload_session(
     spec: &SpawnSpec,
-    protocol: &Protocol,
-    reader: fn(u32) -> Result<f64, BenchError>,
-) -> Result<MemoryOutcome, BenchError> {
-    let Some(metric) = METRIC else {
-        return Err(BenchError::Desync {
-            context: "no memory metric is defined for this platform".to_string(),
-        });
-    };
+) -> Result<(BenchSession, u32), BenchError> {
     let mut session = BenchSession::spawn(spec)?;
     if !session.settle(SettleBound {
         quiet: Duration::from_secs(2),
@@ -358,21 +364,56 @@ fn run_with_reader(
             ),
         });
     }
+    Ok((session, pid))
+}
+
+/// Reads `reader(pid)` once against `session`, folding the session's
+/// on-screen state into the error if the read fails.
+///
+/// A settled screen only proves the screen stopped changing, never that
+/// the process is still alive to read from: a spawn that exits right
+/// after settling (a remote attach failure printed once and then a quiet
+/// exit, say) passes settle() and dies before the first sample, so the
+/// reader's own error carries no clue why. The screen at the moment of
+/// failure is that clue.
+///
+/// # Errors
+///
+/// Whatever `reader` returns, wrapped with the session's screen text.
+pub(crate) fn sample_reading(
+    session: &mut BenchSession,
+    pid: u32,
+    reader: fn(u32) -> Result<f64, BenchError>,
+) -> Result<f64, BenchError> {
+    reader(pid).map_err(|source| BenchError::Desync {
+        context: format!("{source}; screen at failure:\n{}", session.screen_text()),
+    })
+}
+
+/// Shared driver behind [`run`], [`run_view_tree`] and [`run_nvim`]:
+/// prepare `spec`'s session through the standard workload, then sample
+/// `reader(pid)` `protocol.warmup + protocol.samples` times. The three
+/// public entry points differ only in which spec they spawn and which
+/// reader they sample with, so the spawn/workload/settle/sample sequence
+/// -- the part a transposed argument or a skipped settle wait would
+/// silently corrupt -- exists exactly once.
+fn run_with_reader(
+    spec: &SpawnSpec,
+    protocol: &Protocol,
+    reader: fn(u32) -> Result<f64, BenchError>,
+) -> Result<MemoryOutcome, BenchError> {
+    let Some(metric) = METRIC else {
+        return Err(BenchError::Desync {
+            context: "no memory metric is defined for this platform".to_string(),
+        });
+    };
+    let (mut session, pid) = prepare_workload_session(spec)?;
 
     let total = protocol.warmup + protocol.samples;
     let mut raw_mb = Vec::with_capacity(total);
     let pace = Duration::from_millis(2);
     for _ in 0..total {
-        // a settled screen only proves the screen stopped changing, never
-        // that the process is still alive to read from: a spawn that exits
-        // right after settling (a remote attach failure printed once and
-        // then a quiet exit, say) passes settle() and dies before the first
-        // sample, so the reader's own error carries no clue why. The screen
-        // at the moment of failure is that clue -- the same diagnostic the
-        // settle-timeout branch above already prints.
-        raw_mb.push(reader(pid).map_err(|source| BenchError::Desync {
-            context: format!("{source}; screen at failure:\n{}", session.screen_text()),
-        })?);
+        raw_mb.push(sample_reading(&mut session, pid, reader)?);
         let next = Instant::now() + pace;
         while Instant::now() < next {
             std::thread::yield_now();

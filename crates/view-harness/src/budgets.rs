@@ -1749,17 +1749,84 @@ classes = ["dev-macos"]
         }
     }
 
+    /// The dead-row proof, file-wide: a `classes` list naming only
+    /// non-`controlled-` classes makes a row unreachable by construction,
+    /// since the spec budget gate loads the table only for a `controlled-`
+    /// class (`bin/bench.rs`'s `if is_controlled_class(&cli.class) { load
+    /// budgets } else { skip }`). That was `remote_memory`'s own defect
+    /// before its bound was re-derived (`classes = ["dev-linux"]`, which
+    /// can never be a controlled class): it wore a live bound's clothes
+    /// while unreachable on every class the gate ever runs a budget check
+    /// on. Four sibling rows carried the identical defect
+    /// (`input_path.key_to_rpc_p99_us`, `memory.pss_mb`,
+    /// `memory.phys_footprint_mb`, `echo_speculated.speculated_ratio_p50`);
+    /// each was repointed to its `controlled-*` counterpart, preserving the
+    /// exact class-family scope it already had rather than widening onto a
+    /// platform nobody has measured, so no bound moved. That makes the
+    /// whole defect class -- not just one instance of it -- checkable here:
+    /// every row in the shipped file now names either no `classes` (every
+    /// class, including any future `controlled-*` one) or at least one
+    /// `controlled-*` name, so this assertion can hold file-wide without
+    /// papering over an un-derived bound anywhere.
+    #[test]
+    fn every_shipped_budget_row_is_reachable_by_a_controlled_class() {
+        let path = crate::fixture::workspace_root()
+            .join("crates")
+            .join("view-bench")
+            .join("budgets.toml");
+        let file = load(&path).expect("the shipped budgets.toml must load");
+        assert!(
+            !file.budget.is_empty(),
+            "no budget row would make this assert nothing"
+        );
+        for budget in &file.budget {
+            let reachable = budget.classes.as_ref().is_none_or(|classes| {
+                classes
+                    .iter()
+                    .any(|c| crate::baselines::is_controlled_class(c))
+            });
+            assert!(
+                reachable,
+                "{budget:?} names only classes {:?}, none of which the budget gate ever loads \
+                 a table for (`is_controlled_class` requires a `controlled-` prefix), so this \
+                 row can never fire",
+                budget.classes
+            );
+        }
+    }
+
     /// The shipped budget table against every shipped baseline, which is
     /// what makes [`unreached_budgets`] more than a unit-tested function: a
     /// bound moved onto a metric its own scenario never produces is dead,
-    /// and nothing else in the tree can see it. The gate that would catch it
-    /// needs a full matrix run; a recorded baseline is the same
-    /// scenario-to-metric map that run would produce, already committed.
+    /// and nothing else in the tree can see it without a full matrix run.
+    /// A committed baseline is the closest static stand-in for that run: the
+    /// same scenario-to-metric map a run would produce, without running one.
     ///
-    /// This reads what each class last recorded, so a row that renames a
-    /// metric without the class being re-recorded shows up here as a dead
-    /// bound on that class. That is the same staleness the gate's own
-    /// coverage walk reports, and the file is the thing to correct.
+    /// That stand-in is necessarily stale for one case: a budget row shipped
+    /// alongside the code that produces its metric, before any controlled
+    /// class has recorded a cell with that metric in it. Nobody can record a
+    /// baseline for code that does not exist yet, so demanding the recording
+    /// land in the same change as the row is impossible, not strict. This
+    /// test tolerates exactly that gap -- a metric
+    /// [`crate::baselines::RECORDED_METRICS`] declares legal but no shipped
+    /// class has recorded for that scenario,
+    /// under any fixture -- as a staged ship-then-record state, not a defect.
+    ///
+    /// What it keeps catching: a metric recorded for a scenario on one class
+    /// but missing from another class's committed baseline for the same
+    /// scenario -- a rename or a partial re-record, proven dead because a
+    /// sibling class already recorded the pairing as real. What moved
+    /// elsewhere: a budget row permanently pairing a metric with a scenario
+    /// that will never produce it (the metric is declared but the pairing is
+    /// wrong). This static proxy cannot tell that case apart from a merely
+    /// staged one -- both look identical here, "nobody has recorded this
+    /// scenario/metric pair yet" -- but the live gate can and does: every
+    /// `bin/bench --all` run prints `BUDGET UNENFORCED` for a scenario that
+    /// ran and did not produce a bound metric (see [`unreached_budgets`]'s
+    /// own doc), forever, on every run, until either a recording lands or
+    /// the row is corrected. That loud, repeated, run-time signal is strictly
+    /// stronger than this one-shot, static check for exactly the case this
+    /// test gives up.
     #[test]
     fn every_shipped_budget_is_reached_by_the_baselines_that_recorded_its_scenario() {
         let root = crate::fixture::workspace_root();
@@ -1787,9 +1854,28 @@ classes = ["dev-macos"]
             "no baseline under {} would make this assert nothing",
             dir.display()
         );
+        let loaded: Vec<crate::baselines::BaselineFile> = paths
+            .iter()
+            .map(|path| crate::baselines::load(path).expect("every shipped baseline must load"))
+            .collect();
+        // every (scenario, metric) pair any shipped class has ever recorded,
+        // across every class -- a pair absent from this union has never
+        // been measured and committed anywhere yet, which is the
+        // staged-ship-then-record state this test tolerates
+        let ever_recorded: std::collections::BTreeSet<(&str, &str)> = loaded
+            .iter()
+            .flat_map(|recorded| {
+                recorded.cells.iter().flat_map(|(scenario, fixtures)| {
+                    fixtures.values().flat_map(move |metrics| {
+                        metrics
+                            .keys()
+                            .map(move |metric| (scenario.as_str(), metric.as_str()))
+                    })
+                })
+            })
+            .collect();
         let mut dead = Vec::new();
-        for path in &paths {
-            let recorded = crate::baselines::load(path).expect("every shipped baseline must load");
+        for (path, recorded) in paths.iter().zip(&loaded) {
             let measured: Vec<crate::baselines::MeasuredCell> = recorded
                 .cells
                 .iter()
@@ -1803,8 +1889,17 @@ classes = ["dev-macos"]
                 })
                 .collect();
             for budget in unreached_budgets(&file, &recorded.machine_class, &measured) {
+                let vocabulary_valid =
+                    crate::baselines::RECORDED_METRICS.contains(&budget.metric.as_str());
+                let recorded_elsewhere =
+                    ever_recorded.contains(&(budget.scenario.as_str(), budget.metric.as_str()));
+                if vocabulary_valid && !recorded_elsewhere {
+                    continue;
+                }
                 dead.push(format!(
-                    "{}: [{}] {} bounds a metric that scenario did not record",
+                    "{}: [{}] {} bounds a metric another shipped class already recorded for \
+                     this scenario, but this class's baseline does not -- a rename or a \
+                     partial re-record, not a first ship",
                     path.display(),
                     budget.scenario,
                     budget.metric

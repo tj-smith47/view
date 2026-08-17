@@ -245,13 +245,15 @@ pub fn is_controlled_class(class: &str) -> bool {
 /// The gate policy for one metric on one machine class: `None` means
 /// recorded for reference but never gated on this mechanism.
 ///
-/// Two families are exempt on a shared class: every statistic that
-/// [`derives_from_tail`], and every [`is_cold_start_absolute`] metric,
-/// whose value is set by cross-boot state a shared host cannot hold
-/// fixed rather than by run-to-run scheduler noise. A size or a median is
-/// neither, and gates everywhere. Ratios take [`RATIO_HEADROOM`] and
-/// everything else [`ABSOLUTE_HEADROOM`], except a paired delta, which is
-/// signed and so cannot take a proportional allowance at all.
+/// Three families are exempt on a shared class: every statistic that
+/// [`derives_from_tail`], every [`is_cold_start_absolute`] metric, whose
+/// value is set by cross-boot state a shared host cannot hold fixed
+/// rather than by run-to-run scheduler noise, and every
+/// [`is_host_regime_absolute`] metric, set by the host's ambient memory
+/// regime the same way. A size or a median is none of the three, and
+/// gates everywhere. Ratios take [`RATIO_HEADROOM`] and everything else
+/// [`ABSOLUTE_HEADROOM`], except a paired delta, which is signed and so
+/// cannot take a proportional allowance at all.
 ///
 /// The shared-class exemption is lifted per statistic, by measuring one
 /// unchanged binary pair across host-load regimes. Two have been measured:
@@ -310,7 +312,9 @@ pub fn gate_headroom(metric: &str, controlled: bool) -> Option<Headroom> {
     } else {
         Headroom::Proportional(factor)
     };
-    let exempt_on_shared = derives_from_tail(metric) || is_cold_start_absolute(metric);
+    let exempt_on_shared = derives_from_tail(metric)
+        || is_cold_start_absolute(metric)
+        || is_host_regime_absolute(metric);
     if !exempt_on_shared {
         return Some(shape);
     }
@@ -463,6 +467,38 @@ fn is_cold_start_absolute(metric: &str) -> bool {
     metric.split('_').any(|component| component == "cold")
 }
 
+/// Whether `metric` names a settled-process memory footprint -- PSS or
+/// `phys_footprint`, on either the remote or the local leg of the paired
+/// `remote_memory` row -- whose value is set by the host's ambient memory
+/// regime (page cache eviction pressure, other tenants' working sets)
+/// rather than by anything the measured process controls.
+///
+/// A third exemption family alongside [`derives_from_tail`] and
+/// [`is_cold_start_absolute`], for the same shape of reason: one unchanged
+/// `remote_memory` binary pair swung `pss_mb` +/-20% across days on shared
+/// dev-linux, while the paired remote-vs-local ratio taken from the same
+/// interleaved window stayed inside +0.6-2% across those regimes
+/// (2026-08-17 ruling). A within-window headroom sidecar cannot absorb a
+/// cross-day regime shift any more than it can absorb the ambient load a
+/// tail percentile carries, so the absolute is recorded on a shared class
+/// and gated on a controlled one, and the ratio -- this row's actual
+/// claim, and the statistic the evidence above says is regime-invariant --
+/// keeps gating everywhere
+/// (see `remote_local_ratio`'s own doc for why its name earns that instead
+/// of falling into this exemption or the signed-delta one).
+///
+/// A closed list of exact names, not a name-component rule like the other
+/// two: there is no shared word this quantity's name is built from the way
+/// "cold" or a percentile component names a state or a statistic shape,
+/// only the two platform-specific quantities `memory.rs` defines and their
+/// paired-row counterparts.
+fn is_host_regime_absolute(metric: &str) -> bool {
+    matches!(
+        metric,
+        "pss_mb" | "phys_footprint_mb" | "local_pss_mb" | "local_phys_footprint_mb"
+    )
+}
+
 /// Metric values for one `[scenario.fixture]` cell.
 pub type CellMetrics = BTreeMap<String, f64>;
 
@@ -476,7 +512,7 @@ pub type CellMetrics = BTreeMap<String, f64>;
 /// from this list is refused at the moment it produces it, before anything
 /// is recorded, and the per-metric policy table in this module's tests is
 /// checked against this list rather than hand-kept beside it.
-pub const RECORDED_METRICS: [&str; 28] = [
+pub const RECORDED_METRICS: [&str; 31] = [
     "ratio_p50",
     "ratio_p99",
     "paired_delta_p99_ms",
@@ -488,6 +524,9 @@ pub const RECORDED_METRICS: [&str; 28] = [
     "marker_ratio_p99",
     "pss_mb",
     "phys_footprint_mb",
+    "local_pss_mb",
+    "local_phys_footprint_mb",
+    "remote_local_ratio",
     "control_ratio_p50",
     "control_ratio_p99",
     "control_delta_p99_ms",
@@ -2008,8 +2047,22 @@ mod tests {
             ("marker_ratio_p50", ratio, ratio),
             ("control_ratio_p50", ratio, ratio),
             ("speculated_ratio_p50", ratio, ratio),
-            ("pss_mb", absolute, absolute),
-            ("phys_footprint_mb", absolute, absolute),
+            // remote_local_ratio: the paired remote-vs-local statistic
+            // measured regime-invariant (+0.6-2% across the same host
+            // regimes that swung the two absolutes below +/-20%), so it
+            // gates like ratio_p50 rather than falling into the tail
+            // exemption a `p99` component would carry
+            ("remote_local_ratio", ratio, ratio),
+            // pss_mb/phys_footprint_mb/local_pss_mb/local_phys_footprint_mb:
+            // settled-process memory footprints move with the host's
+            // ambient memory regime the same way a cross-boot cold-start
+            // absolute moves with cache/thermal state, so they are
+            // recorded on a shared class and gated on a controlled one
+            // (is_host_regime_absolute) rather than gating everywhere
+            ("pss_mb", None, absolute),
+            ("phys_footprint_mb", None, absolute),
+            ("local_pss_mb", None, absolute),
+            ("local_phys_footprint_mb", None, absolute),
             ("ratio_p99", None, ratio),
             ("marker_ratio_p99", None, ratio),
             ("control_ratio_p99", None, ratio),

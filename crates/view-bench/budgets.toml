@@ -34,12 +34,22 @@ schema = 1
 # this statistic's scale. A breach here still fails as a new finding and
 # should be rerun quiet before being read as a regression; a genuinely
 # quieter campaign is the only route to a functional factor.
+#
+# classes repointed 2026-08-17 from ["dev-linux"] to ["controlled-linux"]:
+# the spec budget gate loads this table only on a controlled-* class
+# (bench.rs's `if controlled { load budgets }`), and dev-linux is never
+# one, so the row as shipped could never fire regardless of what it
+# bounds. dev-macos keeps no counterpart entry -- the spec states that
+# omission deliberately ("dev-macos's input path sits there deliberately")
+# -- so dropping `classes` entirely would newly bind a platform the spec
+# has never measured; repointing to the linux-family controlled name
+# preserves the same scope this row always had while making it reachable.
 [[budget]]
 spec_row = "view input path: key event read from the terminal -> RPC bytes written"
 scenario = "input_path"
 metric = "key_to_rpc_p99_us"
 max = 100.0
-classes = ["dev-linux"]
+classes = ["controlled-linux"]
 
 [[budget]]
 spec_row = "view output path: redraw event parsed -> terminal write"
@@ -146,28 +156,62 @@ max = 16.0
 # its counterpart is the phys_footprint the memory scenario already records.
 # Two entries rather than one renamed metric, so neither class pretends to
 # measure the other's quantity.
+#
+# classes repointed 2026-08-17 from ["dev-linux"]/["dev-macos"] to their
+# controlled-* counterparts: the same dead-by-construction defect as the
+# input-path row above (the spec budget gate never loads this table for a
+# non-controlled-* class), fixed the same way -- the platform split stays
+# exactly as it was, only the class family's name changes from the shared
+# host to the controlled one that can actually gate it.
 [[budget]]
 spec_row = "view-side memory (PSS), 10 buffers, post-workload"
 scenario = "memory"
 metric = "pss_mb"
 max = 150.0
-classes = ["dev-linux"]
+classes = ["controlled-linux"]
 
 [[budget]]
 spec_row = "view-side memory (PSS), 10 buffers, post-workload"
 scenario = "memory"
 metric = "phys_footprint_mb"
 max = 150.0
-classes = ["dev-macos"]
+classes = ["controlled-macos"]
 
-# 6.0 is headroom over the recorded 4.962 local-spawn figure this class
-# inherits from `memory.minimal` -- not a new number invented for this row.
+# Superseded 2026-08-17: this row used to bound pss_mb at 6.0, "headroom over the recorded 4.962
+# local-spawn figure this class inherits from memory.minimal", scoped to
+# dev-linux. That scoping made the row dead by construction: the spec
+# budget gate loads only on a controlled-* class (bench.rs's `if controlled
+# { load budgets }`), and dev-linux is never one, so a row naming only
+# dev-linux can never fire regardless of what it bounds -- the same defect
+# this file's own supervision-row and echo_speculated-row comments already
+# name for their second metrics. It also bounded the wrong quantity: pss_mb
+# on this row is a settled-process absolute that swings +/-20% across days
+# on shared dev-linux (the ratchet finding that triggered this amendment),
+# which a fixed MB ceiling cannot distinguish from a real regression any
+# better than the ratchet's own headroom sidecar could.
+#
+# The row now bounds remote_local_ratio -- remote-leg absolute divided by
+# local-leg absolute, both drawn from the same interleaved window
+# (`view_bench::scenarios::remote_memory::run_paired`) -- which is the
+# row's actual claim ("view's own local footprint once the engine runs
+# remotely" costs ~nothing over a local engine) and the statistic measured
+# regime-invariant (+0.6-2% across the same regimes that swung the
+# absolutes +/-20%). 1.10 is stated the way the input-path row's original
+# 100 us and the echo row's 1.10 ratio bar were: a promise made before a
+# controlled class has measured this cell, not a number computed from a
+# recording -- the defect that made the withdrawn 232 us and cold_ms bars,
+# and this row's own withdrawn 6.0, unfalsifiable. No `classes` key: unlike
+# the platform-split memory rows above (two entries because pss_mb and
+# phys_footprint_mb name different quantities), remote_local_ratio is one
+# dimensionless statistic valid on every platform, so this row applies to
+# every class the way most unscoped rows in this file already do, and
+# fires the moment any controlled-* class runs it rather than naming one
+# class today and excluding every other one forever.
 [[budget]]
 spec_row = "Remote editing: view's own local footprint once the engine runs remotely"
 scenario = "remote_memory"
-metric = "pss_mb"
-max = 6.0
-classes = ["dev-linux"]
+metric = "remote_local_ratio"
+max = 1.10
 
 # Both picker rows bound the tail (p99) of the row's own statistic, so the
 # spec bar holds at the worst measured open/keystroke rather than at a
@@ -235,9 +279,16 @@ max = 12500.0
 # what the input-path row's withdrawn 232 and the first-paint row's withdrawn
 # cold_ms bar were.
 #
-# dev-linux only, on the same terms as the input-path row above: it is the
-# one class this row has ever run on, and a bar published for classes nobody
-# has measured is a guess wearing a gate's clothes.
+# linux-family only, on the same terms as the input-path row above: it is
+# the one class family this row has ever run on, and a bar published for
+# classes nobody has measured is a guess wearing a gate's clothes.
+#
+# classes repointed 2026-08-17 from ["dev-linux"] to ["controlled-linux"]:
+# the same dead-by-construction defect the input-path and memory rows
+# above carried (the spec budget gate never loads this table for a
+# non-controlled-* class) applied here too. Repointing to the controlled
+# name keeps the exact same linux-only scope this row always had, rather
+# than widening onto a platform this row has never run on.
 #
 # The row's second metric, speculated_paint_p99_ms, deliberately has no entry
 # here, for the reason supervision's restart_rehydrate_p99_ms has none:
@@ -250,7 +301,7 @@ spec_row = "Speculative echo: keypress -> predicted glyph visible, RTT hidden"
 scenario = "echo_speculated"
 metric = "speculated_ratio_p50"
 max = 1.0
-classes = ["dev-linux"]
+classes = ["controlled-linux"]
 
 # Metrics measured outside their budget today.
 #

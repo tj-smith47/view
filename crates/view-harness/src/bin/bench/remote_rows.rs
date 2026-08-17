@@ -9,9 +9,15 @@ use super::*;
 use view_bench::scenarios::remote_memory;
 
 /// Runs the `remote_memory` row against `world`'s hermetic `view` side and
-/// returns the metrics [`rows::run_cell`] records. Same workload-planting
-/// and reporting shape as the `memory` row in bench.rs, because the two
-/// differ only in which spawn spec they measure through.
+/// returns the metrics [`rows::run_cell`] records: both legs' absolutes
+/// (record-only on a shared class -- see [`remote_memory`]'s module doc)
+/// and the paired remote-vs-local ratio, the row's only gated metric.
+///
+/// The local and remote legs each get their own [`SideSetup`] (`view-local`
+/// / `view-remote`) rather than sharing the plain `view` tag the old
+/// single-leg driver used: the two sessions now run concurrently, and a
+/// shared `cwd`/`compat.sock`/scratch file would collide the moment both
+/// spawns are live at once instead of one after the other.
 pub(super) fn run_remote_memory_row(
     world: &CellWorld,
     fixture: &str,
@@ -19,37 +25,62 @@ pub(super) fn run_remote_memory_row(
     scenario: &str,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
-    let side = world.side(fixture, "view")?;
-    for (index, name) in memory::workload_files().iter().enumerate() {
-        std::fs::write(side.cwd.join(name), memory::workload_content(index + 1))
-            .with_context(|| format!("writing workload buffer {name}"))?;
+    let local_side = world.side(fixture, "view-local")?;
+    let remote_side = world.side(fixture, "view-remote")?;
+    for side in [&local_side, &remote_side] {
+        for (index, name) in memory::workload_files().iter().enumerate() {
+            std::fs::write(side.cwd.join(name), memory::workload_content(index + 1))
+                .with_context(|| format!("writing workload buffer {name}"))?;
+        }
     }
-    let view_spec = remote_memory_spec_from(side, bins.view_bins())
+    let local_spec = view_spec_from(local_side, bins.view_bins());
+    let remote_spec = remote_memory_spec_from(remote_side, bins.view_bins())
         .with_context(|| format!("arming the remote_memory/{fixture} spawn"))?;
-    let outcome = remote_memory::run(ViewSpec(&view_spec), protocol)
-        .with_context(|| format!("remote_memory/{fixture} run failed"))?;
+    let outcome =
+        remote_memory::run_paired(ViewSpec(&local_spec), ViewSpec(&remote_spec), protocol)
+            .with_context(|| format!("remote_memory/{fixture} run failed"))?;
+
     println!(
         "{}",
         report::absolute_cell(
             scenario,
             fixture,
-            outcome.metric,
+            outcome.remote_metric,
             report::AbsoluteStats {
-                p50: outcome.distribution.p50(),
-                p99: outcome.gated_mb,
-                max: outcome.distribution.max(),
+                p50: outcome.remote_distribution.p50(),
+                p99: outcome.remote_mb,
+                max: outcome.remote_distribution.max(),
                 unit: "MB",
-                samples: outcome.distribution.len(),
+                samples: outcome.remote_distribution.len(),
                 warmup: protocol.warmup,
             }
         )
     );
     println!(
         "{}",
-        report::aggregate_line(outcome.metric, outcome.gated_mb, 1)
+        report::absolute_cell(
+            scenario,
+            fixture,
+            outcome.local_metric,
+            report::AbsoluteStats {
+                p50: outcome.local_distribution.p50(),
+                p99: outcome.local_mb,
+                max: outcome.local_distribution.max(),
+                unit: "MB",
+                samples: outcome.local_distribution.len(),
+                warmup: protocol.warmup,
+            }
+        )
     );
+    println!(
+        "{}",
+        report::aggregate_line(remote_memory::RATIO_METRIC, outcome.ratio, 1)
+    );
+
     let mut metrics = CellMetrics::new();
-    metrics.insert(outcome.metric.to_string(), outcome.gated_mb);
+    metrics.insert(outcome.remote_metric.to_string(), outcome.remote_mb);
+    metrics.insert(outcome.local_metric.to_string(), outcome.local_mb);
+    metrics.insert(remote_memory::RATIO_METRIC.to_string(), outcome.ratio);
     Ok(metrics)
 }
 
