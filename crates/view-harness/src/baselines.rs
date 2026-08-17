@@ -476,14 +476,12 @@ fn is_cold_start_absolute(metric: &str) -> bool {
 /// A third exemption family alongside [`derives_from_tail`] and
 /// [`is_cold_start_absolute`], for the same shape of reason: one unchanged
 /// `remote_memory` binary pair swung `pss_mb` +/-20% across days on shared
-/// dev-linux, while the paired remote-vs-local ratio held inside +0.6-2%
-/// across those regimes -- a figure recorded before `run_paired`'s
-/// sequential, ABBA-alternating redesign, carried forward as historical
-/// evidence rather than re-derived under it (see
-/// `view_bench::scenarios::remote_memory`'s module doc for the exact
-/// provenance and why the ratio, not the absolute, is expected to survive
-/// the redesign unaffected). A within-window headroom sidecar cannot
-/// absorb a cross-day regime shift any more than it can absorb the
+/// dev-linux, while the paired remote-vs-local ratio held a +1.2% delta
+/// across that regime (`remote_memory.pss_mb`'s `[headroom]` entry in
+/// `baselines/dev-linux.headroom.toml`, recorded 2026-08-16, both legs
+/// solo, non-co-resident spawns -- see `view_bench::scenarios::remote_memory`'s
+/// module doc for the full recording). A within-window headroom sidecar
+/// cannot absorb a cross-day regime shift any more than it can absorb the
 /// ambient load a tail percentile carries, so the absolute is recorded on
 /// a shared class and gated on a controlled one, and the ratio -- this
 /// row's actual claim, and the statistic the evidence above says is
@@ -2052,8 +2050,8 @@ mod tests {
             ("control_ratio_p50", ratio, ratio),
             ("speculated_ratio_p50", ratio, ratio),
             // remote_local_ratio: the paired remote-vs-local statistic
-            // measured regime-invariant (+0.6-2% across the same host
-            // regimes that swung the two absolutes below +/-20%), so it
+            // measured regime-invariant (a +1.2% delta against a host
+            // regime swing that moved the two absolutes +/-20%), so it
             // gates like ratio_p50 rather than falling into the tail
             // exemption a `p99` component would carry
             ("remote_local_ratio", ratio, ratio),

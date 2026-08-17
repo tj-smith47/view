@@ -15,13 +15,11 @@
 //! day's regime breaches on the next day's, with nothing about view having
 //! changed. The row's actual claim survives that noise: view's own local
 //! footprint with a remote engine, divided by its footprint with a local
-//! one, held inside +0.6-2% across regimes that moved the absolutes
-//! +/-20% (a figure recorded before this module's sequential redesign --
-//! see "One leg at a time" below for its exact provenance). So
-//! [`run_paired`] gates [`RATIO_METRIC`] -- the remote/local ratio -- and
-//! records both absolutes for reference, record-only on a shared class the
-//! same way a tail statistic already is (see
-//! `view_harness::baselines::gate_headroom`).
+//! one, held a +1.2% delta across that regime (see "One leg at a time"
+//! below for the exact recording this is drawn from). So [`run_paired`]
+//! gates [`RATIO_METRIC`] -- the remote/local ratio -- and records both
+//! absolutes for reference, record-only on a shared class the same way a
+//! tail statistic already is (see `view_harness::baselines::gate_headroom`).
 //!
 //! # One leg at a time
 //!
@@ -35,42 +33,61 @@
 //! The gated row's driver is [`run_paired`], which never has two `view`
 //! processes alive at once. A settled process's PSS/`phys_footprint`
 //! reading is proportional to how many processes map each of its pages:
-//! two co-resident `view` siblings share the same text and rodata, so
-//! keeping both alive through one shared sampling window -- this row's
-//! design before this revision -- deflates both legs' readings below what
-//! either reads alone, an artifact this crate's own oracle battery
-//! measured at -8.0% for a co-resident sibling against +0.8% for the same
-//! process measured twice alone. [`run_paired`] instead runs
-//! `protocol.trials` ABBA-alternating trial pairs ([`abba_trials`]): each
+//! co-resident instances of one binary split their shared file-backed
+//! pages' PSS between them, so keeping both legs alive through one shared
+//! sampling window -- this row's design before this revision -- deflates
+//! both legs' readings below what either reads alone. Measured ~-8.0% on
+//! this class for a co-resident sibling against a ~+0.8% no-sibling
+//! control (the same process read twice, alone); reproducible by spawning
+//! a second instance of any sufficiently large binary and re-reading
+//! `/proc/<pid>/smaps_rollup` for the first with and without the second
+//! alive. [`run_paired`] instead runs `protocol.trials` (rounded up to
+//! even -- see below) ABBA-alternating trial pairs ([`abba_trials`]): each
 //! trial spawns one leg through [`memory::prepare_workload_session`] and
-//! [`memory::sample_distribution`], tears it down, then does the same for
-//! the other leg, so a second `view` process never exists to deflate the
-//! first's reading. Leg order alternates every trial -- trial 0 samples
-//! remote then local, trial 1 local then remote, and so on -- rather than
-//! staying fixed, because whichever leg is spawned second sits idle
-//! through the first leg's entire prepare-and-settle before its own
-//! sampling starts, a positional aging bias a fixed order lets land on the
-//! same leg every trial and that alternating instead spreads across both
-//! legs in opposite trials. Each trial's ratio comes from that trial's own
-//! pair of readings ([`remote_local_ratio`]), and the three reported
+//! [`memory::sample_distribution`], tears it down synchronously
+//! ([`run_one_leg`]), then does the same for the other leg, so a second
+//! `view` process never exists to deflate the first's reading.
+//!
+//! The two legs never overlap, so there is no idle-aging hazard to cancel
+//! -- the leg spawned second is not spawned until the first has been
+//! killed and reaped. What alternation cancels instead is a residual
+//! positional bias: whichever leg samples second in a trial does so later
+//! in wall-clock time than the one sampled first, exposed to whatever
+//! ambient regime drift or leftover page-cache state the first leg's run
+//! and teardown left behind. A fixed order would let that later-position
+//! exposure land on the same leg every trial; alternating -- trial 0
+//! samples remote then local, trial 1 local then remote, and so on --
+//! spreads it across both legs in opposite trials instead. Alternation
+//! only fully cancels across an even number of trials (each leg samples
+//! first in exactly half of them), so [`run_paired`] rounds an odd
+//! `protocol.trials` up by one rather than running it uncancelled or
+//! silently dropping a trial. Each trial's ratio comes from that trial's
+//! own pair of readings ([`remote_local_ratio`]), and the three reported
 //! statistics -- both absolutes and the ratio -- are each the median
 //! across trials of that trial's own value, never a value pooled from
 //! every trial's raw samples (the discipline
-//! `view_bench::scenarios::echo`'s multi-trial outcome also uses).
+//! `view_bench::scenarios::echo`'s multi-trial outcome also uses); the
+//! ratio statistic is a median of per-trial ratios, not the quotient of
+//! the two reported absolute medians, so a reader dividing them back out
+//! will not recover it exactly.
 //!
-//! The +0.6-2% figure above predates this sequential design: it was
-//! recorded while both legs sampled from one shared, concurrent window,
-//! which the paragraph above found deflates absolute readings but --
-//! since both legs are the same binary and so lose pages to co-residency
-//! at close to the same rate -- plausibly left the *ratio* of the two
-//! close to unaffected. That symmetry was never independently verified,
-//! so the figure is carried forward as historical evidence that the ratio
-//! is regime-invariant, not re-derived under [`run_paired`]'s current,
-//! non-co-resident design. What this redesign does establish is that both
-//! recorded absolutes are now comparable to `memory.minimal`'s own
-//! baseline (also a solo, non-co-resident spawn): the prior driver's
-//! co-residency artifact no longer exists to explain any gap between
-//! them.
+//! This costs wall clock the withdrawn concurrent design did not: instead
+//! of two spawns running at once, each trial pays two full
+//! spawn/settle/workload/settle/sample/teardown cycles back to back, so a
+//! run costs `2 x` trial count of that cycle -- 8 sequential cycles at the
+//! CLI's default `trials = 3` (rounded up to 4), against the 2 concurrent
+//! spawns the withdrawn design paid.
+//!
+//! The +1.2% figure above is drawn from `remote_memory.pss_mb`'s
+//! `[headroom]` entry in `baselines/dev-linux.headroom.toml` (recorded
+//! 2026-08-16): an 8-report-plus-1-record replicate campaign put
+//! `remote_memory/minimal`'s 9-draw median PSS at 3.734 MB against
+//! `memory/minimal`'s own 9-draw median of 3.6885 MB, both solo,
+//! non-co-resident spawns under the row's pass-through driver at the
+//! time. That topology is exactly what [`run_paired`]'s sequential legs
+//! now automate one pair at a time, so the figure is directly comparable
+//! to what this driver measures rather than needing a co-residency
+//! caveat.
 //!
 //! The gated CI leg arms that spec against the committed stand-in
 //! `ssh` client ([`view_oracle::remote`]) via [`arm_stub_ssh_path`]: a
@@ -211,7 +228,9 @@ pub struct RemoteLocalOutcome {
     /// Median across trials of each trial's local leg p99, in megabytes.
     pub gated_local_mb: f64,
     /// Median across trials of each trial's ratio -- the row's only gated
-    /// metric.
+    /// metric. A median of per-trial ratios, not the quotient of
+    /// `gated_remote_mb` and `gated_local_mb`: dividing those two back out
+    /// will not in general recover this value.
     pub gated_ratio: f64,
 }
 
@@ -285,13 +304,31 @@ fn run_one_leg(spec: &SpawnSpec, protocol: &Protocol) -> Result<Distribution, Be
     memory::sample_distribution(session, pid, protocol, memory::read_memory_mb)
 }
 
-/// The paired driver: runs `protocol.trials` ABBA-alternating trial pairs
-/// ([`abba_trials`]), each spawning [`RemoteLocalSpecs::remote`] and
-/// [`RemoteLocalSpecs::local`] one at a time ([`run_one_leg`]), and
-/// aggregates every reported statistic as the median across trials. See
-/// this module's doc for why the gated statistic is the ratio rather than
-/// either absolute, and for why no two `view` processes from this driver
-/// are ever alive at once.
+/// Rounds `requested` up to the nearest even number, never down: an odd
+/// request run exactly would leave alternation's positional-bias
+/// cancellation one trial short (see this module's doc), and a caller
+/// asking for `N` trials should never receive fewer.
+fn even_trial_count(requested: usize) -> usize {
+    if requested.is_multiple_of(2) {
+        requested
+    } else {
+        requested + 1
+    }
+}
+
+/// The paired driver: runs `protocol.trials` (rounded up to even --
+/// see below) ABBA-alternating trial pairs ([`abba_trials`]), each
+/// spawning [`RemoteLocalSpecs::remote`] and [`RemoteLocalSpecs::local`]
+/// one at a time ([`run_one_leg`]), and aggregates every reported
+/// statistic as the median across trials. See this module's doc for why
+/// the gated statistic is the ratio rather than either absolute, and for
+/// why no two `view` processes from this driver are ever alive at once.
+///
+/// An odd `protocol.trials` is rounded up by one rather than run exactly:
+/// alternation only fully cancels the positional bias it exists to cancel
+/// (see this module's doc) across an even count, and rounding up never
+/// gives a caller fewer trials than it asked for. `protocol.trials == 0`
+/// is left at 0 (already even), still refused below.
 ///
 /// # Errors
 ///
@@ -318,7 +355,7 @@ pub fn run_paired(
     let ViewSpec(local_spec) = local;
     let ViewSpec(remote_spec) = remote;
     let trials = abba_trials(
-        protocol.trials,
+        even_trial_count(protocol.trials),
         || run_one_leg(remote_spec, protocol),
         || run_one_leg(local_spec, protocol),
     )?;
@@ -406,13 +443,27 @@ mod tests {
         Distribution::from_samples(&[value, value], 0).unwrap()
     }
 
+    /// [`even_trial_count`]'s own contract: an even request passes through
+    /// unchanged, an odd one is rounded up by exactly one, and it never
+    /// rounds down (a rounded-down 3 -> 2 would silently drop a trial the
+    /// caller asked for).
+    #[test]
+    fn even_trial_count_rounds_odd_up_by_one_and_leaves_even_alone() {
+        assert_eq!(even_trial_count(0), 0);
+        assert_eq!(even_trial_count(1), 2);
+        assert_eq!(even_trial_count(2), 2);
+        assert_eq!(even_trial_count(3), 4);
+        assert_eq!(even_trial_count(4), 4);
+    }
+
     /// The falsifiable claim under test: alternating which leg is spawned
     /// first each trial narrows a fixed *positional* bias (whichever leg
-    /// is spawned second sits idle through the first leg's entire
-    /// prepare-and-settle before its own sampling starts, and so reads
-    /// low relative to the other) compared to always spawning the same
-    /// leg first, which lets the bias land on that leg in every trial
-    /// with nothing to offset it.
+    /// samples second in a trial does so later in wall-clock time than the
+    /// one sampled first, exposed to whatever ambient drift or leftover
+    /// state the first leg's run left behind, and so reads low relative to
+    /// the other) compared to always spawning the same leg first, which
+    /// lets the bias land on that leg in every trial with nothing to
+    /// offset it.
     ///
     /// The two runs share one synthetic bias model (a leg read in the
     /// first position of its trial reads 3% low) and differ only in the
@@ -427,8 +478,8 @@ mod tests {
         let position_penalty = 0.97; // the leg spawned first in its trial reads 3% low
 
         // fixed order: remote is always spawned first, so it always eats
-        // the position penalty -- the shape of the WARN-3 hazard this
-        // redesign removes.
+        // the position penalty -- an uncancelled fixed-order position
+        // bias, exactly what alternating leg order exists to prevent.
         let fixed_pairs = abba_trials(
             4,
             || Ok(const_distribution(true_remote * position_penalty)),

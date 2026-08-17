@@ -191,12 +191,13 @@ classes = ["controlled-macos"]
 # better than the ratchet's own headroom sidecar could.
 #
 # The row now bounds remote_local_ratio -- remote-leg absolute divided by
-# local-leg absolute, both drawn from the same interleaved window
-# (`view_bench::scenarios::remote_memory::run_paired`) -- which is the
-# row's actual claim ("view's own local footprint once the engine runs
-# remotely" costs ~nothing over a local engine) and the statistic measured
-# regime-invariant (+0.6-2% across the same regimes that swung the
-# absolutes +/-20%). 1.10 is stated the way the input-path row's original
+# local-leg absolute, each drawn from one trial's own pair of sequential,
+# non-co-resident spawns (`view_bench::scenarios::remote_memory::run_paired`)
+# -- which is the row's actual claim ("view's own local footprint once the
+# engine runs remotely" costs ~nothing over a local engine) and the
+# statistic measured regime-invariant (a +1.2% delta against a host regime
+# swing that moved the absolutes +/-20%; see `remote_memory`'s module doc
+# for the recording). 1.10 is stated the way the input-path row's original
 # 100 us and the echo row's 1.10 ratio bar were: a promise made before a
 # controlled class has measured this cell, not a number computed from a
 # recording -- the defect that made the withdrawn 232 us and cold_ms bars,
@@ -339,11 +340,13 @@ classes = ["controlled-linux"]
 # would erase the only record of the dev-host deficits the user ratified
 # on 2026-08-03 as accepted-and-gated debt -- the acknowledgment survives
 # even though the enforcement it was written for does not yet exist. They
-# become live again the moment a controlled-linux/controlled-macos
-# baseline is recorded for the same scenario/metric/class triple; until a
-# session repoints or retires them the way the four dead [[budget]] rows
-# were repointed, they stay exactly what they are: an honest ledger of
-# debt this project owes, not a bound anything currently checks.
+# do not become live on their own: find_shortfall matches an entry's class
+# field exactly, so a dev-linux entry never matches a controlled-linux run
+# no matter what that class later records. Only editing an entry's class
+# field to name the controlled-* class it should gate on -- the way the
+# four dead [[budget]] rows were repointed -- would revive it; until that
+# edit happens, every entry here stays exactly what it is: an honest
+# ledger of debt this project owes, not a bound anything currently checks.
 
 [[shortfall]]
 scenario = "echo"
