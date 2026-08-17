@@ -467,7 +467,7 @@ mod tests {
     /// replacing.
     #[test]
     fn a_restart_choice_is_deferred_to_the_loop_and_never_ends_the_session() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
         let mut theme = crate::bridge::ThemeBridge::new(None);
@@ -498,7 +498,7 @@ mod tests {
     /// recover from.
     #[test]
     fn a_failed_write_to_an_engine_a_user_quit_ends_the_session_with_its_status() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
@@ -528,7 +528,7 @@ mod tests {
     /// session and hands the connection to supervision.
     #[test]
     fn a_failed_write_to_an_engine_that_died_hands_it_to_supervision() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();
@@ -565,7 +565,7 @@ mod tests {
     /// first one already ran.
     #[test]
     fn a_connection_already_resolved_is_not_resolved_a_second_time() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = Executor::new(&ops);
         let mut native = crate::native::NativeSession::inert();

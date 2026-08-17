@@ -297,7 +297,9 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::SetOption { name, value } => self.ops.set_option(&name, &value),
                     RpcCall::HoldOption { name, value } => self.ops.hold_option(&name, &value),
                     RpcCall::GetDefaultHl { generation } => self.ops.probe_default_hl(generation),
-                    RpcCall::ProbeSwapRecovery => self.ops.probe_swap_recovery(),
+                    RpcCall::ProbeSwapRecovery { generation } => {
+                        self.ops.probe_swap_recovery(generation)
+                    }
                     RpcCall::Redraw => self.ops.redraw(),
                     RpcCall::RegisterMappings { specs, channel_id } => {
                         self.ops.register_mappings(&specs, channel_id)
@@ -770,9 +772,11 @@ impl SupervisionFold {
     /// connection that has actually gone quiet.
     ///
     /// A wedged pass dispatches on every pass rather than only on the
-    /// transition, which is what keeps the banner re-asserted against an
-    /// `msg_clear` that would otherwise take it down while its condition is
-    /// still true.
+    /// transition. What that buys is a banner whose wording tracks its own
+    /// condition -- a reconnect counts attempts, and a wedge that changes
+    /// kind re-words itself -- with no transition table to keep in step. The
+    /// re-assert itself is idempotent: `Messages::clear` retains view's own
+    /// notices, so an engine's `msg_clear` cannot take a live condition down.
     fn note(&mut self, observed: Option<WedgeKind>) -> Option<Msg> {
         if observed.is_none() && self.wedge.is_none() {
             return None;
@@ -1531,130 +1535,11 @@ pub fn run(
 }
 
 #[cfg(test)]
-use view_core::msg::{OptionValue, ReplyToken};
-#[cfg(test)]
-use view_core::native::mappings::MappingSpec;
-#[cfg(test)]
-use view_engine::handle::EngineError;
-
-/// Records every call `Executor::run` makes through [`EngineOps`] instead of
-/// touching a real engine connection, so the executor's effect-to-call
-/// mapping is provable without a live nvim. `pub(crate)` (not confined to
-/// this module's own `mod tests`) so `startup`'s cutover tests can drive the
-/// exact same fake through `runtime::dispatch` without a second, duplicate
-/// implementation.
-#[cfg(test)]
-#[derive(Default)]
-pub(crate) struct FakeOps {
-    pub(crate) calls: std::cell::RefCell<Vec<String>>,
-    pub(crate) fail_next: std::cell::RefCell<bool>,
-}
-
-#[cfg(test)]
-impl FakeOps {
-    fn record(&self, call: String) -> Result<(), EngineError> {
-        self.calls.borrow_mut().push(call);
-        if *self.fail_next.borrow() {
-            Err(EngineError::Closed)
-        } else {
-            Ok(())
-        }
-    }
-}
-
-#[cfg(test)]
-impl EngineOps for FakeOps {
-    fn input(&self, notation: &str) -> Result<(), EngineError> {
-        self.record(format!("input({notation})"))
-    }
-    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
-        self.record(format!("try_resize({width},{height})"))
-    }
-    fn paste(&self, text: &str) -> Result<(), EngineError> {
-        self.record(format!("paste({text})"))
-    }
-    fn input_mouse(
-        &self,
-        button: &str,
-        action: &str,
-        modifier: &str,
-        row: u16,
-        col: u16,
-    ) -> Result<(), EngineError> {
-        self.record(format!(
-            "input_mouse({button},{action},{modifier},{row},{col})"
-        ))
-    }
-    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.record(format!("set_option({name},{value:?})"))
-    }
-    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
-        self.record(format!("hold_option({name},{value:?})"))
-    }
-    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
-        self.record(format!("reply({},{value:?})", token.msgid))
-    }
-    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("probe_default_hl({generation})"))
-    }
-    fn probe_swap_recovery(&self) -> Result<(), EngineError> {
-        self.record("probe_swap_recovery()".to_string())
-    }
-    fn redraw(&self) -> Result<(), EngineError> {
-        self.record("redraw()".to_string())
-    }
-    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
-        let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
-        self.record(format!(
-            "register_mappings({},{channel_id})",
-            keys.join(" ")
-        ))
-    }
-    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
-        self.record(format!("register_bridge({channel_id})"))
-    }
-    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
-        self.record(format!("register_clipboard({channel_id})"))
-    }
-    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("list_buffers({generation})"))
-    }
-    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("preview_buffer({path},{generation})"))
-    }
-    fn open_file(&self, path: &str) -> Result<(), EngineError> {
-        self.record(format!("open_file({path})"))
-    }
-    fn rename_file(
-        &self,
-        old_path: &str,
-        new_path: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        self.record(format!("rename_file({old_path},{new_path},{generation})"))
-    }
-    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("tree_create_prompt({generation})"))
-    }
-    fn tree_rename_prompt(
-        &self,
-        old_path: &str,
-        current_name: &str,
-        generation: u64,
-    ) -> Result<(), EngineError> {
-        self.record(format!(
-            "tree_rename_prompt({old_path},{current_name},{generation})"
-        ))
-    }
-    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.record(format!("tree_delete_confirm({path},{generation})"))
-    }
-}
-
-#[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::engine_ops::FakeOps;
+    use view_core::msg::{OptionValue, ReplyToken};
 
     /// `Messages::visible_lines` returns one span-row per line; these tests
     /// only assert on the text a stall notice carries, so this flattens

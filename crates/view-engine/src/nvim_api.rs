@@ -940,9 +940,10 @@ impl EngineHandle {
     }
 
     /// Reads [`SWAP_RECOVERY_PROBE`] -- what this engine replayed out of a
-    /// swap file while starting, and whether it wrote its own report about
-    /// doing so -- as an async request whose answer crosses back as
-    /// `Msg::SwapRecovered` through the connection's pump.
+    /// swap file while starting, whether it wrote its own report about doing
+    /// so, and the error it raised if the recovery could not be performed --
+    /// as an async request whose answer crosses back as `Msg::SwapRecovered`,
+    /// tagged `generation`, through the connection's pump.
     ///
     /// Async by construction, like [`probe_default_hl`](Self::probe_default_hl):
     /// the caller is the runtime loop and a synchronous `nvim_eval` there
@@ -952,8 +953,12 @@ impl EngineHandle {
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
-    pub fn probe_swap_recovery(&self) -> Result<(), EngineError> {
-        self.request_swap_recovery("nvim_eval", vec![Value::from(SWAP_RECOVERY_PROBE)])
+    pub fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
+        self.request_swap_recovery(
+            "nvim_eval",
+            vec![Value::from(SWAP_RECOVERY_PROBE)],
+            generation,
+        )
     }
 
     /// Sets option `name` to `value` via `nvim_set_option_value(String

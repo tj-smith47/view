@@ -77,6 +77,14 @@ pub enum Msg {
     /// carries a no-op arm for it, mirroring `RedrawReady`/`EngineStopped`'s
     /// contract.
     EngineReady,
+    /// A connection is attached, its pump is running, and view may ask it
+    /// things: the moment the cutover hands the session over to a new engine,
+    /// whether that is the first one or a replacement.
+    ///
+    /// Distinct from [`Msg::EngineReady`], which fires on the attach call
+    /// returning and is consumed before the loop exists. This is folded, so
+    /// the effects it owes are dispatched like any other.
+    EngineAttached,
     EngineDown(ExitInfo),
     EngineRequest(EngineRequest),
     Resized {
@@ -154,21 +162,32 @@ pub enum Msg {
     },
     /// The async answer to one [`RpcCall::ProbeSwapRecovery`]: what this
     /// connection's engine replayed out of a swap file while it was
-    /// starting, and whether it wrote its own report about doing so.
+    /// starting, whether it wrote its own report about doing so, and the
+    /// error it raised if the recovery could not be performed at all.
     ///
     /// `count` is how many buffers came back holding work the file on disk
     /// does not have -- the fact a user is owed a line about. `reported` is
     /// the wider one: nvim writes its multi-line recovery report whenever it
     /// replays a swap, so a recovery that restored nothing changed still
     /// leaves a report over the buffer that only a redraw takes down.
+    /// `failure` is the third case and the one neither of the others can
+    /// express: the recovery was asked for and did not happen, which leaves
+    /// an empty buffer where the user's file should be and an error on
+    /// screen saying why.
     ///
-    /// Both are zero/false for the ordinary session, which is the common case
+    /// All three are empty for the ordinary session, which is the common case
     /// and not an error: a session that met no swap file has nothing to
     /// announce and nothing on its screen to clear. The arm that folds this
     /// is what decides that, so the reading still arrives.
+    ///
+    /// `generation` must match the model's own outstanding swap probe, the
+    /// same stale-reply guard [`Msg::HlProbeReply`] documents: a restart
+    /// hands the replacement engine the sink the dead one wrote into.
     SwapRecovered {
+        generation: u64,
         count: u64,
         reported: bool,
+        failure: Option<String>,
     },
     /// The complete answer to one [`RpcCall::RegisterMappings`]: every
     /// default key the session registered, and whether it landed over a
@@ -899,18 +918,21 @@ pub enum RpcCall {
     GetDefaultHl {
         generation: u64,
     },
-    /// Reads how many swap prompts this engine answered on the user's behalf
-    /// while starting, and answers with the count as [`Msg::SwapRecovered`].
+    /// Reads what this engine recovered on the user's behalf while starting,
+    /// and answers with the reading as [`Msg::SwapRecovered`], tagged with
+    /// `generation`.
     ///
     /// Issued off nvim's own `VimEnter` rather than off the attach that
     /// preceded it: nvim opens the files it was given after config sourcing,
-    /// so the counter is not final until `VimEnter` fires, and a reading
-    /// taken at attach time races the recovery it is asking about.
+    /// so the reading is not final until `VimEnter` fires, and one taken at
+    /// attach time races the recovery it is asking about.
     ///
-    /// Fire-and-forget like every other `RpcCall`: the count crosses back
+    /// Fire-and-forget like every other `RpcCall`: the reading crosses back
     /// through the same dispatch seam other engine-originated traffic uses,
     /// never by blocking the caller that emitted this effect.
-    ProbeSwapRecovery,
+    ProbeSwapRecovery {
+        generation: u64,
+    },
     /// Asks nvim to clear and redraw its screen, which is also how it is
     /// told that the messages it has shown are over.
     ///

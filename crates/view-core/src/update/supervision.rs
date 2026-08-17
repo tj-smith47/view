@@ -1,11 +1,13 @@
-//! The transitions an engine-liveness reading drives: the sticky banner
-//! it raises, and the interrupt/restart modal that reading escalates to.
+//! The transitions an engine-liveness reading drives: the sticky banner it
+//! raises, the interrupt/restart modal that reading escalates to, and what a
+//! replacement engine says about the work it recovered on the way up.
 
 use crate::model::{Model, OverlayKind};
-use crate::msg::Effect;
+use crate::msg::{Effect, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
-    EngineBusyState, ReconnectProgress, SinceStamp, SupervisionChoice, WedgeKind,
+    swap_recovery_failure_notice, swap_recovery_notice, EngineBusyState, ReconnectProgress,
+    SinceStamp, SupervisionChoice, WedgeKind,
 };
 
 /// Folds one supervision reading into the banner and, past the escalation
@@ -169,4 +171,69 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
             }]
         }
     }
+}
+
+/// Folds one connection's swap-recovery reading into what the user is told
+/// and what the screen is asked to do about it.
+///
+/// Three outcomes, and the difference between them is the user's file.
+///
+/// - **Nothing recovered, nothing reported.** The ordinary session. Silent,
+///   and no redraw: a full repaint issued for a startup that went perfectly
+///   discards every reuse the grid's own damage tracking earns.
+/// - **Recovered.** nvim's multi-line report is view's own overlay by now
+///   (`ext_messages` puts no message in the grid), and only nvim can say it
+///   is over -- the `msg_clear` [`RpcCall::Redraw`] answers with is what
+///   takes it off the buffer, leaving the notice, which `Messages::clear`
+///   keeps, as the account of it.
+/// - **Asked for and failed.** The buffer is empty where the file's contents
+///   should be, and the engine's error is the only thing on screen saying
+///   why. view did not put that error there and does not redraw it away:
+///   clearing an error view cannot attribute would leave the user an empty
+///   buffer with no account of itself, one `:w` away from truncating the
+///   file. The notice names the state and carries the error with it.
+///
+/// The failure branch is the one reachable before its connection has
+/// finished starting -- a startup error parks nvim ahead of `VimEnter` -- so
+/// it is deduplicated by the failure itself rather than by the generation:
+/// the second reading of the same connection must not say it twice.
+pub(super) fn note_swap_recovery(
+    model: &mut Model,
+    generation: u64,
+    count: u64,
+    reported: bool,
+    failure: Option<String>,
+) -> Vec<Effect> {
+    // a restart hands the replacement engine's pump the sink the dead one
+    // wrote into, so a reading that crossed before the cutover can arrive
+    // after it, speaking for an engine that is gone -- and one connection is
+    // asked twice, so its earlier answer is superseded by the later question
+    if generation != model.supervision.swap_probe_generation() {
+        return Vec::new();
+    }
+    if let Some(error) = failure {
+        if !model.supervision.note_swap_failure(&error) {
+            return Vec::new();
+        }
+        model.dirty = true;
+        return model
+            .engine
+            .record_native_notice(swap_recovery_failure_notice(&error), false);
+    }
+    if !reported {
+        return Vec::new();
+    }
+    let mut effects = match swap_recovery_notice(count) {
+        Some(notice) => {
+            model.dirty = true;
+            model.engine.record_native_notice(notice, false)
+        }
+        // a recovery that replayed a swap holding nothing the file on disk
+        // did not already have took nothing back, so there is nothing to
+        // tell the user -- but nvim reported it all the same, and that
+        // report is still over their buffer
+        None => Vec::new(),
+    };
+    effects.push(Effect::Rpc(RpcCall::Redraw));
+    effects
 }

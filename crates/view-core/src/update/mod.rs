@@ -1,22 +1,18 @@
 //! The pure state transition: `Msg` in, `Model` mutated, `Effect`s out.
 
-use crate::events::{clamp_dim, saturate_u16, UiEvent};
-use crate::grid::GridOp;
-use crate::hl::HlAttr;
-use crate::model::{
-    CmdlineState, Focus, Model, MouseCapture, OverlayKind, PopupmenuState, TablineState,
-};
+use crate::model::{Focus, Model, MouseCapture, OverlayKind};
 use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
 use crate::native::geometry::{Anchor, OverlayBox};
-use crate::native::prompt::PromptState;
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
 mod supervision;
+mod ui_event;
 
 use supervision::{note_engine_liveness, note_supervision_choice};
+use ui_event::apply_ui_event;
 
 /// Converts a filesystem path to the UTF-8 string an `RpcCall` path field
 /// carries, substituting the replacement character for any byte sequence
@@ -92,6 +88,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // ever starts, so that arm is unreachable in practice but kept for
         // the same defensive-totality reason
         Msg::RedrawReady | Msg::EngineStopped { .. } | Msg::EngineReady => Vec::new(),
+        // asked before this connection can say it has finished starting, and
+        // deliberately: a startup error parks nvim ahead of its own
+        // `VimEnter`, so a chain that waited for that event would never hear
+        // about the recovery that failed. The reading is gated engine-side
+        // and answers "nothing yet" until `VimEnter` has fired
+        Msg::EngineAttached => vec![Effect::Rpc(RpcCall::ProbeSwapRecovery {
+            generation: model.supervision.begin_swap_probe(),
+        })],
         Msg::EngineDown(exit) => {
             model.running = false;
             vec![Effect::Quit {
@@ -109,7 +113,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // This is also the first moment the reading is final -- nvim
             // opens the files it was given, and replays their swap files,
             // before `VimEnter` fires
-            Effect::Rpc(RpcCall::ProbeSwapRecovery),
+            Effect::Rpc(RpcCall::ProbeSwapRecovery {
+                generation: model.supervision.renew_swap_probe(),
+            }),
         ],
         // delegated, not answered here: the worker owns the reply (see
         // Effect::ClipboardRead/ClipboardWrite's docs), so this loop never
@@ -237,32 +243,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             model.engine.record_native_notice(notice, false)
         }
-        Msg::SwapRecovered { count, reported } => {
-            // a session that met no swap file has nothing to say and nothing
-            // on screen to take down, and a redraw issued for it would
-            // discard the grid reuse of a startup that went perfectly
-            if !reported {
-                return Vec::new();
-            }
-            let mut effects = match crate::native::supervision::swap_recovery_notice(count) {
-                Some(notice) => {
-                    model.dirty = true;
-                    model.engine.record_native_notice(notice, false)
-                }
-                // a recovery that replayed a swap holding nothing the file
-                // on disk did not already have took nothing back, so there
-                // is nothing to tell the user -- but nvim reported it all
-                // the same, and that report is still over their buffer
-                None => Vec::new(),
-            };
-            // the report nvim wrote about the recovery is view's own overlay
-            // by now (`ext_messages` puts no message in the grid), and only
-            // nvim can say it is over: the `msg_clear` this redraw answers
-            // with is what takes it off the buffer, leaving the notice above
-            // -- which `Messages::clear` keeps -- as the account of it
-            effects.push(Effect::Rpc(RpcCall::Redraw));
-            effects
-        }
+        Msg::SwapRecovered {
+            generation,
+            count,
+            reported,
+            failure,
+        } => supervision::note_swap_recovery(model, generation, count, reported, failure),
         Msg::MappingsClaimed { claimed } => {
             model.record_claimed_keys(claimed);
             Vec::new()
@@ -1132,282 +1118,6 @@ fn mouse_effect(model: &Model, input: MouseInput) -> Vec<Effect> {
         row: input.row - chrome,
         col: input.col,
     })]
-}
-
-/// Applies one decoded redraw sub-event to `model`, returning any effects
-/// it produces. Only [`UiEvent::TablineUpdate`] can produce one: crossing
-/// the 1-tab chrome-reservation boundary (either direction) changes the
-/// grid target size, which the loop's executor must forward to the engine
-/// as a `TryResize` the same way a terminal resize does.
-fn apply_ui_event(model: &mut Model, ev: UiEvent) -> Vec<Effect> {
-    match ev {
-        UiEvent::GridResize { width, height, .. } => {
-            // clamp untrusted wire dimensions: a desynced or malformed
-            // grid_resize must not allocate unboundedly, and a plain `as
-            // u16` cast would silently truncate 65536 to 0
-            model.engine.apply_grid(GridOp::Resize {
-                width: clamp_dim(width),
-                height: clamp_dim(height),
-            });
-            Vec::new()
-        }
-        UiEvent::GridLine {
-            row,
-            col_start,
-            cells,
-            ..
-        } => {
-            model.engine.apply_grid(GridOp::PutLine {
-                row: saturate_u16(row),
-                col_start: saturate_u16(col_start),
-                cells: cells
-                    .into_iter()
-                    .map(|c| (c.text, c.hl_id, c.repeat))
-                    .collect(),
-            });
-            Vec::new()
-        }
-        UiEvent::GridCursorGoto { row, col, .. } => {
-            model.engine.apply_grid(GridOp::CursorGoto {
-                row: saturate_u16(row),
-                col: saturate_u16(col),
-            });
-            Vec::new()
-        }
-        UiEvent::GridScroll {
-            top,
-            bot,
-            left,
-            right,
-            rows,
-            ..
-        } => {
-            model.engine.apply_grid(GridOp::Scroll {
-                top: saturate_u16(top),
-                bot: saturate_u16(bot),
-                left: saturate_u16(left),
-                right: saturate_u16(right),
-                rows: i32::try_from(rows).unwrap_or(if rows > 0 { i32::MAX } else { i32::MIN }),
-            });
-            Vec::new()
-        }
-        UiEvent::GridClear { .. } => {
-            model.engine.apply_grid(GridOp::Clear);
-            Vec::new()
-        }
-        UiEvent::HlAttrDefine {
-            id,
-            fg,
-            bg,
-            bold,
-            italic,
-            underline,
-            reverse,
-        } => {
-            model.engine.define_hl_attr(
-                id,
-                HlAttr {
-                    fg,
-                    bg,
-                    bold,
-                    italic,
-                    underline,
-                    reverse,
-                },
-            );
-            Vec::new()
-        }
-        UiEvent::DefaultColorsSet { fg, bg, .. } => {
-            // the generation comes back from the write that opened it, so
-            // the emitted probe carries the exact generation these colors
-            // own; a stale reply for an older generation is dropped by the
-            // Msg::HlProbeReply arm above, and Theme::from_hl falls back to
-            // the (possibly still wire-ambiguous) raw values until a
-            // matching reply lands
-            let generation = model.engine.set_hl_default_colors(fg, bg);
-            vec![Effect::Rpc(RpcCall::GetDefaultHl { generation })]
-        }
-        UiEvent::HlGroupSet { name, hl_id } => {
-            model.engine.set_hl_group(name, hl_id);
-            Vec::new()
-        }
-        UiEvent::Flush => {
-            model.dirty = true;
-            // idempotent past the first Flush: see Model::content_painted's
-            // doc comment for why this never resets
-            model.content_painted = true;
-            // records that one full paint cycle has happened, so a
-            // transient toast pushed in this same batch is guaranteed at
-            // least one visible frame before dismiss_transient_on_keypress
-            // can drop it (see Messages::note_flush)
-            model.engine.messages.note_flush();
-            Vec::new()
-        }
-        UiEvent::ModeInfoSet {
-            cursor_style_enabled,
-            modes,
-        } => {
-            model.engine.mode.cursor_style_enabled = cursor_style_enabled;
-            model.engine.mode.modes = modes;
-            Vec::new()
-        }
-        UiEvent::ModeChange { mode, mode_idx } => {
-            model.engine.mode.current = mode;
-            model.engine.mode.current_idx = mode_idx;
-            Vec::new()
-        }
-        UiEvent::CmdlineShow {
-            content,
-            pos,
-            firstc,
-            prompt,
-            indent,
-            level,
-        } => {
-            let cmdline = CmdlineState {
-                content,
-                pos,
-                firstc,
-                prompt,
-                indent,
-                level,
-            };
-            // covers both the prompt's first arrival and every re-arm after
-            // an unmatched key: the two are wire-identical, so re-learning
-            // unconditionally on every CmdlineShow is simpler than trying
-            // to tell them apart
-            if let Some(OverlayKind::Prompt(p)) = model.focused_overlay_mut().map(|ov| &mut ov.kind)
-            {
-                p.learn_cmdline(&cmdline);
-            }
-            model.engine.cmdline = Some(cmdline);
-            Vec::new()
-        }
-        UiEvent::CmdlinePos { pos, level } => {
-            if let Some(cmdline) = &mut model.engine.cmdline {
-                cmdline.pos = pos;
-                cmdline.level = level;
-            }
-            Vec::new()
-        }
-        UiEvent::CmdlineHide => {
-            model.engine.cmdline = None;
-            Vec::new()
-        }
-        UiEvent::MsgShow {
-            kind,
-            content,
-            replace_last,
-        } => {
-            // classification, push, history, and expiry-scheduling all
-            // happen inside record_message -- the wire event owns no copy
-            // of that sequence, only the three fields the choke point needs
-            let effects = model.engine.record_message(kind, content, replace_last);
-            // a confirm-class msg_show while a Prompt overlay is already
-            // open replaces its state wholesale rather than being skipped:
-            // a genuine re-arm of the SAME question (an unmatched key)
-            // never sends a second msg_show at all (see
-            // docs/prompt-overlay-wire-capture.md, section 1), so every
-            // msg_show this branch ever sees while a Prompt overlay is open
-            // names a distinct new question -- routine when nvim's own Lua
-            // resolves one confirm and immediately raises another with no
-            // intervening keystroke, as plugin bootstraps do. Replacing
-            // both the message and the (still-Pending) answer together
-            // keeps them from a prior question's leftovers, so the paired
-            // CmdlineShow that follows learns choices for the same
-            // question this state's message now names.
-            let prompt_state = model
-                .engine
-                .messages
-                .entries
-                .last()
-                .and_then(PromptState::from_entry);
-            if let Some(state) = prompt_state {
-                match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
-                    Some(OverlayKind::Prompt(p)) => *p = state,
-                    _ => {
-                        model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
-                    }
-                }
-            }
-            effects
-        }
-        UiEvent::MsgClear => {
-            model.engine.messages.clear();
-            Vec::new()
-        }
-        UiEvent::MsgShowmode { content } => {
-            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
-            model.engine.statusline.apply(SegmentUpdate::Mode(text));
-            model.dirty = true;
-            Vec::new()
-        }
-        UiEvent::MsgShowcmd { content } => {
-            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
-            model.engine.statusline.apply(SegmentUpdate::Showcmd(text));
-            model.dirty = true;
-            Vec::new()
-        }
-        UiEvent::MsgRuler { content } => {
-            let text: String = content.iter().map(|(_, t)| t.as_str()).collect();
-            model.engine.statusline.apply(SegmentUpdate::Ruler(text));
-            model.dirty = true;
-            Vec::new()
-        }
-        UiEvent::TablineUpdate { current, tabs } => {
-            let before = model.chrome_rows();
-            model.engine.tabline = Some(TablineState { current, tabs });
-            let after = model.chrome_rows();
-            if before == after {
-                Vec::new()
-            } else {
-                let (grid_width, grid_height) = model.grid_target();
-                vec![Effect::Rpc(RpcCall::TryResize {
-                    width: grid_width,
-                    height: grid_height,
-                })]
-            }
-        }
-        UiEvent::PopupmenuShow {
-            items,
-            selected,
-            row,
-            col,
-            grid,
-        } => {
-            model.engine.popupmenu = Some(PopupmenuState {
-                items,
-                selected,
-                row,
-                col,
-                grid,
-            });
-            Vec::new()
-        }
-        UiEvent::PopupmenuSelect { selected } => {
-            if let Some(pm) = &mut model.engine.popupmenu {
-                pm.selected = selected;
-            }
-            Vec::new()
-        }
-        UiEvent::PopupmenuHide => {
-            model.engine.popupmenu = None;
-            Vec::new()
-        }
-        UiEvent::MouseOn => {
-            model.engine.mouse_on = true;
-            Vec::new()
-        }
-        UiEvent::MouseOff => {
-            model.engine.mouse_on = false;
-            Vec::new()
-        }
-        // no cell content and no chrome state: the window's own cells arrive
-        // as `grid_line`, and the only reader of a viewport is
-        // `native::speculate`, which the host folds a batch through before
-        // this applier ever sees it
-        UiEvent::WinViewport { .. } | UiEvent::Unknown { .. } => Vec::new(),
-    }
 }
 
 #[cfg(test)]

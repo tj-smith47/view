@@ -921,12 +921,15 @@ impl Messages {
     /// successive search-match counts share one line); with no prior entry
     /// to replace, it appends instead.
     ///
-    /// "Most recent" means the most recent entry nvim itself produced. A
-    /// raised condition notice (see `set_native_condition`) sits at the
-    /// tail whenever it is up, and nvim's replace targets its own previous
-    /// line: overwriting the notice would both drop a condition that is
-    /// still true and leave the line nvim meant to replace standing as a
-    /// duplicate.
+    /// "Most recent" means the most recent entry nvim itself produced.
+    /// Anything view synthesized locally is skipped over, whether it is a
+    /// raised condition notice (see `set_native_condition`) or a one-shot
+    /// one, because nvim's replace targets nvim's own previous line:
+    /// overwriting a view notice would both drop something nvim never put
+    /// there and leave the line nvim meant to replace standing as a
+    /// duplicate. A one-shot notice reaches the tail as readily as a
+    /// condition does -- `clear` keeps it across an `msg_clear` that empties
+    /// everything around it.
     ///
     /// Crate-private on purpose: this is the raw primitive
     /// [`EngineModel::record_message`] is built from, not an entry point of
@@ -950,7 +953,12 @@ impl Messages {
             id,
         };
         if replace_last {
-            if let Some(last) = self.entries.iter_mut().rev().find(|e| !e.condition) {
+            if let Some(last) = self
+                .entries
+                .iter_mut()
+                .rev()
+                .find(|e| !e.condition && !e.is_native())
+            {
                 *last = entry;
                 return id;
             }

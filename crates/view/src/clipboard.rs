@@ -576,7 +576,10 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn probe_swap_recovery(&self) -> Result<(), view_engine::handle::EngineError> {
+        fn probe_swap_recovery(
+            &self,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
         fn redraw(&self) -> Result<(), view_engine::handle::EngineError> {

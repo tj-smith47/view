@@ -12,7 +12,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::events::UiEvent;
-use crate::model::{OverlayId, OverlayKind};
+use crate::hl::HlAttr;
+use crate::model::{CmdlineState, OverlayId, OverlayKind};
 use crate::msg::{ExitInfo, RegisterType, ReplyToken};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
@@ -1083,7 +1084,7 @@ fn loop_tokens_are_noops_and_engine_request_always_replies() {
             // ordering between the two, is
             // `vim_enter_is_answered_first_and_then_asked_what_it_recovered`'s
             // subject
-            Effect::Rpc(RpcCall::ProbeSwapRecovery),
+            Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
         ]
     ));
 }
@@ -4599,6 +4600,117 @@ fn a_key_the_modal_answers_still_ages_out_a_read_toast() {
     }
 }
 
+/// The swap-probe generation `effects` asks the engine to answer with.
+fn swap_probe_generation(effects: &[Effect]) -> u64 {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Rpc(RpcCall::ProbeSwapRecovery { generation }) => Some(*generation),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("nothing here armed a swap probe: {effects:?}"))
+}
+
+/// Folds one `EngineAttached` -- the cutover's own first act against a fresh
+/// connection -- and answers with the probe generation it armed.
+fn attach_swap_probe(m: &mut Model) -> u64 {
+    let effects = update(m, Msg::EngineAttached);
+    swap_probe_generation(&effects)
+}
+
+/// Folds one `VimEnter` and answers with the probe generation it armed, so a
+/// reading below carries the tag the model is actually waiting on.
+fn arm_swap_probe(m: &mut Model) -> u64 {
+    let effects = update(
+        m,
+        Msg::EngineRequest(EngineRequest::VimEnter {
+            token: ReplyToken { msgid: 7 },
+        }),
+    );
+    swap_probe_generation(&effects)
+}
+
+#[test]
+fn a_connection_is_asked_what_it_recovered_the_moment_it_attaches() {
+    let mut m = model();
+    let effects = update(&mut m, Msg::EngineAttached);
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Rpc(RpcCall::ProbeSwapRecovery { .. })]
+        ),
+        "a connection nobody asks until VimEnter is a connection that never \
+         answers when a startup error parks it first: {effects:?}"
+    );
+}
+
+#[test]
+fn one_connection_says_its_recovery_failed_once_however_often_it_is_asked() {
+    let mut m = model();
+    const E305: &str = "E305: No swap file found for /home/u/notes.md";
+    let attached = attach_swap_probe(&mut m);
+    let first = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation: attached,
+            count: 0,
+            reported: false,
+            failure: Some(E305.to_string()),
+        },
+    );
+    assert!(!first.is_empty(), "the first reading said nothing");
+    let entered = arm_swap_probe(&mut m);
+    let again = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation: entered,
+            count: 0,
+            reported: true,
+            failure: Some(E305.to_string()),
+        },
+    );
+    assert!(
+        again.is_empty(),
+        "the same connection told the user twice about one failure: {again:?}"
+    );
+    let said = visible_texts(&m)
+        .into_iter()
+        .filter(|line| line.contains(E305))
+        .count();
+    assert_eq!(said, 1, "{:?}", visible_texts(&m));
+}
+
+#[test]
+fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
+    let mut m = model();
+    const E305: &str = "E305: No swap file found for /home/u/notes.md";
+    let first = attach_swap_probe(&mut m);
+    let _ = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation: first,
+            count: 0,
+            reported: false,
+            failure: Some(E305.to_string()),
+        },
+    );
+    let second = attach_swap_probe(&mut m);
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation: second,
+            count: 0,
+            reported: false,
+            failure: Some(E305.to_string()),
+        },
+    );
+    assert!(
+        !effects.is_empty(),
+        "a fresh connection's failure went unsaid because the one it \
+         replaced had already failed the same way: {effects:?}"
+    );
+}
+
 #[test]
 fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
     let mut m = model();
@@ -4616,7 +4728,7 @@ fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
                     value: ReplyValue::Nil,
                     ..
                 },
-                Effect::Rpc(RpcCall::ProbeSwapRecovery),
+                Effect::Rpc(RpcCall::ProbeSwapRecovery { .. }),
             ]
         ),
         "a probe queued ahead of the reply waits on the engine that is \
@@ -4625,13 +4737,28 @@ fn vim_enter_is_answered_first_and_then_asked_what_it_recovered() {
 }
 
 #[test]
+fn each_connection_gets_its_own_swap_probe_generation() {
+    let mut m = model();
+    let first = arm_swap_probe(&mut m);
+    let second = arm_swap_probe(&mut m);
+    assert_ne!(
+        first, second,
+        "two engines sharing one probe generation cannot be told apart when \
+         both readings land in the sink they share"
+    );
+}
+
+#[test]
 fn a_session_that_recovered_nothing_neither_speaks_nor_redraws() {
     let mut m = model();
+    let generation = arm_swap_probe(&mut m);
     let effects = update(
         &mut m,
         Msg::SwapRecovered {
+            generation,
             count: 0,
             reported: false,
+            failure: None,
         },
     );
     assert!(effects.is_empty(), "{effects:?}");
@@ -4641,11 +4768,14 @@ fn a_session_that_recovered_nothing_neither_speaks_nor_redraws() {
 #[test]
 fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
     let mut m = model();
+    let generation = arm_swap_probe(&mut m);
     let effects = update(
         &mut m,
         Msg::SwapRecovered {
+            generation,
             count: 1,
             reported: true,
+            failure: None,
         },
     );
     assert!(
@@ -4669,11 +4799,14 @@ fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
 #[test]
 fn a_recovery_that_restored_nothing_still_redraws_and_stays_quiet() {
     let mut m = model();
+    let generation = arm_swap_probe(&mut m);
     let effects = update(
         &mut m,
         Msg::SwapRecovered {
+            generation,
             count: 0,
             reported: true,
+            failure: None,
         },
     );
     assert!(
@@ -4682,6 +4815,90 @@ fn a_recovery_that_restored_nothing_still_redraws_and_stays_quiet() {
          report off their buffer: {effects:?}"
     );
     assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+}
+
+#[test]
+fn a_recovery_that_failed_names_the_error_and_never_redraws_it_away() {
+    let mut m = model();
+    let generation = arm_swap_probe(&mut m);
+    const E305: &str = "E305: No swap file found for /home/u/notes.md";
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation,
+            count: 0,
+            reported: true,
+            failure: Some(E305.to_string()),
+        },
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
+        "view redrew away an error it did not raise, leaving an empty buffer \
+         with nothing on screen to explain it: {effects:?}"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains(E305)),
+        "the failure reached the user without nvim's own account of it: \
+         {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|line| line.contains("swap recovery failed")),
+        "nothing told the user the buffer they are looking at is empty \
+         because a recovery failed: {texts:?}"
+    );
+    assert!(m.dirty, "the failure notice was recorded without a paint");
+}
+
+#[test]
+fn a_reading_from_an_engine_that_has_been_replaced_is_dropped() {
+    let mut m = model();
+    let stale = arm_swap_probe(&mut m);
+    let _current = arm_swap_probe(&mut m);
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation: stale,
+            count: 3,
+            reported: true,
+            failure: None,
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "a dead engine's reading spoke for the session that replaced it: \
+         {effects:?}"
+    );
+    assert!(visible_texts(&m).is_empty(), "{:?}", visible_texts(&m));
+}
+
+#[test]
+fn an_engines_replace_last_cannot_overwrite_a_notice_view_raised() {
+    let mut m = model();
+    let _ = m
+        .engine
+        .record_native_notice("view said this".to_string(), false);
+    m.engine.messages.push(
+        "echomsg".to_string(),
+        vec![(0, "nvim replaced its own line".into())],
+        true,
+    );
+
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line == "view said this"),
+        "nvim's replace overwrote a line it never wrote: {texts:?}"
+    );
+    assert!(
+        texts
+            .iter()
+            .any(|line| line == "nvim replaced its own line"),
+        "{texts:?}"
+    );
 }
 
 #[test]

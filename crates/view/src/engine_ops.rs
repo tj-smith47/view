@@ -38,10 +38,10 @@ pub trait EngineOps {
     /// with `generation`; never blocks, and never itself returns the reply
     /// (see `Msg::HlProbeReply`).
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError>;
-    /// Issues an async read of the swap prompts this engine answered while
-    /// starting; never blocks, and never itself returns the count (see
-    /// `Msg::SwapRecovered`).
-    fn probe_swap_recovery(&self) -> Result<(), EngineError>;
+    /// Issues an async read of what this engine recovered while starting,
+    /// tagged `generation`; never blocks, and never itself returns the
+    /// reading (see `Msg::SwapRecovered`).
+    fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError>;
     /// Asks nvim to repaint from scratch and retract the messages it has
     /// shown (see `RpcCall::Redraw`).
     fn redraw(&self) -> Result<(), EngineError>;
@@ -130,8 +130,8 @@ impl EngineOps for EngineHandle {
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         self.probe_default_hl(generation)
     }
-    fn probe_swap_recovery(&self) -> Result<(), EngineError> {
-        self.probe_swap_recovery()
+    fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
+        self.probe_swap_recovery(generation)
     }
     fn redraw(&self) -> Result<(), EngineError> {
         self.redraw()
@@ -214,8 +214,8 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
         (**self).probe_default_hl(generation)
     }
-    fn probe_swap_recovery(&self) -> Result<(), EngineError> {
-        (**self).probe_swap_recovery()
+    fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_swap_recovery(generation)
     }
     fn redraw(&self) -> Result<(), EngineError> {
         (**self).redraw()
@@ -259,5 +259,119 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).tree_delete_confirm(path, generation)
+    }
+}
+
+/// Records every call `Executor::run` makes through [`EngineOps`] instead of
+/// touching a real engine connection, so the executor's effect-to-call
+/// mapping is provable without a live nvim. `pub(crate)` (not confined to
+/// this module's own `mod tests`) so `startup`'s cutover tests can drive the
+/// exact same fake through `runtime::dispatch` without a second, duplicate
+/// implementation.
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct FakeOps {
+    pub(crate) calls: std::cell::RefCell<Vec<String>>,
+    pub(crate) fail_next: std::cell::RefCell<bool>,
+}
+
+#[cfg(test)]
+impl FakeOps {
+    fn record(&self, call: String) -> Result<(), EngineError> {
+        self.calls.borrow_mut().push(call);
+        if *self.fail_next.borrow() {
+            Err(EngineError::Closed)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+impl EngineOps for FakeOps {
+    fn input(&self, notation: &str) -> Result<(), EngineError> {
+        self.record(format!("input({notation})"))
+    }
+    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        self.record(format!("try_resize({width},{height})"))
+    }
+    fn paste(&self, text: &str) -> Result<(), EngineError> {
+        self.record(format!("paste({text})"))
+    }
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "input_mouse({button},{action},{modifier},{row},{col})"
+        ))
+    }
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.record(format!("set_option({name},{value:?})"))
+    }
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        self.record(format!("hold_option({name},{value:?})"))
+    }
+    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+        self.record(format!("reply({},{value:?})", token.msgid))
+    }
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("probe_default_hl({generation})"))
+    }
+    fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("probe_swap_recovery({generation})"))
+    }
+    fn redraw(&self) -> Result<(), EngineError> {
+        self.record("redraw()".to_string())
+    }
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
+        let keys: Vec<&str> = specs.iter().map(|s| s.lhs).collect();
+        self.record(format!(
+            "register_mappings({},{channel_id})",
+            keys.join(" ")
+        ))
+    }
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.record(format!("register_bridge({channel_id})"))
+    }
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        self.record(format!("register_clipboard({channel_id})"))
+    }
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("list_buffers({generation})"))
+    }
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("preview_buffer({path},{generation})"))
+    }
+    fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        self.record(format!("open_file({path})"))
+    }
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!("rename_file({old_path},{new_path},{generation})"))
+    }
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("tree_create_prompt({generation})"))
+    }
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "tree_rename_prompt({old_path},{current_name},{generation})"
+        ))
+    }
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("tree_delete_confirm({path},{generation})"))
     }
 }

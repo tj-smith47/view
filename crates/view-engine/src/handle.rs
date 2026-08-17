@@ -83,18 +83,18 @@ enum Waiter {
     /// `msgid` either, and its `Response` carries every key the chunk
     /// claimed, routed to `pump` as `Msg::MappingsClaimed`.
     MappingClaims,
-    /// An async read of the swap prompts this engine answered while starting
-    /// (see [`EngineHandle::probe_swap_recovery`]): nothing is blocked on
-    /// this `msgid`, so its `Response` is decoded into a count and routed to
-    /// `pump` as `Msg::SwapRecovered`.
+    /// An async read of what this engine recovered while starting (see
+    /// [`EngineHandle::probe_swap_recovery`]): nothing is blocked on this
+    /// `msgid`, so its `Response` is decoded and routed to `pump` as
+    /// `Msg::SwapRecovered`.
     ///
-    /// Untagged, unlike every generation-carrying waiter beside it. The
-    /// question is asked exactly once per connection, right after that
-    /// connection's own `VimEnter`, so there is no second reading for a
-    /// stale one to clobber -- and a connection that closes drains its
-    /// waiters without answering them, so no reply outlives the engine it
-    /// asked about.
-    SwapRecovery,
+    /// Tagged with `generation` like every async reply beside it, and for the
+    /// same reason: a restart hands the replacement engine's pump the sink
+    /// the dead one wrote into, so a reading that already crossed into that
+    /// sink can be folded after the cutover and speak for an engine that is
+    /// gone. Draining a closed connection's waiters covers the reply that
+    /// never arrives, not the one already in flight.
+    SwapRecovery { generation: u64 },
     /// An async buffer-list enumeration for a picker's `Source::Buffers`
     /// (see [`EngineHandle::request_buffer_list`]): nothing is blocked on
     /// this `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -453,25 +453,28 @@ impl EngineHandle {
                                     pump.route_claims(Msg::MappingsClaimed { claimed });
                                 }
                             }
-                            Some(Waiter::SwapRecovery) => {
+                            Some(Waiter::SwapRecovery { generation }) => {
                                 if let Some(pump) = &reader_pump {
                                     // an error reply degrades to "recovered
-                                    // nothing, reported nothing", the same
-                                    // safe default every decode beside this
-                                    // one takes: the expression is constant,
-                                    // so the only way here is an engine that
-                                    // could not answer at all, and both
-                                    // announcing a recovery and redrawing
-                                    // over a report would be claims about a
+                                    // nothing, reported nothing, failed at
+                                    // nothing", the same safe default every
+                                    // decode beside this one takes: the
+                                    // expression is constant, so the only way
+                                    // here is an engine that could not answer
+                                    // at all, and announcing a recovery,
+                                    // redrawing over a report or naming a
+                                    // failure would each be a claim about a
                                     // session nobody read
-                                    let (count, reported) = if error == Value::Nil {
+                                    let reading = if error == Value::Nil {
                                         decode_swap_recovery_reply(&result)
                                     } else {
-                                        (0, false)
+                                        SwapRecoveryReading::default()
                                     };
                                     pump.route_swap_recovery(Msg::SwapRecovered {
-                                        count,
-                                        reported,
+                                        generation,
+                                        count: reading.count,
+                                        reported: reading.reported,
+                                        failure: reading.failure,
                                     });
                                 }
                             }
@@ -1088,9 +1091,10 @@ impl EngineHandle {
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded into
-    /// a swap-recovery count and routed to the connection's pump as
-    /// `Msg::SwapRecovered` (see [`Waiter::SwapRecovery`]). Async on the same
-    /// terms as [`request_probe`](Self::request_probe).
+    /// a swap-recovery reading and routed to the connection's pump as
+    /// `Msg::SwapRecovered`, tagged with `generation` (see
+    /// [`Waiter::SwapRecovery`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe).
     ///
     /// # Errors
     ///
@@ -1101,8 +1105,9 @@ impl EngineHandle {
         &self,
         method: &str,
         params: Vec<Value>,
+        generation: u64,
     ) -> Result<(), EngineError> {
-        self.request_async(method, params, Waiter::SwapRecovery)
+        self.request_async(method, params, Waiter::SwapRecovery { generation })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -1439,26 +1444,46 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Decodes [`SWAP_RECOVERY_PROBE`]'s two-element answer into the count of
-/// buffers recovered out of a swap file and whether the engine reported a
-/// recovery on screen at all.
-///
-/// A shape this crate has never seen from the pinned engine degrades to
-/// `(0, false)` -- the same "absent or malformed is exactly as informative
-/// as an explicit nothing" precedent [`decode_hl_probe_reply`] follows, and
-/// the conservative direction for both halves: no notice claiming a recovery
-/// that was not read, and no redraw over a report that may not be there.
+/// What one connection answered about the recovery it performed while
+/// starting, as decoded from [`SWAP_RECOVERY_PROBE`].
 ///
 /// [`SWAP_RECOVERY_PROBE`]: crate::process::SWAP_RECOVERY_PROBE
-fn decode_swap_recovery_reply(result: &Value) -> (u64, bool) {
-    let Some(pair) = result.as_array() else {
-        return (0, false);
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct SwapRecoveryReading {
+    /// Buffers that came back holding work the file on disk does not have.
+    count: u64,
+    /// Whether the engine wrote a recovery report on screen at all.
+    reported: bool,
+    /// The engine's own error text when the recovery it was asked for could
+    /// not be performed, `None` when it went through.
+    failure: Option<String>,
+}
+
+/// Decodes [`SWAP_RECOVERY_PROBE`]'s three-element answer.
+///
+/// A shape this crate has never seen from the pinned engine degrades to the
+/// default -- the same "absent or malformed is exactly as informative as an
+/// explicit nothing" precedent [`decode_hl_probe_reply`] follows, and the
+/// conservative direction for all three: no notice claiming a recovery that
+/// was not read, no redraw over a report that may not be there, and no
+/// failure attributed to an engine that did not report one.
+///
+/// [`SWAP_RECOVERY_PROBE`]: crate::process::SWAP_RECOVERY_PROBE
+fn decode_swap_recovery_reply(result: &Value) -> SwapRecoveryReading {
+    let Some(fields) = result.as_array() else {
+        return SwapRecoveryReading::default();
     };
-    let count = pair.first().and_then(Value::as_u64).unwrap_or(0);
-    // vimscript has no boolean type: `||` and a comparison both answer with
-    // the numbers 0 and 1, which is what arrives here
-    let reported = pair.get(1).and_then(Value::as_u64).unwrap_or(0) != 0;
-    (count, reported)
+    SwapRecoveryReading {
+        count: fields.first().and_then(Value::as_u64).unwrap_or(0),
+        // vimscript has no boolean type: `||` and a comparison both answer
+        // with the numbers 0 and 1, which is what arrives here
+        reported: fields.get(1).and_then(Value::as_u64).unwrap_or(0) != 0,
+        failure: fields
+            .get(2)
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned),
+    }
 }
 
 /// Decodes a picker-preview reply's `loaded`/`lines` keys, live-verified

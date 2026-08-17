@@ -750,6 +750,82 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
     );
 }
 
+/// nvim's own error for a recovery it was asked to perform with no swap file
+/// left to read. Pinned engine, so the code is as fixed as any other screen
+/// text asserted here.
+#[cfg(target_os = "linux")]
+const NO_SWAP_TO_RECOVER: &str = "E305";
+
+/// The other half of the recovery chain, and the destructive one: a session
+/// whose engine dies having written no swap file at all.
+///
+/// `-n` is nvim's own switch for that, and it is not exotic -- `set
+/// noswapfile` in a user's config, or an unwritable `'directory'`, reach the
+/// same place, and supervision restarts the first few deaths without asking,
+/// so nobody opts into it. The restart still asks for a recovery, nvim
+/// answers `E305`, and the buffer comes up **empty** where the file's
+/// contents should be: one `:w` from truncating the file.
+///
+/// So the assertions are the inverse of the success path's. The error must
+/// still be on screen -- view neither raised it nor can attribute it, so it
+/// is not view's to redraw away -- and view must say, in its own words, what
+/// state the buffer is in. Nothing is typed here either: this is what the
+/// session paints on its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empty() {
+    let mut session = build_view_pty_with_content(
+        &[std::ffi::OsStr::new("-n")],
+        Some("on disk\n"),
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+    assert!(
+        session.wait_for("on disk", Duration::from_secs(15)),
+        "the session never painted the file it was given; screen:\n{}",
+        session.screen()
+    );
+
+    let view_pid = session.view_pid();
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+    let kill_status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(killed.to_string())
+        .status()
+        .unwrap();
+    assert!(kill_status.success(), "kill -KILL {killed} failed");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut replacement = None;
+    while Instant::now() < deadline && replacement.is_none() {
+        replacement = wait_for_child_pid(view_pid, "nvim", Duration::from_millis(25))
+            .filter(|pid| *pid != killed);
+    }
+    assert!(
+        replacement.is_some(),
+        "view never replaced the engine it lost within 30s; screen:\n{}",
+        session.screen()
+    );
+
+    let notice = view_core::native::supervision::swap_recovery_failure_notice("");
+    let named = notice
+        .split_once(" --")
+        .map(|(said, _)| said.to_string())
+        .unwrap_or(notice);
+    let settled = session.wait_for_screen(Duration::from_secs(30), |screen| {
+        let text = screen.contents();
+        text.contains(NO_SWAP_TO_RECOVER) && text.contains(&named)
+    });
+    assert!(
+        settled,
+        "a recovery that could not happen left the user an empty buffer with \
+         no account of itself -- expected nvim's {NO_SWAP_TO_RECOVER:?} still \
+         standing and view's own {named:?} beside it; screen:\n{}",
+        session.screen()
+    );
+}
+
 /// The restart the other recovery test cannot reach: this one replaces an
 /// engine whose reader thread is *still alive* at the moment of the swap.
 ///

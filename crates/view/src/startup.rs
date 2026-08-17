@@ -627,7 +627,22 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     let mut engine_alive = true;
     let mut engine_stopped_exit = Some(engine_stopped_exit);
 
+    // ahead of everything staged: this is the one point both the first
+    // attach and every replacement pass through, and what it asks the
+    // connection must be asked before that connection can park itself at a
+    // prompt nobody answers (see `SWAP_RECOVERY_PROBE`)
+    match crate::runtime::dispatch(model, executor, follow_ups, Msg::EngineAttached) {
+        crate::runtime::Flow::Continue => {}
+        crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
+        crate::runtime::Flow::EngineLost | crate::runtime::Flow::RestartEngine => {
+            engine_alive = false;
+        }
+    }
+
     for msg in presink {
+        if !engine_alive {
+            break;
+        }
         let msg = match msg {
             Msg::EngineStopped { reason, .. } => {
                 model.fatal_reason = reason;
@@ -943,7 +958,7 @@ mod tests {
             .collect();
 
         let handle = std::thread::spawn(move || {
-            let ops = crate::runtime::FakeOps::default();
+            let ops = crate::engine_ops::FakeOps::default();
             let executor = crate::runtime::Executor::new(ops);
             let mut model = Model::with_term_size(80, 24);
             model.content_painted = false;
@@ -986,15 +1001,17 @@ mod tests {
             content_painted,
             "the pending-damage Flush was not dispatched"
         );
-        // presink's VimEnter reply and the swap-recovery probe it carries,
-        // then the resize, then every buffered key, in that exact order --
-        // the arrival order run_cutover's doc comment claims
-        let expected_len = 3 + KEY_RING_CAPACITY;
+        // the attach probe the cutover opens with, then presink's VimEnter
+        // reply and the second probe that reply carries, then the resize,
+        // then every buffered key, in that exact order -- the arrival order
+        // run_cutover's doc comment claims
+        let expected_len = 4 + KEY_RING_CAPACITY;
         assert_eq!(calls.len(), expected_len);
-        assert_eq!(calls[0], "reply(1,Nil)");
-        assert_eq!(calls[1], "probe_swap_recovery()");
-        assert!(calls[2].starts_with("try_resize("));
-        assert_eq!(calls[3], "input(0)");
+        assert_eq!(calls[0], "probe_swap_recovery(1)");
+        assert_eq!(calls[1], "reply(1,Nil)");
+        assert_eq!(calls[2], "probe_swap_recovery(2)");
+        assert!(calls[3].starts_with("try_resize("));
+        assert_eq!(calls[4], "input(0)");
         assert_eq!(
             calls[expected_len - 1],
             format!("input({})", KEY_RING_CAPACITY - 1)
@@ -1010,7 +1027,7 @@ mod tests {
     /// left to hand them to.
     #[test]
     fn run_cutover_translates_a_presink_engine_stopped_into_quit_and_skips_the_rest() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
         model.content_painted = false;
@@ -1045,9 +1062,13 @@ mod tests {
         assert!(matches!(outcome, CutoverOutcome::Quit(3)));
         assert!(exit_called.get());
         // neither the pending Flush nor the replayed key ever reached
-        // update(): Quit short-circuits everything after it
+        // update(): Quit short-circuits everything after the attach probe
+        // the cutover opens with
         assert!(!model.content_painted);
-        assert!(executor.into_ops().calls.into_inner().is_empty());
+        assert_eq!(
+            executor.into_ops().calls.into_inner(),
+            vec!["probe_swap_recovery(1)"]
+        );
     }
 
     /// A presink `Msg::EngineStopped` carrying a reason stashes it on
@@ -1057,7 +1078,7 @@ mod tests {
     /// never from a direct write inside the reader thread itself.
     #[test]
     fn run_cutover_stashes_a_presink_engine_stopped_reason_on_the_model() {
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
 
@@ -1097,7 +1118,7 @@ mod tests {
     fn run_cutover_stops_replaying_once_a_write_reports_the_engine_lost() {
         use view_core::msg::{EngineRequest, ReplyToken};
 
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         *ops.fail_next.borrow_mut() = true;
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
@@ -1126,10 +1147,11 @@ mod tests {
         );
 
         assert!(matches!(outcome, CutoverOutcome::Continue));
-        // the failed reply is the only call made: pending damage, the
-        // resize, and the key are all skipped once the engine is lost
+        // the failed write is the only call made: the presink reply, pending
+        // damage, the resize and the key are all skipped once the engine is
+        // lost, whichever of the cutover's writes discovered it
         let calls = executor.into_ops().calls.into_inner();
-        assert_eq!(calls, vec!["reply(1,Nil)"]);
+        assert_eq!(calls, vec!["probe_swap_recovery(1)"]);
         assert!(!model.content_painted);
     }
 
@@ -1140,7 +1162,7 @@ mod tests {
     fn a_presink_vim_enter_hands_the_surfaces_over_after_answering_nvim() {
         use view_core::msg::{EngineRequest, ReplyToken};
 
-        let ops = crate::runtime::FakeOps::default();
+        let ops = crate::engine_ops::FakeOps::default();
         let executor = crate::runtime::Executor::new(ops);
         let mut model = Model::with_term_size(80, 24);
         let mut native = crate::native::NativeSession::all_enabled(7, None);
@@ -1169,9 +1191,12 @@ mod tests {
 
         assert!(matches!(outcome, CutoverOutcome::Continue));
         let calls = executor.into_ops().calls.into_inner();
-        assert_eq!(
-            calls.first().map(String::as_str),
-            Some("reply(1,Nil)"),
+        let answered = calls.iter().position(|c| c == "reply(1,Nil)");
+        let took_over = calls
+            .iter()
+            .position(|c| c.starts_with("hold_option(laststatus"));
+        assert!(
+            answered < took_over && answered.is_some(),
             "nvim's blocking request is answered before the takeover it \
              unblocks: {calls:?}"
         );

@@ -501,6 +501,20 @@ pub fn swap_recovery_notice(count: u64) -> Option<String> {
     })
 }
 
+/// What a session says when the recovery it asked its replacement engine for
+/// did not happen, `error` being the engine's own account of why.
+///
+/// The user is owed this one more than they are owed the success line. A
+/// failed `-r` leaves an empty buffer where their file's contents should be,
+/// and the buffer looks like an ordinary empty file: writing it truncates
+/// the file on disk. So this names the state rather than the mechanism, and
+/// carries the engine's error verbatim rather than paraphrasing an error
+/// view did not raise.
+#[must_use]
+pub fn swap_recovery_failure_notice(error: &str) -> String {
+    format!("view: swap recovery failed, this buffer is empty -- {error}")
+}
+
 /// How many times one session recovers a dead engine without asking before
 /// it starts asking.
 ///
@@ -539,6 +553,13 @@ pub struct SupervisionState {
     /// The reconnect sequence the runtime currently has scheduled for this
     /// dead connection, or `None` when it has none.
     reconnect: Option<ReconnectProgress>,
+    /// Which swap-recovery probe this session is still willing to hear back
+    /// from. Bumped per probe, not per connection: a connection is asked
+    /// twice and only the later answer is worth acting on.
+    swap_probe: u64,
+    /// The recovery failure the current connection has already told the user
+    /// about, so being asked twice does not say it twice.
+    swap_failure: Option<String>,
 }
 
 impl Default for SupervisionState {
@@ -551,11 +572,54 @@ impl Default for SupervisionState {
             recovered: 0,
             exit_code: None,
             reconnect: None,
+            swap_probe: 0,
+            swap_failure: None,
         }
     }
 }
 
 impl SupervisionState {
+    /// Claims a probe generation for a connection that has just attached,
+    /// and forgets what the connection before it reported.
+    pub fn begin_swap_probe(&mut self) -> u64 {
+        self.swap_failure = None;
+        self.renew_swap_probe()
+    }
+
+    /// Claims a probe generation for the connection already running, asked
+    /// again now that it has finished starting.
+    ///
+    /// Keeps what it has already reported: this is the same engine being
+    /// asked a second time, not a new one.
+    pub fn renew_swap_probe(&mut self) -> u64 {
+        self.swap_probe = self.swap_probe.wrapping_add(1);
+        self.swap_probe
+    }
+
+    /// The generation a swap-recovery reading must carry to still be worth
+    /// acting on.
+    ///
+    /// Two things go stale here. A restart hands the replacement engine's
+    /// pump the same sink the dead engine wrote into, so a reading produced
+    /// before the cutover can be folded after it; and one connection is
+    /// asked twice, so its earlier answer is superseded the moment the later
+    /// question is put.
+    #[must_use]
+    pub fn swap_probe_generation(&self) -> u64 {
+        self.swap_probe
+    }
+
+    /// Records that the current connection's recovery failed with `error`,
+    /// and answers whether that is news -- `false` once the same failure has
+    /// already been reported for this connection.
+    pub fn note_swap_failure(&mut self, error: &str) -> bool {
+        if self.swap_failure.as_deref() == Some(error) {
+            return false;
+        }
+        self.swap_failure = Some(error.to_string());
+        true
+    }
+
     /// Whether the modal has already been offered for `kind` in the current
     /// episode.
     #[must_use]
