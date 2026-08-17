@@ -635,9 +635,8 @@ impl EngineHandle {
     /// # Ordering: call this BEFORE [`ui_attach`](Self::ui_attach), never
     /// after
     ///
-    /// Live-verified against a real `nvim --clean --embed` (see
-    /// `.superpowers/sdd/p2-task-10-report.md` for the captured transcript):
-    /// registering this autocmd immediately AFTER `ui_attach` returns loses
+    /// Live-verified against a real `nvim --clean --embed`: registering
+    /// this autocmd immediately AFTER `ui_attach` returns loses
     /// the race entirely -- a `--clean` startup's config sourcing and
     /// `VimEnter` dispatch were both already complete (300+ redraw damage
     /// events already staged) by the time the registration request even
@@ -1500,10 +1499,9 @@ mod tests {
     }
 
     /// Pins the exact vimscript shape live-verified against a real `nvim
-    /// --clean --embed` (see `.superpowers/sdd/p2-task-10-report.md`):
-    /// `++once` (self-clearing, never fires twice), plain `rpcrequest` (not
-    /// `rpcnotify` -- the spec mandates blocking here), targeting
-    /// `channel_id` explicitly (nvim has no loopback shorthand).
+    /// --clean --embed`: `++once` (self-clearing, never fires twice), plain
+    /// `rpcrequest` (not `rpcnotify` -- the spec mandates blocking here),
+    /// targeting `channel_id` explicitly (nvim has no loopback shorthand).
     #[test]
     fn register_vim_enter_autocmd_sends_the_exact_verified_vimscript_shape() {
         let (h, cap_rx) = fake_peer_replying_with(Value::Nil);
