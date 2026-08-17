@@ -3755,6 +3755,105 @@ fn a_spent_reconnect_lands_on_the_dead_engine_banner_and_modal() {
     );
 }
 
+/// The restart a user asks for is a question they are owed an answer to. An
+/// attempt that fails leaves the connection exactly as closed as it was, no
+/// keystroke reaches anything, and the modal is the only path to `Quit` --
+/// so a modal that went away with the restart it asked for has to come back
+/// when that restart did not bring an engine.
+///
+/// Driven with automatic recovery switched off, which is the configuration
+/// that reaches this on the very first give-up: the modal is offered before
+/// the sequence is ever armed, so the offer is already spent by the time the
+/// attempts run out.
+#[test]
+fn a_restart_that_did_not_bring_an_engine_back_is_asked_again() {
+    let mut m = attended_model();
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert!(m.engine_busy().is_some(), "the modal opens the episode");
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: RESTART_NOTATION.to_string(),
+        }),
+    );
+    assert!(
+        effects.iter().any(|e| matches!(e, Effect::RestartEngine)),
+        "the modal's Restart must ask for a replacement: {effects:?}"
+    );
+    assert!(m.engine_busy().is_none(), "and take its modal down with it");
+
+    // the sequence that answered it, spent: five attempts made, none of them
+    // reaching an engine
+    assert!(m
+        .supervision
+        .note_reconnect(Some(ReconnectProgress::new(6, 5))));
+    let effects = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+
+    assert!(
+        effects.is_empty(),
+        "a spent sequence must not start another by itself: {effects:?}"
+    );
+    let busy = m.engine_busy().expect(
+        "a user whose restart did not work is left with a dead engine, and must be asked again",
+    );
+    assert_eq!(busy.kind, WedgeKind::Dead);
+    assert_eq!(
+        busy.choices(),
+        vec![SupervisionChoice::Restart, SupervisionChoice::Quit],
+        "and asked with both ways out, since Quit is reachable nowhere else"
+    );
+}
+
+/// The same rule does not reopen a wedge the user put away: a dismissal is
+/// an answer, and re-raising over it would make the annunciator unusable for
+/// the conditions that resolve on their own.
+#[test]
+fn a_dismissed_wedge_stays_dismissed_while_its_condition_runs() {
+    let mut m = model();
+    let elapsed = ENGINE_BUSY_MODAL_THRESHOLD;
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: elapsed,
+        },
+    );
+    assert!(m.engine_busy().is_some(), "the modal opens past the bound");
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".to_string(),
+        }),
+    );
+    assert!(m.engine_busy().is_none(), "and the dismissal closes it");
+
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::ReadSide),
+            observed_for: elapsed + Duration::from_secs(30),
+        },
+    );
+    assert!(
+        m.engine_busy().is_none(),
+        "a wedge the user dismissed must stay dismissed: {:?}",
+        m.overlays()
+    );
+}
+
 /// A session whose engine dies every time it starts is not one automatic
 /// recovery can answer, so the automatic half stops and the modal takes
 /// over.

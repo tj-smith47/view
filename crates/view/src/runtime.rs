@@ -26,7 +26,7 @@
 use crate::bridge::ThemeBridge;
 use crate::native::NativeSession;
 use crate::recovery::{
-    restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
+    reconnects, restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
 };
 use crate::speculate::{
     expire_speculation, note_engine_call, reconcile_speculation, SpeculationClock,
@@ -1537,11 +1537,13 @@ pub fn run(
             // retry would spin the ssh client against a host that is still
             // coming back (see `ReconnectSchedule`)
             reconnect.request(
-                engine.is_remote() && state.connection_lost,
+                reconnects(&engine, state.connection_lost),
                 std::time::Instant::now(),
             );
         }
-        if reconnect.take_due(std::time::Instant::now()) {
+        // the clock behind `armed`, never in front of it: a session with
+        // nothing scheduled -- every pass of a healthy one -- costs the bool
+        if reconnect.armed() && reconnect.take_due(std::time::Instant::now()) {
             match restart_engine(&mut engine, respawn, &model, &channels, &clipboard_route) {
                 Ok(fresh) => {
                     reconnect.clear();
@@ -1676,7 +1678,10 @@ pub fn run(
         // resolved here rather than inside the wait because it is the one
         // deadline read off the model, which the wait does not hold
         let speculation = crate::speculate::next_expiry(&model, follow_ups.speculate);
-        let due = reconnect.poll_deadline(std::time::Instant::now());
+        let due = reconnect
+            .armed()
+            .then(|| reconnect.poll_deadline(std::time::Instant::now()))
+            .flatten();
         #[cfg(unix)]
         let received = wait_for_msg_unified(
             &msg_rx,

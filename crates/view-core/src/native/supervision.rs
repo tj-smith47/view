@@ -231,6 +231,22 @@ impl WedgeKind {
             Self::Dead => vec![SupervisionChoice::Restart, SupervisionChoice::Quit],
         }
     }
+
+    /// Whether the user can put this wedge's modal away and leave the
+    /// condition running, which is what makes a modal offered once and never
+    /// again the right behaviour for it.
+    ///
+    /// False for [`Dead`](Self::Dead), and that is the whole reason this
+    /// exists. A dead-engine modal leaves the screen only by being answered:
+    /// `Quit` ends the session and `Restart` asks for a replacement, so a
+    /// modal that is gone while the connection is still closed means the
+    /// replacement did not arrive. Suppressing the second offer there would
+    /// leave a user holding a dead engine with nothing on screen to act on
+    /// and no keystroke that reaches anything -- an editor with no way out.
+    #[must_use]
+    pub fn dismissible(self) -> bool {
+        self.choices().contains(&SupervisionChoice::Dismiss)
+    }
 }
 
 /// What the user chose on the interrupt/restart modal.

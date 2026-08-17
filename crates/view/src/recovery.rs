@@ -41,6 +41,19 @@ pub(crate) struct LoopState {
     pub(crate) restart_requested: bool,
 }
 
+/// Whether replacing `engine` is a reconnect -- spaced by the backoff and
+/// capped -- or an ordinary restart, which is due the moment it is asked for.
+///
+/// Both halves are load-bearing. A connection that is still open is being
+/// replaced because the user asked, not because it went away, and making
+/// them wait a second for a restart they pressed a key for would be a
+/// regression they can see. A local engine that died has no far side to
+/// become reachable again: its process is gone, the next `spawn` either
+/// works or does not, and spacing the retries would only delay the answer.
+pub(crate) fn reconnects(engine: &Engine, connection_lost: bool) -> bool {
+    engine.is_remote() && connection_lost
+}
+
 /// When the loop's next replacement attempt is due, and how many of a
 /// dropped remote connection's attempts are left.
 ///
@@ -152,6 +165,15 @@ impl ReconnectSchedule {
         self.spent = None;
     }
 
+    /// Whether an attempt is scheduled at all.
+    ///
+    /// Asked before either clock-reading question below it, so the pass that
+    /// has nothing scheduled -- which is every pass of a healthy session --
+    /// answers this one bool and reads no clock at all.
+    pub(crate) fn armed(&self) -> bool {
+        self.due.is_some()
+    }
+
     /// How long the loop may wait before an attempt would be overdue, or
     /// `None` when none is scheduled.
     pub(crate) fn poll_deadline(&self, now: std::time::Instant) -> Option<std::time::Duration> {
@@ -163,7 +185,9 @@ impl ReconnectSchedule {
     pub(crate) fn progress(&self) -> Option<ReconnectProgress> {
         self.spent.map(|spent| {
             ReconnectProgress::new(
-                spent.saturating_add(1).min(self.max_attempts + 1),
+                spent
+                    .saturating_add(1)
+                    .min(self.max_attempts.saturating_add(1)),
                 self.max_attempts,
             )
         })
@@ -256,11 +280,25 @@ pub(crate) struct Restarted {
 ///
 /// # Latency
 ///
-/// This is the one blocking call the loop makes: the teardown is bounded by
-/// the engine's `shutdown_timeout` and the spawn/attach by the handshake
-/// itself. It runs on a transition a user asked for, at most once per engine
-/// death, and never on a steady-state pass -- the same terms the bounded
-/// `wait_exit` teardown already runs on.
+/// This is the one blocking call the loop makes, and the frame it is on is
+/// the one it stalls: the teardown is bounded by the engine's
+/// `shutdown_timeout` and the spawn/attach by its `handshake_timeout`, which
+/// view leaves at its default. Nothing is painted and no keystroke is folded
+/// for as long as it runs, and the banner on screen is frozen at whatever it
+/// last said.
+///
+/// A local engine pays that once per death, on a transition a user asked
+/// for. A dropped remote connection pays it per *attempt*: up to
+/// [`REMOTE_RECONNECT_MAX_ATTEMPTS`] unattended ones, plus one more for each
+/// restart the user picks off the modal afterwards. The worst case is a far
+/// side that accepts the connection and then never completes the handshake,
+/// which spends the whole handshake bound on every one of those attempts
+/// while a connection nobody can type at is already gone. The waits
+/// *between* attempts cost nothing here -- they are a deadline the loop's
+/// own bounded wait reaches ([`ReconnectSchedule`]), and the loop keeps
+/// painting and counting through them.
+///
+/// Neither the steady-state pass nor a healthy session reaches any of this.
 pub(crate) fn restart_engine(
     engine: &mut Engine,
     respawn: &dyn Fn() -> view_engine::EngineConfig,
@@ -728,6 +766,62 @@ mod tests {
             .with_handshake_timeout(std::time::Duration::from_secs(10))
     }
 
+    /// The backoff belongs to a dropped *remote* connection and to nothing
+    /// else, which is a claim about what does NOT wait: a local engine that
+    /// died has no far side to become reachable, and a restart the user
+    /// pressed a key for on a connection that is still open is a second of
+    /// delay they would see.
+    ///
+    /// Both engines are really spawned, because the question is what
+    /// `Engine::is_remote` answers about a session that exists, not what a
+    /// config says it was asked for.
+    #[cfg(unix)]
+    #[test]
+    fn only_a_dropped_remote_connection_waits_before_its_replacement() {
+        let local = Engine::spawn(view_engine::process::EngineConfig::isolated())
+            .expect("a local engine must spawn");
+        assert!(!local.is_remote(), "a local spawn is not a remote session");
+        assert!(
+            !reconnects(&local, true),
+            "a dead local engine is replaced at once: waiting cannot make a process that is \
+             gone come back, and the delay is one the user watches"
+        );
+
+        let remote = Engine::spawn(remote_through("delay-relay")).expect("the stand-in must spawn");
+        assert!(remote.is_remote(), "a spawn through a client is remote");
+        assert!(
+            reconnects(&remote, true),
+            "a dropped remote connection is the one replacement that waits"
+        );
+        assert!(
+            !reconnects(&remote, false),
+            "a restart asked for over a connection that is still open waits for nothing"
+        );
+
+        let mut schedule = ReconnectSchedule::new(
+            TEST_BACKOFF_BASE,
+            view_engine::REMOTE_RECONNECT_MAX_ATTEMPTS,
+        );
+        let now = std::time::Instant::now();
+        schedule.request(false, now);
+        assert!(schedule.armed());
+        assert_eq!(
+            schedule.poll_deadline(now),
+            Some(std::time::Duration::ZERO),
+            "an immediate replacement is owed the moment it is asked for"
+        );
+        assert!(schedule.take_due(now));
+        assert_eq!(
+            schedule.progress(),
+            None,
+            "and no banner counts attempts for a replacement that is not a sequence"
+        );
+        assert!(
+            !schedule.note_failure(now),
+            "its failure is the caller's to report, not the schedule's to absorb"
+        );
+    }
+
     /// The waits a dropped remote connection's attempts are spaced by,
     /// measured off the attempts themselves rather than read back out of the
     /// schedule that computed them.
@@ -930,6 +1024,62 @@ mod tests {
         assert!(
             busy.offers(view_core::native::supervision::SupervisionChoice::Restart),
             "the modal must still offer the one further attempt a user can ask for"
+        );
+
+        // the attempt the user asks for, and the answer they are owed when it
+        // fails too: the connection is exactly as closed as it was, no
+        // keystroke reaches anything, and the modal is the only path to Quit
+        let effects = update(
+            &mut model,
+            Msg::Key(Key {
+                notation: view_core::native::supervision::RESTART_NOTATION.to_string(),
+            }),
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, view_core::msg::Effect::RestartEngine)),
+            "the modal's Restart must ask for the attempt it offers: {effects:?}"
+        );
+        assert!(
+            model.engine_busy().is_none(),
+            "and the modal goes with the attempt it asked for"
+        );
+
+        schedule.request(true, std::time::Instant::now());
+        assert!(
+            schedule.take_due(std::time::Instant::now()),
+            "a user who has already waited out the whole sequence waits no longer"
+        );
+        let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
+        assert!(
+            matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
+            "the client refuses this attempt too"
+        );
+        assert!(schedule.note_failure(std::time::Instant::now()));
+        assert_eq!(schedule.poll_deadline(std::time::Instant::now()), None);
+
+        let _ = model.supervision.note_reconnect(schedule.progress());
+        let effects = update(
+            &mut model,
+            Msg::EngineLiveness {
+                wedge: Some(WedgeKind::Dead),
+                observed_for: std::time::Duration::ZERO,
+            },
+        );
+        assert!(effects.is_empty(), "{effects:?}");
+        let busy = model.engine_busy().expect(
+            "a restart that did not bring an engine back leaves the user with a dead engine, \
+             and it must be asked again rather than swallowed",
+        );
+        assert_eq!(busy.kind, WedgeKind::Dead);
+        assert_eq!(
+            busy.choices(),
+            vec![
+                view_core::native::supervision::SupervisionChoice::Restart,
+                view_core::native::supervision::SupervisionChoice::Quit
+            ],
+            "with both ways out, since Quit is reachable nowhere else"
         );
     }
 

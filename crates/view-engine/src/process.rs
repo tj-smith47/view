@@ -171,8 +171,8 @@ impl RemoteSpec {
     }
 }
 
-/// Backoff applied between successive `Engine::restart()` calls when the
-/// dead engine's config carries a `RemoteSpec`. A local engine restarts
+/// Backoff applied between successive reconnect attempts when the dead
+/// engine's config carries a `RemoteSpec`. A local engine restarts
 /// immediately since a crashed local process is not going to become
 /// reachable by waiting; a remote engine's unreachability is often
 /// transient (network blip, host reboot window), so retrying immediately

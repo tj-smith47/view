@@ -81,8 +81,14 @@ pub(super) fn note_engine_liveness(
         }
         None => {}
     }
+    // the one-offer rule belongs to the wedges a user can put away: it keeps
+    // a dismissed annunciator dismissed. A dead connection has no dismissal,
+    // so a modal that is off screen while the connection is still closed was
+    // answered by a restart that did not bring an engine back, and the same
+    // question is owed again rather than swallowed
+    let answered_already = kind.dismissible() && model.supervision.already_offered(kind);
     if model.engine_busy().is_none()
-        && !model.supervision.already_offered(kind)
+        && !answered_already
         && (kind.escalates_immediately() || since.past_modal_threshold())
     {
         model.supervision.note_offered(kind);

@@ -47,6 +47,8 @@ POLL=0.25
 # without spending the whole doubling ladder to do it.
 REFUSED_ATTEMPTS=1
 
+SESSIONS=()
+ROOTS=()
 SESSION=""
 ROOT=""
 VIEW_PID=""
@@ -55,12 +57,16 @@ CURRENT_LEG=startup
 DUMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/view-reconnect-XXXXXX")
 
 cleanup() {
-    local code=$?
-    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    local code=$? session root
+    for session in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
+        tmux kill-session -t "$session" 2>/dev/null || true
+    done
     # the client owns the far side's editor, and a run that ended between the
     # drop and the recovery would otherwise leave one behind
     pkill -f "view-reconnect-$$" 2>/dev/null || true
-    [ -n "$ROOT" ] && rm -rf "$ROOT"
+    for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
+        [ -n "$root" ] && rm -rf "$root"
+    done
     if [ "$code" -eq 0 ]; then
         rm -rf "$DUMP_DIR"
     else
@@ -100,6 +106,26 @@ const_secs() {
         return 1
     fi
     printf '%s' "$value"
+}
+
+# The `&str` constant `name` holds, read from the file that owns it: the key
+# the modal binds is typed here exactly as the source names it.
+const_str() {
+    local file="$1" name="$2" value
+    value=$(grep -oE "pub const $name: &str = \"[^\"]+\"" "$file" | sed -E 's/.*"(.*)"/\1/')
+    if [ -z "$value" ]; then
+        printf 'FAIL: %s is not a &str constant in %s any more\n' "$name" "$file" >&2
+        return 1
+    fi
+    printf '%s' "$value"
+}
+
+# nvim's own key notation as tmux spells it. The two agree on everything this
+# modal binds once the brackets nvim wraps a named key in are off.
+tmux_key() {
+    local notation="$1"
+    notation=${notation#<}
+    printf '%s' "${notation%>}"
 }
 
 # The value of a plain integer constant, by the same rule.
@@ -212,6 +238,72 @@ assert_edit_accepted() {
     wait_for "$token" 20 "typed text ($token)" >/dev/null || return 1
 }
 
+# A session of view's own against the stand-in client, isolated from
+# whatever this machine's user has configured: a personal init.lua floats
+# errors of its own onto the screen and a personal view.toml can switch off
+# the very affordance under test. Automatic recovery is left at its shipped
+# default, because the reconnect it performs is the subject.
+start_session() {
+    local tag="$1"
+    SESSION="view-reconnect-$$-$tag"
+    ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-reconnect-$tag-XXXXXX")
+    ROOTS+=("$ROOT")
+    cp -R "$FIXTURE" "$ROOT/xdg_config_home"
+    mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_state_home" "$ROOT/xdg_cache_home" "$ROOT/bin"
+    printf 'acceptance seed line\n' >"$ROOT/scratch.txt"
+    # the stand-in client, armed where view looks for the real one. `ssh` by
+    # name and on PATH rather than through a flag, because that is how a
+    # user's own client is found and the lookup is part of what the remote
+    # path does
+    printf '#!/bin/sh\nexec %s "$@"\n' "$FIXTURES/fake-ssh-flaky" >"$ROOT/bin/ssh"
+    chmod +x "$ROOT/bin/ssh"
+    # how many connections the client refuses before it starts working, armed
+    # per leg below: zero here, so the connection the session starts with is
+    # the one that succeeds
+    printf '0\n' >"$ROOT/refusals"
+
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+    SESSIONS+=("$SESSION")
+    tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
+        "env PATH=$ROOT/bin:$PATH \
+             VIEW_STUB_REFUSALS=$ROOT/refusals \
+             VIEW_STUB_INNER=$FIXTURES/delay-relay \
+             VIEW_COMPAT_SOCK=$ROOT/compat.sock \
+             XDG_CONFIG_HOME=$ROOT/xdg_config_home \
+             XDG_DATA_HOME=$ROOT/xdg_data_home \
+             XDG_STATE_HOME=$ROOT/xdg_state_home \
+             XDG_CACHE_HOME=$ROOT/xdg_cache_home \
+             TERM=xterm-256color COLORTERM=truecolor \
+             $VIEW_BIN --remote view-test-host:$ROOT/scratch.txt"
+
+    wait_for 'acceptance seed line' 30 "the remote buffer" >/dev/null || return 1
+    VIEW_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')
+    read_client_pid || return 1
+}
+
+# Waits until the client has refused down to `$1` remaining, which is the
+# race-free proof that the attempts in between actually ran: the countdown
+# is decremented by the client itself, on the far side of view's own spawn,
+# and a modal that opened and closed inside one screen poll leaves no other
+# trace to assert on.
+wait_refusals() {
+    local remaining="$1" budget="$2" start el
+    start=$(now)
+    while [ "$(cat "$ROOT/refusals")" != "$remaining" ]; do
+        el=$(elapsed "$start" "$(now)")
+        if ! in_range "$el" 0 "$budget"; then
+            fail "the client still has $(cat "$ROOT/refusals") refusals left after ${budget}s, not $remaining"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    elapsed "$start" "$(now)"
+}
+
+end_session() {
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
 # Text typed into the buffer and never written to the file, so a later
 # reading of it off the screen can only have come back through the remote
 # editor's own swap file.
@@ -251,12 +343,24 @@ RECONNECT_FMT=$(awk '
     exit 1
 }
 DEAD_NOTICE=$(wedge_arm notice Dead)
+GONE_TITLE=$(wedge_arm title Dead)
+RESTART_NOTATION=$(const_str "$SUPERVISION_RS" RESTART_NOTATION)
+RESTART_KEY=$(tmux_key "$RESTART_NOTATION")
+# the modal's own row for the choice, built the way `SupervisionChoice::label`
+# builds it. The name is a match arm rather than a constant, so it is checked
+# against the source here instead of being read out of it
+RESTART_ROW="[$RESTART_NOTATION] Restart"
+grep -qF -- 'Self::Restart => "Restart"' "$SUPERVISION_RS" || {
+    printf 'FAIL: the modal no longer labels its restart "Restart" in %s\n' "$SUPERVISION_RS" >&2
+    exit 1
+}
 # nvim's own wording for a swap file it replayed. The engine is pinned, so
 # this is as fixed as the constants above, and a reconnect that recovered
 # nothing prints something else.
 SWAP_REPLAYED='Recovery completed'
 FIRST_BANNER=$(banner_for 1)
 SECOND_BANNER=$(banner_for 2)
+LAST_BANNER=$(banner_for "$MAX_ATTEMPTS")
 
 # A dropped connection is resolved off the read side's own EOF rather than by
 # waiting out a heartbeat threshold, so the banner is owed on the pass that
@@ -273,48 +377,28 @@ DROP_MAX=3
 FIRST_WAIT=$BACKOFF_BASE
 SECOND_WAIT=$(times "$BACKOFF_BASE" 2)
 ATTEMPT_SLACK=3
+# The whole doubling ladder: the base, doubled once per attempt, summed over
+# the cap. Computed from the two constants rather than written down, so a
+# retuned backoff moves this with it.
+LADDER_TOTAL=$(awk -v b="$BACKOFF_BASE" -v n="$MAX_ATTEMPTS" 'BEGIN { printf "%.2f", b * (2 ^ n - 1) }')
+LADDER_MIN=$(minus "$LADDER_TOTAL" "$POLL")
+# the last of those waits on its own: the banner counts the attempt it is
+# waiting FOR, so the final count is on screen for one whole doubling before
+# the attempt behind it runs and the sequence gives up
+LAST_WAIT=$(awk -v b="$BACKOFF_BASE" -v n="$MAX_ATTEMPTS" 'BEGIN { printf "%.2f", b * 2 ^ (n - 1) }')
+# every attempt on top of its wait also spends a refused connection, and the
+# give-up is timed from before the drop was even detected
+LADDER_BUDGET=$(plus "$LADDER_TOTAL" 20)
 
 printf 'view acceptance: remote reconnect (%s, %s, %sx%s)\n' \
     "${VIEW_BIN#"$REPO_ROOT/"}" "$(nvim --version | head -1)" "$COLS" "$ROWS"
 
 CURRENT_LEG=remote-session
-SESSION="view-reconnect-$$"
-ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-reconnect-XXXXXX")
-cp -R "$FIXTURE" "$ROOT/xdg_config_home"
-mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_state_home" "$ROOT/xdg_cache_home" "$ROOT/bin"
-# the shipped default recovers a dropped connection without asking, and that
-# recovery is the subject here: a run that switched it off would be asserting
-# the modal instead
-printf 'acceptance seed line\n' >"$ROOT/scratch.txt"
-# the stand-in client, armed where view looks for the real one. `ssh` by
-# name and on PATH rather than through a flag, because that is how a user's
-# own client is found and the lookup is part of what the remote path does
-printf '#!/bin/sh\nexec %s "$@"\n' "$FIXTURES/fake-ssh-flaky" >"$ROOT/bin/ssh"
-chmod +x "$ROOT/bin/ssh"
-# the client is refused this many times before it starts working; armed
-# after the session below is up, so the connection it starts with succeeds
-printf '0\n' >"$ROOT/refusals"
-
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -x "$COLS" -y "$ROWS" \
-    "env PATH=$ROOT/bin:$PATH \
-         VIEW_STUB_REFUSALS=$ROOT/refusals \
-         VIEW_STUB_INNER=$FIXTURES/delay-relay \
-         VIEW_COMPAT_SOCK=$ROOT/compat.sock \
-         XDG_CONFIG_HOME=$ROOT/xdg_config_home \
-         XDG_DATA_HOME=$ROOT/xdg_data_home \
-         XDG_STATE_HOME=$ROOT/xdg_state_home \
-         XDG_CACHE_HOME=$ROOT/xdg_cache_home \
-         TERM=xterm-256color COLORTERM=truecolor \
-         $VIEW_BIN --remote view-test-host:$ROOT/scratch.txt"
-
-wait_for 'acceptance seed line' 30 "the remote buffer" >/dev/null
-VIEW_PID=$(tmux list-panes -t "$SESSION" -F '#{pane_pid}')
-read_client_pid
+start_session drop
 assert_edit_accepted "ALIVE-$$"
 UNSAVED="UNSAVED-$$"
 type_unsaved "$UNSAVED"
-printf '[1/3] %-34s ... %s  OK\n' 'remote session over the client' \
+printf '[1/4] %-34s ... %s  OK\n' 'remote session over the client' \
     "engine alive, edit accepted"
 
 CURRENT_LEG=connection-dropped
@@ -330,7 +414,7 @@ assert_within "$detected" 0 "$DROP_MAX" "the dropped connection"
 if pane | grep -qF -- "$DEAD_NOTICE"; then
     fail "the bare dead-connection notice is on screen while a reconnect is running" || exit 1
 fi
-printf '[2/3] %-34s ... %s  OK\n' 'ssh process killed' \
+printf '[2/4] %-34s ... %s  OK\n' 'ssh process killed' \
     "Dead detected at ${detected}s, banner shows \"$FIRST_BANNER\""
 
 CURRENT_LEG=reconnected
@@ -354,6 +438,48 @@ if grep -qF -- "$UNSAVED" "$ROOT/scratch.txt"; then
     fail "$UNSAVED is in the file on disk, so its return proves a re-read and not a swap recovery" || exit 1
 fi
 assert_edit_accepted "BACK-$$"
-tmux kill-session -t "$SESSION" 2>/dev/null || true
-printf '[3/3] %-34s ... %s  OK\n' 'reconnect after the backoff' \
+end_session
+printf '[3/4] %-34s ... %s  OK\n' 'reconnect after the backoff' \
     "reconnect succeeded on attempt $((REFUSED_ATTEMPTS + 1)) (backoff ${first_gap}s, ${second_gap}s), engine alive, unsaved work rehydrated, edit accepted"
+
+# Every attempt refused, so the sequence runs out and hands the session back
+# to the user -- and then the restart the user picks is refused too. That
+# second failure is the one with nowhere obvious to land: the modal is gone
+# with the restart that asked for it, no keystroke reaches a closed
+# connection, and the modal is the only path to Quit. It has to come back.
+CURRENT_LEG=exhausted
+start_session giveup
+STRANDED="STRANDED-$$"
+type_unsaved "$STRANDED"
+# one past the cap: the whole unattended ladder, then the user's own restart
+printf '%s\n' "$((MAX_ATTEMPTS + 1))" >"$ROOT/refusals"
+giveup_start=$(now)
+kill -9 "$CLIENT_PID"
+wait_for "$LAST_BANNER" "$LADDER_BUDGET" "the last reconnect banner" >/dev/null
+wait_for "$GONE_TITLE" "$(plus "$LAST_WAIT" "$ATTEMPT_SLACK")" \
+    "the dead-engine modal the give-up hands back" >/dev/null
+gave_up=$(elapsed "$giveup_start" "$(now)")
+assert_within "$gave_up" "$LADDER_MIN" "$LADDER_BUDGET" "the whole doubling ladder"
+wait_refusals 1 "$ATTEMPT_SLACK" >/dev/null
+# the restart the user picks off that modal, refused like the rest: the
+# countdown reaching zero is the proof the attempt really ran
+tmux send-keys -t "$SESSION" "$RESTART_KEY"
+wait_refusals 0 20 >/dev/null
+wait_for "$GONE_TITLE" 20 "the dead-engine modal after the failed restart" >/dev/null
+pane | grep -qF -- "$RESTART_ROW" ||
+    fail "the modal is back without the restart it must still offer" || exit 1
+# and the same modal still recovers the session once the far side is
+# reachable again, so nothing about the give-up is a dead end
+tmux send-keys -t "$SESSION" "$RESTART_KEY"
+wait_gone "$GONE_TITLE" 30 "the dead-engine modal" >/dev/null
+wait_for "$SWAP_REPLAYED" 30 "the swap-recovery report" >/dev/null
+tmux send-keys -t "$SESSION" C-l
+wait_gone "$SWAP_REPLAYED" 15 "the swap-recovery report" >/dev/null
+wait_for "$STRANDED" 30 "the unsaved text after the manual restart" >/dev/null
+if grep -qF -- "$STRANDED" "$ROOT/scratch.txt"; then
+    fail "$STRANDED is in the file on disk, so its return proves a re-read and not a swap recovery" || exit 1
+fi
+assert_edit_accepted "RETRY-$$"
+end_session
+printf '[4/4] %-34s ... %s  OK\n' 'every attempt refused' \
+    "gave up after $MAX_ATTEMPTS attempts in ${gave_up}s, modal offered, failed manual restart re-offers it, next one recovers the session and its unsaved work"
