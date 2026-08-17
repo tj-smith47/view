@@ -15,27 +15,62 @@
 //! day's regime breaches on the next day's, with nothing about view having
 //! changed. The row's actual claim survives that noise: view's own local
 //! footprint with a remote engine, divided by its footprint with a local
-//! one, drawn from the same interleaved window, stayed inside +0.6-2%
-//! across regimes that moved the absolutes +/-20% (2026-08-17 ruling). So
+//! one, held inside +0.6-2% across regimes that moved the absolutes
+//! +/-20% (a figure recorded before this module's sequential redesign --
+//! see "One leg at a time" below for its exact provenance). So
 //! [`run_paired`] gates [`RATIO_METRIC`] -- the remote/local ratio -- and
 //! records both absolutes for reference, record-only on a shared class the
 //! same way a tail statistic already is (see
 //! `view_harness::baselines::gate_headroom`).
 //!
-//! # Two legs, one driver
+//! # One leg at a time
 //!
 //! [`run`] is a pass-through to [`memory::run`] -- the same workload
 //! ([`memory::workload_files`], [`memory::workload_content`]), the same
 //! settle/sample loop, the same own-process reader. It exists for the
 //! opt-in real-SSH connectivity test at the bottom of this module, which
 //! needs to prove a reading is obtainable at all, not to compare it against
-//! anything. The gated row's driver is [`run_paired`], which prepares both
-//! a local and a remote session and reads them alternately: the only thing
-//! that can differ between either leg is which [`SpawnSpec`] the caller
-//! built, which is exactly the property the falsifiable check needs -- two
-//! drivers sampling the same workload the same way would drift the moment
-//! one changed and the other did not, while one function measured through
-//! two specs cannot.
+//! anything.
+//!
+//! The gated row's driver is [`run_paired`], which never has two `view`
+//! processes alive at once. A settled process's PSS/`phys_footprint`
+//! reading is proportional to how many processes map each of its pages:
+//! two co-resident `view` siblings share the same text and rodata, so
+//! keeping both alive through one shared sampling window -- this row's
+//! design before this revision -- deflates both legs' readings below what
+//! either reads alone, an artifact this crate's own oracle battery
+//! measured at -8.0% for a co-resident sibling against +0.8% for the same
+//! process measured twice alone. [`run_paired`] instead runs
+//! `protocol.trials` ABBA-alternating trial pairs ([`abba_trials`]): each
+//! trial spawns one leg through [`memory::prepare_workload_session`] and
+//! [`memory::sample_distribution`], tears it down, then does the same for
+//! the other leg, so a second `view` process never exists to deflate the
+//! first's reading. Leg order alternates every trial -- trial 0 samples
+//! remote then local, trial 1 local then remote, and so on -- rather than
+//! staying fixed, because whichever leg is spawned second sits idle
+//! through the first leg's entire prepare-and-settle before its own
+//! sampling starts, a positional aging bias a fixed order lets land on the
+//! same leg every trial and that alternating instead spreads across both
+//! legs in opposite trials. Each trial's ratio comes from that trial's own
+//! pair of readings ([`remote_local_ratio`]), and the three reported
+//! statistics -- both absolutes and the ratio -- are each the median
+//! across trials of that trial's own value, never a value pooled from
+//! every trial's raw samples (the discipline
+//! `view_bench::scenarios::echo`'s multi-trial outcome also uses).
+//!
+//! The +0.6-2% figure above predates this sequential design: it was
+//! recorded while both legs sampled from one shared, concurrent window,
+//! which the paragraph above found deflates absolute readings but --
+//! since both legs are the same binary and so lose pages to co-residency
+//! at close to the same rate -- plausibly left the *ratio* of the two
+//! close to unaffected. That symmetry was never independently verified,
+//! so the figure is carried forward as historical evidence that the ratio
+//! is regime-invariant, not re-derived under [`run_paired`]'s current,
+//! non-co-resident design. What this redesign does establish is that both
+//! recorded absolutes are now comparable to `memory.minimal`'s own
+//! baseline (also a solo, non-co-resident spawn): the prior driver's
+//! co-residency artifact no longer exists to explain any gap between
+//! them.
 //!
 //! The gated CI leg arms that spec against the committed stand-in
 //! `ssh` client ([`view_oracle::remote`]) via [`arm_stub_ssh_path`]: a
@@ -64,12 +99,11 @@
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
-use std::time::{Duration, Instant};
 
-use crate::sampling::{interleave_schedule, Distribution, Side};
+use crate::sampling::{median_of_trials, Distribution};
 use crate::scenarios::memory::{self, MemoryOutcome};
 use crate::scenarios::Protocol;
-use crate::session::ViewSpec;
+use crate::session::{SpawnSpec, ViewSpec};
 use crate::BenchError;
 
 /// The destination `--remote` is given for the CI leg: parsed and dropped
@@ -108,9 +142,10 @@ pub fn run(view_spec: ViewSpec<'_>, protocol: &Protocol) -> Result<MemoryOutcome
 
 /// The local leg's metric name: [`memory::METRIC`] prefixed, so a reader of
 /// `[remote_memory.*]` in a baseline file can never mistake this row's
-/// local-leg reading -- drawn from the same interleaved window as the
-/// remote one, for the paired ratio below -- for `memory.minimal`'s own,
-/// separately-spawned reading of the same platform quantity.
+/// local-leg reading -- paired against the remote leg's for the ratio
+/// below, though never co-resident with it (see this module's doc) -- for
+/// `memory.minimal`'s own, separately-spawned reading of the same
+/// platform quantity.
 pub const LOCAL_METRIC: Option<&str> = if cfg!(target_os = "linux") {
     Some("local_pss_mb")
 } else if cfg!(target_os = "macos") {
@@ -120,107 +155,152 @@ pub const LOCAL_METRIC: Option<&str> = if cfg!(target_os = "linux") {
 };
 
 /// The gated metric: the remote leg's absolute divided by the local leg's,
-/// both drawn from the same interleaved window -- the row's actual claim
-/// (see this module's doc) and the only metric it gates.
+/// both drawn from the same trial -- the row's actual claim (see this
+/// module's doc) and the only metric it gates.
 ///
 /// Named with neither a `p99` component nor a `delta` substring on
 /// purpose: `view_harness::baselines::gate_headroom` exempts a tail
 /// statistic (a name with a `p99` component) from gating on a shared
-/// class, which is exactly backwards for this metric -- the ruling this
-/// row implements found the ratio regime-invariant where the absolutes are
-/// not, so it must gate everywhere, not become exempt by an accident of
-/// spelling. A `delta` substring would instead route it through
-/// `Headroom::Signed`, whose floor (`SIGNED_DELTA_FLOOR_MS`) is in
+/// class, which is exactly backwards for this metric -- the historical
+/// evidence this row relies on found the ratio regime-invariant where the
+/// absolutes are not, so it must gate everywhere, not become exempt by an
+/// accident of spelling. A `delta` substring would instead route it
+/// through `Headroom::Signed`, whose floor (`SIGNED_DELTA_FLOOR_MS`) is in
 /// milliseconds and wrong for a dimensionless ratio; `contains("ratio")`
 /// is the correct branch and this name earns it honestly.
 pub const RATIO_METRIC: &str = "remote_local_ratio";
 
-/// One paired remote-vs-local reading: both legs' absolutes (record-only
-/// on a shared class -- see this module's doc) and the ratio between them
-/// (gated everywhere).
+/// The two legs of a paired remote-vs-local comparison, named rather than
+/// positional. Two identically typed [`ViewSpec`] parameters at a call
+/// site can be transposed with nothing at the type checker to catch it,
+/// and a transposed pair here would report the local leg's reading under
+/// the remote metric and vice versa with no error anywhere in the chain.
+/// Naming the fields makes that mistake unrepresentable: the caller must
+/// write `local:`/`remote:` at the construction site, so a transposition
+/// is a visibly wrong field name instead of a silently swapped positional
+/// argument.
+pub struct RemoteLocalSpecs<'a> {
+    pub local: ViewSpec<'a>,
+    pub remote: ViewSpec<'a>,
+}
+
+/// One ABBA trial's pair of readings: the remote leg's distribution, the
+/// local leg's, and the ratio between them ([`remote_local_ratio`]),
+/// computed while both are still in scope so a later change cannot pair
+/// one trial's remote reading against a different trial's local one.
 #[derive(Debug)]
-pub struct RemoteLocalOutcome {
-    pub remote_distribution: Distribution,
-    pub remote_metric: &'static str,
-    /// p99 of the remote leg's post-workload reads, in megabytes.
-    pub remote_mb: f64,
-    pub local_distribution: Distribution,
-    pub local_metric: &'static str,
-    /// p99 of the local leg's post-workload reads, in megabytes.
-    pub local_mb: f64,
-    /// The gated statistic: `remote.p50() / local.p50()`. A median, not a
-    /// p99 ratio, for the same reason `ratio_p50` (not `ratio_p99`) is the
-    /// echo row's regime-invariant statistic: a tail is set by whichever
-    /// sample a scheduler preemption landed on, while the bulk of the
-    /// distribution is not, and this ratio must stay meaningful on a
-    /// shared class where p99 tails are exempt from gating.
+pub struct RemoteTrial {
+    pub remote: Distribution,
+    pub local: Distribution,
+    /// `remote.p50() / local.p50()`, this trial's own contribution to
+    /// [`RemoteLocalOutcome::gated_ratio`].
     pub ratio: f64,
 }
 
-/// The gated ratio from two full-window distributions: `remote.p50() /
-/// local.p50()`. Split out from [`run_paired`] so the falsifiable claim
-/// under test -- that only a same-window pairing recovers the row's actual
-/// relationship, and a stale one does not -- can be exercised in this
-/// module's tests without a live pair of spawned sessions.
+/// A full paired remote-vs-local run: every trial's own pair
+/// ([`RemoteTrial`]), plus the row's three reported statistics, each the
+/// median across trials of that trial's own value (see this module's
+/// doc).
+#[derive(Debug)]
+pub struct RemoteLocalOutcome {
+    pub remote_metric: &'static str,
+    pub local_metric: &'static str,
+    pub trials: Vec<RemoteTrial>,
+    /// Median across trials of each trial's remote leg p99, in megabytes.
+    pub gated_remote_mb: f64,
+    /// Median across trials of each trial's local leg p99, in megabytes.
+    pub gated_local_mb: f64,
+    /// Median across trials of each trial's ratio -- the row's only gated
+    /// metric.
+    pub gated_ratio: f64,
+}
+
+/// The ratio from one trial's two full distributions: `remote.p50() /
+/// local.p50()`. A median, not a p99 ratio, for the same reason
+/// `ratio_p50` (not `ratio_p99`) is the echo row's regime-invariant
+/// statistic: a tail is set by whichever sample a scheduler preemption
+/// landed on, while the bulk of the distribution is not, and this ratio
+/// must stay meaningful on a shared class where p99 tails are exempt from
+/// gating.
+///
+/// Split out from [`abba_trials`] so the falsifiable claim under test --
+/// that a trial's ratio comes from that trial's own pair of readings, not
+/// a neighboring trial's -- can be exercised in this module's tests
+/// without a live pair of spawned sessions.
 fn remote_local_ratio(remote: &Distribution, local: &Distribution) -> f64 {
     remote.p50() / local.p50()
 }
 
-/// Alternately samples the remote and local legs `total` times each,
-/// `block` at a time starting with the remote leg -- the same
-/// per-sample-alternation discipline `view_bench::pairing` uses for the
-/// view/nvim pairing (`crate::sampling::interleave_schedule`), reused here
-/// for remote/local so a run-wide drift (host load moving between the
-/// first and the last sample) lands on both legs' distributions instead of
-/// accumulating on whichever leg happened to sample later.
+/// Runs `trials` ABBA-alternating trial pairs: trial 0 samples the remote
+/// leg then the local one, trial 1 samples local then remote, and so on.
+/// `remote_leg`/`local_leg` never run concurrently -- each is called to
+/// completion before the other starts -- so this function only decides
+/// their *order*, never their overlap; see this module's doc for why that
+/// ordering matters and what alternating it buys over a fixed order.
 ///
-/// [`Side::View`] is read as "the remote leg" and [`Side::Nvim`] as "the
-/// local leg" here -- not a view/nvim pairing at all, since both legs
-/// spawn `view` -- because the alternative was a third two-variant enum
-/// whose only job would be to alternate, which `Side` already does; the
-/// mapping is documented at every call site rather than left implicit.
-///
-/// Generic over the two readers so the interleaving itself -- the property
-/// this module's tests break on purpose -- is exercised without a live
-/// pair of spawned sessions.
+/// Generic over the two legs' runners so the ordering discipline -- the
+/// property this module's tests break on purpose -- is exercised without
+/// a live pair of spawned sessions.
 ///
 /// # Errors
 ///
-/// Whatever the readers return.
-fn interleaved_readings(
-    total: usize,
-    block: usize,
-    mut remote_reader: impl FnMut() -> Result<f64, BenchError>,
-    mut local_reader: impl FnMut() -> Result<f64, BenchError>,
-) -> Result<(Vec<f64>, Vec<f64>), BenchError> {
-    let mut remote_raw = Vec::with_capacity(total);
-    let mut local_raw = Vec::with_capacity(total);
-    for block in interleave_schedule(total, block.max(1), Side::View) {
-        for _ in 0..block.count {
-            match block.side {
-                Side::View => remote_raw.push(remote_reader()?),
-                Side::Nvim => local_raw.push(local_reader()?),
-            }
-        }
+/// Whatever `remote_leg`/`local_leg` return.
+fn abba_trials(
+    trials: usize,
+    mut remote_leg: impl FnMut() -> Result<Distribution, BenchError>,
+    mut local_leg: impl FnMut() -> Result<Distribution, BenchError>,
+) -> Result<Vec<RemoteTrial>, BenchError> {
+    let mut pairs = Vec::with_capacity(trials);
+    for trial in 0..trials {
+        let (remote, local) = if trial.is_multiple_of(2) {
+            let remote = remote_leg()?;
+            let local = local_leg()?;
+            (remote, local)
+        } else {
+            let local = local_leg()?;
+            let remote = remote_leg()?;
+            (remote, local)
+        };
+        let ratio = remote_local_ratio(&remote, &local);
+        pairs.push(RemoteTrial {
+            remote,
+            local,
+            ratio,
+        });
     }
-    Ok((remote_raw, local_raw))
+    Ok(pairs)
 }
 
-/// The paired driver: prepares a local session and a remote one through
-/// the identical spawn/workload/settle sequence
-/// ([`memory::prepare_workload_session`]), then alternately samples both
-/// (see [`interleaved_readings`]) `protocol.warmup + protocol.samples`
-/// times each. See this module's doc for why the gated statistic is the
-/// ratio rather than either absolute.
+/// One leg of one trial, start to finish: spawn `spec` through
+/// [`memory::prepare_workload_session`], sample it through
+/// [`memory::sample_distribution`], and tear it down -- with no other
+/// `view` process alive while any of that happens.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] if the session never settles, the pid is
+/// unavailable, or the reading cannot be taken.
+fn run_one_leg(spec: &SpawnSpec, protocol: &Protocol) -> Result<Distribution, BenchError> {
+    let (session, pid) = memory::prepare_workload_session(spec)?;
+    memory::sample_distribution(session, pid, protocol, memory::read_memory_mb)
+}
+
+/// The paired driver: runs `protocol.trials` ABBA-alternating trial pairs
+/// ([`abba_trials`]), each spawning [`RemoteLocalSpecs::remote`] and
+/// [`RemoteLocalSpecs::local`] one at a time ([`run_one_leg`]), and
+/// aggregates every reported statistic as the median across trials. See
+/// this module's doc for why the gated statistic is the ratio rather than
+/// either absolute, and for why no two `view` processes from this driver
+/// are ever alive at once.
 ///
 /// # Errors
 ///
 /// Returns [`BenchError::Desync`] if the platform defines no memory
-/// metric, either session never settles, either pid is unavailable, or
-/// either leg's reading cannot be taken.
+/// metric, a session never settles, a pid is unavailable, or a leg's
+/// reading cannot be taken, and [`BenchError::NoTrials`] if no trial was
+/// asked for.
 pub fn run_paired(
-    local_spec: ViewSpec<'_>,
-    remote_spec: ViewSpec<'_>,
+    specs: RemoteLocalSpecs<'_>,
     protocol: &Protocol,
 ) -> Result<RemoteLocalOutcome, BenchError> {
     let Some(remote_metric) = memory::METRIC else {
@@ -234,52 +314,29 @@ pub fn run_paired(
         });
     };
 
-    let ViewSpec(local) = local_spec;
-    let ViewSpec(remote) = remote_spec;
-    let (mut remote_session, remote_pid) = memory::prepare_workload_session(remote)?;
-    let (mut local_session, local_pid) = memory::prepare_workload_session(local)?;
-
-    let total = protocol.warmup + protocol.samples;
-    let pace = Duration::from_millis(2);
-    let (remote_raw, local_raw) = interleaved_readings(
-        total,
-        protocol.block,
-        || {
-            let value =
-                memory::sample_reading(&mut remote_session, remote_pid, memory::read_memory_mb);
-            let next = Instant::now() + pace;
-            while Instant::now() < next {
-                std::thread::yield_now();
-            }
-            value
-        },
-        || {
-            let value =
-                memory::sample_reading(&mut local_session, local_pid, memory::read_memory_mb);
-            let next = Instant::now() + pace;
-            while Instant::now() < next {
-                std::thread::yield_now();
-            }
-            value
-        },
+    let RemoteLocalSpecs { local, remote } = specs;
+    let ViewSpec(local_spec) = local;
+    let ViewSpec(remote_spec) = remote;
+    let trials = abba_trials(
+        protocol.trials,
+        || run_one_leg(remote_spec, protocol),
+        || run_one_leg(local_spec, protocol),
     )?;
-    remote_session.shutdown();
-    local_session.shutdown();
 
-    let remote_distribution = Distribution::from_samples(&remote_raw, protocol.warmup)?;
-    let local_distribution = Distribution::from_samples(&local_raw, protocol.warmup)?;
-    let ratio = remote_local_ratio(&remote_distribution, &local_distribution);
-    let remote_mb = remote_distribution.p99();
-    let local_mb = local_distribution.p99();
+    let remote_p99s: Vec<f64> = trials.iter().map(|trial| trial.remote.p99()).collect();
+    let local_p99s: Vec<f64> = trials.iter().map(|trial| trial.local.p99()).collect();
+    let ratios: Vec<f64> = trials.iter().map(|trial| trial.ratio).collect();
+    let gated_remote_mb = median_of_trials(&remote_p99s)?;
+    let gated_local_mb = median_of_trials(&local_p99s)?;
+    let gated_ratio = median_of_trials(&ratios)?;
 
     Ok(RemoteLocalOutcome {
-        remote_distribution,
         remote_metric,
-        remote_mb,
-        local_distribution,
         local_metric,
-        local_mb,
-        ratio,
+        trials,
+        gated_remote_mb,
+        gated_local_mb,
+        gated_ratio,
     })
 }
 
@@ -339,79 +396,155 @@ pub fn arm_stub_ssh_path(dir: &Path, existing: Option<&OsStr>) -> Result<OsStrin
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::session::SpawnSpec;
     use std::path::PathBuf;
     use view_test_support::ScratchDir;
 
-    /// The falsifiable claim under test: only a same-window pairing (both
-    /// legs read at the same interleaved instant) recovers the row's
-    /// actual remote-vs-local relationship under a host regime that drifts
-    /// both legs' absolutes together, the way the ruling's own citation
-    /// describes (+/-20% PSS swing across days, +0.6-2% paired ratio
-    /// across the same regimes). A stale local draw -- compared against a
-    /// remote reading from later in the drift instead of one taken
-    /// alongside it -- must not recover it.
-    #[test]
-    fn interleaved_reads_recover_the_fixed_ratio_under_shared_drift_but_a_stale_pairing_does_not() {
-        let total = 200;
-        let local_base = 100.0;
-        let remote_base = local_base * 1.012;
-        // drifts 20% peak-to-trough across the run, centered on 1.0 --
-        // the shared regime shift itself, applied identically to both legs
-        let regime = |i: usize| 1.0 + 0.20 * (i as f64 / total as f64 - 0.5);
+    /// A trivial fixed-value distribution, for tests that only care about
+    /// the value [`Distribution::p50`]/[`Distribution::p99`] read back, not
+    /// about a real sample spread.
+    fn const_distribution(value: f64) -> Distribution {
+        Distribution::from_samples(&[value, value], 0).unwrap()
+    }
 
-        let mut remote_i = 0usize;
-        let mut local_i = 0usize;
-        let (remote_raw, local_raw) = interleaved_readings(
-            total,
-            1,
+    /// The falsifiable claim under test: alternating which leg is spawned
+    /// first each trial narrows a fixed *positional* bias (whichever leg
+    /// is spawned second sits idle through the first leg's entire
+    /// prepare-and-settle before its own sampling starts, and so reads
+    /// low relative to the other) compared to always spawning the same
+    /// leg first, which lets the bias land on that leg in every trial
+    /// with nothing to offset it.
+    ///
+    /// The two runs share one synthetic bias model (a leg read in the
+    /// first position of its trial reads 3% low) and differ only in the
+    /// order [`abba_trials`] is allowed to pick: fixed order every trial
+    /// (the mutation this module's redesign eliminates) versus the real
+    /// ABBA alternation.
+    #[test]
+    fn alternating_leg_order_narrows_a_fixed_position_bias_a_fixed_order_leaves_uncancelled() {
+        let true_remote = 101.2;
+        let true_local = 100.0;
+        let true_ratio = true_remote / true_local;
+        let position_penalty = 0.97; // the leg spawned first in its trial reads 3% low
+
+        // fixed order: remote is always spawned first, so it always eats
+        // the position penalty -- the shape of the WARN-3 hazard this
+        // redesign removes.
+        let fixed_pairs = abba_trials(
+            4,
+            || Ok(const_distribution(true_remote * position_penalty)),
+            || Ok(const_distribution(true_local)),
+        )
+        .unwrap();
+        let fixed_ratios: Vec<f64> = fixed_pairs.iter().map(|trial| trial.ratio).collect();
+        let fixed_median = median_of_trials(&fixed_ratios).unwrap();
+        let fixed_error = (fixed_median - true_ratio).abs();
+
+        // real ABBA alternation: whichever leg abba_trials calls first
+        // each trial eats the position penalty, tracked by a shared call
+        // counter rather than by which closure is which -- a call at an
+        // even global index is always the first of its trial's pair,
+        // since every trial contributes exactly two calls in sequence.
+        let call_index = std::cell::Cell::new(0usize);
+        let alternating_pairs = abba_trials(
+            4,
             || {
-                let value = remote_base * regime(remote_i);
-                remote_i += 1;
-                Ok(value)
+                let first = call_index.get().is_multiple_of(2);
+                call_index.set(call_index.get() + 1);
+                let value = if first {
+                    true_remote * position_penalty
+                } else {
+                    true_remote
+                };
+                Ok(const_distribution(value))
             },
             || {
-                let value = local_base * regime(local_i);
-                local_i += 1;
-                Ok(value)
+                let first = call_index.get().is_multiple_of(2);
+                call_index.set(call_index.get() + 1);
+                let value = if first {
+                    true_local * position_penalty
+                } else {
+                    true_local
+                };
+                Ok(const_distribution(value))
             },
         )
-        .expect("synthetic readers never fail");
-        let remote_dist = Distribution::from_samples(&remote_raw, 0).unwrap();
-        let local_dist = Distribution::from_samples(&local_raw, 0).unwrap();
-        let paired_ratio = remote_local_ratio(&remote_dist, &local_dist);
-        assert!(
-            (paired_ratio - 1.012).abs() < 1e-9,
-            "block=1 alternation pairs remote and local at the same regime index every step, \
-             so the aggregate ratio must recover the fixed 1.012 relationship exactly \
-             regardless of the shared drift, got {paired_ratio}"
-        );
+        .unwrap();
+        let alternating_ratios: Vec<f64> =
+            alternating_pairs.iter().map(|trial| trial.ratio).collect();
+        let alternating_median = median_of_trials(&alternating_ratios).unwrap();
+        let alternating_error = (alternating_median - true_ratio).abs();
 
-        // break the pairing: compare the same remote draws against a
-        // single stale local reading (index 0, never refreshed) instead
-        // of one taken alongside each remote sample -- the shape a bug
-        // that stopped re-sampling the local leg every iteration would
-        // produce
-        let stale_local_raw = vec![local_base * regime(0); total];
-        let stale_local_dist = Distribution::from_samples(&stale_local_raw, 0).unwrap();
-        let stale_ratio = remote_local_ratio(&remote_dist, &stale_local_dist);
         assert!(
-            (stale_ratio - 1.012).abs() > 0.05,
-            "a stale local draw must not recover the fixed relationship once the regime has \
-             drifted away from index 0, got {stale_ratio}"
+            fixed_error > 0.02,
+            "a fixed spawn order must leave a real, uncancelled bias in the gated ratio, \
+             got median {fixed_median} against true ratio {true_ratio} (error {fixed_error})"
+        );
+        assert!(
+            alternating_error < fixed_error / 2.0,
+            "alternating leg order must land closer to the true ratio than a fixed order does, \
+             got alternating median {alternating_median} (error {alternating_error}) against \
+             fixed median {fixed_median} (error {fixed_error})"
         );
     }
 
-    /// `interleave_schedule`'s own contract (strict alternation, balanced
-    /// per-side totals) is proven in `crate::sampling`; this checks only
-    /// that [`interleaved_readings`] routes [`Side::View`] to the remote
-    /// reader and [`Side::Nvim`] to the local one, per this module's own
-    /// documented mapping.
+    /// The falsifiable claim under test: each trial's ratio comes from
+    /// that trial's own remote and local readings, never a neighboring
+    /// trial's. `abba_trials`' leg-order alternation does not change which
+    /// value each leg's closure returns (each simply pulls its own next
+    /// value), so this test is independent of alternation and isolates
+    /// the pairing itself -- a bug that reused a stale value from the
+    /// previous trial (an off-by-one on either leg) would move at least
+    /// one of these three ratios away from its expected value.
     #[test]
-    fn interleaved_readings_routes_view_to_remote_and_nvim_to_local() {
-        let (remote_raw, local_raw) = interleaved_readings(4, 1, || Ok(9.0), || Ok(1.0)).unwrap();
-        assert_eq!(remote_raw, vec![9.0; 4]);
-        assert_eq!(local_raw, vec![1.0; 4]);
+    fn each_trials_ratio_pairs_its_own_remote_and_local_reading() {
+        let remote_values = [10.0, 20.0, 30.0];
+        let local_values = [1.0, 4.0, 9.0];
+        let expected_ratios = [10.0, 5.0, 30.0 / 9.0];
+
+        let mut remote_iter = remote_values.into_iter();
+        let mut local_iter = local_values.into_iter();
+        let pairs = abba_trials(
+            3,
+            || Ok(const_distribution(remote_iter.next().unwrap())),
+            || Ok(const_distribution(local_iter.next().unwrap())),
+        )
+        .unwrap();
+
+        let ratios: Vec<f64> = pairs.iter().map(|trial| trial.ratio).collect();
+        for (got, expected) in ratios.iter().zip(expected_ratios.iter()) {
+            assert!(
+                (got - expected).abs() < 1e-9,
+                "each trial's ratio must be computed from that trial's own remote and local \
+                 reading, got {ratios:?}, expected {expected_ratios:?}"
+            );
+        }
+    }
+
+    /// [`abba_trials`]' own contract: trial 0 spawns the remote leg first,
+    /// trial 1 spawns the local leg first, and so on -- never the same
+    /// order twice running.
+    #[test]
+    fn abba_trials_alternates_which_leg_is_spawned_first() {
+        use std::cell::RefCell;
+        let call_order: RefCell<Vec<&'static str>> = RefCell::new(Vec::new());
+        abba_trials(
+            4,
+            || {
+                call_order.borrow_mut().push("remote");
+                Ok(const_distribution(1.0))
+            },
+            || {
+                call_order.borrow_mut().push("local");
+                Ok(const_distribution(1.0))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            *call_order.borrow(),
+            vec!["remote", "local", "local", "remote", "remote", "local", "local", "remote"],
+            "trial order must alternate remote-first/local-first every trial, with each leg \
+             fully sampled before the other starts"
+        );
     }
 
     /// `arm_stub_ssh_path`'s own claim: after arming, `dir/ssh` resolves

@@ -1762,12 +1762,19 @@ classes = ["dev-macos"]
     /// `memory.phys_footprint_mb`, `echo_speculated.speculated_ratio_p50`);
     /// each was repointed to its `controlled-*` counterpart, preserving the
     /// exact class-family scope it already had rather than widening onto a
-    /// platform nobody has measured, so no bound moved. That makes the
-    /// whole defect class -- not just one instance of it -- checkable here:
-    /// every row in the shipped file now names either no `classes` (every
-    /// class, including any future `controlled-*` one) or at least one
+    /// platform nobody has measured, so no bound moved. That makes this
+    /// defect checkable file-wide for every `[[budget]]` row: each one in
+    /// the shipped file now names either no `classes` (every class,
+    /// including any future `controlled-*` one) or at least one
     /// `controlled-*` name, so this assertion can hold file-wide without
     /// papering over an un-derived bound anywhere.
+    ///
+    /// `[[shortfall]]` rows are a separate table this test does not walk:
+    /// every one shipped today names only `dev-linux`/`dev-macos`, which
+    /// carries the identical dead-by-construction defect this test proves
+    /// absent from `[[budget]]` rows -- see `budgets.toml`'s own
+    /// `[[shortfall]]` header comment for why those entries are left as
+    /// they are rather than fixed the same way.
     #[test]
     fn every_shipped_budget_row_is_reachable_by_a_controlled_class() {
         let path = crate::fixture::workspace_root()
@@ -1802,6 +1809,24 @@ classes = ["dev-macos"]
     /// A committed baseline is the closest static stand-in for that run: the
     /// same scenario-to-metric map a run would produce, without running one.
     ///
+    /// Three checks divide this defect space, none redundant with another:
+    /// - [`parse`] rejects an unknown metric name at load time
+    ///   (`BudgetError::UnknownMetric`), so a budget row naming a metric
+    ///   outside [`crate::baselines::RECORDED_METRICS`] never reaches this
+    ///   test at all -- vocabulary is not this test's job.
+    /// - This test owns cross-class staleness: a metric recorded for a
+    ///   scenario on one shipped class's baseline but missing from another
+    ///   shipped class's baseline for the same scenario -- a rename or a
+    ///   partial re-record, proven dead because a sibling class already
+    ///   recorded the pairing as real.
+    /// - The live gate owns unrecorded-but-gated: `BUDGET UNENFORCED`
+    ///   prints from `bin/bench.rs` only when a `controlled-*` class runs
+    ///   `--all --gate` and a shipped budget's scenario ran without
+    ///   producing the bound metric (see [`unreached_budgets`]'s own doc)
+    ///   -- not on every `--all` run regardless of class or flags, and not
+    ///   at all in this tree today, since no `controlled-*` baseline has
+    ///   been recorded yet.
+    ///
     /// That stand-in is necessarily stale for one case: a budget row shipped
     /// alongside the code that produces its metric, before any controlled
     /// class has recorded a cell with that metric in it. Nobody can record a
@@ -1811,22 +1836,6 @@ classes = ["dev-macos"]
     /// [`crate::baselines::RECORDED_METRICS`] declares legal but no shipped
     /// class has recorded for that scenario,
     /// under any fixture -- as a staged ship-then-record state, not a defect.
-    ///
-    /// What it keeps catching: a metric recorded for a scenario on one class
-    /// but missing from another class's committed baseline for the same
-    /// scenario -- a rename or a partial re-record, proven dead because a
-    /// sibling class already recorded the pairing as real. What moved
-    /// elsewhere: a budget row permanently pairing a metric with a scenario
-    /// that will never produce it (the metric is declared but the pairing is
-    /// wrong). This static proxy cannot tell that case apart from a merely
-    /// staged one -- both look identical here, "nobody has recorded this
-    /// scenario/metric pair yet" -- but the live gate can and does: every
-    /// `bin/bench --all` run prints `BUDGET UNENFORCED` for a scenario that
-    /// ran and did not produce a bound metric (see [`unreached_budgets`]'s
-    /// own doc), forever, on every run, until either a recording lands or
-    /// the row is corrected. That loud, repeated, run-time signal is strictly
-    /// stronger than this one-shot, static check for exactly the case this
-    /// test gives up.
     #[test]
     fn every_shipped_budget_is_reached_by_the_baselines_that_recorded_its_scenario() {
         let root = crate::fixture::workspace_root();
@@ -1889,11 +1898,9 @@ classes = ["dev-macos"]
                 })
                 .collect();
             for budget in unreached_budgets(&file, &recorded.machine_class, &measured) {
-                let vocabulary_valid =
-                    crate::baselines::RECORDED_METRICS.contains(&budget.metric.as_str());
                 let recorded_elsewhere =
                     ever_recorded.contains(&(budget.scenario.as_str(), budget.metric.as_str()));
-                if vocabulary_valid && !recorded_elsewhere {
+                if !recorded_elsewhere {
                     continue;
                 }
                 dead.push(format!(

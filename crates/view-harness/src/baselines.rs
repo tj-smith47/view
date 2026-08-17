@@ -476,14 +476,18 @@ fn is_cold_start_absolute(metric: &str) -> bool {
 /// A third exemption family alongside [`derives_from_tail`] and
 /// [`is_cold_start_absolute`], for the same shape of reason: one unchanged
 /// `remote_memory` binary pair swung `pss_mb` +/-20% across days on shared
-/// dev-linux, while the paired remote-vs-local ratio taken from the same
-/// interleaved window stayed inside +0.6-2% across those regimes
-/// (2026-08-17 ruling). A within-window headroom sidecar cannot absorb a
-/// cross-day regime shift any more than it can absorb the ambient load a
-/// tail percentile carries, so the absolute is recorded on a shared class
-/// and gated on a controlled one, and the ratio -- this row's actual
-/// claim, and the statistic the evidence above says is regime-invariant --
-/// keeps gating everywhere
+/// dev-linux, while the paired remote-vs-local ratio held inside +0.6-2%
+/// across those regimes -- a figure recorded before `run_paired`'s
+/// sequential, ABBA-alternating redesign, carried forward as historical
+/// evidence rather than re-derived under it (see
+/// `view_bench::scenarios::remote_memory`'s module doc for the exact
+/// provenance and why the ratio, not the absolute, is expected to survive
+/// the redesign unaffected). A within-window headroom sidecar cannot
+/// absorb a cross-day regime shift any more than it can absorb the
+/// ambient load a tail percentile carries, so the absolute is recorded on
+/// a shared class and gated on a controlled one, and the ratio -- this
+/// row's actual claim, and the statistic the evidence above says is
+/// regime-invariant -- keeps gating everywhere
 /// (see `remote_local_ratio`'s own doc for why its name earns that instead
 /// of falling into this exemption or the signed-delta one).
 ///

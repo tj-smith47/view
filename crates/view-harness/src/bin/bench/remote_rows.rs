@@ -15,9 +15,11 @@ use view_bench::scenarios::remote_memory;
 ///
 /// The local and remote legs each get their own [`SideSetup`] (`view-local`
 /// / `view-remote`) rather than sharing the plain `view` tag the old
-/// single-leg driver used: the two sessions now run concurrently, and a
-/// shared `cwd`/`compat.sock`/scratch file would collide the moment both
-/// spawns are live at once instead of one after the other.
+/// single-leg driver used: each trial spawns and tears down one leg before
+/// the other starts (see [`remote_memory`]'s module doc), but the two legs
+/// still write and read their own scratch file and `cwd` across trials,
+/// and a shared one would let one leg's leftover state bleed into the
+/// other's next spawn.
 pub(super) fn run_remote_memory_row(
     world: &CellWorld,
     fixture: &str,
@@ -36,51 +38,62 @@ pub(super) fn run_remote_memory_row(
     let local_spec = view_spec_from(local_side, bins.view_bins());
     let remote_spec = remote_memory_spec_from(remote_side, bins.view_bins())
         .with_context(|| format!("arming the remote_memory/{fixture} spawn"))?;
-    let outcome =
-        remote_memory::run_paired(ViewSpec(&local_spec), ViewSpec(&remote_spec), protocol)
-            .with_context(|| format!("remote_memory/{fixture} run failed"))?;
+    let outcome = remote_memory::run_paired(
+        remote_memory::RemoteLocalSpecs {
+            local: ViewSpec(&local_spec),
+            remote: ViewSpec(&remote_spec),
+        },
+        protocol,
+    )
+    .with_context(|| format!("remote_memory/{fixture} run failed"))?;
 
-    println!(
-        "{}",
-        report::absolute_cell(
-            scenario,
-            fixture,
-            outcome.remote_metric,
-            report::AbsoluteStats {
-                p50: outcome.remote_distribution.p50(),
-                p99: outcome.remote_mb,
-                max: outcome.remote_distribution.max(),
-                unit: "MB",
-                samples: outcome.remote_distribution.len(),
-                warmup: protocol.warmup,
-            }
-        )
-    );
-    println!(
-        "{}",
-        report::absolute_cell(
-            scenario,
-            fixture,
-            outcome.local_metric,
-            report::AbsoluteStats {
-                p50: outcome.local_distribution.p50(),
-                p99: outcome.local_mb,
-                max: outcome.local_distribution.max(),
-                unit: "MB",
-                samples: outcome.local_distribution.len(),
-                warmup: protocol.warmup,
-            }
-        )
-    );
-    println!(
-        "{}",
-        report::aggregate_line(remote_memory::RATIO_METRIC, outcome.ratio, 1)
-    );
+    for trial in &outcome.trials {
+        println!(
+            "{}",
+            report::absolute_cell(
+                scenario,
+                fixture,
+                outcome.remote_metric,
+                report::AbsoluteStats {
+                    p50: trial.remote.p50(),
+                    p99: trial.remote.p99(),
+                    max: trial.remote.max(),
+                    unit: "MB",
+                    samples: trial.remote.len(),
+                    warmup: protocol.warmup,
+                }
+            )
+        );
+    }
+    for trial in &outcome.trials {
+        println!(
+            "{}",
+            report::absolute_cell(
+                scenario,
+                fixture,
+                outcome.local_metric,
+                report::AbsoluteStats {
+                    p50: trial.local.p50(),
+                    p99: trial.local.p99(),
+                    max: trial.local.max(),
+                    unit: "MB",
+                    samples: trial.local.len(),
+                    warmup: protocol.warmup,
+                }
+            )
+        );
+    }
 
+    let trials = outcome.trials.len();
     let mut metrics = CellMetrics::new();
-    metrics.insert(outcome.remote_metric.to_string(), outcome.remote_mb);
-    metrics.insert(outcome.local_metric.to_string(), outcome.local_mb);
-    metrics.insert(remote_memory::RATIO_METRIC.to_string(), outcome.ratio);
+    for (metric, value) in [
+        (outcome.remote_metric, outcome.gated_remote_mb),
+        (outcome.local_metric, outcome.gated_local_mb),
+        (remote_memory::RATIO_METRIC, outcome.gated_ratio),
+    ] {
+        println!("{}", report::aggregate_line(metric, value, trials));
+        metrics.insert(metric.to_string(), value);
+    }
     Ok(metrics)
 }
 

@@ -328,6 +328,22 @@ classes = ["controlled-linux"]
 #
 # Improving past the budget does not need an edit here to pass; deleting the
 # entry is the housekeeping that follows.
+#
+# Every entry below names class = "dev-linux" or "dev-macos", neither a
+# controlled-* class. They predate the gate-attestation split (spec 3.1
+# budgets attest on controlled classes only; `bin/bench.rs` loads this
+# [[budget]]/[[shortfall]] table at all only when `is_controlled_class`
+# holds), so none of them can fire against a live budget check today: the
+# table that would consult them is never loaded on the shared class they
+# name. They are left in place rather than deleted, because deleting them
+# would erase the only record of the dev-host deficits the user ratified
+# on 2026-08-03 as accepted-and-gated debt -- the acknowledgment survives
+# even though the enforcement it was written for does not yet exist. They
+# become live again the moment a controlled-linux/controlled-macos
+# baseline is recorded for the same scenario/metric/class triple; until a
+# session repoints or retires them the way the four dead [[budget]] rows
+# were repointed, they stay exactly what they are: an honest ledger of
+# debt this project owes, not a bound anything currently checks.
 
 [[shortfall]]
 scenario = "echo"

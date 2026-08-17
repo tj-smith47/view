@@ -72,10 +72,11 @@ pub const METRIC: Option<&str> = if cfg!(target_os = "linux") {
 /// gates green forever once recorded, since every later measurement is
 /// then a breach of a zero bar rather than a pass.
 ///
-/// `pub(crate)`, not private: [`crate::scenarios::remote_memory`]'s paired
-/// driver reads through this same function for both its legs, since a
-/// remote-spawned `view` process's own memory is read exactly the way a
-/// local one is -- only the spec that spawned it differs.
+/// `pub(crate)`, not private: a remote-spawned `view` process's own memory
+/// is read exactly the way a local one is -- only the spec that spawned it
+/// differs -- so the reader carries no notion of "local" or "remote" and
+/// stays visible to any driver pairing readings taken through different
+/// specs.
 pub(crate) fn read_memory_mb(pid: u32) -> Result<f64, BenchError> {
     let mb = read_platform_memory_mb(pid)?;
     require_positive_mb(mb, pid)
@@ -313,12 +314,11 @@ pub fn run_nvim(nvim_spec: NvimSpec<'_>, protocol: &Protocol) -> Result<MemoryOu
 /// to a second settle and returns the live session plus its pid, ready for
 /// [`sample_reading`] to read from.
 ///
-/// Split out of [`run_with_reader`] so [`crate::scenarios::remote_memory`]'s
-/// paired driver can prepare two sessions (a local spec and a remote one)
-/// through the identical spawn/workload/settle sequence before it starts
-/// alternating reads between them -- the only thing that may differ
-/// between a local and a remote leg of a paired comparison is which spec
-/// this spawns, never how the workload settles.
+/// Split out of [`run_with_reader`] so the spawn/workload/settle sequence
+/// exists exactly once and stays reusable wherever more than one session
+/// needs to go through it independently -- the only thing that may differ
+/// between two sessions built this way is which spec this spawns, never
+/// how the workload settles.
 ///
 /// # Errors
 ///
@@ -407,8 +407,36 @@ fn run_with_reader(
             context: "no memory metric is defined for this platform".to_string(),
         });
     };
-    let (mut session, pid) = prepare_workload_session(spec)?;
+    let (session, pid) = prepare_workload_session(spec)?;
+    let distribution = sample_distribution(session, pid, protocol, reader)?;
+    let gated_mb = distribution.p99();
+    Ok(MemoryOutcome {
+        distribution,
+        metric,
+        gated_mb,
+    })
+}
 
+/// Samples `reader(pid)` against `session`, paced 2ms apart,
+/// `protocol.warmup + protocol.samples` times, then shuts the session down
+/// and turns the raw reads into a [`Distribution`].
+///
+/// `pub(crate)`, not private, and taking an owned, already-spawned
+/// `session` rather than a `SpawnSpec`: a driver comparing more than one
+/// session needs this exact spawn-once/settle-elsewhere/sample-many/
+/// shutdown sequence per session without duplicating the pacing loop, and
+/// without this function reaching back into how each session got settled.
+///
+/// # Errors
+///
+/// Whatever `reader` returns through [`sample_reading`], or
+/// [`Distribution::from_samples`]'s error if too few samples were taken.
+pub(crate) fn sample_distribution(
+    mut session: BenchSession,
+    pid: u32,
+    protocol: &Protocol,
+    reader: fn(u32) -> Result<f64, BenchError>,
+) -> Result<Distribution, BenchError> {
     let total = protocol.warmup + protocol.samples;
     let mut raw_mb = Vec::with_capacity(total);
     let pace = Duration::from_millis(2);
@@ -420,14 +448,7 @@ fn run_with_reader(
         }
     }
     session.shutdown();
-
-    let distribution = Distribution::from_samples(&raw_mb, protocol.warmup)?;
-    let gated_mb = distribution.p99();
-    Ok(MemoryOutcome {
-        distribution,
-        metric,
-        gated_mb,
-    })
+    Distribution::from_samples(&raw_mb, protocol.warmup)
 }
 
 #[cfg(test)]
