@@ -527,6 +527,78 @@ pub fn swap_recovery_failure_notice(error: &str, buffer_empty: bool) -> String {
     }
 }
 
+/// What a session says when the recovery finished but the engine reported
+/// errors along the way.
+///
+/// Not the failure wording, because it did not fail: `E312` means the buffer
+/// holds recovered content with the lines the recovery could not read marked
+/// `???`, and `E311` means the recovery stopped partway with what it had.
+/// Calling either a failure sends a user looking for work that is in front of
+/// them; saying nothing sends them away from damage they are looking at. The
+/// engine's own error carries the detail -- `E312` names the `???` marker
+/// itself -- so this says only that the buffer is not whole.
+#[must_use]
+pub fn swap_recovery_damage_notice(error: &str) -> String {
+    format!("view: swap recovery finished with errors, check the buffer -- {error}")
+}
+
+/// What a session says when the recovery worked and the engine warned about
+/// it anyway, `count` being the buffers that came back with work in them.
+///
+/// One warning reaches this today and it is the ordinary crash: `E308` says
+/// the file on disk changed after the swap was written, which is exactly what
+/// a machine that died mid-edit and came back leaves behind. The recovery
+/// itself went through, so this is the success line rather than an alarm --
+/// but it carries the warning, because the redraw that takes nvim's recovery
+/// report off the buffer takes the warning with it, and this is then the only
+/// account of it the user gets.
+#[must_use]
+pub fn swap_recovery_warning_notice(count: u64, error: &str) -> String {
+    match swap_recovery_notice(count) {
+        Some(recovered) => format!("{recovered} -- {error}"),
+        None => format!("view: swap recovery finished with a warning -- {error}"),
+    }
+}
+
+/// What one swap-family error says about the recovery that raised it.
+///
+/// The engine records an error only when the recovery itself raised it (see
+/// `view-engine`'s `SWAP_RECOVERY_CMD`), so provenance is settled by the time
+/// one arrives here and the only question left is what it means. That is a
+/// property of the code alone, which is why it is decided here rather than in
+/// the expression that reads it.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SwapOutcome {
+    /// Nothing usable came back: the buffer holds the file from disk, or
+    /// nothing at all.
+    Failed,
+    /// Content came back damaged -- recovered, with the parts that could not
+    /// be read missing or marked.
+    Damaged,
+    /// The recovery went through and the engine warned about it.
+    Warned,
+}
+
+/// Which [`SwapOutcome`] `error` describes, read off the engine's own error
+/// code.
+///
+/// Enumerated against the pinned engine: `E308` is a warning printed by a
+/// recovery that completed, `E311`/`E312` are the two half-successes
+/// (interrupted, and completed with unreadable lines marked `???`), and every
+/// other swap-file code in the family the engine records means the work did
+/// not come back. An unrecognized code reads as a failure, which is the
+/// direction that keeps nvim's own error on screen rather than redrawing it
+/// away.
+#[must_use]
+pub fn swap_error_outcome(error: &str) -> SwapOutcome {
+    match error.split(':').next() {
+        Some("E308") => SwapOutcome::Warned,
+        Some("E311" | "E312") => SwapOutcome::Damaged,
+        _ => SwapOutcome::Failed,
+    }
+}
+
 /// How many times one session recovers a dead engine without asking before
 /// it starts asking.
 ///
@@ -569,9 +641,9 @@ pub struct SupervisionState {
     /// from. Bumped per probe, not per connection: a connection is asked
     /// twice and only the later answer is worth acting on.
     swap_probe: u64,
-    /// The recovery failure the current connection has already told the user
-    /// about, so being asked twice does not say it twice.
-    swap_failure: Option<String>,
+    /// The recovery notice the current connection has already put on screen,
+    /// so being asked twice does not say the same thing twice.
+    swap_notice: Option<String>,
 }
 
 impl Default for SupervisionState {
@@ -585,7 +657,7 @@ impl Default for SupervisionState {
             exit_code: None,
             reconnect: None,
             swap_probe: 0,
-            swap_failure: None,
+            swap_notice: None,
         }
     }
 }
@@ -594,7 +666,7 @@ impl SupervisionState {
     /// Claims a probe generation for a connection that has just attached,
     /// and forgets what the connection before it reported.
     pub fn begin_swap_probe(&mut self) -> u64 {
-        self.swap_failure = None;
+        self.swap_notice = None;
         self.renew_swap_probe()
     }
 
@@ -621,14 +693,19 @@ impl SupervisionState {
         self.swap_probe
     }
 
-    /// Records that the current connection's recovery failed with `error`,
-    /// and answers whether that is news -- `false` once the same failure has
-    /// already been reported for this connection.
-    pub fn note_swap_failure(&mut self, error: &str) -> bool {
-        if self.swap_failure.as_deref() == Some(error) {
+    /// Records that the current connection's recovery raised `notice`, and
+    /// answers whether that is news -- `false` once the same line has already
+    /// been put on screen for this connection.
+    ///
+    /// Compared by the wording rather than by the error behind it, because a
+    /// connection asked twice can answer the second time with more than it
+    /// knew the first: the same error alongside a recovery count it had not
+    /// finished when it was first asked words a different, truer line.
+    pub fn note_swap_notice(&mut self, notice: &str) -> bool {
+        if self.swap_notice.as_deref() == Some(notice) {
             return false;
         }
-        self.swap_failure = Some(error.to_string());
+        self.swap_notice = Some(notice.to_string());
         true
     }
 
@@ -728,6 +805,58 @@ impl SupervisionState {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// Every swap-family error the engine can hand over, sorted by what it
+    /// says happened to the user's work rather than by how alarming it looks.
+    ///
+    /// The two half-successes and the one warning are the whole reason this
+    /// exists: a recovery that completed with `???` markers, or one that
+    /// completed while the file on disk had changed underneath it, both leave
+    /// work in the buffer, and calling either a failure sends a user looking
+    /// for text that is in front of them.
+    #[test]
+    fn only_the_codes_that_lost_the_work_read_as_failures() {
+        assert_eq!(
+            swap_error_outcome("E308: Warning: Original file may have been changed"),
+            SwapOutcome::Warned
+        );
+        assert_eq!(
+            swap_error_outcome("E311: Recovery Interrupted"),
+            SwapOutcome::Damaged
+        );
+        assert_eq!(
+            swap_error_outcome(
+                "E312: Errors detected while recovering; look for lines starting with ???"
+            ),
+            SwapOutcome::Damaged
+        );
+        for error in [
+            "E295: Read error in swap file",
+            "E305: No swap file found for notes.md",
+            "E307: notes.md.swp does not look like a Nvim swap file",
+            "E309: Unable to read block 1 from .notes.md.swp",
+            "E310: Block 1 ID wrong (.notes.md.swp not a .swp file?)",
+        ] {
+            assert_eq!(swap_error_outcome(error), SwapOutcome::Failed, "{error}");
+        }
+    }
+
+    /// A recovery that worked says so, and the warning rides along on the
+    /// same line: the redraw that takes nvim's report off the buffer takes
+    /// the warning with it, so a notice that dropped it would leave the user
+    /// with no account of a file that changed under their swap.
+    #[test]
+    fn a_warned_recovery_says_what_came_back_and_what_the_engine_warned() {
+        let notice =
+            swap_recovery_warning_notice(1, "E308: Warning: Original file may have been changed");
+        assert!(notice.contains("unsaved changes recovered"), "{notice}");
+        assert!(notice.contains("E308"), "{notice}");
+        assert!(!notice.contains("failed"), "{notice}");
+        let nothing =
+            swap_recovery_warning_notice(0, "E308: Warning: Original file may have been changed");
+        assert!(!nothing.contains("failed"), "{nothing}");
+        assert!(nothing.contains("E308"), "{nothing}");
+    }
 
     /// The banner a user reads while a dropped connection is being retried,
     /// asserted as the literal string it renders as: the count is the whole

@@ -4863,6 +4863,70 @@ fn a_recovery_that_failed_names_the_error_and_never_redraws_it_away() {
 }
 
 #[test]
+fn a_recovery_that_came_back_damaged_is_not_worded_as_one_that_failed() {
+    let mut m = model();
+    let generation = arm_swap_probe(&mut m);
+    const E312: &str = "E312: Errors detected while recovering; look for lines starting with ???";
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation,
+            count: 1,
+            reported: true,
+            failure: Some(E312.to_string()),
+            empty: false,
+        },
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
+        "view redrew away the marker lines' own explanation: {effects:?}"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains(E312)),
+        "the damage reached the user without nvim's own account of it: {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|line| line.contains("failed")),
+        "a buffer holding recovered work was reported as a failed recovery, \
+         sending the user looking for text they are looking at: {texts:?}"
+    );
+}
+
+#[test]
+fn a_recovery_the_engine_only_warned_about_still_says_the_work_came_back() {
+    let mut m = model();
+    let generation = arm_swap_probe(&mut m);
+    const E308: &str = "E308: Warning: Original file may have been changed";
+    let effects = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation,
+            count: 1,
+            reported: true,
+            failure: Some(E308.to_string()),
+            empty: false,
+        },
+    );
+    assert!(
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
+        "a recovery that worked kept nvim's report over the buffer: {effects:?}"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts
+            .iter()
+            .any(|line| line.contains("unsaved changes recovered") && line.contains(E308)),
+        "the warning and what came back were not said together, and the \
+         redraw above takes the warning off the screen: {texts:?}"
+    );
+}
+
+#[test]
 fn a_failure_that_left_the_file_in_place_never_says_the_buffer_is_empty() {
     let mut m = model();
     let generation = arm_swap_probe(&mut m);

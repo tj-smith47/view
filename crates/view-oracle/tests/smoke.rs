@@ -185,7 +185,21 @@ fn build_view_pty_with_content(
     if let Some(content) = content {
         std::fs::write(&paths.scratch, content).expect("scratch fixture must be writable");
     }
+    spawn_view_pty_at(paths, extra_args, isolation, policy)
+}
 
+/// Like [`build_view_pty_with_content`], but against scratch paths the caller
+/// already holds.
+///
+/// For a test that has to plant something under those paths before the
+/// session starts -- a config the engine will source, a swap file it will
+/// find -- and so cannot let the helper create them on its way past.
+fn spawn_view_pty_at(
+    paths: common::ScratchPaths,
+    extra_args: &[&std::ffi::OsStr],
+    isolation: Option<RwLockReadGuard<'static, ()>>,
+    policy: QueryPolicy,
+) -> ViewPtySession {
     let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
     for arg in extra_args {
         cmd.arg(arg);
@@ -855,42 +869,365 @@ fn an_ordinary_launch_whose_config_errors_is_never_told_a_recovery_failed() {
     )
     .expect("the isolated config must be writable");
 
-    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
-    cmd.arg(&paths.scratch);
-    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
-    let isolation = shared_isolation();
-    let mut session = ViewPtySession {
-        session: PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap(),
-        paths,
-        _isolation: isolation,
-    };
-    // watched from the spawn rather than read once afterwards: view's own
-    // notices are transient toasts, so a single reading taken later cannot
-    // tell a notice that was never raised from one that has already expired
-    // -- and this one would be raised before the buffer ever paints, off a
-    // reading the connection answers while it is still starting. The window
-    // outlasts that expiry
-    let deadline =
-        Instant::now() + view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(2);
-    let mut said = None;
-    while Instant::now() < deadline && said.is_none() {
-        let text = session.screen();
-        if text.contains("swap recovery") {
-            said = Some(text);
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
+    let mut session = spawn_view_pty_at(paths, &[], shared_isolation(), QueryPolicy::AnswerDa1);
+
+    // an absence is only worth reading against something that happened, and
+    // both halves here are events rather than clocks. The screen is watched
+    // from the spawn -- view's notices are transient toasts, so a reading
+    // taken afterwards cannot tell a notice that was never raised from one
+    // that has already expired, and this one would be raised before the
+    // buffer paints at all. The watch then runs on until the session answers
+    // a command sent after the attach, which nvim cannot answer ahead of the
+    // recovery reading already queued in front of it, so the absence is
+    // asserted against a reading that has been taken and folded
+    let (painted, early) = watch_screen(&mut session, Duration::from_secs(30), FORBIDDEN, |text| {
+        text.contains("on disk")
+    });
     assert!(
-        said.is_none(),
-        "an ordinary launch was told its recovery failed; screen:\n{}",
-        said.unwrap_or_default()
-    );
-    assert!(
-        session.wait_for("on disk", Duration::from_secs(15)),
+        painted,
         "the session never painted the file it was given, so nothing here \
          watched a launch that got anywhere; screen:\n{}",
         session.screen()
     );
+    const SETTLED: &str = "zzsettledzz";
+    session.send(b"\x1b:echo 'zzsettled' . 'zz'\r").unwrap();
+    let (answered, late) = watch_screen(&mut session, Duration::from_secs(30), FORBIDDEN, |text| {
+        text.contains(SETTLED)
+    });
+    assert!(
+        answered,
+        "the session never answered a command, so nothing here established \
+         that its recovery reading had been taken; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        !(early || late),
+        "an ordinary launch was told something about a recovery; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// The recovery lines an ordinary launch must never be shown: view's own
+/// failure, damage and warning wordings all name the recovery, and the
+/// success and warning wordings both name the work.
+#[cfg(target_os = "linux")]
+const FORBIDDEN: &[&str] = &[SAID_RECOVERY, RECOVERED_WORK];
+
+/// What a user sees when the swap they were told is being replayed cannot be
+/// read, and what they must never see: that their work came back.
+///
+/// Nothing here is exotic. A machine that dies mid-flush leaves a swap whose
+/// blocks were never written, and the ordinary way a user meets it is the
+/// next launch over that file -- no restart, no `-r`, just nvim finding a
+/// swap and view answering the prompt on their behalf. The prompt is answered
+/// identically whether the swap can be read or not, so a session that counted
+/// the answered prompt would announce unsaved work that is gone, and redraw
+/// away the engine's own account of where it went.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_swap_that_cannot_be_read_is_reported_as_a_failure_and_never_as_work_returned() {
+    let paths = common::ScratchPaths::new("smoke");
+    std::fs::write(&paths.scratch, "on disk\n").expect("scratch fixture must be writable");
+    let swaps = paths.isolated_home.join("swap");
+    plant_unreadable_swap(&paths.scratch, &swaps, &paths.isolated_home);
+
+    let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
+    let mut session = spawn_view_pty_at(
+        paths,
+        &[std::ffi::OsStr::new("--cmd"), &directory],
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+
+    let named = said_part(&view_core::native::supervision::swap_recovery_failure_notice("", false));
+    let (settled, claimed) = watch_screen(
+        &mut session,
+        Duration::from_secs(45),
+        &[RECOVERED_WORK],
+        |text| text.contains(UNREADABLE_SWAP) && text.contains(&named),
+    );
+    // the lie before the silence: a session that says nothing has at least
+    // left the user looking at the engine's own error, and a session that
+    // says the work came back has sent them away from it
+    assert!(
+        !claimed,
+        "view told the user their unsaved work came back from a swap it could \
+         not read; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        settled,
+        "a recovery that could not read its swap left the user no account of \
+         itself -- expected nvim's {UNREADABLE_SWAP:?} still standing and \
+         view's own {named:?} beside it; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// The same unreadable swap reached through the other path: view's own
+/// restart, which carries `-r` and never meets a prompt at all.
+///
+/// Worth pinning apart from the launch above because nothing about the
+/// reading looks the same on the two: one answers a prompt nvim raised, the
+/// other replays a file nvim was told to replay and announces nothing. The
+/// swap is corrupted between the death and the replacement, which is where a
+/// half-written swap really comes from -- a `--nvim-bin` wrapper is the only
+/// thing that runs in that gap.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restart_that_cannot_read_the_swap_says_so_instead_of_going_silent() {
+    let paths = common::ScratchPaths::new("smoke");
+    std::fs::write(&paths.scratch, "on disk\n").expect("scratch fixture must be writable");
+    let swaps = paths.isolated_home.join("swap");
+    std::fs::create_dir_all(&swaps).expect("the swap dir must be creatable");
+    let wrapper = write_swap_corrupting_nvim_wrapper(&swaps);
+
+    let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
+    let mut session = spawn_view_pty_at(
+        paths,
+        &[
+            std::ffi::OsStr::new("--nvim-bin"),
+            wrapper.as_os_str(),
+            std::ffi::OsStr::new("--cmd"),
+            &directory,
+        ],
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+    assert!(
+        session.wait_for("on disk", Duration::from_secs(15)),
+        "the session never painted the file it was given; screen:\n{}",
+        session.screen()
+    );
+
+    const UNSAVED: &str = "zzunsavedzz";
+    session.send(format!("o{UNSAVED}\x1b").as_bytes()).unwrap();
+    assert!(
+        session.wait_for(UNSAVED, Duration::from_secs(15)),
+        "the unsaved line never reached the buffer; screen:\n{}",
+        session.screen()
+    );
+    // the same flush-and-barrier the success path uses: the swap has to be
+    // written before the kill, or what the replacement fails to read is a
+    // swap this test never finished writing
+    const PRESERVED: &str = "zzpreservedzz";
+    session
+        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
+        .unwrap();
+    assert!(
+        session.wait_for(PRESERVED, Duration::from_secs(15)),
+        "the swap was never flushed; screen:\n{}",
+        session.screen()
+    );
+
+    let view_pid = session.view_pid();
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+    let kill_status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(killed.to_string())
+        .status()
+        .unwrap();
+    assert!(kill_status.success(), "kill -KILL {killed} failed");
+
+    let named = said_part(&view_core::native::supervision::swap_recovery_failure_notice("", false));
+    let (settled, claimed) = watch_screen(
+        &mut session,
+        Duration::from_secs(45),
+        &[RECOVERED_WORK],
+        |text| text.contains(UNREADABLE_SWAP) && text.contains(&named),
+    );
+    assert!(
+        !claimed,
+        "view told the user their unsaved work came back from a swap it could \
+         not read; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        settled,
+        "a restart whose recovery could not read the swap said nothing at all, \
+         leaving the work gone with no account of it -- expected nvim's \
+         {UNREADABLE_SWAP:?} and view's own {named:?}; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// nvim's own error for a swap file whose blocks it cannot read back. Pinned
+/// engine, and pinned corruption: [`plant_unreadable_swap`] drops every block
+/// but the header, which is what a process dying mid-flush leaves.
+#[cfg(target_os = "linux")]
+const UNREADABLE_SWAP: &str = "E309";
+
+/// The success wording, named here so the failure tests can assert it never
+/// appears -- the harm they guard is not silence, it is a session announcing
+/// work that is gone.
+#[cfg(target_os = "linux")]
+const RECOVERED_WORK: &str = "unsaved changes recovered";
+
+/// The part every failure, damage and warning wording shares, for a test
+/// whose claim is that none of them was raised.
+#[cfg(target_os = "linux")]
+const SAID_RECOVERY: &str = "swap recovery";
+
+/// What a notice says before it starts quoting the engine, so a test can
+/// assert view's own wording without pinning an error text view did not
+/// write.
+#[cfg(target_os = "linux")]
+fn said_part(notice: &str) -> String {
+    notice
+        .split_once(" --")
+        .map_or_else(|| notice.to_string(), |(said, _)| said.to_string())
+}
+
+/// Samples the screen until `settled` holds or `timeout` elapses, answering
+/// both whether it settled and whether any of `forbidden` was on screen at
+/// any point on the way there.
+///
+/// Both readings have to come from the same sampling. view's notices expire
+/// on their own after a few seconds, so a forbidden line looked for once at
+/// the end is a line that had the whole window to appear and vanish
+/// unobserved.
+#[cfg(target_os = "linux")]
+fn watch_screen(
+    session: &mut ViewPtySession,
+    timeout: Duration,
+    forbidden: &[&str],
+    settled: impl Fn(&str) -> bool,
+) -> (bool, bool) {
+    let deadline = Instant::now() + timeout;
+    let mut seen = false;
+    loop {
+        let text = session.screen();
+        seen |= forbidden.iter().any(|line| text.contains(line));
+        if settled(&text) {
+            return (true, seen);
+        }
+        if Instant::now() >= deadline {
+            return (false, seen);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Leaves a swap file under `swaps` that nvim will find for `scratch` and
+/// then fail to read.
+///
+/// Written by a real engine rather than synthesized: a swap nvim does not
+/// recognize as this file's is one it never offers to recover, so the fixture
+/// has to be genuine and then lose its blocks. `:preserve` is what puts it on
+/// disk, the kill is what leaves it there, and truncating to the header is
+/// what a process dying mid-flush leaves behind.
+#[cfg(target_os = "linux")]
+fn plant_unreadable_swap(
+    scratch: &std::path::Path,
+    swaps: &std::path::Path,
+    home: &std::path::Path,
+) {
+    std::fs::create_dir_all(swaps).expect("the swap dir must be creatable");
+    let ready = swaps.join("planted");
+    let mut command = std::process::Command::new("nvim");
+    command
+        .arg("--headless")
+        .arg("--cmd")
+        .arg(format!("set directory={}", swaps.display()))
+        .arg("-c")
+        .arg("normal Gozzplantedzz")
+        .arg("-c")
+        .arg("preserve")
+        .arg("-c")
+        .arg(format!(
+            "call writefile(['planted'], '{}')",
+            ready.display()
+        ))
+        .arg("-c")
+        .arg("while 1 | sleep 100m | endwhile")
+        .arg(scratch)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for var in [
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        command.env(var, common::xdg_home(home, var));
+    }
+    let mut child = command
+        .spawn()
+        .expect("failed to spawn the swap-planting engine");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while Instant::now() < deadline && !ready.exists() {
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let planted = ready.exists();
+    let _ = child.kill();
+    let _ = child.wait();
+    assert!(
+        planted,
+        "the swap-planting engine never flushed its swap file"
+    );
+
+    let swap = std::fs::read_dir(swaps)
+        .expect("the swap dir must be readable")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "swp"))
+        .expect("the planting engine left no swap file behind");
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&swap)
+        .expect("the planted swap must be writable")
+        .set_len(SWAP_HEADER_BYTES)
+        .expect("the planted swap must be truncatable");
+}
+
+/// One swap block, which is what a swap file is left with when everything
+/// after its header is lost. nvim reads the header to recognize the file and
+/// offer the recovery, then fails on the first block it needs.
+#[cfg(target_os = "linux")]
+const SWAP_HEADER_BYTES: u64 = 4096;
+
+/// A `--nvim-bin` wrapper that truncates any swap file under `swaps` on its
+/// way to the real engine.
+///
+/// The corruption has to happen between one engine's death and its
+/// replacement's spawn, and the wrapper is the only thing that runs there.
+/// The first spawn of a session finds no swap and passes straight through.
+/// Disambiguated by pid and a per-call counter for the same reason
+/// [`write_delayed_nvim_wrapper`] is: every test here is a thread of one
+/// process.
+#[cfg(target_os = "linux")]
+fn write_swap_corrupting_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
+    static NEXT_CORRUPTING_ID: AtomicU64 = AtomicU64::new(0);
+
+    let real_nvim = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("nvim")
+            .output()
+            .expect("which nvim failed")
+            .stdout,
+    )
+    .expect("non-utf8 which output")
+    .trim()
+    .to_string();
+
+    let id = NEXT_CORRUPTING_ID.fetch_add(1, Ordering::Relaxed);
+    let path =
+        common::scratch_root().join(format!("corrupting-nvim-{}-{id}.sh", std::process::id()));
+    let script = format!(
+        "#!/bin/sh\nfor swap in {}/*.swp; do\n  [ -f \"$swap\" ] && truncate -s {SWAP_HEADER_BYTES} \"$swap\"\ndone\nexec {real_nvim} \"$@\"\n",
+        swaps.display()
+    );
+    std::fs::write(&path, script).expect("failed to write the swap-corrupting wrapper script");
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    path
 }
 
 /// The restart the other recovery test cannot reach: this one replaces an

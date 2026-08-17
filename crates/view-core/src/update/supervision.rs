@@ -6,8 +6,9 @@ use crate::model::{Model, OverlayKind};
 use crate::msg::{Effect, RpcCall};
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
-    swap_recovery_failure_notice, swap_recovery_notice, EngineBusyState, ReconnectProgress,
-    SinceStamp, SupervisionChoice, WedgeKind,
+    swap_error_outcome, swap_recovery_damage_notice, swap_recovery_failure_notice,
+    swap_recovery_notice, swap_recovery_warning_notice, EngineBusyState, ReconnectProgress,
+    SinceStamp, SupervisionChoice, SwapOutcome, WedgeKind,
 };
 
 /// Folds one supervision reading into the banner and, past the escalation
@@ -176,7 +177,10 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
 /// Folds one connection's swap-recovery reading into what the user is told
 /// and what the screen is asked to do about it.
 ///
-/// Three outcomes, and the difference between them is the user's file.
+/// The reading arrives already attributed -- the engine records an error only
+/// when the recovery it was watching raised it -- so what is decided here is
+/// only what the user is owed and whether nvim's own account may be taken off
+/// their screen.
 ///
 /// - **Nothing recovered, nothing reported.** The ordinary session. Silent,
 ///   and no redraw: a full repaint issued for a startup that went perfectly
@@ -186,17 +190,21 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
 ///   is over -- the `msg_clear` [`RpcCall::Redraw`] answers with is what
 ///   takes it off the buffer, leaving the notice, which `Messages::clear`
 ///   keeps, as the account of it.
-/// - **Asked for and failed.** The buffer is empty where the file's contents
-///   should be, and the engine's error is the only thing on screen saying
-///   why. view did not put that error there and does not redraw it away:
-///   clearing an error view cannot attribute would leave the user an empty
-///   buffer with no account of itself, one `:w` away from truncating the
-///   file. The notice names the state and carries the error with it.
+/// - **Recovered, with a warning.** The recovery went through and the engine
+///   warned about it, so the report still comes down -- but the notice
+///   carries the warning, which that same redraw would otherwise take with
+///   it.
+/// - **Recovered damaged, or not at all.** The engine's error is the only
+///   thing on screen saying what happened to the user's work, and view did
+///   not put it there: redrawing it away would leave a buffer that is empty,
+///   or quietly missing lines, with no account of itself. The notice names
+///   the state and carries the error with it, and nothing is redrawn.
 ///
-/// The failure branch is the one reachable before its connection has
-/// finished starting -- a startup error parks nvim ahead of `VimEnter` -- so
-/// it is deduplicated by the failure itself rather than by the generation:
-/// the second reading of the same connection must not say it twice.
+/// The reading is deduplicated by the line it words rather than by the
+/// generation, because a connection is asked twice and the failure branch is
+/// the one reachable before that connection has finished starting: the same
+/// error alongside a count it had not settled the first time is a truer line,
+/// not a repeat.
 pub(super) fn note_swap_recovery(
     model: &mut Model,
     generation: u64,
@@ -213,13 +221,21 @@ pub(super) fn note_swap_recovery(
         return Vec::new();
     }
     if let Some(error) = failure {
-        if !model.supervision.note_swap_failure(&error) {
+        let outcome = swap_error_outcome(&error);
+        let notice = match outcome {
+            SwapOutcome::Failed => swap_recovery_failure_notice(&error, empty),
+            SwapOutcome::Damaged => swap_recovery_damage_notice(&error),
+            SwapOutcome::Warned => swap_recovery_warning_notice(count, &error),
+        };
+        if !model.supervision.note_swap_notice(&notice) {
             return Vec::new();
         }
         model.dirty = true;
-        return model
-            .engine
-            .record_native_notice(swap_recovery_failure_notice(&error, empty), false);
+        let mut effects = model.engine.record_native_notice(notice, false);
+        if outcome == SwapOutcome::Warned {
+            effects.push(Effect::Rpc(RpcCall::Redraw));
+        }
+        return effects;
     }
     if !reported {
         return Vec::new();
