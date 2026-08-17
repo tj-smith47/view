@@ -18,6 +18,8 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=scripts/acceptance/artifacts.sh
+. "$SCRIPT_DIR/artifacts.sh"
 VIEW_BIN=${VIEW_BIN:-$REPO_ROOT/target/release/view}
 FIXTURE=$REPO_ROOT/compat/fixtures/minimal
 SUPERVISION_RS=$REPO_ROOT/crates/view-core/src/native/supervision.rs
@@ -75,7 +77,10 @@ cleanup() {
     for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
         [ -n "$root" ] && rm -rf "$root"
     done
-    if [ "$code" -eq 0 ]; then
+    # kept only when there is something in them: a run that refused before it
+    # ever opened a session has no pane to dump, and pointing at an empty
+    # directory reads as evidence that does not exist
+    if [ "$code" -eq 0 ] || [ -z "$(ls -A "$DUMP_DIR" 2>/dev/null)" ]; then
         rm -rf "$DUMP_DIR"
     else
         printf '      pane dumps kept in %s\n' "$DUMP_DIR" >&2
@@ -307,10 +312,8 @@ for tool in tmux awk sed grep pgrep; do
         exit 1
     }
 done
-[ -x "$VIEW_BIN" ] || {
-    printf 'FAIL: no view binary at %s (cargo build --release -p view, or set VIEW_BIN)\n' "$VIEW_BIN" >&2
-    exit 1
-}
+ensure_artifact "$VIEW_BIN" "$REPO_ROOT/target/release/view" \
+    cargo build --release -p view || exit 1
 [ -d "$FIXTURE" ] || {
     printf 'FAIL: the no-plugins fixture is missing at %s\n' "$FIXTURE" >&2
     exit 1

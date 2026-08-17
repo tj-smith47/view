@@ -16,21 +16,17 @@ set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 REPO_ROOT=$(cd -- "$SCRIPT_DIR/../.." && pwd)
+# shellcheck source=scripts/acceptance/artifacts.sh
+. "$SCRIPT_DIR/artifacts.sh"
 
 RTT_ACCEPTANCE_BIN=${RTT_ACCEPTANCE_BIN:-$REPO_ROOT/target/release/rtt-acceptance}
 TAPS_VIEW_BIN=${TAPS_VIEW_BIN:-$REPO_ROOT/target/taps/release/view}
 NVIM_BIN=${NVIM_BIN:-nvim}
 
-[ -x "$RTT_ACCEPTANCE_BIN" ] || {
-    printf 'FAIL: no rtt-acceptance binary at %s (cargo build --release -p view-harness --bin rtt-acceptance, or set RTT_ACCEPTANCE_BIN)\n' \
-        "$RTT_ACCEPTANCE_BIN" >&2
-    exit 1
-}
-[ -x "$TAPS_VIEW_BIN" ] || {
-    printf 'FAIL: no bench-taps view binary at %s (cargo build --release -p view --features bench-taps --target-dir target/taps, or set TAPS_VIEW_BIN)\n' \
-        "$TAPS_VIEW_BIN" >&2
-    exit 1
-}
+ensure_artifact "$RTT_ACCEPTANCE_BIN" "$REPO_ROOT/target/release/rtt-acceptance" \
+    cargo build --release -p view-harness --bin rtt-acceptance || exit 1
+ensure_artifact "$TAPS_VIEW_BIN" "$REPO_ROOT/target/taps/release/view" \
+    cargo build --release -p view --features bench-taps --target-dir target/taps || exit 1
 command -v "$NVIM_BIN" >/dev/null 2>&1 || {
     printf 'FAIL: no nvim on PATH as %s (set NVIM_BIN)\n' "$NVIM_BIN" >&2
     exit 1
