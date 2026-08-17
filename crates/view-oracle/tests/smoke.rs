@@ -973,7 +973,7 @@ fn a_restart_that_cannot_read_the_swap_says_so_instead_of_going_silent() {
         paths,
         &[
             std::ffi::OsStr::new("--nvim-bin"),
-            wrapper.as_os_str(),
+            wrapper.path().as_os_str(),
             std::ffi::OsStr::new("--cmd"),
             &directory,
         ],
@@ -1112,7 +1112,7 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
         paths,
         &[
             std::ffi::OsStr::new("--nvim-bin"),
-            wrapper.as_os_str(),
+            wrapper.path().as_os_str(),
             std::ffi::OsStr::new("--cmd"),
             &directory,
         ],
@@ -1210,14 +1210,14 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
          regressed",
         swaps.display()
     );
-    let wrapper = write_swap_dir_locking_nvim_wrapper(&paths.isolated_home, &swaps);
+    let wrapper = write_swap_dir_locking_nvim_wrapper(&swaps);
 
     let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
     let mut session = spawn_view_pty_at(
         paths,
         &[
             std::ffi::OsStr::new("--nvim-bin"),
-            wrapper.as_os_str(),
+            wrapper.path().as_os_str(),
             std::ffi::OsStr::new("--cmd"),
             &directory,
         ],
@@ -1357,24 +1357,10 @@ fn unlock_directory(path: &std::path::Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
 }
 
-/// A `--nvim-bin` wrapper that makes `swaps` refuse new files on its way to
-/// a recovering engine, and leaves every other spawn alone.
-///
-/// The refusal has to arrive between the death and the replacement -- before
-/// it, the session under test could never write the swap this recovery is
-/// supposed to read. The `-r` the restart carries is what tells the two
-/// spawns apart, and it is the engine's own flag rather than anything this
-/// test invents.
-///
-/// Written under `home` rather than beside the other wrappers in the shared
-/// scratch root so the session's own cleanup takes it: this is the one
-/// wrapper whose test can leave an unremovable directory behind, so it is
-/// the one that must not add a second thing to remove by hand.
-#[cfg(target_os = "linux")]
-fn write_swap_dir_locking_nvim_wrapper(home: &std::path::Path, swaps: &std::path::Path) -> PathBuf {
-    static NEXT_LOCKING_ID: AtomicU64 = AtomicU64::new(0);
-
-    let real_nvim = String::from_utf8(
+/// The real engine binary these wrappers stand in front of.
+#[cfg(unix)]
+fn real_nvim_path() -> String {
+    String::from_utf8(
         std::process::Command::new("which")
             .arg("nvim")
             .output()
@@ -1383,24 +1369,84 @@ fn write_swap_dir_locking_nvim_wrapper(home: &std::path::Path, swaps: &std::path
     )
     .expect("non-utf8 which output")
     .trim()
-    .to_string();
+    .to_string()
+}
 
-    let id = NEXT_LOCKING_ID.fetch_add(1, Ordering::Relaxed);
-    let path = home.join(format!("locking-nvim-{}-{id}.sh", std::process::id()));
-    let script = format!(
-        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-r\" ]; then\n    \
-         chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n    break\n  fi\ndone\n\
-         exec {real_nvim} \"$@\"\n",
-        swaps = swaps.display(),
-    );
-    std::fs::write(&path, script).expect("failed to write the swap-dir-locking wrapper script");
+/// A `--nvim-bin` wrapper script that takes itself, and anything it wrote
+/// beside itself, away when the test that built it ends.
+///
+/// Each wrapper gets a directory of its own under the scratch root, named by
+/// pid and a per-call counter: every test in this binary runs as a thread of
+/// the same process, so a shared name lets one test's cleanup race another's
+/// in-flight `view --nvim-bin <wrapper>` spawn -- the collision
+/// `ScratchPaths` documents and avoids the same way. Removing the directory
+/// rather than the file is what lets a script keep state between spawns (a
+/// counter, say) without that state outliving the test either.
+///
+/// The removal is a `Drop` rather than a line at the end of each test
+/// because a failing assertion unwinds past that line, and a wrapper left in
+/// the shared scratch root outlives the run entirely: the root grew by one
+/// file per wrapper-using test per run, without bound, and an immutable
+/// directory among them can turn a later `rm -rf target` into a failure.
+#[cfg(unix)]
+struct WrapperScript {
+    dir: PathBuf,
+    path: PathBuf,
+}
 
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
+#[cfg(unix)]
+impl WrapperScript {
+    /// Writes an executable `/bin/sh` wrapper whose body `script` builds,
+    /// given the directory the wrapper may write its own state into.
+    fn new(kind: &str, script: impl FnOnce(&std::path::Path) -> String) -> Self {
+        static NEXT_WRAPPER_ID: AtomicU64 = AtomicU64::new(0);
 
-    path
+        let id = NEXT_WRAPPER_ID.fetch_add(1, Ordering::Relaxed);
+        let dir = common::scratch_root().join(format!("{kind}-{}-{id}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("failed to create the wrapper's own directory");
+        let path = dir.join("nvim");
+        std::fs::write(&path, script(&dir)).expect("failed to write the wrapper script");
+
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        Self { dir, path }
+    }
+
+    /// What to hand `--nvim-bin`.
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+#[cfg(unix)]
+impl Drop for WrapperScript {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// A `--nvim-bin` wrapper that makes `swaps` refuse new files on its way to
+/// a recovering engine, and leaves every other spawn alone.
+///
+/// The refusal has to arrive between the death and the replacement -- before
+/// it, the session under test could never write the swap this recovery is
+/// supposed to read. The `-r` the restart carries is what tells the two
+/// spawns apart, and it is the engine's own flag rather than anything this
+/// test invents.
+#[cfg(target_os = "linux")]
+fn write_swap_dir_locking_nvim_wrapper(swaps: &std::path::Path) -> WrapperScript {
+    let real_nvim = real_nvim_path();
+    WrapperScript::new("locking-nvim", |_| {
+        format!(
+            "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-r\" ]; then\n    \
+             chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n    break\n  fi\ndone\n\
+             exec {real_nvim} \"$@\"\n",
+            swaps = swaps.display(),
+        )
+    })
 }
 
 /// nvim's own error for a swap file whose blocks it cannot read back. Pinned
@@ -1614,39 +1660,15 @@ const SWAP_BLOCK_BYTES: u64 = 4096;
 /// The corruption has to happen between one engine's death and its
 /// replacement's spawn, and the wrapper is the only thing that runs there.
 /// The first spawn of a session finds no swap and passes straight through.
-/// Disambiguated by pid and a per-call counter for the same reason
-/// [`write_delayed_nvim_wrapper`] is: every test here is a thread of one
-/// process.
 #[cfg(target_os = "linux")]
-fn write_swap_corrupting_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
-    static NEXT_CORRUPTING_ID: AtomicU64 = AtomicU64::new(0);
-
-    let real_nvim = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("nvim")
-            .output()
-            .expect("which nvim failed")
-            .stdout,
-    )
-    .expect("non-utf8 which output")
-    .trim()
-    .to_string();
-
-    let id = NEXT_CORRUPTING_ID.fetch_add(1, Ordering::Relaxed);
-    let path =
-        common::scratch_root().join(format!("corrupting-nvim-{}-{id}.sh", std::process::id()));
-    let script = format!(
-        "#!/bin/sh\nfor swap in {}/*.swp; do\n  [ -f \"$swap\" ] && truncate -s {SWAP_HEADER_BYTES} \"$swap\"\ndone\nexec {real_nvim} \"$@\"\n",
-        swaps.display()
-    );
-    std::fs::write(&path, script).expect("failed to write the swap-corrupting wrapper script");
-
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    path
+fn write_swap_corrupting_nvim_wrapper(swaps: &std::path::Path) -> WrapperScript {
+    let real_nvim = real_nvim_path();
+    WrapperScript::new("corrupting-nvim", |_| {
+        format!(
+            "#!/bin/sh\nfor swap in {}/*.swp; do\n  [ -f \"$swap\" ] && truncate -s {SWAP_HEADER_BYTES} \"$swap\"\ndone\nexec {real_nvim} \"$@\"\n",
+            swaps.display()
+        )
+    })
 }
 
 /// A `--nvim-bin` wrapper that rewrites `file` on its way to the real
@@ -1657,41 +1679,19 @@ fn write_swap_corrupting_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
 /// is dead, and the wrapper is the only thing that runs in that gap. Both
 /// halves are needed: nvim compares the swap's record of the file against
 /// what is on disk, and a rewrite alone can land inside the same second the
-/// swap recorded. The counter keeps successive spawns apart for the same
-/// reason [`write_swap_corrupting_nvim_wrapper`]'s does, and puts the
-/// timestamps in order.
+/// swap recorded. The counter the script keeps beside itself is what puts
+/// the timestamps in order across successive spawns.
 #[cfg(target_os = "linux")]
-fn write_file_moving_nvim_wrapper(file: &std::path::Path) -> PathBuf {
-    static NEXT_MOVING_ID: AtomicU64 = AtomicU64::new(0);
-
-    let real_nvim = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("nvim")
-            .output()
-            .expect("which nvim failed")
-            .stdout,
-    )
-    .expect("non-utf8 which output")
-    .trim()
-    .to_string();
-
-    let id = NEXT_MOVING_ID.fetch_add(1, Ordering::Relaxed);
-    let path = common::scratch_root().join(format!("moving-nvim-{}-{id}.sh", std::process::id()));
-    let counter = common::scratch_root().join(format!("moving-count-{}-{id}", std::process::id()));
-    let script = format!(
-        "#!/bin/sh\nn=$(cat {counter} 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > {counter}\n\
-         printf 'on disk\\nrewritten %s\\n' \"$n\" > {file}\ntouch -d \"+$n hours\" {file}\nexec {real_nvim} \"$@\"\n",
-        counter = counter.display(),
-        file = file.display(),
-    );
-    std::fs::write(&path, script).expect("failed to write the file-moving wrapper script");
-
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    path
+fn write_file_moving_nvim_wrapper(file: &std::path::Path) -> WrapperScript {
+    let real_nvim = real_nvim_path();
+    WrapperScript::new("moving-nvim", |dir| {
+        format!(
+            "#!/bin/sh\nn=$(cat {counter} 2>/dev/null || echo 0)\nn=$((n + 1))\necho \"$n\" > {counter}\n\
+             printf 'on disk\\nrewritten %s\\n' \"$n\" > {file}\ntouch -d \"+$n hours\" {file}\nexec {real_nvim} \"$@\"\n",
+            counter = dir.join("count").display(),
+            file = file.display(),
+        )
+    })
 }
 
 /// The restart the other recovery test cannot reach: this one replaces an
@@ -2461,48 +2461,18 @@ fn view_shrinks_and_writes_nothing_below_the_new_last_row() {
     let _ = session.wait();
 }
 
-/// Writes a shell script that sleeps `delay_ms` milliseconds, then `exec`s
-/// the real `nvim` (resolved via `which`, matching this file's other
-/// `nvim`-locating helpers) with every argument forwarded verbatim --
-/// standing in for a slow-starting engine without patching nvim itself.
-/// Marked executable directly (`portable_pty`/`Command` exec it, not a
-/// shell). Disambiguated by pid AND a per-call atomic counter, not pid
-/// alone: every test in this binary runs as a thread of the SAME process,
-/// so pid-only naming (this function's original scheme) gives every
-/// concurrently-running wrapper-using test the identical path, letting one
-/// test's cleanup `remove_file` (or a differently-delayed overwrite) race
-/// another's in-flight `view --nvim-bin <wrapper>` spawn -- exactly the
-/// collision `ScratchPaths` in `common/mod.rs` already documents and
-/// avoids via the same pid+counter shape.
+/// A `--nvim-bin` wrapper that sleeps `delay_ms` milliseconds before the
+/// real engine, standing in for a slow-starting one without patching nvim
+/// itself.
 #[cfg(unix)]
-fn write_delayed_nvim_wrapper(delay_ms: u64) -> PathBuf {
-    static NEXT_WRAPPER_ID: AtomicU64 = AtomicU64::new(0);
-
-    let real_nvim = String::from_utf8(
-        std::process::Command::new("which")
-            .arg("nvim")
-            .output()
-            .expect("which nvim failed")
-            .stdout,
-    )
-    .expect("non-utf8 which output")
-    .trim()
-    .to_string();
-
-    let id = NEXT_WRAPPER_ID.fetch_add(1, Ordering::Relaxed);
-    let path = common::scratch_root().join(format!("delayed-nvim-{}-{id}.sh", std::process::id()));
-    let script = format!(
-        "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
-        f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0
-    );
-    std::fs::write(&path, script).expect("failed to write delayed-nvim wrapper script");
-
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-
-    path
+fn write_delayed_nvim_wrapper(delay_ms: u64) -> WrapperScript {
+    let real_nvim = real_nvim_path();
+    WrapperScript::new("delayed-nvim", |_| {
+        format!(
+            "#!/bin/sh\nsleep {}\nexec {real_nvim} \"$@\"\n",
+            f64::from(u32::try_from(delay_ms).unwrap_or(u32::MAX)) / 1000.0
+        )
+    })
 }
 
 /// nvim's own empty-buffer line marker, the first thing a fresh buffer's
@@ -2582,7 +2552,10 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
     // this test loudly rather than hang the whole binary, and with it CI.
     let mut exclusive = Some(pty_isolation_exclusive());
     let mut session = spawn_view_pty_raw_isolated_with_args(
-        &[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()],
+        &[
+            std::ffi::OsStr::new("--nvim-bin"),
+            wrapper.path().as_os_str(),
+        ],
         QueryPolicy::AnswerDa1,
     );
 
@@ -2639,8 +2612,6 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
         saved.contains("hello world"),
         "saved file did not contain the pre-attach-typed text; contents:\n{saved:?}"
     );
-
-    let _ = std::fs::remove_file(&wrapper);
 }
 
 /// A flood of pre-attach keystrokes at (and somewhat past)
@@ -2670,8 +2641,10 @@ fn shell_frame_paints_before_a_slow_engine_and_pre_attach_keys_replay_in_order()
 #[test]
 fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
     let wrapper = write_delayed_nvim_wrapper(300);
-    let mut session =
-        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+    let mut session = spawn_view_pty_raw_with_args(&[
+        std::ffi::OsStr::new("--nvim-bin"),
+        wrapper.path().as_os_str(),
+    ]);
 
     assert_shell_frame_precedes_attach(&mut session);
 
@@ -2705,8 +2678,6 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
         exit.success(),
         "view did not exit cleanly after a >64-key pre-attach flood"
     );
-
-    let _ = std::fs::remove_file(&wrapper);
 }
 
 /// The deferred-scheduling half of the pre-attach seam: a key-ring
@@ -2720,8 +2691,10 @@ fn a_flood_of_more_than_64_pre_attach_keys_never_freezes_the_session() {
 #[test]
 fn a_pre_attach_key_overflow_notice_expires_after_attach_the_same_idle_wait_a_wire_toast_does() {
     let wrapper = write_delayed_nvim_wrapper(800);
-    let mut session =
-        spawn_view_pty_raw_with_args(&[std::ffi::OsStr::new("--nvim-bin"), wrapper.as_os_str()]);
+    let mut session = spawn_view_pty_raw_with_args(&[
+        std::ffi::OsStr::new("--nvim-bin"),
+        wrapper.path().as_os_str(),
+    ]);
 
     assert_shell_frame_precedes_attach(&mut session);
 
@@ -2762,7 +2735,6 @@ fn a_pre_attach_key_overflow_notice_expires_after_attach_the_same_idle_wait_a_wi
 
     session.send(b"\x1b:q!\r").unwrap();
     let _ = session.wait();
-    let _ = std::fs::remove_file(&wrapper);
 }
 
 /// Spawns `view` with `VIEW_LOG` pointed at a path whose parent directory
