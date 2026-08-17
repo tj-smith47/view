@@ -593,31 +593,65 @@ fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
     }
 }
 
-/// Parks a `-r` startup inside its own config over an intact swap, with
-/// `E303` standing for either the file the spawn was told to recover or an
-/// unrelated one, and answers what the probe's failure field reads there.
+/// The file a parked config's planted `v:errmsg` names, which is the whole
+/// of what separates a recovery's own failure from an error raised while the
+/// recovery is still ahead of it.
+enum ErrorNaming {
+    /// The swap-creation failure standing for the file this spawn was told
+    /// to recover: the recovery's own, and the one nvim paints nothing for.
+    TheRecoveryTarget,
+    /// The same code standing for a file the config went looking for on its
+    /// own account, with the recovery not yet begun.
+    AnotherFile,
+    /// A swap-creation failure whose message quotes no path at all, spawned
+    /// alongside a directory operand resolving to the working directory --
+    /// which is what an empty match names once `fnamemodify(':p')` has
+    /// answered for it.
+    NothingAtAll,
+}
+
+/// Parks a `-r` startup inside its own config over an intact swap, with the
+/// planted error standing for one of [`ErrorNaming`]'s shapes, and answers
+/// what the probe's failure field reads there.
 ///
-/// Both shapes are real. A recovery that cannot create the swap file for the
-/// buffer it recovers into raises `E303` naming its own target and gives up,
-/// leaving an empty buffer nvim says nothing about; a config that cannot
-/// create one for a file of its own raises the same code naming that file,
-/// with the recovery still ahead of it. Nothing else about the two differs
-/// where the reading can see it, so the file the message names is the whole
-/// discrimination and both directions are pinned from here.
+/// All three shapes are real. A recovery that cannot create the swap file
+/// for the buffer it recovers into raises `E303` naming its own target and
+/// gives up, leaving an empty buffer nvim says nothing about; a config that
+/// cannot create one for a file of its own raises the same code naming that
+/// file; and the rest of that family (`E300`, `E301`, `E302`, `E304`) names
+/// nothing at all, which must not be read as naming whatever the working
+/// directory happens to be. Nothing else about them differs where the
+/// reading can see it, so the file the message names is the whole
+/// discrimination and every direction is pinned from here.
 ///
 /// The error is planted rather than provoked because the provoking needs a
 /// directory the host will refuse to write into, which is a privilege
 /// question rather than an engine one; the end-to-end leg for the genuine
 /// shape lives in view-oracle's pty suite, which can arrange that.
-fn failure_read_from_a_config_park(scratch_name: &str, names_the_target: bool) -> String {
+fn failure_read_from_a_config_park(scratch_name: &str, planted: ErrorNaming) -> String {
     let dir = scratch(scratch_name);
     let file = dir.join("doc.txt");
     std::fs::write(&file, "what is on disk\n").unwrap();
     crash_with_unsaved_edit(&dir, &file, "never written to disk");
-    let named = if names_the_target {
-        file.display().to_string()
-    } else {
-        dir.join("something-else.txt").display().to_string()
+    let (error, operand) = match planted {
+        ErrorNaming::TheRecoveryTarget => (
+            format!(
+                "E303: Unable to open swap file for \"{}\", recovery impossible",
+                file.display()
+            ),
+            None,
+        ),
+        ErrorNaming::AnotherFile => (
+            format!(
+                "E303: Unable to open swap file for \"{}\", recovery impossible",
+                dir.join("something-else.txt").display()
+            ),
+            None,
+        ),
+        ErrorNaming::NothingAtAll => (
+            "E300: Swap file already exists (symlink attack?)".to_string(),
+            Some("."),
+        ),
     };
     let vimrc = dir.join("init.vim");
     // the swap is intact and the recovery has not begun: nvim opens the
@@ -629,7 +663,7 @@ fn failure_read_from_a_config_park(scratch_name: &str, names_the_target: bool) -
     std::fs::write(
         &vimrc,
         format!(
-            "let v:errmsg = 'E303: Unable to open swap file for \"{named}\", recovery impossible'\n\
+            "let v:errmsg = '{error}'\n\
              let g:reached_the_park = 1\n\
              call input('parked> ')\n\
              let g:left_the_park = 1\n"
@@ -637,14 +671,15 @@ fn failure_read_from_a_config_park(scratch_name: &str, names_the_target: bool) -
     )
     .unwrap();
 
-    let engine = Engine::spawn(
-        session(&dir)
-            .with_arg("-u")
-            .with_arg(&vimrc)
-            .with_arg("-r")
-            .with_arg(&file),
-    )
-    .unwrap();
+    let mut config = session(&dir)
+        .with_arg("-u")
+        .with_arg(&vimrc)
+        .with_arg("-r")
+        .with_arg(&file);
+    if let Some(operand) = operand {
+        config = config.with_arg(operand);
+    }
+    let engine = Engine::spawn(config).unwrap();
     engine.handle.ui_attach(80, 24).unwrap();
 
     // sourcing runs after the attach, so the park is something to wait for
@@ -693,10 +728,30 @@ fn failure_read_from_a_config_park(scratch_name: &str, names_the_target: bool) -
 #[test]
 fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure() {
     assert_eq!(
-        failure_read_from_a_config_park("park-on-config-error", false),
+        failure_read_from_a_config_park("park-on-config-error", ErrorNaming::AnotherFile),
         "",
         "an error a config raised for a file of its own was read as the \
          failure of a recovery that has not started"
+    );
+}
+
+/// The reading that has to survive a message with no path in it. Only
+/// `E303` of the swap-creation family quotes one, and the file the message
+/// names is what admits the family at all, so the four that name nothing
+/// have to be refused by that same test rather than answered for.
+///
+/// The working directory is what answers for them if the emptiness goes
+/// untested, and a directory operand is an ordinary way to start the editor,
+/// so the shape is reachable rather than contrived: a restart carries `-r`
+/// for whatever it was given, including `.`.
+#[test]
+fn an_error_naming_no_file_at_all_is_not_read_as_naming_the_recovery_target() {
+    assert_eq!(
+        failure_read_from_a_config_park("park-naming-nothing", ErrorNaming::NothingAtAll),
+        "",
+        "an error that quotes no path at all was read as naming a file this \
+         spawn was told to recover, which only the working directory could \
+         have answered for"
     );
 }
 
@@ -710,7 +765,7 @@ fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure()
 #[test]
 fn an_error_naming_the_file_a_startup_was_told_to_recover_is_that_recoverys_failure() {
     assert!(
-        failure_read_from_a_config_park("park-naming-the-target", true)
+        failure_read_from_a_config_park("park-naming-the-target", ErrorNaming::TheRecoveryTarget)
             .starts_with("E303: Unable to open swap file"),
         "a recovery that could not make its own swap file went unsaid, which \
          is the one failure nvim itself says nothing about"

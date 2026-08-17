@@ -370,7 +370,14 @@ mod tests {
     /// causal difference is still unreachable for the two failures this
     /// test exists to catch, both of which put the difference at
     /// approximately zero: a relay that ignores `DELAY_RELAY_MS`, and one
-    /// adding a constant sleep regardless of it. The upper slack is
+    /// adding a constant sleep regardless of it. What it gives up is
+    /// everything between: the floor sits at exactly the half-scale point,
+    /// so a relay applying half the configured delay lands ~0.6ms under it
+    /// -- caught here, a coin flip on a slower host -- and any scaling
+    /// between half and full passes outright. A relay applying much less
+    /// than half is what this floor still catches with margin; the 155ms
+    /// floor it replaces demanded ~97% scaling and could not survive a
+    /// parallel run. The upper slack is
     /// doubled to 1000ms rather than the single-point band's 500ms,
     /// because a *difference* of two independent medians can still carry
     /// up to two independent scheduler-jitter excursions instead of one --

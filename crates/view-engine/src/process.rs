@@ -1404,11 +1404,22 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// left no account of the loss anywhere.
 ///
 /// What separates those two is the file the message names, which is why
-/// `E300`-`E304` are admitted only when it is one of the files this spawn
-/// was told to recover. `argv()` is that list and it is populated before the
-/// config runs; both sides go through `fnamemodify(':p')` because either can
-/// be relative -- measured, a `-r` spawn given a relative path raises the
-/// error quoting that same relative path.
+/// `E300`-`E304` are admitted only when the message names a file and that
+/// file is one this spawn was told to recover. `argv()` is that list and it
+/// is populated before the config runs; both sides go through
+/// `fnamemodify(':p')` because either can be relative -- measured, a `-r`
+/// spawn given a relative path raises the error quoting that same relative
+/// path.
+///
+/// The naming test therefore refuses `E300`, `E301`, `E302` and `E304`
+/// outright: `E303` is the only one of the five whose message quotes a path
+/// at all, and the others are read as naming nothing rather than as naming
+/// the recovery target. The emptiness of the match has to be tested on its
+/// own, because `fnamemodify('', ':p')` answers with the working directory
+/// rather than with the empty string -- without that conjunct the four
+/// path-less codes degenerate into "is the working directory one of
+/// `argv()`'s entries", which any directory operand resolving to it
+/// satisfies, and a directory operand is an ordinary way to start the editor.
 ///
 /// An ordinary launch says nothing about this: it is excluded by the
 /// [`RECOVERY_ARG`] term long before the code is looked at, so measuring
@@ -1440,6 +1451,7 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
      (get(g:, 'view_swap_read', 0) == 0 && index(v:argv, '-r') >= 0 && \
      (v:errmsg =~# '^E\\(295\\|30[5-9]\\|31[0-2]\\):' || \
      (v:errmsg =~# '^E30[0-4]:' && \
+     matchstr(v:errmsg, '\"\\zs[^\"]*\\ze\"') != '' && \
      index(map(argv(), 'fnamemodify(v:val, \":p\")'), \
      fnamemodify(matchstr(v:errmsg, '\"\\zs[^\"]*\\ze\"'), ':p')) >= 0)) \
      ? v:errmsg : ''), \

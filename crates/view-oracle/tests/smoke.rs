@@ -704,21 +704,7 @@ fn a_recovered_engine_says_so_and_clears_nvims_report_with_no_keypress() {
         "the unsaved line never reached the buffer; screen:\n{}",
         session.screen()
     );
-    // `:preserve` rather than a wait on nvim's idle swap flush: the swap is
-    // what a recovery replays, and a test that raced the flush would fail
-    // for the clock rather than for the recovery. The echo after it is the
-    // barrier: nvim runs one command line in order, so the flush is on disk
-    // by the time its own answer is readable, and killing on the send alone
-    // recovers a half-written swap (`E309`) instead
-    const PRESERVED: &str = "zzpreservedzz";
-    session
-        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
-        .unwrap();
-    assert!(
-        session.wait_for(PRESERVED, Duration::from_secs(15)),
-        "the swap was never flushed; screen:\n{}",
-        session.screen()
-    );
+    flush_swap_to_disk(&mut session);
 
     let view_pid = session.view_pid();
     let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
@@ -1007,18 +993,7 @@ fn a_restart_that_cannot_read_the_swap_says_so_instead_of_going_silent() {
         "the unsaved line never reached the buffer; screen:\n{}",
         session.screen()
     );
-    // the same flush-and-barrier the success path uses: the swap has to be
-    // written before the kill, or what the replacement fails to read is a
-    // swap this test never finished writing
-    const PRESERVED: &str = "zzpreservedzz";
-    session
-        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
-        .unwrap();
-    assert!(
-        session.wait_for(PRESERVED, Duration::from_secs(15)),
-        "the swap was never flushed; screen:\n{}",
-        session.screen()
-    );
+    flush_swap_to_disk(&mut session);
 
     let view_pid = session.view_pid();
     let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
@@ -1157,18 +1132,7 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
         "the unsaved line never reached the buffer; screen:\n{}",
         session.screen()
     );
-    // the same flush-and-barrier the other restart tests use: the swap has
-    // to be on disk before the kill, or what comes back is a swap this test
-    // never finished writing
-    const PRESERVED: &str = "zzpreservedzz";
-    session
-        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
-        .unwrap();
-    assert!(
-        session.wait_for(PRESERVED, Duration::from_secs(15)),
-        "the swap was never flushed; screen:\n{}",
-        session.screen()
-    );
+    flush_swap_to_disk(&mut session);
 
     let view_pid = session.view_pid();
     let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
@@ -1240,14 +1204,13 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
     std::fs::create_dir_all(&swaps).expect("the swap dir must be creatable");
     assert!(
         UncreatableDir::refuses_a_new_file(&swaps),
-        "no way to make {} refuse a new file on this host, so nothing here \
-         would drive the recovery this test is about",
+        "neither `chattr +i` nor mode 0500 makes {} refuse a new file on \
+         this host, so nothing here would drive the recovery this test is \
+         about -- a fixture this host cannot express, not a recovery that \
+         regressed",
         swaps.display()
     );
-    // whatever the wrapper does to that directory is undone even if an
-    // assertion below unwinds first, or the scratch tree cannot be cleaned
-    let _unlock_at_exit = UncreatableDir::new(&swaps);
-    let wrapper = write_swap_dir_locking_nvim_wrapper(&swaps);
+    let wrapper = write_swap_dir_locking_nvim_wrapper(&paths.isolated_home, &swaps);
 
     let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
     let mut session = spawn_view_pty_at(
@@ -1261,6 +1224,12 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
         shared_isolation(),
         QueryPolicy::AnswerDa1,
     );
+    // declared after the session so it drops before it: whatever the wrapper
+    // does to that directory is undone even if an assertion below unwinds
+    // first, and undone while the session's scratch tree can still be
+    // removed -- an immutable directory defeats the removal silently, and
+    // an unlock arriving after it has nothing left to retry
+    let _unlock_at_exit = UncreatableDir::new(&swaps);
     assert!(
         session.wait_for("on disk", Duration::from_secs(15)),
         "the session never painted the file it was given; screen:\n{}",
@@ -1274,18 +1243,7 @@ fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
         "the unsaved line never reached the buffer; screen:\n{}",
         session.screen()
     );
-    // the same flush-and-barrier the other restart tests use: the swap has
-    // to be on disk before the kill, or the replacement finds nothing to be
-    // stopped from recovering
-    const PRESERVED: &str = "zzpreservedzz";
-    session
-        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
-        .unwrap();
-    assert!(
-        session.wait_for(PRESERVED, Duration::from_secs(15)),
-        "the swap was never flushed; screen:\n{}",
-        session.screen()
-    );
+    flush_swap_to_disk(&mut session);
 
     let view_pid = session.view_pid();
     let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
@@ -1407,8 +1365,13 @@ fn unlock_directory(path: &std::path::Path) {
 /// supposed to read. The `-r` the restart carries is what tells the two
 /// spawns apart, and it is the engine's own flag rather than anything this
 /// test invents.
+///
+/// Written under `home` rather than beside the other wrappers in the shared
+/// scratch root so the session's own cleanup takes it: this is the one
+/// wrapper whose test can leave an unremovable directory behind, so it is
+/// the one that must not add a second thing to remove by hand.
 #[cfg(target_os = "linux")]
-fn write_swap_dir_locking_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
+fn write_swap_dir_locking_nvim_wrapper(home: &std::path::Path, swaps: &std::path::Path) -> PathBuf {
     static NEXT_LOCKING_ID: AtomicU64 = AtomicU64::new(0);
 
     let real_nvim = String::from_utf8(
@@ -1423,7 +1386,7 @@ fn write_swap_dir_locking_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
     .to_string();
 
     let id = NEXT_LOCKING_ID.fetch_add(1, Ordering::Relaxed);
-    let path = common::scratch_root().join(format!("locking-nvim-{}-{id}.sh", std::process::id()));
+    let path = home.join(format!("locking-nvim-{}-{id}.sh", std::process::id()));
     let script = format!(
         "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-r\" ]; then\n    \
          chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n    break\n  fi\ndone\n\
@@ -1505,6 +1468,38 @@ fn watch_screen(
         }
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+/// Puts the buffer's unsaved work in its swap file on disk, and waits for
+/// the engine's own answer that the flush has run.
+///
+/// `:preserve` rather than a wait on nvim's idle flush: the swap is what a
+/// recovery replays, and a test that raced the flush would fail for the
+/// clock rather than for the recovery. The echo is the barrier -- nvim runs
+/// one command line in order, so the swap is on disk by the time its answer
+/// is readable, and killing on the send alone hands the replacement a
+/// half-written swap (`E309`) instead.
+///
+/// The answer is spelled as a concatenation because the screen scan covers
+/// the command line too: a barrier echoing its own literal is satisfied by
+/// the keystrokes that type it rather than by the flush that follows, which
+/// on a host loaded enough to widen that window is exactly the `E309` the
+/// barrier exists to prevent.
+#[cfg(target_os = "linux")]
+fn flush_swap_to_disk(session: &mut ViewPtySession) {
+    const PRESERVED: &str = "zzpreservedzz";
+    const TYPED: &str = ":preserve | echo 'zzpreserv' . 'edzz'\r";
+    assert!(
+        !TYPED.contains(PRESERVED),
+        "the barrier types the answer it waits for, so the keystrokes \
+         satisfy it before the flush they were meant to follow"
+    );
+    session.send(TYPED.as_bytes()).unwrap();
+    assert!(
+        session.wait_for(PRESERVED, Duration::from_secs(15)),
+        "the swap was never flushed; screen:\n{}",
+        session.screen()
+    );
 }
 
 /// Leaves a swap file under `swaps` that nvim will find for `scratch` and
