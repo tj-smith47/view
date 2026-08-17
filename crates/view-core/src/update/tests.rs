@@ -4656,6 +4656,7 @@ fn one_connection_says_its_recovery_failed_once_however_often_it_is_asked() {
             count: 0,
             reported: false,
             failure: Some(E305.to_string()),
+            empty: true,
         },
     );
     assert!(!first.is_empty(), "the first reading said nothing");
@@ -4667,6 +4668,7 @@ fn one_connection_says_its_recovery_failed_once_however_often_it_is_asked() {
             count: 0,
             reported: true,
             failure: Some(E305.to_string()),
+            empty: true,
         },
     );
     assert!(
@@ -4692,6 +4694,7 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
             count: 0,
             reported: false,
             failure: Some(E305.to_string()),
+            empty: true,
         },
     );
     let second = attach_swap_probe(&mut m);
@@ -4702,6 +4705,7 @@ fn a_replacement_connection_may_report_the_same_failure_its_predecessor_did() {
             count: 0,
             reported: false,
             failure: Some(E305.to_string()),
+            empty: true,
         },
     );
     assert!(
@@ -4759,6 +4763,7 @@ fn a_session_that_recovered_nothing_neither_speaks_nor_redraws() {
             count: 0,
             reported: false,
             failure: None,
+            empty: false,
         },
     );
     assert!(effects.is_empty(), "{effects:?}");
@@ -4776,6 +4781,7 @@ fn a_swap_recovery_announces_what_came_back_and_redraws_the_report_away() {
             count: 1,
             reported: true,
             failure: None,
+            empty: false,
         },
     );
     assert!(
@@ -4807,6 +4813,7 @@ fn a_recovery_that_restored_nothing_still_redraws_and_stays_quiet() {
             count: 0,
             reported: true,
             failure: None,
+            empty: false,
         },
     );
     assert!(
@@ -4829,6 +4836,7 @@ fn a_recovery_that_failed_names_the_error_and_never_redraws_it_away() {
             count: 0,
             reported: true,
             failure: Some(E305.to_string()),
+            empty: true,
         },
     );
     assert!(
@@ -4855,6 +4863,33 @@ fn a_recovery_that_failed_names_the_error_and_never_redraws_it_away() {
 }
 
 #[test]
+fn a_failure_that_left_the_file_in_place_never_says_the_buffer_is_empty() {
+    let mut m = model();
+    let generation = arm_swap_probe(&mut m);
+    const E309: &str = "E309: Unable to read block 1 from /home/u/.notes.md.swp";
+    let _ = update(
+        &mut m,
+        Msg::SwapRecovered {
+            generation,
+            count: 0,
+            reported: true,
+            failure: Some(E309.to_string()),
+            empty: false,
+        },
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains(E309)),
+        "the failure reached the user without nvim's own account of it: \
+         {texts:?}"
+    );
+    assert!(
+        !texts.iter().any(|line| line.contains("is empty")),
+        "view told the user the text it is showing them is gone: {texts:?}"
+    );
+}
+
+#[test]
 fn a_reading_from_an_engine_that_has_been_replaced_is_dropped() {
     let mut m = model();
     let stale = arm_swap_probe(&mut m);
@@ -4866,6 +4901,7 @@ fn a_reading_from_an_engine_that_has_been_replaced_is_dropped() {
             count: 3,
             reported: true,
             failure: None,
+            empty: false,
         },
     );
     assert!(

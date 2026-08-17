@@ -502,17 +502,29 @@ pub fn swap_recovery_notice(count: u64) -> Option<String> {
 }
 
 /// What a session says when the recovery it asked its replacement engine for
-/// did not happen, `error` being the engine's own account of why.
+/// did not happen, `error` being the engine's own account of why and
+/// `buffer_empty` what the reading found in the buffer it was left with.
 ///
 /// The user is owed this one more than they are owed the success line. A
-/// failed `-r` leaves an empty buffer where their file's contents should be,
-/// and the buffer looks like an ordinary empty file: writing it truncates
-/// the file on disk. So this names the state rather than the mechanism, and
-/// carries the engine's error verbatim rather than paraphrasing an error
-/// view did not raise.
+/// failed `-r` can leave an empty buffer where their file's contents should
+/// be, and that buffer looks like an ordinary empty file: writing it
+/// truncates the file on disk. So the empty wording names the state rather
+/// than the mechanism.
+///
+/// It is worded off the reading and never off the error, because the two
+/// failures do not leave the same screen: a swap file that cannot be found
+/// empties the buffer, while one that cannot be read leaves the contents
+/// from disk sitting there. Telling a user their intact text is gone is a
+/// worse lie than the one the notice exists to prevent, so the second wording
+/// claims nothing about the buffer at all. Both carry the engine's error
+/// verbatim rather than paraphrasing an error view did not raise.
 #[must_use]
-pub fn swap_recovery_failure_notice(error: &str) -> String {
-    format!("view: swap recovery failed, this buffer is empty -- {error}")
+pub fn swap_recovery_failure_notice(error: &str, buffer_empty: bool) -> String {
+    if buffer_empty {
+        format!("view: swap recovery failed, this buffer is empty -- {error}")
+    } else {
+        format!("view: swap recovery failed -- {error}")
+    }
 }
 
 /// How many times one session recovers a dead engine without asking before

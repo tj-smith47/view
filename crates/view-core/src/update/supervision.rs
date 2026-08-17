@@ -203,6 +203,7 @@ pub(super) fn note_swap_recovery(
     count: u64,
     reported: bool,
     failure: Option<String>,
+    empty: bool,
 ) -> Vec<Effect> {
     // a restart hands the replacement engine's pump the sink the dead one
     // wrote into, so a reading that crossed before the cutover can arrive
@@ -218,7 +219,7 @@ pub(super) fn note_swap_recovery(
         model.dirty = true;
         return model
             .engine
-            .record_native_notice(swap_recovery_failure_notice(&error), false);
+            .record_native_notice(swap_recovery_failure_notice(&error, empty), false);
     }
     if !reported {
         return Vec::new();

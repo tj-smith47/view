@@ -475,6 +475,7 @@ impl EngineHandle {
                                         count: reading.count,
                                         reported: reading.reported,
                                         failure: reading.failure,
+                                        empty: reading.empty,
                                     });
                                 }
                             }
@@ -1457,16 +1458,21 @@ struct SwapRecoveryReading {
     /// The engine's own error text when the recovery it was asked for could
     /// not be performed, `None` when it went through.
     failure: Option<String>,
+    /// Whether the buffer this connection came up holding is empty -- read,
+    /// not inferred from the error, because a failed recovery is not one
+    /// shape.
+    empty: bool,
 }
 
-/// Decodes [`SWAP_RECOVERY_PROBE`]'s three-element answer.
+/// Decodes [`SWAP_RECOVERY_PROBE`]'s four-element answer.
 ///
 /// A shape this crate has never seen from the pinned engine degrades to the
 /// default -- the same "absent or malformed is exactly as informative as an
 /// explicit nothing" precedent [`decode_hl_probe_reply`] follows, and the
-/// conservative direction for all three: no notice claiming a recovery that
-/// was not read, no redraw over a report that may not be there, and no
-/// failure attributed to an engine that did not report one.
+/// conservative direction for all four: no notice claiming a recovery that
+/// was not read, no redraw over a report that may not be there, no failure
+/// attributed to an engine that did not report one, and no claim about a
+/// buffer nobody looked in.
 ///
 /// [`SWAP_RECOVERY_PROBE`]: crate::process::SWAP_RECOVERY_PROBE
 fn decode_swap_recovery_reply(result: &Value) -> SwapRecoveryReading {
@@ -1483,6 +1489,7 @@ fn decode_swap_recovery_reply(result: &Value) -> SwapRecoveryReading {
             .and_then(Value::as_str)
             .filter(|text| !text.is_empty())
             .map(str::to_owned),
+        empty: fields.get(3).and_then(Value::as_u64).unwrap_or(0) != 0,
     }
 }
 

@@ -84,6 +84,12 @@ pub enum Msg {
     /// Distinct from [`Msg::EngineReady`], which fires on the attach call
     /// returning and is consumed before the loop exists. This is folded, so
     /// the effects it owes are dispatched like any other.
+    ///
+    /// Carries no generation tag, and needs none: one place constructs it,
+    /// synchronously, and hands it straight to the dispatcher on the same
+    /// thread. It never crosses the message channel, so the race every
+    /// engine-originated reply is tagged against -- a replacement engine
+    /// writing into the sink its predecessor was given -- cannot reach it.
     EngineAttached,
     EngineDown(ExitInfo),
     EngineRequest(EngineRequest),
@@ -171,12 +177,14 @@ pub enum Msg {
     /// replays a swap, so a recovery that restored nothing changed still
     /// leaves a report over the buffer that only a redraw takes down.
     /// `failure` is the third case and the one neither of the others can
-    /// express: the recovery was asked for and did not happen, which leaves
-    /// an empty buffer where the user's file should be and an error on
-    /// screen saying why.
+    /// express: the recovery was asked for and did not happen, leaving an
+    /// error on screen saying why. `empty` says whether that left the user
+    /// looking at an empty buffer, and it is read out of the buffer rather
+    /// than assumed from the error, because a failed recovery is not one
+    /// shape -- some leave the file on disk in place.
     ///
-    /// All three are empty for the ordinary session, which is the common case
-    /// and not an error: a session that met no swap file has nothing to
+    /// All of them are empty for the ordinary session, which is the common
+    /// case and not an error: a session that met no swap file has nothing to
     /// announce and nothing on its screen to clear. The arm that folds this
     /// is what decides that, so the reading still arrives.
     ///
@@ -188,6 +196,7 @@ pub enum Msg {
         count: u64,
         reported: bool,
         failure: Option<String>,
+        empty: bool,
     },
     /// The complete answer to one [`RpcCall::RegisterMappings`]: every
     /// default key the session registered, and whether it landed over a

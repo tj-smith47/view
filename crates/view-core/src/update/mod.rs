@@ -248,7 +248,8 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             count,
             reported,
             failure,
-        } => supervision::note_swap_recovery(model, generation, count, reported, failure),
+            empty,
+        } => supervision::note_swap_recovery(model, generation, count, reported, failure, empty),
         Msg::MappingsClaimed { claimed } => {
             model.record_claimed_keys(claimed);
             Vec::new()

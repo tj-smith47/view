@@ -592,7 +592,11 @@ pub(crate) enum CutoverOutcome {
 /// translates a live one (see `view_core::msg`'s module doc comment):
 /// `dispatch` does not replicate that loop-specific mapping itself, since
 /// it is otherwise unreachable from the `Msg::Key`/`Msg::Resized` messages
-/// replay sends.
+/// replay sends. Between the staged traffic and the replayed input sits
+/// `Msg::EngineAttached`, the one announcement this call makes rather than
+/// replays: it comes after the presink because a connection that died on the
+/// way up says so there, and asking a dead connection anything ahead of that
+/// would lose the exit that saying carries.
 ///
 /// # Why nothing here can ever block on `msg_tx`
 ///
@@ -627,22 +631,7 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
     let mut engine_alive = true;
     let mut engine_stopped_exit = Some(engine_stopped_exit);
 
-    // ahead of everything staged: this is the one point both the first
-    // attach and every replacement pass through, and what it asks the
-    // connection must be asked before that connection can park itself at a
-    // prompt nobody answers (see `SWAP_RECOVERY_PROBE`)
-    match crate::runtime::dispatch(model, executor, follow_ups, Msg::EngineAttached) {
-        crate::runtime::Flow::Continue => {}
-        crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
-        crate::runtime::Flow::EngineLost | crate::runtime::Flow::RestartEngine => {
-            engine_alive = false;
-        }
-    }
-
     for msg in presink {
-        if !engine_alive {
-            break;
-        }
         let msg = match msg {
             Msg::EngineStopped { reason, .. } => {
                 model.fatal_reason = reason;
@@ -667,6 +656,24 @@ pub(crate) fn run_cutover<E: crate::engine_ops::EngineOps>(
             crate::runtime::Flow::EngineLost | crate::runtime::Flow::RestartEngine => {
                 engine_alive = false;
                 break;
+            }
+        }
+    }
+
+    // after the connection's own staged traffic and before anything replayed
+    // from the terminal: the staged messages are the only place a connection
+    // that died on the way up says so, and that saying has to be translated
+    // into an exit before anything else is asked of it. Still ahead of the
+    // steady-state loop, which is what the reading needs -- the connection
+    // this asks about can park itself at a prompt nobody answers, so waiting
+    // for it to announce it finished starting would wait forever (see
+    // `SWAP_RECOVERY_PROBE`)
+    if engine_alive {
+        match crate::runtime::dispatch(model, executor, follow_ups, Msg::EngineAttached) {
+            crate::runtime::Flow::Continue => {}
+            crate::runtime::Flow::Quit(code) => return CutoverOutcome::Quit(code),
+            crate::runtime::Flow::EngineLost | crate::runtime::Flow::RestartEngine => {
+                engine_alive = false;
             }
         }
     }
@@ -1001,14 +1008,14 @@ mod tests {
             content_painted,
             "the pending-damage Flush was not dispatched"
         );
-        // the attach probe the cutover opens with, then presink's VimEnter
-        // reply and the second probe that reply carries, then the resize,
-        // then every buffered key, in that exact order -- the arrival order
-        // run_cutover's doc comment claims
+        // presink's VimEnter reply and the probe that reply carries, then
+        // the attach probe the cutover closes the staged traffic with, then
+        // the resize, then every buffered key, in that exact order -- the
+        // arrival order run_cutover's doc comment claims
         let expected_len = 4 + KEY_RING_CAPACITY;
         assert_eq!(calls.len(), expected_len);
-        assert_eq!(calls[0], "probe_swap_recovery(1)");
-        assert_eq!(calls[1], "reply(1,Nil)");
+        assert_eq!(calls[0], "reply(1,Nil)");
+        assert_eq!(calls[1], "probe_swap_recovery(1)");
         assert_eq!(calls[2], "probe_swap_recovery(2)");
         assert!(calls[3].starts_with("try_resize("));
         assert_eq!(calls[4], "input(0)");
@@ -1062,13 +1069,10 @@ mod tests {
         assert!(matches!(outcome, CutoverOutcome::Quit(3)));
         assert!(exit_called.get());
         // neither the pending Flush nor the replayed key ever reached
-        // update(): Quit short-circuits everything after the attach probe
-        // the cutover opens with
+        // update(): Quit short-circuits everything, the attach probe
+        // included
         assert!(!model.content_painted);
-        assert_eq!(
-            executor.into_ops().calls.into_inner(),
-            vec!["probe_swap_recovery(1)"]
-        );
+        assert!(executor.into_ops().calls.into_inner().is_empty());
     }
 
     /// A presink `Msg::EngineStopped` carrying a reason stashes it on
@@ -1109,6 +1113,54 @@ mod tests {
         assert_eq!(model.fatal_reason.as_deref(), Some("wedged reader"));
     }
 
+    /// A connection that died while starting still exits with its own status
+    /// and its own reason, even though nothing it is asked can be written to
+    /// it. The staged `Msg::EngineStopped` is what carries both, so it is
+    /// translated before the cutover asks the connection anything: an
+    /// unanswerable question asked first would take the exit down with it and
+    /// leave the session running against a dead engine.
+    #[test]
+    fn run_cutover_exits_with_the_status_of_an_engine_that_died_while_starting() {
+        let ops = crate::engine_ops::FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor = crate::runtime::Executor::new(ops);
+        let mut model = Model::with_term_size(80, 24);
+
+        let exit_called = std::cell::Cell::new(false);
+        let outcome = run_cutover(
+            &mut model,
+            &executor,
+            &mut crate::runtime::FollowUps {
+                native: &mut crate::native::NativeSession::inert(),
+                theme: &mut crate::bridge::ThemeBridge::new(None),
+                speculate: crate::speculate::SpeculationClock::default(),
+            },
+            CutoverInput {
+                presink: vec![Msg::EngineStopped {
+                    generation: 1,
+                    reason: Some("nvim: E492: Not an editor command".to_string()),
+                }],
+                pending_redraw: vec![],
+                resize: None,
+                keys: vec![],
+            },
+            || {
+                exit_called.set(true);
+                view_core::msg::ExitInfo {
+                    code: Some(3),
+                    by_signal: false,
+                }
+            },
+        );
+
+        assert!(matches!(outcome, CutoverOutcome::Quit(3)));
+        assert!(exit_called.get());
+        assert_eq!(
+            model.fatal_reason.as_deref(),
+            Some("nvim: E492: Not an editor command")
+        );
+    }
+
     /// Once a dispatch reports the engine connection lost, every later
     /// stage (pending damage, resize, keys) is skipped rather than
     /// attempted: a further write would fail the same way, and
@@ -1147,11 +1199,11 @@ mod tests {
         );
 
         assert!(matches!(outcome, CutoverOutcome::Continue));
-        // the failed write is the only call made: the presink reply, pending
-        // damage, the resize and the key are all skipped once the engine is
-        // lost, whichever of the cutover's writes discovered it
+        // the failed reply is the only call made: pending damage, the attach
+        // probe, the resize and the key are all skipped once the engine is
+        // lost
         let calls = executor.into_ops().calls.into_inner();
-        assert_eq!(calls, vec!["probe_swap_recovery(1)"]);
+        assert_eq!(calls, vec!["reply(1,Nil)"]);
         assert!(!model.content_painted);
     }
 

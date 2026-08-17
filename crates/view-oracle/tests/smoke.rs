@@ -808,7 +808,7 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
         session.screen()
     );
 
-    let notice = view_core::native::supervision::swap_recovery_failure_notice("");
+    let notice = view_core::native::supervision::swap_recovery_failure_notice("", true);
     let named = notice
         .split_once(" --")
         .map(|(said, _)| said.to_string())
@@ -822,6 +822,73 @@ fn a_recovery_with_no_swap_to_read_keeps_nvims_error_and_says_the_buffer_is_empt
         "a recovery that could not happen left the user an empty buffer with \
          no account of itself -- expected nvim's {NO_SWAP_TO_RECOVER:?} still \
          standing and view's own {named:?} beside it; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// The ordinary launch the recovery chain must stay silent through, driven
+/// by the config error that reaches it most easily.
+///
+/// `:preserve` under `set noswapfile` raises `E313`, and it is not a contrived
+/// pairing: auto-save plugins call `:preserve` on a timer, and swapfiles are
+/// commonly off. That error is in the same numeric neighbourhood as the ones
+/// a failed recovery raises and it is still standing in `v:errmsg` long after
+/// the config that raised it finished, so a reading that only pattern-matched
+/// the error would tell a user with a perfectly intact buffer that their text
+/// was gone. Nothing here is a recovery at all: first launch, no crash, no
+/// restart, no `-r`.
+/// The config is a real `init.vim` and not a `--cmd`, because the two are
+/// not interchangeable here: a pre-vimrc command's error is overwritten by
+/// the ordinary `E216` nvim's own bundled plugins raise while loading, so it
+/// is gone from `v:errmsg` before anything could misread it. A config's error
+/// is raised after those plugins and stands.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_ordinary_launch_whose_config_errors_is_never_told_a_recovery_failed() {
+    let paths = common::ScratchPaths::new("smoke");
+    std::fs::write(&paths.scratch, "on disk\n").expect("scratch fixture must be writable");
+    let config_dir = common::xdg_home(&paths.isolated_home, "XDG_CONFIG_HOME").join("nvim");
+    std::fs::create_dir_all(&config_dir).expect("the isolated config dir must be creatable");
+    std::fs::write(
+        config_dir.join("init.vim"),
+        "set noswapfile\nsilent! preserve\n",
+    )
+    .expect("the isolated config must be writable");
+
+    let mut cmd = portable_pty::CommandBuilder::new(common::view_bin_path());
+    cmd.arg(&paths.scratch);
+    common::isolate_xdg_native_off(&mut cmd, &paths.isolated_home);
+    let isolation = shared_isolation();
+    let mut session = ViewPtySession {
+        session: PtySession::spawn_configured_with(cmd, 80, 24, QueryPolicy::AnswerDa1).unwrap(),
+        paths,
+        _isolation: isolation,
+    };
+    // watched from the spawn rather than read once afterwards: view's own
+    // notices are transient toasts, so a single reading taken later cannot
+    // tell a notice that was never raised from one that has already expired
+    // -- and this one would be raised before the buffer ever paints, off a
+    // reading the connection answers while it is still starting. The window
+    // outlasts that expiry
+    let deadline =
+        Instant::now() + view_core::native::toast::TRANSIENT_TOAST_TIMEOUT + Duration::from_secs(2);
+    let mut said = None;
+    while Instant::now() < deadline && said.is_none() {
+        let text = session.screen();
+        if text.contains("swap recovery") {
+            said = Some(text);
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(
+        said.is_none(),
+        "an ordinary launch was told its recovery failed; screen:\n{}",
+        said.unwrap_or_default()
+    );
+    assert!(
+        session.wait_for("on disk", Duration::from_secs(15)),
+        "the session never painted the file it was given, so nothing here \
+         watched a launch that got anywhere; screen:\n{}",
         session.screen()
     );
 }
