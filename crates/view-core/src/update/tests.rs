@@ -4911,18 +4911,19 @@ fn a_recovery_the_engine_only_warned_about_still_says_the_work_came_back() {
         },
     );
     assert!(
-        effects
+        !effects
             .iter()
             .any(|e| matches!(e, Effect::Rpc(RpcCall::Redraw))),
-        "a recovery that worked kept nvim's report over the buffer: {effects:?}"
+        "view redrew away the engine's warning that the file underneath the \
+         recovered work has changed, leaving the next write to discover it: \
+         {effects:?}"
     );
     let texts = visible_texts(&m);
     assert!(
         texts
             .iter()
             .any(|line| line.contains("unsaved changes recovered") && line.contains(E308)),
-        "the warning and what came back were not said together, and the \
-         redraw above takes the warning off the screen: {texts:?}"
+        "the warning and what came back were not said together: {texts:?}"
     );
 }
 

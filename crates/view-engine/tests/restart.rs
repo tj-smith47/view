@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use view_engine::process::{Engine, EngineConfig};
+use view_engine::process::{Engine, EngineConfig, SWAP_RECOVERY_PROBE};
 
 mod common;
 
@@ -131,10 +131,10 @@ fn first_line(engine: &Engine) -> String {
         .unwrap_or_else(|| panic!("nvim_buf_get_lines answered with {lines:?}"))
 }
 
-/// How many swap prompts this engine has answered on its user's behalf, per
-/// the counter the injected `SwapExists` autocommand keeps. Read through
-/// `get()`, so an engine that never met a swap file answers 0 rather than
-/// failing on a variable nothing ever set.
+/// How much work this engine's startup brought back out of swap files, per
+/// the counter the injected recovery window keeps. Read through `get()`, so
+/// an engine that never met a swap file answers 0 rather than failing on a
+/// variable nothing ever set.
 fn swap_events(engine: &Engine) -> u64 {
     engine
         .handle
@@ -146,6 +146,65 @@ fn swap_events(engine: &Engine) -> u64 {
         .expect("a live engine answers nvim_eval")
         .as_u64()
         .expect("the swap-prompt counter is a number")
+}
+
+/// What this engine would tell its session went wrong with the recovery it
+/// was started for: the failure field of the probe view itself reads.
+///
+/// Asked through the shipped expression rather than a hand-written copy of
+/// it, so a test here measures what a session gets and not what this file
+/// thinks it gets.
+fn swap_failure(engine: &Engine) -> String {
+    let reading = engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from(SWAP_RECOVERY_PROBE)],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval");
+    reading
+        .as_array()
+        .and_then(|fields| fields.get(2))
+        .and_then(rmpv::Value::as_str)
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("the swap probe answered with {reading:?}"))
+}
+
+/// What `expr` evaluates to in this engine, for the expressions a test here
+/// reads as a count or a flag.
+fn number(engine: &Engine, expr: &str) -> u64 {
+    let value = engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from(expr)],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval");
+    value
+        .as_u64()
+        .unwrap_or_else(|| panic!("{expr} answered with {value:?}"))
+}
+
+/// One of the globals the recovery window writes, or `<unset>` where it
+/// never wrote at all -- the difference between a window that closed and one
+/// still recording.
+fn swap_global(engine: &Engine, name: &str) -> String {
+    let value = engine
+        .handle
+        .request_timeout(
+            "nvim_eval",
+            vec![rmpv::Value::from(format!(
+                "string(get(g:, '{name}', '<unset>'))"
+            ))],
+            Duration::from_secs(5),
+        )
+        .expect("a live engine answers nvim_eval");
+    value
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| panic!("string() answered with {value:?}"))
 }
 
 /// Whether the engine's session carries view's own `SwapExists` guard.
@@ -508,14 +567,109 @@ fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
         "the engine is parked at a swap prompt nobody can answer"
     );
     assert_eq!(
-        swap_events(&engine),
-        1,
-        "the swap file this test left was not met as a SwapExists event"
-    );
-    assert_eq!(
         first_line(&engine),
         "typed after the last write",
         "the open discarded what the swap held"
+    );
+
+    // and it is answered without reopening the window a startup's reading
+    // comes from. `VimEnter` is the only thing that closes that window and
+    // it cannot fire twice, so a window reopened here would stay open for
+    // the rest of the session -- attributing every later error to a
+    // recovery and counting every modified buffer as work it brought back.
+    // What the session says about its recovery is settled at startup; a
+    // mid-session open leaves nvim's own report standing instead.
+    for name in [
+        "view_swap_recovered",
+        "view_swap_reported",
+        "view_swap_error",
+    ] {
+        assert_eq!(
+            swap_global(&engine, name),
+            "'<unset>'",
+            "a swap met mid-session wrote g:{name}, so the startup's \
+             recovery window is open again with nothing left to close it"
+        );
+    }
+}
+
+/// The reading that has to survive a config: a startup told to recover, and
+/// parked by something that is not the recovery.
+///
+/// nvim answers RPC while it waits at a prompt, which is the whole reason
+/// the failure reading is taken before `VimEnter` -- a recovery that could
+/// not open its swap file parks there, and a session that stayed silent
+/// would leave the user an empty buffer with no account of it. But a config
+/// that parks a `-r` startup meets every condition that reading tests: no
+/// file has been read, the startup has not finished, and the spawn asked for
+/// a recovery. Only the error code separates them, and `E303` is one an
+/// ordinary session raises for its own swap file, with no recovery in sight.
+///
+/// Read as the recovery's, it becomes the worst wording view has: the user
+/// is told the recovery failed and the buffer they are looking at is empty.
+#[test]
+fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure() {
+    let dir = scratch("park-on-config-error");
+    let file = dir.join("doc.txt");
+    std::fs::write(&file, "what is on disk\n").unwrap();
+    crash_with_unsaved_edit(&dir, &file, "never written to disk");
+    let vimrc = dir.join("init.vim");
+    // the swap is intact and the recovery has not begun: nvim opens the
+    // files it was given after sourcing, so this parks in front of it
+    // the markers either side of the prompt are what makes the park
+    // measurable: `nvim_get_mode` reports a session waiting inside `input()`
+    // as an ordinary cmdline mode, so it cannot tell one from a startup that
+    // finished
+    std::fs::write(
+        &vimrc,
+        "let v:errmsg = 'E303: Unable to open swap file for \"x\", recovery impossible'\n\
+         let g:reached_the_park = 1\n\
+         call input('parked> ')\n\
+         let g:left_the_park = 1\n",
+    )
+    .unwrap();
+
+    let engine = Engine::spawn(
+        session(&dir)
+            .with_arg("-u")
+            .with_arg(&vimrc)
+            .with_arg("-r")
+            .with_arg(&file),
+    )
+    .unwrap();
+    engine.handle.ui_attach(80, 24).unwrap();
+
+    // sourcing runs after the attach, so the park is something to wait for
+    // rather than something to read once
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline
+        && number(&engine, "get(g:, 'reached_the_park', 0)") == 0
+    {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(
+        number(&engine, "get(g:, 'reached_the_park', 0)"),
+        1,
+        "the config never ran, so this test never reached the reading a park \
+         is the only way to take"
+    );
+    assert_eq!(
+        swap_failure(&engine),
+        "",
+        "a config's own error was read as the failure of a recovery that has \
+         not started"
+    );
+    assert_eq!(
+        number(&engine, "get(g:, 'left_the_park', 0)"),
+        0,
+        "the prompt returned on its own, so the reading above was taken of a \
+         startup that was never parked"
+    );
+    assert_eq!(
+        number(&engine, "v:vim_did_enter"),
+        0,
+        "the startup finished, so the reading above came from the window and \
+         not from the park"
     );
 }
 

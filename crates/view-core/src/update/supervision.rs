@@ -190,15 +190,14 @@ pub(super) fn note_supervision_choice(model: &mut Model, notation: &str) -> Vec<
 ///   is over -- the `msg_clear` [`RpcCall::Redraw`] answers with is what
 ///   takes it off the buffer, leaving the notice, which `Messages::clear`
 ///   keeps, as the account of it.
-/// - **Recovered, with a warning.** The recovery went through and the engine
-///   warned about it, so the report still comes down -- but the notice
-///   carries the warning, which that same redraw would otherwise take with
-///   it.
-/// - **Recovered damaged, or not at all.** The engine's error is the only
-///   thing on screen saying what happened to the user's work, and view did
-///   not put it there: redrawing it away would leave a buffer that is empty,
-///   or quietly missing lines, with no account of itself. The notice names
-///   the state and carries the error with it, and nothing is redrawn.
+/// - **Recovered, damaged, or not at all, with an error recorded.** The
+///   engine's error is the only standing account of what happened to the
+///   user's work, and view did not put it there: redrawing it away would
+///   leave a buffer that is empty, quietly missing lines, or holding work
+///   the file underneath it no longer matches, with nothing on screen to say
+///   so. view's notice is a transient toast and the risk outlives it -- an
+///   `E308` is answered by the *next* write, minutes later -- so the notice
+///   names the state and carries the error, and nothing is redrawn.
 ///
 /// The reading is deduplicated by the line it words rather than by the
 /// generation, because a connection is asked twice and the failure branch is
@@ -221,8 +220,7 @@ pub(super) fn note_swap_recovery(
         return Vec::new();
     }
     if let Some(error) = failure {
-        let outcome = swap_error_outcome(&error);
-        let notice = match outcome {
+        let notice = match swap_error_outcome(&error) {
             SwapOutcome::Failed => swap_recovery_failure_notice(&error, empty),
             SwapOutcome::Damaged => swap_recovery_damage_notice(&error),
             SwapOutcome::Warned => swap_recovery_warning_notice(count, &error),
@@ -231,11 +229,7 @@ pub(super) fn note_swap_recovery(
             return Vec::new();
         }
         model.dirty = true;
-        let mut effects = model.engine.record_native_notice(notice, false);
-        if outcome == SwapOutcome::Warned {
-            effects.push(Effect::Rpc(RpcCall::Redraw));
-        }
-        return effects;
+        return model.engine.record_native_notice(notice, false);
     }
     if !reported {
         return Vec::new();

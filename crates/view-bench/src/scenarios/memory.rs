@@ -436,8 +436,24 @@ mod tests {
             .spawn()
             .expect("spawning a throwaway child process for the test");
         let child_pid = child.id();
-        let children = direct_children(std::process::id())
-            .expect("reading this test process's own children file");
+        // read until it appears rather than once: `/proc/<pid>/task` is
+        // listed while the rest of this binary's tests are starting and
+        // ending threads of their own, and a directory that changes under a
+        // listing can drop an entry from it -- including the entry of the
+        // thread this child was forked from. A reader that gave up on the
+        // first miss would fail for the listing rather than for the
+        // relationship being measured, while an undercount that is really
+        // there still exhausts this loop.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut children = Vec::new();
+        while std::time::Instant::now() < deadline {
+            children = direct_children(std::process::id())
+                .expect("reading this test process's own children file");
+            if children.contains(&child_pid) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
         assert!(
             children.contains(&child_pid),
             "expected spawned child {child_pid} among direct children {children:?}"

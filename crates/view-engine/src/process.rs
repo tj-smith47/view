@@ -1216,10 +1216,8 @@ impl Drop for Engine {
 /// answers the question is the recovery itself, so these autocommands watch
 /// it happen.
 ///
-/// The window opens where the recovery is decided -- the `SwapExists` answer,
-/// or, for a spawn carrying [`RECOVERY_ARG`], the first file read of a
-/// startup that has not finished -- and closes at `VimEnter`, with
-/// `v:errmsg` snapshotted as the window opens. Every buffer event inside it
+/// The window opens where the recovery is decided and closes at `VimEnter`,
+/// with `v:errmsg` snapshotted as it opens. Every buffer event inside it
 /// compares `v:errmsg` against that snapshot, so what is recorded in
 /// `g:view_swap_error` is an error this recovery raised and never one that
 /// was already standing. Measured on the pinned engine: a corrupt swap raises
@@ -1227,10 +1225,44 @@ impl Drop for Engine {
 /// prompt path and the [`RECOVERY_ARG`] path, and a config that raises `E313`
 /// on an ordinary launch opens no window at all.
 ///
+/// Where that moment is differs by path, and only one of the two announces
+/// itself. The prompt path opens on the `SwapExists` answer, which nvim
+/// raises before it replays anything. A [`RECOVERY_ARG`] spawn raises no
+/// event at all before the replay: measured on the pinned engine with an
+/// event trace, the first autocommand of that startup is a `BufReadPre` that
+/// already carries the recovery's own `E308`, so a window opened there
+/// snapshots the error it exists to catch and compares it away. The last
+/// moment that provably precedes the replay is this `--cmd` itself -- nvim
+/// runs it before sourcing any config and before opening any file -- so a
+/// spawn carrying [`RECOVERY_ARG`] opens its window here, on a `v:errmsg`
+/// the same trace reads as empty.
+///
 /// The window is a span rather than one event because nvim reads the file
 /// more than once while recovering it -- the recovery's own error lands on
 /// the last of those reads, after a boundary drawn at any single read has
 /// already closed.
+///
+/// A window opened there spans the config sourcing that follows, and that is
+/// what `fault` bounds: it recognizes only the codes a recovery itself raises
+/// (`E305`-`E312`, plus the `E295` a swap read fault raises under one),
+/// never the `E300`-`E304` an ordinary session raises writing its own swap
+/// file. A config that cannot open a swap file of its own raises `E303`
+/// while the window is open, and it is not this recovery's to report.
+///
+/// `g:view_swap_read` is a separate mark, set by the first file read of a
+/// startup rather than by the window, because the reading below needs the
+/// two apart: a startup that opened a window and one that got as far as
+/// reading a file are the same thing on the prompt path and different things
+/// on a [`RECOVERY_ARG`] spawn, whose window is open before nvim has done
+/// anything at all.
+///
+/// A swap met mid-session opens nothing. `VimEnter` is the only close there
+/// is and it cannot fire twice, so a window opened after it would stay open
+/// for the rest of the session, recording every later error as a recovery's
+/// and counting every modified buffer as recovered work. The prompt is still
+/// answered -- an editor that parks on a dialog nobody can see is the hang
+/// this guard exists to prevent -- and nvim's own recovery report is left
+/// standing, since nothing asks for the redraw that takes it away.
 ///
 /// `g:view_swap_recovered` counts the buffers that came back holding work the
 /// file on disk does not have, read off `&modified` at the close of the
@@ -1244,13 +1276,12 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      local before = '' \
      local function fault(err) \
      local code = tonumber(err:match('^E(%d+):') or '') \
-     return code ~= nil and code >= 293 and code <= 312 \
+     return code == 295 or (code ~= nil and code >= 305 and code <= 312) \
      end \
      local function open() \
      if window then return end \
      window = true \
      before = vim.v.errmsg \
-     vim.g.view_swap_read = 1 \
      end \
      local function look() \
      if not window then return end \
@@ -1260,8 +1291,8 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      before = err \
      if fault(err) then \
      vim.g.view_swap_error = err \
-     local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false) \
-     vim.g.view_swap_empty = (#lines == 1 and lines[1] == '') and 1 or 0 \
+     vim.g.view_swap_empty = (vim.api.nvim_buf_line_count(0) == 1 \
+     and vim.api.nvim_buf_get_lines(0, 0, 1, false)[1] == '') and 1 or 0 \
      end \
      end \
      if vim.bo.modified and not vim.b.view_swap_counted then \
@@ -1269,6 +1300,7 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      vim.g.view_swap_recovered = (vim.g.view_swap_recovered or 0) + 1 \
      end \
      end \
+     if vim.tbl_contains(vim.v.argv, '-r') then open() end \
      vim.api.nvim_create_autocmd('SwapExists', { \
      group = group, \
      pattern = '*', \
@@ -1276,15 +1308,15 @@ const SWAP_RECOVERY_CMD: &str = "lua \
      callback = function() \
      if vim.v.swapchoice ~= '' then return end \
      vim.v.swapchoice = 'r' \
-     open() \
+     if vim.v.vim_did_enter == 0 then open() end \
      end, \
      }) \
      vim.api.nvim_create_autocmd('BufReadPre', { \
      group = group, \
      pattern = '*', \
-     desc = 'Open the recovery window a -r startup never announces', \
+     desc = 'Mark the startup that got as far as reading a file', \
      callback = function() \
-     if vim.v.vim_did_enter == 0 and vim.tbl_contains(vim.v.argv, '-r') then open() end \
+     if vim.v.vim_did_enter == 0 then vim.g.view_swap_read = 1 end \
      end, \
      }) \
      vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWinEnter' }, { \
@@ -1338,15 +1370,28 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// since nvim answers RPC while it waits at that prompt.
 ///
 /// That park is the one place this reads `v:errmsg` directly, under three
-/// conditions that together leave nothing else it could be about: no file
-/// read ever started (`g:view_swap_read` unset, so no window could have
-/// opened), the startup never finished, and the spawn asked for a recovery by
-/// carrying [`RECOVERY_ARG`]. The error is still checked against the
-/// swap-file family -- `E293`-`E298` are the swap block/seek/read/write
-/// faults and `E300`-`E312` the recovery's own, while `E313`/`E314` are
-/// `:preserve` refusing, which ordinary configs and auto-save plugins raise
-/// with no recovery in sight, and `E315` upwards are internal `ml_get`
-/// faults. Enumerated out of the pinned engine, not assumed from the prefix.
+/// conditions -- no file read ever started (`g:view_swap_read` unset), the
+/// startup never finished, and the spawn asked for a recovery by carrying
+/// [`RECOVERY_ARG`] -- and a fourth that does the discriminating: the code
+/// itself.
+///
+/// The three conditions alone do not settle whose error it is. A config that
+/// parks a [`RECOVERY_ARG`] startup meets every one of them while the
+/// recovery has not begun, so an error it raised reads exactly like one the
+/// recovery raised. What separates them is that only a recovery raises
+/// `E305`-`E312`: measured against the pinned engine, a `-r` startup parks on
+/// `E305` with no swap file to read, on `E307` over a file that is not a
+/// swap, and on `E295` over one truncated inside its blocks, and the same
+/// engine raises `E303` on an ordinary launch whose `'directory'` it cannot
+/// write into -- with no recovery in sight, and one restart away from being
+/// read as a recovery that lost the user's work. So `E300`-`E304` are out
+/// (they belong to writing a swap file, which every session does),
+/// `E293`-`E298` are out but for the `E295` measured parking a recovery (the
+/// rest are the seek/write faults of that same ordinary traffic, and the
+/// conjunction above already excludes a session that has read no file at
+/// all), `E313`/`E314` are `:preserve` refusing, which auto-save plugins
+/// raise on a timer, and `E315` upwards are internal `ml_get` faults.
+/// Enumerated out of the pinned engine, not assumed from the prefix.
 ///
 /// # What `empty` is for
 ///
@@ -1372,7 +1417,7 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
      v:vim_did_enter && get(g:, 'view_swap_reported', 0), \
      v:vim_did_enter ? get(g:, 'view_swap_error', '') : \
      (get(g:, 'view_swap_read', 0) == 0 && index(v:argv, '-r') >= 0 && \
-     v:errmsg =~# '^E\\(29[3-8]\\|30[0-9]\\|31[0-2]\\):' ? v:errmsg : ''), \
+     v:errmsg =~# '^E\\(295\\|30[5-9]\\|31[0-2]\\):' ? v:errmsg : ''), \
      get(g:, 'view_swap_empty', line('$') == 1 && getline(1) == '')]";
 
 /// nvim's own crash-recovery flag: the replacement engine opens each file it

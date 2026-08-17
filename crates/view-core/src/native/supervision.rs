@@ -547,11 +547,12 @@ pub fn swap_recovery_damage_notice(error: &str) -> String {
 ///
 /// One warning reaches this today and it is the ordinary crash: `E308` says
 /// the file on disk changed after the swap was written, which is exactly what
-/// a machine that died mid-edit and came back leaves behind. The recovery
-/// itself went through, so this is the success line rather than an alarm --
-/// but it carries the warning, because the redraw that takes nvim's recovery
-/// report off the buffer takes the warning with it, and this is then the only
-/// account of it the user gets.
+/// a branch switch, a formatter or a second writer leaves behind while the
+/// session was gone. The recovery itself went through, so this is the success
+/// line rather than an alarm -- but it carries the warning, because the risk
+/// it names is answered by the next write and not by reading the line: a user
+/// who saves over a file that moved underneath their swap loses whatever
+/// moved it.
 #[must_use]
 pub fn swap_recovery_warning_notice(count: u64, error: &str) -> String {
     match swap_recovery_notice(count) {
