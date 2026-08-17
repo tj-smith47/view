@@ -100,3 +100,20 @@ The macOS sessions only behave when the laptop is actually awake — the
 Deep-Idle/DarkWake cycling that corrupted weeks of remote evidence is a
 host property, and any future by-hand macOS dogfooding over ssh needs the
 caffeinate wrapper too.
+
+## 2026-08-17 — remote editing (P5.5-remote exit note)
+
+What was actually driven: the stub-ssh path end to end, repeatedly and
+adversarially — supervision.sh (3 legs), remote-reconnect.sh (4 legs,
+including live crash → backoff → give-up → modal → recovery with unsaved
+work), remote-rtt.sh (4 injected RTT tiers through delay-relay), plus 26
+remote oracle PARITY legs in task oracle. Real ssh: T12's real-host legs
+ran single automated sessions against winserver and mbp (documented in the
+plan as once-per-release opt-in evidence, not continuous coverage).
+
+Owed, stated honestly: no human has yet edited over a real network by hand
+— a caffeinate-wrapped by-hand session against mbp (real latency, real
+sleep/wake, real fingers) is the missing dogfood. The stub proves the
+machinery; it cannot surface feel (echo latency perception, banner timing
+under real jitter). That session should happen before the first release
+tag, and its warts belong here.
