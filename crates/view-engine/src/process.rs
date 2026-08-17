@@ -1372,26 +1372,47 @@ const SWAP_RECOVERY_CMD: &str = "lua \
 /// That park is the one place this reads `v:errmsg` directly, under three
 /// conditions -- no file read ever started (`g:view_swap_read` unset), the
 /// startup never finished, and the spawn asked for a recovery by carrying
-/// [`RECOVERY_ARG`] -- and a fourth that does the discriminating: the code
-/// itself.
+/// [`RECOVERY_ARG`] -- and a fourth that does the discriminating: what the
+/// error says.
 ///
 /// The three conditions alone do not settle whose error it is. A config that
 /// parks a [`RECOVERY_ARG`] startup meets every one of them while the
 /// recovery has not begun, so an error it raised reads exactly like one the
-/// recovery raised. What separates them is that only a recovery raises
-/// `E305`-`E312`: measured against the pinned engine, a `-r` startup parks on
-/// `E305` with no swap file to read, on `E307` over a file that is not a
-/// swap, and on `E295` over one truncated inside its blocks, and the same
-/// engine raises `E303` on an ordinary launch whose `'directory'` it cannot
-/// write into -- with no recovery in sight, and one restart away from being
-/// read as a recovery that lost the user's work. So `E300`-`E304` are out
-/// (they belong to writing a swap file, which every session does),
-/// `E293`-`E298` are out but for the `E295` measured parking a recovery (the
-/// rest are the seek/write faults of that same ordinary traffic, and the
-/// conjunction above already excludes a session that has read no file at
-/// all), `E313`/`E314` are `:preserve` refusing, which auto-save plugins
-/// raise on a timer, and `E315` upwards are internal `ml_get` faults.
-/// Enumerated out of the pinned engine, not assumed from the prefix.
+/// recovery raised.
+///
+/// Most of the family is separated by the code. Measured against the pinned
+/// engine, a `-r` startup parks on `E305` with no swap file to read, on
+/// `E307` over a file that is not a swap, and on `E295` over one truncated
+/// inside its blocks, and the codes `E305`-`E312` are raised by nothing but a
+/// recovery. `E293`/`E294`/`E296`-`E298` are the seek and write faults of the
+/// swap traffic every session has, `E313`/`E314` are `:preserve` refusing,
+/// which auto-save plugins raise on a timer, and `E315` upwards are internal
+/// `ml_get` faults. Enumerated out of the pinned engine, not assumed from the
+/// prefix.
+///
+/// `E300`-`E304` are the exception, and the code cannot settle them.
+/// Creating a swap file is something every session does *and* something a
+/// recovery does for the buffer it recovers into, so `E303: Unable to open
+/// swap file for "…", recovery impossible` is raised on both sides.
+/// Measured, same engine, both parked before `VimEnter` with an intact swap
+/// on disk: a config that opens a file of its own while `'directory'` is
+/// unwritable raises it for *that* file, and a recovery whose `'directory'`
+/// refuses a new swap (an immutable or read-only directory, a full or
+/// quota-bound filesystem) raises it for the file it was told to recover,
+/// having recovered nothing -- the buffer is empty where the user's file
+/// should be, and nvim never paints the error, so a reading that dropped it
+/// left no account of the loss anywhere.
+///
+/// What separates those two is the file the message names, which is why
+/// `E300`-`E304` are admitted only when it is one of the files this spawn
+/// was told to recover. `argv()` is that list and it is populated before the
+/// config runs; both sides go through `fnamemodify(':p')` because either can
+/// be relative -- measured, a `-r` spawn given a relative path raises the
+/// error quoting that same relative path.
+///
+/// An ordinary launch says nothing about this: it is excluded by the
+/// [`RECOVERY_ARG`] term long before the code is looked at, so measuring
+/// `E303` on one establishes nothing about whether a recovery raises it too.
 ///
 /// # What `empty` is for
 ///
@@ -1417,7 +1438,11 @@ pub const SWAP_RECOVERY_PROBE: &str = "[\
      v:vim_did_enter && get(g:, 'view_swap_reported', 0), \
      v:vim_did_enter ? get(g:, 'view_swap_error', '') : \
      (get(g:, 'view_swap_read', 0) == 0 && index(v:argv, '-r') >= 0 && \
-     v:errmsg =~# '^E\\(295\\|30[5-9]\\|31[0-2]\\):' ? v:errmsg : ''), \
+     (v:errmsg =~# '^E\\(295\\|30[5-9]\\|31[0-2]\\):' || \
+     (v:errmsg =~# '^E30[0-4]:' && \
+     index(map(argv(), 'fnamemodify(v:val, \":p\")'), \
+     fnamemodify(matchstr(v:errmsg, '\"\\zs[^\"]*\\ze\"'), ':p')) >= 0)) \
+     ? v:errmsg : ''), \
      get(g:, 'view_swap_empty', line('$') == 1 && getline(1) == '')]";
 
 /// nvim's own crash-recovery flag: the replacement engine opens each file it

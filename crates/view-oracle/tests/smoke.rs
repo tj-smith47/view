@@ -1215,6 +1215,231 @@ fn a_restart_whose_file_moved_under_the_swap_recovers_the_work_and_keeps_the_war
     );
 }
 
+/// The silent failure: a recovery that cannot make a swap file of its own,
+/// which nvim refuses to start and never says a word about on screen.
+///
+/// `'directory'` refusing a new file is not exotic -- a read-only mount, a
+/// full or quota-bound filesystem, a swap directory owned by another user --
+/// and the restart that meets it is unattended, so nobody opted into it. The
+/// recovery does not happen: the buffer comes up **empty** where the file's
+/// contents should be, exactly as the no-swap case does, and one `:w`
+/// truncates the file on disk.
+///
+/// What makes this one worse than every other failure here is that nvim
+/// paints nothing. The other failures leave their own error on screen and
+/// view's line is the framing beside it; here view's line is the **only**
+/// account there is, and a reading that dropped this error left the user an
+/// empty buffer, a swap banner naming a recovery that did not happen, and
+/// nothing else.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restart_that_cannot_make_a_swap_of_its_own_says_the_recovery_failed() {
+    let paths = common::ScratchPaths::new("smoke");
+    std::fs::write(&paths.scratch, "on disk\n").expect("scratch fixture must be writable");
+    let swaps = paths.isolated_home.join("swap");
+    std::fs::create_dir_all(&swaps).expect("the swap dir must be creatable");
+    assert!(
+        UncreatableDir::refuses_a_new_file(&swaps),
+        "no way to make {} refuse a new file on this host, so nothing here \
+         would drive the recovery this test is about",
+        swaps.display()
+    );
+    // whatever the wrapper does to that directory is undone even if an
+    // assertion below unwinds first, or the scratch tree cannot be cleaned
+    let _unlock_at_exit = UncreatableDir::new(&swaps);
+    let wrapper = write_swap_dir_locking_nvim_wrapper(&swaps);
+
+    let directory = std::ffi::OsString::from(format!("set directory={}", swaps.display()));
+    let mut session = spawn_view_pty_at(
+        paths,
+        &[
+            std::ffi::OsStr::new("--nvim-bin"),
+            wrapper.as_os_str(),
+            std::ffi::OsStr::new("--cmd"),
+            &directory,
+        ],
+        shared_isolation(),
+        QueryPolicy::AnswerDa1,
+    );
+    assert!(
+        session.wait_for("on disk", Duration::from_secs(15)),
+        "the session never painted the file it was given; screen:\n{}",
+        session.screen()
+    );
+
+    const UNSAVED: &str = "zzunsavedzz";
+    session.send(format!("o{UNSAVED}\x1b").as_bytes()).unwrap();
+    assert!(
+        session.wait_for(UNSAVED, Duration::from_secs(15)),
+        "the unsaved line never reached the buffer; screen:\n{}",
+        session.screen()
+    );
+    // the same flush-and-barrier the other restart tests use: the swap has
+    // to be on disk before the kill, or the replacement finds nothing to be
+    // stopped from recovering
+    const PRESERVED: &str = "zzpreservedzz";
+    session
+        .send(format!(":preserve | echo '{PRESERVED}'\r").as_bytes())
+        .unwrap();
+    assert!(
+        session.wait_for(PRESERVED, Duration::from_secs(15)),
+        "the swap was never flushed; screen:\n{}",
+        session.screen()
+    );
+
+    let view_pid = session.view_pid();
+    let killed = wait_for_child_pid(view_pid, "nvim", Duration::from_secs(5))
+        .expect("view never spawned an nvim child within the timeout");
+    let kill_status = std::process::Command::new("kill")
+        .arg("-KILL")
+        .arg(killed.to_string())
+        .status()
+        .unwrap();
+    assert!(kill_status.success(), "kill -KILL {killed} failed");
+
+    let named = said_part(&view_core::native::supervision::swap_recovery_failure_notice("", true));
+    let (settled, claimed) = watch_screen(
+        &mut session,
+        Duration::from_secs(45),
+        &[RECOVERED_WORK],
+        |text| text.contains(&named) && text.contains(NO_SWAP_TO_MAKE),
+    );
+    assert!(
+        !claimed,
+        "view told the user their unsaved work came back from a recovery \
+         that never ran; screen:\n{}",
+        session.screen()
+    );
+    assert!(
+        settled,
+        "a recovery that could not make a swap file left the user an empty \
+         buffer with no account of it anywhere -- expected view's own \
+         {named:?} carrying the engine's {NO_SWAP_TO_MAKE:?}, which nothing \
+         else on this screen says; screen:\n{}",
+        session.screen()
+    );
+}
+
+/// nvim's own error for a swap file it cannot create, which it raises for
+/// the file it was told to recover and then gives up on the recovery.
+///
+/// The same code an ordinary session raises for its own swap file, which is
+/// why the reading that admits it is keyed on the file the message names
+/// rather than on the code (see `SWAP_RECOVERY_PROBE`).
+#[cfg(target_os = "linux")]
+const NO_SWAP_TO_MAKE: &str = "E303";
+
+/// A swap directory that refuses new files, and puts itself back however it
+/// was refused.
+///
+/// Two mechanisms because two callers: an unprivileged user is refused by
+/// mode bits, and root is not -- root goes through `chattr +i`, which the
+/// kernel enforces against every user. Which one applies is decided by
+/// trying, never by asking who is running, so a host that answers neither
+/// way is a loud failure rather than a test that quietly proves nothing.
+#[cfg(target_os = "linux")]
+struct UncreatableDir {
+    path: PathBuf,
+}
+
+#[cfg(target_os = "linux")]
+impl UncreatableDir {
+    /// Adopts `path` for cleanup, without touching it: the wrapper is what
+    /// locks it, and this is what guarantees the unlock.
+    fn new(path: &std::path::Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+        }
+    }
+
+    /// Whether this host can make `path` refuse a new file at all, leaving
+    /// it creatable again either way.
+    fn refuses_a_new_file(path: &std::path::Path) -> bool {
+        lock_directory(path);
+        let refused = std::fs::write(path.join("zz-precondition"), "x").is_err();
+        unlock_directory(path);
+        let _ = std::fs::remove_file(path.join("zz-precondition"));
+        refused
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for UncreatableDir {
+    fn drop(&mut self) {
+        unlock_directory(&self.path);
+    }
+}
+
+/// Makes `path` refuse new files, by whichever of the two mechanisms this
+/// user has. Written as free functions because the wrapper script performs
+/// the same two steps in shell, and the pair has to stay readable as one
+/// thing.
+#[cfg(target_os = "linux")]
+fn lock_directory(path: &std::path::Path) {
+    let immutable = std::process::Command::new("chattr")
+        .arg("+i")
+        .arg(path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false);
+    if !immutable {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o500));
+    }
+}
+
+/// Undoes [`lock_directory`], both ways, whichever one took.
+#[cfg(target_os = "linux")]
+fn unlock_directory(path: &std::path::Path) {
+    let _ = std::process::Command::new("chattr")
+        .arg("-i")
+        .arg(path)
+        .status();
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+}
+
+/// A `--nvim-bin` wrapper that makes `swaps` refuse new files on its way to
+/// a recovering engine, and leaves every other spawn alone.
+///
+/// The refusal has to arrive between the death and the replacement -- before
+/// it, the session under test could never write the swap this recovery is
+/// supposed to read. The `-r` the restart carries is what tells the two
+/// spawns apart, and it is the engine's own flag rather than anything this
+/// test invents.
+#[cfg(target_os = "linux")]
+fn write_swap_dir_locking_nvim_wrapper(swaps: &std::path::Path) -> PathBuf {
+    static NEXT_LOCKING_ID: AtomicU64 = AtomicU64::new(0);
+
+    let real_nvim = String::from_utf8(
+        std::process::Command::new("which")
+            .arg("nvim")
+            .output()
+            .expect("which nvim failed")
+            .stdout,
+    )
+    .expect("non-utf8 which output")
+    .trim()
+    .to_string();
+
+    let id = NEXT_LOCKING_ID.fetch_add(1, Ordering::Relaxed);
+    let path = common::scratch_root().join(format!("locking-nvim-{}-{id}.sh", std::process::id()));
+    let script = format!(
+        "#!/bin/sh\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"-r\" ]; then\n    \
+         chattr +i {swaps} 2>/dev/null || chmod 0500 {swaps}\n    break\n  fi\ndone\n\
+         exec {real_nvim} \"$@\"\n",
+        swaps = swaps.display(),
+    );
+    std::fs::write(&path, script).expect("failed to write the swap-dir-locking wrapper script");
+
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+
+    path
+}
+
 /// nvim's own error for a swap file whose blocks it cannot read back. Pinned
 /// engine, and pinned corruption: [`plant_unreadable_swap`] drops every block
 /// but the header, which is what a process dying mid-flush leaves.

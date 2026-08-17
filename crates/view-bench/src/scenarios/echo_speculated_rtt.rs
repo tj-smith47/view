@@ -358,15 +358,25 @@ mod tests {
     /// the same way this crate's own scenarios reduce to `_p50` medians
     /// rather than trusting a single sample.
     ///
-    /// The band is `[2 * (HIGH_MS - LOW_MS) - 5ms, 2 * (HIGH_MS - LOW_MS) +
-    /// 1000ms]`: the lower bound is causal minus the same 5ms
-    /// clock-resolution guard the single-point band this test replaces
-    /// used. The upper slack is doubled to 1000ms rather than the
-    /// single-point band's 500ms, because a *difference* of two
-    /// independent medians can still carry up to two independent
-    /// scheduler-jitter excursions instead of one -- still a fixed floor of
-    /// noise, not a multiple of the configured difference, for the same
-    /// reason the single-point band's slack was fixed rather than scaled.
+    /// The band is `[HIGH_MS - LOW_MS, 2 * (HIGH_MS - LOW_MS) + 1000ms]`.
+    /// The causal difference is two crossings' worth, `2 * (HIGH_MS -
+    /// LOW_MS)`, and the floor is one crossing below it rather than a
+    /// clock-resolution guard below it, because the two sides are measured
+    /// at different moments: a median cancels a one-off spike but not
+    /// sustained contention, which inflates whichever side it lands on and
+    /// *shrinks* the difference when that side is the low one -- observed
+    /// at a `LOW_MS` median of 37ms against this host's ~28ms idle
+    /// baseline, on a relay applying the configuration exactly. Half the
+    /// causal difference is still unreachable for the two failures this
+    /// test exists to catch, both of which put the difference at
+    /// approximately zero: a relay that ignores `DELAY_RELAY_MS`, and one
+    /// adding a constant sleep regardless of it. The upper slack is
+    /// doubled to 1000ms rather than the single-point band's 500ms,
+    /// because a *difference* of two independent medians can still carry
+    /// up to two independent scheduler-jitter excursions instead of one --
+    /// still a fixed floor of noise, not a multiple of the configured
+    /// difference, for the same reason the single-point band's slack was
+    /// fixed rather than scaled.
     #[test]
     fn delay_relay_scales_the_added_delay_with_the_configured_value() {
         if !delay_relay_client().is_file() {
@@ -411,8 +421,7 @@ mod tests {
         let high_median = high_elapsed[TRIALS / 2];
 
         let diff = high_median.saturating_sub(low_median);
-        let floor =
-            Duration::from_millis(2 * (HIGH_MS - LOW_MS)).saturating_sub(Duration::from_millis(5));
+        let floor = Duration::from_millis(HIGH_MS - LOW_MS);
         let ceiling = Duration::from_millis(2 * (HIGH_MS - LOW_MS)) + Duration::from_millis(1000);
         assert!(
             diff >= floor && diff <= ceiling,

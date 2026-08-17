@@ -593,39 +593,47 @@ fn a_file_opened_mid_session_over_a_swap_recovers_without_parking_the_editor() {
     }
 }
 
-/// The reading that has to survive a config: a startup told to recover, and
-/// parked by something that is not the recovery.
+/// Parks a `-r` startup inside its own config over an intact swap, with
+/// `E303` standing for either the file the spawn was told to recover or an
+/// unrelated one, and answers what the probe's failure field reads there.
 ///
-/// nvim answers RPC while it waits at a prompt, which is the whole reason
-/// the failure reading is taken before `VimEnter` -- a recovery that could
-/// not open its swap file parks there, and a session that stayed silent
-/// would leave the user an empty buffer with no account of it. But a config
-/// that parks a `-r` startup meets every condition that reading tests: no
-/// file has been read, the startup has not finished, and the spawn asked for
-/// a recovery. Only the error code separates them, and `E303` is one an
-/// ordinary session raises for its own swap file, with no recovery in sight.
+/// Both shapes are real. A recovery that cannot create the swap file for the
+/// buffer it recovers into raises `E303` naming its own target and gives up,
+/// leaving an empty buffer nvim says nothing about; a config that cannot
+/// create one for a file of its own raises the same code naming that file,
+/// with the recovery still ahead of it. Nothing else about the two differs
+/// where the reading can see it, so the file the message names is the whole
+/// discrimination and both directions are pinned from here.
 ///
-/// Read as the recovery's, it becomes the worst wording view has: the user
-/// is told the recovery failed and the buffer they are looking at is empty.
-#[test]
-fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure() {
-    let dir = scratch("park-on-config-error");
+/// The error is planted rather than provoked because the provoking needs a
+/// directory the host will refuse to write into, which is a privilege
+/// question rather than an engine one; the end-to-end leg for the genuine
+/// shape lives in view-oracle's pty suite, which can arrange that.
+fn failure_read_from_a_config_park(scratch_name: &str, names_the_target: bool) -> String {
+    let dir = scratch(scratch_name);
     let file = dir.join("doc.txt");
     std::fs::write(&file, "what is on disk\n").unwrap();
     crash_with_unsaved_edit(&dir, &file, "never written to disk");
+    let named = if names_the_target {
+        file.display().to_string()
+    } else {
+        dir.join("something-else.txt").display().to_string()
+    };
     let vimrc = dir.join("init.vim");
     // the swap is intact and the recovery has not begun: nvim opens the
-    // files it was given after sourcing, so this parks in front of it
-    // the markers either side of the prompt are what makes the park
-    // measurable: `nvim_get_mode` reports a session waiting inside `input()`
-    // as an ordinary cmdline mode, so it cannot tell one from a startup that
+    // files it was given after sourcing, so this parks in front of it. The
+    // markers either side of the prompt are what makes the park measurable
+    // -- `nvim_get_mode` reports a session waiting inside `input()` as an
+    // ordinary cmdline mode, so it cannot tell one from a startup that
     // finished
     std::fs::write(
         &vimrc,
-        "let v:errmsg = 'E303: Unable to open swap file for \"x\", recovery impossible'\n\
-         let g:reached_the_park = 1\n\
-         call input('parked> ')\n\
-         let g:left_the_park = 1\n",
+        format!(
+            "let v:errmsg = 'E303: Unable to open swap file for \"{named}\", recovery impossible'\n\
+             let g:reached_the_park = 1\n\
+             call input('parked> ')\n\
+             let g:left_the_park = 1\n"
+        ),
     )
     .unwrap();
 
@@ -653,12 +661,7 @@ fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure()
         "the config never ran, so this test never reached the reading a park \
          is the only way to take"
     );
-    assert_eq!(
-        swap_failure(&engine),
-        "",
-        "a config's own error was read as the failure of a recovery that has \
-         not started"
-    );
+    let failure = swap_failure(&engine);
     assert_eq!(
         number(&engine, "get(g:, 'left_the_park', 0)"),
         0,
@@ -670,6 +673,47 @@ fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure()
         0,
         "the startup finished, so the reading above came from the window and \
          not from the park"
+    );
+    failure
+}
+
+/// The reading that has to survive a config: a startup told to recover, and
+/// parked by something that is not the recovery.
+///
+/// nvim answers RPC while it waits at a prompt, which is the whole reason
+/// the failure reading is taken before `VimEnter` -- a recovery that could
+/// not open its swap file parks there, and a session that stayed silent
+/// would leave the user an empty buffer with no account of it. But a config
+/// that parks a `-r` startup meets every condition that reading tests: no
+/// file has been read, the startup has not finished, and the spawn asked for
+/// a recovery.
+///
+/// Read as the recovery's, it becomes the worst wording view has: the user
+/// is told the recovery failed and the buffer they are looking at is empty.
+#[test]
+fn a_config_error_that_parks_a_recovering_startup_is_not_its_recoverys_failure() {
+    assert_eq!(
+        failure_read_from_a_config_park("park-on-config-error", false),
+        "",
+        "an error a config raised for a file of its own was read as the \
+         failure of a recovery that has not started"
+    );
+}
+
+/// The other direction, and the one a family keyed on the code alone gets
+/// wrong: the same code, standing for the file this spawn was told to
+/// recover, is the recovery's own failure and has to be said.
+///
+/// The engine gives up on the recovery there and paints nothing, so a
+/// reading that dropped this leaves an empty buffer, a swap banner naming a
+/// recovery that did not happen, and no account of it anywhere on screen.
+#[test]
+fn an_error_naming_the_file_a_startup_was_told_to_recover_is_that_recoverys_failure() {
+    assert!(
+        failure_read_from_a_config_park("park-naming-the-target", true)
+            .starts_with("E303: Unable to open swap file"),
+        "a recovery that could not make its own swap file went unsaid, which \
+         is the one failure nvim itself says nothing about"
     );
 }
 
