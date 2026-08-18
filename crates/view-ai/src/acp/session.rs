@@ -14,13 +14,6 @@ use crate::acp::fs::PendingFsReplies;
 use crate::acp::wire::JsonRpcCodec;
 use crate::{AiConfig, AiError};
 
-/// The state the session task and the handle both reach: emitting an event
-/// into the caller's loop, and the correlation map for agent-initiated
-/// filesystem requests.
-///
-/// Separate from [`AiSession`] because the handle owns the tokio runtime
-/// and so cannot itself be shared into a task running on it, while both
-/// sides genuinely need these two things.
 /// The agent child, reachable from both the handle and the session task.
 ///
 /// Shared rather than owned by the task because the handle's `Drop` must be
@@ -31,6 +24,13 @@ use crate::{AiConfig, AiError};
 /// already recycled.
 pub(crate) type ChildSlot = Arc<Mutex<Option<Child>>>;
 
+/// The state the session task and the handle both reach: emitting an event
+/// into the caller's loop, and the correlation map for agent-initiated
+/// filesystem requests.
+///
+/// Separate from [`AiSession`] because the handle owns the tokio runtime
+/// and so cannot itself be shared into a task running on it, while both
+/// sides genuinely need these two things.
 pub(crate) struct SessionShared {
     emit: Box<dyn Fn(Msg) + Send + Sync>,
     pending: PendingFsReplies,

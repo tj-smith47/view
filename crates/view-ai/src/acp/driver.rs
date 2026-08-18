@@ -86,20 +86,22 @@ pub(crate) async fn run_session(
         return;
     };
 
-    // Taking the child out and signalling it happen with no await in
-    // between, so this path and the handle's `Drop` cannot interleave into a
-    // state where neither has signalled: either the child is still in the
-    // slot and gets the signal here, or the handle already holds it long
-    // enough to send its own. Signalling on the way out matters even for a
-    // reader that saw end-of-file, because an agent may close its stdout and
-    // keep running.
+    // The signal is sent while the lock is still held, and the child leaves
+    // the slot only afterwards. That ordering is what makes the state where
+    // neither teardown path signalled unreachable: the handle's `Drop` either
+    // finds the child still in the slot and signals it itself, or blocks on
+    // the lock until this path has signalled and taken it. Killing after
+    // releasing the guard would leave exactly that gap, since a `Drop` landing
+    // inside it sees an empty slot and a live child. Signalling on the way out
+    // matters even for a reader that saw end-of-file, because an agent may
+    // close its stdout and keep running.
     let mut child = {
         let mut slot = child.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(child) = slot.as_mut() {
+            let _ = child.start_kill();
+        }
         slot.take()
     };
-    if let Some(child) = child.as_mut() {
-        let _ = child.start_kill();
-    }
 
     let detail = match ending {
         SessionEnd::ReaderEof => match child.as_mut() {
