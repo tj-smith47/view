@@ -881,9 +881,14 @@ fn context_block(block: &ContextBlock) -> Option<Value> {
             "type": "text",
             "text": format!("Cursor at line {line}, column {col}"),
         })),
+        // An entry-less list renders as a bare header the agent would read
+        // as content; `assemble` never produces one, but this function takes
+        // blocks from any producer and owes the same blank-message refusal.
+        ContextBlock::Diagnostics { entries } if entries.is_empty() => None,
         ContextBlock::Diagnostics { entries } => {
             Some(json!({ "type": "text", "text": diagnostics_text(entries) }))
         }
+        ContextBlock::QuickfixList { entries } if entries.is_empty() => None,
         ContextBlock::QuickfixList { entries } => {
             Some(json!({ "type": "text", "text": quickfix_text(entries) }))
         }
@@ -984,6 +989,41 @@ mod tests {
             .as_str()
             .expect("diagnostics block carries text")
             .contains("[error] unresolved import"));
+    }
+
+    /// Full-text equality over the rendered attachments: a garbled label,
+    /// separator, or field order fails here, not in an agent's lap.
+    #[test]
+    fn diagnostic_and_quickfix_renderings_pin_the_exact_line_format() {
+        let diagnostics = ContextBlock::Diagnostics {
+            entries: vec![
+                DiagnosticEntry::new(3, 1, DiagnosticSeverity::Warning, "unused var".to_string()),
+                DiagnosticEntry::new(9, 4, DiagnosticSeverity::Hint, "inline this".to_string()),
+                DiagnosticEntry::new(2, 0, DiagnosticSeverity::Info, "note".to_string()),
+            ],
+        };
+        let block = context_block(&diagnostics).expect("non-empty diagnostics lower to text");
+        assert_eq!(
+            block["text"],
+            "Diagnostics:\n3:1 [warning] unused var\n9:4 [hint] inline this\n2:0 [info] note"
+        );
+
+        let quickfix = ContextBlock::QuickfixList {
+            entries: vec![QfEntry::new(
+                std::path::PathBuf::from("/tmp/a.rs"),
+                5,
+                0,
+                "TODO".to_string(),
+            )],
+        };
+        let block = context_block(&quickfix).expect("non-empty quickfix lowers to text");
+        assert_eq!(block["text"], "Quickfix list:\n/tmp/a.rs:5:0 TODO");
+    }
+
+    #[test]
+    fn entry_less_diagnostic_and_quickfix_blocks_lower_to_no_content() {
+        assert!(context_block(&ContextBlock::Diagnostics { entries: vec![] }).is_none());
+        assert!(context_block(&ContextBlock::QuickfixList { entries: vec![] }).is_none());
     }
 
     /// A stdin that is already broken: every write fails, which is what an

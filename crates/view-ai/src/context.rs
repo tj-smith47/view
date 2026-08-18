@@ -263,6 +263,10 @@ mod tests {
                 _ => "other",
             })
             .collect();
+        assert!(
+            !kinds.contains(&"other"),
+            "a block kind assemble emits must be named here, not lumped into the wildcard"
+        );
         assert_eq!(
             kinds,
             vec![
