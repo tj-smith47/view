@@ -52,10 +52,11 @@ fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut pending_prompt: Option<serde_json::Value> = None;
-    // counts this fixture's own session/new attempts, so auth_mode()'s
-    // one-time auth_required answer cannot fire more than once regardless
-    // of how many times the client retries
-    let mut session_new_attempts: u32 = 0;
+    // Set only once this fixture has actually received `authenticate`, so
+    // `session/new` still refuses a client that retries without
+    // authenticating first -- an attempt counter would let any second
+    // attempt through regardless of whether authentication happened.
+    let mut authenticated = false;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -131,10 +132,22 @@ fn main() {
                     "authMethods": auth_methods()
                 }),
             ),
-            "authenticate" => reply(&mut stdout, id, serde_json::json!({})),
+            "authenticate" => {
+                let method_id = frame["params"]["methodId"].as_str().unwrap_or_default();
+                if method_id == "stub-login" {
+                    authenticated = true;
+                    reply(&mut stdout, id, serde_json::json!({}));
+                } else {
+                    error_reply(
+                        &mut stdout,
+                        id,
+                        -32602,
+                        "unexpected methodId in authenticate",
+                    );
+                }
+            }
             "session/new" => {
-                session_new_attempts += 1;
-                if auth_mode() && session_new_attempts == 1 {
+                if auth_mode() && !authenticated {
                     error_reply(&mut stdout, id, AUTH_REQUIRED, "authentication required");
                 } else {
                     reply(

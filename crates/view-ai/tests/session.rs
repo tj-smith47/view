@@ -11,7 +11,7 @@ use std::time::Duration;
 use view_ai::{AiConfig, AiSession};
 use view_core::msg::Msg;
 use view_core::native::ai_event::{
-    AiCommand, AiEvent, FsError, PermissionOutcome, StopReason, ToolCallStatus,
+    AiCommand, AiEvent, PermissionOutcome, StopReason, ToolCallStatus,
 };
 
 /// Generous enough that a loaded CI host does not flake, short enough that a
@@ -273,35 +273,6 @@ fn a_permission_request_crosses_out_and_its_answer_crosses_back() {
 }
 
 #[test]
-fn an_agent_file_read_crosses_out_and_its_reply_crosses_back() {
-    let (session, rx) = session();
-    ready(&rx);
-    session.send(AiCommand::Prompt {
-        text: "read".to_string(),
-        context: Vec::new(),
-    });
-
-    let AiEvent::FsReadRequested { request_id, path } = next_event(&rx, "FsReadRequested") else {
-        panic!("expected FsReadRequested")
-    };
-    assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
-
-    session.send(AiCommand::FsReadReply {
-        request_id,
-        result: Ok("fn main() {}".to_string()),
-    });
-
-    assert_eq!(
-        next_event(&rx, "the agent's echo of the read"),
-        AiEvent::MessageChunk {
-            message_id: Some("msg_1".to_string()),
-            text: "read fn main() {}".to_string(),
-            from_agent: true,
-        }
-    );
-}
-
-#[test]
 fn a_command_sent_before_the_session_exists_is_replayed_not_dropped() {
     let (session, rx) = session();
     // queued in the same breath as the spawn, ahead of the handshake the
@@ -315,41 +286,6 @@ fn a_command_sent_before_the_session_exists_is_replayed_not_dropped() {
         next_event(&rx, "TurnEnded"),
         AiEvent::TurnEnded { .. }
     ));
-}
-
-#[test]
-fn an_agent_file_write_crosses_out_and_its_failure_crosses_back() {
-    let (session, rx) = session();
-    ready(&rx);
-    session.send(AiCommand::Prompt {
-        text: "write".to_string(),
-        context: Vec::new(),
-    });
-
-    let AiEvent::FsWriteRequested {
-        request_id,
-        path,
-        content,
-    } = next_event(&rx, "FsWriteRequested")
-    else {
-        panic!("expected FsWriteRequested")
-    };
-    assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
-    assert_eq!(content, "fn main() {}");
-
-    session.send(AiCommand::FsWriteReply {
-        request_id,
-        result: Err(FsError::PermissionDenied),
-    });
-
-    assert_eq!(
-        next_event(&rx, "the agent's report of the refusal"),
-        AiEvent::MessageChunk {
-            message_id: Some("msg_1".to_string()),
-            text: "refused".to_string(),
-            from_agent: true,
-        }
-    );
 }
 
 #[test]

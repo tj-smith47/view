@@ -10,7 +10,7 @@
 
 mod acp;
 
-pub use acp::session::AiSession;
+pub use acp::session::{AgentAdapter, AiSession, ClaudeCodeAdapter};
 
 /// Where the agent comes from and where it runs.
 #[non_exhaustive]
@@ -62,19 +62,12 @@ impl AiConfig {
         self
     }
 
-    /// An agent config derived from an [`AgentAdapter`](acp::session::AgentAdapter):
-    /// its command, arguments, and authentication requirement carried
-    /// straight through, so a caller with an adapter never re-derives what
-    /// the adapter already knows.
-    // exercised by this crate's own adapter test, not by a production
-    // caller yet: no config or provisioning step exists to hand this crate
-    // a real AgentAdapter, so the seam waits here for the step that will
-    #[allow(dead_code)]
+    /// An agent config derived from an [`AgentAdapter`]: its command,
+    /// arguments, and authentication requirement carried straight through,
+    /// so a caller with an adapter never re-derives what the adapter
+    /// already knows.
     #[must_use]
-    pub(crate) fn from_adapter(
-        adapter: &dyn acp::session::AgentAdapter,
-        cwd: impl Into<std::path::PathBuf>,
-    ) -> Self {
+    pub fn from_adapter(adapter: &dyn AgentAdapter, cwd: impl Into<std::path::PathBuf>) -> Self {
         let (command, args) = adapter.command();
         Self {
             command: command.to_string(),

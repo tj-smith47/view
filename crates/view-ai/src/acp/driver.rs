@@ -538,8 +538,12 @@ impl Driver {
     fn on_request(&mut self, id: RequestId, method: &str, params: &Value) {
         match method {
             "session/request_permission" => self.on_permission_request(id, params),
-            "fs/read_text_file" => self.on_fs_read(id, params),
-            "fs/write_text_file" => self.on_fs_write(id, params),
+            // `fs/read_text_file` and `fs/write_text_file` fall to the
+            // METHOD_NOT_FOUND arm below on purpose: `begin`'s advertised
+            // `clientCapabilities.fs` is false, and a client that dispatched
+            // these anyway would answer a call it told the agent it cannot
+            // handle. A conforming agent never sends them while the
+            // capability is false; the arm exists for the one that does.
             _ => {
                 let _ = self.out.send(JsonRpcMessage::error_response(
                     id,
@@ -582,6 +586,14 @@ impl Driver {
         });
     }
 
+    /// The `fs/read_text_file` handler body, kept live and directly tested
+    /// even though `on_request` no longer dispatches to it: the wire route
+    /// is closed while `clientCapabilities.fs.readTextFile` is false, but
+    /// the body itself -- registering the reply and emitting the event --
+    /// is exactly what the dispatch arm re-attaches to once that capability
+    /// is advertised true again, and re-deriving it at that point would be
+    /// the one place a hand-written duplicate could silently drift.
+    #[allow(dead_code)]
     fn on_fs_read(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
             params
@@ -604,6 +616,10 @@ impl Driver {
             .emit(AiEvent::FsReadRequested { request_id, path });
     }
 
+    /// The `fs/write_text_file` handler body -- see [`Self::on_fs_read`]'s
+    /// doc comment for why it stays live and directly tested with no
+    /// dispatch arm reaching it.
+    #[allow(dead_code)]
     fn on_fs_write(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
             params
@@ -923,9 +939,253 @@ mod tests {
         let frame = out_rx.try_recv().expect("initialize was sent");
         assert_eq!(frame.method.as_deref(), Some("initialize"));
         let params = frame.params.expect("initialize carries params");
+        // the capture doc pins this as the JSON integer 1, not the string
+        // "1" -- a string round-trips through every assertion in this suite
+        // that only checks the decoded value, so the wire type is the part
+        // worth pinning
+        assert_eq!(params["protocolVersion"], 1);
         assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], false);
         assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], false);
+        assert_eq!(params["clientCapabilities"]["terminal"], false);
         assert_eq!(params["clientInfo"]["name"], "view");
         assert_eq!(params["clientInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    /// Deleting the `return` after the version-mismatch `SessionCrashed`
+    /// emit would let a client still speak `session/new` to an agent it just
+    /// told the caller it refuses to talk to. Draining `out_rx` for a second
+    /// frame is what a first-event-only assertion (checking only the emitted
+    /// `AiEvent`) cannot catch.
+    #[test]
+    fn a_version_mismatch_never_reaches_session_new() {
+        let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.begin();
+        let _initialize = out_rx.try_recv().expect("initialize was sent");
+
+        driver.on_response(RequestId::Num(1), Ok(json!({ "protocolVersion": 2 })));
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no further request after a version refusal"
+        );
+    }
+
+    fn detached_driver(requires_auth: bool) -> (Driver, mpsc::UnboundedReceiver<JsonRpcMessage>) {
+        let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        (
+            Driver::new(shared, out_tx, std::env::temp_dir(), requires_auth),
+            out_rx,
+        )
+    }
+
+    /// Drives a real `begin()`/`initialize`-response round trip rather than
+    /// inventing a wire id: `next_wire_id` is single-counter state shared
+    /// with every other request the driver sends, so a hand-picked id can
+    /// silently collide with the one `begin_session_new` assigns next and
+    /// mask exactly the ordering bug these tests exist to catch.
+    fn initialize_with_auth_methods(
+        driver: &mut Driver,
+        out_rx: &mut mpsc::UnboundedReceiver<JsonRpcMessage>,
+        methods: &[&str],
+    ) {
+        driver.begin();
+        let initialize = out_rx.try_recv().expect("initialize was sent");
+        let ids: Vec<Value> = methods
+            .iter()
+            .map(|id| json!({ "id": id, "name": id }))
+            .collect();
+        driver.on_response(
+            initialize.id.expect("initialize carries an id"),
+            Ok(json!({ "protocolVersion": PROTOCOL_VERSION, "authMethods": ids })),
+        );
+    }
+
+    fn auth_required_error() -> JsonRpcError {
+        JsonRpcError {
+            code: AUTH_REQUIRED,
+            message: "authentication required".to_string(),
+            data: None,
+        }
+    }
+
+    /// `requires_auth: false` must never call `authenticate`, even against
+    /// an agent that offers methods and refuses `session/new` with the
+    /// wire's own `auth_required` code.
+    #[test]
+    fn auth_required_is_not_retried_when_the_adapter_does_not_require_it() {
+        let (mut driver, mut out_rx) = detached_driver(false);
+        initialize_with_auth_methods(&mut driver, &mut out_rx, &["stub-login"]);
+        let session_new = out_rx.try_recv().expect("session/new was sent");
+
+        driver.on_response(
+            session_new.id.expect("session/new carries an id"),
+            Err(auth_required_error()),
+        );
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no authenticate frame without requires_auth"
+        );
+    }
+
+    /// A `session/new` that still fails with `auth_required` after a
+    /// successful `authenticate` must not be retried a second time --
+    /// exactly one `authenticate` frame, ever, per session.
+    #[test]
+    fn a_second_auth_required_after_authenticating_is_not_retried_again() {
+        let (mut driver, mut out_rx) = detached_driver(true);
+        initialize_with_auth_methods(&mut driver, &mut out_rx, &["stub-login"]);
+        let first_session_new = out_rx.try_recv().expect("session/new was sent");
+
+        driver.on_response(
+            first_session_new.id.expect("session/new carries an id"),
+            Err(auth_required_error()),
+        );
+        let authenticate = out_rx.try_recv().expect("authenticate was sent");
+        assert_eq!(authenticate.method.as_deref(), Some("authenticate"));
+
+        driver.on_response(
+            authenticate.id.expect("authenticate carries an id"),
+            Ok(json!({})),
+        );
+        let second_session_new = out_rx.try_recv().expect("session/new was retried");
+
+        driver.on_response(
+            second_session_new.id.expect("session/new carries an id"),
+            Err(auth_required_error()),
+        );
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no second authenticate frame after one has already been sent"
+        );
+    }
+
+    /// An agent that fails `session/new` with `auth_required` but offered no
+    /// `authMethods` at all gives the client nothing to authenticate with,
+    /// so the retry path must not fire.
+    #[test]
+    fn auth_required_with_no_advertised_methods_is_not_retried() {
+        let (mut driver, mut out_rx) = detached_driver(true);
+        initialize_with_auth_methods(&mut driver, &mut out_rx, &[]);
+        let session_new = out_rx.try_recv().expect("session/new was sent");
+
+        driver.on_response(
+            session_new.id.expect("session/new carries an id"),
+            Err(auth_required_error()),
+        );
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no authenticate frame with no methods to authenticate with"
+        );
+    }
+
+    /// The wire route is closed while the `fs` capability is advertised
+    /// false, so both methods fall to the same `METHOD_NOT_FOUND` arm every
+    /// other unimplemented method does.
+    #[test]
+    fn fs_read_and_write_answer_method_not_found_over_the_wire() {
+        let (mut driver, mut out_rx) = detached_driver(false);
+
+        driver.on_request(
+            RequestId::Str("read-1".to_string()),
+            "fs/read_text_file",
+            &json!({ "path": "/stub/a.rs" }),
+        );
+        driver.on_request(
+            RequestId::Str("write-1".to_string()),
+            "fs/write_text_file",
+            &json!({ "path": "/stub/a.rs", "content": "fn main() {}" }),
+        );
+
+        for _ in 0..2 {
+            let frame = out_rx.try_recv().expect("an error response was sent");
+            let error = frame.error.expect("the response carries an error");
+            assert_eq!(error.code, METHOD_NOT_FOUND);
+        }
+    }
+
+    /// The `fs/read_text_file` handler body, driven directly rather than
+    /// through `on_request`: proves `on_fs_read` still registers a reply and
+    /// answers the wire correctly, independent of whether any dispatch arm
+    /// currently reaches it.
+    #[tokio::test]
+    async fn on_fs_read_registers_a_reply_and_answers_the_wire_when_it_arrives() {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.on_fs_read(
+            RequestId::Str("read-1".to_string()),
+            &json!({ "path": "/stub/a.rs" }),
+        );
+
+        let view_core::msg::Msg::Ai(AiEvent::FsReadRequested { request_id, path }) =
+            events_rx.recv().expect("FsReadRequested was emitted")
+        else {
+            panic!("expected FsReadRequested")
+        };
+        assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
+
+        driver.on_command(AiCommand::FsReadReply {
+            request_id,
+            result: Ok("fn main() {}".to_string()),
+        });
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("the reply was written")
+            .expect("the channel stayed open");
+        assert_eq!(frame.result, Some(json!({ "content": "fn main() {}" })));
+    }
+
+    /// The `fs/write_text_file` handler body's failure leg: a refused write
+    /// must answer the wire with an error, not silently drop the request.
+    #[tokio::test]
+    async fn on_fs_write_registers_a_reply_and_answers_a_refusal_over_the_wire() {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.on_fs_write(
+            RequestId::Str("write-1".to_string()),
+            &json!({ "path": "/stub/a.rs", "content": "fn main() {}" }),
+        );
+
+        let view_core::msg::Msg::Ai(AiEvent::FsWriteRequested {
+            request_id,
+            path,
+            content,
+        }) = events_rx.recv().expect("FsWriteRequested was emitted")
+        else {
+            panic!("expected FsWriteRequested")
+        };
+        assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
+        assert_eq!(content, "fn main() {}");
+
+        driver.on_command(AiCommand::FsWriteReply {
+            request_id,
+            result: Err(FsError::PermissionDenied),
+        });
+
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(5), out_rx.recv())
+            .await
+            .expect("the reply was written")
+            .expect("the channel stayed open");
+        assert!(
+            frame.error.is_some(),
+            "a refused write answers with an error"
+        );
     }
 }

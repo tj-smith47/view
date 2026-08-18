@@ -253,19 +253,7 @@ impl std::fmt::Debug for AiSession {
 /// [`AiConfig::from_adapter`](crate::AiConfig::from_adapter); no ACP wire
 /// type is reachable through this trait, so a consumer choosing which agent
 /// to run never sees this crate's JSON-RPC shapes.
-///
-/// Crate-private for now: nothing outside `view-ai` constructs an agent's
-/// launch details yet, so exposing this beyond the crate would be surface
-/// with no call site to justify it. A future config or provisioning task
-/// that needs to hand in its own adapter from another crate is the reason
-/// to promote it, not a reason to promote it early.
-// no [ai] config loader or provisioning step exists yet to hand this crate
-// a real pinned_version/binary_path, so the only caller today is this
-// file's own test proving the trait's shape holds -- allowed rather than
-// deleted, the same way a closed value domain's still-unused variants stay
-// in place ahead of the surface that will pick them
-#[allow(dead_code)]
-pub(crate) trait AgentAdapter: Send + Sync {
+pub trait AgentAdapter: Send + Sync {
     /// The executable and the arguments it is invoked with, in order.
     fn command(&self) -> (&str, &[String]);
     /// A short, stable name for this agent, used only in diagnostics.
@@ -283,19 +271,17 @@ pub(crate) trait AgentAdapter: Send + Sync {
 /// downloading, checksumming the executable -- is provisioning work this
 /// type does not do itself; it only shapes what [`AgentAdapter`] needs once
 /// those values exist.
-#[allow(dead_code)]
-pub(crate) struct ClaudeCodeAdapter {
+pub struct ClaudeCodeAdapter {
     pinned_version: String,
     binary_path: PathBuf,
     args: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl ClaudeCodeAdapter {
     /// An adapter for the binary at `binary_path`, pinned to
     /// `pinned_version`.
     #[must_use]
-    pub(crate) fn new(pinned_version: impl Into<String>, binary_path: PathBuf) -> Self {
+    pub fn new(pinned_version: impl Into<String>, binary_path: PathBuf) -> Self {
         Self {
             pinned_version: pinned_version.into(),
             binary_path,
@@ -307,7 +293,7 @@ impl ClaudeCodeAdapter {
     /// [`AgentAdapter::id`], which names the agent kind rather than the
     /// pinned build.
     #[must_use]
-    pub(crate) fn pinned_version(&self) -> &str {
+    pub fn pinned_version(&self) -> &str {
         &self.pinned_version
     }
 }

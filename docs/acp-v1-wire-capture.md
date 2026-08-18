@@ -1100,9 +1100,12 @@ On success, the Agent returns an empty result:
 ```
 
 The schema's `session_new` method description, verbatim: "May return an
-`auth_required` error if the agent requires authentication." No other
-method's schema description mentions this error, so the guard belongs on
-`session/new` specifically, not on every outgoing request.
+`auth_required` error if the agent requires authentication." The
+`authenticate` method's own description also mentions the error, describing
+what a successful call clears: "the client can proceed to create sessions
+with `new_session` without receiving an `auth_required` error." Between the
+two, only `session/new` is the request that can itself fail with the code,
+so the guard belongs there specifically, not on every outgoing request.
 
 Pinned `authMethods` entry shape, from `authentication.mdx`'s advertising
 example (`docs/protocol/v1/authentication.mdx` lines 41-61, same commit):
@@ -1114,6 +1117,13 @@ example (`docs/protocol/v1/authentication.mdx` lines 41-61, same commit):
   "description": "Sign in using the agent's login flow"
 }
 ```
+
+The schema defines `AuthMethod` itself as an `anyOf` union carrying a `type`
+field that acts as the discriminator between its members, with an absent
+`type` treated as `agent`. Today the union has exactly one member,
+`AuthMethodAgent`, which is the flattened `{id, name, description}` shape
+pinned above -- but the discriminator field means a second variant can be
+added to the union later without changing this shape's own fields.
 
 Pinned facts for the session-lifecycle client: `authenticate`'s request
 carries exactly one field, `methodId` (a string, one of the ids in the
