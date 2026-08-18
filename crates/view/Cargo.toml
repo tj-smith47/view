@@ -53,6 +53,7 @@ arboard = { version = "3", default-features = false, features = [
 clap = { version = "4.6.2", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+view-ai = { version = "0.0.1", path = "../view-ai" }
 view-core = { version = "0.0.1", path = "../view-core" }
 view-engine = { version = "0.0.1", path = "../view-engine" }
 view-native = { version = "0.0.1", path = "../view-native" }

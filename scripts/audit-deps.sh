@@ -28,11 +28,17 @@ check_absent view-oracle view-bench
 for dep in view view-engine view-tui view-native view-ai view-oracle view-bench tokio async-std smol; do
   check_absent view-surface "$dep"
 done
-for crate in view-native view-ai; do
-  for dep in view view-engine view-tui view-oracle view-bench tokio async-std smol; do
-    check_absent "$crate" "$dep"
-  done
+# the tokio ban keeps view-native and drops view-ai, whose runtime the
+# spec's decision log sanctions; view-ai still may not reach the app,
+# RPC, or measurement crates
+for dep in view view-engine view-tui view-oracle view-bench tokio async-std smol; do
+  check_absent view-native "$dep"
 done
+for dep in view view-engine view-tui view-oracle view-bench; do
+  check_absent view-ai "$dep"
+done
+# the view-native <-> view-ai mutual forbid at L36-37 is unrelated to tokio
+# and stays verbatim
 check_absent view-native view-ai
 check_absent view-ai view-native
 for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view view-harness; do
@@ -80,10 +86,16 @@ done
 # the oracle lib's own manifest and fail its own absence check below --
 # view-harness exists precisely to be the one non-view package allowed to
 # parse TOML, not to be checked for its absence.
-for crate in view-core view-engine view-surface view-ai view-tui view-oracle view-bench; do
+# view-ai owns a file format of its own now ([ai]'s table), so it leaves the
+# serde/toml absence loop alongside view-native. serde_json gains the loop it
+# never had: ACP is JSON-RPC, and the pure layers stay free of that wire
+# format the same way they stay free of serde and toml.
+for crate in view-core view-engine view-surface view-tui view-oracle view-bench; do
   check_absent "$crate" serde
   check_absent "$crate" toml
+  check_absent "$crate" serde_json
 done
+check_absent view-native serde_json
 
 # view-test-support (the ScratchDir fixture, see its own module doc) is
 # dev-only by charter: it exists to be pulled in as a [dev-dependencies]
@@ -175,9 +187,13 @@ check_transitive_reach rmpv view-engine view view-oracle view-bench view-harness
 # view-harness is the corpus loader's sanctioned TOML/serde home (see the
 # check_absent loop above): its dependency on view-oracle is what makes the
 # resolved graph legitimately reach these two through it, same shape as the
-# rmpv widening just above.
-check_transitive_reach serde view view-harness view-native
-check_transitive_reach toml view view-harness view-native
+# rmpv widening just above. serde/toml also gain view-ai here because its
+# manifest now declares both. serde_json had no line at all; view-harness
+# already reaches it through the corpus loader, and view reaches it through
+# view-ai.
+check_transitive_reach serde      view view-harness view-native view-ai
+check_transitive_reach toml       view view-harness view-native view-ai
+check_transitive_reach serde_json view view-harness view-ai
 check_transitive_reach crossterm view-tui view
 check_transitive_reach ratatui view-tui view
 check_transitive_reach arboard view
@@ -187,7 +203,7 @@ check_transitive_reach arboard view
 # reaches them through that sanctioned edge.
 check_transitive_reach grep-searcher view-native view
 check_transitive_reach grep-regex view-native view
-check_transitive_reach tokio
+check_transitive_reach tokio view view-ai
 check_transitive_reach async-std
 check_transitive_reach smol
 exit $fail
