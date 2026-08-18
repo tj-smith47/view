@@ -32,11 +32,11 @@
 //! - `ask` -- send a `session/request_permission` request, then end the turn
 //!   once it is answered.
 //! - `read` -- send an `fs/read_text_file` request and report what came
-//!   back as a message chunk. No current test drives this: the client's
-//!   `initialize` advertises `clientCapabilities.fs.readTextFile: false`,
-//!   so a conforming client answers `METHOD_NOT_FOUND` rather than the
-//!   shape this arm expects. Held for the task that flips the capability
-//!   back on and exercises this leg over the wire again.
+//!   back as a message chunk. Unreachable over the wire while the client's
+//!   `initialize` advertises `clientCapabilities.fs.readTextFile: false`:
+//!   view answers `METHOD_NOT_FOUND` rather than the shape this arm
+//!   expects. Kept so the leg can be driven over the wire again once the
+//!   capability is advertised `true`.
 //! - `write` -- send an `fs/write_text_file` request and report whether it
 //!   was accepted or refused. Unreachable for the same reason as `read`,
 //!   against `clientCapabilities.fs.writeTextFile: false`.
