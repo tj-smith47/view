@@ -2696,11 +2696,12 @@ fn esc_on_a_focused_pending_permission_cancels_it_even_with_only_allow_options_o
     assert!(m.ai_panel().pending_permission.is_none());
 }
 
-/// Critical 2, the guard's focus half: a request auto-opens the panel
-/// without taking focus (see `auto_opened_permission_model`'s doc), so a
-/// `y` typed right after must still reach the engine as ordinary input --
-/// dropping the `focused` half of `route_key`'s guard is exactly the
-/// mutation this fails under, since the panel genuinely is open here.
+/// A request auto-opens the panel without taking focus (see
+/// `auto_opened_permission_model`'s doc), so a `y` typed right after must
+/// still reach the engine as ordinary input -- dropping the `focused`
+/// condition of `route_key`'s three-condition guard is exactly the
+/// mutation this fails under, since the panel genuinely is open and
+/// `model.focus()` genuinely reports `Focus::Engine` here.
 #[test]
 fn a_y_typed_while_the_panel_is_auto_opened_but_not_focused_reaches_the_engine() {
     let mut m = auto_opened_permission_model();
@@ -2724,10 +2725,13 @@ fn a_y_typed_while_the_panel_is_auto_opened_but_not_focused_reaches_the_engine()
     );
 }
 
-/// Critical 2, the guard's open half: closing the panel while a request is
-/// still pending (the user can always dismiss the sidebar without
-/// answering) must not leave the intercept live -- dropping the `open`
-/// half of `route_key`'s guard is exactly the mutation this fails under.
+/// Closing the panel while a request is still pending (the user can always
+/// dismiss the sidebar without answering) must not leave the intercept
+/// live. `route_key`'s guard no longer names the overlay's own presence at
+/// all -- it is `close_ai_panel` that must clear `AiPanelState::focused` at
+/// the single point every close goes through (see `Model::close_ai_panel`'s
+/// doc); dropping that line is exactly the mutation this fails under, not
+/// any check inside `route_key` itself.
 #[test]
 fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the_engine() {
     let mut m = pending_permission_model();
@@ -2739,6 +2743,7 @@ fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the
         },
     );
     assert!(!m.ai_panel_overlay_open());
+    assert!(!m.ai_panel().focused, "close_ai_panel clears focused too");
     assert!(
         m.ai_panel().pending_permission.is_some(),
         "closing the sidebar does not answer the request it leaves behind"
@@ -2753,7 +2758,78 @@ fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the
 
     assert!(
         matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
-        "a closed panel must never intercept a keystroke: {effects:?}"
+        "a closed, unfocused panel must never intercept a keystroke: {effects:?}"
+    );
+}
+
+/// Mutation-proof for the `focus` condition: a picker (or any other
+/// focus-taking overlay) opened on top of a focused, pending permission
+/// must take the key for itself. `AiPanelState::focused` alone cannot tell
+/// this apart from the panel genuinely holding the keyboard, since
+/// `OverlayKind::Ai` never takes the stack's own focus slot (see
+/// `Model::takes_focus`'s doc) -- `model.focus() == Focus::Engine` is what
+/// `route_key`'s guard checks instead, and this proves dropping that check
+/// lets `y` answer a request meant for the overlay actually on top.
+#[test]
+fn a_y_typed_while_another_overlay_holds_focus_reaches_that_overlay_not_the_permission() {
+    let mut m = pending_permission_model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "tree".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(matches!(m.focus(), Focus::Native(_)));
+    assert!(
+        m.ai_panel().focused,
+        "the ai panel's own focused flag is untouched by another overlay opening on top of it"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Ai(AiCommand::AnswerPermission { .. }))),
+        "a key reaching another focus-taking overlay must never answer the \
+         permission underneath it: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the request stays open; the tree overlay took the key instead"
+    );
+}
+
+/// Mutation-proof for the mode condition: `AiPanelState::focused` can stay
+/// true while the user goes back to editing elsewhere (nothing about focus
+/// forces the panel closed), so a `y` typed as ordinary insert text must
+/// reach nvim, not answer the request -- this proves dropping the mode
+/// check lets exactly that happen.
+#[test]
+fn a_y_typed_in_insert_mode_reaches_the_engine_not_the_permission() {
+    let mut m = pending_permission_model();
+    m.engine.mode.current = "insert".to_string();
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
+        "insert-mode input must reach nvim untouched: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the request stays open; the keystroke reached nvim instead of answering it"
     );
 }
 

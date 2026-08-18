@@ -1244,6 +1244,125 @@ mod tests {
         );
     }
 
+    /// `cancel_open_permissions` at both crash-return points in `drive`'s
+    /// select loop was previously covered only by calling the method
+    /// directly, which cannot tell apart a call that is load-bearing there
+    /// from one that would compile and pass even if both call sites were
+    /// deleted. This drives the real `drive()` select loop over two duplex
+    /// pairs (one per direction, mirroring a child's independent stdin and
+    /// stdout pipes), with a stand-in agent answering the handshake and
+    /// opening a permission request before going silent, and asserts the
+    /// cancelled reply is read back off the actual wire.
+    #[tokio::test]
+    async fn a_crash_while_a_permission_is_open_settles_it_cancelled_on_the_wire() {
+        // agent -> client and client -> agent are independent pipes, exactly
+        // like a real child's separate stdout and stdin: dropping the whole
+        // `agent_out` end below must EOF only the client's reader, leaving
+        // `client_out` free to still carry the cancelled reply
+        let (agent_out, client_in) = tokio::io::duplex(4096);
+        let (client_out, agent_in) = tokio::io::duplex(4096);
+
+        let (mut agent_reader, mut agent_writer) = JsonRpcCodec::new(agent_in, agent_out).split();
+        let (commands_tx, commands) = mpsc::unbounded_channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
+
+        let session = tokio::spawn(drive(
+            JsonRpcCodec::new(client_in, client_out),
+            commands,
+            shared,
+            std::env::temp_dir(),
+            false,
+        ));
+
+        let initialize = agent_reader
+            .next_message()
+            .await
+            .expect("read initialize")
+            .expect("initialize arrives");
+        let initialize_id = initialize.id.expect("initialize carries an id");
+        agent_writer
+            .write_message(&JsonRpcMessage::response(
+                initialize_id,
+                json!({ "protocolVersion": PROTOCOL_VERSION }),
+            ))
+            .await
+            .expect("answer initialize");
+
+        let new_session = agent_reader
+            .next_message()
+            .await
+            .expect("read session/new")
+            .expect("session/new arrives");
+        let new_session_id = new_session.id.expect("session/new carries an id");
+        agent_writer
+            .write_message(&JsonRpcMessage::response(
+                new_session_id,
+                json!({ "sessionId": "sess_stand_in" }),
+            ))
+            .await
+            .expect("answer session/new");
+
+        // a permission request is normally raised mid-turn; sending the
+        // prompt keeps this test's shape matching that reality even though
+        // `on_permission_request` itself would process the request either way
+        commands_tx
+            .send(AiCommand::Prompt {
+                text: "irrelevant".to_string(),
+                context: Vec::new(),
+            })
+            .expect("the drive task is still alive");
+        let _prompt = agent_reader
+            .next_message()
+            .await
+            .expect("read session/prompt")
+            .expect("session/prompt arrives");
+
+        agent_writer
+            .write_message(&JsonRpcMessage::request(
+                RequestId::Str("perm-1".to_string()),
+                "session/request_permission",
+                json!({
+                    "sessionId": "sess_stand_in",
+                    "toolCall": { "toolCallId": "call_001" },
+                    "options": [
+                        { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
+                    ],
+                }),
+            ))
+            .await
+            .expect("send session/request_permission");
+
+        // the crash: dropping the whole `agent_writer` (and its `agent_out`
+        // stream) EOFs the client's reader without touching `client_out`,
+        // the pipe the cancelled reply still needs to travel on
+        drop(agent_writer);
+
+        let ending = tokio::time::timeout(std::time::Duration::from_secs(10), session)
+            .await
+            .expect("drive() reports the crash instead of hanging")
+            .expect("the drive task did not panic");
+        assert!(
+            matches!(ending, Some(SessionEnd::ReaderEof)),
+            "expected ReaderEof, got {ending:?}"
+        );
+
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent_reader.next_message(),
+        )
+        .await
+        .expect("the cancelled reply arrives instead of hanging")
+        .expect("read the cancelled reply")
+        .expect("the cancelled reply is a real frame, not eof");
+        assert_eq!(reply.id, Some(RequestId::Str("perm-1".to_string())));
+        assert_eq!(
+            reply.result,
+            Some(json!({ "outcome": { "outcome": "cancelled" } })),
+            "the still-open permission request is settled cancelled on the real wire, \
+             not only inside driver state"
+        );
+    }
+
     /// The tripwire a later handler-landing change must flip, not delete:
     /// until a trust-gated `fs/*` handler exists end to end, the agent must
     /// be told these capabilities are absent, never advertised ahead of the

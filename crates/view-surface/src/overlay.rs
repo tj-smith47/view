@@ -296,6 +296,7 @@ fn picker_split_rows(
             .map(Line::Text)
             .collect(),
         selected: None,
+        header_keep_tail: false,
     };
     let preview = lay_out(&preview_body, preview_width, height, borders);
 
@@ -415,6 +416,16 @@ struct Body {
     /// [`lay_out`] knows which of them is selected.
     items: Vec<Line>,
     selected: Option<usize>,
+    /// Which end of `header` [`lay_out`] keeps when the overlay is too
+    /// short for all of it: `false` (every kind but [`ai_body`]) keeps the
+    /// first `height` rows, the shape a prompt or picker's own message-then-
+    /// input-then-rule ordering wants. `true` keeps the last `height` rows
+    /// instead -- `ai_body`'s only user, where the tail is the pending
+    /// permission's answerable options and the head is the question and
+    /// composer line above them; those options are the actionable content
+    /// a request blocking the agent's own turn cannot be shown without,
+    /// while the question is context that can be sacrificed first.
+    header_keep_tail: bool,
 }
 
 /// Cuts `body` down to exactly `height` rows of exactly `width` cells: the
@@ -428,10 +439,13 @@ struct Body {
 /// list on every cursor move.
 fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
-    for line in &body.header {
-        if lines.len() >= usize::from(height) {
-            break;
-        }
+    let header_budget = usize::from(height).min(body.header.len());
+    let header_slice = if body.header_keep_tail {
+        &body.header[body.header.len() - header_budget..]
+    } else {
+        &body.header[..header_budget]
+    };
+    for line in header_slice {
         lines.push(fit(line, width, borders));
     }
     let header_rows = lines.len();
@@ -498,6 +512,7 @@ fn picker_body(view: &PickerView) -> Body {
         ],
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
+        header_keep_tail: false,
     }
 }
 
@@ -512,6 +527,7 @@ fn tree_body(view: &TreeView) -> Body {
             .map(Line::Text)
             .collect(),
         selected: view.selected,
+        header_keep_tail: false,
     }
 }
 
@@ -555,6 +571,7 @@ fn statusline_body(view: &StatuslineView) -> Body {
         )],
         items: Vec::new(),
         selected: None,
+        header_keep_tail: false,
     }
 }
 
@@ -579,6 +596,7 @@ fn prompt_body(view: &PromptView) -> Body {
             .map(Line::Text)
             .collect(),
         selected: view.selected,
+        header_keep_tail: false,
     }
 }
 
@@ -591,6 +609,7 @@ fn palette_body(view: &PaletteView) -> Body {
         ],
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
+        header_keep_tail: false,
     }
 }
 
@@ -614,6 +633,10 @@ fn ai_body(view: &AiPanelView) -> Body {
         header,
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
+        // the pending permission's options are the actionable content of
+        // this header; see `Body::header_keep_tail`'s own doc for why they
+        // must outlive the question and composer line under truncation
+        header_keep_tail: true,
     }
 }
 

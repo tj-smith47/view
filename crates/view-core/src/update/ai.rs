@@ -339,8 +339,8 @@ mod tests {
         assert!(model.ai_panel().focused);
     }
 
-    /// Critical 3: a turn ending while a permission is still pending must
-    /// clear it panel-side -- the driver's own `cancel_open_permissions`
+    /// A turn ending while a permission is still pending must clear it
+    /// panel-side -- the driver's own `cancel_open_permissions`
     /// (see `view-ai`'s `driver.rs`) settles the wire reply, but the panel
     /// has its own copy of the question and must stop showing it once
     /// nothing is waiting on an answer to it.

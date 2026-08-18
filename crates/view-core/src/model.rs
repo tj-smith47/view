@@ -448,6 +448,11 @@ impl Model {
                 self.mouse_capture = None;
             }
         }
+        // the single authoritative closing point, so every caller that
+        // closes the panel clears it the same way `mouse_capture` above
+        // already is, rather than each having to remember to also clear
+        // `AiPanelState::focused` itself
+        self.ai_panel.focused = false;
         true
     }
 

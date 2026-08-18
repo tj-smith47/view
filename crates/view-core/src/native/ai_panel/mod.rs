@@ -71,11 +71,19 @@ pub struct AiPanelState {
     pub pending_permission: Option<PermissionPrompt>,
     /// Whether the panel's own input line currently owns the keyboard, set
     /// only by the user's own explicit `open`/`toggle` invocation and
-    /// cleared on close -- never by a `PermissionRequested` arriving while
-    /// the panel is closed (see `update::open_ai_panel`'s doc): the panel
-    /// is non-modal, so becoming visible and taking the keyboard are two
-    /// different things, and only the second one lets `y`/`n`/`a`/`<Esc>`
-    /// reach the pending permission prompt instead of the engine.
+    /// cleared on close (by `Model::close_ai_panel`, the single
+    /// authoritative closing point) -- never by a `PermissionRequested`
+    /// arriving while the panel is closed (see `update::open_ai_panel`'s
+    /// doc): the panel is non-modal, so becoming visible and taking the
+    /// keyboard are two different things.
+    ///
+    /// Necessary but not sufficient for `y`/`n`/`a`/`<Esc>` to reach the
+    /// pending permission prompt instead of the engine: `route_key`'s gate
+    /// also requires `model.focus() == Focus::Engine` (nothing else, such
+    /// as a picker, holds the stack's real focus slot) and that the engine
+    /// is not in insert mode -- see that gate's own doc for why `focused`
+    /// alone cannot tell those cases apart, since the AI panel never takes
+    /// the stack's literal focus slot.
     pub focused: bool,
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.
@@ -162,9 +170,9 @@ mod tests {
         );
     }
 
-    /// Critical 1: the panel's own `view()` must carry and render a pending
-    /// prompt, not just hold it in state -- a `pending_permission` the
-    /// paint frame never surfaces is a prompt the user cannot see or answer.
+    /// The panel's own `view()` must carry and render a pending prompt, not
+    /// just hold it in state -- a `pending_permission` the paint frame
+    /// never surfaces is a prompt the user cannot see or answer.
     #[test]
     fn a_pending_permission_renders_the_question_and_its_options_with_their_kinds() {
         let mut state = AiPanelState::new();

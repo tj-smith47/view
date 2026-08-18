@@ -299,6 +299,175 @@ Pinned `PermissionOptionKind` wire strings: `"allow_once"`, `"allow_always"`,
 `"reject_once"`, `"reject_always"`. These are `snake_case`, not
 `kebab-case` or `camelCase`; the research pass's uncertainty is resolved.
 
+## `RequestPermissionRequest`
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))
+print(json.dumps(d['\$defs']['RequestPermissionRequest'], indent=2))
+print(json.dumps(d['\$defs']['ToolCallUpdate'], indent=2))
+"
+```
+
+Raw output (the true, unedited result of the command above):
+
+```json
+{
+  "description": "Request for user permission to execute a tool call.\n\nSent when the agent needs authorization before performing a sensitive operation.\n\nSee protocol docs: [Requesting Permission](https://agentclientprotocol.com/protocol/tool-calls#requesting-permission)",
+  "type": "object",
+  "properties": {
+    "sessionId": {
+      "description": "The session ID for this request.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/SessionId"
+        }
+      ]
+    },
+    "toolCall": {
+      "description": "Details about the tool call requiring permission.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/ToolCallUpdate"
+        }
+      ]
+    },
+    "options": {
+      "description": "Available permission options for the user to choose from.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/PermissionOption"
+      }
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "sessionId",
+    "toolCall",
+    "options"
+  ],
+  "x-side": "client",
+  "x-method": "session/request_permission"
+}
+```
+
+`ToolCallUpdate`'s raw output (same command form, second `$defs` key --
+what `toolCall` actually `$ref`s, not `ToolCall`):
+
+```json
+{
+  "description": "An update to an existing tool call.\n\nUsed to report progress and results as tools execute. All fields except\nthe tool call ID are optional - only changed fields need to be included.\n\nSee protocol docs: [Updating](https://agentclientprotocol.com/protocol/tool-calls#updating)",
+  "type": "object",
+  "properties": {
+    "toolCallId": {
+      "description": "The ID of the tool call being updated.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/ToolCallId"
+        }
+      ]
+    },
+    "kind": {
+      "description": "Update the tool kind.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolKind"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "x-deserialize-default-on-error": true
+    },
+    "status": {
+      "description": "Update the execution status.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ToolCallStatus"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "x-deserialize-default-on-error": true
+    },
+    "title": {
+      "description": "Update the human-readable title.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true
+    },
+    "content": {
+      "description": "Replace the content collection.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ToolCallContent"
+      },
+      "x-deserialize-default-on-error": true,
+      "x-deserialize-skip-invalid-items": true
+    },
+    "locations": {
+      "description": "Replace the locations collection.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/ToolCallLocation"
+      },
+      "x-deserialize-default-on-error": true,
+      "x-deserialize-skip-invalid-items": true
+    },
+    "rawInput": {
+      "description": "Update the raw input.",
+      "x-deserialize-default-on-error": true
+    },
+    "rawOutput": {
+      "description": "Update the raw output.",
+      "x-deserialize-default-on-error": true
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "toolCallId"
+  ]
+}
+```
+
+Pinned facts this settles, both load-bearing in `view-ai`'s
+`Driver::on_permission_request`:
+- `toolCall` is `ToolCallUpdate`, not `ToolCall` -- only `toolCallId` is
+  required (every other field, including `title`, is nullable/optional),
+  which is why the driver falls back to the id itself when `title` is
+  absent rather than treating an absent title as malformed input.
+- `options` is a required array of `PermissionOption` (never omitted,
+  though it may be empty -- see the driver's own empty-options handling,
+  which settles the request `cancelled` rather than leaving it open on a
+  request no user interface could ever answer).
+- `x-method` pins the wire method name verbatim: `session/request_permission`.
+
 ## `RequestPermissionOutcome`
 
 ```

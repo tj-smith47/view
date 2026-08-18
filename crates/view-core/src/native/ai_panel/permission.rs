@@ -32,12 +32,12 @@ impl PermissionPrompt {
     /// Builds the prompt an [`crate::native::ai_event::AiEvent::PermissionRequested`]
     /// folds into [`super::AiPanelState::pending_permission`]. Names `title`
     /// when the agent sent one, falling back to `tool_call_id`: the wire's
-    /// `ToolCallUpdate.title` member is optional (only `toolCallId` is
-    /// required -- `docs/acp-v1-wire-capture.md`'s "Method payload members"
-    /// table pins `ToolCallUpdate`'s required set as `toolCallId` alone,
-    /// distinct from the full `ToolCall` shape's own `title`-required set),
-    /// so an agent that omits it still gets a question naming the call it
-    /// asks about, never a blank.
+    /// `RequestPermissionRequest.toolCall` member is a `ToolCallUpdate`, not
+    /// a `ToolCall` (`docs/acp-v1-wire-capture.md`'s
+    /// `## RequestPermissionRequest` section dumps both `$defs` verbatim),
+    /// and `ToolCallUpdate` requires only `toolCallId` -- `title` is
+    /// nullable/optional there -- so an agent that omits it still gets a
+    /// question naming the call it asks about, never a blank.
     #[must_use]
     pub fn new(
         request_id: u64,

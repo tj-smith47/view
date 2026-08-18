@@ -228,8 +228,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 return effects;
             }
             if feature == "ai" && verb == "close" {
+                // `close_ai_panel` itself clears `AiPanelState::focused`, at
+                // the single authoritative closing point
                 if model.close_ai_panel() {
-                    model.ai_panel_mut().focused = false;
                     model.dirty = true;
                 }
                 return Vec::new();
@@ -778,13 +779,29 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
     // keystroke straight to nvim as ordinary input, which does nothing
     // toward unblocking the agent actually waiting on it.
     //
-    // Gated on the panel's own `focused` flag, not merely its presence on
-    // the stack: a permission request auto-opens the panel without
-    // claiming the keyboard (see `update::ai::on_ai_event`'s
-    // `PermissionRequested` arm), so a `y` typed at the engine with the
-    // panel only visible, never focused, must still reach nvim untouched
-    // rather than be read as an answer the user never meant to give.
-    if model.ai_panel_overlay_open() && model.ai_panel().focused {
+    // Three conditions, all required, because none alone names real
+    // keyboard ownership of the prompt:
+    // - `AiPanelState::focused`: a permission request auto-opens the panel
+    //   without claiming the keyboard (see `update::ai::on_ai_event`'s
+    //   `PermissionRequested` arm), so a panel that is only visible, never
+    //   focused, must not answer for the user.
+    // - `model.focus() == Focus::Engine`: the AI panel never takes the
+    //   stack's literal focus slot, so `focused` alone cannot tell a real
+    //   overlay (a picker, a prompt) holding focus apart from nothing
+    //   holding it; a `y` meant for that overlay must reach it instead.
+    // - `model.engine.mode.current != "insert"`: `focused` can stay true
+    //   while the user goes back to editing elsewhere (nothing about focus
+    //   forces the panel closed), so a `y` typed as ordinary insert text
+    //   must not be read as an answer either. Excluding only `"insert"`,
+    //   not requiring `"normal"`, matches what nvim's own mode string
+    //   distinguishes (see `native::speculate`'s `INSERT_MODE` for the
+    //   same convention) and keeps this reachable before the engine has
+    //   ever reported a mode at all, the same state a freshly attached
+    //   session is in.
+    let engine_owns_keyboard = model.focus() == Focus::Engine;
+    let panel_answering =
+        model.ai_panel().focused && engine_owns_keyboard && model.engine.mode.current != "insert";
+    if panel_answering {
         if let Some(prompt) = model.ai_panel().pending_permission.clone() {
             // <Esc> settles the request as `Cancelled` rather than any
             // offered option -- the one answer that exists even when the
@@ -1266,8 +1283,9 @@ fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
 /// focus the same way the `open`/`close` verbs do -- see
 /// `AiPanelState::focused`'s own doc.
 fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
+    // `close_ai_panel` itself clears `AiPanelState::focused`, at the single
+    // authoritative closing point
     if model.close_ai_panel() {
-        model.ai_panel_mut().focused = false;
         model.dirty = true;
         return Vec::new();
     }

@@ -368,10 +368,10 @@ fn a_prompt_carries_its_question_its_input_and_its_choices() {
     assert_eq!(framed.selected, Some(5));
 }
 
-/// Critical 1's other half: the prompt has to reach the painted frame, not
-/// only `AiPanelView`'s own field. A pending permission's question and its
-/// options render into the header, above the rule that separates them from
-/// the scrolling transcript.
+/// The prompt has to reach the painted frame, not only `AiPanelView`'s own
+/// field. A pending permission's question and its options render into the
+/// header, above the rule that separates them from the scrolling
+/// transcript.
 #[test]
 fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
     use view_core::native::views::AiPanelView;
@@ -400,6 +400,42 @@ fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
         line_text(&framed.lines[4]).contains("---"),
         "the rule still separates the header from the transcript once a \
          permission prompt has grown it"
+    );
+}
+
+/// A request blocking the agent's own turn is unanswerable if the overlay
+/// is too short to show how to answer it: the option must survive, and the
+/// question and composer line -- context, not action -- are what a short
+/// overlay sacrifices first.
+#[test]
+fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("draft prompt")
+            .with_pending_permission(vec![
+                vec![Span::plain(
+                    "Permission requested for Delete config.yaml".to_string(),
+                )],
+                vec![Span::plain("  Allow once (allow_once)".to_string())],
+            ]),
+    );
+    // interior = height - 2 = 2: room for exactly one header row and the
+    // rule, not both the composer line and the question above them
+    let framed = rows(50, 4, &kind, BorderSet::ASCII);
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(
+        text.iter()
+            .any(|line| line.contains("Allow once (allow_once)")),
+        "the answerable option must survive truncation: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("Delete config.yaml")),
+        "the question is context, sacrificed first under truncation: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("draft prompt")),
+        "the composer line is context, sacrificed first under truncation: {text:?}"
     );
 }
 
