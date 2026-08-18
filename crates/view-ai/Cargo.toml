@@ -60,7 +60,11 @@ sha2 = "0.10"
 # vendors for crate source extraction, chosen over hand-rolling a tar
 # reader or a DEFLATE decoder here, which would trade an audited
 # implementation for an unaudited one to save two small dependencies.
-tar = "0.4"
+# `default-features = false` drops the `xattr` feature (and its `libc`
+# pull): extraction never enables `unpack_xattrs`, so that path is dead
+# weight -- the same discipline `ureq` below applies to shed unused
+# transfer-encoding gzip.
+tar = { version = "0.4", default-features = false }
 # `flate2`'s pure-Rust `miniz_oxide` backend (the crate's default) decodes
 # the tarball's gzip layer without linking a system zlib, keeping this
 # crate's build reproducible across the platforms `view` ships on.

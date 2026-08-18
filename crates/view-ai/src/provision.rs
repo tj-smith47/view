@@ -408,17 +408,40 @@ fn ensure_extracted(
     // Directory rename cannot atomically replace a non-empty destination
     // on any platform this crate ships on, so a stale (or corrupted)
     // `extract_dir` is removed first. That pair is not atomic against a
-    // crash between the two calls -- but an absent `extract_dir` is
-    // exactly the state `extraction_is_valid` already treats as "needs
-    // (re)extraction", so an interruption here only costs a repeat
-    // extraction on the next call, never a corrupt-but-trusted one.
+    // crash -- or another process -- between the two calls; `publish_extraction`
+    // is what absorbs that gap.
     let _ = std::fs::remove_dir_all(extract_dir);
-    std::fs::rename(&tmp_dir, extract_dir).map_err(|source| ProvisionError::Write {
-        path: extract_dir.to_path_buf(),
-        source,
-    })?;
+    publish_extraction(&tmp_dir, extract_dir, &entry_path)
+}
 
-    Ok(entry_path)
+/// Publishes a completed extraction at `tmp_dir` into `extract_dir` via
+/// rename. A concurrent `view` process provisioning the same adapter can
+/// win the same race `ensure_extracted` runs: both remove the stale
+/// `extract_dir`, both extract into their own temp dir, and whichever
+/// renames second hits a now-repopulated destination (`ENOTEMPTY` on
+/// Linux, `rename()` can never atomically replace a non-empty directory on
+/// any mainstream OS regardless of privilege). That is not corruption --
+/// it is someone else's already-valid extraction -- so a rename failure is
+/// only a hard error if `extract_dir` is *still* invalid afterward;
+/// otherwise the loser discards its own (unused) temp dir and defers to
+/// the winner.
+fn publish_extraction(
+    tmp_dir: &Path,
+    extract_dir: &Path,
+    entry_path: &Path,
+) -> Result<PathBuf, ProvisionError> {
+    if let Err(source) = std::fs::rename(tmp_dir, extract_dir) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        if extraction_is_valid(entry_path, extract_dir) {
+            return Ok(entry_path.to_path_buf());
+        }
+        return Err(ProvisionError::Write {
+            path: extract_dir.to_path_buf(),
+            source,
+        });
+    }
+
+    Ok(entry_path.to_path_buf())
 }
 
 /// The extracted entry stamp's file name: a hex SHA-256 of the entry
@@ -769,12 +792,152 @@ mod tests {
         gz_bytes
     }
 
+    /// A malicious `.tar.gz` combining the three classic tar-extraction
+    /// escape vectors in one archive, in order: a `../`-relative member, an
+    /// absolute-path member, and a symlinked directory later written
+    /// through. Built to pin `extract_tarball`'s currently-safe behavior --
+    /// the `../` member is dropped outright (no file, no error), the
+    /// absolute member has its leading `/` stripped and is relocated under
+    /// the destination rather than skipped, and the symlink write-through
+    /// is the one hard error -- so a future `tar` upgrade that changed any
+    /// of the three turns a test red instead of silently reopening an
+    /// escape.
+    fn build_escaping_tarball(symlink_target: &Path) -> Vec<u8> {
+        let mut tar_bytes = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut tar_bytes);
+            // A hand-crafted malicious archive never goes through this
+            // crate's own `Header::set_path` -- it arrives as arbitrary
+            // bytes over the wire. `tar`'s safe builder API refuses to
+            // *construct* a `..` name at all (the same validation this
+            // test exists to make sure `unpack` also enforces), so the
+            // relative-escape entry's name is written directly into the
+            // header's raw bytes to reproduce what an attacker's archive
+            // actually looks like on disk.
+            let relative_content = b"escaped via relative path";
+            let mut relative = tar::Header::new_gnu();
+            let raw_name = b"../escaped-relative.txt";
+            relative.as_mut_bytes()[..raw_name.len()].copy_from_slice(raw_name);
+            relative.set_size(relative_content.len() as u64);
+            relative.set_mode(0o644);
+            relative.set_cksum();
+            builder
+                .append(&relative, &relative_content[..])
+                .expect("append relative-escape entry");
+
+            // An absolute member name is representable through the safe
+            // API (`preserve_absolute`), unlike `..`, so this one is built
+            // through it.
+            builder.preserve_absolute(true);
+            let absolute_content = b"escaped via absolute path";
+            let mut absolute = tar::Header::new_gnu();
+            absolute.set_size(absolute_content.len() as u64);
+            absolute.set_mode(0o644);
+            absolute.set_cksum();
+            builder
+                .append_data(
+                    &mut absolute,
+                    "/tmp/escaped-absolute.txt",
+                    &absolute_content[..],
+                )
+                .expect("append absolute-escape entry");
+
+            let mut symlink = tar::Header::new_gnu();
+            symlink.set_entry_type(tar::EntryType::Symlink);
+            symlink.set_size(0);
+            symlink.set_mode(0o777);
+            symlink.set_cksum();
+            builder
+                .append_link(&mut symlink, Path::new("package"), symlink_target)
+                .expect("append symlink entry");
+
+            let planted_content = b"planted via symlink write-through";
+            let mut planted = tar::Header::new_gnu();
+            planted.set_size(planted_content.len() as u64);
+            planted.set_mode(0o644);
+            planted.set_cksum();
+            builder
+                .append_data(&mut planted, "package/planted.txt", &planted_content[..])
+                .expect("append write-through entry");
+
+            builder.finish().expect("finish tar");
+        }
+        let mut gz_bytes = Vec::new();
+        {
+            let mut encoder =
+                flate2::write::GzEncoder::new(&mut gz_bytes, flate2::Compression::default());
+            encoder.write_all(&tar_bytes).expect("gzip tar bytes");
+            encoder.finish().expect("finish gzip");
+        }
+        gz_bytes
+    }
+
+    #[test]
+    fn extract_tarball_blocks_relative_absolute_and_symlink_escape_members() {
+        let dest = scratch_cache_root("escape-dest");
+        let outside = scratch_cache_root("escape-outside");
+
+        let malicious = build_escaping_tarball(&outside);
+        let result = extract_tarball(&malicious, &dest);
+
+        // vector 1: a `../` member is dropped entirely -- `tar`'s own
+        // traversal check returns `Ok(false)` for it (no error, no file),
+        // pinned here at both the plausible outside path and the naively
+        // stripped-to-dest path
+        assert!(
+            !dest
+                .parent()
+                .expect("dest has a parent")
+                .join("escaped-relative.txt")
+                .exists(),
+            "the relative-escape member must not land outside the destination"
+        );
+        assert!(
+            !dest.join("escaped-relative.txt").exists(),
+            "the relative-escape member must not land anywhere -- `tar` skips it outright"
+        );
+
+        // vector 2: an absolute member has its leading `/` silently
+        // dropped and the remainder treated as relative to `dest`, so it
+        // is confined -- not skipped outright, but never escapes
+        let relocated = dest.join("tmp").join("escaped-absolute.txt");
+        assert!(
+            relocated.exists(),
+            "the absolute-escape member is expected to be relocated under dest, not skipped: {}",
+            relocated.display()
+        );
+        assert_eq!(
+            std::fs::read(&relocated).expect("read relocated absolute member"),
+            b"escaped via absolute path",
+            "the relocated member's content must be exactly what was archived"
+        );
+
+        // vector 3: a symlinked directory later written through is the
+        // one hard error -- pinned here so a `tar` upgrade that started
+        // allowing it turns this test red instead of silently reopening
+        // the escape
+        assert!(
+            matches!(&result, Err(ProvisionError::Extract { .. })),
+            "expected the symlink write-through to be refused, got {result:?}"
+        );
+        let message = result.unwrap_err().to_string();
+        assert!(
+            message.contains("outside of destination path"),
+            "expected an outside-destination refusal, got: {message}"
+        );
+        assert!(
+            !outside.join("planted.txt").exists(),
+            "the symlink write-through must never reach the real target it points at"
+        );
+    }
+
     #[test]
     fn a_tampered_payload_fails_verification_and_writes_nothing_to_cache() {
-        let server = StubServer::start(b"not a valid tarball at all".to_vec());
-        // the checksum a genuine payload would hash to; the stub above
-        // serves something else entirely, so verification must fail
-        // against this pin regardless of what the real digest is
+        // a genuine, well-formed tarball -- the real supply-chain case is a
+        // substituted package that still unpacks cleanly, not corrupted
+        // bytes; a malformed payload would kill this test via `Extract`
+        // instead of `ChecksumMismatch`, which tests the wrong thing
+        let server = StubServer::start(build_test_tarball(b"substituted payload"));
         let expected_sha256: &'static str =
             Box::leak(sha256_hex(b"the genuine bytes").into_boxed_str());
         let pin = test_pin(server.url(), expected_sha256);
@@ -891,6 +1054,87 @@ mod tests {
         );
     }
 
+    /// Writes a complete, self-consistent extraction directly at
+    /// `extract_dir` -- the entry file plus its stamp -- without going
+    /// through `ensure_extracted`, so a test can pre-populate a "someone
+    /// else already published a valid extraction" state deterministically.
+    fn write_valid_extraction(extract_dir: &Path, entry: &str, content: &[u8]) {
+        let entry_path = extract_dir.join(entry);
+        std::fs::create_dir_all(entry_path.parent().expect("entry has a parent"))
+            .expect("create extracted entry's parent dir");
+        std::fs::write(&entry_path, content).expect("write extracted entry");
+        std::fs::write(extract_dir.join(ENTRY_STAMP_NAME), sha256_hex(content))
+            .expect("write entry stamp");
+    }
+
+    #[test]
+    fn publish_extraction_defers_to_a_concurrently_published_valid_destination() {
+        let root = scratch_cache_root("publish-race");
+        let extract_dir = root.join("extracted");
+        let entry_path = extract_dir.join("package/dist/index.js");
+
+        // "someone else" (a concurrent process winning the same race)
+        // already published a valid extraction at extract_dir
+        write_valid_extraction(
+            &extract_dir,
+            "package/dist/index.js",
+            b"the winner's content",
+        );
+
+        // this call's own temp dir, extracted independently and now
+        // trying to publish into the same, already-occupied destination
+        // -- `rename` onto a non-empty directory always fails, regardless
+        // of privilege, so this deterministically forces the collision
+        // `ensure_extracted` can hit under real concurrency
+        let tmp_dir = root.join(".extracted.loser.tmp");
+        write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
+
+        let result = publish_extraction(&tmp_dir, &extract_dir, &entry_path);
+
+        assert_eq!(
+            result.expect("a rename onto an already-valid destination must be treated as benign"),
+            entry_path
+        );
+        assert_eq!(
+            std::fs::read(&entry_path).expect("read published entry"),
+            b"the winner's content",
+            "the already-published valid destination must win -- the loser's content must \
+             never overwrite it"
+        );
+        assert!(
+            !tmp_dir.exists(),
+            "the loser's now-unused temp dir must be cleaned up"
+        );
+    }
+
+    #[test]
+    fn publish_extraction_still_fails_when_the_destination_is_populated_but_invalid() {
+        let root = scratch_cache_root("publish-race-invalid");
+        let extract_dir = root.join("extracted");
+        let entry_path = extract_dir.join("package/dist/index.js");
+
+        // extract_dir is occupied by something, but it does not form a
+        // valid extraction (no stamp) -- the collision must not be waved
+        // through just because the destination happens to be non-empty
+        std::fs::create_dir_all(extract_dir.join("package/dist"))
+            .expect("create unrelated occupant dir");
+        std::fs::write(
+            extract_dir.join("package/dist/index.js"),
+            b"unrelated, unstamped",
+        )
+        .expect("write unrelated occupant file");
+
+        let tmp_dir = root.join(".extracted.loser.tmp");
+        write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
+
+        let result = publish_extraction(&tmp_dir, &extract_dir, &entry_path);
+
+        assert!(
+            matches!(result, Err(ProvisionError::Write { .. })),
+            "an occupied-but-invalid destination must still be a hard error, got {result:?}"
+        );
+    }
+
     #[test]
     fn an_unknown_id_is_reported_rather_than_panicking() {
         let err = ensure_adapter("no-such-adapter").expect_err("unknown id must be an error");
@@ -909,7 +1153,14 @@ mod tests {
 
     /// Serializes every test here that mutates `PATH`: it is process-global,
     /// and two tests racing their own redirect/restore would interleave --
-    /// the same reason `trust.rs`'s own tests guard `XDG_STATE_HOME`.
+    /// the same reason `trust.rs`'s own tests guard `XDG_STATE_HOME`. This
+    /// lock only serializes the tests *against each other* -- it does
+    /// nothing for a concurrently running test elsewhere in this same
+    /// `view-ai` lib test binary that reads `PATH` or spawns a
+    /// subprocess, since `cargo test` runs the whole binary's tests on
+    /// one shared process. Nothing does either today, so this is latent
+    /// rather than flaky; a future test that spawns a child process must
+    /// take this lock too, or move to a separate test binary/process.
     static PATH_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     struct PathRestoreGuard {
