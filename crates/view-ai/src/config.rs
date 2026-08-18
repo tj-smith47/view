@@ -150,7 +150,11 @@ fn resolve_agent(wire: WireAgentSpec) -> Result<AgentSpec, AiConfigError> {
             path: None,
             detail: "agent id must not be empty or whitespace-only",
         }),
-        WireAgentSpec::Id(id) => Ok(AgentSpec::Id(id)),
+        // stored trimmed so an id validated as non-blank is also the exact
+        // string later lookups and spawns see; " claude-code " resolving to
+        // a padded id would fail adapter resolution with no config line to
+        // blame, the same downstream-blame problem the blank check exists for
+        WireAgentSpec::Id(id) => Ok(AgentSpec::Id(id.trim().to_string())),
         WireAgentSpec::Command(words) if words.first().is_none_or(|w| w.trim().is_empty()) => {
             Err(AiConfigError::EmptyAgent {
                 path: None,
@@ -439,6 +443,13 @@ agent = "claude-code"
             matches!(err, AiConfigError::EmptyAgent { .. }),
             "expected an empty-agent error, got: {err}"
         );
+    }
+
+    #[test]
+    fn a_padded_agent_id_resolves_trimmed() {
+        let cfg = AiConfig::from_toml_str("[ai]\nagent = \" claude-code \"\n")
+            .expect("a padded id is valid once trimmed");
+        assert_eq!(cfg.agent_spec(), &AgentSpec::Id("claude-code".into()));
     }
 
     #[test]
