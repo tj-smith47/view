@@ -17,9 +17,9 @@ use serde::Deserialize;
 /// Which agent an `[ai]` table names: a known adapter by id, or an
 /// arbitrary command line for one this build has no adapter for.
 ///
-/// No `serde` derive here: the wire shape lives in [`WireAgentSpec`] so this
-/// resolved, public type never carries a deserialization contract as part
-/// of its API.
+/// No `serde` derive here: the wire shape lives in a private wire type, so
+/// this resolved, public type never carries a deserialization contract as
+/// part of its API.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSpec {
     /// A known adapter id, resolved to a provisioned binary elsewhere.
@@ -58,8 +58,8 @@ impl AiConfig {
     ///
     /// Returns [`AiConfigError`] on invalid TOML, an `[ai]` value that does
     /// not match its expected shape, or an `agent` that names nothing
-    /// runnable (an empty or whitespace-only id, or a command with no
-    /// program).
+    /// runnable (an empty or whitespace-only id, or a command whose first
+    /// element -- the program -- is empty, whitespace-only, or absent).
     pub fn from_toml_str(s: &str) -> Result<Self, AiConfigError> {
         // boxed for the same reason `NativeConfigError::Toml` is:
         // `toml::de::Error` is 128+ bytes on the msvc ABI, which makes an
@@ -76,21 +76,26 @@ impl AiConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`AiConfigError`] when the file exists but cannot be read or
-    /// parsed; the error names the path in both cases.
+    /// Returns [`AiConfigError`] when the file exists but cannot be read,
+    /// cannot be parsed, or names an `agent` with nothing runnable in it;
+    /// the error names the path in every case.
     pub fn load(config_path: Option<&Path>) -> Result<Self, AiConfigError> {
         let Some(path) = config_path else {
             return Ok(Self::default());
         };
         match std::fs::read_to_string(path) {
-            // a parse failure that came from a file names that file: a bare
-            // line/column is not actionable when a user has more than one
-            // config in play, and the read failure arm below already
-            // answers with the path
+            // a failure that came from a file names that file: a bare
+            // line/column, or a detail string with no file attached, is not
+            // actionable when a user has more than one config in play, and
+            // the read failure arm below already answers with the path
             Ok(s) => Self::from_toml_str(&s).map_err(|e| match e {
                 AiConfigError::Toml(source) => AiConfigError::ParseFile {
                     path: path.to_path_buf(),
                     source,
+                },
+                AiConfigError::EmptyAgent { detail, .. } => AiConfigError::EmptyAgent {
+                    path: Some(path.to_path_buf()),
+                    detail,
                 },
                 other => other,
             }),
@@ -128,19 +133,30 @@ impl Default for AiConfig {
 /// Turns a parsed [`WireAgentSpec`] into the public [`AgentSpec`], refusing
 /// one that names nothing runnable.
 ///
-/// A `Command([])` has no program to run and an `Id("")` (or a
-/// whitespace-only id) names no adapter; both would otherwise surface only
-/// as a spawn failure downstream, with no line in `view.toml` to blame.
-/// Refusing here, at parse time, keeps the diagnostic where the mistake is.
+/// A `Command([])` has no program to run, a `Command` whose first element
+/// (the program) is empty or whitespace-only is equally unrunnable, and an
+/// `Id("")` (or a whitespace-only id) names no adapter; all three would
+/// otherwise surface only as a spawn failure downstream, with no line in
+/// `view.toml` to blame. Refusing here, at parse time, keeps the
+/// diagnostic where the mistake is.
+///
+/// A blank *later* element (`agent = ["mycli", ""]`) is deliberately left
+/// alone: it is a command line with an empty argument, which is still
+/// runnable and is `mycli`'s own business to accept or reject -- only the
+/// program name in position zero is this loader's concern.
 fn resolve_agent(wire: WireAgentSpec) -> Result<AgentSpec, AiConfigError> {
     match wire {
         WireAgentSpec::Id(id) if id.trim().is_empty() => Err(AiConfigError::EmptyAgent {
+            path: None,
             detail: "agent id must not be empty or whitespace-only",
         }),
         WireAgentSpec::Id(id) => Ok(AgentSpec::Id(id)),
-        WireAgentSpec::Command(words) if words.is_empty() => Err(AiConfigError::EmptyAgent {
-            detail: "agent command must name a program, e.g. agent = [\"mycli\", \"--acp\"]",
-        }),
+        WireAgentSpec::Command(words) if words.first().is_none_or(|w| w.trim().is_empty()) => {
+            Err(AiConfigError::EmptyAgent {
+                path: None,
+                detail: "agent command must name a program, e.g. agent = [\"mycli\", \"--acp\"]",
+            })
+        }
         WireAgentSpec::Command(words) => Ok(AgentSpec::Command(words)),
     }
 }
@@ -203,6 +219,14 @@ enum WireAgentSpec {
     Command(Vec<String>),
 }
 
+/// The two legal `agent` shapes, phrased for a config-file author rather
+/// than for a Rust reader. Shared by the top-level `expecting` text (a
+/// bad scalar or container) and the per-element wrap in `visit_seq` (a bad
+/// word inside an otherwise-legal array), so both paths name the same two
+/// shapes in the same words instead of drifting apart.
+const AGENT_SHAPE_HINT: &str =
+    "a string id (agent = \"claude-code\") or an array command (agent = [\"mycli\", \"--acp\"])";
+
 impl<'de> Deserialize<'de> for WireAgentSpec {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -214,10 +238,7 @@ impl<'de> Deserialize<'de> for WireAgentSpec {
             type Value = WireAgentSpec;
 
             fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str(
-                    "[ai] agent to be a string id (agent = \"claude-code\") or an array \
-                     command (agent = [\"mycli\", \"--acp\"])",
-                )
+                write!(f, "[ai] agent to be {AGENT_SHAPE_HINT}")
             }
 
             fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
@@ -239,8 +260,21 @@ impl<'de> Deserialize<'de> for WireAgentSpec {
                 A: serde::de::SeqAccess<'de>,
             {
                 let mut words = Vec::new();
-                while let Some(word) = seq.next_element::<String>()? {
-                    words.push(word);
+                loop {
+                    // a per-element type mismatch (`agent = [1, 2]`) is
+                    // useful on its own -- it names the offending element --
+                    // but on its own it never says what `agent` as a whole
+                    // is allowed to be; the wrap appends that without
+                    // discarding the element-level detail
+                    match seq.next_element::<String>() {
+                        Ok(Some(word)) => words.push(word),
+                        Ok(None) => break,
+                        Err(e) => {
+                            return Err(serde::de::Error::custom(format!(
+                                "{e} ([ai] agent must be {AGENT_SHAPE_HINT})"
+                            )));
+                        }
+                    }
                 }
                 Ok(WireAgentSpec::Command(words))
             }
@@ -283,9 +317,17 @@ pub enum AiConfigError {
     #[error(transparent)]
     Toml(#[from] Box<toml::de::Error>),
     /// `agent` parsed to a legal shape but named nothing runnable: an empty
-    /// or whitespace-only id, or a command array with no program.
-    #[error("[ai] agent is empty: {detail}")]
+    /// or whitespace-only id, or a command array with no program (empty, or
+    /// whose first element is empty or whitespace-only).
+    #[error(
+        "[ai] agent is empty: {detail}{}",
+        path.as_ref()
+            .map_or_else(String::new, |p| format!(" (in {})", p.display()))
+    )]
     EmptyAgent {
+        /// The file this value was read from, when there was one; `None`
+        /// for TOML given directly as a string.
+        path: Option<PathBuf>,
         /// What was empty, and what a legal value looks like instead.
         detail: &'static str,
     },
@@ -397,6 +439,68 @@ agent = "claude-code"
             matches!(err, AiConfigError::EmptyAgent { .. }),
             "expected an empty-agent error, got: {err}"
         );
+    }
+
+    #[test]
+    fn a_command_with_a_blank_program_name_is_refused() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = [\"\"]\n")
+            .expect_err("an empty program name names nothing runnable");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+        let err = AiConfig::from_toml_str("[ai]\nagent = [\"   \", \"--acp\"]\n")
+            .expect_err("a whitespace-only program name is equally unrunnable");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_blank_later_argument_is_left_to_the_program_to_reject() {
+        // deliberate: only the program name (element zero) is this
+        // loader's concern -- a blank later argument is still a runnable
+        // command line, and accepting or rejecting it is `mycli`'s call
+        let cfg = AiConfig::from_toml_str("[ai]\nagent = [\"mycli\", \"\"]\n")
+            .expect("a blank later argument must not be refused here");
+        assert_eq!(
+            cfg.agent_spec(),
+            &AgentSpec::Command(vec!["mycli".into(), String::new()])
+        );
+    }
+
+    #[test]
+    fn a_malformed_agent_array_element_names_the_two_legal_shapes() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = [1, 2]\n")
+            .expect_err("an integer is not a legal command word");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string id") && msg.contains("array"),
+            "the error must name both legal shapes, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn a_file_backed_empty_agent_names_its_path() {
+        let dir =
+            std::env::temp_dir().join(format!("view-ai-empty-agent-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir must be creatable");
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nagent = \"\"\n").expect("temp file must be writable");
+
+        let err = AiConfig::load(Some(&path)).expect_err("an empty agent id must be refused");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "a file-backed error must name the file it came from, got: {msg}"
+        );
+
+        std::fs::remove_dir_all(&dir).expect("temp dir must be removable");
     }
 
     #[test]
