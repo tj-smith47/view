@@ -574,6 +574,47 @@ impl PaletteView {
     }
 }
 
+/// The agent panel's frame: its composer line and the transcript rows
+/// beneath it. Carries no selection index -- a transcript scrolls, it does
+/// not offer a row to act on the way a picker's or a palette's rows do.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct AiPanelView {
+    /// The overlay's title, drawn into its top border.
+    pub title: String,
+    /// The composer line's text as typed so far.
+    pub input: String,
+    /// The transcript, oldest first, each entry already formatted as one
+    /// row of spans.
+    pub rows: Vec<Vec<Span>>,
+}
+
+impl AiPanelView {
+    /// An empty panel titled `title`: no transcript yet, nothing typed.
+    #[must_use]
+    pub fn new(title: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            ..Self::default()
+        }
+    }
+
+    /// The same panel with `input` on its composer line.
+    #[must_use]
+    pub fn with_input(self, input: impl Into<String>) -> Self {
+        Self {
+            input: input.into(),
+            ..self
+        }
+    }
+
+    /// The same panel showing `rows` as its transcript.
+    #[must_use]
+    pub fn with_rows(self, rows: Vec<Vec<Span>>) -> Self {
+        Self { rows, ..self }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

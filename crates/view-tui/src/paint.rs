@@ -526,7 +526,8 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
             | LayerKind::Tree(_)
             | LayerKind::Statusline(_)
             | LayerKind::Prompt(_)
-            | LayerKind::Palette(_) => {
+            | LayerKind::Palette(_)
+            | LayerKind::Ai(_) => {
                 paint_native_overlay(layer, &theme, model.caps.truecolor, area, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to

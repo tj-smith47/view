@@ -4,6 +4,7 @@
 //! drive a feature read the same table for its name and its off switch.
 
 pub mod ai_event;
+pub mod ai_panel;
 pub mod geometry;
 pub mod mappings;
 pub mod palette;

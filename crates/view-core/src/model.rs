@@ -223,16 +223,27 @@ impl Model {
 
     /// Whether an overlay of this kind takes the keyboard while it is open.
     ///
-    /// Every kind does except [`OverlayKind::EngineBusy`], which is raised
-    /// by view noticing something rather than by the user asking for it,
-    /// and which is on screen precisely when the engine may be slow to
-    /// answer. A user who keeps typing at a long operation has always had
-    /// those keystrokes queued and applied on catch-up, so an annunciator
-    /// that consumed them would turn a slow operation into lost work. It
-    /// answers its own choice keys, and every other key routes as though it
-    /// were not there.
+    /// Every kind does except [`OverlayKind::EngineBusy`] and
+    /// [`OverlayKind::Ai`].
+    ///
+    /// `EngineBusy` is raised by view noticing something rather than by the
+    /// user asking for it, and is on screen precisely when the engine may
+    /// be slow to answer. A user who keeps typing at a long operation has
+    /// always had those keystrokes queued and applied on catch-up, so an
+    /// annunciator that consumed them would turn a slow operation into lost
+    /// work. It answers its own choice keys, and every other key routes as
+    /// though it were not there.
+    ///
+    /// `Ai` is non-modal by design (see the variant's own doc): the panel
+    /// sits open beside the buffer the user keeps editing, so its presence
+    /// must not redirect the engine's own keystrokes. Nothing today gives
+    /// its composer line a way to claim a keystroke -- the panel opens with
+    /// no key path in front of `Focus::Native` at all -- so this is not
+    /// "opt out for now and revisit": a focused composer answers keys the
+    /// same ahead-of-`route_key` way [`crate::native::supervision`]'s busy
+    /// modal already does, never by taking the stack's focus slot.
     const fn takes_focus(kind: &OverlayKind) -> bool {
-        !matches!(kind, OverlayKind::EngineBusy(_))
+        !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai(_))
     }
 
     fn focused_overlay(&self) -> Option<&Overlay> {
@@ -352,6 +363,43 @@ impl Model {
             .overlays
             .iter()
             .position(|overlay| matches!(overlay.kind, OverlayKind::Tree(_)))
+        else {
+            return false;
+        };
+        let removed = self.overlays.remove(pos);
+        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
+            if removed.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        true
+    }
+
+    /// The open agent panel's state, wherever it sits in the stack -- not
+    /// only when it is topmost, for the same reason [`Model::tree_mut`]
+    /// looks past the top: the panel never takes focus (see
+    /// [`Model::takes_focus`]), so a prompt opening over it is the ordinary
+    /// case, not the exception, and a streamed transcript chunk must still
+    /// reach the panel while that prompt holds focus.
+    #[must_use]
+    pub fn ai_panel_mut(&mut self) -> Option<&mut crate::native::ai_panel::AiPanelState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::Ai(a) => Some(a),
+                _ => None,
+            })
+    }
+
+    /// Closes the agent panel overlay, wherever it sits in the stack, and
+    /// reports whether one was found to close. See [`Model::close_tree`]'s
+    /// doc for why this searches by kind rather than closing only the
+    /// topmost overlay.
+    pub fn close_ai_panel(&mut self) -> bool {
+        let Some(pos) = self
+            .overlays
+            .iter()
+            .position(|overlay| matches!(overlay.kind, OverlayKind::Ai(_)))
         else {
             return false;
         };
@@ -1305,6 +1353,17 @@ pub enum OverlayKind {
     /// prompt either, so the recovery offer outranks it. See
     /// [`crate::native::supervision::EngineBusyState`].
     EngineBusy(crate::native::supervision::EngineBusyState),
+    /// The agent panel, anchored flush right and full height -- the mirror
+    /// of [`OverlayKind::Tree`]'s left-anchored sidebar, sitting beside an
+    /// active buffer rather than centered over it. Pushed like a picker or
+    /// tree, with the identical beneath-a-blocked-prompt fallback. Unlike
+    /// every other overlay here it does not take focus (see
+    /// [`Model::takes_focus`]): a running agent session and the engine the
+    /// user is editing in are two peers the user works with at once, not a
+    /// question blocking one or the other, so an engine keystroke while the
+    /// panel is open still reaches the engine. See
+    /// [`crate::native::ai_panel::AiPanelState`].
+    Ai(crate::native::ai_panel::AiPanelState),
 }
 
 /// Opaque identifier for an open native overlay, handed out by

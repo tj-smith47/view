@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use view_core::grid::Grid;
 use view_core::model::Tier;
 use view_core::native::views::{
-    PaletteRow, PaletteView, PickerView, PromptView, StatuslineView, TreeRow, TreeView,
+    AiPanelView, PaletteRow, PaletteView, PickerView, PromptView, StatuslineView, TreeRow, TreeView,
 };
 use view_surface::{Layer, LayerKind, Rect, Surface};
 
@@ -141,6 +141,12 @@ fn palette() -> LayerKind {
     )
 }
 
+/// Empty: no session has ever streamed a chunk into this build's transcript,
+/// since a real transcript row needs a live agent to produce one.
+fn ai_panel() -> LayerKind {
+    LayerKind::Ai(AiPanelView::new("AI Agent"))
+}
+
 /// A picker is the widest and tallest of the five, so it is the one whose
 /// scroll window and title inset a dump has room to show.
 #[test]
@@ -256,4 +262,22 @@ fn standard_palette() {
 #[test]
 fn basic_palette() {
     assert_golden("basic-palette", &dump(Tier::Basic, 38, 8, palette()));
+}
+
+#[test]
+fn full_ai_panel() {
+    assert_golden("full-ai-panel", &dump(Tier::Full, 30, 7, ai_panel()));
+}
+
+#[test]
+fn standard_ai_panel() {
+    assert_golden(
+        "standard-ai-panel",
+        &dump(Tier::Standard, 30, 7, ai_panel()),
+    );
+}
+
+#[test]
+fn basic_ai_panel() {
+    assert_golden("basic-ai-panel", &dump(Tier::Basic, 30, 7, ai_panel()));
 }

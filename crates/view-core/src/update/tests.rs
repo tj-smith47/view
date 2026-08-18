@@ -2228,20 +2228,28 @@ fn a_trusted_ai_invoke_never_opens_the_trust_prompt() {
         &mut m,
         Msg::FeatureInvoke {
             feature: "ai".to_string(),
-            verb: String::new(),
+            verb: "toggle".to_string(),
         },
     );
     assert!(
-        m.overlays().is_empty(),
+        m.overlays()
+            .iter()
+            .all(|o| !matches!(o.kind, OverlayKind::Prompt(_))),
         "a trusted project must never see the gate again this session: {:?}",
         m.overlays()
     );
-    // "ai" has no registered handler yet, so a trusted invoke falls to the
-    // same "must not go quiet" notice any other unrecognized invoke does
     assert!(
-        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
-        "a trusted ai invoke must fall through to the ordinary invoke \
-             handling rather than reopening the gate: {effects:?}"
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Ai(_))
+        ),
+        "a trusted ai invoke must reach the panel toggle rather than \
+             reopening the gate: {:?}",
+        m.overlays()
+    );
+    assert!(
+        effects.is_empty(),
+        "opening the agent panel issues no effect of its own: {effects:?}"
     );
 }
 
@@ -2505,24 +2513,33 @@ fn ai_trust_resolved_true_re_dispatches_the_interrupted_feature_invoke() {
         &mut m,
         Msg::AiTrustResolved {
             trusted: true,
-            verb: String::new(),
+            verb: "toggle".to_string(),
         },
     );
     assert!(m.ai_trusted);
     assert!(
-        m.overlays().is_empty(),
+        m.overlays()
+            .iter()
+            .all(|o| !matches!(o.kind, OverlayKind::Prompt(_))),
         "a successful resolution must not reopen the gate: {:?}",
         m.overlays()
     );
-    // "ai" has no registered handler yet, so the re-dispatched invoke falls
-    // to the same "must not go quiet" notice any other unrecognized invoke
-    // does -- see `a_trusted_ai_invoke_never_opens_the_trust_prompt`; the
-    // point proven here is that it falls through to *that*, not that it
-    // does nothing at all
+    // the re-dispatched invoke must reach the real panel toggle, not the
+    // "must not go quiet" notice a still-unregistered verb falls to (see
+    // `a_trusted_ai_invoke_never_opens_the_trust_prompt`) -- proving that is
+    // the whole point of this test, not merely that the gate stays shut
     assert!(
-        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Ai(_))
+        ),
         "answering Yes must complete the interrupted `ai` invoke in one flow, \
-             not close the prompt with nothing behind it: {effects:?}"
+             not close the prompt with nothing behind it: {:?}",
+        m.overlays()
+    );
+    assert!(
+        effects.is_empty(),
+        "opening the agent panel issues no effect of its own: {effects:?}"
     );
 }
 
@@ -2587,17 +2604,27 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
         &mut m,
         Msg::FeatureInvoke {
             feature: "ai".to_string(),
-            verb: String::new(),
+            verb: "toggle".to_string(),
         },
     );
     assert!(
-        m.overlays().is_empty(),
+        m.overlays()
+            .iter()
+            .all(|o| !matches!(o.kind, OverlayKind::Prompt(_))),
         "a second ai invoke in the same session must not reopen the gate: {:?}",
         m.overlays()
     );
     assert!(
-        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
-        "falls through to the ordinary unregistered-invoke notice: {effects:?}"
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Ai(_))
+        ),
+        "falls through to the real panel toggle: {:?}",
+        m.overlays()
+    );
+    assert!(
+        effects.is_empty(),
+        "opening the agent panel issues no effect of its own: {effects:?}"
     );
 }
 
@@ -3340,6 +3367,121 @@ fn tree_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_steali
         m.tree_mut().is_some(),
         "the tree must still be reachable so a streamed scan reply can \
              reach it even while the prompt holds focus"
+    );
+}
+
+#[test]
+fn ai_panel_toggle_pushes_then_pops_the_overlay() {
+    use crate::native::geometry::Anchor;
+    let mut m = model();
+    m.ai_trusted = true;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "opening the agent panel issues no effect of its own: {effects:?}"
+    );
+    assert!(m.dirty, "opening the panel must trigger a repaint");
+    let opened = m.overlays().last().expect("the panel must be on the stack");
+    assert!(
+        matches!(opened.kind, OverlayKind::Ai(_)),
+        "toggling against no open overlay must push OverlayKind::Ai: {:?}",
+        m.overlays()
+    );
+    assert_eq!(
+        opened.geometry.anchor,
+        Anchor::Right,
+        "the panel is anchored right, the mirror of the tree's anchored-left sidebar"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Engine,
+        "the panel is non-modal: an open panel with nothing else on the \
+             stack must leave engine keystrokes reaching the engine"
+    );
+
+    m.dirty = false;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "closing the agent panel issues no effect of its own: {effects:?}"
+    );
+    assert!(m.dirty, "closing the panel must trigger a repaint");
+    assert!(
+        m.overlays().is_empty(),
+        "toggling against an open panel must pop it: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_stealing_focus() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "test".into())],
+            replace_last: false,
+        }]),
+    );
+    let prompt_id = match m.focus() {
+        Focus::Native(id) => id,
+        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+    };
+    assert!(matches!(
+        m.overlays().last().map(|o| &o.kind),
+        Some(OverlayKind::Prompt(_))
+    ));
+
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "opening beneath the prompt issues no effect of its own: {effects:?}"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(prompt_id),
+        "an agent panel opening while a blocked prompt is topmost must not \
+             steal its focus"
+    );
+    assert_eq!(
+        m.overlays().len(),
+        2,
+        "the panel must open beneath the prompt, not replace it"
+    );
+    assert!(
+        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        "the panel must sit beneath the prompt on the stack: {:?}",
+        m.overlays()
+    );
+    assert!(
+        matches!(m.overlays()[1].kind, OverlayKind::Prompt(_)),
+        "the prompt must remain topmost: {:?}",
+        m.overlays()
+    );
+    assert!(
+        m.ai_panel_mut().is_some(),
+        "the panel must still be reachable so a streamed transcript chunk \
+             can reach it even while the prompt holds focus"
     );
 }
 

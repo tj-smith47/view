@@ -20,8 +20,8 @@
 use unicode_width::UnicodeWidthChar;
 use view_core::model::Tier;
 use view_core::native::views::{
-    GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, StyleRole,
-    TreeRow, TreeView,
+    AiPanelView, GitMark, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView,
+    StyleRole, TreeRow, TreeView,
 };
 
 use crate::LayerKind;
@@ -478,6 +478,7 @@ fn body(kind: &LayerKind) -> Option<Body> {
         LayerKind::Statusline(view) => Some(statusline_body(view)),
         LayerKind::Prompt(view) => Some(prompt_body(view)),
         LayerKind::Palette(view) => Some(palette_body(view)),
+        LayerKind::Ai(view) => Some(ai_body(view)),
         LayerKind::EngineGrid
         | LayerKind::Cmdline(_)
         | LayerKind::Messages(_)
@@ -590,6 +591,18 @@ fn palette_body(view: &PaletteView) -> Body {
         ],
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
+    }
+}
+
+fn ai_body(view: &AiPanelView) -> Body {
+    Body {
+        title: view.title.clone(),
+        header: vec![
+            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.input))),
+            Line::Rule,
+        ],
+        items: view.rows.iter().cloned().map(Line::Text).collect(),
+        selected: None,
     }
 }
 

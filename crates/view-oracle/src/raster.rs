@@ -213,7 +213,8 @@ fn paint_layer<'a>(canvas: &mut Canvas<'a>, layer: &Layer, grid: &'a Grid, offse
         | LayerKind::Tree(_)
         | LayerKind::Statusline(_)
         | LayerKind::Prompt(_)
-        | LayerKind::Palette(_) => paint_native_overlay(canvas, layer),
+        | LayerKind::Palette(_)
+        | LayerKind::Ai(_) => paint_native_overlay(canvas, layer),
         // LayerKind is #[non_exhaustive]: a future variant paints nothing
         // here until this raster gains explicit support for it, rather
         // than failing to compile against it

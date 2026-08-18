@@ -205,6 +205,9 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "ai" && !model.ai_trusted {
                 return open_ai_trust_prompt(model, verb);
             }
+            if feature == "ai" && verb == "toggle" {
+                return toggle_ai_panel(model);
+            }
             if feature == "picker" {
                 if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {
                     return open_picker(model, source);
@@ -1132,6 +1135,31 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
         });
     }
     effects
+}
+
+/// Opens or closes the agent panel, anchored flush right like the tree
+/// sidebar is flush left (see [`OverlayKind::Ai`]'s doc). No effect on
+/// either edge yet: opening allocates no session and closing has no live
+/// one to tear down, since nothing in this build binds `session_id` to a
+/// real agent process.
+fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
+    if model.close_ai_panel() {
+        model.dirty = true;
+        return Vec::new();
+    }
+    let state = crate::native::ai_panel::AiPanelState::new();
+    let prompt_is_topmost = matches!(
+        model.overlays().last().map(|overlay| &overlay.kind),
+        Some(OverlayKind::Prompt(_))
+    );
+    let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Right);
+    if prompt_is_topmost {
+        model.insert_overlay_beneath_top(geometry, OverlayKind::Ai(state));
+    } else {
+        model.push_overlay(geometry, OverlayKind::Ai(state));
+    }
+    model.dirty = true;
+    Vec::new()
 }
 
 /// Opens the message-history overlay over a snapshot of `ToastHistory`,

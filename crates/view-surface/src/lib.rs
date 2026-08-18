@@ -19,7 +19,7 @@ use view_core::native::geometry::OverlayBox;
 use view_core::native::palette::PaletteState;
 use view_core::native::speculate::PredictedCell;
 use view_core::native::views::{
-    PaletteView, PickerView, PromptView, Span, StatuslineView, TreeView,
+    AiPanelView, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeView,
 };
 
 use crate::overlay::BorderSet;
@@ -160,6 +160,8 @@ pub enum LayerKind {
     /// column and leaves it there until an authoritative redraw touches that
     /// exact cell.
     Speculated(Vec<PredictedCell>),
+    /// The agent panel's composer line and transcript rows.
+    Ai(AiPanelView),
 }
 
 /// The exact indicator text a [`LayerKind::Shell`] layer puts on screen.
@@ -215,7 +217,8 @@ impl LayerKind {
             | Self::Tree(_)
             | Self::Statusline(_)
             | Self::Prompt(_)
-            | Self::Palette(_) => true,
+            | Self::Palette(_)
+            | Self::Ai(_) => true,
             Self::EngineGrid
             | Self::Cmdline(_)
             | Self::Messages(_)
@@ -769,6 +772,7 @@ fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not
         OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
+        OverlayKind::Ai(state) => Some(LayerKind::Ai(state.view())),
         _ => None,
     }
 }
