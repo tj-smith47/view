@@ -17,10 +17,21 @@ workspace = true
 test-support = []
 
 [dependencies]
+# Two roles: the ACP JSON-RPC wire types (crates/view-ai/src/acp/wire.rs)
+# and the [ai] table's own wire types (crates/view-ai/src/config.rs).
+# Confined to this crate and view-native by scripts/audit-deps.sh, on the
+# same terms view-native's own [native]/[supervision] parser has: every
+# other lib crate stays free of it, so a config or wire concern can never
+# leak into the pure layers.
 serde = { version = "1", features = ["derive"] }
+# The ACP wire's own JSON-RPC payloads (crates/view-ai/src/acp/wire.rs),
+# never the [ai] table -- config.rs speaks TOML only. Confined the same way
+# `serde` above is.
 serde_json = "1"
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "macros"] }
+# The [ai] table's own parser (crates/view-ai/src/config.rs), this crate's
+# first use of it. Confined the same way `serde` above is.
 toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
 

@@ -473,6 +473,14 @@ mod tests {
             matches!(err, NativeConfigError::Toml(_)),
             "expected a TOML type error, got: {err:?}"
         );
+        // `matches!` alone cannot tell this error from any other TOML
+        // error, which is exactly how this test's predecessor passed for
+        // the wrong reason: pin the message so a future reordering that
+        // changes which table the trailing key lands in cannot go unnoticed
+        assert!(
+            err.to_string().contains("expected a boolean"),
+            "the refusal must be the nested-table type error, got: {err}"
+        );
     }
 
     #[test]
@@ -516,10 +524,10 @@ mod tests {
     }
 
     #[test]
-    fn ais_array_agent_form_does_not_trip_a_native_side_toml_error() {
+    fn an_array_agent_form_in_ai_is_ignored_by_native() {
         // `[ai]`'s `agent` key takes either a string or an array of
         // strings (view-ai's `AgentSpec`); `ViewFile` never grows a field
-        // for `[ai]` at all (Q3), so the array shape must be exactly as
+        // for `[ai]` at all, so the array shape must be exactly as
         // invisible to this loader as the string shape already is
         let cfg = NativeConfig::from_toml_str(
             "[native]\npicker = false\n\n[ai]\nenabled = true\nagent = [\"mycli\", \"--acp\"]\n",

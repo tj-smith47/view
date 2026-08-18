@@ -1,14 +1,15 @@
 //! The `[ai]` table of `view.toml`: whether the agent panel and ACP client
 //! are turned on, and which agent this build speaks to.
 //!
-//! `view-native`'s own `ViewFile` never grows a field for this table (spec
-//! decision log, Q3) -- this crate owns its own config so the dependency
-//! direction stays core <- surface <- {native, ai} instead of ai reaching
-//! back through native to be read. An absent or empty `[ai]` table is the
-//! full experience, matching `[native]`'s own config-absent convention:
-//! `AiConfig::default()` is agent-on with the one adapter this build knows
-//! how to provision on its own.
+//! `view-native`'s own `ViewFile` never grows a field for this table -- this
+//! crate owns its own config so the dependency direction stays core <-
+//! surface <- {native, ai} instead of `[ai]` reaching back through native to
+//! be read. An absent or empty `[ai]` table is the full experience, matching
+//! `[native]`'s own config-absent convention: `AiConfig::default()` is
+//! agent-on with the one adapter this build knows how to provision on its
+//! own.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -16,12 +17,10 @@ use serde::Deserialize;
 /// Which agent an `[ai]` table names: a known adapter by id, or an
 /// arbitrary command line for one this build has no adapter for.
 ///
-/// `#[serde(untagged)]` on the wire form is what makes both TOML shapes
-/// (`agent = "claude-code"` and `agent = ["mycli", "--acp"]`) resolve
-/// without a second key telling `serde` which one it is looking at: a
-/// string can only ever be `Id`, an array only ever `Command`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(untagged)]
+/// No `serde` derive here: the wire shape lives in [`WireAgentSpec`] so this
+/// resolved, public type never carries a deserialization contract as part
+/// of its API.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentSpec {
     /// A known adapter id, resolved to a provisioned binary elsewhere.
     Id(String),
@@ -57,8 +56,10 @@ impl AiConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`AiConfigError`] on invalid TOML, or an `[ai]` value that
-    /// does not match its expected shape.
+    /// Returns [`AiConfigError`] on invalid TOML, an `[ai]` value that does
+    /// not match its expected shape, or an `agent` that names nothing
+    /// runnable (an empty or whitespace-only id, or a command with no
+    /// program).
     pub fn from_toml_str(s: &str) -> Result<Self, AiConfigError> {
         // boxed for the same reason `NativeConfigError::Toml` is:
         // `toml::de::Error` is 128+ bytes on the msvc ABI, which makes an
@@ -66,7 +67,7 @@ impl AiConfig {
         let file: ConfigFile = toml::from_str(s).map_err(|e| AiConfigError::Toml(Box::new(e)))?;
         Ok(Self {
             enabled: file.ai.enabled,
-            agent: file.ai.agent,
+            agent: resolve_agent(file.ai.agent)?,
         })
     }
 
@@ -124,6 +125,26 @@ impl Default for AiConfig {
     }
 }
 
+/// Turns a parsed [`WireAgentSpec`] into the public [`AgentSpec`], refusing
+/// one that names nothing runnable.
+///
+/// A `Command([])` has no program to run and an `Id("")` (or a
+/// whitespace-only id) names no adapter; both would otherwise surface only
+/// as a spawn failure downstream, with no line in `view.toml` to blame.
+/// Refusing here, at parse time, keeps the diagnostic where the mistake is.
+fn resolve_agent(wire: WireAgentSpec) -> Result<AgentSpec, AiConfigError> {
+    match wire {
+        WireAgentSpec::Id(id) if id.trim().is_empty() => Err(AiConfigError::EmptyAgent {
+            detail: "agent id must not be empty or whitespace-only",
+        }),
+        WireAgentSpec::Id(id) => Ok(AgentSpec::Id(id)),
+        WireAgentSpec::Command(words) if words.is_empty() => Err(AiConfigError::EmptyAgent {
+            detail: "agent command must name a program, e.g. agent = [\"mycli\", \"--acp\"]",
+        }),
+        WireAgentSpec::Command(words) => Ok(AgentSpec::Command(words)),
+    }
+}
+
 /// The shape of `view.toml` this loader reads: one table, `[ai]`, with
 /// every other top-level table ignored the same way `view-native`'s own
 /// `ViewFile` ignores `[ai]`.
@@ -143,7 +164,7 @@ struct WireAiTable {
     #[serde(default = "wire_enabled_default")]
     enabled: bool,
     #[serde(default = "wire_agent_default")]
-    agent: AgentSpec,
+    agent: WireAgentSpec,
 }
 
 impl Default for WireAiTable {
@@ -161,8 +182,72 @@ fn wire_enabled_default() -> bool {
 }
 
 /// `serde`'s `default` for [`WireAiTable::agent`].
-fn wire_agent_default() -> AgentSpec {
-    AgentSpec::Id("claude-code".to_string())
+fn wire_agent_default() -> WireAgentSpec {
+    WireAgentSpec::Id("claude-code".to_string())
+}
+
+/// The wire form of `agent`. Kept private and separate from the public
+/// [`AgentSpec`] it resolves to (via [`resolve_agent`]) so `serde` is an
+/// implementation detail of this module, never part of `AgentSpec`'s own
+/// API -- and so this type, not `AgentSpec`, is the one place a
+/// deserialization contract has to be honored.
+///
+/// `Deserialize` is hand-written rather than derived with
+/// `#[serde(untagged)]`: an untagged enum's own error on a bad value names
+/// the enum type and the words "untagged enum", neither of which a
+/// `view.toml` author has ever seen. The [`Visitor`](serde::de::Visitor)
+/// below answers in the two shapes the table actually accepts instead.
+#[derive(Debug)]
+enum WireAgentSpec {
+    Id(String),
+    Command(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for WireAgentSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct AgentVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for AgentVisitor {
+            type Value = WireAgentSpec;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(
+                    "[ai] agent to be a string id (agent = \"claude-code\") or an array \
+                     command (agent = [\"mycli\", \"--acp\"])",
+                )
+            }
+
+            fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireAgentSpec::Id(v.to_string()))
+            }
+
+            fn visit_string<E>(self, v: String) -> Result<Self::Value, E>
+            where
+                E: serde::de::Error,
+            {
+                Ok(WireAgentSpec::Id(v))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                let mut words = Vec::new();
+                while let Some(word) = seq.next_element::<String>()? {
+                    words.push(word);
+                }
+                Ok(WireAgentSpec::Command(words))
+            }
+        }
+
+        deserializer.deserialize_any(AgentVisitor)
+    }
 }
 
 /// Every `Result` in this module carries `AiConfigError` by value, so a
@@ -197,6 +282,13 @@ pub enum AiConfigError {
     /// behind it.
     #[error(transparent)]
     Toml(#[from] Box<toml::de::Error>),
+    /// `agent` parsed to a legal shape but named nothing runnable: an empty
+    /// or whitespace-only id, or a command array with no program.
+    #[error("[ai] agent is empty: {detail}")]
+    EmptyAgent {
+        /// What was empty, and what a legal value looks like instead.
+        detail: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -233,6 +325,10 @@ agent = "claude-code"
     fn an_absent_ai_table_resolves_the_derived_default() {
         let cfg = AiConfig::from_toml_str("").expect("an empty document must parse");
         assert_eq!(cfg, AiConfig::default());
+        // the inherent `default` and the `Default` trait impl must agree --
+        // see the rationale on `impl Default for AiConfig` for why this is
+        // not automatic
+        assert_eq!(cfg, <AiConfig as Default>::default());
     }
 
     #[test]
@@ -259,8 +355,62 @@ agent = "claude-code"
     }
 
     #[test]
+    fn a_malformed_agent_value_names_the_two_legal_shapes() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = 3\n")
+            .expect_err("a bare number is neither legal agent shape");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("string id") && msg.contains("array"),
+            "the error must name both legal shapes, got: {msg}"
+        );
+        assert!(
+            !msg.contains("untagged") && !msg.contains("AgentSpec"),
+            "the error must never surface serde's own type names, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn an_empty_agent_command_is_refused() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = []\n")
+            .expect_err("a command with no program cannot run");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn an_empty_agent_id_is_refused() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = \"\"\n")
+            .expect_err("an empty id names no adapter");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn a_whitespace_only_agent_id_is_refused() {
+        let err = AiConfig::from_toml_str("[ai]\nagent = \"   \"\n")
+            .expect_err("a whitespace-only id names no adapter");
+        assert!(
+            matches!(err, AiConfigError::EmptyAgent { .. }),
+            "expected an empty-agent error, got: {err}"
+        );
+    }
+
+    #[test]
     fn the_example_ai_block_round_trips() {
         const EXAMPLE_TOML: &str = include_str!("../../../view.toml.example");
+        // the parse-to-defaults assertion below is satisfied by an absent
+        // `[ai]` table too, so it alone cannot prove the block is live --
+        // this pins presence first
+        let doc: toml::Value =
+            toml::from_str(EXAMPLE_TOML).expect("the shipped example must be valid TOML");
+        assert!(
+            doc.get("ai").is_some(),
+            "the shipped example must carry a live [ai] table, not just a commented-out stub"
+        );
         let cfg = AiConfig::from_toml_str(EXAMPLE_TOML)
             .expect("view.toml.example's [ai] block must parse");
         assert_eq!(cfg, AiConfig::default());

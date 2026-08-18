@@ -164,6 +164,54 @@ recorded in the config validation layer or its tests.
 
 ---
 
+## C4. Agent change gallery (code-front-and-center live view)
+
+**Start gate:** P5 AI shipped and dogfooded — this is an alternate
+*presentation* of the same agent activity P5 builds, recorded here so the
+vision survives until the shipped experience can be judged against it
+(user-directed 2026-08-18: "I want to see what you come up with, I just
+want this written down"). It is not a replacement decision; at the gate it
+is evaluated against the as-dogfooded P5 panel + diff-overlay experience
+and the Hyprland/omarchy work, in the spec `#15` fresh-eyes pattern.
+
+**Charter:** invert the P5 layout's emphasis. The panel-first experience
+puts conversation and status forward with diffs summoned on demand; the
+gallery vision puts the *code changes* front and center — the user watches
+the code happen in real time as the agent works:
+
+- A gallery floating pane taking roughly 2/3 of the screen, each agent
+  change (a buffer edit, a diff hunk, a file touch) a card in a
+  horizontal strip that cycles as changes land.
+- Smart autoscroll follows the newest change while the agent streams;
+  the user can disable it and cycle back through the timeline of changes
+  manually, then rejoin the live head.
+
+```
++----------------------------------------------------------------+
+|  . . . [ src/driver.rs  hunk 3/4 ] [ src/wire.rs  hunk 1/1 ] > |
+|        |  fn on_response(..) {    | |  const AUTH_REQUIRED..  | |
+|        |  -    return None;      | |  +    pub const ..      | |
+|        |  +    self.begin(..);   | |                         | |
+|        +-------------------------+ +-------------------------+ |
+|  auto-follow: ON            timeline: change 7 of 9  (live)    |
++----------------------------------------------------------------+
+```
+
+Constraints carried from the spec regardless of mechanism: nvim owns the
+buffer text (the cards render from the same change stream the `#9` diff
+overlay consumes, never a private copy); paint never awaits RPC; the
+gallery is a view-native/view-ai surface behind the same config toggles as
+the `#9` overlays. The timeline-of-changes half overlaps the session-DVR
+plan's replay spine — the gate-time assessment states whether the DVR's
+timeline is the natural host or the gallery carries its own.
+
+**Exit gates (if pursued at the gate):** budget from spec `#3.1` for the
+surface class; autoscroll-follow keeps the input-latency budgets under a
+streaming agent; a recorded side-by-side judgment (gallery vs. panel-first)
+from real dogfooding, ruled on by the user.
+
+---
+
 ## Sequencing
 
 | Charter | After | Why there |
@@ -171,3 +219,4 @@ recorded in the config validation layer or its tests.
 | C1 reattach | P5.5 remote Part B | extends the transport it needs; highest retention value for remote users |
 | C3 theme interop | any time post-P4 exercise | verification-mostly; cheap, independent |
 | C2 fleet attention | P5 AI + feasibility gate | the session model decides the mechanism; earlier planning would invent it |
+| C4 change gallery | P5 AI dogfooded | judged against the lived panel experience, not the imagined one |

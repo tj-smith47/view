@@ -35,12 +35,12 @@ auto_restart = true        # false: surface a dead engine and wait for the modal
 # arbitrary command line runs that instead, unprovisioned.
 
 [ai]
-enabled = true              # default: true -- opt-out, matching [native]'s
-                             # default-on philosophy
-agent = "claude-code"       # default: "claude-code" -- the one adapter this
-                             # build knows how to auto-provision.
-                             # Override with another known adapter id, or an
-                             # arbitrary command: agent = ["mycli", "--acp"]
+enabled = true             # default: true -- opt-out, matching [native]'s
+                           # default-on philosophy
+agent = "claude-code"      # default: "claude-code" -- the one adapter this
+                           # build knows how to auto-provision.
+                           # Override with another known adapter id, or an
+                           # arbitrary command: agent = ["mycli", "--acp"]
 
 # The tables below are commented out because THIS BUILD DOES NOT READ THEM
 # yet. Uncommenting one is harmless -- view ignores tables it has no loader
