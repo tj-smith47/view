@@ -289,6 +289,23 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// An adapter built entirely from `provision::ensure_adapter`'s own
+    /// result: `binary_path` is the downloaded, checksum-verified path it
+    /// returns, and `pinned_version` is read from the same compile-time row
+    /// `ensure_adapter` resolved against, so neither field is ever a
+    /// hand-typed literal that could drift from what was actually
+    /// provisioned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::ProvisionError`] under the same conditions
+    /// [`crate::ensure_adapter`] does.
+    pub fn provisioned() -> Result<Self, crate::ProvisionError> {
+        let binary_path = crate::ensure_adapter("claude-code")?;
+        let pinned_version = crate::pinned_version("claude-code").unwrap_or("unknown");
+        Ok(Self::new(pinned_version, binary_path))
+    }
+
     /// The version this adapter was constructed against, independent of
     /// [`AgentAdapter::id`], which names the agent kind rather than the
     /// pinned build.

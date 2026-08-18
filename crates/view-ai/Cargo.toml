@@ -33,6 +33,23 @@ tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "s
 # The [ai] table's own parser (crates/view-ai/src/config.rs), this crate's
 # first use of it. Confined the same way `serde` above is.
 toml = "0.8"
+# `provision.rs`'s checksummed adapter download. Blocking, rustls-backed,
+# default-features off: `ensure_adapter`'s signature is synchronous (no
+# caller of it should have to spin up a runtime just to fetch a binary),
+# and the alternative candidate, `reqwest`, pulls hyper/tower/tokio and a
+# second async runtime surface into a crate that already has its own for
+# a completely unrelated reason (the ACP transport) -- a second one for
+# one blocking GET would be redundant weight with no parallelism to spend
+# it on. Default features add gzip (via flate2) this crate never needs;
+# `rustls` alone keeps the dependency graph to one TLS stack.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# `provision.rs`'s checksum verification. RustCrypto's own SHA-2, the same
+# family every other Rust ecosystem checksum tool (cargo itself included)
+# verifies against; its own dependency footprint is three small crates
+# (`cfg-if`, `cpufeatures`, `digest`), which is why it wins over hand-
+# rolling SHA-256 in this crate instead of trusting an audited
+# implementation.
+sha2 = "0.10"
 view-core = { version = "0.0.1", path = "../view-core" }
 
 [dev-dependencies]

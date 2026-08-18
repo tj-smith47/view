@@ -57,6 +57,15 @@ done
 for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness; do
   check_absent "$crate" arboard
 done
+# ureq (the checksummed adapter download, crates/view-ai/src/provision.rs)
+# and sha2 (its checksum verification) are confined to view-ai the same way
+# arboard is confined to the bin above: nothing else in the workspace
+# fetches or verifies a downloaded binary, so neither dependency has any
+# business appearing anywhere else.
+for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness; do
+  check_absent "$crate" ureq
+  check_absent "$crate" sha2
+done
 # nucleo (the picker's matcher engine, spec §18), ignore (the Files
 # source's .gitignore-respecting walker), and grep-searcher/grep-regex (the
 # live-grep source's in-process search, ripgrep's own constituent crates)

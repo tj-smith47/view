@@ -279,7 +279,14 @@ fn store_path() -> Option<PathBuf> {
 /// empty identically: shells routinely export empty XDG vars, and an empty
 /// base would silently anchor every path built on it at the filesystem
 /// root.
-fn env_dir(var: &str) -> Option<PathBuf> {
+///
+/// `pub(crate)`, not private: `provision.rs`'s cache directory resolves the
+/// same XDG-style fallback chain this module's own `store_path` does, and
+/// both live in this one crate, so reusing this helper is the DRY choice --
+/// the mutual `view-ai`/`view-native` forbid this module's own doc explains
+/// is about crossing a crate boundary, which sharing a helper inside a
+/// single crate never does.
+pub(crate) fn env_dir(var: &str) -> Option<PathBuf> {
     match std::env::var(var) {
         Ok(v) if !v.is_empty() => Some(PathBuf::from(v)),
         _ => None,
