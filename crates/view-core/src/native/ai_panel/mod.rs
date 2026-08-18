@@ -1,9 +1,11 @@
 //! Pure state for the agent panel overlay: the transcript, the composer
 //! line, and whatever the agent is waiting on. No ACP or `view-ai` types
-//! reach this module -- transcript entries and permission prompts are
-//! copied down to plain strings and a closed role vocabulary at whatever
-//! boundary owns the real client, the same way `native::tree` never holds a
-//! `git2` type and `native::picker` never holds a ripgrep match struct.
+//! reach this module -- transcript entries are copied down to plain strings
+//! and a closed role vocabulary, and a permission prompt's options carry
+//! `view-core`'s own [`crate::native::ai_event::PermissionOption`] (already
+//! a closed, wire-free vocabulary), never a raw wire value, the same way
+//! `native::tree` never holds a `git2` type and `native::picker` never
+//! holds a ripgrep match struct.
 //!
 //! This module owns the shape, not the behaviour: streaming a transcript
 //! chunk, answering a permission request, and reviewing a diff all fold new
@@ -12,21 +14,11 @@
 
 use super::views::AiPanelView;
 
+mod permission;
 mod transcript;
 
+pub use permission::PermissionPrompt;
 pub use transcript::{Transcript, TranscriptEntry, TranscriptEntryKind, TranscriptRole};
-
-/// One outstanding permission request the agent is blocked on: the question
-/// text and the fixed answers it offers. Plain strings rather than a wire
-/// enum -- the module that speaks ACP is the one place that ever needs to
-/// know an option's real identity, and it stamps that identity onto
-/// whatever effect answering this prompt emits, not onto this struct.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PermissionPrompt {
-    pub prompt: String,
-    pub options: Vec<String>,
-}
 
 /// The session's context-window and cost accounting, folded from
 /// [`crate::native::ai_event::AiEvent::UsageUpdated`]. A panel stat, not a

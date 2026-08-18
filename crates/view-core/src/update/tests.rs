@@ -15,6 +15,10 @@ use crate::events::UiEvent;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, OverlayId, OverlayKind};
 use crate::msg::{ExitInfo, RegisterType, ReplyToken};
+use crate::native::ai_event::{
+    AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
+};
+use crate::native::ai_panel::PermissionPrompt;
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
@@ -2523,6 +2527,96 @@ fn esc_on_the_trust_prompt_declines_it_too() {
         "<Esc> must decline the same as an explicit No: {effects:?}"
     );
     assert!(m.overlays().is_empty());
+}
+
+fn permission_option(id: &str, kind: PermissionOptionKind) -> PermissionOption {
+    PermissionOption {
+        option_id: id.to_string(),
+        name: id.to_string(),
+        kind,
+    }
+}
+
+/// A model with one outstanding permission request: `OverlayKind::Ai`
+/// deliberately never takes focus (`Model::takes_focus`'s doc), so this
+/// model has no overlay pushed at all -- the point is that the intercept
+/// fires purely off `AiPanelState::pending_permission`, not off overlay
+/// focus.
+fn pending_permission_model() -> Model {
+    let mut m = model();
+    m.ai_panel_mut().pending_permission = Some(PermissionPrompt::new(
+        7,
+        "call_1",
+        vec![
+            permission_option("allow-once", PermissionOptionKind::AllowOnce),
+            permission_option("allow-always", PermissionOptionKind::AllowAlways),
+            permission_option("reject-once", PermissionOptionKind::RejectOnce),
+        ],
+    ));
+    m
+}
+
+#[test]
+fn y_on_a_pending_permission_answers_allow_once_and_clears_the_slot() {
+    let mut m = pending_permission_model();
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+    match effects.as_slice() {
+        [Effect::Ai(AiCommand::AnswerPermission {
+            request_id: 7,
+            outcome: PermissionOutcome::Selected { option_id },
+        })] => {
+            assert_eq!(option_id, "allow-once");
+        }
+        other => panic!("expected one AnswerPermission{{Selected: allow-once}}, got {other:?}"),
+    }
+    assert!(
+        m.ai_panel().pending_permission.is_none(),
+        "the slot must clear once the user has answered"
+    );
+}
+
+#[test]
+fn an_unmapped_key_is_swallowed_while_a_permission_is_pending() {
+    let mut m = pending_permission_model();
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "x".to_string(),
+        }),
+    );
+    assert!(
+        effects.is_empty(),
+        "an unmapped key must not forward to nvim: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the prompt stays open on an unmapped key"
+    );
+}
+
+/// The intercept must win over ordinary engine routing: with no overlay
+/// pushed, `Focus::Engine` is what `route_key` would otherwise pick (see
+/// `key_in_engine_focus_becomes_rpc_input_effect`), and this proves a
+/// pending permission overrides that before focus is ever consulted.
+#[test]
+fn ordinary_input_never_reaches_the_engine_while_a_permission_is_pending() {
+    let mut m = pending_permission_model();
+    assert_eq!(m.focus(), Focus::Engine);
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<C-x>".to_string(),
+        }),
+    );
+    assert!(
+        !matches!(effects.as_slice(), [Effect::Rpc(_)]),
+        "a pending permission must intercept ahead of engine routing: {effects:?}"
+    );
 }
 
 #[test]

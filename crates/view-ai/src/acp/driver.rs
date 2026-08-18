@@ -36,11 +36,12 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use view_core::native::ai_context::{DiagnosticEntry, DiagnosticSeverity, QuickfixEntry};
 use view_core::native::ai_event::{
-    AiCommand, AiEvent, ContextBlock, Cost, FsError, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, PlanEntry, PlanEntryPriority, PlanEntryStatus, StopReason, ToolCallStatus,
+    AiCommand, AiEvent, ContextBlock, Cost, FsError, PermissionOption, PlanEntry,
+    PlanEntryPriority, PlanEntryStatus, StopReason, ToolCallStatus,
 };
 
 use crate::acp::fs::PendingReply;
+use crate::acp::permission::{permission_option, permission_outcome};
 use crate::acp::session::{ChildSlot, SessionShared};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
@@ -976,34 +977,6 @@ fn cost_from_wire(raw: &Value) -> Option<Cost> {
     })
 }
 
-/// One offered permission option, or `None` when its kind is not one of the
-/// four the protocol defines: an option whose nature cannot be read is one
-/// the panel cannot present honestly, and guessing between allow and reject
-/// is the one mistake with a cost.
-fn permission_option(raw: &Value) -> Option<PermissionOption> {
-    let kind = match raw.get("kind").and_then(Value::as_str)? {
-        "allow_once" => PermissionOptionKind::AllowOnce,
-        "allow_always" => PermissionOptionKind::AllowAlways,
-        "reject_once" => PermissionOptionKind::RejectOnce,
-        "reject_always" => PermissionOptionKind::RejectAlways,
-        _ => return None,
-    };
-    Some(PermissionOption {
-        option_id: raw.get("optionId").and_then(Value::as_str)?.to_string(),
-        name: raw.get("name").and_then(Value::as_str)?.to_string(),
-        kind,
-    })
-}
-
-fn permission_outcome(outcome: &PermissionOutcome) -> Value {
-    match outcome {
-        PermissionOutcome::Cancelled => json!({ "outcome": "cancelled" }),
-        PermissionOutcome::Selected { option_id } => {
-            json!({ "outcome": "selected", "optionId": option_id })
-        }
-    }
-}
-
 /// One attached context block as a wire content block, or `None` when the
 /// vocabulary has grown a kind with no wire mapping here: an unmappable
 /// attachment is left out of the turn rather than sent as empty text the
@@ -1099,6 +1072,7 @@ mod tests {
     use view_core::native::ai_context::{
         CurrentBufferRead, CursorRead, EngineReadSnapshot, QuickfixEntry as QfEntry, SelectionRead,
     };
+    use view_core::native::ai_event::PermissionOutcome;
 
     use super::*;
 
@@ -1697,5 +1671,165 @@ mod tests {
             panic!("expected PlanUpdated")
         };
         assert_eq!(entries.len(), 2, "the undecodable entry must not vanish");
+    }
+
+    /// A ready driver: `begin()` through a successful `session/new`, with
+    /// both intervening frames drained from `out_rx` and the `SessionReady`
+    /// event drained from `events_rx`, so a permission test starts from a
+    /// clean slate with `session_id` set -- `on_command`'s `AnswerPermission`
+    /// arm defers to `self.deferred` rather than answering the wire when no
+    /// session exists yet (see that arm's own doc), which a real agent can
+    /// never trigger for this method since it has no session to issue
+    /// `session/request_permission` on before `session/new` succeeds.
+    fn driver_with_ready_session() -> (
+        Driver,
+        mpsc::UnboundedReceiver<JsonRpcMessage>,
+        std::sync::mpsc::Receiver<view_core::msg::Msg>,
+    ) {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.begin();
+        let initialize = out_rx.try_recv().expect("initialize was sent");
+        driver.on_response(
+            initialize.id.expect("initialize carries an id"),
+            Ok(json!({ "protocolVersion": PROTOCOL_VERSION, "authMethods": [] })),
+        );
+        let session_new = out_rx.try_recv().expect("session/new was sent");
+        driver.on_response(
+            session_new.id.expect("session/new carries an id"),
+            Ok(json!({ "sessionId": "s1" })),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::SessionReady { .. }) =
+            events_rx.recv().expect("SessionReady was emitted")
+        else {
+            panic!("expected SessionReady")
+        };
+
+        (driver, out_rx, events_rx)
+    }
+
+    fn permission_request_params() -> Value {
+        json!({
+            "sessionId": "s1",
+            "toolCall": { "toolCallId": "call_1" },
+            "options": [
+                { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" },
+            ],
+        })
+    }
+
+    /// The whole point of `session/request_permission`: this is a JSON-RPC
+    /// REQUEST that blocks the agent's own turn, so nothing may answer it
+    /// on the wire until the user's own answer arrives as
+    /// `AiCommand::AnswerPermission` -- an auto-reply here would let the
+    /// agent's tool call proceed on a decision the user never made.
+    #[test]
+    fn a_permission_request_holds_the_reply_open_until_answered() {
+        let (mut driver, mut out_rx, events_rx) = driver_with_ready_session();
+
+        driver.on_request(
+            RequestId::Str("perm-1".to_string()),
+            "session/request_permission",
+            &permission_request_params(),
+        );
+
+        assert!(
+            out_rx.try_recv().is_err(),
+            "no reply is sent before the user answers"
+        );
+
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
+            request_id,
+            tool_call_id,
+            options,
+        }) = events_rx.recv().expect("PermissionRequested was emitted")
+        else {
+            panic!("expected PermissionRequested")
+        };
+        assert_eq!(tool_call_id, "call_1");
+        assert_eq!(options.len(), 2);
+
+        driver.on_command(AiCommand::AnswerPermission {
+            request_id,
+            outcome: PermissionOutcome::Selected {
+                option_id: "allow-once".to_string(),
+            },
+        });
+
+        let frame = out_rx.try_recv().expect("the reply was written");
+        assert_eq!(frame.id, Some(RequestId::Str("perm-1".to_string())));
+        assert_eq!(
+            frame.result,
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }))
+        );
+    }
+
+    /// The driver's own correlation map (`open_permissions`) holds
+    /// arbitrarily many outstanding requests, each keyed by its own
+    /// `request_id` -- the single-outstanding-request policy is
+    /// `view-core`'s `AiPanelState::pending_permission` slot, not a
+    /// constraint this map enforces. Two requests answered out of order
+    /// still each reach the correct wire id: proves `request_id` keys
+    /// the map rather than the map assuming one slot.
+    #[test]
+    fn two_outstanding_requests_are_answered_independently_by_request_id() {
+        let (mut driver, mut out_rx, events_rx) = driver_with_ready_session();
+
+        driver.on_request(
+            RequestId::Str("perm-1".to_string()),
+            "session/request_permission",
+            &permission_request_params(),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
+            request_id: first, ..
+        }) = events_rx.recv().expect("first PermissionRequested")
+        else {
+            panic!("expected PermissionRequested")
+        };
+
+        driver.on_request(
+            RequestId::Str("perm-2".to_string()),
+            "session/request_permission",
+            &permission_request_params(),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
+            request_id: second, ..
+        }) = events_rx.recv().expect("second PermissionRequested")
+        else {
+            panic!("expected PermissionRequested")
+        };
+        assert_ne!(first, second, "each request gets its own boundary id");
+
+        // answered in reverse order, on purpose: proves the map is keyed by
+        // request_id rather than assuming FIFO or a single slot
+        driver.on_command(AiCommand::AnswerPermission {
+            request_id: second,
+            outcome: PermissionOutcome::Cancelled,
+        });
+        let second_frame = out_rx.try_recv().expect("the second reply was written");
+        assert_eq!(second_frame.id, Some(RequestId::Str("perm-2".to_string())));
+        assert_eq!(
+            second_frame.result,
+            Some(json!({ "outcome": { "outcome": "cancelled" } }))
+        );
+
+        driver.on_command(AiCommand::AnswerPermission {
+            request_id: first,
+            outcome: PermissionOutcome::Selected {
+                option_id: "allow-once".to_string(),
+            },
+        });
+        let first_frame = out_rx.try_recv().expect("the first reply was written");
+        assert_eq!(first_frame.id, Some(RequestId::Str("perm-1".to_string())));
+        assert_eq!(
+            first_frame.result,
+            Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }))
+        );
     }
 }

@@ -4,6 +4,7 @@ use crate::model::{Focus, Model, MouseCapture, OverlayKind};
 use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
+use crate::native::ai_event::{AiCommand, PermissionOutcome};
 use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
@@ -761,6 +762,31 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
         // later query for a different source, which closing here
         // may never produce
         return vec![Effect::PickerClose];
+    }
+    // A pending permission request blocks the issuing agent's own turn
+    // until answered, so every keystroke while one is outstanding is
+    // consumed right here, ahead of the ordinary focus routing below:
+    // `OverlayKind::Ai` deliberately never takes focus (see
+    // `Model::takes_focus`'s doc), so without this check `match
+    // model.focus()` would forward an answering keystroke straight to
+    // nvim as ordinary input, which does nothing toward unblocking the
+    // agent actually waiting on it. An unmapped key is swallowed rather
+    // than forwarded, the same way an unmatched key on a confirm-class
+    // `PromptState` leaves the prompt open instead of falling through.
+    if let Some(prompt) = model.ai_panel().pending_permission.clone() {
+        let mut chars = notation.chars();
+        let key = chars.next().filter(|_| chars.next().is_none());
+        let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() else {
+            return Vec::new();
+        };
+        model.ai_panel_mut().pending_permission = None;
+        model.dirty = true;
+        return vec![Effect::Ai(AiCommand::AnswerPermission {
+            request_id: prompt.request_id,
+            outcome: PermissionOutcome::Selected {
+                option_id: option.option_id,
+            },
+        })];
     }
     match model.focus() {
         Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],

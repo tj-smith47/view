@@ -8,5 +8,6 @@
 
 mod driver;
 pub(crate) mod fs;
+mod permission;
 pub(crate) mod session;
 pub(crate) mod wire;

@@ -2,17 +2,18 @@
 
 use crate::model::Model;
 use crate::msg::Effect;
-use crate::native::ai_event::AiEvent;
+use crate::native::ai_event::{AiCommand, AiEvent, PermissionOutcome};
+use crate::native::ai_panel::PermissionPrompt;
 
 /// Applies `event` to [`Model::ai_panel`].
 ///
 /// Matched without a wildcard on purpose, the same reason the caller's own
 /// `Msg::Ai` arm has none: a new `AiEvent` variant must recompile every
 /// consumer of it, not silently fall through here. Every variant not yet
-/// rendered (session lifecycle, permission requests, diff review) is its
-/// own explicit no-op arm rather than absorbed by `_`, so wiring each one
-/// later turns exactly one arm from a no-op into real behavior instead of
-/// hunting for where a wildcard swallowed it.
+/// rendered (session lifecycle, diff review) is its own explicit no-op arm
+/// rather than absorbed by `_`, so wiring each one later turns exactly one
+/// arm from a no-op into real behavior instead of hunting for where a
+/// wildcard swallowed it.
 ///
 /// Folds unconditionally: [`Model::ai_panel`] is session state, not overlay
 /// state (see that field's own doc), so a chunk streamed while the sidebar
@@ -20,6 +21,45 @@ use crate::native::ai_event::AiEvent;
 /// already there rather than dropped mid-stream.
 pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
     match event {
+        AiEvent::PermissionRequested {
+            request_id,
+            tool_call_id,
+            options,
+        } => {
+            // `AiPanelState::pending_permission`'s own doc states the
+            // invariant this branches on: ACP blocks the issuing agent's
+            // own turn on the reply, so a conformant agent never has two
+            // outstanding requests on one session at once, and a second
+            // arriving while the slot is still held is a protocol
+            // violation, not a capacity problem a queue would solve.
+            //
+            // The reply shape for that second request is a view-side
+            // policy choice, not one the wire spec dictates:
+            // `docs/acp-v1-wire-capture.md`'s "Permission-overlap reply
+            // legitimacy" section found the closest analogous case (a
+            // whole prompt-turn cancellation) described two different ways
+            // across the upstream ACP docs -- one page mandates a
+            // `RequestPermissionOutcome` `"cancelled"` result, the other's
+            // own worked example shows a raw JSON-RPC error instead -- and
+            // found no page that addresses this overlap case at all. A
+            // normal `Cancelled` outcome is legal under every reading of
+            // the schema (the schema's `RequestPermissionResponse` defines
+            // only the success shape, and `"cancelled"` is its own
+            // "not granted" spelling), so it is what answers the second
+            // request here, never a guessed-at raw error. The pending slot
+            // and its prompt are left exactly as they were: this is an
+            // answer to a different request, not an answer to the one the
+            // user is still looking at.
+            if model.ai_panel().pending_permission.is_some() {
+                return vec![Effect::Ai(AiCommand::AnswerPermission {
+                    request_id,
+                    outcome: PermissionOutcome::Cancelled,
+                })];
+            }
+            model.ai_panel_mut().pending_permission =
+                Some(PermissionPrompt::new(request_id, &tool_call_id, options));
+            model.dirty = true;
+        }
         AiEvent::MessageChunk {
             message_id,
             text,
@@ -55,7 +95,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         }
         AiEvent::SessionReady { .. }
         | AiEvent::ThoughtChunk { .. }
-        | AiEvent::PermissionRequested { .. }
         | AiEvent::DiffProposed { .. }
         | AiEvent::TurnEnded { .. }
         | AiEvent::SessionCrashed { .. }
@@ -67,7 +106,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
     use crate::model::OverlayKind;
@@ -155,6 +194,91 @@ mod tests {
         assert!(effects.is_empty());
         assert_eq!(model.ai_panel_mut().transcript.len(), 1);
         assert!(model.dirty);
+    }
+
+    fn allow_once(id: &str) -> crate::native::ai_event::PermissionOption {
+        crate::native::ai_event::PermissionOption {
+            option_id: id.to_string(),
+            name: "Allow once".to_string(),
+            kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+        }
+    }
+
+    #[test]
+    fn a_permission_request_becomes_the_pending_prompt_when_none_is_outstanding() {
+        let mut model = Model::new();
+        let effects = on_ai_event(
+            &mut model,
+            AiEvent::PermissionRequested {
+                request_id: 1,
+                tool_call_id: "call_1".to_string(),
+                options: vec![allow_once("allow-once")],
+            },
+        );
+        assert!(effects.is_empty());
+        assert!(model.dirty);
+        let prompt = model
+            .ai_panel()
+            .pending_permission
+            .as_ref()
+            .expect("pending_permission is Some");
+        assert_eq!(prompt.request_id, 1);
+        assert_eq!(prompt.options, vec![allow_once("allow-once")]);
+    }
+
+    /// The single-slot degrade: a second `PermissionRequested` arriving
+    /// while one is already pending is answered immediately with
+    /// `Cancelled` -- never queued (the slot has no room), never a raw
+    /// error (the wire capture found no basis for one here), and never
+    /// touching the first request's still-open slot.
+    #[test]
+    fn a_second_permission_request_is_answered_cancelled_and_leaves_the_first_untouched() {
+        let mut model = Model::new();
+        let first_effects = on_ai_event(
+            &mut model,
+            AiEvent::PermissionRequested {
+                request_id: 1,
+                tool_call_id: "call_1".to_string(),
+                options: vec![allow_once("allow-once")],
+            },
+        );
+        assert!(first_effects.is_empty());
+        model.dirty = false;
+
+        let second_effects = on_ai_event(
+            &mut model,
+            AiEvent::PermissionRequested {
+                request_id: 2,
+                tool_call_id: "call_2".to_string(),
+                options: vec![allow_once("allow-once-2")],
+            },
+        );
+
+        let [Effect::Ai(AiCommand::AnswerPermission {
+            request_id: answered_id,
+            outcome: PermissionOutcome::Cancelled,
+        })] = second_effects.as_slice()
+        else {
+            panic!("expected one AnswerPermission{{outcome: Cancelled}}, got {second_effects:?}")
+        };
+        assert_eq!(
+            *answered_id, 2,
+            "the second request is answered directly, not folded into the panel"
+        );
+        assert!(
+            !model.dirty,
+            "answering the second request changes nothing the panel paints"
+        );
+        let prompt = model
+            .ai_panel()
+            .pending_permission
+            .as_ref()
+            .expect("the first prompt is still pending");
+        assert_eq!(
+            prompt.request_id, 1,
+            "the first request's slot is untouched"
+        );
+        assert_eq!(prompt.options, vec![allow_once("allow-once")]);
     }
 
     fn ai_feature_invoke(verb: &str) -> Msg {
