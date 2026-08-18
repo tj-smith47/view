@@ -241,6 +241,23 @@ pub enum ContextBlock {
     /// mentioned file. A link rather than inlined content: a mention costs
     /// the turn nothing until the agent decides it needs the bytes.
     ResourceLink { uri: String, name: String },
+    /// The current buffer's path and nvim-authoritative text, inlined
+    /// rather than a [`Self::ResourceLink`]: the point of attaching it is
+    /// that the agent reads it as part of the turn, not on a later fetch.
+    CurrentBuffer { path: PathBuf, text: String },
+    /// The active visual selection's text and its `(start_line, end_line)`
+    /// range.
+    Selection { text: String, range: (u32, u32) },
+    /// The cursor's buffer-space line and column.
+    Cursor { line: u32, col: u32 },
+    /// Every current entry from `vim.diagnostic.get(0)`.
+    Diagnostics {
+        entries: Vec<crate::native::ai_context::DiagnosticEntry>,
+    },
+    /// Every current entry from `getqflist()`.
+    QuickfixList {
+        entries: Vec<crate::native::ai_context::QuickfixEntry>,
+    },
 }
 
 /// Why a filesystem request the agent made could not be answered.

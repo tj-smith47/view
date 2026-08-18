@@ -34,6 +34,7 @@ use std::sync::{Arc, PoisonError};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
+use view_core::native::ai_context::{DiagnosticEntry, DiagnosticSeverity, QuickfixEntry};
 use view_core::native::ai_event::{
     AiCommand, AiEvent, ContextBlock, FsError, PermissionOption, PermissionOptionKind,
     PermissionOutcome, StopReason, ToolCallStatus,
@@ -856,14 +857,80 @@ fn permission_outcome(outcome: &PermissionOutcome) -> Value {
 /// vocabulary has grown a kind with no wire mapping here: an unmappable
 /// attachment is left out of the turn rather than sent as empty text the
 /// agent would read as a blank message.
+///
+/// The engine-read blocks (`CurrentBuffer` through `QuickfixList`) all
+/// lower to `"text"`: the ACP schema's own `resource`/`image`/`audio`
+/// content kinds are not pinned anywhere in this crate's wire capture, and
+/// guessing their field shapes would risk a payload the agent's decoder
+/// rejects outright, which is worse than the plainer text rendering below.
 fn context_block(block: &ContextBlock) -> Option<Value> {
     match block {
         ContextBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
         ContextBlock::ResourceLink { uri, name } => {
             Some(json!({ "type": "resource_link", "uri": uri, "name": name }))
         }
+        ContextBlock::CurrentBuffer { path, text } => Some(json!({
+            "type": "text",
+            "text": format!("Current buffer: {}\n\n{text}", path.display()),
+        })),
+        ContextBlock::Selection { text, range } => Some(json!({
+            "type": "text",
+            "text": format!("Selected lines {}-{}:\n\n{text}", range.0, range.1),
+        })),
+        ContextBlock::Cursor { line, col } => Some(json!({
+            "type": "text",
+            "text": format!("Cursor at line {line}, column {col}"),
+        })),
+        ContextBlock::Diagnostics { entries } => {
+            Some(json!({ "type": "text", "text": diagnostics_text(entries) }))
+        }
+        ContextBlock::QuickfixList { entries } => {
+            Some(json!({ "type": "text", "text": quickfix_text(entries) }))
+        }
         _ => None,
     }
+}
+
+/// One line per entry: `line:col [severity] message`.
+fn diagnostics_text(entries: &[DiagnosticEntry]) -> String {
+    let mut out = String::from("Diagnostics:");
+    for entry in entries {
+        out.push_str(&format!(
+            "\n{}:{} [{}] {}",
+            entry.line,
+            entry.col,
+            severity_label(entry.severity),
+            entry.message
+        ));
+    }
+    out
+}
+
+/// Closed match over [`DiagnosticSeverity`]'s own four levels -- adding a
+/// fifth there fails this compilation rather than this label silently
+/// falling through to a misreported existing one.
+fn severity_label(severity: DiagnosticSeverity) -> &'static str {
+    match severity {
+        DiagnosticSeverity::Error => "error",
+        DiagnosticSeverity::Warning => "warning",
+        DiagnosticSeverity::Info => "info",
+        DiagnosticSeverity::Hint => "hint",
+    }
+}
+
+/// One line per entry: `path:line:col text`.
+fn quickfix_text(entries: &[QuickfixEntry]) -> String {
+    let mut out = String::from("Quickfix list:");
+    for entry in entries {
+        out.push_str(&format!(
+            "\n{}:{}:{} {}",
+            entry.path.display(),
+            entry.line,
+            entry.col,
+            entry.text
+        ));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -873,7 +940,51 @@ mod tests {
     use std::pin::Pin;
     use std::task::{Context, Poll};
 
+    use view_core::native::ai_context::{
+        CurrentBufferRead, CursorRead, EngineReadSnapshot, QuickfixEntry as QfEntry, SelectionRead,
+    };
+
     use super::*;
+
+    /// `context::assemble`'s output reaches `session/prompt`'s wire content
+    /// array with every engine-read block kind mapped to something an agent
+    /// can read, none of them silently dropped by `context_block`'s
+    /// fallback arm.
+    #[test]
+    fn assembled_context_serializes_every_block_kind() {
+        let reads = EngineReadSnapshot::default()
+            .with_current_buffer(CurrentBufferRead::new(
+                std::path::PathBuf::from("/tmp/a.rs"),
+                "fn main() {}".to_string(),
+            ))
+            .with_selection(SelectionRead::new("main".to_string(), (0, 0)))
+            .with_cursor(CursorRead::new(0, 3))
+            .with_diagnostics(vec![DiagnosticEntry::new(
+                1,
+                2,
+                DiagnosticSeverity::Error,
+                "unresolved import".to_string(),
+            )])
+            .with_quickfix(vec![QfEntry::new(
+                std::path::PathBuf::from("/tmp/a.rs"),
+                5,
+                0,
+                "TODO".to_string(),
+            )]);
+
+        let context = crate::context::assemble(&reads);
+        assert_eq!(context.len(), 5);
+
+        let blocks: Vec<Value> = context.iter().filter_map(context_block).collect();
+        assert_eq!(blocks.len(), 5, "no engine-read block should be dropped");
+        for block in &blocks {
+            assert_eq!(block["type"], "text");
+        }
+        assert!(blocks[3]["text"]
+            .as_str()
+            .expect("diagnostics block carries text")
+            .contains("[error] unresolved import"));
+    }
 
     /// A stdin that is already broken: every write fails, which is what an
     /// agent that closed its input looks like from this side.

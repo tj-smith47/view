@@ -10,11 +10,13 @@
 
 mod acp;
 mod config;
+mod context;
 mod provision;
 mod trust;
 
 pub use acp::session::{AgentAdapter, AiSession, ClaudeCodeAdapter};
 pub use config::{AgentSpec, AiConfig, AiConfigError};
+pub use context::assemble;
 pub use provision::{ensure_adapter, pinned_version, AdapterPin, ProvisionError};
 pub use trust::{path_is_contained, TrustError, TrustStore};
 

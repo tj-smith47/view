@@ -1160,4 +1160,35 @@ pub enum RpcCall {
         generation: u64,
         path: String,
     },
+    /// Reads the current buffer's path and nvim-authoritative text --
+    /// unlike `PreviewBuffer`, keyed off no path argument and no picker
+    /// state, since a prompt submission has neither: it reads whatever
+    /// buffer nvim considers current at the moment of the call.
+    /// `generation` tags the read for whichever reply-routing scheme its
+    /// consumer adopts; this crate declares no reply variant or
+    /// consumption behavior for it yet.
+    ReadCurrentBufferText {
+        generation: u64,
+    },
+    /// Reads the buffer-space cursor position and, when one is active, the
+    /// visual selection's text and line range -- nvim's own position, never
+    /// the painted grid's viewport-relative cursor. `generation` tags the
+    /// read on the same terms as `ReadCurrentBufferText`.
+    ReadCursorContext {
+        generation: u64,
+    },
+    /// Reads every current entry from `vim.diagnostic.get(0)`, tagged
+    /// `generation` on the same terms as `ReadCurrentBufferText`. Distinct
+    /// from the bridge's `DiagnosticChanged` autocmd, which reports only
+    /// the error/warning totals a statusline segment needs -- context
+    /// assembly needs each diagnostic's own line, column, severity, and
+    /// message.
+    ReadDiagnosticEntries {
+        generation: u64,
+    },
+    /// Reads every current entry from `getqflist()`, tagged `generation` on
+    /// the same terms as `ReadCurrentBufferText`.
+    ReadQuickfixEntries {
+        generation: u64,
+    },
 }

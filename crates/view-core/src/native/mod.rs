@@ -3,6 +3,7 @@
 //! these descriptions against a user's config, and the crates that paint or
 //! drive a feature read the same table for its name and its off switch.
 
+pub mod ai_context;
 pub mod ai_event;
 pub mod ai_panel;
 pub mod ai_registry;
