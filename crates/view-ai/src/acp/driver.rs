@@ -593,6 +593,11 @@ impl Driver {
     /// is exactly what the dispatch arm re-attaches to once that capability
     /// is advertised true again, and re-deriving it at that point would be
     /// the one place a hand-written duplicate could silently drift.
+    // this allow is the only thing keeping the whole retained fs reply path
+    // compiling: PendingFsReplies::register, spawn_fs_reply, fs_reason, and
+    // the REQUEST_CANCELLED/INTERNAL_ERROR wire constants are reachable from
+    // nowhere else, so rustc's dead-code walk needs this call site treated
+    // as live to see any of them as used
     #[allow(dead_code)]
     fn on_fs_read(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
@@ -619,6 +624,11 @@ impl Driver {
     /// The `fs/write_text_file` handler body -- see [`Self::on_fs_read`]'s
     /// doc comment for why it stays live and directly tested with no
     /// dispatch arm reaching it.
+    // this allow keeps the write leg of the same retained fs reply path
+    // compiling: PendingFsReplies::register (the Write variant),
+    // spawn_fs_reply, fs_reason, and the REQUEST_CANCELLED/INTERNAL_ERROR
+    // wire constants are the same shared machinery on_fs_read's allow keeps
+    // live for the read leg, reachable from nowhere but these two call sites
     #[allow(dead_code)]
     fn on_fs_write(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
@@ -1103,8 +1113,9 @@ mod tests {
             &json!({ "path": "/stub/a.rs", "content": "fn main() {}" }),
         );
 
-        for _ in 0..2 {
+        for expected_id in ["read-1", "write-1"] {
             let frame = out_rx.try_recv().expect("an error response was sent");
+            assert_eq!(frame.id, Some(RequestId::Str(expected_id.to_string())));
             let error = frame.error.expect("the response carries an error");
             assert_eq!(error.code, METHOD_NOT_FOUND);
         }
@@ -1144,6 +1155,7 @@ mod tests {
             .await
             .expect("the reply was written")
             .expect("the channel stayed open");
+        assert_eq!(frame.id, Some(RequestId::Str("read-1".to_string())));
         assert_eq!(frame.result, Some(json!({ "content": "fn main() {}" })));
     }
 
@@ -1183,9 +1195,9 @@ mod tests {
             .await
             .expect("the reply was written")
             .expect("the channel stayed open");
-        assert!(
-            frame.error.is_some(),
-            "a refused write answers with an error"
-        );
+        assert_eq!(frame.id, Some(RequestId::Str("write-1".to_string())));
+        let error = frame.error.expect("a refused write answers with an error");
+        assert_eq!(error.code, INTERNAL_ERROR);
+        assert_eq!(error.message, fs_reason(&FsError::PermissionDenied));
     }
 }

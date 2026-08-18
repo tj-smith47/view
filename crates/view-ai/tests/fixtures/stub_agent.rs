@@ -32,9 +32,14 @@
 //! - `ask` -- send a `session/request_permission` request, then end the turn
 //!   once it is answered.
 //! - `read` -- send an `fs/read_text_file` request and report what came
-//!   back as a message chunk.
+//!   back as a message chunk. No current test drives this: the client's
+//!   `initialize` advertises `clientCapabilities.fs.readTextFile: false`,
+//!   so a conforming client answers `METHOD_NOT_FOUND` rather than the
+//!   shape this arm expects. Held for the task that flips the capability
+//!   back on and exercises this leg over the wire again.
 //! - `write` -- send an `fs/write_text_file` request and report whether it
-//!   was accepted or refused.
+//!   was accepted or refused. Unreachable for the same reason as `read`,
+//!   against `clientCapabilities.fs.writeTextFile: false`.
 //! - `refuse` -- answer the prompt with a JSON-RPC error instead of a
 //!   result.
 //! - anything else -- end the turn straight away.
