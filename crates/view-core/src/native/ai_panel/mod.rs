@@ -125,9 +125,13 @@ impl AiPanelState {
     /// the one place that appends [`ENTER_HINT`] to the prompt's own rows;
     /// [`PermissionPrompt::render_rows`] stays unaware of focus, since the
     /// hint depends on this state, not on the prompt's own content.
+    /// An entered panel also announces itself in its title: entry swallows
+    /// every key but `<Esc>`, and unlike the modal, centered overlays that
+    /// state is not self-evident from geometry alone, so the border is the
+    /// one always-visible place to say how to get back out.
     #[must_use]
     pub fn view(&self) -> AiPanelView {
-        let view = AiPanelView::new(TITLE)
+        let view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
             .with_rows(self.transcript.rendered_rows());
         match &self.pending_permission {
@@ -151,6 +155,11 @@ impl Default for AiPanelState {
 
 /// The overlay's title, drawn into its top border.
 const TITLE: &str = "AI Agent";
+
+/// The entered panel's title: the border is the one surface that shows in
+/// every state, so it carries the fact that keys now belong to the panel
+/// and names the way back out.
+const FOCUSED_TITLE: &str = "AI Agent -- focused, Esc returns";
 
 /// Named after the verb it points at (`update::mod`'s `feature == "ai" &&
 /// (verb == "open" || verb == "focus")` arm) -- shown beneath a pending
@@ -191,6 +200,24 @@ mod tests {
         assert!(
             view.pending_permission.is_empty(),
             "no permission is pending, so there is nothing extra to draw"
+        );
+    }
+
+    /// Entry swallows every key but `<Esc>`, so an entered panel must look
+    /// different from an un-entered one in every state -- including idle,
+    /// where no prompt rows exist to hang a hint off. The title is the one
+    /// surface drawn in every state.
+    #[test]
+    fn an_entered_panel_announces_itself_in_its_title_even_while_idle() {
+        let mut state = AiPanelState::new();
+        assert_eq!(state.view().title, TITLE);
+        state.focused = true;
+        let view = state.view();
+        assert_eq!(view.title, FOCUSED_TITLE);
+        assert!(
+            view.title.contains("Esc"),
+            "the entered title must name the way back out: {:?}",
+            view.title
         );
     }
 
