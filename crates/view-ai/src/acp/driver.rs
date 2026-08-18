@@ -42,8 +42,8 @@ use view_core::native::ai_event::{
 use crate::acp::fs::PendingReply;
 use crate::acp::session::{ChildSlot, SessionShared};
 use crate::acp::wire::{
-    Incoming, JsonRpcCodec, JsonRpcMessage, RequestId, INTERNAL_ERROR, METHOD_NOT_FOUND,
-    REQUEST_CANCELLED,
+    Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
+    METHOD_NOT_FOUND, REQUEST_CANCELLED,
 };
 
 /// The wire protocol version this client speaks, a bare integer.
@@ -53,6 +53,7 @@ const PROTOCOL_VERSION: i64 = 1;
 #[derive(Debug, Clone, Copy)]
 enum Outstanding {
     Initialize,
+    Authenticate,
     NewSession,
     Prompt,
 }
@@ -79,8 +80,9 @@ pub(crate) async fn run_session(
     commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
+    requires_auth: bool,
 ) {
-    let Some(ending) = drive(codec, commands, Arc::clone(&shared), cwd).await else {
+    let Some(ending) = drive(codec, commands, Arc::clone(&shared), cwd, requires_auth).await else {
         // the handle was dropped: the session is being torn down on purpose,
         // and the handle's own `Drop` has already signalled the child
         return;
@@ -131,6 +133,7 @@ async fn drive<R, W>(
     mut commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
+    requires_auth: bool,
 ) -> Option<SessionEnd>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -170,7 +173,7 @@ where
         }
     });
 
-    let mut driver = Driver::new(shared, out_tx, cwd);
+    let mut driver = Driver::new(shared, out_tx, cwd, requires_auth);
     driver.begin();
 
     loop {
@@ -208,6 +211,22 @@ struct Driver {
     /// ids never leave this file.
     next_boundary_id: u64,
     outstanding: HashMap<RequestId, Outstanding>,
+    /// Whether the agent enforces `authenticate` before `session/new`
+    /// succeeds, from [`AiConfig::requiring_auth`](crate::AiConfig::requiring_auth)
+    /// (or an [`AgentAdapter`](crate::acp::session::AgentAdapter) that set
+    /// it). Gates the retry-after-`auth_required` path so an agent that
+    /// merely advertises optional methods is never made to authenticate
+    /// against its own wishes.
+    requires_auth: bool,
+    /// The method ids `initialize` advertised in `authMethods`, in order.
+    /// Empty means the agent offered none, which makes the retry path a
+    /// no-op regardless of `requires_auth`.
+    auth_methods: Vec<String>,
+    /// Set once `authenticate` has been sent, so a `session/new` that fails
+    /// with `auth_required` a second time is reported rather than retried
+    /// forever against an agent whose rejection has nothing to do with
+    /// authentication.
+    auth_attempted: bool,
     session_id: Option<String>,
     /// Permission requests the agent is still waiting on an answer for,
     /// from the boundary id the event carried to the wire id the answer
@@ -231,6 +250,7 @@ impl Driver {
         shared: Arc<SessionShared>,
         out: mpsc::UnboundedSender<JsonRpcMessage>,
         cwd: std::path::PathBuf,
+        requires_auth: bool,
     ) -> Self {
         Self {
             shared,
@@ -239,6 +259,9 @@ impl Driver {
             next_wire_id: 1,
             next_boundary_id: 1,
             outstanding: HashMap::new(),
+            requires_auth,
+            auth_methods: Vec::new(),
+            auth_attempted: false,
             session_id: None,
             open_permissions: HashMap::new(),
             tool_calls: HashMap::new(),
@@ -251,9 +274,17 @@ impl Driver {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "clientCapabilities": {
-                // both true: an agent's file access is mediated through the
-                // editor, which is the whole reason the fs events exist
-                "fs": { "readTextFile": true, "writeTextFile": true },
+                // both false: this transport already answers fs/read_text_file
+                // and fs/write_text_file at the wire level, but nothing yet
+                // routes the resulting event through a trust prompt or
+                // nvim's buffer truth, so a well-behaved agent that trusted
+                // a true flag here could wait on an answer no other part of
+                // the running editor provides yet. Advertising false is
+                // truthful about the whole path, not just this file's part
+                // of it, and a fallback to the agent's own direct-disk
+                // access is the same "capability absent" behavior every ACP
+                // agent already has to support
+                "fs": { "readTextFile": false, "writeTextFile": false },
                 // false, and not a placeholder: the terminal methods are
                 // unimplemented here, and claiming them would have the agent
                 // wait forever on a call nothing answers
@@ -273,6 +304,71 @@ impl Driver {
         self.next_wire_id = self.next_wire_id.saturating_add(1);
         self.outstanding.insert(id.clone(), kind);
         let _ = self.out.send(JsonRpcMessage::request(id, method, params));
+    }
+
+    /// Sends `session/new`, from a fresh handshake or after `authenticate`
+    /// has just succeeded -- both paths request the same session, so both
+    /// go through the one place that builds it.
+    fn begin_session_new(&mut self) {
+        // the same directory the agent process itself was started in: a
+        // session created against a different root would have the agent
+        // resolving relative paths one way and reading files another
+        let cwd = self.cwd.to_string_lossy().into_owned();
+        self.request(
+            "session/new",
+            json!({ "cwd": cwd, "mcpServers": [] }),
+            Outstanding::NewSession,
+        );
+    }
+
+    /// Handles a JSON-RPC error answer to a request this client sent.
+    ///
+    /// `session/new` failing with `auth_required` is the one case that is
+    /// not terminal: the wire's own signal to call `authenticate` and try
+    /// again, gated on the adapter actually requiring it so an agent that
+    /// merely advertises optional methods is never made to authenticate
+    /// against its own wishes, and on `auth_attempted` so a `session/new`
+    /// that still fails after a successful `authenticate` is reported
+    /// rather than retried forever.
+    fn on_error_response(&mut self, kind: Outstanding, error: JsonRpcError) {
+        if matches!(kind, Outstanding::NewSession)
+            && error.code == AUTH_REQUIRED
+            && self.requires_auth
+            && !self.auth_attempted
+        {
+            if let Some(method_id) = self.auth_methods.first().cloned() {
+                self.auth_attempted = true;
+                self.request(
+                    "authenticate",
+                    json!({ "methodId": method_id }),
+                    Outstanding::Authenticate,
+                );
+                return;
+            }
+        }
+        match kind {
+            // a refused handshake, authentication, or session creation
+            // leaves no session to work in at all, which is the same dead
+            // end as a dead agent
+            Outstanding::Initialize | Outstanding::Authenticate | Outstanding::NewSession => {
+                self.shared.emit(AiEvent::SessionCrashed {
+                    message: format!("the agent refused {}: {}", method_of(kind), error.message),
+                });
+            }
+            // a refused turn leaves the session usable, so it is reported
+            // as what it is: the agent's own words about the turn, and
+            // then the turn ending
+            Outstanding::Prompt => {
+                self.shared.emit(AiEvent::MessageChunk {
+                    message_id: None,
+                    text: error.message,
+                    from_agent: true,
+                });
+                self.shared.emit(AiEvent::TurnEnded {
+                    stop_reason: StopReason::Refusal,
+                });
+            }
+        }
     }
 
     /// The next id to put on an event crossing into the closed vocabulary.
@@ -295,43 +391,14 @@ impl Driver {
         }
     }
 
-    fn on_response(
-        &mut self,
-        id: RequestId,
-        outcome: Result<Value, crate::acp::wire::JsonRpcError>,
-    ) {
+    fn on_response(&mut self, id: RequestId, outcome: Result<Value, JsonRpcError>) {
         let Some(kind) = self.outstanding.remove(&id) else {
             return;
         };
         let result = match outcome {
             Ok(result) => result,
             Err(error) => {
-                match kind {
-                    // a refused handshake leaves no session to work in at
-                    // all, which is the same dead end as a dead agent
-                    Outstanding::Initialize | Outstanding::NewSession => {
-                        self.shared.emit(AiEvent::SessionCrashed {
-                            message: format!(
-                                "the agent refused {}: {}",
-                                method_of(kind),
-                                error.message
-                            ),
-                        });
-                    }
-                    // a refused turn leaves the session usable, so it is
-                    // reported as what it is: the agent's own words about
-                    // the turn, and then the turn ending
-                    Outstanding::Prompt => {
-                        self.shared.emit(AiEvent::MessageChunk {
-                            message_id: None,
-                            text: error.message,
-                            from_agent: true,
-                        });
-                        self.shared.emit(AiEvent::TurnEnded {
-                            stop_reason: StopReason::Refusal,
-                        });
-                    }
-                }
+                self.on_error_response(kind, error);
                 return;
             }
         };
@@ -355,17 +422,20 @@ impl Driver {
                     });
                     return;
                 }
-                // the same directory the agent process itself was started
-                // in: a session created against a different root would have
-                // the agent resolving relative paths one way and reading
-                // files another
-                let cwd = self.cwd.to_string_lossy().into_owned();
-                self.request(
-                    "session/new",
-                    json!({ "cwd": cwd, "mcpServers": [] }),
-                    Outstanding::NewSession,
-                );
+                self.auth_methods = result
+                    .get("authMethods")
+                    .and_then(Value::as_array)
+                    .map(|methods| {
+                        methods
+                            .iter()
+                            .filter_map(|m| m.get("id").and_then(Value::as_str))
+                            .map(ToString::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                self.begin_session_new();
             }
+            Outstanding::Authenticate => self.begin_session_new(),
             Outstanding::NewSession => {
                 let Some(session_id) = result.get("sessionId").and_then(Value::as_str) else {
                     self.shared.emit(AiEvent::SessionCrashed {
@@ -679,6 +749,7 @@ fn fs_reason(error: &FsError) -> String {
 fn method_of(kind: Outstanding) -> &'static str {
     match kind {
         Outstanding::Initialize => "initialize",
+        Outstanding::Authenticate => "authenticate",
         Outstanding::NewSession => "session/new",
         Outstanding::Prompt => "session/prompt",
     }
@@ -822,6 +893,7 @@ mod tests {
                 commands,
                 shared,
                 std::env::temp_dir(),
+                false,
             ),
         )
         .await
@@ -834,5 +906,26 @@ mod tests {
             reason.contains("stdin"),
             "the reason names what broke: {reason}"
         );
+    }
+
+    /// The tripwire a later handler-landing change must flip, not delete:
+    /// until a trust-gated `fs/*` handler exists end to end, the agent must
+    /// be told these capabilities are absent, never advertised ahead of the
+    /// handler that would back them.
+    #[test]
+    fn the_outgoing_initialize_advertises_fs_capabilities_as_false() {
+        let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.begin();
+
+        let frame = out_rx.try_recv().expect("initialize was sent");
+        assert_eq!(frame.method.as_deref(), Some("initialize"));
+        let params = frame.params.expect("initialize carries params");
+        assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], false);
+        assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], false);
+        assert_eq!(params["clientInfo"]["name"], "view");
+        assert_eq!(params["clientInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 }

@@ -15,8 +15,10 @@
 //!
 //! Arguments, all optional and all positional: the file whose appearance
 //! releases a stalled reader, the protocol version to answer `initialize`
-//! with, and the path of a file to hold an exclusive lock on for as long as
-//! this process lives.
+//! with, the path of a file to hold an exclusive lock on for as long as
+//! this process lives, and the literal `auth` to fail the first
+//! `session/new` with the wire's `auth_required` error and answer
+//! `authenticate` before letting a retried `session/new` succeed.
 //!
 //! Prompt texts it treats as instructions, so one fixture covers every
 //! transport case a test needs:
@@ -39,6 +41,10 @@
 
 use std::io::{BufRead, Write};
 
+/// The wire's reserved code for `session/new` reporting that `authenticate`
+/// must be called first, pinned in `docs/acp-v1-wire-capture.md`.
+const AUTH_REQUIRED: i64 = -32000;
+
 fn main() {
     // Taken before a single frame is served, so a client that has seen this
     // agent answer anything has also seen it take the lock.
@@ -46,6 +52,10 @@ fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut pending_prompt: Option<serde_json::Value> = None;
+    // counts this fixture's own session/new attempts, so auth_mode()'s
+    // one-time auth_required answer cannot fire more than once regardless
+    // of how many times the client retries
+    let mut session_new_attempts: u32 = 0;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -118,14 +128,22 @@ fn main() {
                     "protocolVersion": protocol_version(),
                     "agentCapabilities": {},
                     "agentInfo": { "name": "stub", "title": "Stub", "version": "1.0.0" },
-                    "authMethods": []
+                    "authMethods": auth_methods()
                 }),
             ),
-            "session/new" => reply(
-                &mut stdout,
-                id,
-                serde_json::json!({ "sessionId": "sess_stub" }),
-            ),
+            "authenticate" => reply(&mut stdout, id, serde_json::json!({})),
+            "session/new" => {
+                session_new_attempts += 1;
+                if auth_mode() && session_new_attempts == 1 {
+                    error_reply(&mut stdout, id, AUTH_REQUIRED, "authentication required");
+                } else {
+                    reply(
+                        &mut stdout,
+                        id,
+                        serde_json::json!({ "sessionId": "sess_stub" }),
+                    );
+                }
+            }
             "session/prompt" => {
                 let text = frame["params"]["prompt"][0]["text"]
                     .as_str()
@@ -190,7 +208,9 @@ fn main() {
                             }),
                         );
                     }
-                    "refuse" => error_reply(&mut stdout, id, "the agent refused the turn"),
+                    "refuse" => {
+                        error_reply(&mut stdout, id, -32603, "the agent refused the turn");
+                    }
                     _ => reply(
                         &mut stdout,
                         id,
@@ -245,6 +265,25 @@ fn protocol_version() -> i64 {
         .nth(2)
         .and_then(|arg| arg.parse().ok())
         .unwrap_or(1)
+}
+
+/// Whether this fixture's fourth argument requests the auth-required retry
+/// leg: the first `session/new` fails with the wire's `auth_required` code,
+/// and every attempt after a successful `authenticate` succeeds.
+fn auth_mode() -> bool {
+    std::env::args().nth(4).as_deref() == Some("auth")
+}
+
+/// The `authMethods` this fixture advertises in its `initialize` response:
+/// one method whenever `auth_mode` is set, so the client has an id to pass
+/// back to `authenticate`, and none otherwise, matching every other test's
+/// expectation that no auth flow is offered.
+fn auth_methods() -> serde_json::Value {
+    if auth_mode() {
+        serde_json::json!([{ "id": "stub-login", "name": "Stub login" }])
+    } else {
+        serde_json::json!([])
+    }
 }
 
 fn end_prompt(stdout: &mut std::io::Stdout, pending: &mut Option<serde_json::Value>) {
@@ -351,13 +390,13 @@ fn reply(stdout: &mut std::io::Stdout, id: serde_json::Value, result: serde_json
     );
 }
 
-fn error_reply(stdout: &mut std::io::Stdout, id: serde_json::Value, message: &str) {
+fn error_reply(stdout: &mut std::io::Stdout, id: serde_json::Value, code: i64, message: &str) {
     send(
         stdout,
         &serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "error": { "code": -32603, "message": message }
+            "error": { "code": code, "message": message }
         }),
     );
 }

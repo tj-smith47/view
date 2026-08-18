@@ -42,6 +42,31 @@ fn session() -> (AiSession, Receiver<Msg>) {
     session_with(&[])
 }
 
+/// Like [`session_with`], but with [`AiConfig::requiring_auth`] set: the
+/// only difference between this and every other session in this file, and
+/// the reason the auth-retry test needs its own constructor rather than
+/// reusing `session_with`.
+fn session_requiring_auth(args: &[&str]) -> (AiSession, Receiver<Msg>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let tx = Mutex::new(tx);
+    let cfg = AiConfig::new(
+        env!("CARGO_BIN_EXE_view-ai-stub-agent"),
+        std::env::temp_dir(),
+    )
+    .with_args(args.iter().copied())
+    .requiring_auth();
+    let session = AiSession::spawn(
+        cfg,
+        Box::new(move |msg| {
+            if let Ok(tx) = tx.lock() {
+                let _ = tx.send(msg);
+            }
+        }),
+    )
+    .expect("the stub agent starts");
+    (session, rx)
+}
+
 /// The next event, or a failure naming what was waited for.
 fn next_event(rx: &Receiver<Msg>, what: &str) -> AiEvent {
     match rx.recv_timeout(WAIT) {
@@ -125,6 +150,17 @@ fn an_agent_speaking_another_protocol_version_is_refused_at_the_handshake() {
         }
         other => panic!("expected SessionCrashed, got {other:?}"),
     }
+}
+
+/// The falsifiable check for the retry-after-auth path: the stub fails its
+/// first `session/new` with the wire's `auth_required` error, which only a
+/// client that calls `authenticate` and retries `session/new` can ever get
+/// past. `SessionReady` arriving at all is the proof, since nothing else in
+/// this fixture's flow can produce it.
+#[test]
+fn a_session_new_auth_required_error_is_answered_with_authenticate_then_retried() {
+    let (_session, rx) = session_requiring_auth(&["", "", "", "auth"]);
+    assert_eq!(ready(&rx), "sess_stub");
 }
 
 #[test]

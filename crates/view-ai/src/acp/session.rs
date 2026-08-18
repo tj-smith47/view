@@ -1,6 +1,7 @@
 //! The agent session: one child process, one tokio runtime, and the two
 //! calls the rest of the editor makes against it.
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -194,6 +195,7 @@ impl AiSession {
         let task_shared = Arc::clone(&shared);
         let task_child = Arc::clone(&child);
         let cwd = cfg.cwd;
+        let requires_auth = cfg.requires_auth;
         runtime.spawn(async move {
             run_session(
                 task_child,
@@ -201,6 +203,7 @@ impl AiSession {
                 command_rx,
                 task_shared,
                 cwd,
+                requires_auth,
             )
             .await;
         });
@@ -240,5 +243,125 @@ impl std::fmt::Debug for AiSession {
             .field("closed", &self.commands.is_closed())
             .field("shared", &Arc::strong_count(&self.shared))
             .finish()
+    }
+}
+
+/// The seam between a specific agent's own launch details and the ACP
+/// client this crate drives: what to execute, how to name it in
+/// diagnostics, and whether it enforces authentication. `AiSession::spawn`
+/// drives an adapter's config internally through
+/// [`AiConfig::from_adapter`](crate::AiConfig::from_adapter); no ACP wire
+/// type is reachable through this trait, so a consumer choosing which agent
+/// to run never sees this crate's JSON-RPC shapes.
+///
+/// Crate-private for now: nothing outside `view-ai` constructs an agent's
+/// launch details yet, so exposing this beyond the crate would be surface
+/// with no call site to justify it. A future config or provisioning task
+/// that needs to hand in its own adapter from another crate is the reason
+/// to promote it, not a reason to promote it early.
+// no [ai] config loader or provisioning step exists yet to hand this crate
+// a real pinned_version/binary_path, so the only caller today is this
+// file's own test proving the trait's shape holds -- allowed rather than
+// deleted, the same way a closed value domain's still-unused variants stay
+// in place ahead of the surface that will pick them
+#[allow(dead_code)]
+pub(crate) trait AgentAdapter: Send + Sync {
+    /// The executable and the arguments it is invoked with, in order.
+    fn command(&self) -> (&str, &[String]);
+    /// A short, stable name for this agent, used only in diagnostics.
+    fn id(&self) -> &str;
+    /// Whether `session/new` failing with the wire's `auth_required` error
+    /// must be answered with `authenticate` rather than treated as a
+    /// terminal refusal.
+    fn requires_auth(&self) -> bool;
+}
+
+/// The adapter for the reference agent binary this build ships with, whose
+/// ACP endpoint sits behind an account login.
+///
+/// Resolving a real `pinned_version` and `binary_path` -- locating,
+/// downloading, checksumming the executable -- is provisioning work this
+/// type does not do itself; it only shapes what [`AgentAdapter`] needs once
+/// those values exist.
+#[allow(dead_code)]
+pub(crate) struct ClaudeCodeAdapter {
+    pinned_version: String,
+    binary_path: PathBuf,
+    args: Vec<String>,
+}
+
+#[allow(dead_code)]
+impl ClaudeCodeAdapter {
+    /// An adapter for the binary at `binary_path`, pinned to
+    /// `pinned_version`.
+    #[must_use]
+    pub(crate) fn new(pinned_version: impl Into<String>, binary_path: PathBuf) -> Self {
+        Self {
+            pinned_version: pinned_version.into(),
+            binary_path,
+            args: Vec::new(),
+        }
+    }
+
+    /// The version this adapter was constructed against, independent of
+    /// [`AgentAdapter::id`], which names the agent kind rather than the
+    /// pinned build.
+    #[must_use]
+    pub(crate) fn pinned_version(&self) -> &str {
+        &self.pinned_version
+    }
+}
+
+impl AgentAdapter for ClaudeCodeAdapter {
+    fn command(&self) -> (&str, &[String]) {
+        (self.binary_path.to_str().unwrap_or_default(), &self.args)
+    }
+
+    fn id(&self) -> &str {
+        "claude-code"
+    }
+
+    fn requires_auth(&self) -> bool {
+        // this agent's ACP endpoint sits behind an account login; a session
+        // created without authenticating first is not a degraded session,
+        // it is one that was never going to work
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use super::*;
+
+    #[test]
+    fn an_adapter_reports_its_own_command_id_and_auth_requirement() {
+        let adapter = ClaudeCodeAdapter::new("1.2.3", PathBuf::from("/usr/bin/claude-code-acp"));
+        assert_eq!(adapter.pinned_version(), "1.2.3");
+        assert_eq!(adapter.id(), "claude-code");
+        assert!(adapter.requires_auth());
+        let (command, args) = adapter.command();
+        assert_eq!(command, "/usr/bin/claude-code-acp");
+        assert!(args.is_empty());
+    }
+
+    /// The disconfirm the falsifiable check names, driven through the
+    /// adapter path rather than a raw `AiConfig`: a config built from an
+    /// adapter whose binary does not exist must fail `spawn` synchronously,
+    /// before any tokio task starts, exactly like a raw one does.
+    #[test]
+    fn a_nonexistent_adapter_binary_fails_spawn_synchronously_not_a_hang() {
+        let adapter = ClaudeCodeAdapter::new(
+            "0.0.0",
+            PathBuf::from("/no/such/path/view-ai-adapter-binary-does-not-exist"),
+        );
+        let cfg = AiConfig::from_adapter(&adapter, std::env::temp_dir());
+        let err =
+            AiSession::spawn(cfg, Box::new(|_| {})).expect_err("a missing agent cannot start");
+        assert!(
+            matches!(err, AiError::Spawn { .. }),
+            "expected AiError::Spawn, got {err:?}"
+        );
     }
 }

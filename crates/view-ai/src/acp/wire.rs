@@ -101,6 +101,11 @@ pub const METHOD_NOT_FOUND: i64 = -32601;
 /// carry out.
 pub const INTERNAL_ERROR: i64 = -32603;
 
+/// The reserved code `session/new` answers with when the agent requires
+/// `authenticate` before a session can be created, pinned in
+/// `docs/acp-v1-wire-capture.md`.
+pub const AUTH_REQUIRED: i64 = -32000;
+
 /// One frame, in the union shape JSON-RPC 2.0 actually puts on the wire.
 ///
 /// A single struct with optional members rather than an untagged enum:

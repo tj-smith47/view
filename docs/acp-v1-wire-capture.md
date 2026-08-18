@@ -1030,3 +1030,94 @@ its runtime is the `async-io`/`async-process`/`blocking` reactor, with
 `tokio` present only as a dev-dependency. Its resolved graph is 145 crates.
 Its release cadence went `1.0.0` (2026-06-24) to `2.0.0` (2026-07-23), a
 major version inside one month.
+
+## `authenticate` and the `auth_required` error code
+
+Re-verified against the same commit pinned at the top of this document
+(`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, re-checked live before this
+capture and unchanged).
+
+`ErrorCode`'s `$defs` entry (the reserved-range members only; the JSON-RPC
+standard four are omitted here, already implemented as `wire.rs` constants):
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))
+print(json.dumps(d['\$defs']['ErrorCode'], indent=2))
+"
+```
+
+Raw output, the `-32000` member (verbatim, unedited):
+
+```json
+{
+  "title": "Authentication required",
+  "description": "**Authentication required**: Authentication is required before this operation can be performed.",
+  "type": "integer",
+  "format": "int32",
+  "const": -32000
+}
+```
+
+`docs/protocol/v1/schema.mdx` documents the same code at the same value,
+under the heading `ErrorCode`, confirming the schema and the rendered docs
+agree.
+
+`docs/protocol/v1/authentication.mdx`, verbatim, on when it is sent:
+
+```
+$ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/authentication.mdx" | sed -n '81,111p'
+```
+
+```
+## Authenticating
+
+When an Agent requires authentication before allowing session creation, the Client calls `authenticate` with one of the advertised authentication method IDs:
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "authenticate",
+  "params": {
+    "methodId": "agent-login"
+  }
+}
+```
+
+```
+On success, the Agent returns an empty result:
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {}
+}
+```
+
+The schema's `session_new` method description, verbatim: "May return an
+`auth_required` error if the agent requires authentication." No other
+method's schema description mentions this error, so the guard belongs on
+`session/new` specifically, not on every outgoing request.
+
+Pinned `authMethods` entry shape, from `authentication.mdx`'s advertising
+example (`docs/protocol/v1/authentication.mdx` lines 41-61, same commit):
+
+```json
+{
+  "id": "agent-login",
+  "name": "Agent login",
+  "description": "Sign in using the agent's login flow"
+}
+```
+
+Pinned facts for the session-lifecycle client: `authenticate`'s request
+carries exactly one field, `methodId` (a string, one of the ids in the
+`initialize` response's `authMethods`); its success reply is `{}`, no
+fields; a `session/new` failing with JSON-RPC error code `-32000` is the
+wire's own signal to call `authenticate` and retry, not a terminal
+failure.

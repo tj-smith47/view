@@ -23,6 +23,12 @@ pub struct AiConfig {
     /// The working directory the agent is started in, and the one the
     /// session is created against.
     pub cwd: std::path::PathBuf,
+    /// Whether the session must call `authenticate` when `session/new`
+    /// reports the wire's `auth_required` error, rather than treating that
+    /// error as terminal. `false` by default: an agent that offers
+    /// authentication methods without enforcing them must not be made to
+    /// authenticate against its own wishes.
+    pub requires_auth: bool,
 }
 
 impl AiConfig {
@@ -33,6 +39,7 @@ impl AiConfig {
             command: command.into(),
             args: Vec::new(),
             cwd: cwd.into(),
+            requires_auth: false,
         }
     }
 
@@ -45,6 +52,36 @@ impl AiConfig {
     {
         self.args = args.into_iter().map(Into::into).collect();
         self
+    }
+
+    /// The same configuration, requiring `authenticate` before `session/new`
+    /// is treated as having succeeded or failed for good.
+    #[must_use]
+    pub fn requiring_auth(mut self) -> Self {
+        self.requires_auth = true;
+        self
+    }
+
+    /// An agent config derived from an [`AgentAdapter`](acp::session::AgentAdapter):
+    /// its command, arguments, and authentication requirement carried
+    /// straight through, so a caller with an adapter never re-derives what
+    /// the adapter already knows.
+    // exercised by this crate's own adapter test, not by a production
+    // caller yet: no config or provisioning step exists to hand this crate
+    // a real AgentAdapter, so the seam waits here for the step that will
+    #[allow(dead_code)]
+    #[must_use]
+    pub(crate) fn from_adapter(
+        adapter: &dyn acp::session::AgentAdapter,
+        cwd: impl Into<std::path::PathBuf>,
+    ) -> Self {
+        let (command, args) = adapter.command();
+        Self {
+            command: command.to_string(),
+            args: args.to_vec(),
+            cwd: cwd.into(),
+            requires_auth: adapter.requires_auth(),
+        }
     }
 }
 
