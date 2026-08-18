@@ -314,6 +314,18 @@ mod tests {
     /// of them this build reads -- see [`loaded_tables`].
     static SPECIFIED_TABLES: [&str; 5] = ["native", "ui", "engine", "supervision", "ai"];
 
+    /// Tables `SPECIFIED_TABLES` names that this crate's own `ViewFile`
+    /// never reads, by design, but that a sibling crate's own loader does.
+    /// `every_specified_table_is_documented_in_the_example` folds this into
+    /// `reads_it` so the shipped example can honestly go live the moment a
+    /// real reader exists anywhere in the workspace, not only inside this
+    /// crate. Without it, `reads_it` silently means "read by view-native"
+    /// rather than "read by this build". A table lands here in the same
+    /// commit that gives it a sibling reader, never a step ahead of that
+    /// reader landing -- the same atomicity the fs capability flags are
+    /// held to.
+    static SIBLING_READ_TABLES: [&str; 1] = ["ai"];
+
     /// Every top-level table **this crate's** loader reads, taken from
     /// [`ViewFile`]'s own rendered shape rather than restated.
     ///
@@ -369,7 +381,7 @@ mod tests {
         let headers = example_headers();
         let loaded = loaded_tables();
         for name in SPECIFIED_TABLES {
-            let reads_it = loaded.contains(name);
+            let reads_it = loaded.contains(name) || SIBLING_READ_TABLES.contains(&name);
             // one comparison for both failure modes: `None` is a table the
             // example never mentions, `Some(other)` is one whose block is
             // live when this build cannot read it, or commented out when it
@@ -440,12 +452,21 @@ mod tests {
 
     #[test]
     fn appending_the_dotted_form_under_the_example_table_is_refused() {
-        // the shape the README must never recommend: appended after the
-        // example's `[native]` header, the dotted key nests as
+        // the shape the README must never recommend: appended inside the
+        // example's `[native]` block itself, the dotted key nests as
         // `native.native.picker`, whose value is a table where the loader
         // needs a bool. Refusing is what keeps a user from reading it as
-        // "done" while `native.rs` falls back to all-enabled for the session
-        let appended = format!("{EXAMPLE_TOML}\nnative.picker = false\n");
+        // "done" while `native.rs` falls back to all-enabled for the
+        // session. Spliced in right after `[native]`'s own last key rather
+        // than appended at the file's end: which table a trailing dotted
+        // key nests under depends on whichever `[table]` header the file
+        // happened to open last, and that is not `[native]`'s own concern
+        // to pin.
+        let appended = EXAMPLE_TOML.replacen(
+            "palette = true\n",
+            "palette = true\nnative.picker = false\n",
+            1,
+        );
         let err = NativeConfig::from_toml_str(&appended)
             .expect_err("a nested [native] table is not a feature switch");
         assert!(
@@ -490,6 +511,20 @@ mod tests {
             "[ui]\ntier = \"auto\"\n\n[native]\npicker = false\n\n[ai]\nenabled = true\n",
         )
         .expect("sibling tables must not fail the native loader");
+        assert!(!cfg.enabled("picker"));
+        assert!(cfg.enabled("tree"));
+    }
+
+    #[test]
+    fn ais_array_agent_form_does_not_trip_a_native_side_toml_error() {
+        // `[ai]`'s `agent` key takes either a string or an array of
+        // strings (view-ai's `AgentSpec`); `ViewFile` never grows a field
+        // for `[ai]` at all (Q3), so the array shape must be exactly as
+        // invisible to this loader as the string shape already is
+        let cfg = NativeConfig::from_toml_str(
+            "[native]\npicker = false\n\n[ai]\nenabled = true\nagent = [\"mycli\", \"--acp\"]\n",
+        )
+        .expect("[ai]'s array-form agent must not fail the native loader");
         assert!(!cfg.enabled("picker"));
         assert!(cfg.enabled("tree"));
     }

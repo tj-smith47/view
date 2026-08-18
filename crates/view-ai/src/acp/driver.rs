@@ -212,7 +212,7 @@ struct Driver {
     next_boundary_id: u64,
     outstanding: HashMap<RequestId, Outstanding>,
     /// Whether the agent enforces `authenticate` before `session/new`
-    /// succeeds, from [`AiConfig::requiring_auth`](crate::AiConfig::requiring_auth)
+    /// succeeds, from [`AgentLaunch::requiring_auth`](crate::AgentLaunch::requiring_auth)
     /// (or an [`AgentAdapter`](crate::acp::session::AgentAdapter) that set
     /// it). Gates the retry-after-`auth_required` path so an agent that
     /// merely advertises optional methods is never made to authenticate

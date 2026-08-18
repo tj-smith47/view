@@ -29,6 +29,19 @@ palette = true
 [supervision]
 auto_restart = true        # false: surface a dead engine and wait for the modal's own Restart
 
+# [ai] turns the agent panel and its ACP client on or off, and names which
+# agent view speaks to. "claude-code" is the one adapter this build knows
+# how to auto-provision on its own; naming another known adapter id or an
+# arbitrary command line runs that instead, unprovisioned.
+
+[ai]
+enabled = true              # default: true -- opt-out, matching [native]'s
+                             # default-on philosophy
+agent = "claude-code"       # default: "claude-code" -- the one adapter this
+                             # build knows how to auto-provision.
+                             # Override with another known adapter id, or an
+                             # arbitrary command: agent = ["mycli", "--acp"]
+
 # The tables below are commented out because THIS BUILD DOES NOT READ THEM
 # yet. Uncommenting one is harmless -- view ignores tables it has no loader
 # for -- but it will not change anything either. They are listed so the
@@ -43,7 +56,3 @@ auto_restart = true        # false: surface a dead engine and wait for the modal
 # nvim_bin = "bundled"       # "bundled" | absolute path
 # appname = ""               # NVIM_APPNAME passthrough for isolated profiles
 # single_grid = false
-#
-# [ai]
-# enabled = true
-# agent = "claude-code"      # ACP agent id or ["cmd", "args..."]

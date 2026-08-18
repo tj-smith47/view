@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use view_ai::{AiConfig, AiSession};
+use view_ai::{AgentLaunch, AiSession};
 use view_core::msg::Msg;
 use view_core::native::ai_event::{
     AiCommand, AiEvent, PermissionOutcome, StopReason, ToolCallStatus,
@@ -21,7 +21,7 @@ const WAIT: Duration = Duration::from_secs(10);
 fn session_with(args: &[&str]) -> (AiSession, Receiver<Msg>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let tx = Mutex::new(tx);
-    let cfg = AiConfig::new(
+    let cfg = AgentLaunch::new(
         env!("CARGO_BIN_EXE_view-ai-stub-agent"),
         std::env::temp_dir(),
     )
@@ -42,14 +42,14 @@ fn session() -> (AiSession, Receiver<Msg>) {
     session_with(&[])
 }
 
-/// Like [`session_with`], but with [`AiConfig::requiring_auth`] set: the
+/// Like [`session_with`], but with [`AgentLaunch::requiring_auth`] set: the
 /// only difference between this and every other session in this file, and
 /// the reason the auth-retry test needs its own constructor rather than
 /// reusing `session_with`.
 fn session_requiring_auth(args: &[&str]) -> (AiSession, Receiver<Msg>) {
     let (tx, rx) = std::sync::mpsc::channel();
     let tx = Mutex::new(tx);
-    let cfg = AiConfig::new(
+    let cfg = AgentLaunch::new(
         env!("CARGO_BIN_EXE_view-ai-stub-agent"),
         std::env::temp_dir(),
     )
@@ -354,7 +354,7 @@ fn a_refused_turn_ends_the_turn_rather_than_killing_the_session() {
 
 #[test]
 fn a_missing_agent_is_an_error_value_not_a_panic() {
-    let cfg = AiConfig::new("view-ai-no-such-agent-on-any-path", std::env::temp_dir());
+    let cfg = AgentLaunch::new("view-ai-no-such-agent-on-any-path", std::env::temp_dir());
     let err = AiSession::spawn(cfg, Box::new(|_| {})).expect_err("a missing agent cannot start");
     assert!(
         err.to_string()

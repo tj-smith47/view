@@ -13,7 +13,7 @@
 
 use std::time::Duration;
 
-use view_ai::{AiConfig, AiSession};
+use view_ai::{AgentLaunch, AiSession};
 
 /// Long enough that a loaded host still gets the agent up, short enough that
 /// a wedged handshake fails the harness rather than hanging the gate.
@@ -28,7 +28,7 @@ fn main() {
 
     let (tx, rx) = std::sync::mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
-    let cfg = AiConfig::new(agent, std::env::temp_dir()).with_args([
+    let cfg = AgentLaunch::new(agent, std::env::temp_dir()).with_args([
         // no stall-release file and the default protocol version: this
         // harness only needs the agent to answer the handshake
         String::new(),

@@ -13,7 +13,7 @@ use view_core::native::ai_event::{AiCommand, AiEvent};
 use crate::acp::driver::run_session;
 use crate::acp::fs::PendingFsReplies;
 use crate::acp::wire::JsonRpcCodec;
-use crate::{AiConfig, AiError};
+use crate::{AgentLaunch, AiError};
 
 /// The agent child, reachable from both the handle and the session task.
 ///
@@ -147,7 +147,7 @@ impl AiSession {
     /// stdout. That last one is taken rather than unwrapped: a library has
     /// no panic budget, and a child spawned without the pipes it was
     /// configured for is a bug the caller must see as an error value.
-    pub fn spawn(cfg: AiConfig, emit: Box<dyn Fn(Msg) + Send + Sync>) -> Result<Self, AiError> {
+    pub fn spawn(cfg: AgentLaunch, emit: Box<dyn Fn(Msg) + Send + Sync>) -> Result<Self, AiError> {
         // a single worker thread: this runtime drives one child's stdio and
         // a handful of correlation tasks, none of them CPU-bound, so extra
         // workers would add threads to the editor's own footprint for no
@@ -250,7 +250,7 @@ impl std::fmt::Debug for AiSession {
 /// client this crate drives: what to execute, how to name it in
 /// diagnostics, and whether it enforces authentication. `AiSession::spawn`
 /// drives an adapter's config internally through
-/// [`AiConfig::from_adapter`](crate::AiConfig::from_adapter); no ACP wire
+/// [`AgentLaunch::from_adapter`](crate::AgentLaunch::from_adapter); no ACP wire
 /// type is reachable through this trait, so a consumer choosing which agent
 /// to run never sees this crate's JSON-RPC shapes.
 pub trait AgentAdapter: Send + Sync {
@@ -333,7 +333,7 @@ mod tests {
     }
 
     /// The disconfirm the falsifiable check names, driven through the
-    /// adapter path rather than a raw `AiConfig`: a config built from an
+    /// adapter path rather than a raw `AgentLaunch`: a config built from an
     /// adapter whose binary does not exist must fail `spawn` synchronously,
     /// before any tokio task starts, exactly like a raw one does.
     #[test]
@@ -342,7 +342,7 @@ mod tests {
             "0.0.0",
             PathBuf::from("/no/such/path/view-ai-adapter-binary-does-not-exist"),
         );
-        let cfg = AiConfig::from_adapter(&adapter, std::env::temp_dir());
+        let cfg = AgentLaunch::from_adapter(&adapter, std::env::temp_dir());
         let err =
             AiSession::spawn(cfg, Box::new(|_| {})).expect_err("a missing agent cannot start");
         assert!(

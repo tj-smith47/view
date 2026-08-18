@@ -9,13 +9,15 @@
 //! boundary.
 
 mod acp;
+mod config;
 
 pub use acp::session::{AgentAdapter, AiSession, ClaudeCodeAdapter};
+pub use config::{AgentSpec, AiConfig, AiConfigError};
 
 /// Where the agent comes from and where it runs.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
-pub struct AiConfig {
+pub struct AgentLaunch {
     /// The agent executable.
     pub command: String,
     /// Arguments passed to it, in order.
@@ -31,7 +33,7 @@ pub struct AiConfig {
     pub requires_auth: bool,
 }
 
-impl AiConfig {
+impl AgentLaunch {
     /// An agent started from `command` with no arguments, in `cwd`.
     #[must_use]
     pub fn new(command: impl Into<String>, cwd: impl Into<std::path::PathBuf>) -> Self {
