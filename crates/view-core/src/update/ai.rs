@@ -108,19 +108,51 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 Some(crate::native::ai_panel::UsageStats { used, size, cost });
             model.dirty = true;
         }
-        // a turn ending or the session dying is the same point past which
-        // nothing will ever answer a still-open prompt as the driver's own
+        // a turn ending is the same point past which nothing will ever
+        // answer a still-open prompt as the driver's own
         // `cancel_open_permissions` settles on the wire (see that method's
         // doc); the panel side has no wire reply to send, but leaving
         // `pending_permission` set here would show a question the agent is
         // no longer waiting on an answer to
-        AiEvent::TurnEnded { .. } | AiEvent::SessionCrashed { .. } => {
+        AiEvent::TurnEnded { .. } => {
             if model.ai_panel_mut().pending_permission.take().is_some() {
                 model.dirty = true;
             }
         }
-        AiEvent::SessionReady { .. }
-        | AiEvent::ThoughtChunk { .. }
+        // The session dying is the same point-of-no-return `TurnEnded`'s
+        // own arm settles a pending permission at, plus its own persistent
+        // surface: `AiPanelState::local_error`'s own doc states why this is
+        // never a transient toast on its own -- a crashed long-running
+        // session is easy to miss in four seconds -- so the only thing this
+        // arm ever schedules a toast for is a session that never reached
+        // `SessionReady` at all (`panel.session_id` still `None`). That is
+        // the one case with no panel content yet for a user to notice the
+        // banner sitting in: the agent panel may not even be open, and a
+        // silent failure the first time someone tries the feature reads as
+        // "nothing happened" rather than "it broke."
+        AiEvent::SessionCrashed { message } => {
+            let panel = model.ai_panel_mut();
+            panel.pending_permission = None;
+            let never_became_ready = panel.session_id.is_none();
+            panel.local_error = Some(message.clone());
+            model.dirty = true;
+            if never_became_ready {
+                return model
+                    .engine
+                    .record_native_notice(format!("AI agent failed to start: {message}"), false);
+            }
+        }
+        // The session's own recovery from whatever `local_error` recorded:
+        // a session id only ever arrives once the handshake and
+        // `session/new` both succeeded, which is a stronger signal that
+        // the agent is working again than any timeout could be.
+        AiEvent::SessionReady { session_id } => {
+            let panel = model.ai_panel_mut();
+            panel.session_id = Some(session_id);
+            panel.local_error = None;
+            model.dirty = true;
+        }
+        AiEvent::ThoughtChunk { .. }
         | AiEvent::DiffProposed { .. }
         | AiEvent::FsReadRequested { .. }
         | AiEvent::FsWriteRequested { .. } => {}
@@ -362,10 +394,20 @@ mod tests {
         assert!(model.dirty);
     }
 
+    fn session_ready(session_id: &str) -> Msg {
+        Msg::Ai(AiEvent::SessionReady {
+            session_id: session_id.to_string(),
+        })
+    }
+
     /// The crash-side twin of `a_turn_ending_clears_a_still_pending_permission`.
+    /// Crashed after `SessionReady`, so this is the "was working, then
+    /// died" case: panel-local only, never a toast (see the production
+    /// arm's own doc for why).
     #[test]
     fn a_session_crash_clears_a_still_pending_permission() {
         let mut model = Model::new();
+        let _ = update(&mut model, session_ready("s1"));
         let _ = update(&mut model, permission_requested(1, "call_1", "allow-once"));
         model.dirty = false;
 
@@ -376,8 +418,125 @@ mod tests {
             }),
         );
 
-        assert!(effects.is_empty());
+        assert!(
+            effects.is_empty(),
+            "an already-active session's own crash is panel-local only: {effects:?}"
+        );
         assert_eq!(model.ai_panel().pending_permission, None);
+        assert!(model.dirty);
+    }
+
+    /// The falsifiable half of the crash-surfacing contract: `local_error`
+    /// must actually hold the agent's own message, not just clear the
+    /// permission slot -- a doctor row or a panel render reading `None`
+    /// here would show a healthy session for one that just died.
+    #[test]
+    fn a_session_crash_sets_the_panels_local_error_to_the_agents_own_message() {
+        let mut model = Model::new();
+        let _ = update(&mut model, session_ready("s1"));
+
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited (signal: 9)".to_string(),
+            }),
+        );
+
+        assert_eq!(
+            model.ai_panel().local_error,
+            Some("the agent exited (signal: 9)".to_string())
+        );
+    }
+
+    /// The other half of "the runtime loop's next paint stays within
+    /// budget" once a crash reaches this fold: `on_ai_event`'s
+    /// `SessionCrashed` arm touches no lock, no I/O, and nothing beyond a
+    /// handful of `Option`/`Vec` writes on `model`, so the wall clock is
+    /// measured here rather than assumed, the same way `view-ai`'s own
+    /// `killing_the_agent_mid_turn_reports_the_crash_within_a_tight_bound`
+    /// measures the crash reaching the channel in the first place; the two
+    /// together cover the whole path from a dead child process to a painted
+    /// banner. 1 millisecond is generously wide for pure in-memory work and
+    /// tight enough that a fold that started blocking on something would
+    /// fail it.
+    #[test]
+    fn folding_a_session_crash_into_local_error_completes_within_a_tight_bound() {
+        let mut model = Model::new();
+        let _ = update(&mut model, session_ready("s1"));
+
+        let started = std::time::Instant::now();
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited (signal: 9)".to_string(),
+            }),
+        );
+        let elapsed = started.elapsed();
+
+        assert!(model.ai_panel().local_error.is_some());
+        assert!(
+            elapsed < std::time::Duration::from_millis(1),
+            "folding a crash into local_error must not stall the paint that \
+             follows it: took {elapsed:?}"
+        );
+    }
+
+    /// The one case `SessionCrashed`'s own arm additionally toasts: a
+    /// session that never reached `SessionReady` at all, where the panel
+    /// may not even be open for `local_error`'s own banner to be visible
+    /// in -- a failed first attempt at the feature must not read as
+    /// "nothing happened."
+    #[test]
+    fn a_session_crash_before_the_session_ever_became_ready_also_toasts() {
+        let mut model = Model::new();
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "could not provision the claude-code agent".to_string(),
+            }),
+        );
+
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ScheduleToastExpiry { .. })),
+            "a spawn failure must schedule a toast, got {effects:?}"
+        );
+        let entry = model.engine.messages.entries.last().expect("a notice");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert!(
+            text.contains("could not provision the claude-code agent"),
+            "the toast must name what the agent reported: {text:?}"
+        );
+        assert_eq!(
+            model.ai_panel().local_error,
+            Some("could not provision the claude-code agent".to_string()),
+            "the persistent banner is still owed alongside the toast"
+        );
+    }
+
+    /// The recovery half: a fresh `SessionReady` must clear whatever
+    /// `local_error` a previous crash left behind, or a doctor row / panel
+    /// render would keep reporting a dead session the agent has since
+    /// replaced.
+    #[test]
+    fn a_session_ready_binds_the_session_id_and_clears_any_previous_local_error() {
+        let mut model = Model::new();
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited".to_string(),
+            }),
+        );
+        assert!(model.ai_panel().local_error.is_some());
+        model.dirty = false;
+
+        let effects = update(&mut model, session_ready("s2"));
+
+        assert!(effects.is_empty());
+        assert_eq!(model.ai_panel().session_id, Some("s2".to_string()));
+        assert_eq!(model.ai_panel().local_error, None);
         assert!(model.dirty);
     }
 

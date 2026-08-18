@@ -23,7 +23,8 @@ use std::path::PathBuf;
 use view_core::grid::Grid;
 use view_core::model::Tier;
 use view_core::native::views::{
-    AiPanelView, PaletteRow, PaletteView, PickerView, PromptView, StatuslineView, TreeRow, TreeView,
+    AiPanelView, PaletteRow, PaletteView, PickerView, PromptView, Span, StatuslineView, TreeRow,
+    TreeView,
 };
 use view_surface::{Layer, LayerKind, Rect, Surface};
 
@@ -145,6 +146,19 @@ fn palette() -> LayerKind {
 /// since a real transcript row needs a live agent to produce one.
 fn ai_panel() -> LayerKind {
     LayerKind::Ai(AiPanelView::new("AI Agent"))
+}
+
+/// A crashed session's panel-local banner, distinct from the empty panel
+/// [`ai_panel`] dumps: the falsifiable check for "never stalls paint" is a
+/// latency claim (`native_overlay_goldens` cannot measure that), but the
+/// banner reaching the painted frame at every tier is a framing claim this
+/// file's whole point is to pin.
+fn crashed_ai_panel() -> LayerKind {
+    LayerKind::Ai(
+        AiPanelView::new("AI Agent").with_local_error(vec![vec![Span::plain(
+            "Error: the agent exited (signal: 9)".to_string(),
+        )]]),
+    )
 }
 
 /// A picker is the widest and tallest of the five, so it is the one whose
@@ -280,4 +294,28 @@ fn standard_ai_panel() {
 #[test]
 fn basic_ai_panel() {
     assert_golden("basic-ai-panel", &dump(Tier::Basic, 30, 7, ai_panel()));
+}
+
+#[test]
+fn full_crashed_ai_panel() {
+    assert_golden(
+        "full-crashed-ai-panel",
+        &dump(Tier::Full, 30, 7, crashed_ai_panel()),
+    );
+}
+
+#[test]
+fn standard_crashed_ai_panel() {
+    assert_golden(
+        "standard-crashed-ai-panel",
+        &dump(Tier::Standard, 30, 7, crashed_ai_panel()),
+    );
+}
+
+#[test]
+fn basic_crashed_ai_panel() {
+    assert_golden(
+        "basic-crashed-ai-panel",
+        &dump(Tier::Basic, 30, 7, crashed_ai_panel()),
+    );
 }

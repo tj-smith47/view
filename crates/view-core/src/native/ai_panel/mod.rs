@@ -116,8 +116,9 @@ impl AiPanelState {
     /// The panel's current paint frame: the composer line as typed, the
     /// transcript rendered oldest first (see [`Transcript::rendered_rows`]
     /// for how a paint that follows a lone folded chunk avoids re-rendering
-    /// every earlier entry), and the pending permission prompt's own rows
-    /// when one is outstanding (see [`PermissionPrompt::render_rows`]).
+    /// every earlier entry), the crash banner when [`Self::local_error`] is
+    /// set, and the pending permission prompt's own rows when one is
+    /// outstanding (see [`PermissionPrompt::render_rows`]).
     ///
     /// A prompt sitting on an un-entered panel (auto-opened, see
     /// [`Self::focused`]'s doc) is otherwise unanswerable -- nothing on
@@ -131,9 +132,12 @@ impl AiPanelState {
     /// one always-visible place to say how to get back out.
     #[must_use]
     pub fn view(&self) -> AiPanelView {
-        let view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
+        let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
             .with_rows(self.transcript.rendered_rows());
+        if let Some(message) = &self.local_error {
+            view = view.with_local_error(vec![vec![Span::plain(format!("Error: {message}"))]]);
+        }
         match &self.pending_permission {
             Some(prompt) => {
                 let mut rows = prompt.render_rows();
@@ -200,6 +204,27 @@ mod tests {
         assert!(
             view.pending_permission.is_empty(),
             "no permission is pending, so there is nothing extra to draw"
+        );
+        assert!(
+            view.local_error.is_empty(),
+            "nothing crashed, so there is no banner to draw"
+        );
+    }
+
+    /// The falsifiable half of the crash-surfacing contract: a session
+    /// that set `local_error` must show up in the paint frame itself, not
+    /// only in state nothing ever reads -- the same "state without a view
+    /// arm is invisible" bar `pending_permission`'s own test above holds.
+    #[test]
+    fn a_local_error_renders_as_the_panels_own_banner_row() {
+        let mut state = AiPanelState::new();
+        state.local_error = Some("the agent exited (signal: 9)".to_string());
+        let view = state.view();
+        assert_eq!(
+            view.local_error,
+            vec![vec![Span::plain(
+                "Error: the agent exited (signal: 9)".to_string()
+            )]]
         );
     }
 

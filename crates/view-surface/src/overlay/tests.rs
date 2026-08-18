@@ -439,6 +439,61 @@ fn a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first()
     );
 }
 
+/// The crash banner's own falsifiable check, the same shape
+/// `an_ai_panel_with_a_pending_permission_renders_its_question_and_options`
+/// proves for the permission prompt: a session-local error has to reach the
+/// painted frame, not only `AiPanelView`'s own field.
+#[test]
+fn an_ai_panel_with_a_local_error_renders_its_crash_banner() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("")
+            .with_local_error(vec![vec![Span::plain(
+                "Error: the agent exited (signal: 9)".to_string(),
+            )]]),
+    );
+    let framed = rows(50, 8, &kind, BorderSet::ASCII);
+    assert!(
+        line_text(&framed.lines[2]).contains("the agent exited"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[3]).contains("---"),
+        "the rule still separates the header from the transcript once a \
+         crash banner has grown it"
+    );
+}
+
+/// A crashed session is unmissable even if the overlay is too short to show
+/// everything: the banner must survive, on the same "actionable content
+/// outlives context" terms `a_short_ai_panel_keeps_the_permissions_options_and_drops_the_question_first`
+/// proves for the permission prompt.
+#[test]
+fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("draft prompt")
+            .with_local_error(vec![vec![Span::plain(
+                "Error: the agent exited (signal: 9)".to_string(),
+            )]]),
+    );
+    // interior = height - 2 = 2: room for exactly one header row and the
+    // rule, not both the composer line and the banner above them
+    let framed = rows(50, 4, &kind, BorderSet::ASCII);
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(
+        text.iter().any(|line| line.contains("the agent exited")),
+        "the crash banner must survive truncation: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("draft prompt")),
+        "the composer line is context, sacrificed first under truncation: {text:?}"
+    );
+}
+
 #[test]
 fn a_tier_maps_to_exactly_one_border_charset() {
     assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);

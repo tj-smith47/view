@@ -420,10 +420,10 @@ struct Body {
     /// short for all of it: `false` (every kind but [`ai_body`]) keeps the
     /// first `height` rows, the shape a prompt or picker's own message-then-
     /// input-then-rule ordering wants. `true` keeps the last `height` rows
-    /// instead -- `ai_body`'s only user, where the tail is the pending
-    /// permission's answerable options and the head is the question and
-    /// composer line above them; those options are the actionable content
-    /// a request blocking the agent's own turn cannot be shown without,
+    /// instead -- `ai_body`'s only user, where the tail is the crash banner
+    /// and the pending permission's answerable options, and the head is
+    /// the question and composer line above them; a crashed session or a
+    /// request blocking the agent's own turn cannot be shown without those,
     /// while the question is context that can be sacrificed first.
     header_keep_tail: bool,
 }
@@ -617,15 +617,21 @@ fn palette_body(view: &PaletteView) -> Body {
 /// picker match or a palette command does, so there is nothing here for a
 /// cursor position to point at.
 ///
-/// The pending permission prompt's rows, when there are any, are drawn
-/// between the composer line and the rule -- part of the header that always
-/// shows, never a scrolling item, since a request blocking the agent's own
-/// turn must stay visible however far the transcript has scrolled.
+/// The crash banner and the pending permission prompt's rows, when either
+/// is present, are drawn between the composer line and the rule -- part of
+/// the header that always shows, never a scrolling item, since a crashed
+/// session or a request blocking the agent's own turn must both stay
+/// visible however far the transcript has scrolled. The banner is drawn
+/// first: a crash already cleared any pending permission (see
+/// `update/ai.rs`'s `on_ai_event`), so the two never actually appear
+/// together, and this ordering is what a future case where they did would
+/// fall back to.
 fn ai_body(view: &AiPanelView) -> Body {
     let mut header = vec![Line::Text(plain_spans(format!(
         "{PROMPT_MARK} {}",
         view.input
     )))];
+    header.extend(view.local_error.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     header.push(Line::Rule);
     Body {
@@ -633,9 +639,10 @@ fn ai_body(view: &AiPanelView) -> Body {
         header,
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
-        // the pending permission's options are the actionable content of
-        // this header; see `Body::header_keep_tail`'s own doc for why they
-        // must outlive the question and composer line under truncation
+        // the crash banner and the pending permission's options are the
+        // actionable content of this header; see `Body::header_keep_tail`'s
+        // own doc for why they must outlive the question and composer line
+        // under truncation
         header_keep_tail: true,
     }
 }

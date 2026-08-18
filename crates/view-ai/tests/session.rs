@@ -6,7 +6,7 @@
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use view_ai::{AgentLaunch, AiSession};
 use view_core::msg::Msg;
@@ -183,6 +183,40 @@ fn an_agent_that_dies_mid_turn_is_reported_not_swallowed() {
     }
 }
 
+/// The falsifiable half of "never stalls paint" this crate owns: from the
+/// command that kills the stub child to `SessionCrashed` reaching the
+/// caller's channel is process exit detection (the child is already dead,
+/// so `Child::wait` resolves at once) plus a channel send, neither of which
+/// waits on anything external -- unlike `next_event`'s own `WAIT`, a ceiling
+/// generous enough to absorb CI scheduling noise on every other test in this
+/// file, this bound is the claim itself: a regression that made the crash
+/// path block (on a lock, a retry, a second I/O round trip) would still pass
+/// under `WAIT` and would only be caught here. 2 seconds is the same
+/// watchdog width `view-engine`'s own burst test
+/// (`ten_thousand_undrained_folds_produce_at_most_one_channel_token`) uses
+/// for an identical class of claim, not a number tuned to this run.
+#[test]
+fn killing_the_agent_mid_turn_reports_the_crash_within_a_tight_bound() {
+    let (session, rx) = session();
+    ready(&rx);
+    let started = Instant::now();
+    session.send(AiCommand::Prompt {
+        text: "die".to_string(),
+        context: Vec::new(),
+    });
+    let event = next_event(&rx, "SessionCrashed");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(event, AiEvent::SessionCrashed { .. }),
+        "expected SessionCrashed, got {event:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "a crash mid-turn must reach the caller promptly, not stall the loop \
+         that is waiting to paint it: took {elapsed:?}"
+    );
+}
+
 #[test]
 fn every_streamed_chunk_kind_reaches_its_own_arm() {
     let (session, rx) = session();
@@ -336,6 +370,18 @@ fn a_cancel_settles_every_permission_request_the_agent_is_holding() {
             message_id: Some("msg_1".to_string()),
             text: "chose none".to_string(),
             from_agent: true,
+        }
+    );
+
+    // the other half of the contract: the agent's own reply to the
+    // original session/prompt call carries stopReason "cancelled", not
+    // "end_turn" -- proof that the client's session/cancel notification
+    // itself reached the agent, not just the permission's own cancelled
+    // outcome
+    assert_eq!(
+        next_event(&rx, "TurnEnded"),
+        AiEvent::TurnEnded {
+            stop_reason: StopReason::Cancelled
         }
     );
 }

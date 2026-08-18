@@ -62,6 +62,14 @@ fn main() {
     // authenticating first -- an attempt counter would let any second
     // attempt through regardless of whether authentication happened.
     let mut authenticated = false;
+    // Set on `session/cancel` and consulted the next time a pending prompt
+    // is resolved: the transport requires this fixture's own reply to
+    // `session/prompt` to carry `stopReason: "cancelled"` once the client
+    // cancelled the turn, not the `"end_turn"` every other path answers
+    // with, so a client that only settled the permission's own outcome and
+    // never actually notified `session/cancel` is distinguishable from one
+    // that did both.
+    let mut cancelled = false;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -92,7 +100,8 @@ fn main() {
                         "agent_message_chunk",
                         &format!("chose {chosen}"),
                     );
-                    end_prompt(&mut stdout, &mut pending_prompt);
+                    end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
+                    cancelled = false;
                 }
                 Some("fs-read-1") => {
                     let content = frame["result"]["content"]
@@ -104,7 +113,8 @@ fn main() {
                         "agent_message_chunk",
                         &format!("read {content}"),
                     );
-                    end_prompt(&mut stdout, &mut pending_prompt);
+                    end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
+                    cancelled = false;
                 }
                 Some("fs-write-1") => {
                     let outcome = if frame.get("error").is_some() {
@@ -113,7 +123,8 @@ fn main() {
                         "wrote"
                     };
                     chunk(&mut stdout, "agent_message_chunk", outcome);
-                    end_prompt(&mut stdout, &mut pending_prompt);
+                    end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
+                    cancelled = false;
                 }
                 _ => {}
             }
@@ -122,7 +133,11 @@ fn main() {
 
         let Some(id) = id else {
             // a notification; the only one this fixture is sent is
-            // session/cancel, which needs no answer
+            // session/cancel, which flips the flag `end_prompt`'s stop
+            // reason is read from the next time a pending prompt resolves
+            if method == "session/cancel" {
+                cancelled = true;
+            }
             continue;
         };
 
@@ -304,13 +319,28 @@ fn auth_methods() -> serde_json::Value {
     }
 }
 
-fn end_prompt(stdout: &mut std::io::Stdout, pending: &mut Option<serde_json::Value>) {
+fn end_prompt(
+    stdout: &mut std::io::Stdout,
+    pending: &mut Option<serde_json::Value>,
+    stop_reason: &str,
+) {
     if let Some(prompt) = pending.take() {
         reply(
             stdout,
             prompt,
-            serde_json::json!({ "stopReason": "end_turn" }),
+            serde_json::json!({ "stopReason": stop_reason }),
         );
+    }
+}
+
+/// The wire's own two spellings this fixture ever answers a resolved
+/// prompt with: `"cancelled"` once `session/cancel` arrived since the
+/// prompt was issued, `"end_turn"` otherwise.
+fn stop_reason_for(cancelled: bool) -> &'static str {
+    if cancelled {
+        "cancelled"
+    } else {
+        "end_turn"
     }
 }
 

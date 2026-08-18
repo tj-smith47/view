@@ -592,6 +592,11 @@ pub struct AiPanelView {
     /// when nothing is pending, which is what tells `view-surface`'s own
     /// `ai_body` there is nothing extra to draw above the transcript.
     pub pending_permission: Vec<Vec<Span>>,
+    /// The panel-local crash banner's own row, when the session it belongs
+    /// to has one -- see `AiPanelState::local_error`'s own doc for why this
+    /// is never a transient toast. Empty when nothing crashed, on the same
+    /// "empty means nothing extra to draw" terms `pending_permission` uses.
+    pub local_error: Vec<Vec<Span>>,
 }
 
 impl AiPanelView {
@@ -624,6 +629,15 @@ impl AiPanelView {
     pub fn with_pending_permission(self, rows: Vec<Vec<Span>>) -> Self {
         Self {
             pending_permission: rows,
+            ..self
+        }
+    }
+
+    /// The same panel showing `rows` as its panel-local crash banner.
+    #[must_use]
+    pub fn with_local_error(self, rows: Vec<Vec<Span>>) -> Self {
+        Self {
+            local_error: rows,
             ..self
         }
     }
