@@ -37,8 +37,8 @@ done
 for dep in view view-engine view-tui view-oracle view-bench; do
   check_absent view-ai "$dep"
 done
-# the view-native <-> view-ai mutual forbid at L36-37 is unrelated to tokio
-# and stays verbatim
+# the view-native <-> view-ai mutual forbid below is unrelated to tokio
+# and stays
 check_absent view-native view-ai
 check_absent view-ai view-native
 for crate in view-core view-engine view-surface view-native view-ai view-oracle view-bench view view-harness; do
