@@ -214,6 +214,12 @@ pub(crate) struct LoopChannels {
     pub(crate) osc52: mpsc::Sender<Osc52Job>,
     pub(crate) picker: mpsc::Sender<view_native::picker::matcher::WorkerRequest>,
     pub(crate) msg: crate::wake::LoopSender,
+    /// The project's agent session worker -- see `Executor`'s own `ai`
+    /// field doc for why this outlives any single engine the same way the
+    /// other three do: a session already running, or already being spawned,
+    /// must not be torn down and re-spawned just because the engine
+    /// underneath it restarted.
+    pub(crate) ai: crate::ai_worker::AiWorker,
 }
 
 impl LoopChannels {
@@ -234,6 +240,7 @@ impl LoopChannels {
             .with_osc52(self.osc52.clone())
             .with_toast_timer(self.msg.clone())
             .with_picker(self.picker.clone())
+            .with_ai(self.ai.clone())
     }
 }
 
@@ -413,6 +420,19 @@ mod tests {
     /// them wired to anything: these tests are about what [`step`] does with
     /// a flow, and a takeover or a theme write would only add traffic to the
     /// recorder they assert on.
+    /// An `AiWorker` these tests never dispatch through: `[ai]` is off in
+    /// every fixture here, so no `Effect::Ai` is ever produced for it to
+    /// answer, and building a real one only needs a `LoopSender` clone --
+    /// see `ai_worker::AiWorker::new`'s own doc for why it never touches
+    /// the network until `dispatch` is actually called.
+    fn inert_ai_worker(msg: &crate::wake::LoopSender) -> crate::ai_worker::AiWorker {
+        crate::ai_worker::AiWorker::new(
+            view_ai::AgentSpec::Id("claude-code".to_string()),
+            std::path::PathBuf::from("."),
+            msg.clone(),
+        )
+    }
+
     fn inert_follow_ups<'a>(
         native: &'a mut crate::native::NativeSession,
         theme: &'a mut crate::bridge::ThemeBridge,
@@ -606,11 +626,13 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
-            msg: crate::wake::LoopSender::new(msg_tx),
+            ai: inert_ai_worker(&msg),
+            msg,
         };
         let respawn = || view_engine::process::EngineConfig::isolated();
         let mut engine = Engine::spawn(respawn()).unwrap();
@@ -720,11 +742,13 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
-            msg: crate::wake::LoopSender::new(msg_tx),
+            ai: inert_ai_worker(&msg),
+            msg,
         };
         let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
@@ -946,11 +970,13 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
-            msg: crate::wake::LoopSender::new(msg_tx),
+            ai: inert_ai_worker(&msg),
+            msg,
         };
         // the relay double, so killing the client closes the pipes the way
         // the loss of a real connection does: the plain stand-in hands its

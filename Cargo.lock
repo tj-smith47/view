@@ -2568,6 +2568,7 @@ dependencies = [
  "clap",
  "rustix",
  "serde",
+ "thiserror 2.0.18",
  "toml",
  "view-ai",
  "view-core",

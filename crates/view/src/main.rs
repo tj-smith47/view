@@ -3,6 +3,7 @@
 //! paint, background attach, pre-attach key buffering) lives in
 //! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
+mod ai_worker;
 mod bridge;
 mod clipboard;
 mod engine_ops;
@@ -634,7 +635,10 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
 }
 
 /// Resolves `[ai]` from `view.toml` into `model.ai_enabled`, returning
-/// whatever notice a broken config owes the user.
+/// whatever notice a broken config owes the user alongside which agent
+/// `[ai]` names -- the same resolution `ai_worker::AiWorker` is later built
+/// from, read once here rather than a second time at that call site so the
+/// two can never disagree about what one `view.toml` said.
 ///
 /// Hoisted out of `main` so the fail-closed leg -- the one that rots
 /// silently, since a broken `[ai]` table is rare in practice -- is
@@ -643,21 +647,28 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
 /// one path: a file that exists but cannot be read or parsed fails toward
 /// disabled rather than the enabled default the successful case leaves it
 /// at, so a broken config can only ever narrow what a user's untouched
-/// `view.toml` already granted, never silently widen it.
-fn seed_ai_enabled(config_path: Option<&std::path::Path>, model: &mut Model) -> Vec<Effect> {
+/// `view.toml` already granted, never silently widen it. The agent spec
+/// returned on that path is `AiConfig::default`'s, which is never acted on:
+/// `model.ai_enabled` is false, so nothing ever asks the worker to spawn.
+fn seed_ai_enabled(
+    config_path: Option<&std::path::Path>,
+    model: &mut Model,
+) -> (Vec<Effect>, view_ai::AgentSpec) {
     match view_ai::AiConfig::load(config_path) {
         Ok(cfg) => {
             model.ai_enabled = cfg.enabled();
-            Vec::new()
+            let agent = cfg.agent_spec().clone();
+            (Vec::new(), agent)
         }
         Err(err) => {
             model.ai_enabled = false;
-            model.engine.record_native_notice(
+            let effects = model.engine.record_native_notice(
                 format!(
                     "view: could not read [ai] from view.toml ({err}); the AI agent panel is disabled this run"
                 ),
                 false,
-            )
+            );
+            (effects, view_ai::AiConfig::default().agent_spec().clone())
         }
     }
 }
@@ -759,7 +770,8 @@ fn main() -> Result<()> {
 
     let config_path = resolve_config_path(&cli);
 
-    pre_executor_effects.extend(seed_ai_enabled(config_path.as_deref(), &mut model));
+    let (ai_seed_effects, ai_agent) = seed_ai_enabled(config_path.as_deref(), &mut model);
+    pre_executor_effects.extend(ai_seed_effects);
 
     match &config_path {
         Some(path) => {
@@ -972,6 +984,7 @@ fn main() -> Result<()> {
         },
         &mut follow_ups,
         &mut term,
+        ai_agent,
     )?;
     vlog::log_with("engine", || format!("exit code={exit_code}"));
     // std::process::exit bypasses destructors, so the terminal must be
@@ -2041,7 +2054,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = \"not a bool\"\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let effects = seed_ai_enabled(Some(&path), &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), &mut model);
         assert!(
             !model.ai_enabled,
             "an unreadable/invalid [ai] table must fail closed, not silently widen the surface"
@@ -2069,7 +2082,7 @@ mod tests {
         let path = dir.join("view.toml");
         std::fs::write(&path, "[ai]\nenabled = false\n").unwrap();
         let mut model = Model::with_term_size(80, 24);
-        let effects = seed_ai_enabled(Some(&path), &mut model);
+        let (effects, _agent) = seed_ai_enabled(Some(&path), &mut model);
         assert!(
             !model.ai_enabled,
             "a valid [ai] enabled = false must seed the configured value, not the default"
@@ -2080,11 +2093,35 @@ mod tests {
         );
 
         let mut absent = Model::with_term_size(80, 24);
-        let effects = seed_ai_enabled(None, &mut absent);
+        let (effects, agent) = seed_ai_enabled(None, &mut absent);
         assert!(
             absent.ai_enabled,
             "no config path at all is the documented default-on case"
         );
         assert!(effects.is_empty(), "{effects:?}");
+        assert_eq!(
+            agent,
+            view_ai::AgentSpec::Id("claude-code".to_string()),
+            "the absent-config default must resolve the same agent AiConfig::default names"
+        );
+    }
+
+    /// The agent `ai_worker::AiWorker` is later built from is the same one
+    /// `[ai]` named, not a second, independent read of the file: a
+    /// `command = [...]` line resolves to `AgentSpec::Command`, carrying the
+    /// exact argv this build will spawn.
+    #[test]
+    fn a_command_agent_spec_resolves_to_the_configured_argv() {
+        let dir = view_test_support::ScratchDir::new("seed-ai-enabled-command").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nagent = [\"my-agent\", \"--flag\"]\n").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let (effects, agent) = seed_ai_enabled(Some(&path), &mut model);
+        assert!(effects.is_empty(), "{effects:?}");
+        assert!(model.ai_enabled);
+        assert_eq!(
+            agent,
+            view_ai::AgentSpec::Command(vec!["my-agent".to_string(), "--flag".to_string()])
+        );
     }
 }

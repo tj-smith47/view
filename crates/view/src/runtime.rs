@@ -123,6 +123,13 @@ pub struct Executor<E: EngineOps> {
     /// (`toast_timer`) or, like this one, mutated from behind `&self` by
     /// more than one effect over the executor's lifetime.
     tree_scan_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
+    /// The project's agent session worker, or `None` when `[ai]` is
+    /// disabled -- the one degrade in this type that is never reachable in
+    /// practice rather than merely untested: `update()`'s own
+    /// `Msg::FeatureInvoke` gate refuses to ever produce an `Effect::Ai`
+    /// while `model.ai_enabled` is false (see `notice_ai_disabled`), so no
+    /// command can arrive here with nothing wired to take it.
+    ai: Option<crate::ai_worker::AiWorker>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -191,7 +198,7 @@ fn drain_osc52<S: Osc52Sink>(osc52_rx: &mpsc::Receiver<Osc52Job>, sink: &mut S) 
 /// Returns whether the thread was actually spawned, for the one caller
 /// (`Effect::TreeGitScan`) whose reply, unlike every other one here,
 /// clears a state machine flag with no other clearer.
-fn spawn_or_log<F>(label: &'static str, f: F) -> bool
+pub(crate) fn spawn_or_log<F>(label: &'static str, f: F) -> bool
 where
     F: FnOnce() + Send + 'static,
 {
@@ -220,6 +227,7 @@ impl<E: EngineOps> Executor<E> {
             toast_timer: None,
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
+            ai: None,
         }
     }
 
@@ -264,6 +272,14 @@ impl<E: EngineOps> Executor<E> {
         tx: mpsc::Sender<view_native::picker::matcher::WorkerRequest>,
     ) -> Self {
         self.picker = Some(tx);
+        self
+    }
+
+    /// Wires the agent session worker; `Effect::Ai` forwards to it instead
+    /// of silently no-oping.
+    #[must_use]
+    pub(crate) fn with_ai(mut self, worker: crate::ai_worker::AiWorker) -> Self {
+        self.ai = Some(worker);
         self
     }
 
@@ -665,6 +681,19 @@ impl<E: EngineOps> Executor<E> {
                             verb,
                         });
                     });
+                }
+                Flow::Continue
+            }
+            // Forwards to the live agent session, spawning one lazily on
+            // the first command this project ever issues (see
+            // `AiWorker::dispatch`'s own doc for why the spawn -- which may
+            // provision an adapter over the network -- runs on its own
+            // thread rather than this one). `None` only when `[ai]` is
+            // disabled; see the `ai` field's own doc for why nothing can
+            // reach this arm in that case.
+            Effect::Ai(command) => {
+                if let Some(worker) = &self.ai {
+                    worker.dispatch(command);
                 }
                 Flow::Continue
             }
@@ -1308,6 +1337,7 @@ pub fn run(
     inputs: InputHandles<'_>,
     follow_ups: &mut FollowUps<'_>,
     term: &mut Term,
+    ai_agent: view_ai::AgentSpec,
 ) -> anyhow::Result<(Model, i32)> {
     let EngineSession {
         mut engine,
@@ -1344,11 +1374,17 @@ pub fn run(
     // `_clipboard_worker` above: the matcher worker exits once `picker_tx`
     // drops at the end of this function
     let _picker_worker = view_native::picker::matcher::spawn(picker_rx, msg_tx.clone());
+    // built from the model's own cwd, resolved once at startup
+    // (`main.rs`'s `Model::with_cwd`) and never reassigned afterward, so an
+    // engine restart's fresh `Executor` re-wiring this same worker (below)
+    // still targets the one project this session was ever asked about
+    let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone());
     let channels = LoopChannels {
         clipboard: clipboard_tx,
         osc52: osc52_tx,
         picker: picker_tx,
         msg: msg_tx,
+        ai,
     };
     let mut executor = channels.executor(engine.handle.clone(), clipboard_route.epoch());
     let mut write_stall = OutboxStallWatch::default();
