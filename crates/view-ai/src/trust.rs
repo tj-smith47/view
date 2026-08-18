@@ -220,7 +220,17 @@ fn persist(path: Option<&Path>, trusted: &BTreeSet<PathBuf>) -> Result<(), Trust
     };
     let text =
         toml::to_string_pretty(&wire).map_err(|source| TrustError::Serialize(Box::new(source)))?;
-    let tmp_path = parent.join(format!(".trusted-projects.toml.{}.tmp", std::process::id()));
+    // pid alone collides between two concurrent `set_trusted` calls in one
+    // process: `Effect::AiTrustSet` runs on a spawned thread per effect, so
+    // two answers in flight share a pid. The counter makes each call's temp
+    // name unique within the process too; `rename` is still what makes each
+    // individual write atomic.
+    static TMP_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nonce = TMP_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp_path = parent.join(format!(
+        ".trusted-projects.toml.{}.{nonce}.tmp",
+        std::process::id()
+    ));
     std::fs::write(&tmp_path, &text).map_err(|source| TrustError::Write {
         path: path.to_path_buf(),
         source,
@@ -303,8 +313,17 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 /// caller's next syscall," the same residual TOCTOU window every
 /// canonicalize-then-use pattern carries and no path-containment check can
 /// close outright. `Ok(None)` is the answer for "resolves outside `root`,"
-/// or for a tail that cannot be safely resolved (see above) -- never an
-/// `Err` for either.
+/// for a tail that cannot be safely resolved (see above), or for a relative
+/// `candidate` (see precondition below) -- never an `Err` for either.
+///
+/// `candidate` must be absolute. The ACP wire shapes this gates (an agent's
+/// read/write requests) always carry absolute paths, so a relative
+/// `candidate` reaching this function is already a caller bug, not a
+/// filesystem fact to report -- resolving it against this process's cwd
+/// would answer a question about the wrong directory, and refusing it as
+/// `Err` would read as a filesystem problem rather than the policy refusal
+/// it is. A relative `candidate` therefore returns `Ok(None)` deterministically,
+/// without touching the filesystem at all.
 ///
 /// Free function, not a `TrustStore` method: no store state is needed, and
 /// both the read and the write side of an agent's file access run this on
@@ -322,6 +341,9 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 /// cannot answer the question, not that this function found an answer and
 /// it was "outside."
 pub fn path_is_contained(root: &Path, candidate: &Path) -> Result<Option<PathBuf>, TrustError> {
+    if !candidate.is_absolute() {
+        return Ok(None);
+    }
     let root = std::fs::canonicalize(root).map_err(|source| TrustError::Canonicalize {
         path: root.to_path_buf(),
         source,
@@ -369,9 +391,14 @@ fn resolve_deepest_existing_ancestor(
             return Ok((canonical, components[split..].to_vec()));
         }
         if split == 0 {
-            // nothing along this path resolves, not even the filesystem
-            // root -- canonicalize the original candidate to surface a
-            // real, specific error instead of inventing one
+            // reachable only for an absolute candidate whose filesystem
+            // root itself has no entry, which does not happen on any real
+            // system (path_is_contained already refuses relative candidates
+            // before calling this). Every prefix down to the empty one has
+            // already failed symlink_metadata above, so a canonicalize call
+            // here could not report anything canonicalize itself would not
+            // also report as NotFound -- fabricate that error directly
+            // instead of spending a syscall to reproduce it.
             return Err(TrustError::Canonicalize {
                 path: path.to_path_buf(),
                 source: std::io::Error::from(std::io::ErrorKind::NotFound),
@@ -670,5 +697,50 @@ mod tests {
             );
             let _ = std::fs::remove_dir_all(&base);
         }
+    }
+
+    /// The single most load-bearing line in the containment check: the
+    /// `ParentDir` refusal on the *unresolved tail*. Neither of the other
+    /// `..` tests reaches it -- both use `root/..`, which exists on disk, so
+    /// `resolve_deepest_existing_ancestor` consumes the `..` during
+    /// canonicalization and it never lands in the tail at all. This drives a
+    /// `..` behind a component that does not exist yet (`nodir`), so the
+    /// walk stops at `root` and the tail is `["nodir", "..", "..",
+    /// "escaped-evil", "target.txt"]`: without the refusal, the literal
+    /// re-append would produce `root/nodir/../../escaped-evil/target.txt`,
+    /// whose *components* share `root`'s prefix, so an unresolved
+    /// `starts_with` would wrongly answer `Some` for a path two levels
+    /// outside `root`.
+    #[test]
+    fn path_is_contained_rejects_a_dot_dot_escape_via_component_arithmetic_in_an_unresolved_tail() {
+        let root = scratch_dir("tail-dotdot-root");
+        let candidate = root
+            .join("nodir")
+            .join("..")
+            .join("..")
+            .join("escaped-evil")
+            .join("target.txt");
+        assert!(!root.join("nodir").exists(), "fixture must not pre-exist");
+        assert_eq!(
+            path_is_contained(&root, &candidate).expect("must resolve"),
+            None,
+            "a `..` that only exists in the unresolved tail must still be refused"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// [`path_is_contained`]'s absolute-candidate precondition: a relative
+    /// candidate must refuse deterministically rather than resolving against
+    /// this process's cwd (a question about the wrong directory) or erroring
+    /// as if the filesystem itself could not answer.
+    #[test]
+    fn path_is_contained_refuses_a_relative_candidate_without_touching_the_filesystem() {
+        let root = scratch_dir("relative-candidate-root");
+        assert_eq!(
+            path_is_contained(&root, Path::new("relative-file.txt")).expect("must resolve"),
+            None,
+            "a relative candidate must be refused, not resolved against the process cwd"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
