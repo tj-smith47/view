@@ -168,6 +168,12 @@ pub fn render_table() -> String {
 /// through the same mechanism a registry feature's claim does, rather than
 /// being dropped for lacking a `FeatureDesc` row (see
 /// `view_native::report::report`, which now checks this table as a fallback).
+///
+/// Deliberately NOT `#[non_exhaustive]`: the only place this type is ever
+/// built is its own static table, [`REGISTRY_EXEMPT_FEATURES`], right below
+/// -- there is no caller outside this module for a hidden field to protect
+/// against, and closing it off would just make that one table literal
+/// unbuildable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExemptFeatureDesc {
     /// Stable id, spelled identically to the id [`MappingSpec::feature`]

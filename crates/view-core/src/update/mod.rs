@@ -998,7 +998,7 @@ fn picker_preview_request(state: &mut crate::native::picker::PickerState) -> Vec
 fn notice_ai_disabled(model: &mut Model) -> Vec<Effect> {
     model.dirty = true;
     model.engine.record_native_notice(
-        "view: the AI agent panel is off -- turn it on with [ai] enabled = true in view.toml"
+        "view: the AI agent panel is off -- turn it on with ai.enabled = true in view.toml"
             .to_string(),
         false,
     )

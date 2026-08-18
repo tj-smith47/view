@@ -633,6 +633,35 @@ fn resolve_config_path(cli: &Cli) -> Option<std::path::PathBuf> {
     cli.config.clone().or_else(view_native::paths::config_path)
 }
 
+/// Resolves `[ai]` from `view.toml` into `model.ai_enabled`, returning
+/// whatever notice a broken config owes the user.
+///
+/// Hoisted out of `main` so the fail-closed leg -- the one that rots
+/// silently, since a broken `[ai]` table is rare in practice -- is
+/// assertable directly rather than only by reading the match arm. Diverges
+/// from `AiConfig::load`'s own "no file is the full experience" contract on
+/// one path: a file that exists but cannot be read or parsed fails toward
+/// disabled rather than the enabled default the successful case leaves it
+/// at, so a broken config can only ever narrow what a user's untouched
+/// `view.toml` already granted, never silently widen it.
+fn seed_ai_enabled(config_path: Option<&std::path::Path>, model: &mut Model) -> Vec<Effect> {
+    match view_ai::AiConfig::load(config_path) {
+        Ok(cfg) => {
+            model.ai_enabled = cfg.enabled();
+            Vec::new()
+        }
+        Err(err) => {
+            model.ai_enabled = false;
+            model.engine.record_native_notice(
+                format!(
+                    "view: could not read [ai] from view.toml ({err}); the AI agent panel is disabled this run"
+                ),
+                false,
+            )
+        }
+    }
+}
+
 fn main() -> Result<()> {
     // startup's own VIEW_LOG "startup" line (see startup::paint_shell_frame)
     // measures the shell-paint budget from this instant, not from
@@ -730,27 +759,7 @@ fn main() -> Result<()> {
 
     let config_path = resolve_config_path(&cli);
 
-    // seeded here, once, before the engine exists, for the same reason
-    // `model.ai_trusted` is above: `update()` cannot read `view.toml`, so
-    // whether the feature is on at all has to arrive as already-resolved
-    // state (see the `Msg::FeatureInvoke` gate that reads `model.ai_enabled`
-    // ahead of the trust gate -- a disabled feature must not prompt for
-    // trust either). Diverges from `AiConfig::load`'s own "no file is the
-    // full experience" contract on one path: a file that exists but cannot
-    // be read or parsed fails toward disabled rather than the enabled
-    // default the successful case leaves it at, so a broken config can only
-    // ever narrow what a user's untouched `view.toml` already granted,
-    // never silently widen it.
-    match view_ai::AiConfig::load(config_path.as_deref()) {
-        Ok(cfg) => model.ai_enabled = cfg.enabled(),
-        Err(err) => {
-            model.ai_enabled = false;
-            pre_executor_effects.extend(model.engine.record_native_notice(
-                format!("view: could not read [ai] from view.toml ({err}); the AI agent panel is disabled this run"),
-                false,
-            ));
-        }
-    }
+    pre_executor_effects.extend(seed_ai_enabled(config_path.as_deref(), &mut model));
 
     match &config_path {
         Some(path) => {
@@ -2024,5 +2033,58 @@ mod tests {
              engine's own argument list, got {:?}",
             cli.passthrough
         );
+    }
+
+    #[test]
+    fn a_broken_ai_config_seeds_disabled_and_names_the_file() {
+        let dir = view_test_support::ScratchDir::new("seed-ai-enabled-broken").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nenabled = \"not a bool\"\n").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let effects = seed_ai_enabled(Some(&path), &mut model);
+        assert!(
+            !model.ai_enabled,
+            "an unreadable/invalid [ai] table must fail closed, not silently widen the surface"
+        );
+        assert!(
+            !effects.is_empty(),
+            "a broken config owes the user a notice effect"
+        );
+        let shown: String = model
+            .engine
+            .messages
+            .entries
+            .iter()
+            .flat_map(|e| e.content.iter().map(|(_, t)| t.as_str()))
+            .collect();
+        assert!(
+            shown.contains(&path.display().to_string()),
+            "the toast must name the file that failed to parse: {shown}"
+        );
+    }
+
+    #[test]
+    fn a_readable_ai_config_seeds_the_configured_value() {
+        let dir = view_test_support::ScratchDir::new("seed-ai-enabled-ok").unwrap();
+        let path = dir.join("view.toml");
+        std::fs::write(&path, "[ai]\nenabled = false\n").unwrap();
+        let mut model = Model::with_term_size(80, 24);
+        let effects = seed_ai_enabled(Some(&path), &mut model);
+        assert!(
+            !model.ai_enabled,
+            "a valid [ai] enabled = false must seed the configured value, not the default"
+        );
+        assert!(
+            effects.is_empty(),
+            "a valid config owes no notice: {effects:?}"
+        );
+
+        let mut absent = Model::with_term_size(80, 24);
+        let effects = seed_ai_enabled(None, &mut absent);
+        assert!(
+            absent.ai_enabled,
+            "no config path at all is the documented default-on case"
+        );
+        assert!(effects.is_empty(), "{effects:?}");
     }
 }

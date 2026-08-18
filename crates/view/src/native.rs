@@ -464,6 +464,25 @@ mod tests {
     }
 
     #[test]
+    fn load_snapshots_ai_enabled_from_the_model_rather_than_a_hardcoded_default() {
+        let mut m = model();
+        m.ai_enabled = false;
+        let (mut session, _effects) = NativeSession::load(None, 21, &mut m);
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let specs = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs),
+                _ => None,
+            })
+            .expect("a RegisterMappings effect must still register the rest");
+        assert!(
+            specs.iter().all(|s| s.feature != "ai"),
+            "load() must carry model.ai_enabled into the session, not a hardcoded true: {specs:?}"
+        );
+    }
+
+    #[test]
     fn the_takeover_registers_the_clipboard_provider_even_with_every_plan_entry_empty() {
         let mut session = NativeSession {
             cfg: NativeConfig::all_enabled(),

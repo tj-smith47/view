@@ -2243,7 +2243,7 @@ fn an_ai_invoke_while_disabled_gets_a_notice_and_never_opens_the_trust_prompt() 
     );
     assert!(m.dirty);
     assert!(
-        visible_texts(&m).iter().any(|t| t.contains("[ai] enabled")),
+        visible_texts(&m).iter().any(|t| t.contains("ai.enabled")),
         "the notice must name the config line that turns the feature back on: {:?}",
         visible_texts(&m)
     );
