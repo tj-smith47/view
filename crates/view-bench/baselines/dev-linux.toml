@@ -63,7 +63,9 @@ match_paint_p50_ms = 2.831874
 match_paint_p99_ms = 4.703527
 
 [remote_memory.minimal]
+local_pss_mb = 5.19140625
 pss_mb = 3.7109375
+remote_local_ratio = 1.024527766595133
 
 [scroll.heavy]
 ratio_p50 = 1.8909534928734097

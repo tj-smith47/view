@@ -161,4 +161,28 @@ ratio_p50 = 1.06
 # 0.87%) put the remote-vs-local delta at +1.2% -- inside the two-condition
 # resolution rule, so the recorded number is the local footprint plus
 # noise, which is the row's entire claim.
+#
+# Kept as the cited provenance record for the +1.2% remote-vs-local figure
+# even though pss_mb no longer gates on this shared class (host-regime
+# absolutes are record-only here since the row's gate moved to the paired
+# ratio below); an entry for an exempt metric is never consulted.
 "remote_memory.pss_mb" = 1.04
+
+# 8 report-only replicates plus the record draw, 2026-08-17, host loads
+# 0.40 to 0.66, one unchanged binary pair, remote_memory/minimal under the
+# sequential ABBA paired driver (gated statistic per replicate,
+# remote_local_ratio, median of 4 trials each): 1.001, 1.013, 1.006,
+# 1.022, 1.013, 1.017, 1.023, 0.997; record draw 1.0245, kept as recorded
+# -- the highest of nine, so the bar sits at the band's top rather than
+# inside it. Nine-draw median 1.013, half-width 0.0138 (1.36% of median).
+# Worst excursion above the recorded value 1.000x (the record draw IS the
+# maximum); the 2x half-width rule asks 1.016x (1.013 + 2 x 0.0138
+# against 1.0245). 1.03 clears both with margin for a future window whose
+# regime sits where this one's top did, and its gate ceiling (1.0245 x
+# 1.03 = 1.055) stays well under the spec row's 1.10 promise, so the
+# ratchet stays the binding check on this class. The same-window
+# absolutes (local_pss_mb median 5.205, pss_mb median 5.263) sit ~5%
+# above the 2026-08-16 window's -- the across-day regime movement the
+# ratio design exists to cancel; both are record-only here and carry no
+# entry.
+"remote_memory.remote_local_ratio" = 1.03
