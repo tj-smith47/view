@@ -26,6 +26,7 @@ use std::time::Duration;
 
 use crate::events::UiEvent;
 use crate::model::MessageId;
+use crate::native::ai_event::{AiCommand, AiEvent};
 use crate::native::mappings::{MappingClaim, MappingSpec};
 use crate::native::picker::{PickerItem, Source};
 
@@ -420,6 +421,13 @@ pub enum Msg {
         generation: u64,
         ok: bool,
     },
+    /// Everything the agent side reports, in the closed vocabulary of
+    /// [`AiEvent`]. One arm rather than one per agent event, because the
+    /// crate that speaks the agent protocol is the only thing that ever
+    /// constructs these and it has no business naming the rest of this
+    /// enum -- the same boundary [`Effect::Rpc`] draws in the other
+    /// direction.
+    Ai(AiEvent),
 }
 
 /// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
@@ -814,6 +822,12 @@ pub enum Effect {
         path: std::path::PathBuf,
         generation: u64,
     },
+    /// Hands one [`AiCommand`] to the agent session off the loop thread.
+    /// Non-blocking like every other effect: the session queues the command
+    /// onto its own channel and returns, so a busy or wedged agent can
+    /// never stall the executor -- the same contract "the paint loop never
+    /// awaits RPC" states for [`Rpc`](Self::Rpc), extended to agent traffic.
+    Ai(AiCommand),
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],

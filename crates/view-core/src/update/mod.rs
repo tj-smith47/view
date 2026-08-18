@@ -618,6 +618,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 root,
             }]
         }
+        // The agent vocabulary crosses into the loop here, and `Model` holds
+        // no agent panel state for it to change yet, so an event arriving
+        // today is a no-op. Written as its own arm rather than folded into a
+        // wildcard on purpose: this match has none, which is what makes a
+        // later `AiEvent` arm impossible to add without every consumer of it
+        // being recompiled against the addition.
+        Msg::Ai(_) => Vec::new(),
     }
 }
 

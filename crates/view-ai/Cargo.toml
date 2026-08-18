@@ -8,9 +8,33 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Builds the stub agent the transport tests drive. Off by default: the
+# fixture is a test double for a third-party agent process and has no place
+# in an ordinary build of this crate. Enabled automatically for this crate's
+# own test session by the self dev-dependency below.
+test-support = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+thiserror = "2.0.18"
 tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "macros"] }
 toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
+
+[dev-dependencies]
+# Self dev-dependency: cargo's feature unification enables test-support for
+# every build of this package within a `cargo test` session, so the tests
+# under tests/ see the stub agent binary without a manual --features flag.
+# No normal (non-test) build depends on view-ai as its own dev-dependency,
+# so test-support never leaks in.
+view-ai = { path = ".", features = ["test-support"] }
+
+[[bin]]
+name = "view-ai-stub-agent"
+path = "tests/fixtures/stub_agent.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+doc = false
