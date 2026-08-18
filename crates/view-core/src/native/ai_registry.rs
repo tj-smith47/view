@@ -112,6 +112,16 @@ mod tests {
         panel.pending_edits = vec![edit("1", false), edit("2", false), edit("3", true)];
         let status = AiStatus::derive(&panel, true, "claude-code", false);
         assert_eq!(status.pending_edit_count, 2);
+        assert!(status.enabled);
+        assert_eq!(status.agent_id, "claude-code");
+    }
+
+    #[test]
+    fn disabled_config_passes_through_as_disabled() {
+        let panel = AiPanelState::new();
+        let status = AiStatus::derive(&panel, false, "custom-agent", false);
+        assert!(!status.enabled);
+        assert_eq!(status.agent_id, "custom-agent");
     }
 
     #[test]
