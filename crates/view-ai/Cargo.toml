@@ -40,8 +40,12 @@ toml = "0.8"
 # second async runtime surface into a crate that already has its own for
 # a completely unrelated reason (the ACP transport) -- a second one for
 # one blocking GET would be redundant weight with no parallelism to spend
-# it on. Default features add gzip (via flate2) this crate never needs;
-# `rustls` alone keeps the dependency graph to one TLS stack.
+# it on. Default features add transfer-encoding gzip (also via flate2,
+# but for HTTP response decompression, unrelated to the tar.gz extraction
+# below) this crate never needs -- the tarball is verified byte-for-byte
+# against its pin, so an intermediary transparently re-encoding the
+# response body is not a feature this download wants; `rustls` alone
+# keeps the dependency graph to one TLS stack.
 ureq = { version = "3", default-features = false, features = ["rustls"] }
 # `provision.rs`'s checksum verification. RustCrypto's own SHA-2, the same
 # family every other Rust ecosystem checksum tool (cargo itself included)
@@ -50,6 +54,17 @@ ureq = { version = "3", default-features = false, features = ["rustls"] }
 # rolling SHA-256 in this crate instead of trusting an audited
 # implementation.
 sha2 = "0.10"
+# `provision.rs`'s tarball extraction, paired with `flate2` below. The
+# pinned `claude-code` adapter ships as an npm `.tar.gz`, not a standalone
+# binary; `tar`+`flate2` is the maintained combination `cargo` itself
+# vendors for crate source extraction, chosen over hand-rolling a tar
+# reader or a DEFLATE decoder here, which would trade an audited
+# implementation for an unaudited one to save two small dependencies.
+tar = "0.4"
+# `flate2`'s pure-Rust `miniz_oxide` backend (the crate's default) decodes
+# the tarball's gzip layer without linking a system zlib, keeping this
+# crate's build reproducible across the platforms `view` ships on.
+flate2 = "1"
 view-core = { version = "0.0.1", path = "../view-core" }
 
 [dev-dependencies]

@@ -267,10 +267,12 @@ pub trait AgentAdapter: Send + Sync {
 /// The adapter for the reference agent binary this build ships with, whose
 /// ACP endpoint sits behind an account login.
 ///
-/// Resolving a real `pinned_version` and `binary_path` -- locating,
-/// downloading, checksumming the executable -- is provisioning work this
-/// type does not do itself; it only shapes what [`AgentAdapter`] needs once
-/// those values exist.
+/// [`ClaudeCodeAdapter::new`] takes `pinned_version`/`binary_path` as given,
+/// for a caller that already has both (a test, or a hand-configured
+/// command). [`ClaudeCodeAdapter::provisioned`] is the real path: it
+/// resolves both from `provision::ensure_adapter`'s own verified,
+/// extracted output instead of a hand-typed value that could drift from
+/// what was actually provisioned.
 pub struct ClaudeCodeAdapter {
     pinned_version: String,
     binary_path: PathBuf,
@@ -278,8 +280,8 @@ pub struct ClaudeCodeAdapter {
 }
 
 impl ClaudeCodeAdapter {
-    /// An adapter for the binary at `binary_path`, pinned to
-    /// `pinned_version`.
+    /// An adapter for the executable at `binary_path`, pinned to
+    /// `pinned_version`, with no arguments.
     #[must_use]
     pub fn new(pinned_version: impl Into<String>, binary_path: PathBuf) -> Self {
         Self {
@@ -289,21 +291,30 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    /// An adapter built entirely from `provision::ensure_adapter`'s own
-    /// result: `binary_path` is the downloaded, checksum-verified path it
-    /// returns, and `pinned_version` is read from the same compile-time row
-    /// `ensure_adapter` resolved against, so neither field is ever a
-    /// hand-typed literal that could drift from what was actually
-    /// provisioned.
+    /// The real `claude-code` adapter, provisioned end to end: resolves
+    /// `node` from `PATH` (the pinned release is an npm package, run under
+    /// Node.js, not a standalone executable), ensures the pinned tarball is
+    /// downloaded, verified, and extracted via
+    /// [`crate::ensure_adapter`], and returns an adapter whose
+    /// [`AgentAdapter::command`] is `node <extracted entry script>` --
+    /// something [`AiSession::spawn`] can actually launch, not a path to
+    /// the tarball itself. The node check runs before the download: an
+    /// adapter this build cannot run has no reason to fetch anything first.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::ProvisionError`] under the same conditions
-    /// [`crate::ensure_adapter`] does.
+    /// Returns [`crate::ProvisionError::NodeNotFound`] if no `node` is on
+    /// `PATH`, and any other [`crate::ProvisionError`] variant
+    /// [`crate::ensure_adapter`] can return.
     pub fn provisioned() -> Result<Self, crate::ProvisionError> {
-        let binary_path = crate::ensure_adapter("claude-code")?;
+        let node = crate::provision::resolve_node()?;
+        let entry_path = crate::ensure_adapter("claude-code")?;
         let pinned_version = crate::pinned_version("claude-code").unwrap_or("unknown");
-        Ok(Self::new(pinned_version, binary_path))
+        Ok(Self {
+            pinned_version: pinned_version.to_string(),
+            binary_path: node,
+            args: vec![entry_path.to_string_lossy().into_owned()],
+        })
     }
 
     /// The version this adapter was constructed against, independent of

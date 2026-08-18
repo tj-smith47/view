@@ -53,18 +53,25 @@ done
 # the view bin crate (see crates/view/src/clipboard.rs): every other crate,
 # including view-native (which owns the clipboard line-shaping helpers, not
 # the system-clipboard call) and view-tui (which owns the OSC 52 escape
-# write, not the local read/write), must stay free of it.
-for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness; do
+# write, not the local read/write), must stay free of it. view-test-support
+# is included even though it is a dev-only leaf fixture crate (see its own
+# check_dev_only row below): the point of this loop is that arboard has no
+# business anywhere outside the bin crate, and a workspace member being
+# dev-only elsewhere does not exempt it from that.
+for crate in view-core view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
   check_absent "$crate" arboard
 done
-# ureq (the checksummed adapter download, crates/view-ai/src/provision.rs)
-# and sha2 (its checksum verification) are confined to view-ai the same way
+# ureq (the checksummed adapter download), sha2 (its checksum
+# verification), and tar/flate2 (its tarball extraction) --
+# crates/view-ai/src/provision.rs -- are confined to view-ai the same way
 # arboard is confined to the bin above: nothing else in the workspace
-# fetches or verifies a downloaded binary, so neither dependency has any
-# business appearing anywhere else.
-for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness; do
+# fetches, verifies, or unpacks a downloaded adapter, so none of the four
+# has any business appearing anywhere else.
+for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support; do
   check_absent "$crate" ureq
   check_absent "$crate" sha2
+  check_absent "$crate" tar
+  check_absent "$crate" flate2
 done
 # nucleo (the picker's matcher engine, spec §18), ignore (the Files
 # source's .gitignore-respecting walker), and grep-searcher/grep-regex (the
@@ -213,6 +220,14 @@ check_transitive_reach arboard view
 check_transitive_reach grep-searcher view-native view
 check_transitive_reach grep-regex view-native view
 check_transitive_reach tokio view view-ai
+# ureq (rustls/ring), sha2, and tar/flate2 are view-ai's own additions
+# (crates/view-ai/src/provision.rs); view reaches all four transitively
+# through its sanctioned view-ai edge, the same shape as the tokio row
+# just above.
+check_transitive_reach ureq   view-ai view
+check_transitive_reach sha2   view-ai view
+check_transitive_reach tar    view-ai view
+check_transitive_reach flate2 view-ai view
 check_transitive_reach async-std
 check_transitive_reach smol
 exit $fail
