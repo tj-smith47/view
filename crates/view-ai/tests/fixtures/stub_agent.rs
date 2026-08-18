@@ -13,6 +13,11 @@
 //! string-id leg below simply never finishes -- which is the regression
 //! being nailed down.
 //!
+//! Arguments, all optional and all positional: the file whose appearance
+//! releases a stalled reader, the protocol version to answer `initialize`
+//! with, and the path of a file to hold an exclusive lock on for as long as
+//! this process lives.
+//!
 //! Prompt texts it treats as instructions, so one fixture covers every
 //! transport case a test needs:
 //!
@@ -35,17 +40,20 @@
 use std::io::{BufRead, Write};
 
 fn main() {
+    // Taken before a single frame is served, so a client that has seen this
+    // agent answer anything has also seen it take the lock.
+    let liveness = liveness_lock();
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     let mut pending_prompt: Option<serde_json::Value> = None;
 
     for line in stdin.lock().lines() {
-        let Ok(line) = line else { return };
+        let Ok(line) = line else { break };
         if line.trim().is_empty() {
             continue;
         }
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else {
-            return;
+            break;
         };
         let id = frame.get("id").cloned();
         let method = frame
@@ -193,6 +201,41 @@ fn main() {
             _ => {}
         }
     }
+
+    outlive_the_client(liveness.as_ref());
+}
+
+/// Holds an exclusive lock on the file named by the fixture's third
+/// argument, for as long as this process lives.
+///
+/// The lock is the only portable way a test can ask "is that process still
+/// alive" about a process it does not own: every operating system releases
+/// a file lock when the holder dies, and none of them lets a second holder
+/// take it first.
+fn liveness_lock() -> Option<std::fs::File> {
+    let path = std::env::args().nth(3).filter(|arg| !arg.is_empty())?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .ok()?;
+    file.lock().ok()?;
+    Some(file)
+}
+
+/// Keeps running after stdin closes, so that a client which failed to signal
+/// this process leaves an observably live one behind.
+///
+/// A real agent is under no obligation to exit when its client disappears,
+/// and one that does exit would hide exactly the bug this fixture is here to
+/// expose. The wait is bounded so a fixture never outlives the machine's
+/// patience if the signal it is waiting for never comes.
+fn outlive_the_client(liveness: Option<&std::fs::File>) {
+    if liveness.is_none() {
+        return;
+    }
+    std::thread::sleep(std::time::Duration::from_secs(60));
 }
 
 /// The version this fixture answers the handshake with: 1 unless the second

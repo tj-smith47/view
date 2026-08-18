@@ -9,9 +9,10 @@ repository.workspace = true
 workspace = true
 
 [features]
-# Builds the stub agent the transport tests drive. Off by default: the
-# fixture is a test double for a third-party agent process and has no place
-# in an ordinary build of this crate. Enabled automatically for this crate's
+# Builds the stub agent the transport tests drive and the harness that
+# proves a dropped session takes its agent with it. Off by default: both are
+# test doubles for processes outside this crate and have no place in an
+# ordinary build of it. Enabled automatically for this crate's
 # own test session by the self dev-dependency below.
 test-support = []
 
@@ -39,6 +40,14 @@ view-ai = { path = ".", features = ["test-support"] }
 [[bin]]
 name = "view-ai-stub-agent"
 path = "tests/fixtures/stub_agent.rs"
+required-features = ["test-support"]
+test = false
+bench = false
+doc = false
+
+[[bin]]
+name = "view-ai-drop-harness"
+path = "tests/fixtures/drop_harness.rs"
 required-features = ["test-support"]
 test = false
 bench = false

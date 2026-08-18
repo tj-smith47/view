@@ -2,8 +2,9 @@
 //! calls the rest of the editor makes against it.
 
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
+use tokio::process::Child;
 use tokio::sync::mpsc;
 use view_core::msg::Msg;
 use view_core::native::ai_event::{AiCommand, AiEvent};
@@ -20,6 +21,16 @@ use crate::{AiConfig, AiError};
 /// Separate from [`AiSession`] because the handle owns the tokio runtime
 /// and so cannot itself be shared into a task running on it, while both
 /// sides genuinely need these two things.
+/// The agent child, reachable from both the handle and the session task.
+///
+/// Shared rather than owned by the task because the handle's `Drop` must be
+/// able to signal the child itself, on the dropping thread, without waiting
+/// for a task to be scheduled. The `Option` is what makes that safe once the
+/// session has ended: the task takes the child out before reaping it, so the
+/// handle can never signal a process identifier the operating system has
+/// already recycled.
+pub(crate) type ChildSlot = Arc<Mutex<Option<Child>>>;
+
 pub(crate) struct SessionShared {
     emit: Box<dyn Fn(Msg) + Send + Sync>,
     pending: PendingFsReplies,
@@ -65,10 +76,28 @@ pub struct AiSession {
     runtime: Option<tokio::runtime::Runtime>,
     commands: mpsc::UnboundedSender<AiCommand>,
     shared: Arc<SessionShared>,
+    child: ChildSlot,
 }
 
 impl Drop for AiSession {
     fn drop(&mut self) {
+        // Signal the child here, synchronously, before anything else.
+        // `shutdown_background` returns before a single task has been
+        // dropped, so leaving the kill to `Child`'s own `kill_on_drop` would
+        // race whatever the dropping thread does next: at editor teardown
+        // `main` can return and the process can exit before a runtime thread
+        // ever reaches that drop, and the agent would go on running with no
+        // editor left to answer. `start_kill` sends the signal and returns
+        // without waiting on it, so the guarantee costs one syscall.
+        //
+        // A poisoned lock is stepped over rather than propagated: a panicked
+        // task must not be the reason a child process survives.
+        let mut slot = self.child.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(child) = slot.as_mut() {
+            let _ = child.start_kill();
+        }
+        drop(slot);
+
         // `Runtime`'s own `Drop` shuts down synchronously on the dropping
         // thread, and the dropping thread here is the loop thread. That is
         // the one call this type would make that is not a channel send, and
@@ -77,11 +106,10 @@ impl Drop for AiSession {
         // in the middle of a frame. `shutdown_background` returns at once
         // and lets the runtime's own threads wind themselves down.
         //
-        // The cost, stated rather than hidden: with no live reaper the
-        // child's `kill_on_drop` signal still fires, but the dead process is
-        // reaped by the operating system when the editor exits rather than
-        // by the runtime moments after the drop. One short-lived zombie per
-        // session, against never blocking a paint.
+        // What is guaranteed after this returns: the child has been
+        // signalled. What is not: that it has been reaped. Collection is
+        // left to the runtime's reaper if its threads outlive the drop, and
+        // to the operating system otherwise.
         if let Some(runtime) = self.runtime.take() {
             runtime.shutdown_background();
         }
@@ -102,7 +130,8 @@ impl AiSession {
     /// Latency consequence: zero on the paint and key-dispatch paths by
     /// construction. Nothing here runs on the loop thread; the only things
     /// the loop thread ever does with the result are a channel send
-    /// ([`send`](Self::send)) and a non-blocking runtime shutdown (`Drop`).
+    /// ([`send`](Self::send)) and, in `Drop`, one non-blocking kill syscall
+    /// followed by a non-blocking runtime shutdown.
     ///
     /// `emit` must not block, and the requirement is stronger than it looks:
     /// the runtime has one worker thread, so an `emit` that blocks stalls
@@ -160,11 +189,14 @@ impl AiSession {
         });
         let (commands, command_rx) = mpsc::unbounded_channel();
 
+        let child: ChildSlot = Arc::new(Mutex::new(Some(child)));
+
         let task_shared = Arc::clone(&shared);
+        let task_child = Arc::clone(&child);
         let cwd = cfg.cwd;
         runtime.spawn(async move {
             run_session(
-                child,
+                task_child,
                 JsonRpcCodec::new(stdout, stdin),
                 command_rx,
                 task_shared,
@@ -177,6 +209,7 @@ impl AiSession {
             runtime: Some(runtime),
             commands,
             shared,
+            child,
         })
     }
 

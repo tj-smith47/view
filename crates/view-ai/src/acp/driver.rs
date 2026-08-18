@@ -29,11 +29,10 @@
 //! `docs/acp-v1-wire-capture.md`; none is recalled.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use view_core::native::ai_event::{
     AiCommand, AiEvent, ContextBlock, FsError, PermissionOption, PermissionOptionKind,
@@ -41,7 +40,7 @@ use view_core::native::ai_event::{
 };
 
 use crate::acp::fs::PendingReply;
-use crate::acp::session::SessionShared;
+use crate::acp::session::{ChildSlot, SessionShared};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcMessage, RequestId, INTERNAL_ERROR, METHOD_NOT_FOUND,
     REQUEST_CANCELLED,
@@ -75,7 +74,7 @@ pub(crate) enum SessionEnd {
 
 /// Runs one session to completion, reporting why it ended.
 pub(crate) async fn run_session(
-    mut child: Child,
+    child: ChildSlot,
     codec: JsonRpcCodec<tokio::process::ChildStdout, tokio::process::ChildStdin>,
     commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
@@ -83,13 +82,32 @@ pub(crate) async fn run_session(
 ) {
     let Some(ending) = drive(codec, commands, Arc::clone(&shared), cwd).await else {
         // the handle was dropped: the session is being torn down on purpose,
-        // so nothing is reported and the child goes with the task
+        // and the handle's own `Drop` has already signalled the child
         return;
     };
+
+    // Taking the child out and signalling it happen with no await in
+    // between, so this path and the handle's `Drop` cannot interleave into a
+    // state where neither has signalled: either the child is still in the
+    // slot and gets the signal here, or the handle already holds it long
+    // enough to send its own. Signalling on the way out matters even for a
+    // reader that saw end-of-file, because an agent may close its stdout and
+    // keep running.
+    let mut child = {
+        let mut slot = child.lock().unwrap_or_else(PoisonError::into_inner);
+        slot.take()
+    };
+    if let Some(child) = child.as_mut() {
+        let _ = child.start_kill();
+    }
+
     let detail = match ending {
-        SessionEnd::ReaderEof => match child.wait().await {
-            Ok(status) => format!("the agent exited ({status})"),
-            Err(err) => format!("the agent exited and could not be reaped: {err}"),
+        SessionEnd::ReaderEof => match child.as_mut() {
+            Some(child) => match child.wait().await {
+                Ok(status) => format!("the agent exited ({status})"),
+                Err(err) => format!("the agent exited and could not be reaped: {err}"),
+            },
+            None => "the agent exited".to_string(),
         },
         SessionEnd::ReaderFailed(reason) => reason,
         SessionEnd::WriterFailed(reason) => {

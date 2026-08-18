@@ -390,3 +390,48 @@ fn a_missing_agent_is_an_error_value_not_a_panic() {
         "the error names the command: {err}"
     );
 }
+
+#[test]
+fn a_dropped_session_signals_its_agent_before_the_editor_process_is_gone() {
+    let lock_path = std::env::temp_dir().join(format!(
+        "view-ai-liveness-{}-{}.lock",
+        std::process::id(),
+        line!()
+    ));
+    let _ = std::fs::remove_file(&lock_path);
+
+    // The editor stand-in spawns the agent, waits for it to answer, drops the
+    // session, and returns from main at once. Anything the agent's own death
+    // depends on happening later than that has already lost the race.
+    let status = std::process::Command::new(env!("CARGO_BIN_EXE_view-ai-drop-harness"))
+        .arg(env!("CARGO_BIN_EXE_view-ai-stub-agent"))
+        .arg(&lock_path)
+        .status()
+        .expect("the drop harness runs");
+    assert!(
+        status.success(),
+        "the drop harness exited cleanly: {status}"
+    );
+
+    // The agent holds an exclusive lock on this file for as long as it lives
+    // and keeps running after its client's pipes close, so taking the lock is
+    // exactly the claim "the agent is no longer running".
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&lock_path)
+        .expect("the agent created its liveness file");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(file.lock().is_ok());
+    });
+
+    let outcome = rx.recv_timeout(WAIT);
+    let _ = std::fs::remove_file(&lock_path);
+    match outcome {
+        Ok(true) => {}
+        Ok(false) => panic!("the liveness lock could not be taken at all"),
+        Err(_) => panic!(
+            "the agent outlived the editor process that spawned it: its liveness lock is still held"
+        ),
+    }
+}
