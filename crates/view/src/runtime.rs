@@ -630,6 +630,33 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // The one caller of `view_ai::TrustStore::set_trusted` (see
+            // `Effect::AiTrustSet`'s own doc for why `view-core` cannot call
+            // it directly): spawned off the loop thread on the same terms
+            // `TreeCreateFile`/`TreeDeleteFile` are, since this is at most
+            // one write per session's first `ai` invocation and holding a
+            // `TrustStore` open across the executor's own lifetime buys
+            // nothing. A write that fails, or finds no state directory to
+            // write into, folds to `trusted: false` regardless of what the
+            // user answered: the store did not durably record a "yes", so
+            // the model must not believe one happened either.
+            Effect::AiTrustSet {
+                project_root,
+                trusted,
+            } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("ai-trust-set", move || {
+                        let resolved = view_ai::TrustStore::load()
+                            .and_then(|mut store| {
+                                store.set_trusted(&project_root, trusted).map(|()| trusted)
+                            })
+                            .unwrap_or(false);
+                        let _ = tx.send(Msg::AiTrustResolved { trusted: resolved });
+                    });
+                }
+                Flow::Continue
+            }
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
             _ => Flow::Continue,
         }
@@ -1536,10 +1563,28 @@ pub fn run(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::disallowed_methods
+    )]
     use super::*;
     use crate::engine_ops::FakeOps;
     use view_core::msg::{OptionValue, ReplyToken};
+
+    /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
+    /// reason `view-native::paths`' and `view-ai::trust`'s own suites each
+    /// hold a module-local guard: the base directory `view_ai::TrustStore`
+    /// resolves is process-global, and two tests racing their own
+    /// plant/restore would interleave.
+    static ENV_MUTATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_mutation_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_MUTATION_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     /// `Messages::visible_lines` returns one span-row per line; these tests
     /// only assert on the text a stall notice carries, so this flattens
@@ -2147,6 +2192,125 @@ mod tests {
         assert!(!path.exists());
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Redirects `XDG_STATE_HOME` to a nonce-tagged scratch directory under
+    /// the guarded lock for the duration of `f`, restoring the prior value
+    /// (or removing it) before returning -- the same isolation
+    /// `view-ai::trust`'s own suite gives `TrustStore::load`, needed here so
+    /// this test never touches the real user's trust store.
+    fn with_scratch_state_dir<R>(nonce: &str, f: impl FnOnce() -> R) -> R {
+        let _guard = env_mutation_guard();
+        let prev = std::env::var("XDG_STATE_HOME").ok();
+        let dir = tree_effect_scratch(&format!("ai-trust-state-{nonce}"));
+        std::env::set_var("XDG_STATE_HOME", &dir);
+        let result = f();
+        match prev {
+            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+            None => std::env::remove_var("XDG_STATE_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    /// Proves `Executor::run` is the one caller of
+    /// `view_ai::TrustStore::set_trusted` in production: the write actually
+    /// lands on disk (a freshly reloaded `TrustStore` sees it), and the
+    /// affirmative answer round-trips back as `Msg::AiTrustResolved{trusted:
+    /// true}` over the wired channel.
+    #[test]
+    fn ai_trust_set_effect_persists_and_reports_resolved() {
+        with_scratch_state_dir("persist", || {
+            let root = tree_effect_scratch("ai-trust-project");
+
+            let ops = FakeOps::default();
+            let (tx, rx) = mpsc::sync_channel(4);
+            let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+            let flow = executor.run(Effect::AiTrustSet {
+                project_root: root.clone(),
+                trusted: true,
+            });
+            assert!(matches!(flow, Flow::Continue));
+
+            let msg = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("AiTrustResolved arrives from the worker thread");
+            assert!(
+                matches!(msg, Msg::AiTrustResolved { trusted: true }),
+                "expected AiTrustResolved{{trusted: true}}, got {msg:?}"
+            );
+
+            let reloaded = view_ai::TrustStore::load().expect("reload the trust store");
+            assert!(
+                reloaded.is_trusted(&root),
+                "the executor's write must be visible to a freshly reloaded store"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    /// Symmetric to the affirmative case: a decline round-trips back as
+    /// `Msg::AiTrustResolved{trusted: false}` and leaves the project
+    /// unrecorded (see `TrustStore::set_trusted`'s own doc on why a decline
+    /// is not durable).
+    #[test]
+    fn ai_trust_set_effect_declined_reports_resolved_false() {
+        with_scratch_state_dir("decline", || {
+            let root = tree_effect_scratch("ai-trust-project-declined");
+
+            let ops = FakeOps::default();
+            let (tx, rx) = mpsc::sync_channel(4);
+            let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(tx));
+            let flow = executor.run(Effect::AiTrustSet {
+                project_root: root.clone(),
+                trusted: false,
+            });
+            assert!(matches!(flow, Flow::Continue));
+
+            let msg = rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("AiTrustResolved arrives from the worker thread");
+            assert!(
+                matches!(msg, Msg::AiTrustResolved { trusted: false }),
+                "expected AiTrustResolved{{trusted: false}}, got {msg:?}"
+            );
+
+            let reloaded = view_ai::TrustStore::load().expect("reload the trust store");
+            assert!(!reloaded.is_trusted(&root));
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
+    }
+
+    /// The disconfirm proving persistence genuinely runs through this
+    /// executor arm and not through some path `view-core` reached on its
+    /// own: with no `toast_timer` wired (every bare `FakeOps`-only
+    /// `Executor::new`, the shape every `view-core`-only test builds), the
+    /// write never happens and nothing is reported back -- a stub answer
+    /// arm here is exactly what would leave a "trusted" prompt answer
+    /// unpersisted, and the next process re-prompts.
+    #[test]
+    fn ai_trust_set_without_a_toast_timer_persists_nothing() {
+        with_scratch_state_dir("unwired", || {
+            let root = tree_effect_scratch("ai-trust-project-unwired");
+
+            let ops = FakeOps::default();
+            let executor = Executor::new(&ops);
+            let flow = executor.run(Effect::AiTrustSet {
+                project_root: root.clone(),
+                trusted: true,
+            });
+            assert!(matches!(flow, Flow::Continue));
+
+            let reloaded = view_ai::TrustStore::load().expect("reload the trust store");
+            assert!(
+                !reloaded.is_trusted(&root),
+                "an unwired executor must not have persisted anything"
+            );
+
+            let _ = std::fs::remove_dir_all(&root);
+        });
     }
 
     /// Closing the tree while a scan of a huge directory is still

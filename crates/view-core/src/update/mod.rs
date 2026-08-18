@@ -197,6 +197,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
         Msg::FeatureInvoke { feature, verb } => {
+            // `ai_trusted` is plain data the bin seeded (see `Model`'s own
+            // doc on the field): the pure core decides the gate from it and
+            // names nothing outside itself to do so. Checked ahead of every
+            // other feature below, since an untrusted project must never
+            // reach whatever the `ai` feature does next.
+            if feature == "ai" && !model.ai_trusted {
+                return open_ai_trust_prompt(model);
+            }
             if feature == "picker" {
                 if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {
                     return open_picker(model, source);
@@ -625,6 +633,24 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // later `AiEvent` arm impossible to add without every consumer of it
         // being recompiled against the addition.
         Msg::Ai(_) => Vec::new(),
+        // A write that failed after an affirmative answer folds back to
+        // `trusted: false` on the same terms a declined answer does (see
+        // `Effect::AiTrustSet`'s own doc): either way the durable fact is
+        // "not trusted", and this arm cannot tell the two apart from the
+        // bool alone, so one notice covers both -- it names the way back in
+        // rather than claiming to know why the gate did not open.
+        Msg::AiTrustResolved { trusted } => {
+            model.ai_trusted = trusted;
+            if trusted {
+                Vec::new()
+            } else {
+                model.dirty = true;
+                model.engine.record_native_notice(
+                    "view: AI agent access is not enabled for this project -- invoke :View ai again to be asked".to_string(),
+                    false,
+                )
+            }
+        }
     }
 }
 
@@ -660,10 +686,14 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
     // keypress observed after the cmdline has actually stayed
     // closed, exactly when the toast falls back to ordinary
     // transient rules
+    // excludes the AI trust prompt: it has no paired cmdline_show to have
+    // gone quiet, so `cmdline_open` reads `false` for it from the moment it
+    // opens, and this heuristic would otherwise pop it before the answer
+    // arm below ever sees the keystroke meant to resolve it
     if !cmdline_open
         && matches!(
             model.focused_overlay_mut().map(|ov| &ov.kind),
-            Some(OverlayKind::Prompt(_))
+            Some(OverlayKind::Prompt(p)) if p.ai_trust_project_root().is_none()
         )
     {
         model.pop_focused_overlay();
@@ -698,16 +728,28 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
     match model.focus() {
         Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
-            // the prompt overlay answers by feeding the engine a
+            // an nvim-relayed prompt answers by feeding the engine a
             // keystroke -- the engine is blocked in its own input
             // loop, not on an RpcRequest, so this is the one Native
-            // arm that still reaches RpcCall::Input
+            // arm that still reaches RpcCall::Input. The AI trust
+            // prompt is the one exception (see PromptState's Origin
+            // doc): it resolves locally, so this returns
+            // Effect::AiTrustSet instead of forwarding the key.
             Some(OverlayKind::Prompt(p)) => {
-                if p.accepts(&notation) {
-                    vec![Effect::Rpc(RpcCall::Input { notation })]
-                } else {
-                    Vec::new()
+                if !p.accepts(&notation) {
+                    return Vec::new();
                 }
+                if let Some(project_root) = p.ai_trust_project_root() {
+                    let project_root = project_root.to_path_buf();
+                    let trusted = p.accepted_is_default(&notation);
+                    model.pop_focused_overlay();
+                    model.dirty = true;
+                    return vec![Effect::AiTrustSet {
+                        project_root,
+                        trusted,
+                    }];
+                }
+                vec![Effect::Rpc(RpcCall::Input { notation })]
             }
             // every other key edits the query and re-asks the
             // matcher worker; edit_query itself decides what a
@@ -913,6 +955,38 @@ fn picker_preview_request(state: &mut crate::native::picker::PickerState) -> Vec
         Some((generation, path)) => vec![Effect::Rpc(RpcCall::PreviewBuffer { path, generation })],
         None => Vec::new(),
     }
+}
+
+/// Opens the per-project AI trust confirm as the topmost overlay, the first
+/// time a session's `Msg::FeatureInvoke` names the `ai` feature with
+/// `model.ai_trusted` still false.
+///
+/// A second `ai` invocation before the first prompt is answered replaces
+/// its state in place rather than stacking a second one, the same
+/// "topmost Prompt already open" precedent `ui_event`'s own `msg_show`
+/// handling follows. A blocked-engine `Prompt` already topmost keeps its
+/// focus instead -- the same stacking rule `open_picker`'s own doc states
+/// -- since a stray `FeatureInvoke` racing nvim's own confirm block must
+/// not steal the answer nvim is still waiting on.
+fn open_ai_trust_prompt(model: &mut Model) -> Vec<Effect> {
+    let message = format!(
+        "Trust {} to launch an AI agent? Agents can read and write files in this project.",
+        model.cwd.display()
+    );
+    let state = crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), message);
+    match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
+        Some(OverlayKind::Prompt(p)) if p.ai_trust_project_root().is_some() => {
+            *p = state;
+        }
+        Some(OverlayKind::Prompt(_)) => {
+            model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+        }
+        _ => {
+            model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+        }
+    }
+    model.dirty = true;
+    Vec::new()
 }
 
 /// The picker source `verb` names, or `None` when `verb` is not one of the

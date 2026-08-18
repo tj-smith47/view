@@ -14,6 +14,8 @@
 //! already covers every reachable case, so there is no third code path to
 //! add for it.
 
+use std::path::{Path, PathBuf};
+
 use crate::model::{CmdlineState, MessageEntry};
 
 /// One accelerator choice parsed from nvim's own bracket/paren convention,
@@ -55,6 +57,23 @@ enum Answer {
     FreeText { typed: String, digits_only: bool },
 }
 
+/// Where an already-open confirm-class prompt's answer goes.
+///
+/// Every prompt built through [`PromptState::from_entry`] is relayed from a
+/// real nvim `msg_show`, blocked in its own input loop until the accepted
+/// key reaches it as `RpcCall::Input`. [`PromptState::ai_trust_prompt`] is
+/// the one exception: view raises that question itself, with nothing on the
+/// wire waiting for an answer, so it resolves locally instead.
+/// `update()`'s key-routing arm reads this to decide which of the two an
+/// accepted key does, and the lazy-dismiss timing `Msg::Key` applies to a
+/// resolved nvim prompt (see that arm's own doc) must never fire for the
+/// local case, since there is no paired `cmdline_show` to have gone quiet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Origin {
+    Engine,
+    AiTrust { project_root: PathBuf },
+}
+
 /// One open confirm-class prompt: the question text plus whatever choices
 /// or free-text state its paired `cmdline_show` has revealed so far.
 #[non_exhaustive]
@@ -62,6 +81,7 @@ enum Answer {
 pub struct PromptState {
     message: String,
     answer: Answer,
+    origin: Origin,
 }
 
 impl PromptState {
@@ -78,7 +98,73 @@ impl PromptState {
         Some(Self {
             message: e.lines().join("\n"),
             answer: Answer::Pending,
+            origin: Origin::Engine,
         })
+    }
+
+    /// The per-project AI trust confirm: view raises this itself the first
+    /// time a session invokes an AI feature with `Model::ai_trusted` still
+    /// `false`, rather than relaying an nvim `msg_show`. Its choices are
+    /// known up front (`Yes`/`No`, `Yes` bracketed as the default), unlike
+    /// [`PromptState::from_entry`]'s `Answer::Pending` start, since there is
+    /// no paired `cmdline_show` to learn them from. `message` is the
+    /// question text; owned by the caller (`update/mod.rs`'s
+    /// `open_ai_trust_prompt`) so this module carries no AI-specific prose
+    /// of its own.
+    #[must_use]
+    pub fn ai_trust_prompt(project_root: PathBuf, message: String) -> Self {
+        Self {
+            message,
+            answer: Answer::Choices(vec![
+                Choice {
+                    key: 'y',
+                    label: "Yes".to_string(),
+                    default: true,
+                },
+                Choice {
+                    key: 'n',
+                    label: "No".to_string(),
+                    default: false,
+                },
+            ]),
+            origin: Origin::AiTrust { project_root },
+        }
+    }
+
+    /// `Some` when this prompt resolves locally instead of forwarding an
+    /// accepted key to the engine as `RpcCall::Input` -- the project root
+    /// the AI trust decision applies to. See [`Origin`]'s own doc.
+    #[must_use]
+    pub(crate) fn ai_trust_project_root(&self) -> Option<&Path> {
+        match &self.origin {
+            Origin::Engine => None,
+            Origin::AiTrust { project_root } => Some(project_root),
+        }
+    }
+
+    /// Whether an already-[`accepts`](Self::accepts)-ed `notation` selects
+    /// this prompt's bracketed default choice, for a caller resolving a
+    /// [`PromptState::ai_trust_project_root`] prompt to the trusted/declined
+    /// bool `Effect::AiTrustSet` carries. `<CR>` follows the default the
+    /// same way [`PromptState::view`] reads it; every other accepted key --
+    /// including `<Esc>` -- is the non-default answer, since a two-choice
+    /// confirm has exactly one alternative to its default. `false` for a
+    /// prompt with no choices yet (`Answer::Pending`) or free-text state,
+    /// neither of which this method's one caller ever reaches.
+    #[must_use]
+    pub(crate) fn accepted_is_default(&self, notation: &str) -> bool {
+        let Answer::Choices(choices) = &self.answer else {
+            return false;
+        };
+        if notation == "<CR>" {
+            return choices.iter().any(|c| c.default);
+        }
+        let Some(c) = notation.chars().next() else {
+            return false;
+        };
+        choices
+            .iter()
+            .any(|choice| choice.default && choice.key == c.to_ascii_lowercase())
     }
 
     /// Reads this prompt's choices (or free-text echo) off the paired

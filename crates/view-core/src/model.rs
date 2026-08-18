@@ -94,6 +94,16 @@ pub struct Model {
     /// ([`Model::with_cwd`]) since `update()` has no filesystem access to
     /// ask for it itself. Empty until startup sets it.
     pub cwd: PathBuf,
+    /// Whether this session's project has been granted AI agent access,
+    /// resolved once at startup from `view-ai`'s own trust store
+    /// (`crates/view/src/main.rs` seeds it the same way `cwd` and
+    /// `statusline_enabled` are) and folded forward by
+    /// `Msg::AiTrustResolved` once the user answers the gate
+    /// `Msg::FeatureInvoke`'s `ai` arm opens. Plain data: `update()` reads
+    /// it and nothing else, never the `view-ai` store this fact came from
+    /// -- see `Effect::AiTrustSet`'s own doc for why the crossing has to be
+    /// a bool rather than a call.
+    pub ai_trusted: bool,
     /// Supervision's memory of the current wedge episode -- which wedge the
     /// user has already been offered a modal for, so a dismissed one stays
     /// dismissed while the banner behind it keeps re-asserting; see
@@ -144,6 +154,7 @@ impl Model {
             statusline_enabled: false,
             palette_enabled: false,
             cwd: PathBuf::new(),
+            ai_trusted: false,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
         }

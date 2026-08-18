@@ -10,9 +10,11 @@
 
 mod acp;
 mod config;
+mod trust;
 
 pub use acp::session::{AgentAdapter, AiSession, ClaudeCodeAdapter};
 pub use config::{AgentSpec, AiConfig, AiConfigError};
+pub use trust::{path_is_contained, TrustError, TrustStore};
 
 /// Where the agent comes from and where it runs.
 #[non_exhaustive]

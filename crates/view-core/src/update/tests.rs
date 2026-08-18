@@ -2195,6 +2195,322 @@ fn a_feature_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
 }
 
 #[test]
+fn an_untrusted_ai_invoke_opens_the_trust_prompt_instead_of_going_further() {
+    let mut m = model();
+    assert!(!m.ai_trusted);
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "opening the trust prompt issues no effect of its own: {effects:?}"
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "an untrusted ai invoke must open a Prompt overlay: {:?}",
+        m.overlays()
+    );
+    assert!(m.dirty);
+}
+
+#[test]
+fn a_trusted_ai_invoke_never_opens_the_trust_prompt() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "a trusted project must never see the gate again this session: {:?}",
+        m.overlays()
+    );
+    // "ai" has no registered handler yet, so a trusted invoke falls to the
+    // same "must not go quiet" notice any other unrecognized invoke does
+    assert!(
+        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+        "a trusted ai invoke must fall through to the ordinary invoke \
+             handling rather than reopening the gate: {effects:?}"
+    );
+}
+
+#[test]
+fn a_second_ai_invoke_before_answering_replaces_the_prompt_rather_than_stacking() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert_eq!(
+        m.overlays().len(),
+        1,
+        "a second ai invoke must replace the open trust prompt in place, \
+             not stack a second one: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn an_ai_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::Redraw(vec![UiEvent::MsgShow {
+            kind: "confirm".into(),
+            content: vec![(0, "test".into())],
+            replace_last: false,
+        }]),
+    );
+    let prompt_id = match m.focus() {
+        Focus::Native(id) => id,
+        Focus::Engine => unreachable!("MsgShow must open a Prompt overlay"),
+    };
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(prompt_id),
+        "the trust prompt must not steal focus from a blocked engine prompt"
+    );
+    assert_eq!(m.overlays().len(), 2, "both prompts must remain open");
+}
+
+#[test]
+fn answering_yes_on_the_trust_prompt_emits_ai_trust_set_true_and_closes_it() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+    match effects.as_slice() {
+        [Effect::AiTrustSet {
+            project_root,
+            trusted: true,
+        }] => assert_eq!(project_root, &m.cwd),
+        other => panic!("expected one AiTrustSet{{trusted: true}}, got {other:?}"),
+    }
+    assert!(
+        m.overlays().is_empty(),
+        "the trust prompt must close once answered"
+    );
+}
+
+#[test]
+fn a_bare_cr_selects_the_bracketed_yes_default() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<CR>".to_string(),
+        }),
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::AiTrustSet { trusted: true, .. }]
+        ),
+        "<CR> must select the bracketed Yes default: {effects:?}"
+    );
+}
+
+#[test]
+fn answering_no_on_the_trust_prompt_emits_ai_trust_set_false() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "n".to_string(),
+        }),
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::AiTrustSet { trusted: false, .. }]
+        ),
+        "expected AiTrustSet{{trusted: false}}, got {effects:?}"
+    );
+    assert!(m.overlays().is_empty());
+}
+
+#[test]
+fn esc_on_the_trust_prompt_declines_it_too() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".to_string(),
+        }),
+    );
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::AiTrustSet { trusted: false, .. }]
+        ),
+        "<Esc> must decline the same as an explicit No: {effects:?}"
+    );
+    assert!(m.overlays().is_empty());
+}
+
+#[test]
+fn an_unmatched_key_leaves_the_trust_prompt_open() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "z".to_string(),
+        }),
+    );
+    assert!(
+        effects.is_empty(),
+        "an unmatched key must not resolve the prompt: {effects:?}"
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "the trust prompt must stay open on an unmatched key"
+    );
+}
+
+#[test]
+fn ai_trust_resolved_true_folds_into_the_model_with_no_toast() {
+    let mut m = model();
+    let effects = update(&mut m, Msg::AiTrustResolved { trusted: true });
+    assert!(m.ai_trusted);
+    assert!(
+        effects.is_empty(),
+        "a successful trust resolution needs no notice: {effects:?}"
+    );
+}
+
+#[test]
+fn ai_trust_resolved_false_toasts_the_way_back_in() {
+    let mut m = model();
+    m.ai_trusted = true; // prove the fold actually runs, not just reads a default
+    let effects = update(&mut m, Msg::AiTrustResolved { trusted: false });
+    assert!(!m.ai_trusted);
+    assert!(
+        !effects.is_empty(),
+        "a false resolution must notify the user"
+    );
+    let entry = m
+        .engine
+        .messages
+        .entries
+        .last()
+        .expect("the notice must reach the message surface");
+    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        text.contains(":View ai"),
+        "the notice must name the way back in, got {text:?}"
+    );
+}
+
+#[test]
+fn a_trusted_project_never_reprompts_within_the_same_session() {
+    let mut m = model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+    // the executor's own round trip is out of this crate's reach; the bin
+    // feeds this back once TrustStore::set_trusted succeeds (see
+    // crates/view/src/runtime.rs)
+    let _ = update(&mut m, Msg::AiTrustResolved { trusted: true });
+    assert!(m.ai_trusted);
+
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "a second ai invoke in the same session must not reopen the gate: {:?}",
+        m.overlays()
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+        "falls through to the ordinary unregistered-invoke notice: {effects:?}"
+    );
+}
+
+#[test]
 fn a_prompt_opening_over_an_open_picker_takes_focus_and_returns_it_on_resolve() {
     let mut m = model();
     let _ = update(

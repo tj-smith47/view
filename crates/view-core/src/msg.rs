@@ -428,6 +428,18 @@ pub enum Msg {
     /// enum -- the same boundary [`Effect::Rpc`] draws in the other
     /// direction.
     Ai(AiEvent),
+    /// The trust store's own answer to one [`Effect::AiTrustSet`], carried
+    /// back by the bin's executor -- the only code with a `view-ai`
+    /// dependency -- so `update()` can fold the durable fact into
+    /// `Model::ai_trusted` without ever calling into the store itself.
+    /// `trusted` is `false` both for a user who declined and for a
+    /// persistence failure after an affirmative answer: the store write is
+    /// what durably grants trust, so a write that failed must not leave the
+    /// in-memory model believing it succeeded anyway (see
+    /// [`Effect::AiTrustSet`]'s own doc).
+    AiTrustResolved {
+        trusted: bool,
+    },
 }
 
 /// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
@@ -828,6 +840,19 @@ pub enum Effect {
     /// never stall the executor -- the same contract "the paint loop never
     /// awaits RPC" states for [`Rpc`](Self::Rpc), extended to agent traffic.
     Ai(AiCommand),
+    /// Persists the user's answer to the per-project AI trust gate
+    /// (`update/mod.rs`'s `Msg::FeatureInvoke` arm) through
+    /// `view_ai::TrustStore::set_trusted`, the one crossing point plain data
+    /// takes instead of a call: `view-core` cannot depend on `view-ai` (see
+    /// `scripts/audit-deps.sh`), so the write itself happens in the bin's
+    /// executor, which answers with [`Msg::AiTrustResolved`] once the write
+    /// (or its failure) is known. Never issued for a prompt whose answer
+    /// routes to the engine instead -- see `PromptState`'s own `Origin`
+    /// distinction (`native/prompt.rs`).
+    AiTrustSet {
+        project_root: std::path::PathBuf,
+        trusted: bool,
+    },
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],

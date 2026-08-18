@@ -707,6 +707,27 @@ fn main() -> Result<()> {
     // these up the same way it already does for `drained.toast_effects` --
     // see that binding's construction below.
     let mut pre_executor_effects: Vec<Effect> = Vec::new();
+
+    // seeded here, once, before the engine exists: `update()` has no
+    // filesystem access, so whether this project is trusted for AI agent
+    // access has to arrive as already-resolved state on `Model` (see
+    // `view_ai::TrustStore` and the `Msg::FeatureInvoke` gate that reads
+    // `model.ai_trusted`). A store that cannot be read at all fails closed
+    // -- `model.ai_trusted` stays `false` (`Model::new`'s own default)
+    // rather than risking a stale or corrupt read being treated as trust.
+    match view_ai::TrustStore::load() {
+        Ok(store) => model.ai_trusted = store.is_trusted(&model.cwd),
+        Err(err) => {
+            pre_executor_effects.extend(model.engine.record_native_notice(
+                format!(
+                    "view: could not read the AI trust store ({err}); this project will be \
+                     asked to trust AI agent access again this run"
+                ),
+                false,
+            ));
+        }
+    }
+
     let config_path = resolve_config_path(&cli);
     match &config_path {
         Some(path) => {
