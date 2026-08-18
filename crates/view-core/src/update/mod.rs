@@ -197,6 +197,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
         Msg::FeatureInvoke { feature, verb } => {
+            // `ai_enabled` gates ahead of `ai_trusted`: a feature that is
+            // off has nothing to trust it for, so prompting first would ask
+            // a question whose every answer is thrown away the moment the
+            // disabled check runs anyway.
+            if feature == "ai" && !model.ai_enabled {
+                return notice_ai_disabled(model);
+            }
             // `ai_trusted` is plain data the bin seeded (see `Model`'s own
             // doc on the field): the pure core decides the gate from it and
             // names nothing outside itself to do so. Checked ahead of every
@@ -982,6 +989,19 @@ fn picker_preview_request(state: &mut crate::native::picker::PickerState) -> Vec
         Some((generation, path)) => vec![Effect::Rpc(RpcCall::PreviewBuffer { path, generation })],
         None => Vec::new(),
     }
+}
+
+/// Answers a `Msg::FeatureInvoke` naming `ai` while `model.ai_enabled` is
+/// false: a native notice naming the exact config line that turns it back
+/// on, and nothing else -- no prompt, no panel, no trust question, since a
+/// disabled feature has nothing behind any of those to open.
+fn notice_ai_disabled(model: &mut Model) -> Vec<Effect> {
+    model.dirty = true;
+    model.engine.record_native_notice(
+        "view: the AI agent panel is off -- turn it on with [ai] enabled = true in view.toml"
+            .to_string(),
+        false,
+    )
 }
 
 /// Opens the per-project AI trust confirm as the topmost overlay, the first

@@ -104,6 +104,17 @@ pub struct Model {
     /// -- see `Effect::AiTrustSet`'s own doc for why the crossing has to be
     /// a bool rather than a call.
     pub ai_trusted: bool,
+    /// Whether the `ai` feature is on at all, resolved once at startup from
+    /// `view-ai`'s own `AiConfig` (`crates/view/src/main.rs` seeds it the
+    /// same way `ai_trusted` is, right beside it). Checked by
+    /// `Msg::FeatureInvoke`'s `ai` arm ahead of the trust gate: a disabled
+    /// feature must not prompt for trust either, since there is nothing to
+    /// trust it for. Defaults to `true`, matching `AiConfig`'s own
+    /// default-on: a session that never seeds this (most tests, and a
+    /// startup with no `view.toml` to read) gets the full experience, the
+    /// same "absent config changes nothing" contract every other native
+    /// feature's enabled bit holds.
+    pub ai_enabled: bool,
     /// Supervision's memory of the current wedge episode -- which wedge the
     /// user has already been offered a modal for, so a dismissed one stays
     /// dismissed while the banner behind it keeps re-asserting; see
@@ -155,6 +166,7 @@ impl Model {
             palette_enabled: false,
             cwd: PathBuf::new(),
             ai_trusted: false,
+            ai_enabled: true,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
         }

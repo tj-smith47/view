@@ -219,7 +219,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     let registered = session.register(&cfg);
     assert_eq!(
         registered,
-        vec!["<leader>a".to_string()],
+        vec!["<leader>ai".to_string()],
         "a disabled feature must contribute no key of its own; the only \
              survivor is ai's default key, which [native] has no switch to \
              turn off, got {registered:?}"
@@ -230,7 +230,7 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
         1,
         "only ai's key, which no [native] entry here names, may be claimed: {claimed:?}"
     );
-    assert_eq!(claimed[0].lhs, "<leader>a");
+    assert_eq!(claimed[0].lhs, "<leader>ai");
 
     let rhs = session.eval("maparg('<leader>ff', 'n')");
     assert!(

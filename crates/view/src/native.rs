@@ -74,6 +74,15 @@ pub(crate) struct NativeSession {
     /// registering twice would answer the second pass with view's own
     /// mappings and report every key as one the user had.
     handed_over: bool,
+    /// Snapshot of `model.ai_enabled` at construction, the same "read once
+    /// before the loop, not per pass" rule every other field here follows.
+    /// `mappings::register_plan` reads `NativeConfig` alone and has no `ai`
+    /// switch to consult (`[ai]` is not a `[native]` key by design), so this
+    /// crate -- which already knows `ai` by name through `view_ai::TrustStore`
+    /// -- is where the registration plan's `ai` row is dropped when the
+    /// feature is off, keeping `view-native` itself unaware of any feature
+    /// beyond the generic registry/exemption predicate it already reads.
+    ai_enabled: bool,
 }
 
 impl NativeSession {
@@ -142,6 +151,7 @@ impl NativeSession {
             record: paths::state_dir().map(|dir| paths::first_run_record(&dir)),
             channel_id,
             handed_over: false,
+            ai_enabled: model.ai_enabled,
         };
         (session, effects)
     }
@@ -202,10 +212,19 @@ impl NativeSession {
             .iter()
             .map(|entry| Effect::Rpc(entry.rpc.clone()))
             .collect();
-        effects.push(Effect::Rpc(mappings::register_plan(
-            &self.cfg,
-            self.channel_id,
-        )));
+        let mut mapping_call = mappings::register_plan(&self.cfg, self.channel_id);
+        // `NativeConfig::enabled("ai")` is unconditionally `true` -- `[ai]`
+        // has no `[native]` switch by design, so `register_plan` alone would
+        // always register the key. `model.ai_enabled` is the bit `[native]`
+        // structurally cannot carry for this one feature, so it is applied
+        // here instead, once, rather than teaching `view-native` a feature
+        // name it has no other reason to know.
+        if !self.ai_enabled {
+            if let RpcCall::RegisterMappings { specs, .. } = &mut mapping_call {
+                specs.retain(|spec| spec.feature != "ai");
+            }
+        }
+        effects.push(Effect::Rpc(mapping_call));
         effects.push(Effect::Rpc(RpcCall::RegisterClipboard {
             channel_id: self.channel_id,
         }));
@@ -282,6 +301,7 @@ impl NativeSession {
             record: None,
             channel_id: 0,
             handed_over: true,
+            ai_enabled: true,
         }
     }
 
@@ -295,6 +315,7 @@ impl NativeSession {
             record,
             channel_id,
             handed_over: false,
+            ai_enabled: true,
         }
     }
 }
@@ -395,6 +416,54 @@ mod tests {
     }
 
     #[test]
+    fn a_disabled_ai_feature_registers_no_ai_key() {
+        let mut session = NativeSession {
+            cfg: NativeConfig::all_enabled(),
+            plan: plan(&NativeConfig::all_enabled(), registry::features()),
+            config_path: None,
+            record: None,
+            channel_id: 13,
+            handed_over: false,
+            ai_enabled: false,
+        };
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let specs = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs),
+                _ => None,
+            })
+            .expect("a RegisterMappings effect must still register the rest");
+        assert!(
+            specs.iter().all(|s| s.feature != "ai"),
+            "ai must contribute no key while disabled: {specs:?}"
+        );
+        assert!(
+            specs.iter().any(|s| s.feature == "picker"),
+            "every other feature's keys must still register: {specs:?}"
+        );
+    }
+
+    #[test]
+    fn an_enabled_ai_feature_still_registers_its_key() {
+        let mut session = NativeSession::all_enabled(14, None);
+        let mut m = model();
+        let effects = session.follow_up(&mut m, Stage::VimEnter);
+        let specs = effects
+            .iter()
+            .find_map(|e| match e {
+                Effect::Rpc(RpcCall::RegisterMappings { specs, .. }) => Some(specs),
+                _ => None,
+            })
+            .expect("a RegisterMappings effect must register the plan");
+        assert!(
+            specs.iter().any(|s| s.feature == "ai"),
+            "the default (enabled) session must still register the ai key: {specs:?}"
+        );
+    }
+
+    #[test]
     fn the_takeover_registers_the_clipboard_provider_even_with_every_plan_entry_empty() {
         let mut session = NativeSession {
             cfg: NativeConfig::all_enabled(),
@@ -403,6 +472,7 @@ mod tests {
             record: None,
             channel_id: 9,
             handed_over: false,
+            ai_enabled: true,
         };
         let mut m = model();
         let effects = session.follow_up(&mut m, Stage::VimEnter);
@@ -463,6 +533,7 @@ mod tests {
             record: None,
             channel_id: 11,
             handed_over: false,
+            ai_enabled: true,
         };
         let mut m = model();
         let effects = session.follow_up(&mut m, Stage::VimEnter);

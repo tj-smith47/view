@@ -729,6 +729,29 @@ fn main() -> Result<()> {
     }
 
     let config_path = resolve_config_path(&cli);
+
+    // seeded here, once, before the engine exists, for the same reason
+    // `model.ai_trusted` is above: `update()` cannot read `view.toml`, so
+    // whether the feature is on at all has to arrive as already-resolved
+    // state (see the `Msg::FeatureInvoke` gate that reads `model.ai_enabled`
+    // ahead of the trust gate -- a disabled feature must not prompt for
+    // trust either). Diverges from `AiConfig::load`'s own "no file is the
+    // full experience" contract on one path: a file that exists but cannot
+    // be read or parsed fails toward disabled rather than the enabled
+    // default the successful case leaves it at, so a broken config can only
+    // ever narrow what a user's untouched `view.toml` already granted,
+    // never silently widen it.
+    match view_ai::AiConfig::load(config_path.as_deref()) {
+        Ok(cfg) => model.ai_enabled = cfg.enabled(),
+        Err(err) => {
+            model.ai_enabled = false;
+            pre_executor_effects.extend(model.engine.record_native_notice(
+                format!("view: could not read [ai] from view.toml ({err}); the AI agent panel is disabled this run"),
+                false,
+            ));
+        }
+    }
+
     match &config_path {
         Some(path) => {
             let (cached, notice) = theme_cache::load(path);

@@ -12,6 +12,7 @@
 //! registered at all is a different question, answered by the mapping table
 //! and the config rather than by this report.
 
+use view_core::native::mappings;
 use view_core::native::mappings::MappingClaim;
 use view_core::native::registry::FeatureDesc;
 
@@ -115,12 +116,25 @@ pub fn report(
             .iter()
             .filter(|c| c.had_user_mapping)
             .filter_map(|c| {
-                let desc = features.iter().find(|f| f.id == c.feature)?;
+                // A feature the registry tracks answers first; a feature
+                // reachable only through `mappings::exempt_feature` (a key
+                // with no `FeatureDesc` row, `ai` today) answers the same
+                // three facts from there instead of being silently dropped
+                // -- both a user's own mapping being taken and the line that
+                // gives it back are news regardless of which table names the
+                // feature.
+                let (id, supersedes, off_switch) =
+                    if let Some(desc) = features.iter().find(|f| f.id == c.feature) {
+                        (desc.id, desc.supersedes, desc.off_switch)
+                    } else {
+                        let exempt = mappings::exempt_feature(&c.feature)?;
+                        (exempt.id, exempt.supersedes, exempt.off_switch)
+                    };
                 Some(Handover {
-                    feature: desc.id,
+                    feature: id,
                     surface: Surface::Key { lhs: c.lhs.clone() },
-                    reverses_with: desc.off_switch,
-                    supersedes: desc.supersedes,
+                    reverses_with: off_switch,
+                    supersedes,
                 })
             }),
     );
@@ -245,5 +259,28 @@ mod tests {
             registry::features(),
         );
         assert!(report.is_empty(), "{report:?}");
+    }
+
+    /// A claim naming a feature the registry does not track (`ai`, which
+    /// has no `FeatureDesc` by design) must still be reported: a user's own
+    /// mapping being taken is news whichever table names the feature that
+    /// took it.
+    #[test]
+    fn a_claim_on_a_registry_exempt_feature_is_reported_not_dropped() {
+        let report = report(
+            &[],
+            &[claim("ai", "<leader>ai", true)],
+            registry::features(),
+        );
+        assert_eq!(
+            report.len(),
+            1,
+            "the claimed ai key must be reported even with no FeatureDesc: {report:?}"
+        );
+        assert_eq!(
+            report[0].notice(),
+            "view took <leader>ai for the ai (avante.nvim / codecompanion.nvim \
+             still loads). Turn it off with ai.enabled = false"
+        );
     }
 }

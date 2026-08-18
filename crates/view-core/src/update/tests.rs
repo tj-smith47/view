@@ -2221,6 +2221,57 @@ fn an_untrusted_ai_invoke_opens_the_trust_prompt_instead_of_going_further() {
 }
 
 #[test]
+fn an_ai_invoke_while_disabled_gets_a_notice_and_never_opens_the_trust_prompt() {
+    let mut m = model();
+    m.ai_enabled = false;
+    m.ai_trusted = true; // disabled must still short-circuit ahead of trust
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "a disabled feature must open nothing at all: {:?}",
+        m.overlays()
+    );
+    assert!(
+        !effects.is_empty(),
+        "the notice must reach the engine as an effect"
+    );
+    assert!(m.dirty);
+    assert!(
+        visible_texts(&m).iter().any(|t| t.contains("[ai] enabled")),
+        "the notice must name the config line that turns the feature back on: {:?}",
+        visible_texts(&m)
+    );
+}
+
+#[test]
+fn an_ai_invoke_with_the_default_model_reaches_the_trust_gate_not_the_disabled_notice() {
+    let mut m = model();
+    assert!(m.ai_enabled, "ai_enabled must default to true");
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "the default (enabled, untrusted) model must still reach the trust \
+             prompt exactly as before this round: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
 fn a_trusted_ai_invoke_never_opens_the_trust_prompt() {
     let mut m = model();
     m.ai_trusted = true;

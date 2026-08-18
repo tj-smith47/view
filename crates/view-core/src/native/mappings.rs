@@ -89,7 +89,7 @@ static DEFAULT_MAPS: [MappingSpec; 6] = [
     },
     MappingSpec {
         feature: "ai",
-        lhs: "<leader>a",
+        lhs: "<leader>ai",
         verb: "toggle",
     },
 ];
@@ -162,27 +162,59 @@ pub fn render_table() -> String {
     out
 }
 
-/// Feature ids that reach a key in [`DEFAULT_MAPS`] without a
-/// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc.
-static REGISTRY_EXEMPT_FEATURES: [&str; 1] = ["ai"];
+/// Display metadata for a feature in [`REGISTRY_EXEMPT_FEATURES`] -- the same
+/// three facts [`registry::FeatureDesc`] carries for a feature the registry
+/// tracks. A claim on an exempt feature's key needs exactly these to report
+/// through the same mechanism a registry feature's claim does, rather than
+/// being dropped for lacking a `FeatureDesc` row (see
+/// `view_native::report::report`, which now checks this table as a fallback).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExemptFeatureDesc {
+    /// Stable id, spelled identically to the id [`MappingSpec::feature`]
+    /// carries for this feature.
+    pub id: &'static str,
+    /// The plugin surface this feature takes over, rendered as prose in a
+    /// claim's notice exactly as [`registry::FeatureDesc::supersedes`] is.
+    pub supersedes: Option<&'static str>,
+    /// The exact config line that turns this feature off, verbatim in a
+    /// claim's notice, the same contract [`registry::FeatureDesc::off_switch`]
+    /// holds.
+    pub off_switch: &'static str,
+}
+
+/// Features that reach a key in [`DEFAULT_MAPS`] without a
+/// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc on why
+/// a feature lands here.
+static REGISTRY_EXEMPT_FEATURES: [ExemptFeatureDesc; 1] = [ExemptFeatureDesc {
+    id: "ai",
+    supersedes: Some("avante.nvim / codecompanion.nvim"),
+    off_switch: "ai.enabled = false",
+}];
 
 /// Whether `feature` is reachable from somewhere a reviewer, and a
 /// `[native]` config loader deciding what to register, can both find it:
 /// the registry itself, or [`REGISTRY_EXEMPT_FEATURES`] for a feature that
 /// deliberately has no registry row.
 ///
-/// `ai` has no `[native]` entry: its enabled state lives in a parallel
-/// `AiStatus` mechanism, not in the registry every other feature shares, so
-/// `[native]` can never carry a switch that turns its key off -- a loader
-/// that gated registration on `registry::is_feature` alone would read that
-/// absence as "disabled" and drop the key from nvim registration, even
-/// though completion, usage, and the docs table (all read from
-/// [`default_maps`] directly) would still advertise it. A feature lands in
-/// this list in the same commit that gives it a mapping row, never a step
-/// ahead of it.
+/// `ai` has no `[native]` entry: its enabled state lives in its own `[ai]`
+/// table, not in the registry every other feature shares, so `[native]` can
+/// never carry a switch that turns its key off -- a loader that gated
+/// registration on `registry::is_feature` alone would read that absence as
+/// "disabled" and drop the key from nvim registration, even though
+/// completion, usage, and the docs table (all read from [`default_maps`]
+/// directly) would still advertise it. A feature lands in this list in the
+/// same commit that gives it a mapping row, never a step ahead of it.
 #[must_use]
 pub fn is_reachable_feature(feature: &str) -> bool {
-    crate::native::registry::is_feature(feature) || REGISTRY_EXEMPT_FEATURES.contains(&feature)
+    crate::native::registry::is_feature(feature) || exempt_feature(feature).is_some()
+}
+
+/// The exemption metadata for `feature`, when it is one of
+/// [`REGISTRY_EXEMPT_FEATURES`] -- what a claim report needs to announce a
+/// takeover the registry itself has no row for.
+#[must_use]
+pub fn exempt_feature(feature: &str) -> Option<&'static ExemptFeatureDesc> {
+    REGISTRY_EXEMPT_FEATURES.iter().find(|f| f.id == feature)
 }
 
 #[cfg(test)]
@@ -207,6 +239,13 @@ mod tests {
     #[test]
     fn a_feature_in_neither_the_registry_nor_the_exemption_list_fails_the_check() {
         assert!(!is_reachable_feature("nonexistent-feature"));
+        assert!(exempt_feature("nonexistent-feature").is_none());
+    }
+
+    #[test]
+    fn the_ai_exemption_carries_its_own_off_switch() {
+        let exempt = exempt_feature("ai").expect("ai must be a registered exemption");
+        assert_eq!(exempt.off_switch, "ai.enabled = false");
     }
 
     #[test]

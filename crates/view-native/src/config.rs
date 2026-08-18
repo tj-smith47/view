@@ -232,16 +232,20 @@ impl NativeConfig {
     }
 
     /// Whether the feature named `id` is enabled. An id that names no
-    /// feature and is not on
-    /// [`view_core::native::mappings::is_reachable_feature`]'s exemption
-    /// list either is not enabled: nothing in the build can act on it.
+    /// feature, and is not
+    /// [`view_core::native::mappings::is_reachable_feature`]'s one other
+    /// case -- a feature whose own enabled state lives outside `[native]`
+    /// entirely, so `disabled` structurally can never carry a switch for it
+    /// -- either is not enabled: nothing in the build can act on it.
     ///
-    /// The exemption check matters for `register_plan`
-    /// ([`crate::mappings`]): `id` reaching here as `"ai"` must still
-    /// contribute its default key, since `[native]` has no `ai` switch this
-    /// struct's `disabled` list could ever carry -- `is_feature` alone would
-    /// read that structural absence as "disabled" and drop a key
-    /// `default_maps` and `:View`'s own completion both still advertise.
+    /// The second case matters for `register_plan` ([`crate::mappings`]):
+    /// such a feature's default key must still be registered from here, or
+    /// `is_feature` alone would read the structural absence of a `[native]`
+    /// switch as "disabled" and silently drop a key `default_maps` and
+    /// `:View`'s own completion both still advertise as live. Whether that
+    /// feature's key is *itself* also gated on its own real enabled bit is a
+    /// question this method has no way to answer -- it knows only that
+    /// `[native]` is not where that bit lives.
     #[must_use]
     pub fn enabled(&self, id: &str) -> bool {
         view_core::native::mappings::is_reachable_feature(id) && !self.disabled.contains(&id)
