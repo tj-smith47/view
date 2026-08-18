@@ -188,6 +188,24 @@ Response:
 `protocolVersion` is a bare integer, not a string: the wire value pinned for
 view's `initialize` call is the JSON integer `1`.
 
+Version negotiation, verbatim from the same page:
+
+```
+$ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/initialization.mdx" | sed -n '92,99p'
+### Version Negotiation
+
+The `initialize` request **MUST** include the latest protocol version the Client supports.
+
+If the Agent supports the requested version, it **MUST** respond with the same version. Otherwise, the Agent **MUST** respond with the latest version it supports.
+
+If the Client does not support the version specified by the Agent in the `initialize` response, the Client **SHOULD** close the connection and inform the user about it.
+```
+
+The response `protocolVersion` is therefore the agent's counter-offer, not an
+echo, and a client that ignores it will speak a dialect the agent never
+agreed to. view supports exactly version `1`, so any other answer closes the
+session and reports both versions to the user.
+
 ## `PermissionOption`
 
 ```
@@ -752,6 +770,55 @@ example agent implementation exists in this repo to cross-check error
 handling against
 (`agent-client-protocol-schema/`, `schema-generator/`, `schema/`, `docs/`,
 `scripts/` are the only source directories at the repo root).
+
+## `RequestId`
+
+The id member is a three-way union, not an integer. An implementation that
+types it as an integer fails to decode the first frame any string-id agent
+sends, and misreads a null-id request as a notification.
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))
+print(json.dumps(d['\$defs']['RequestId'], indent=2))
+"
+{
+  "description": "JSON RPC Request Id\n\nAn identifier established by the Client that MUST contain a String, Number, or NULL value if included. If it is not included it is assumed to be a notification. The value SHOULD normally not be Null \\[1\\] and Numbers SHOULD NOT contain fractional parts \\[2\\]\n\nThe Server MUST reply with the same value in the Response object if included. This member is used to correlate the context between the two objects.\n\n\\[1\\] The use of Null as a value for the id member in a Request object is discouraged, because this specification uses a value of Null for Responses with an unknown id. Also, because JSON-RPC 1.0 uses an id value of Null for Notifications this could cause confusion in handling.\n\n\\[2\\] Fractional parts may be problematic, since many decimal fractions cannot be represented exactly as binary fractions.",
+  "anyOf": [
+    {
+      "title": "Null",
+      "description": "The JSON-RPC `null` request id.",
+      "type": "null"
+    },
+    {
+      "title": "Number",
+      "description": "A numeric JSON-RPC request id.",
+      "type": "integer",
+      "format": "int64"
+    },
+    {
+      "title": "Str",
+      "description": "A string JSON-RPC request id.",
+      "type": "string"
+    }
+  ]
+}
+```
+
+Three consequences the schema text pins directly:
+
+- present-but-null and absent are different frames. Only the absent case is a
+  notification, so a decoder cannot collapse both onto `None`.
+- the number arm is `int64`, signed, and fractional parts are discouraged
+  rather than forbidden, so a `u64` field rejects ids the schema permits.
+- correlation is by equality of the whole value ("the Server MUST reply with
+  the same value"), which means the id a peer chose must be stored and
+  echoed unchanged rather than re-derived.
+
+view allocates only numeric ids for the requests it originates. The string
+and null arms exist so that ids chosen by the agent survive the round trip
+intact.
 
 ## stdio framing
 

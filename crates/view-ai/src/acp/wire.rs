@@ -14,7 +14,7 @@
 //! blocking pool into a process whose design pins exactly one async runtime
 //! -- against a wire shape already captured, for a codec this size.
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
 
@@ -39,6 +39,46 @@ pub enum WireError {
         "agent sent a JSON-RPC frame that is neither a request, a notification, nor a response"
     )]
     UnknownFrame,
+}
+
+/// A JSON-RPC request id, spanning the whole domain the schema defines for
+/// it: `null`, a signed 64-bit integer, or a string.
+///
+/// Untagged, because the wire carries the bare value with nothing to
+/// discriminate on. Which of the three an agent uses is the agent's choice,
+/// not this client's, and the schema's own description of the field is the
+/// contract this type exists to keep: "The Server MUST reply with the same
+/// value in the Response object." An id is therefore never re-encoded into
+/// a shape of this crate's choosing -- it is carried and echoed verbatim.
+///
+/// Confined to this crate. The closed event vocabulary carries a
+/// view-allocated `u64` instead, so nothing outside here ever learns that
+/// the wire has three id shapes.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum RequestId {
+    /// A numeric id. Signed: the schema says `int64`, and an agent
+    /// numbering from a negative seed is conformant.
+    Num(i64),
+    /// A string id.
+    Str(String),
+    /// An explicit `null` id, which the schema allows and which is not the
+    /// same thing as an absent `id` -- see [`JsonRpcMessage::id`].
+    Null,
+}
+
+/// Distinguishes an absent `id` member from one explicitly set to `null`.
+///
+/// `Option<T>`'s own `Deserialize` maps a JSON `null` to `None`, which would
+/// collapse the two: a request carrying `"id": null` would then classify as
+/// a notification and never be answered. Deserializing the inner type
+/// directly, with `#[serde(default)]` supplying `None` only when the member
+/// is missing, keeps them apart.
+fn absent_or_present<'de, D>(deserializer: D) -> Result<Option<RequestId>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    RequestId::deserialize(deserializer).map(Some)
 }
 
 /// A JSON-RPC error object.
@@ -73,8 +113,14 @@ pub const INTERNAL_ERROR: i64 = -32603;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct JsonRpcMessage {
     pub jsonrpc: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<u64>,
+    /// `None` when the member is absent, which is what makes a frame a
+    /// notification. `Some(RequestId::Null)` when it is present and null.
+    #[serde(
+        default,
+        deserialize_with = "absent_or_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub id: Option<RequestId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,7 +134,7 @@ pub struct JsonRpcMessage {
 impl JsonRpcMessage {
     /// A request: answered, so it carries an `id`.
     #[must_use]
-    pub fn request(id: u64, method: &str, params: Value) -> Self {
+    pub fn request(id: RequestId, method: &str, params: Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: Some(id),
@@ -115,7 +161,7 @@ impl JsonRpcMessage {
 
     /// A successful answer to the request numbered `id`.
     #[must_use]
-    pub fn response(id: u64, result: Value) -> Self {
+    pub fn response(id: RequestId, result: Value) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: Some(id),
@@ -128,7 +174,7 @@ impl JsonRpcMessage {
 
     /// A failed answer to the request numbered `id`.
     #[must_use]
-    pub fn error_response(id: u64, code: i64, message: &str) -> Self {
+    pub fn error_response(id: RequestId, code: i64, message: &str) -> Self {
         Self {
             jsonrpc: JSONRPC_VERSION.to_string(),
             id: Some(id),
@@ -176,7 +222,7 @@ pub enum Incoming {
     /// The agent is asking something of this client and expects an answer
     /// addressed to `id`.
     Request {
-        id: u64,
+        id: RequestId,
         method: String,
         params: Value,
     },
@@ -184,7 +230,7 @@ pub enum Incoming {
     Notification { method: String, params: Value },
     /// The agent's answer to a request this client sent.
     Response {
-        id: u64,
+        id: RequestId,
         outcome: Result<Value, JsonRpcError>,
     },
 }
@@ -392,7 +438,7 @@ mod tests {
                 .unwrap();
             writer
                 .write_message(&JsonRpcMessage::request(
-                    7,
+                    RequestId::Num(7),
                     "initialize",
                     serde_json::json!({ "protocolVersion": 1 }),
                 ))
@@ -416,17 +462,50 @@ mod tests {
         let second = reader.next_message().await.unwrap().unwrap();
         assert!(matches!(
             second.classify().unwrap(),
-            Incoming::Request { id: 7, .. }
+            Incoming::Request {
+                id: RequestId::Num(7),
+                ..
+            }
         ));
         assert!(reader.next_message().await.unwrap().is_none());
     }
 
     #[test]
+    fn a_request_id_spans_the_schemas_whole_null_int_string_domain() {
+        let string_id: JsonRpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":"req-1","method":"initialize"}"#)
+                .unwrap();
+        assert_eq!(string_id.id, Some(RequestId::Str("req-1".to_string())));
+
+        let negative: JsonRpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":-3,"result":{}}"#).unwrap();
+        assert_eq!(negative.id, Some(RequestId::Num(-3)));
+
+        let explicit_null: JsonRpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","id":null,"method":"session/cancel"}"#)
+                .unwrap();
+        assert!(matches!(
+            explicit_null.classify().unwrap(),
+            Incoming::Request { .. }
+        ));
+
+        let absent: JsonRpcMessage =
+            serde_json::from_str(r#"{"jsonrpc":"2.0","method":"session/update"}"#).unwrap();
+        assert!(matches!(
+            absent.classify().unwrap(),
+            Incoming::Notification { .. }
+        ));
+    }
+
+    #[test]
     fn classify_sorts_the_three_message_kinds_and_rejects_the_fourth() {
-        let request = JsonRpcMessage::request(1, "session/new", Value::Null);
+        let request = JsonRpcMessage::request(RequestId::Num(1), "session/new", Value::Null);
         assert!(matches!(
             request.classify().unwrap(),
-            Incoming::Request { id: 1, .. }
+            Incoming::Request {
+                id: RequestId::Num(1),
+                ..
+            }
         ));
 
         let notification = JsonRpcMessage::notification("session/update", Value::Null);
@@ -435,14 +514,24 @@ mod tests {
             Incoming::Notification { .. }
         ));
 
-        let ok = JsonRpcMessage::response(2, serde_json::json!({ "sessionId": "s" }));
-        let Incoming::Response { id: 2, outcome } = ok.classify().unwrap() else {
+        let ok =
+            JsonRpcMessage::response(RequestId::Num(2), serde_json::json!({ "sessionId": "s" }));
+        let Incoming::Response {
+            id: RequestId::Num(2),
+            outcome,
+        } = ok.classify().unwrap()
+        else {
             panic!("a frame with an id and a result is a response")
         };
         assert_eq!(outcome.unwrap()["sessionId"], "s");
 
-        let failed = JsonRpcMessage::error_response(3, REQUEST_CANCELLED, "Cancelled");
-        let Incoming::Response { id: 3, outcome } = failed.classify().unwrap() else {
+        let failed =
+            JsonRpcMessage::error_response(RequestId::Num(3), REQUEST_CANCELLED, "Cancelled");
+        let Incoming::Response {
+            id: RequestId::Num(3),
+            outcome,
+        } = failed.classify().unwrap()
+        else {
             panic!("a frame with an id and an error is a response")
         };
         assert_eq!(outcome.unwrap_err().code, REQUEST_CANCELLED);
@@ -472,7 +561,10 @@ mod tests {
                 .unwrap()
                 .classify()
                 .unwrap(),
-            Incoming::Response { id: 1, .. }
+            Incoming::Response {
+                id: RequestId::Num(1),
+                ..
+            }
         ));
         assert!(matches!(
             reader.next_message().await,

@@ -8,7 +8,7 @@
 //! no agent-protocol type, and no JSON, is visible from either side of that
 //! boundary.
 
-pub mod acp;
+mod acp;
 
 pub use acp::session::AiSession;
 

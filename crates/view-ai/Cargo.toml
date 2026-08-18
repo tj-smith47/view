@@ -24,6 +24,11 @@ toml = "0.8"
 view-core = { version = "0.0.1", path = "../view-core" }
 
 [dev-dependencies]
+# `time` is test-only: nothing in the shipped crate uses a timer, and the
+# runtime it builds does not enable one. The tests need a bounded wait so a
+# regression that reintroduces a forever-running session loop fails the gate
+# instead of hanging it.
+tokio = { version = "1", features = ["time"] }
 # Self dev-dependency: cargo's feature unification enables test-support for
 # every build of this package within a `cargo test` session, so the tests
 # under tests/ see the stub agent binary without a manual --features flag.

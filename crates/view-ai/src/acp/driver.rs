@@ -8,14 +8,32 @@
 //! sends on unbounded channels, so it can always keep draining the agent's
 //! output no matter how far behind the agent is on reading its input.
 //!
+//! Unbounded is a deliberate trade with a real cost, not a default. A
+//! bounded channel would make the driver's own sends either await (which
+//! reintroduces the stall the split exists to remove, since the driver is
+//! what drains the agent) or drop (which loses a user's prompt or an answer
+//! the agent is blocked on). What unbounded buys instead is that a backlog
+//! grows with the agent's unresponsiveness rather than wedging anything, and
+//! what it costs is that a permanently unresponsive agent grows the backlog
+//! until the process runs out of memory. Nothing here caps or reports the
+//! depth, so an agent that accepts input and never answers is bounded only
+//! by how long the user keeps typing at it.
+//!
+//! Both stream halves report their own ending. The reader's is obvious; the
+//! writer's is not, and is the reason it has a channel of its own: an agent
+//! that breaks its stdin while holding stdout open leaves the reader parked
+//! on a stream that never ends, so nothing else would ever notice that
+//! everything sent since is going nowhere.
+//!
 //! Every method name and every enum string below is pinned in
 //! `docs/acp-v1-wire-capture.md`; none is recalled.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::process::Child;
 use tokio::sync::{mpsc, oneshot};
 use view_core::native::ai_event::{
     AiCommand, AiEvent, ContextBlock, FsError, PermissionOption, PermissionOptionKind,
@@ -25,7 +43,8 @@ use view_core::native::ai_event::{
 use crate::acp::fs::PendingReply;
 use crate::acp::session::SessionShared;
 use crate::acp::wire::{
-    Incoming, JsonRpcCodec, JsonRpcMessage, INTERNAL_ERROR, METHOD_NOT_FOUND, REQUEST_CANCELLED,
+    Incoming, JsonRpcCodec, JsonRpcMessage, RequestId, INTERNAL_ERROR, METHOD_NOT_FOUND,
+    REQUEST_CANCELLED,
 };
 
 /// The wire protocol version this client speaks, a bare integer.
@@ -39,41 +58,83 @@ enum Outstanding {
     Prompt,
 }
 
-/// What ended the read side.
-enum ReaderEnd {
+/// What ended the session, from whichever half noticed first.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SessionEnd {
     /// The agent closed its stdout.
-    Eof,
-    /// The stream failed or carried something that is not a frame.
-    Failed(String),
+    ReaderEof,
+    /// The agent's output stream failed or carried something that is not a
+    /// frame.
+    ReaderFailed(String),
+    /// The agent's input stream stopped accepting frames. Reported in its
+    /// own right rather than left to the reader: an agent can break its
+    /// stdin and hold its stdout open, and then nothing is ever delivered
+    /// and nothing ever ends.
+    WriterFailed(String),
 }
 
-/// Runs one session to completion. Returns once the agent's output stream
-/// has ended, after reporting why.
+/// Runs one session to completion, reporting why it ended.
 pub(crate) async fn run_session(
     mut child: Child,
-    codec: JsonRpcCodec<ChildStdout, ChildStdin>,
-    mut commands: mpsc::UnboundedReceiver<AiCommand>,
+    codec: JsonRpcCodec<tokio::process::ChildStdout, tokio::process::ChildStdin>,
+    commands: mpsc::UnboundedReceiver<AiCommand>,
     shared: Arc<SessionShared>,
     cwd: std::path::PathBuf,
 ) {
+    let Some(ending) = drive(codec, commands, Arc::clone(&shared), cwd).await else {
+        // the handle was dropped: the session is being torn down on purpose,
+        // so nothing is reported and the child goes with the task
+        return;
+    };
+    let detail = match ending {
+        SessionEnd::ReaderEof => match child.wait().await {
+            Ok(status) => format!("the agent exited ({status})"),
+            Err(err) => format!("the agent exited and could not be reaped: {err}"),
+        },
+        SessionEnd::ReaderFailed(reason) => reason,
+        SessionEnd::WriterFailed(reason) => {
+            format!("the agent stopped accepting input: {reason}")
+        }
+    };
+    shared.emit(AiEvent::SessionCrashed { message: detail });
+}
+
+/// The session loop itself, over any stream pair rather than a child's
+/// pipes: what ends a session is a property of the streams, and the one
+/// ending that cannot be produced with a real child is the half-wedge this
+/// separation exists to make testable.
+///
+/// `None` means the command handle was dropped, which is a deliberate
+/// teardown and not something to report.
+async fn drive<R, W>(
+    codec: JsonRpcCodec<R, W>,
+    mut commands: mpsc::UnboundedReceiver<AiCommand>,
+    shared: Arc<SessionShared>,
+    cwd: std::path::PathBuf,
+) -> Option<SessionEnd>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     let (mut reader, mut writer) = codec.split();
-    let (frames_tx, mut frames) = mpsc::unbounded_channel();
+    let (ends_tx, mut frames) = mpsc::unbounded_channel();
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<JsonRpcMessage>();
 
+    let reader_ends = ends_tx.clone();
     tokio::spawn(async move {
         loop {
             match reader.next_message().await {
                 Ok(Some(frame)) => {
-                    if frames_tx.send(Ok(frame)).is_err() {
+                    if reader_ends.send(Ok(frame)).is_err() {
                         break;
                     }
                 }
                 Ok(None) => {
-                    let _ = frames_tx.send(Err(ReaderEnd::Eof));
+                    let _ = reader_ends.send(Err(SessionEnd::ReaderEof));
                     break;
                 }
                 Err(err) => {
-                    let _ = frames_tx.send(Err(ReaderEnd::Failed(err.to_string())));
+                    let _ = reader_ends.send(Err(SessionEnd::ReaderFailed(err.to_string())));
                     break;
                 }
             }
@@ -82,43 +143,31 @@ pub(crate) async fn run_session(
 
     tokio::spawn(async move {
         while let Some(frame) = out_rx.recv().await {
-            if writer.write_message(&frame).await.is_err() {
-                // the child's stdin is gone; the read side is about to
-                // report the same death, and reporting it twice would put
-                // two crash notices in front of the user for one event
+            if let Err(err) = writer.write_message(&frame).await {
+                let _ = ends_tx.send(Err(SessionEnd::WriterFailed(err.to_string())));
                 break;
             }
         }
     });
 
-    let mut driver = Driver::new(Arc::clone(&shared), out_tx, cwd);
+    let mut driver = Driver::new(shared, out_tx, cwd);
     driver.begin();
 
-    let ending = loop {
+    loop {
         tokio::select! {
             frame = frames.recv() => match frame {
                 Some(Ok(frame)) => driver.on_frame(frame),
-                Some(Err(end)) => break end,
-                None => break ReaderEnd::Eof,
+                Some(Err(end)) => return Some(end),
+                // both halves are gone without either having said why, which
+                // only happens if a task was dropped out from under the loop
+                None => return Some(SessionEnd::ReaderEof),
             },
             command = commands.recv() => match command {
                 Some(command) => driver.on_command(command),
-                // the handle was dropped: the session is being torn down on
-                // purpose, so nothing is reported and the child goes with
-                // the task
-                None => return,
+                None => return None,
             },
         }
-    };
-
-    let detail = match ending {
-        ReaderEnd::Eof => match child.wait().await {
-            Ok(status) => format!("the agent exited ({status})"),
-            Err(err) => format!("the agent exited and could not be reaped: {err}"),
-        },
-        ReaderEnd::Failed(reason) => reason,
-    };
-    shared.emit(AiEvent::SessionCrashed { message: detail });
+    }
 }
 
 /// The correlation state one session accumulates.
@@ -128,14 +177,24 @@ struct Driver {
     /// The directory the agent was started in, and the root the session is
     /// created against.
     cwd: std::path::PathBuf,
-    next_id: u64,
-    outstanding: HashMap<u64, Outstanding>,
+    /// The next id for a request this client sends. Numeric because view
+    /// chooses its own shape for the ids it originates; an agent's own ids
+    /// keep whatever shape the agent gave them.
+    next_wire_id: i64,
+    /// The one id space that crosses the boundary. Every `request_id` on an
+    /// `AiEvent` is drawn from here -- permission requests and filesystem
+    /// requests alike -- so a consumer holding two of them can compare or
+    /// key on them without knowing which kind it has. An agent's own wire
+    /// ids never leave this file.
+    next_boundary_id: u64,
+    outstanding: HashMap<RequestId, Outstanding>,
     session_id: Option<String>,
-    /// Permission requests the agent is still waiting on an answer for.
-    /// Kept so an answer naming an id the agent never asked about is
-    /// dropped rather than written, and so a cancel can settle every one of
-    /// them.
-    open_permissions: HashSet<u64>,
+    /// Permission requests the agent is still waiting on an answer for,
+    /// from the boundary id the event carried to the wire id the answer
+    /// must be addressed to. Kept so an answer naming an id the agent never
+    /// asked about is dropped rather than written, and so a cancel can
+    /// settle every one of them.
+    open_permissions: HashMap<u64, RequestId>,
     /// The last title and status seen per tool call. A `tool_call_update`
     /// carries only what changed, while the event vocabulary carries a
     /// whole call, so the fields the agent omitted come from here rather
@@ -157,10 +216,11 @@ impl Driver {
             shared,
             out,
             cwd,
-            next_id: 1,
+            next_wire_id: 1,
+            next_boundary_id: 1,
             outstanding: HashMap::new(),
             session_id: None,
-            open_permissions: HashSet::new(),
+            open_permissions: HashMap::new(),
             tool_calls: HashMap::new(),
             deferred: Vec::new(),
         }
@@ -189,10 +249,17 @@ impl Driver {
     }
 
     fn request(&mut self, method: &str, params: Value, kind: Outstanding) {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.outstanding.insert(id, kind);
+        let id = RequestId::Num(self.next_wire_id);
+        self.next_wire_id = self.next_wire_id.saturating_add(1);
+        self.outstanding.insert(id.clone(), kind);
         let _ = self.out.send(JsonRpcMessage::request(id, method, params));
+    }
+
+    /// The next id to put on an event crossing into the closed vocabulary.
+    fn next_boundary_id(&mut self) -> u64 {
+        let id = self.next_boundary_id;
+        self.next_boundary_id = self.next_boundary_id.saturating_add(1);
+        id
     }
 
     fn on_frame(&mut self, frame: JsonRpcMessage) {
@@ -208,7 +275,11 @@ impl Driver {
         }
     }
 
-    fn on_response(&mut self, id: u64, outcome: Result<Value, crate::acp::wire::JsonRpcError>) {
+    fn on_response(
+        &mut self,
+        id: RequestId,
+        outcome: Result<Value, crate::acp::wire::JsonRpcError>,
+    ) {
         let Some(kind) = self.outstanding.remove(&id) else {
             return;
         };
@@ -246,6 +317,24 @@ impl Driver {
         };
         match kind {
             Outstanding::Initialize => {
+                // the version is only bumped for breaking changes, so an
+                // agent answering with anything else is saying that
+                // everything after this handshake is a different protocol.
+                // Speaking v1 at it anyway would turn one legible refusal
+                // into a stream of decode failures blamed on the agent.
+                let agreed = result.get("protocolVersion").and_then(Value::as_i64);
+                if agreed != Some(PROTOCOL_VERSION) {
+                    let spoken = match agreed {
+                        Some(version) => version.to_string(),
+                        None => "no version at all".to_string(),
+                    };
+                    self.shared.emit(AiEvent::SessionCrashed {
+                        message: format!(
+                            "the agent speaks protocol version {spoken}, view speaks {PROTOCOL_VERSION}"
+                        ),
+                    });
+                    return;
+                }
                 // the same directory the agent process itself was started
                 // in: a session created against a different root would have
                 // the agent resolving relative paths one way and reading
@@ -356,7 +445,7 @@ impl Driver {
         });
     }
 
-    fn on_request(&mut self, id: u64, method: &str, params: &Value) {
+    fn on_request(&mut self, id: RequestId, method: &str, params: &Value) {
         match method {
             "session/request_permission" => self.on_permission_request(id, params),
             "fs/read_text_file" => self.on_fs_read(id, params),
@@ -371,7 +460,7 @@ impl Driver {
         }
     }
 
-    fn on_permission_request(&mut self, id: u64, params: &Value) {
+    fn on_permission_request(&mut self, id: RequestId, params: &Value) {
         let tool_call_id = params["toolCall"]
             .get("toolCallId")
             .and_then(Value::as_str)
@@ -392,15 +481,18 @@ impl Driver {
             ));
             return;
         }
-        self.open_permissions.insert(id);
+        // the agent's own wire id stays here; what crosses is a view id
+        // from the one counter every boundary id comes from
+        let request_id = self.next_boundary_id();
+        self.open_permissions.insert(request_id, id);
         self.shared.emit(AiEvent::PermissionRequested {
-            request_id: id,
+            request_id,
             tool_call_id,
             options,
         });
     }
 
-    fn on_fs_read(&mut self, id: u64, params: &Value) {
+    fn on_fs_read(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
             params
                 .get("path")
@@ -408,7 +500,10 @@ impl Driver {
                 .unwrap_or_default(),
         );
         let (tx, rx) = oneshot::channel();
-        let request_id = self.shared.pending().register(PendingReply::Read(tx));
+        let request_id = self.next_boundary_id();
+        self.shared
+            .pending()
+            .register(request_id, PendingReply::Read(tx));
         spawn_fs_reply(
             self.out.clone(),
             id,
@@ -419,7 +514,7 @@ impl Driver {
             .emit(AiEvent::FsReadRequested { request_id, path });
     }
 
-    fn on_fs_write(&mut self, id: u64, params: &Value) {
+    fn on_fs_write(&mut self, id: RequestId, params: &Value) {
         let path = std::path::PathBuf::from(
             params
                 .get("path")
@@ -432,7 +527,10 @@ impl Driver {
             .unwrap_or_default()
             .to_string();
         let (tx, rx) = oneshot::channel();
-        let request_id = self.shared.pending().register(PendingReply::Write(tx));
+        let request_id = self.next_boundary_id();
+        self.shared
+            .pending()
+            .register(request_id, PendingReply::Write(tx));
         spawn_fs_reply(self.out.clone(), id, rx, |()| json!({}));
         self.shared.emit(AiEvent::FsWriteRequested {
             request_id,
@@ -468,9 +566,9 @@ impl Driver {
                 request_id,
                 outcome,
             } => {
-                if self.open_permissions.remove(&request_id) {
+                if let Some(wire_id) = self.open_permissions.remove(&request_id) {
                     let _ = self.out.send(JsonRpcMessage::response(
-                        request_id,
+                        wire_id,
                         json!({ "outcome": permission_outcome(&outcome) }),
                     ));
                 }
@@ -484,9 +582,9 @@ impl Driver {
                 // be answered with the cancelled outcome once a turn is
                 // cancelled; an unanswered one would leave the agent waiting
                 // on a turn that is already over
-                for request_id in std::mem::take(&mut self.open_permissions) {
+                for wire_id in std::mem::take(&mut self.open_permissions).into_values() {
                     let _ = self.out.send(JsonRpcMessage::response(
-                        request_id,
+                        wire_id,
                         json!({ "outcome": { "outcome": "cancelled" } }),
                     ));
                 }
@@ -525,7 +623,7 @@ impl Driver {
 /// it doing so.
 fn spawn_fs_reply<T, F>(
     out: mpsc::UnboundedSender<JsonRpcMessage>,
-    id: u64,
+    id: RequestId,
     rx: oneshot::Receiver<Result<T, FsError>>,
     to_result: F,
 ) where
@@ -536,7 +634,7 @@ fn spawn_fs_reply<T, F>(
         let frame = match rx.await {
             Ok(Ok(value)) => JsonRpcMessage::response(id, to_result(value)),
             Ok(Err(error)) => {
-                JsonRpcMessage::error_response(id, INTERNAL_ERROR, &fs_reason(&error))
+                JsonRpcMessage::error_response(id.clone(), INTERNAL_ERROR, &fs_reason(&error))
             }
             // the sender was dropped without an answer: the editor is going
             // away, which for the agent is the same as its request being
@@ -648,5 +746,73 @@ fn context_block(block: &ContextBlock) -> Option<Value> {
             Some(json!({ "type": "resource_link", "uri": uri, "name": name }))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    use super::*;
+
+    /// A stdin that is already broken: every write fails, which is what an
+    /// agent that closed its input looks like from this side.
+    struct BrokenStdin;
+
+    impl AsyncWrite for BrokenStdin {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the agent closed its stdin",
+            )))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// The half-wedge: the agent's input is gone while its output is still
+    /// open and silent, so the reader has nothing to notice and never will.
+    /// Without the writer reporting for itself this loop runs forever and
+    /// every prompt after it vanishes into a channel nobody drains.
+    #[tokio::test]
+    async fn a_broken_stdin_is_reported_even_though_the_reader_never_ends() {
+        // held open for the whole test: dropping this end would EOF the
+        // reader and let the reader-side path report instead
+        let (_agent_stdout, client_side) = tokio::io::duplex(4096);
+        let (_commands_tx, commands) = mpsc::unbounded_channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
+
+        let ending = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            drive(
+                JsonRpcCodec::new(client_side, BrokenStdin),
+                commands,
+                shared,
+                std::env::temp_dir(),
+            ),
+        )
+        .await
+        .expect("the session reports a dead writer instead of running forever");
+
+        let Some(SessionEnd::WriterFailed(reason)) = ending else {
+            panic!("expected WriterFailed, got {ending:?}")
+        };
+        assert!(
+            reason.contains("stdin"),
+            "the reason names what broke: {reason}"
+        );
     }
 }

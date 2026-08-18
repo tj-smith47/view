@@ -7,6 +7,12 @@
 //! a `#!` script, and an interpreter named on the command line is one more
 //! thing that has to be installed on every host the gate runs on.
 //!
+//! Every request this fixture originates carries a **string** id, which the
+//! schema allows and which the client must echo back verbatim. A client that
+//! assumed numeric ids never matches its own pending request, so every
+//! string-id leg below simply never finishes -- which is the regression
+//! being nailed down.
+//!
 //! Prompt texts it treats as instructions, so one fixture covers every
 //! transport case a test needs:
 //!
@@ -31,8 +37,7 @@ use std::io::{BufRead, Write};
 fn main() {
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
-    let mut permission_id: Option<u64> = None;
-    let mut pending_prompt: Option<u64> = None;
+    let mut pending_prompt: Option<serde_json::Value> = None;
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { return };
@@ -42,30 +47,78 @@ fn main() {
         let Ok(frame) = serde_json::from_str::<serde_json::Value>(&line) else {
             return;
         };
-        let id = frame.get("id").and_then(serde_json::Value::as_u64);
+        let id = frame.get("id").cloned();
         let method = frame
             .get("method")
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default()
             .to_string();
 
-        match (method.as_str(), id) {
-            ("initialize", Some(id)) => reply(
+        if method.is_empty() {
+            // an answer to something this fixture asked for, matched on the
+            // string id it chose
+            match id.as_ref().and_then(serde_json::Value::as_str) {
+                Some("perm-1") => {
+                    let chosen = frame["result"]["outcome"]["optionId"]
+                        .as_str()
+                        .unwrap_or("none")
+                        .to_string();
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("chose {chosen}"),
+                    );
+                    end_prompt(&mut stdout, &mut pending_prompt);
+                }
+                Some("fs-read-1") => {
+                    let content = frame["result"]["content"]
+                        .as_str()
+                        .unwrap_or("none")
+                        .to_string();
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("read {content}"),
+                    );
+                    end_prompt(&mut stdout, &mut pending_prompt);
+                }
+                Some("fs-write-1") => {
+                    let outcome = if frame.get("error").is_some() {
+                        "refused"
+                    } else {
+                        "wrote"
+                    };
+                    chunk(&mut stdout, "agent_message_chunk", outcome);
+                    end_prompt(&mut stdout, &mut pending_prompt);
+                }
+                _ => {}
+            }
+            continue;
+        }
+
+        let Some(id) = id else {
+            // a notification; the only one this fixture is sent is
+            // session/cancel, which needs no answer
+            continue;
+        };
+
+        match method.as_str() {
+            "initialize" => reply(
                 &mut stdout,
                 id,
                 serde_json::json!({
-                    "protocolVersion": 1,
+                    "protocolVersion": protocol_version(),
                     "agentCapabilities": {},
                     "agentInfo": { "name": "stub", "title": "Stub", "version": "1.0.0" },
                     "authMethods": []
                 }),
             ),
-            ("session/new", Some(id)) => reply(
+            "session/new" => reply(
                 &mut stdout,
                 id,
                 serde_json::json!({ "sessionId": "sess_stub" }),
             ),
-            ("session/prompt", Some(id)) => {
+            "session/prompt" => {
                 let text = frame["params"]["prompt"][0]["text"]
                     .as_str()
                     .unwrap_or_default()
@@ -89,11 +142,10 @@ fn main() {
                         );
                     }
                     "ask" => {
-                        permission_id = Some(900);
                         pending_prompt = Some(id);
                         request(
                             &mut stdout,
-                            900,
+                            serde_json::json!("perm-1"),
                             "session/request_permission",
                             serde_json::json!({
                                 "sessionId": "sess_stub",
@@ -109,7 +161,7 @@ fn main() {
                         pending_prompt = Some(id);
                         request(
                             &mut stdout,
-                            901,
+                            serde_json::json!("fs-read-1"),
                             "fs/read_text_file",
                             serde_json::json!({
                                 "sessionId": "sess_stub",
@@ -121,7 +173,7 @@ fn main() {
                         pending_prompt = Some(id);
                         request(
                             &mut stdout,
-                            902,
+                            serde_json::json!("fs-write-1"),
                             "fs/write_text_file",
                             serde_json::json!({
                                 "sessionId": "sess_stub",
@@ -138,61 +190,27 @@ fn main() {
                     ),
                 }
             }
-            // an answer to something this fixture asked for
-            (_, Some(id)) if Some(id) == permission_id => {
-                let chosen = frame["result"]["outcome"]["optionId"]
-                    .as_str()
-                    .unwrap_or("none")
-                    .to_string();
-                chunk(
-                    &mut stdout,
-                    "agent_message_chunk",
-                    &format!("chose {chosen}"),
-                );
-                if let Some(prompt) = pending_prompt.take() {
-                    reply(
-                        &mut stdout,
-                        prompt,
-                        serde_json::json!({ "stopReason": "end_turn" }),
-                    );
-                }
-                permission_id = None;
-            }
-            (_, Some(902)) => {
-                let outcome = if frame.get("error").is_some() {
-                    "refused"
-                } else {
-                    "wrote"
-                };
-                chunk(&mut stdout, "agent_message_chunk", outcome);
-                if let Some(prompt) = pending_prompt.take() {
-                    reply(
-                        &mut stdout,
-                        prompt,
-                        serde_json::json!({ "stopReason": "end_turn" }),
-                    );
-                }
-            }
-            (_, Some(901)) => {
-                let content = frame["result"]["content"]
-                    .as_str()
-                    .unwrap_or("none")
-                    .to_string();
-                chunk(
-                    &mut stdout,
-                    "agent_message_chunk",
-                    &format!("read {content}"),
-                );
-                if let Some(prompt) = pending_prompt.take() {
-                    reply(
-                        &mut stdout,
-                        prompt,
-                        serde_json::json!({ "stopReason": "end_turn" }),
-                    );
-                }
-            }
             _ => {}
         }
+    }
+}
+
+/// The version this fixture answers the handshake with: 1 unless the second
+/// argument names another, which is how the version-mismatch path is driven.
+fn protocol_version() -> i64 {
+    std::env::args()
+        .nth(2)
+        .and_then(|arg| arg.parse().ok())
+        .unwrap_or(1)
+}
+
+fn end_prompt(stdout: &mut std::io::Stdout, pending: &mut Option<serde_json::Value>) {
+    if let Some(prompt) = pending.take() {
+        reply(
+            stdout,
+            prompt,
+            serde_json::json!({ "stopReason": "end_turn" }),
+        );
     }
 }
 
@@ -283,14 +301,14 @@ fn chunk(stdout: &mut std::io::Stdout, discriminant: &str, text: &str) {
     );
 }
 
-fn reply(stdout: &mut std::io::Stdout, id: u64, result: serde_json::Value) {
+fn reply(stdout: &mut std::io::Stdout, id: serde_json::Value, result: serde_json::Value) {
     send(
         stdout,
         &serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }),
     );
 }
 
-fn error_reply(stdout: &mut std::io::Stdout, id: u64, message: &str) {
+fn error_reply(stdout: &mut std::io::Stdout, id: serde_json::Value, message: &str) {
     send(
         stdout,
         &serde_json::json!({
@@ -301,7 +319,12 @@ fn error_reply(stdout: &mut std::io::Stdout, id: u64, message: &str) {
     );
 }
 
-fn request(stdout: &mut std::io::Stdout, id: u64, method: &str, params: serde_json::Value) {
+fn request(
+    stdout: &mut std::io::Stdout,
+    id: serde_json::Value,
+    method: &str,
+    params: serde_json::Value,
+) {
     send(
         stdout,
         &serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),

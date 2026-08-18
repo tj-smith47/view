@@ -5,8 +5,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use view_ai::{AiConfig, AiSession};
 use view_core::msg::Msg;
@@ -70,6 +70,7 @@ fn send_returns_while_the_agent_is_not_reading() {
     let resume = std::env::temp_dir().join(format!("view-ai-resume-{}", std::process::id()));
     let _ = std::fs::remove_file(&resume);
     let (session, rx) = session_with(&[&resume.to_string_lossy()]);
+    let session = Arc::new(session);
     ready(&rx);
 
     // the stub answers this one and then stops reading its stdin entirely
@@ -82,22 +83,25 @@ fn send_returns_while_the_agent_is_not_reading() {
         AiEvent::TurnEnded { .. }
     ));
 
-    // far more than a pipe buffer holds: a send that reached the child
-    // synchronously could not return until the child read, and the child is
-    // not reading
-    let bulk = "x".repeat(4096);
-    let start = Instant::now();
-    for _ in 0..512 {
-        session.send(AiCommand::Prompt {
-            text: bulk.clone(),
-            context: Vec::new(),
-        });
-    }
-    let elapsed = start.elapsed();
-    assert!(
-        elapsed < Duration::from_secs(1),
-        "2 MiB of commands queued in {elapsed:?} against an agent that is not reading"
-    );
+    // far more than a pipe buffer holds. The assertion is completion, not
+    // elapsed time: a genuinely blocking send never finishes at all against
+    // an agent that is not reading, so the falsification is the same while
+    // the bound stops being a wall-clock guess on a shared host.
+    let sender = Arc::clone(&session);
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let bulk = "x".repeat(4096);
+        for _ in 0..512 {
+            sender.send(AiCommand::Prompt {
+                text: bulk.clone(),
+                context: Vec::new(),
+            });
+        }
+        let _ = done_tx.send(());
+    });
+    done_rx
+        .recv_timeout(WAIT)
+        .expect("512 sends complete against an agent that is not reading");
 
     // the queue was real, not discarded: once the agent reads again, the
     // turns it never saw arrive
@@ -107,6 +111,20 @@ fn send_returns_while_the_agent_is_not_reading() {
         AiEvent::TurnEnded { .. }
     ));
     let _ = std::fs::remove_file(&resume);
+}
+
+#[test]
+fn an_agent_speaking_another_protocol_version_is_refused_at_the_handshake() {
+    let (_session, rx) = session_with(&["", "2"]);
+    match next_event(&rx, "SessionCrashed") {
+        AiEvent::SessionCrashed { message } => {
+            assert!(
+                message.contains("protocol version 2") && message.contains("view speaks 1"),
+                "the refusal names both versions: {message}"
+            );
+        }
+        other => panic!("expected SessionCrashed, got {other:?}"),
+    }
 }
 
 #[test]
@@ -178,6 +196,9 @@ fn every_streamed_chunk_kind_reaches_its_own_arm() {
     );
 }
 
+/// Every request the stub originates carries a string id, which the schema
+/// allows. A client that echoed back an id of its own choosing, or failed to
+/// decode one at all, never completes any of these round trips.
 #[test]
 fn a_permission_request_crosses_out_and_its_answer_crosses_back() {
     let (session, rx) = session();

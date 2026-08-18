@@ -13,7 +13,6 @@
 //! closed event and command vocabulary; the ids it carries are opaque to it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
@@ -38,23 +37,21 @@ pub enum PendingReply {
 #[derive(Debug, Clone, Default)]
 pub struct PendingFsReplies {
     inner: Arc<Mutex<HashMap<u64, PendingReply>>>,
-    next_id: Arc<AtomicU64>,
 }
 
 impl PendingFsReplies {
-    /// Allocates a fresh `request_id`, registers `reply` against it, and
-    /// returns the id the answering command must carry.
+    /// Registers `reply` against `id`, which the caller allocated from the
+    /// session's single boundary-id counter -- the registry does not number
+    /// requests itself, so filesystem ids and permission ids cannot collide.
     ///
     /// A poisoned lock drops the registration rather than propagating: the
     /// caller's `await` on the paired receiver then resolves as a closed
     /// channel, which is already the path a lost answer takes, and a panic
     /// here would take the session task down with it.
-    pub fn register(&self, reply: PendingReply) -> u64 {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    pub fn register(&self, id: u64, reply: PendingReply) {
         if let Ok(mut map) = self.inner.lock() {
             map.insert(id, reply);
         }
-        id
     }
 
     /// Removes and returns the reply channel registered against `id`, or
@@ -76,7 +73,8 @@ mod tests {
     async fn a_registered_read_is_answered_exactly_once() {
         let pending = PendingFsReplies::default();
         let (tx, rx) = oneshot::channel();
-        let id = pending.register(PendingReply::Read(tx));
+        let id = 7;
+        pending.register(id, PendingReply::Read(tx));
 
         let Some(PendingReply::Read(sender)) = pending.take(id) else {
             panic!("the registered read is the one taken")
@@ -91,13 +89,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ids_are_distinct_across_both_request_kinds() {
+    async fn each_id_resolves_to_the_channel_registered_against_it() {
         let pending = PendingFsReplies::default();
         let (read_tx, _read_rx) = oneshot::channel();
         let (write_tx, write_rx) = oneshot::channel();
-        let read_id = pending.register(PendingReply::Read(read_tx));
-        let write_id = pending.register(PendingReply::Write(write_tx));
-        assert_ne!(read_id, write_id);
+        let (read_id, write_id) = (11, 12);
+        pending.register(read_id, PendingReply::Read(read_tx));
+        pending.register(write_id, PendingReply::Write(write_tx));
 
         let Some(PendingReply::Write(sender)) = pending.take(write_id) else {
             panic!("the write id resolves to the write channel")

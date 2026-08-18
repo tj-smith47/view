@@ -26,6 +26,16 @@ pub(crate) struct SessionShared {
 }
 
 impl SessionShared {
+    /// Builds the shared half on its own, without a child or a runtime, so
+    /// the session loop can be driven over ordinary streams.
+    #[cfg(test)]
+    pub(crate) fn detached(emit: Box<dyn Fn(Msg) + Send + Sync>) -> Self {
+        Self {
+            emit,
+            pending: PendingFsReplies::default(),
+        }
+    }
+
     /// Wraps `event` in [`Msg::Ai`] and hands it to the stored emit
     /// closure.
     ///
@@ -47,16 +57,35 @@ impl SessionShared {
 
 /// A running agent session.
 ///
-/// Dropping it shuts the runtime down, which drops the session task and
-/// with it the child handle; the child was spawned with `kill_on_drop`, so
-/// the agent process goes away with the session rather than outliving the
-/// editor.
+/// Dropping it tears the session down without waiting on it: see the `Drop`
+/// impl below for why that is the whole point.
 pub struct AiSession {
-    // dropped last is irrelevant here, but declared first for the reader:
-    // this is the only tokio runtime the process owns
-    runtime: tokio::runtime::Runtime,
+    /// `Option` only so `Drop` can take the runtime out and hand it to a
+    /// non-blocking shutdown; it is `Some` for the whole life of the value.
+    runtime: Option<tokio::runtime::Runtime>,
     commands: mpsc::UnboundedSender<AiCommand>,
     shared: Arc<SessionShared>,
+}
+
+impl Drop for AiSession {
+    fn drop(&mut self) {
+        // `Runtime`'s own `Drop` shuts down synchronously on the dropping
+        // thread, and the dropping thread here is the loop thread. That is
+        // the one call this type would make that is not a channel send, and
+        // a session is dropped for reasons other than editor teardown --
+        // restarting an agent, closing the panel -- where a stall would land
+        // in the middle of a frame. `shutdown_background` returns at once
+        // and lets the runtime's own threads wind themselves down.
+        //
+        // The cost, stated rather than hidden: with no live reaper the
+        // child's `kill_on_drop` signal still fires, but the dead process is
+        // reaped by the operating system when the editor exits rather than
+        // by the runtime moments after the drop. One short-lived zombie per
+        // session, against never blocking a paint.
+        if let Some(runtime) = self.runtime.take() {
+            runtime.shutdown_background();
+        }
+    }
 }
 
 impl AiSession {
@@ -71,8 +100,14 @@ impl AiSession {
     /// type.
     ///
     /// Latency consequence: zero on the paint and key-dispatch paths by
-    /// construction. Nothing here runs on the loop thread, and the only
-    /// thing the loop thread ever does with the result is a channel send.
+    /// construction. Nothing here runs on the loop thread; the only things
+    /// the loop thread ever does with the result are a channel send
+    /// ([`send`](Self::send)) and a non-blocking runtime shutdown (`Drop`).
+    ///
+    /// `emit` must not block, and the requirement is stronger than it looks:
+    /// the runtime has one worker thread, so an `emit` that blocks stalls
+    /// the whole session -- the reader, the writer, and every outstanding
+    /// filesystem answer -- not just the task that called it.
     ///
     /// # Errors
     ///
@@ -139,7 +174,7 @@ impl AiSession {
         });
 
         Ok(Self {
-            runtime,
+            runtime: Some(runtime),
             commands,
             shared,
         })
@@ -165,7 +200,10 @@ impl std::fmt::Debug for AiSession {
         // whose handle cannot be printed at all is worse than one that
         // prints its liveness
         f.debug_struct("AiSession")
-            .field("runtime", &self.runtime.handle())
+            .field(
+                "runtime",
+                &self.runtime.as_ref().map(tokio::runtime::Runtime::handle),
+            )
             .field("closed", &self.commands.is_closed())
             .field("shared", &Arc::strong_count(&self.shared))
             .finish()
