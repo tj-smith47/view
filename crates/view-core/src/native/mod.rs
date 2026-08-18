@@ -5,6 +5,7 @@
 
 pub mod ai_event;
 pub mod ai_panel;
+pub mod ai_registry;
 pub mod geometry;
 pub mod mappings;
 pub mod palette;
