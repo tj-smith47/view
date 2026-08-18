@@ -1507,17 +1507,16 @@ mod tests {
         json!({ "sessionId": "s1", "update": update })
     }
 
-    /// A tool call's title and status must never regress once rendered,
-    /// even though `Driver::tool_calls` prunes `content` at a terminal
-    /// status to bound memory: a further `tool_call_update` naming only
-    /// `title`/`status` (the capture doc permits, does not forbid, one)
-    /// would otherwise read `known` as absent and fall back to an empty
-    /// title and `Pending`, undoing the completed call the panel already
-    /// rendered. `content` is asserted `None` here, not resolved against a
-    /// remembered copy: the driver no longer remembers a call's content at
-    /// all (see [`KnownToolCall`]'s doc) -- leaving an omitted result
-    /// untouched is [`view_core::native::ai_panel::Transcript::upsert_tool_call`]'s
-    /// job now, pinned on that side by
+    /// A tool call's title and status must never regress once rendered:
+    /// a further `tool_call_update` after a terminal status (the capture
+    /// doc permits, does not forbid, one) would read `known` as absent if
+    /// the entry were dropped, and fall back to an empty title and
+    /// `Pending`, undoing the completed call the panel already rendered.
+    /// `content` is asserted `None` here, not resolved against a
+    /// remembered copy: the driver never remembers a call's content (see
+    /// [`KnownToolCall`]'s doc) -- leaving an omitted result untouched is
+    /// [`view_core::native::ai_panel::Transcript::upsert_tool_call`]'s
+    /// job, pinned on that side by
     /// `upsert_tool_call_with_no_content_leaves_the_rendered_result_rows_intact`.
     #[test]
     fn a_tool_call_update_after_a_terminal_status_never_regresses_the_entry() {
