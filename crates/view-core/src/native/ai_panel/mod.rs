@@ -12,7 +12,7 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
-use super::views::AiPanelView;
+use super::views::{AiPanelView, Span};
 
 mod permission;
 mod transcript;
@@ -70,20 +70,24 @@ pub struct AiPanelState {
     /// unanswered one.
     pub pending_permission: Option<PermissionPrompt>,
     /// Whether the panel's own input line currently owns the keyboard, set
-    /// only by the user's own explicit `open`/`toggle` invocation and
-    /// cleared on close (by `Model::close_ai_panel`, the single
-    /// authoritative closing point) -- never by a `PermissionRequested`
-    /// arriving while the panel is closed (see `update::open_ai_panel`'s
-    /// doc): the panel is non-modal, so becoming visible and taking the
-    /// keyboard are two different things.
+    /// only by the user's own explicit `open`/`focus`/`toggle` invocation
+    /// and cleared on close (by `Model::close_ai_panel`, the single
+    /// authoritative closing point) or by `<Esc>` while entered -- never by
+    /// a `PermissionRequested` arriving while the panel is closed (see
+    /// `update::open_ai_panel`'s doc): the panel is non-modal, so becoming
+    /// visible and taking the keyboard are two different things.
     ///
-    /// Necessary but not sufficient for `y`/`n`/`a`/`<Esc>` to reach the
-    /// pending permission prompt instead of the engine: `route_key`'s gate
-    /// also requires `model.focus() == Focus::Engine` (nothing else, such
-    /// as a picker, holds the stack's real focus slot) and that the engine
-    /// is not in insert mode -- see that gate's own doc for why `focused`
-    /// alone cannot tell those cases apart, since the AI panel never takes
-    /// the stack's literal focus slot.
+    /// This is not merely consulted by the focus machinery -- it *is* the
+    /// focus machinery for this overlay: `Model::takes_focus_now` reads it
+    /// directly, so `model.focus()` names the AI panel overlay exactly
+    /// when this is `true` and nothing else on the stack outranks it, the
+    /// same way any other focus-taking overlay works. `y`/`n`/`a`/`<Esc>`
+    /// reach the pending permission prompt (`route_key`'s
+    /// `Focus::Native(OverlayKind::Ai)` arm) only through that real focus,
+    /// never through a side channel ahead of it -- with the panel merely
+    /// open and this `false`, every key, including `y`/`n` as ordinary
+    /// engine commands, reaches nvim exactly as if the panel were not
+    /// there at all.
     pub focused: bool,
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.
@@ -114,13 +118,26 @@ impl AiPanelState {
     /// for how a paint that follows a lone folded chunk avoids re-rendering
     /// every earlier entry), and the pending permission prompt's own rows
     /// when one is outstanding (see [`PermissionPrompt::render_rows`]).
+    ///
+    /// A prompt sitting on an un-entered panel (auto-opened, see
+    /// [`Self::focused`]'s doc) is otherwise unanswerable -- nothing on
+    /// screen would say how a blocked agent gets its reply -- so this is
+    /// the one place that appends [`ENTER_HINT`] to the prompt's own rows;
+    /// [`PermissionPrompt::render_rows`] stays unaware of focus, since the
+    /// hint depends on this state, not on the prompt's own content.
     #[must_use]
     pub fn view(&self) -> AiPanelView {
         let view = AiPanelView::new(TITLE)
             .with_input(self.input.clone())
             .with_rows(self.transcript.rendered_rows());
         match &self.pending_permission {
-            Some(prompt) => view.with_pending_permission(prompt.render_rows()),
+            Some(prompt) => {
+                let mut rows = prompt.render_rows();
+                if !self.focused {
+                    rows.push(vec![Span::plain(ENTER_HINT)]);
+                }
+                view.with_pending_permission(rows)
+            }
             None => view,
         }
     }
@@ -134,6 +151,13 @@ impl Default for AiPanelState {
 
 /// The overlay's title, drawn into its top border.
 const TITLE: &str = "AI Agent";
+
+/// Named after the verb it points at (`update::mod`'s `feature == "ai" &&
+/// (verb == "open" || verb == "focus")` arm) -- shown beneath a pending
+/// permission's own rows exactly when [`AiPanelState::focused`] is `false`,
+/// the one state where the prompt is visible but `y`/`n`/`a`/`<Esc>` all
+/// reach the engine instead of it.
+const ENTER_HINT: &str = "Not focused -- run :View ai focus to answer";
 
 #[cfg(test)]
 mod tests {
@@ -172,10 +196,13 @@ mod tests {
 
     /// The panel's own `view()` must carry and render a pending prompt, not
     /// just hold it in state -- a `pending_permission` the paint frame
-    /// never surfaces is a prompt the user cannot see or answer.
+    /// never surfaces is a prompt the user cannot see or answer. Focused,
+    /// so the answer is already reachable and no hint row is appended (see
+    /// the two tests below for the un-entered/entered hint split itself).
     #[test]
     fn a_pending_permission_renders_the_question_and_its_options_with_their_kinds() {
         let mut state = AiPanelState::new();
+        state.focused = true;
         state.pending_permission = Some(PermissionPrompt::new(
             1,
             "call_1",
@@ -193,6 +220,60 @@ mod tests {
                 vec![Span::plain("Permission requested for Delete config.yaml")],
                 vec![Span::plain("  Allow once (allow_once)".to_string())],
             ]
+        );
+    }
+
+    /// The discoverability half of the round-3 ruling: a prompt sitting on
+    /// an un-entered panel (`focused` stays `false` after an agent's own
+    /// auto-open) is otherwise unanswerable on screen, so `view()` must
+    /// append [`ENTER_HINT`] naming the way in.
+    #[test]
+    fn a_pending_permission_on_an_unfocused_panel_appends_the_enter_hint() {
+        let mut state = AiPanelState::new();
+        assert!(!state.focused, "auto-open never sets focused");
+        state.pending_permission = Some(PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            vec![crate::native::ai_event::PermissionOption {
+                option_id: "allow-once".to_string(),
+                name: "Allow once".to_string(),
+                kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+            }],
+        ));
+        let view = state.view();
+        assert_eq!(
+            view.pending_permission.last(),
+            Some(&vec![Span::plain(ENTER_HINT)]),
+            "an unanswerable prompt must name the way in: {:?}",
+            view.pending_permission
+        );
+    }
+
+    /// The mirror case: once the user has entered the panel, `y`/`n`/`a`
+    /// already reach the prompt, so the hint would be stale advice and must
+    /// not be drawn.
+    #[test]
+    fn a_pending_permission_on_a_focused_panel_carries_no_enter_hint() {
+        let mut state = AiPanelState::new();
+        state.focused = true;
+        state.pending_permission = Some(PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            vec![crate::native::ai_event::PermissionOption {
+                option_id: "allow-once".to_string(),
+                name: "Allow once".to_string(),
+                kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+            }],
+        ));
+        let view = state.view();
+        assert!(
+            view.pending_permission
+                .iter()
+                .all(|row| row != &vec![Span::plain(ENTER_HINT)]),
+            "a focused panel already answers keys; the hint would be stale: {:?}",
+            view.pending_permission
         );
     }
 

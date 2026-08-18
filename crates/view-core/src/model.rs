@@ -241,10 +241,18 @@ impl Model {
         }
     }
 
-    /// Whether an overlay of this kind takes the keyboard while it is open.
+    /// Whether an overlay of this kind takes the keyboard while it is open,
+    /// with no further state consulted.
     ///
     /// Every kind does except [`OverlayKind::EngineBusy`] and
-    /// [`OverlayKind::Ai`].
+    /// [`OverlayKind::Ai`] -- `Ai` unconditionally here, since this form
+    /// cannot see [`Model::ai_panel`]'s own `focused` flag. It is what it
+    /// is: the pure, kind-only question `open_ai_panel`'s insert-beneath
+    /// check needs, evaluated against whatever overlay already sits on top
+    /// of the stack -- never `OverlayKind::Ai` itself, since that call only
+    /// runs while the panel is closed. Every other caller wants
+    /// [`Self::takes_focus_now`] instead, which layers the panel's own
+    /// state on top of this for `Ai`.
     ///
     /// `EngineBusy` is raised by view noticing something rather than by the
     /// user asking for it, and is on screen precisely when the engine may
@@ -253,34 +261,48 @@ impl Model {
     /// annunciator that consumed them would turn a slow operation into lost
     /// work. It answers its own choice keys, and every other key routes as
     /// though it were not there.
-    ///
-    /// `Ai` is non-modal by design (see the variant's own doc): the panel
-    /// sits open beside the buffer the user keeps editing, so its presence
-    /// must not redirect the engine's own keystrokes. Nothing today gives
-    /// its composer line a way to claim a keystroke -- the panel opens with
-    /// no key path in front of `Focus::Native` at all -- so this is not
-    /// "opt out for now and revisit": a focused composer answers keys the
-    /// same ahead-of-`route_key` way [`crate::native::supervision`]'s busy
-    /// modal already does, never by taking the stack's focus slot.
     pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
         !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai)
     }
 
+    /// Whether `kind` takes the keyboard right now, on this model -- what
+    /// every focus-resolution method below actually wants.
+    ///
+    /// Identical to [`Self::takes_focus`] for every kind but
+    /// [`OverlayKind::Ai`]: the panel is non-modal by design (see that
+    /// variant's own doc), so its mere presence on the stack must not
+    /// redirect the engine's own keystrokes. It takes the keyboard only
+    /// once the user has deliberately entered it -- `ai_entered`, read from
+    /// [`crate::native::ai_panel::AiPanelState::focused`] -- never by side
+    /// effect of an agent auto-opening it. Takes the flag as a plain `bool`
+    /// rather than `&self`, so [`Self::focused_overlay_mut`] and
+    /// [`Self::pop_focused_overlay`] can read `ai_panel.focused` once,
+    /// ahead of borrowing `overlays` mutably, instead of needing both
+    /// borrows live at the same time.
+    const fn takes_focus_now(kind: &OverlayKind, ai_entered: bool) -> bool {
+        match kind {
+            OverlayKind::Ai => ai_entered,
+            other => Self::takes_focus(other),
+        }
+    }
+
     fn focused_overlay(&self) -> Option<&Overlay> {
+        let ai_entered = self.ai_panel.focused;
         self.overlays
             .iter()
             .rev()
-            .find(|overlay| Self::takes_focus(&overlay.kind))
+            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))
     }
 
     /// The topmost focus-taking overlay, for a feature that needs to fold
     /// its own state forward as input arrives.
     #[must_use]
     pub fn focused_overlay_mut(&mut self) -> Option<&mut Overlay> {
+        let ai_entered = self.ai_panel.focused;
         self.overlays
             .iter_mut()
             .rev()
-            .find(|overlay| Self::takes_focus(&overlay.kind))
+            .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))
     }
 
     /// Closes the overlay [`Model::focus`] names, wherever it sits in the
@@ -290,10 +312,11 @@ impl Model {
     /// above it, and popping that instead would close an annunciator the
     /// user never addressed while leaving the overlay they did address open.
     pub fn pop_focused_overlay(&mut self) -> Option<Overlay> {
+        let ai_entered = self.ai_panel.focused;
         let pos = self
             .overlays
             .iter()
-            .rposition(|overlay| Self::takes_focus(&overlay.kind))?;
+            .rposition(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))?;
         let closed = self.overlays.remove(pos);
         if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
             if closed.id == held {
@@ -1401,11 +1424,20 @@ pub enum OverlayKind {
     /// of [`OverlayKind::Tree`]'s left-anchored sidebar, sitting beside an
     /// active buffer rather than centered over it. Pushed like a picker or
     /// tree, with the identical beneath-a-blocked-prompt fallback. Unlike
-    /// every other overlay here it does not take focus (see
-    /// [`Model::takes_focus`]): a running agent session and the engine the
-    /// user is editing in are two peers the user works with at once, not a
-    /// question blocking one or the other, so an engine keystroke while the
-    /// panel is open still reaches the engine.
+    /// every other overlay here it does not take focus merely by being open
+    /// (see [`Model::takes_focus`]): a running agent session and the engine
+    /// the user is editing in are two peers the user works with at once,
+    /// not a question blocking one or the other, so an engine keystroke
+    /// while the panel is only visible still reaches the engine.
+    ///
+    /// It does take focus, the same as any other overlay here, once the
+    /// user has deliberately entered it (`open`/`focus`/`toggle`, see
+    /// [`crate::native::ai_panel::AiPanelState::focused`]) -- consulted by
+    /// [`Model::takes_focus_now`], not by this static form. A permission
+    /// request blocking the issuing agent's own turn answers through that
+    /// real focus (`route_key`'s `Focus::Native(OverlayKind::Ai)` arm),
+    /// never through a side channel ahead of the ordinary routing that
+    /// every other focus-taking overlay already goes through.
     ///
     /// A unit marker, not a payload: the session state it renders lives in
     /// [`Model::ai_panel`] instead, so that closing this overlay (and

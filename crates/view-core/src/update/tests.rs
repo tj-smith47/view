@@ -2629,16 +2629,23 @@ fn an_unmapped_key_is_swallowed_while_a_permission_is_pending_and_focused() {
     );
 }
 
-/// The intercept must win over ordinary engine routing while focused: with
-/// the panel open and focused, `Focus::Engine` is still what
-/// `model.focus()` reports (`OverlayKind::Ai` never takes the stack's own
-/// focus slot), which is what `key_in_engine_focus_becomes_rpc_input_effect`
-/// exercises for the ordinary case -- this proves a pending, focused
-/// permission overrides that before focus is ever consulted.
+/// Entering the panel makes `model.focus()` name it for real, the same way
+/// any other focus-taking overlay works (`Model::takes_focus_now` reads
+/// `AiPanelState::focused` directly) -- unlike `key_in_engine_focus_
+/// becomes_rpc_input_effect`'s ordinary case, this key never reaches
+/// `route_key`'s `Focus::Engine` arm at all, because `model.focus()`
+/// itself no longer names the engine while entered. A control-chord key
+/// unmapped to any offered option is swallowed by the pending-permission
+/// arm the same way a plain unmapped letter is (see
+/// `an_unmapped_key_is_swallowed_while_a_permission_is_pending_and_focused`).
 #[test]
 fn ordinary_input_never_reaches_the_engine_while_a_permission_is_pending_and_focused() {
     let mut m = pending_permission_model();
-    assert_eq!(m.focus(), Focus::Engine);
+    assert!(
+        matches!(m.focus(), Focus::Native(_)),
+        "the entered panel owns the stack's real focus slot: {:?}",
+        m.focus()
+    );
     let effects = update(
         &mut m,
         Msg::Key(Key {
@@ -2696,12 +2703,52 @@ fn esc_on_a_focused_pending_permission_cancels_it_even_with_only_allow_options_o
     assert!(m.ai_panel().pending_permission.is_none());
 }
 
+/// With nothing pending, `<Esc>` on an entered panel relinquishes the
+/// keyboard without closing it -- the panel is non-modal by design (see
+/// `OverlayKind::Ai`'s own doc), so it stays on the stack, visible beside
+/// the buffer, exactly as an auto-opened-but-not-entered panel would.
+/// Dropping the `focused = false` line in the `Some(OverlayKind::Ai)` arm's
+/// no-pending-permission branch is exactly the mutation this fails under:
+/// the panel would stay entered and keep swallowing every key forever.
+#[test]
+fn esc_on_an_entered_panel_with_nothing_pending_un_enters_it_without_closing() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(m.ai_panel().focused, "open claims focus");
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".to_string(),
+        }),
+    );
+
+    assert!(
+        effects.is_empty(),
+        "un-entering emits no effect of its own: {effects:?}"
+    );
+    assert!(!m.ai_panel().focused, "<Esc> must relinquish the keyboard");
+    assert!(
+        m.ai_panel_overlay_open(),
+        "the panel stays on the stack -- <Esc> un-enters, it does not close"
+    );
+}
+
 /// A request auto-opens the panel without taking focus (see
-/// `auto_opened_permission_model`'s doc), so a `y` typed right after must
-/// still reach the engine as ordinary input -- dropping the `focused`
-/// condition of `route_key`'s three-condition guard is exactly the
-/// mutation this fails under, since the panel genuinely is open and
-/// `model.focus()` genuinely reports `Focus::Engine` here.
+/// `auto_opened_permission_model`'s doc): `AiPanelState::focused` stays
+/// `false`, so `Model::takes_focus_now` never names the AI overlay and
+/// `model.focus()` reports `Focus::Engine` here exactly as if the panel
+/// were not on the stack at all -- a `y` typed right after must still
+/// reach the engine as ordinary input. Dropping `takes_focus_now`'s
+/// `ai_entered` check (making `Ai` unconditionally focus-taking) is
+/// exactly the mutation this fails under.
 #[test]
 fn a_y_typed_while_the_panel_is_auto_opened_but_not_focused_reaches_the_engine() {
     let mut m = auto_opened_permission_model();
@@ -2762,14 +2809,14 @@ fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the
     );
 }
 
-/// Mutation-proof for the `focus` condition: a picker (or any other
-/// focus-taking overlay) opened on top of a focused, pending permission
-/// must take the key for itself. `AiPanelState::focused` alone cannot tell
-/// this apart from the panel genuinely holding the keyboard, since
-/// `OverlayKind::Ai` never takes the stack's own focus slot (see
-/// `Model::takes_focus`'s doc) -- `model.focus() == Focus::Engine` is what
-/// `route_key`'s guard checks instead, and this proves dropping that check
-/// lets `y` answer a request meant for the overlay actually on top.
+/// A picker (or any other focus-taking overlay) opened on top of an
+/// entered, pending permission must take the key for itself: overlay
+/// stack order, not which overlay was entered first, decides
+/// `model.focus()` (`focused_overlay` walks the stack topmost-first), so
+/// the tree pushed on top outranks the AI panel underneath it even though
+/// `AiPanelState::focused` is still `true`. This is what would break if
+/// `focused_overlay`/`focused_overlay_mut`/`pop_focused_overlay` stopped
+/// walking the stack in order.
 #[test]
 fn a_y_typed_while_another_overlay_holds_focus_reaches_that_overlay_not_the_permission() {
     let mut m = pending_permission_model();
@@ -2806,31 +2853,44 @@ fn a_y_typed_while_another_overlay_holds_focus_reaches_that_overlay_not_the_perm
     );
 }
 
-/// Mutation-proof for the mode condition: `AiPanelState::focused` can stay
-/// true while the user goes back to editing elsewhere (nothing about focus
-/// forces the panel closed), so a `y` typed as ordinary insert text must
-/// reach nvim, not answer the request -- this proves dropping the mode
-/// check lets exactly that happen.
+/// The round-3 hazard, generalized: excluding only `"insert"` left `y`/`n`
+/// live in every other mode too -- visual, replace, operator-pending,
+/// terminal -- because the old guard asked what mode the engine was in
+/// instead of who owned the keyboard. The new gate never reads
+/// `model.engine.mode` at all: real focus is the only thing that decides,
+/// so an un-entered panel lets `y` reach the engine identically no matter
+/// what mode it is left in, unlike the guard this replaces which would
+/// have passed a mode-only exclusion list no matter how long it grew.
 #[test]
-fn a_y_typed_in_insert_mode_reaches_the_engine_not_the_permission() {
-    let mut m = pending_permission_model();
-    m.engine.mode.current = "insert".to_string();
+fn a_y_typed_while_not_entered_reaches_the_engine_in_every_engine_mode() {
+    for mode in [
+        "",
+        "normal",
+        "insert",
+        "visual",
+        "replace",
+        "cmdline_normal",
+        "terminal",
+    ] {
+        let mut m = auto_opened_permission_model();
+        m.engine.mode.current = mode.to_string();
 
-    let effects = update(
-        &mut m,
-        Msg::Key(Key {
-            notation: "y".to_string(),
-        }),
-    );
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: "y".to_string(),
+            }),
+        );
 
-    assert!(
-        matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
-        "insert-mode input must reach nvim untouched: {effects:?}"
-    );
-    assert!(
-        m.ai_panel().pending_permission.is_some(),
-        "the request stays open; the keystroke reached nvim instead of answering it"
-    );
+        assert!(
+            matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
+            "mode {mode:?}: an un-entered panel must never intercept a keystroke: {effects:?}"
+        );
+        assert!(
+            m.ai_panel().pending_permission.is_some(),
+            "mode {mode:?}: the prompt stays open; the keystroke reached nvim instead"
+        );
+    }
 }
 
 #[test]
@@ -3748,11 +3808,11 @@ fn ai_panel_toggle_pushes_then_pops_the_overlay() {
         Anchor::Right,
         "the panel is anchored right, the mirror of the tree's anchored-left sidebar"
     );
-    assert_eq!(
-        m.focus(),
-        Focus::Engine,
-        "the panel is non-modal: an open panel with nothing else on the \
-             stack must leave engine keystrokes reaching the engine"
+    assert!(
+        matches!(m.focus(), Focus::Native(_)),
+        "toggle is a deliberate user entry the same as open/focus, so it \
+             claims the panel's keyboard focus: {:?}",
+        m.focus()
     );
 
     m.dirty = false;

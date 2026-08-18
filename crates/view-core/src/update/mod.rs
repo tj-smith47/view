@@ -218,12 +218,27 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "ai" && verb == "toggle" {
                 return toggle_ai_panel(model);
             }
-            if feature == "ai" && verb == "open" {
+            if feature == "ai" && (verb == "open" || verb == "focus") {
                 // an explicit user invoke, unlike a `PermissionRequested`
                 // auto-open (`update::ai::on_ai_event`), is the one action
                 // that claims the panel's keyboard focus -- see
-                // `AiPanelState::focused`'s own doc
+                // `AiPanelState::focused`'s own doc. "open" and "focus" do
+                // the identical thing (open if closed, then claim focus
+                // either way): "focus" exists as the name a discoverability
+                // hint can point at that still reads correctly when the
+                // panel is already open (an agent's own auto-open leaves it
+                // unentered), where "open" would read oddly.
                 let effects = open_ai_panel(model);
+                // `open_ai_panel` already dirties on a push; this only adds
+                // a repaint for the case it does not cover -- an
+                // already-open, not-yet-entered panel (auto-opened by a
+                // permission request) taking focus for the first time.
+                // Re-invoking on an already-entered panel is a true no-op:
+                // nothing about the paint frame depends on `focused` beyond
+                // whether it is set at all.
+                if !model.ai_panel().focused {
+                    model.dirty = true;
+                }
                 model.ai_panel_mut().focused = true;
                 return effects;
             }
@@ -771,68 +786,6 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
         // may never produce
         return vec![Effect::PickerClose];
     }
-    // A pending permission request blocks the issuing agent's own turn
-    // until answered, so a keystroke answering it is consumed right here,
-    // ahead of the ordinary focus routing below: `OverlayKind::Ai`
-    // deliberately never takes focus (see `Model::takes_focus`'s doc), so
-    // without this check `match model.focus()` would forward an answering
-    // keystroke straight to nvim as ordinary input, which does nothing
-    // toward unblocking the agent actually waiting on it.
-    //
-    // Three conditions, all required, because none alone names real
-    // keyboard ownership of the prompt:
-    // - `AiPanelState::focused`: a permission request auto-opens the panel
-    //   without claiming the keyboard (see `update::ai::on_ai_event`'s
-    //   `PermissionRequested` arm), so a panel that is only visible, never
-    //   focused, must not answer for the user.
-    // - `model.focus() == Focus::Engine`: the AI panel never takes the
-    //   stack's literal focus slot, so `focused` alone cannot tell a real
-    //   overlay (a picker, a prompt) holding focus apart from nothing
-    //   holding it; a `y` meant for that overlay must reach it instead.
-    // - `model.engine.mode.current != "insert"`: `focused` can stay true
-    //   while the user goes back to editing elsewhere (nothing about focus
-    //   forces the panel closed), so a `y` typed as ordinary insert text
-    //   must not be read as an answer either. Excluding only `"insert"`,
-    //   not requiring `"normal"`, matches what nvim's own mode string
-    //   distinguishes (see `native::speculate`'s `INSERT_MODE` for the
-    //   same convention) and keeps this reachable before the engine has
-    //   ever reported a mode at all, the same state a freshly attached
-    //   session is in.
-    let engine_owns_keyboard = model.focus() == Focus::Engine;
-    let panel_answering =
-        model.ai_panel().focused && engine_owns_keyboard && model.engine.mode.current != "insert";
-    if panel_answering {
-        if let Some(prompt) = model.ai_panel().pending_permission.clone() {
-            // <Esc> settles the request as `Cancelled` rather than any
-            // offered option -- the one answer that exists even when the
-            // agent offered only allow-kind options, so declining always
-            // has a key that means it regardless of what was offered.
-            if notation == "<Esc>" {
-                model.ai_panel_mut().pending_permission = None;
-                model.dirty = true;
-                return vec![Effect::Ai(AiCommand::AnswerPermission {
-                    request_id: prompt.request_id,
-                    outcome: PermissionOutcome::Cancelled,
-                })];
-            }
-            // An unmapped key is swallowed rather than forwarded, the same
-            // way an unmatched key on a confirm-class `PromptState` leaves
-            // the prompt open instead of falling through.
-            let mut chars = notation.chars();
-            let key = chars.next().filter(|_| chars.next().is_none());
-            let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() else {
-                return Vec::new();
-            };
-            model.ai_panel_mut().pending_permission = None;
-            model.dirty = true;
-            return vec![Effect::Ai(AiCommand::AnswerPermission {
-                request_id: prompt.request_id,
-                outcome: PermissionOutcome::Selected {
-                    option_id: option.option_id,
-                },
-            })];
-        }
-    }
     match model.focus() {
         Focus::Engine => vec![Effect::Rpc(RpcCall::Input { notation })],
         Focus::Native(_) => match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
@@ -1004,6 +957,66 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                 }
                 _ => Vec::new(),
             },
+            // A pending permission request blocks the issuing agent's own
+            // turn until answered; y/n/a/<Esc> reach it here because
+            // `model.focus()` only ever names this overlay once the user
+            // has deliberately entered it (`AiPanelState::focused`,
+            // consulted by `Model::takes_focus_now`) -- never merely by
+            // being open, and never by side effect of whatever mode the
+            // engine happens to be in. With the panel not entered,
+            // `model.focus()` is `Focus::Engine` instead, so every key --
+            // including `y`/`n` as ordinary engine commands -- reaches
+            // nvim through this same `match`'s `Focus::Engine` arm
+            // untouched.
+            Some(OverlayKind::Ai) => {
+                if let Some(prompt) = model.ai_panel().pending_permission.clone() {
+                    // <Esc> settles the request as `Cancelled` rather than
+                    // any offered option -- the one answer that exists
+                    // even when the agent offered only allow-kind options,
+                    // so declining always has a key that means it
+                    // regardless of what was offered.
+                    if notation == "<Esc>" {
+                        model.ai_panel_mut().pending_permission = None;
+                        model.dirty = true;
+                        return vec![Effect::Ai(AiCommand::AnswerPermission {
+                            request_id: prompt.request_id,
+                            outcome: PermissionOutcome::Cancelled,
+                        })];
+                    }
+                    // An unmapped key is swallowed rather than forwarded,
+                    // the same way an unmatched key on a confirm-class
+                    // `PromptState` leaves the prompt open instead of
+                    // falling through.
+                    let mut chars = notation.chars();
+                    let key = chars.next().filter(|_| chars.next().is_none());
+                    let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() else {
+                        return Vec::new();
+                    };
+                    model.ai_panel_mut().pending_permission = None;
+                    model.dirty = true;
+                    return vec![Effect::Ai(AiCommand::AnswerPermission {
+                        request_id: prompt.request_id,
+                        outcome: PermissionOutcome::Selected {
+                            option_id: option.option_id,
+                        },
+                    })];
+                }
+                // Nothing pending: the panel has no composer key path yet
+                // (see `OverlayKind::Ai`'s own doc), so every key but
+                // <Esc> is swallowed rather than leaked to nvim -- the
+                // whole point of having deliberately entered the panel is
+                // that the engine does not see these keystrokes. <Esc>
+                // relinquishes the keyboard (clears `focused`) without
+                // closing the panel itself: it stays visible beside the
+                // buffer, the same non-modal presence it had before being
+                // entered, and the `close` verb remains the only thing
+                // that removes it from the stack.
+                if notation == "<Esc>" {
+                    model.ai_panel_mut().focused = false;
+                    model.dirty = true;
+                }
+                Vec::new()
+            }
             // the key belongs to the overlay on top of the stack,
             // and no other overlay kind carries a key handler yet,
             // so consuming it is the whole of that routing. <Esc>
