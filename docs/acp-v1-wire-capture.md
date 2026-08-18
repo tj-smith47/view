@@ -199,31 +199,80 @@ print(json.dumps(d['\$defs']['PermissionOptionKind'], indent=2))
 "
 ```
 
+Raw output (the true, unedited result of the command above):
+
 ```json
 {
   "description": "An option presented to the user when requesting permission.",
   "type": "object",
   "properties": {
-    "optionId": { "description": "Unique identifier for this permission option.", "allOf": [{ "$ref": "#/$defs/PermissionOptionId" }] },
-    "name": { "description": "Human-readable label to display to the user.", "type": "string" },
-    "kind": { "description": "Hint about the nature of this permission option.", "allOf": [{ "$ref": "#/$defs/PermissionOptionKind" }] },
-    "_meta": { "type": ["object", "null"], "additionalProperties": true }
+    "optionId": {
+      "description": "Unique identifier for this permission option.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/PermissionOptionId"
+        }
+      ]
+    },
+    "name": {
+      "description": "Human-readable label to display to the user.",
+      "type": "string"
+    },
+    "kind": {
+      "description": "Hint about the nature of this permission option.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/PermissionOptionKind"
+        }
+      ]
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
   },
-  "required": ["optionId", "name", "kind"]
+  "required": [
+    "optionId",
+    "name",
+    "kind"
+  ]
 }
 ```
 
 `PermissionOptionKind`'s enum strings (`oneOf` of string `const`s), verbatim,
 all four:
 
+Raw output:
+
 ```json
 {
   "description": "The type of permission option being presented to the user.\n\nHelps clients choose appropriate icons and UI treatment.",
   "oneOf": [
-    { "description": "Allow this operation only this time.", "type": "string", "const": "allow_once" },
-    { "description": "Allow this operation and remember the choice.", "type": "string", "const": "allow_always" },
-    { "description": "Reject this operation only this time.", "type": "string", "const": "reject_once" },
-    { "description": "Reject this operation and remember the choice.", "type": "string", "const": "reject_always" }
+    {
+      "description": "Allow this operation only this time.",
+      "type": "string",
+      "const": "allow_once"
+    },
+    {
+      "description": "Allow this operation and remember the choice.",
+      "type": "string",
+      "const": "allow_always"
+    },
+    {
+      "description": "Reject this operation only this time.",
+      "type": "string",
+      "const": "reject_once"
+    },
+    {
+      "description": "Reject this operation and remember the choice.",
+      "type": "string",
+      "const": "reject_always"
+    }
   ]
 }
 ```
@@ -243,25 +292,79 @@ print(json.dumps(d['\$defs']['SelectedPermissionOutcome'], indent=2))
 "
 ```
 
+Raw output:
+
 ```json
 {
   "description": "The outcome of a permission request.",
   "oneOf": [
     {
-      "description": "The prompt turn was cancelled before the user responded.\n\nWhen a client sends a `session/cancel` notification to cancel an ongoing\nprompt turn, it MUST respond to all pending `session/request_permission`\nrequests with this `Cancelled` outcome.",
+      "description": "The prompt turn was cancelled before the user responded.\n\nWhen a client sends a `session/cancel` notification to cancel an ongoing\nprompt turn, it MUST respond to all pending `session/request_permission`\nrequests with this `Cancelled` outcome.\n\nSee protocol docs: [Cancellation](https://agentclientprotocol.com/protocol/prompt-turn#cancellation)",
       "type": "object",
-      "properties": { "outcome": { "type": "string", "const": "cancelled" } },
-      "required": ["outcome"]
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "cancelled"
+        }
+      },
+      "required": [
+        "outcome"
+      ]
     },
     {
       "description": "The user selected one of the provided options.",
       "type": "object",
-      "properties": { "outcome": { "type": "string", "const": "selected" } },
-      "required": ["outcome"],
-      "allOf": [{ "$ref": "#/$defs/SelectedPermissionOutcome" }]
+      "properties": {
+        "outcome": {
+          "type": "string",
+          "const": "selected"
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/SelectedPermissionOutcome"
+        }
+      ]
     }
   ],
-  "discriminator": { "propertyName": "outcome" }
+  "discriminator": {
+    "propertyName": "outcome"
+  }
+}
+```
+
+`SelectedPermissionOutcome`'s raw output (same command form, second
+`$defs` key):
+
+```json
+{
+  "description": "The user selected one of the provided options.",
+  "type": "object",
+  "properties": {
+    "optionId": {
+      "description": "The ID of the option the user selected.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/PermissionOptionId"
+        }
+      ]
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "optionId"
+  ]
 }
 ```
 
@@ -291,10 +394,20 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
   "method": "session/request_permission",
   "params": {
     "sessionId": "sess_abc123def456",
-    "toolCall": { "toolCallId": "call_001" },
+    "toolCall": {
+      "toolCallId": "call_001"
+    },
     "options": [
-      { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
-      { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+      {
+        "optionId": "allow-once",
+        "name": "Allow once",
+        "kind": "allow_once"
+      },
+      {
+        "optionId": "reject-once",
+        "name": "Reject",
+        "kind": "reject_once"
+      }
     ]
   }
 }
@@ -304,7 +417,12 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 {
   "jsonrpc": "2.0",
   "id": 5,
-  "result": { "outcome": { "outcome": "selected", "optionId": "allow-once" } }
+  "result": {
+    "outcome": {
+      "outcome": "selected",
+      "optionId": "allow-once"
+    }
+  }
 }
 ```
 
@@ -312,7 +430,11 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 {
   "jsonrpc": "2.0",
   "id": 5,
-  "result": { "outcome": { "outcome": "cancelled" } }
+  "result": {
+    "outcome": {
+      "outcome": "cancelled"
+    }
+  }
 }
 ```
 
@@ -374,21 +496,111 @@ print(json.dumps(d['\$defs']['Diff'], indent=2))
 
 `ToolCallContent` is a three-way `oneOf` discriminated on `type`:
 `"content"` (merges `Content`), `"diff"` (merges `Diff`), `"terminal"`
-(merges `Terminal`).
-
-`Diff`'s fields, verbatim:
+(merges `Terminal`). Its raw `$defs` output (`ToolCallContent`, then
+`Diff`, the two keys the command above prints):
 
 ```json
 {
-  "description": "A diff representing file modifications.\n\nShows changes to files in a format suitable for display in the client UI.",
+  "description": "Content produced by a tool call.\n\nTool calls can produce different types of content including\nstandard content blocks (text, images) or file diffs.\n\nSee protocol docs: [Content](https://agentclientprotocol.com/protocol/tool-calls#content)",
+  "oneOf": [
+    {
+      "description": "Standard content block (text, images, resources).",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "content"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/Content"
+        }
+      ]
+    },
+    {
+      "description": "File modification shown as a diff.",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "diff"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/Diff"
+        }
+      ]
+    },
+    {
+      "description": "Embed a terminal created with `terminal/create` by its id.\n\nThe terminal must be added before calling `terminal/release`.\n\nSee protocol docs: [Terminal](https://agentclientprotocol.com/protocol/terminals)",
+      "type": "object",
+      "properties": {
+        "type": {
+          "type": "string",
+          "const": "terminal"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "allOf": [
+        {
+          "$ref": "#/$defs/Terminal"
+        }
+      ]
+    }
+  ],
+  "discriminator": {
+    "propertyName": "type"
+  }
+}
+```
+
+`Diff`'s raw output:
+
+```json
+{
+  "description": "A diff representing file modifications.\n\nShows changes to files in a format suitable for display in the client UI.\n\nSee protocol docs: [Content](https://agentclientprotocol.com/protocol/tool-calls#content)",
   "type": "object",
   "properties": {
-    "path": { "description": "The absolute file path being modified.", "type": "string" },
-    "oldText": { "description": "The original content (None for new files).", "type": ["string", "null"] },
-    "newText": { "description": "The new content after modification.", "type": "string" },
-    "_meta": { "type": ["object", "null"], "additionalProperties": true }
+    "path": {
+      "description": "The absolute file path being modified.",
+      "type": "string"
+    },
+    "oldText": {
+      "description": "The original content (None for new files).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true
+    },
+    "newText": {
+      "description": "The new content after modification.",
+      "type": "string"
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
   },
-  "required": ["path", "newText"]
+  "required": [
+    "path",
+    "newText"
+  ]
 }
 ```
 
@@ -415,24 +627,46 @@ import json
 d = json.load(open('schema-v1.json'))
 print(json.dumps(d['\$defs']['RequestPermissionResponse'], indent=2))
 "
+```
+
+Raw output:
+
+```json
 {
   "description": "Response to a permission request.",
   "type": "object",
   "properties": {
-    "outcome": { "description": "The user's decision on the permission request.", "allOf": [{ "$ref": "#/$defs/RequestPermissionOutcome" }] },
-    "_meta": { "type": ["object", "null"], "additionalProperties": true }
+    "outcome": {
+      "description": "The user's decision on the permission request.",
+      "allOf": [
+        {
+          "$ref": "#/$defs/RequestPermissionOutcome"
+        }
+      ]
+    },
+    "_meta": {
+      "description": "The _meta property is reserved by ACP to allow clients and agents to attach additional\nmetadata to their interactions. Implementations MUST NOT make assumptions about values at\nthese keys.\n\nSee protocol docs: [Extensibility](https://agentclientprotocol.com/protocol/extensibility)",
+      "type": [
+        "object",
+        "null"
+      ],
+      "x-deserialize-default-on-error": true,
+      "additionalProperties": true
+    }
   },
-  "required": ["outcome"],
+  "required": [
+    "outcome"
+  ],
   "x-side": "client",
   "x-method": "session/request_permission"
 }
 ```
 
-Two prose sources settle the question, and they are **not** in tension once
-their triggers are read precisely: they answer different questions.
+Two prose sources bear on the question, and a careful read of both against
+the *same* triggering scenario finds that they contradict each other,
+not that they cleanly divide the space by who initiated cancellation.
 
-**Source 1, `docs/protocol/v1/prompt-turn.mdx`, its Cancellation section**
-(client-initiated prompt-turn cancellation):
+**Source 1, `docs/protocol/v1/prompt-turn.mdx`, its Cancellation section:**
 
 ```
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/prompt-turn.mdx" | sed -n '312,332p'
@@ -442,12 +676,12 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > requests with the `cancelled` outcome."
 
 This is a **`RequestPermissionOutcome` value** (`{"outcome": {"outcome":
-"cancelled"}}`), a valid JSON-RPC *result*, not an error, when the trigger
-is the client sending `session/cancel` to cancel the whole prompt turn.
+"cancelled"}}`), a valid JSON-RPC *result*, not an error. The trigger this
+prose names is the client sending `session/cancel` to cancel the whole
+prompt turn.
 
 **Source 2, `docs/protocol/v1/cancellation.mdx`, its Cascading
-Cancellation Flow example** (agent-initiated `$/cancel_request` targeting one
-specific in-flight request):
+Cancellation Flow worked example:**
 
 ```
 $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/main/docs/protocol/v1/cancellation.mdx" | sed -n '10,68p'
@@ -457,21 +691,47 @@ $ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-p
 > response with appropriate data ... OR An error response with code
 > `-32800` (Request Cancelled)"
 
-and the cascading example's mermaid diagram shows this applied to a
-pending permission request directly:
+and the cascading example's mermaid diagram, numbered steps verbatim:
 
+> `Note over Client,Agent: 3. Client cancels the prompt turn`
+> `Client->>Agent: session/cancel (sessionId)`
+>
+> `Note over Client,Agent: 4. Agent cascades cancellation internally`
 > `Agent->>Client: $/cancel_request (id=3) [permission request]`
+>
+> `Note over Client,Agent: 5. Client confirms individual cancellations`
 > `Client->>Agent: response to id=3 (error -32800 "Cancelled")`
 
-**Verdict, matching the brief's option (a): the spec states a raw JSON-RPC
-error (`-32800`, "Request Cancelled") IS conformant client behavior an
-agent must handle**, for a `session/request_permission` request that the
-agent cancels via the general-purpose `$/cancel_request` notification. This
-is distinct from, and does not override, the `RequestPermissionOutcome`
-`cancelled` value required specifically when the *client* cancels the whole
-prompt turn via `session/cancel`. Both are legal reply shapes to
-`session/request_permission`; which one applies depends on which party
-initiated the cancellation and by which mechanism.
+**These two sources are describing the identical trigger and the identical
+pending-request type, and they prescribe two different response bodies for
+it.** The cascading example's own annotation "3. Client cancels the prompt
+turn" is a client-initiated `session/cancel` of the whole prompt turn, the
+exact same trigger Source 1's MUST governs, not an independent
+agent-initiated event. The following annotation, "4. Agent cascades
+cancellation internally," shows `$/cancel_request` as downstream of, and
+part of the same flow as, that `session/cancel`; the example does not
+depict the agent cancelling on its own initiative (that is
+`cancellation.mdx`'s separate "Internal Cancellation" section, e.g. "LLM
+context limit reached", which genuinely is independent of any client
+trigger and is not what this worked example shows). Yet for that one
+client-initiated-whole-turn-cancel case, applied to the identical kind of
+pending request (`session/request_permission`, labeled "[permission
+request]" in the diagram): `prompt-turn.mdx` mandates a
+`RequestPermissionOutcome` `"cancelled"` result, while `cancellation.mdx`'s
+own worked example for the same trigger shows a raw JSON-RPC `-32800` error
+instead.
+
+**This is a genuine contradiction in the upstream ACP v1 docs, not two
+non-competing rules keyed on who initiated cancellation.** Both quotes are
+byte-exact above; no interpretation reconciles them for the
+client-cancels-the-whole-turn case. What this does establish without
+ambiguity: a raw JSON-RPC error is shown, in the spec's own worked example,
+as a body the agent must be prepared to receive in place of a
+`RequestPermissionOutcome` for a pending `session/request_permission`
+(matching the brief's option (a), at minimum for this triggering path).
+What it does not establish: the spec does not consistently say
+error-vs-outcome is determined by who initiated cancellation; its own two
+pages disagree with each other on that same case.
 
 Neither source directly discusses the exact overlap scenario the degrade
 path handles ("a second `session/request_permission` arrives while a first
@@ -479,9 +739,11 @@ is unanswered," with no cancellation in play at all): that is not a
 cancellation scenario in either source's terms, and no ACP doc page or
 schema field addresses concurrent/overlapping permission requests
 specifically. The overlap degrade path is therefore a view-side policy
-choice, not one dictated by the wire spec; the two verdicts above bound
-what a *cancellation*-triggered error reply may legally look like once
-view's degrade path decides to cancel the stale request itself.
+choice, not one dictated by the wire spec, and it inherits an upstream spec
+that disagrees with itself on the closest analogous case (whole-turn
+cancellation) rather than a clean, resolvable rule. Deciding how the
+degrade path should behave given that inconsistency is a downstream design
+call, not a fact this capture pins.
 
 **Reference/example agent implementation:** not discoverable. The
 `agentclientprotocol/agent-client-protocol` repository ships only the
