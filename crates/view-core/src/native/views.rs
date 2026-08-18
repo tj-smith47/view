@@ -587,6 +587,11 @@ pub struct AiPanelView {
     /// The transcript, oldest first, each entry already formatted as one
     /// row of spans.
     pub rows: Vec<Vec<Span>>,
+    /// The pending permission prompt's own rows -- the question first, then
+    /// one row per option the agent offered, each naming its kind. Empty
+    /// when nothing is pending, which is what tells `view-surface`'s own
+    /// `ai_body` there is nothing extra to draw above the transcript.
+    pub pending_permission: Vec<Vec<Span>>,
 }
 
 impl AiPanelView {
@@ -612,6 +617,15 @@ impl AiPanelView {
     #[must_use]
     pub fn with_rows(self, rows: Vec<Vec<Span>>) -> Self {
         Self { rows, ..self }
+    }
+
+    /// The same panel showing `rows` as its pending permission prompt.
+    #[must_use]
+    pub fn with_pending_permission(self, rows: Vec<Vec<Span>>) -> Self {
+        Self {
+            pending_permission: rows,
+            ..self
+        }
     }
 }
 

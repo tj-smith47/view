@@ -597,13 +597,21 @@ fn palette_body(view: &PaletteView) -> Body {
 /// `selected` stays `None`: a transcript has no actionable row the way a
 /// picker match or a palette command does, so there is nothing here for a
 /// cursor position to point at.
+///
+/// The pending permission prompt's rows, when there are any, are drawn
+/// between the composer line and the rule -- part of the header that always
+/// shows, never a scrolling item, since a request blocking the agent's own
+/// turn must stay visible however far the transcript has scrolled.
 fn ai_body(view: &AiPanelView) -> Body {
+    let mut header = vec![Line::Text(plain_spans(format!(
+        "{PROMPT_MARK} {}",
+        view.input
+    )))];
+    header.extend(view.pending_permission.iter().cloned().map(Line::Text));
+    header.push(Line::Rule);
     Body {
         title: view.title.clone(),
-        header: vec![
-            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.input))),
-            Line::Rule,
-        ],
+        header,
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: None,
     }

@@ -18,7 +18,6 @@ use crate::msg::{ExitInfo, RegisterType, ReplyToken};
 use crate::native::ai_event::{
     AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
 };
-use crate::native::ai_panel::PermissionPrompt;
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
@@ -2537,22 +2536,53 @@ fn permission_option(id: &str, kind: PermissionOptionKind) -> PermissionOption {
     }
 }
 
-/// A model with one outstanding permission request: `OverlayKind::Ai`
-/// deliberately never takes focus (`Model::takes_focus`'s doc), so this
-/// model has no overlay pushed at all -- the point is that the intercept
-/// fires purely off `AiPanelState::pending_permission`, not off overlay
-/// focus.
+fn permission_requested_msg(request_id: u64, options: Vec<PermissionOption>) -> Msg {
+    Msg::Ai(crate::native::ai_event::AiEvent::PermissionRequested {
+        request_id,
+        tool_call_id: "call_1".to_string(),
+        title: None,
+        options,
+    })
+}
+
+fn everyday_options() -> Vec<PermissionOption> {
+    vec![
+        permission_option("allow-once", PermissionOptionKind::AllowOnce),
+        permission_option("allow-always", PermissionOptionKind::AllowAlways),
+        permission_option("reject-once", PermissionOptionKind::RejectOnce),
+    ]
+}
+
+/// A model with one outstanding permission request and the panel both open
+/// and focused -- the real, reachable path: an explicit user `open` invoke
+/// (which is what claims focus, see `AiPanelState::focused`'s own doc)
+/// followed by the request arriving. Built entirely through `update()`
+/// rather than poking `pending_permission` in directly, so this fixture
+/// cannot silently drift from what production dispatch actually produces.
 fn pending_permission_model() -> Model {
     let mut m = model();
-    m.ai_panel_mut().pending_permission = Some(PermissionPrompt::new(
-        7,
-        "call_1",
-        vec![
-            permission_option("allow-once", PermissionOptionKind::AllowOnce),
-            permission_option("allow-always", PermissionOptionKind::AllowAlways),
-            permission_option("reject-once", PermissionOptionKind::RejectOnce),
-        ],
-    ));
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
+    m
+}
+
+/// The other reachable shape: a request arrives with the panel closed, so
+/// it auto-opens (see `update::ai::on_ai_event`'s `PermissionRequested`
+/// arm) without taking focus. Distinct from [`pending_permission_model`]
+/// on purpose -- proving the guard in `route_key` needs both a focused and
+/// an unfocused pending-permission state to intercept a key in one and let
+/// it through in the other.
+fn auto_opened_permission_model() -> Model {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(&mut m, permission_requested_msg(7, everyday_options()));
     m
 }
 
@@ -2581,7 +2611,7 @@ fn y_on_a_pending_permission_answers_allow_once_and_clears_the_slot() {
 }
 
 #[test]
-fn an_unmapped_key_is_swallowed_while_a_permission_is_pending() {
+fn an_unmapped_key_is_swallowed_while_a_permission_is_pending_and_focused() {
     let mut m = pending_permission_model();
     let effects = update(
         &mut m,
@@ -2599,12 +2629,14 @@ fn an_unmapped_key_is_swallowed_while_a_permission_is_pending() {
     );
 }
 
-/// The intercept must win over ordinary engine routing: with no overlay
-/// pushed, `Focus::Engine` is what `route_key` would otherwise pick (see
-/// `key_in_engine_focus_becomes_rpc_input_effect`), and this proves a
-/// pending permission overrides that before focus is ever consulted.
+/// The intercept must win over ordinary engine routing while focused: with
+/// the panel open and focused, `Focus::Engine` is still what
+/// `model.focus()` reports (`OverlayKind::Ai` never takes the stack's own
+/// focus slot), which is what `key_in_engine_focus_becomes_rpc_input_effect`
+/// exercises for the ordinary case -- this proves a pending, focused
+/// permission overrides that before focus is ever consulted.
 #[test]
-fn ordinary_input_never_reaches_the_engine_while_a_permission_is_pending() {
+fn ordinary_input_never_reaches_the_engine_while_a_permission_is_pending_and_focused() {
     let mut m = pending_permission_model();
     assert_eq!(m.focus(), Focus::Engine);
     let effects = update(
@@ -2616,6 +2648,112 @@ fn ordinary_input_never_reaches_the_engine_while_a_permission_is_pending() {
     assert!(
         !matches!(effects.as_slice(), [Effect::Rpc(_)]),
         "a pending permission must intercept ahead of engine routing: {effects:?}"
+    );
+}
+
+/// <Esc> settles the request as `Cancelled`, never as a selected option --
+/// the one answer that exists even when the agent offered only allow-kind
+/// options, which is exactly the set exercised here.
+#[test]
+fn esc_on_a_focused_pending_permission_cancels_it_even_with_only_allow_options_offered() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    let _ = update(
+        &mut m,
+        permission_requested_msg(
+            9,
+            vec![
+                permission_option("allow-once", PermissionOptionKind::AllowOnce),
+                permission_option("allow-always", PermissionOptionKind::AllowAlways),
+            ],
+        ),
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<Esc>".to_string(),
+        }),
+    );
+
+    assert!(
+        matches!(
+            effects.as_slice(),
+            [Effect::Ai(AiCommand::AnswerPermission {
+                request_id: 9,
+                outcome: PermissionOutcome::Cancelled,
+            })]
+        ),
+        "expected one AnswerPermission{{Cancelled}}, got {effects:?}"
+    );
+    assert!(m.ai_panel().pending_permission.is_none());
+}
+
+/// Critical 2, the guard's focus half: a request auto-opens the panel
+/// without taking focus (see `auto_opened_permission_model`'s doc), so a
+/// `y` typed right after must still reach the engine as ordinary input --
+/// dropping the `focused` half of `route_key`'s guard is exactly the
+/// mutation this fails under, since the panel genuinely is open here.
+#[test]
+fn a_y_typed_while_the_panel_is_auto_opened_but_not_focused_reaches_the_engine() {
+    let mut m = auto_opened_permission_model();
+    assert!(m.ai_panel_overlay_open());
+    assert!(!m.ai_panel().focused);
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
+        "an auto-opened, unfocused panel must never intercept a keystroke: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the prompt is untouched by a keystroke that reached the engine instead"
+    );
+}
+
+/// Critical 2, the guard's open half: closing the panel while a request is
+/// still pending (the user can always dismiss the sidebar without
+/// answering) must not leave the intercept live -- dropping the `open`
+/// half of `route_key`'s guard is exactly the mutation this fails under.
+#[test]
+fn a_y_typed_after_closing_the_panel_with_a_permission_still_pending_reaches_the_engine() {
+    let mut m = pending_permission_model();
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        },
+    );
+    assert!(!m.ai_panel_overlay_open());
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "closing the sidebar does not answer the request it leaves behind"
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Rpc(RpcCall::Input { .. })]),
+        "a closed panel must never intercept a keystroke: {effects:?}"
     );
 }
 

@@ -90,6 +90,11 @@ pub enum AiEvent {
     PermissionRequested {
         request_id: u64,
         tool_call_id: String,
+        /// The tool call's human-readable name, when the agent sent one.
+        /// `ToolCallUpdate` only requires `toolCallId` on the wire, so this
+        /// is `None` for an agent that omits it; a consumer falls back to
+        /// `tool_call_id` rather than showing nothing.
+        title: Option<String>,
         options: Vec<PermissionOption>,
     },
     /// A file modification the agent proposes, carried as content rather
@@ -399,6 +404,7 @@ mod tests {
             AiEvent::PermissionRequested {
                 request_id: 5,
                 tool_call_id: "call_001".to_string(),
+                title: Some("Read file".to_string()),
                 options: vec![PermissionOption {
                     option_id: "allow-once".to_string(),
                     name: "Allow once".to_string(),

@@ -8,6 +8,7 @@
 //! ever reaches here.
 
 use crate::native::ai_event::{PermissionOption, PermissionOptionKind};
+use crate::native::views::Span;
 
 /// One outstanding permission request the agent is blocked on: which
 /// boundary id answering it must cite, a display question, and the options
@@ -29,16 +30,25 @@ pub struct PermissionPrompt {
 
 impl PermissionPrompt {
     /// Builds the prompt an [`crate::native::ai_event::AiEvent::PermissionRequested`]
-    /// folds into [`super::AiPanelState::pending_permission`]. `tool_call_id`
-    /// is the only description the wire's own worked example guarantees
-    /// (`docs/acp-v1-wire-capture.md`'s `RequestPermissionParams` pin --
-    /// `toolCall` carries only `toolCallId` in that example, no title), so
-    /// it is what the question text names.
+    /// folds into [`super::AiPanelState::pending_permission`]. Names `title`
+    /// when the agent sent one, falling back to `tool_call_id`: the wire's
+    /// `ToolCallUpdate.title` member is optional (only `toolCallId` is
+    /// required -- `docs/acp-v1-wire-capture.md`'s "Method payload members"
+    /// table pins `ToolCallUpdate`'s required set as `toolCallId` alone,
+    /// distinct from the full `ToolCall` shape's own `title`-required set),
+    /// so an agent that omits it still gets a question naming the call it
+    /// asks about, never a blank.
     #[must_use]
-    pub fn new(request_id: u64, tool_call_id: &str, options: Vec<PermissionOption>) -> Self {
+    pub fn new(
+        request_id: u64,
+        tool_call_id: &str,
+        title: Option<String>,
+        options: Vec<PermissionOption>,
+    ) -> Self {
+        let name = title.unwrap_or_else(|| tool_call_id.to_string());
         Self {
             request_id,
-            prompt: format!("Permission requested for {tool_call_id}"),
+            prompt: format!("Permission requested for {name}"),
             options,
         }
     }
@@ -66,6 +76,36 @@ impl PermissionPrompt {
     fn option_of_kind(&self, kind: PermissionOptionKind) -> Option<&PermissionOption> {
         self.options.iter().find(|option| option.kind == kind)
     }
+
+    /// The prompt's own paint rows: the question, then one row per offered
+    /// option naming both its display name and its wire kind, so the panel
+    /// shows what pressing `y`/`a`/`n` will actually answer rather than a
+    /// name alone that leaves the kind to guesswork.
+    #[must_use]
+    pub fn render_rows(&self) -> Vec<Vec<Span>> {
+        let mut rows = vec![vec![Span::plain(self.prompt.clone())]];
+        rows.extend(self.options.iter().map(|option| {
+            vec![Span::plain(format!(
+                "  {} ({})",
+                option.name,
+                kind_label(option.kind)
+            ))]
+        }));
+        rows
+    }
+}
+
+/// The wire spelling for `kind`, per `docs/acp-v1-wire-capture.md`'s pinned
+/// `PermissionOptionKind` strings -- shown verbatim rather than a
+/// view-invented label, so what the panel prints for a kind always matches
+/// what the wire itself called it.
+fn kind_label(kind: PermissionOptionKind) -> &'static str {
+    match kind {
+        PermissionOptionKind::AllowOnce => "allow_once",
+        PermissionOptionKind::AllowAlways => "allow_always",
+        PermissionOptionKind::RejectOnce => "reject_once",
+        PermissionOptionKind::RejectAlways => "reject_always",
+    }
 }
 
 #[cfg(test)]
@@ -83,10 +123,18 @@ mod tests {
     }
 
     #[test]
-    fn the_prompt_names_the_tool_call_it_answers_for() {
-        let prompt = PermissionPrompt::new(1, "call_1", vec![]);
+    fn the_prompt_names_the_tool_call_it_answers_for_with_no_title() {
+        let prompt = PermissionPrompt::new(1, "call_1", None, vec![]);
         assert_eq!(prompt.request_id, 1);
         assert!(prompt.prompt.contains("call_1"));
+    }
+
+    #[test]
+    fn the_prompt_prefers_the_human_readable_title_when_the_agent_sent_one() {
+        let prompt =
+            PermissionPrompt::new(1, "call_1", Some("Delete config.yaml".to_string()), vec![]);
+        assert!(prompt.prompt.contains("Delete config.yaml"));
+        assert!(!prompt.prompt.contains("call_1"));
     }
 
     #[test]
@@ -94,6 +142,7 @@ mod tests {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
+            None,
             vec![
                 option("allow-once", PermissionOptionKind::AllowOnce),
                 option("allow-always", PermissionOptionKind::AllowAlways),
@@ -114,6 +163,7 @@ mod tests {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
+            None,
             vec![option("reject-always", PermissionOptionKind::RejectAlways)],
         );
         assert_eq!(
@@ -127,10 +177,38 @@ mod tests {
         let prompt = PermissionPrompt::new(
             1,
             "call_1",
+            None,
             vec![option("allow-once", PermissionOptionKind::AllowOnce)],
         );
         assert!(prompt.option_for_key('a').is_none());
         assert!(prompt.option_for_key('n').is_none());
         assert!(prompt.option_for_key('z').is_none());
+    }
+
+    #[test]
+    fn render_rows_names_the_question_and_every_options_kind() {
+        let prompt = PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            vec![
+                option("allow-once", PermissionOptionKind::AllowOnce),
+                option("reject-once", PermissionOptionKind::RejectOnce),
+            ],
+        );
+        let rows = prompt.render_rows();
+        assert_eq!(rows.len(), 3, "the question plus one row per option");
+        assert_eq!(
+            rows[0],
+            vec![Span::plain("Permission requested for Delete config.yaml")]
+        );
+        assert_eq!(
+            rows[1],
+            vec![Span::plain("  allow-once (allow_once)".to_string())]
+        );
+        assert_eq!(
+            rows[2],
+            vec![Span::plain("  reject-once (reject_once)".to_string())]
+        );
     }
 }

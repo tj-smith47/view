@@ -182,10 +182,16 @@ where
         tokio::select! {
             frame = frames.recv() => match frame {
                 Some(Ok(frame)) => driver.on_frame(frame),
-                Some(Err(end)) => return Some(end),
+                Some(Err(end)) => {
+                    driver.cancel_open_permissions();
+                    return Some(end);
+                }
                 // both halves are gone without either having said why, which
                 // only happens if a task was dropped out from under the loop
-                None => return Some(SessionEnd::ReaderEof),
+                None => {
+                    driver.cancel_open_permissions();
+                    return Some(SessionEnd::ReaderEof);
+                }
             },
             command = commands.recv() => match command {
                 Some(command) => driver.on_command(command),
@@ -386,6 +392,11 @@ impl Driver {
                     text: error.message,
                     from_agent: true,
                 });
+                // defensive: a conformant agent cannot refuse a prompt while
+                // still holding a permission request on it open, but a turn
+                // ending is exactly the point past which no reply would ever
+                // be sent otherwise
+                self.cancel_open_permissions();
                 self.shared.emit(AiEvent::TurnEnded {
                     stop_reason: StopReason::Refusal,
                 });
@@ -479,6 +490,10 @@ impl Driver {
                     .and_then(Value::as_str)
                     .and_then(stop_reason_from_wire)
                     .unwrap_or(StopReason::EndTurn);
+                // defensive: see the same call in on_error_response's Prompt
+                // arm -- a turn ending is the point past which no reply
+                // would ever be sent otherwise
+                self.cancel_open_permissions();
                 self.shared.emit(AiEvent::TurnEnded { stop_reason });
             }
         }
@@ -617,11 +632,19 @@ impl Driver {
     }
 
     fn on_permission_request(&mut self, id: RequestId, params: &Value) {
-        let tool_call_id = params["toolCall"]
-            .get("toolCallId")
+        let tool_call = params.get("toolCall");
+        let tool_call_id = tool_call
+            .and_then(|call| call.get("toolCallId"))
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        // `ToolCallUpdate.title` is optional on the wire (only `toolCallId`
+        // is required); the id is what the panel falls back to displaying
+        // when an agent omits it
+        let title = tool_call
+            .and_then(|call| call.get("title"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string);
         let options: Vec<PermissionOption> = params
             .get("options")
             .and_then(Value::as_array)
@@ -644,8 +667,24 @@ impl Driver {
         self.shared.emit(AiEvent::PermissionRequested {
             request_id,
             tool_call_id,
+            title,
             options,
         });
+    }
+
+    /// Settles every `session/request_permission` this client is still
+    /// holding a reply open for, each with the wire's own `cancelled`
+    /// outcome. Called both by an explicit `AiCommand::Cancel` and by every
+    /// path that ends the session (a crash, a turn ending on its own) so a
+    /// reply the agent is blocked on is never left unanswered once nothing
+    /// still intends to answer it.
+    fn cancel_open_permissions(&mut self) {
+        for wire_id in std::mem::take(&mut self.open_permissions).into_values() {
+            let _ = self.out.send(JsonRpcMessage::response(
+                wire_id,
+                json!({ "outcome": { "outcome": "cancelled" } }),
+            ));
+        }
     }
 
     /// The `fs/read_text_file` handler body, kept live and directly tested
@@ -760,12 +799,7 @@ impl Driver {
                 // be answered with the cancelled outcome once a turn is
                 // cancelled; an unanswered one would leave the agent waiting
                 // on a turn that is already over
-                for wire_id in std::mem::take(&mut self.open_permissions).into_values() {
-                    let _ = self.out.send(JsonRpcMessage::response(
-                        wire_id,
-                        json!({ "outcome": { "outcome": "cancelled" } }),
-                    ));
-                }
+                self.cancel_open_permissions();
             }
             AiCommand::FsReadReply { .. } | AiCommand::FsWriteReply { .. } => {
                 self.answer_fs(command);
@@ -1747,12 +1781,14 @@ mod tests {
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
             request_id,
             tool_call_id,
+            title,
             options,
         }) = events_rx.recv().expect("PermissionRequested was emitted")
         else {
             panic!("expected PermissionRequested")
         };
         assert_eq!(tool_call_id, "call_1");
+        assert_eq!(title, None, "the wire params carried no title member");
         assert_eq!(options.len(), 2);
 
         driver.on_command(AiCommand::AnswerPermission {
@@ -1830,6 +1866,112 @@ mod tests {
         assert_eq!(
             first_frame.result,
             Some(json!({ "outcome": { "outcome": "selected", "optionId": "allow-once" } }))
+        );
+    }
+
+    /// `ToolCallUpdate.title` is optional on the wire; when an agent does
+    /// send it, the client's job is to carry it rather than fall back to
+    /// the id.
+    #[test]
+    fn a_permission_request_carrying_a_title_carries_it_across() {
+        let (mut driver, _out_rx, events_rx) = driver_with_ready_session();
+
+        driver.on_request(
+            RequestId::Str("perm-1".to_string()),
+            "session/request_permission",
+            &json!({
+                "sessionId": "s1",
+                "toolCall": { "toolCallId": "call_1", "title": "Delete config.yaml" },
+                "options": [
+                    { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                ],
+            }),
+        );
+
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { title, .. }) =
+            events_rx.recv().expect("PermissionRequested was emitted")
+        else {
+            panic!("expected PermissionRequested")
+        };
+        assert_eq!(title, Some("Delete config.yaml".to_string()));
+    }
+
+    /// A turn ending -- successfully or by refusal -- is the point past
+    /// which nothing will ever answer a still-open permission reply, so the
+    /// driver settles it itself rather than leaving the agent's own
+    /// `session/request_permission` call blocked forever.
+    #[test]
+    fn a_turn_ending_settles_any_still_open_permission_as_cancelled() {
+        let (mut driver, mut out_rx, events_rx) = driver_with_ready_session();
+
+        driver.on_command(AiCommand::Prompt {
+            text: "do the thing".to_string(),
+            context: vec![],
+        });
+        let prompt_request = out_rx.try_recv().expect("session/prompt was sent");
+
+        driver.on_request(
+            RequestId::Str("perm-1".to_string()),
+            "session/request_permission",
+            &permission_request_params(),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { .. }) =
+            events_rx.recv().expect("PermissionRequested was emitted")
+        else {
+            panic!("expected PermissionRequested")
+        };
+
+        driver.on_response(
+            prompt_request.id.expect("session/prompt carries an id"),
+            Ok(json!({ "stopReason": "end_turn" })),
+        );
+
+        let cancelled = out_rx
+            .try_recv()
+            .expect("the still-open permission reply was settled");
+        assert_eq!(cancelled.id, Some(RequestId::Str("perm-1".to_string())));
+        assert_eq!(
+            cancelled.result,
+            Some(json!({ "outcome": { "outcome": "cancelled" } }))
+        );
+        let view_core::msg::Msg::Ai(AiEvent::TurnEnded { .. }) =
+            events_rx.recv().expect("TurnEnded was emitted")
+        else {
+            panic!("expected TurnEnded")
+        };
+    }
+
+    /// The driver's own crash path -- the reader stream failing or ending
+    /// unexpectedly -- is the same kind of point of no return as a turn
+    /// ending: covered directly here via [`Driver::cancel_open_permissions`]
+    /// rather than through `drive`'s task-spawning setup, since that is
+    /// where `drive`'s own crash-return arms call it.
+    #[test]
+    fn cancel_open_permissions_settles_every_outstanding_request() {
+        let (mut driver, mut out_rx, events_rx) = driver_with_ready_session();
+
+        driver.on_request(
+            RequestId::Str("perm-1".to_string()),
+            "session/request_permission",
+            &permission_request_params(),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { .. }) =
+            events_rx.recv().expect("PermissionRequested was emitted")
+        else {
+            panic!("expected PermissionRequested")
+        };
+
+        driver.cancel_open_permissions();
+
+        let cancelled = out_rx.try_recv().expect("the open reply was settled");
+        assert_eq!(cancelled.id, Some(RequestId::Str("perm-1".to_string())));
+        assert_eq!(
+            cancelled.result,
+            Some(json!({ "outcome": { "outcome": "cancelled" } }))
+        );
+        assert!(
+            driver.open_permissions.is_empty(),
+            "the correlation map is drained, not just replied to"
         );
     }
 }

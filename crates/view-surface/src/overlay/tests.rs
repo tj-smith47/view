@@ -368,6 +368,41 @@ fn a_prompt_carries_its_question_its_input_and_its_choices() {
     assert_eq!(framed.selected, Some(5));
 }
 
+/// Critical 1's other half: the prompt has to reach the painted frame, not
+/// only `AiPanelView`'s own field. A pending permission's question and its
+/// options render into the header, above the rule that separates them from
+/// the scrolling transcript.
+#[test]
+fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("")
+            .with_pending_permission(vec![
+                vec![Span::plain(
+                    "Permission requested for Delete config.yaml".to_string(),
+                )],
+                vec![Span::plain("  Allow once (allow_once)".to_string())],
+            ]),
+    );
+    let framed = rows(50, 8, &kind, BorderSet::ASCII);
+    assert!(
+        line_text(&framed.lines[2]).contains("Delete config.yaml"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[3]).contains("Allow once (allow_once)"),
+        "{:?}",
+        framed.lines
+    );
+    assert!(
+        line_text(&framed.lines[4]).contains("---"),
+        "the rule still separates the header from the transcript once a \
+         permission prompt has grown it"
+    );
+}
+
 #[test]
 fn a_tier_maps_to_exactly_one_border_charset() {
     assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);

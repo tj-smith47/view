@@ -69,6 +69,14 @@ pub struct AiPanelState {
     /// that it holds at most one prompt and is never overwritten by an
     /// unanswered one.
     pub pending_permission: Option<PermissionPrompt>,
+    /// Whether the panel's own input line currently owns the keyboard, set
+    /// only by the user's own explicit `open`/`toggle` invocation and
+    /// cleared on close -- never by a `PermissionRequested` arriving while
+    /// the panel is closed (see `update::open_ai_panel`'s doc): the panel
+    /// is non-modal, so becoming visible and taking the keyboard are two
+    /// different things, and only the second one lets `y`/`n`/`a`/`<Esc>`
+    /// reach the pending permission prompt instead of the engine.
+    pub focused: bool,
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.
     pub local_error: Option<String>,
@@ -87,20 +95,26 @@ impl AiPanelState {
             input: String::new(),
             pending_edits: Vec::new(),
             pending_permission: None,
+            focused: false,
             local_error: None,
             usage: None,
         }
     }
 
-    /// The panel's current paint frame: the composer line as typed, and the
+    /// The panel's current paint frame: the composer line as typed, the
     /// transcript rendered oldest first (see [`Transcript::rendered_rows`]
     /// for how a paint that follows a lone folded chunk avoids re-rendering
-    /// every earlier entry).
+    /// every earlier entry), and the pending permission prompt's own rows
+    /// when one is outstanding (see [`PermissionPrompt::render_rows`]).
     #[must_use]
     pub fn view(&self) -> AiPanelView {
-        AiPanelView::new(TITLE)
+        let view = AiPanelView::new(TITLE)
             .with_input(self.input.clone())
-            .with_rows(self.transcript.rendered_rows())
+            .with_rows(self.transcript.rendered_rows());
+        match &self.pending_permission {
+            Some(prompt) => view.with_pending_permission(prompt.render_rows()),
+            None => view,
+        }
     }
 }
 
@@ -129,6 +143,7 @@ mod tests {
         assert_eq!(state.input, "");
         assert!(state.pending_edits.is_empty());
         assert_eq!(state.pending_permission, None);
+        assert!(!state.focused);
         assert_eq!(state.local_error, None);
         assert_eq!(state.usage, None);
     }
@@ -141,6 +156,36 @@ mod tests {
         assert_eq!(view.title, TITLE);
         assert_eq!(view.input, "hello");
         assert!(view.rows.is_empty());
+        assert!(
+            view.pending_permission.is_empty(),
+            "no permission is pending, so there is nothing extra to draw"
+        );
+    }
+
+    /// Critical 1: the panel's own `view()` must carry and render a pending
+    /// prompt, not just hold it in state -- a `pending_permission` the
+    /// paint frame never surfaces is a prompt the user cannot see or answer.
+    #[test]
+    fn a_pending_permission_renders_the_question_and_its_options_with_their_kinds() {
+        let mut state = AiPanelState::new();
+        state.pending_permission = Some(PermissionPrompt::new(
+            1,
+            "call_1",
+            Some("Delete config.yaml".to_string()),
+            vec![crate::native::ai_event::PermissionOption {
+                option_id: "allow-once".to_string(),
+                name: "Allow once".to_string(),
+                kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
+            }],
+        ));
+        let view = state.view();
+        assert_eq!(
+            view.pending_permission,
+            vec![
+                vec![Span::plain("Permission requested for Delete config.yaml")],
+                vec![Span::plain("  Allow once (allow_once)".to_string())],
+            ]
+        );
     }
 
     #[test]
