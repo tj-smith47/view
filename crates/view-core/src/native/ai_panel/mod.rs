@@ -10,36 +10,11 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
-use super::views::{AiPanelView, Span};
+use super::views::AiPanelView;
 
-/// Who spoke one transcript entry. Closed rather than a free-form string:
-/// every renderer that ever styles a row by speaker (the composer's own
-/// "you" vs "agent" convention every chat-shaped UI uses) switches on this
-/// instead of matching text an adapter could spell differently release to
-/// release.
-#[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TranscriptRole {
-    /// The user's own composed message.
-    User,
-    /// The agent's reply.
-    Agent,
-}
+mod transcript;
 
-/// One folded entry in the transcript: an id chunks stream into, who sent
-/// it, and its text so far.
-///
-/// `id` is what a later chunk folds against rather than appending a new
-/// entry -- ACP streams a reply as multiple chunks against one message id,
-/// and without an id to fold on the transcript would grow one row per
-/// chunk instead of one row per message.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TranscriptEntry {
-    pub id: String,
-    pub role: TranscriptRole,
-    pub text: String,
-}
+pub use transcript::{Transcript, TranscriptEntry, TranscriptEntryKind, TranscriptRole};
 
 /// One outstanding permission request the agent is blocked on: the question
 /// text and the fixed answers it offers. Plain strings rather than a wire
@@ -51,6 +26,20 @@ pub struct TranscriptEntry {
 pub struct PermissionPrompt {
     pub prompt: String,
     pub options: Vec<String>,
+}
+
+/// The session's context-window and cost accounting, folded from
+/// [`crate::native::ai_event::AiEvent::UsageUpdated`]. A panel stat, not a
+/// transcript row: the wire's own `usage_update` discriminant carries a
+/// snapshot to display beside the conversation, not an event that happened
+/// in it, so it replaces [`AiPanelState::usage`] in place rather than
+/// folding into [`AiPanelState::transcript`].
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq)]
+pub struct UsageStats {
+    pub used: u64,
+    pub size: u64,
+    pub cost: Option<crate::native::ai_event::Cost>,
 }
 
 /// One diff hunk the agent has proposed and the user has not yet acted on.
@@ -71,8 +60,9 @@ pub struct PendingEdit {
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiPanelState {
     pub session_id: Option<String>,
-    /// Agent output, folded per message id as chunks stream in.
-    pub transcript: Vec<TranscriptEntry>,
+    /// Agent output, folded per message id as chunks stream in, and tool
+    /// calls folded per `tool_call_id` as their status advances.
+    pub transcript: Transcript,
     /// The panel's own prompt-composition line.
     pub input: String,
     /// Diff hunks the agent has proposed, oldest first.
@@ -90,6 +80,9 @@ pub struct AiPanelState {
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.
     pub local_error: Option<String>,
+    /// The session's last-reported context-window and cost accounting, or
+    /// `None` before the first `usage_update` arrives. See [`UsageStats`].
+    pub usage: Option<UsageStats>,
 }
 
 impl AiPanelState {
@@ -98,21 +91,24 @@ impl AiPanelState {
     pub fn new() -> Self {
         Self {
             session_id: None,
-            transcript: Vec::new(),
+            transcript: Transcript::new(),
             input: String::new(),
             pending_edits: Vec::new(),
             pending_permission: None,
             local_error: None,
+            usage: None,
         }
     }
 
     /// The panel's current paint frame: the composer line as typed, and the
-    /// transcript rendered one row per entry, oldest first.
+    /// transcript rendered oldest first (see [`Transcript::rendered_rows`]
+    /// for how a paint that follows a lone folded chunk avoids re-rendering
+    /// every earlier entry).
     #[must_use]
     pub fn view(&self) -> AiPanelView {
         AiPanelView::new(TITLE)
             .with_input(self.input.clone())
-            .with_rows(self.transcript.iter().map(transcript_row).collect())
+            .with_rows(self.transcript.rendered_rows())
     }
 }
 
@@ -125,24 +121,12 @@ impl Default for AiPanelState {
 /// The overlay's title, drawn into its top border.
 const TITLE: &str = "AI Agent";
 
-/// One transcript entry's row: the speaker as a plain-text prefix, then its
-/// text. A single unstyled span, the same honest "nothing to preserve"
-/// shape a picker candidate or a tree leaf paints in -- `role` already
-/// distinguishes a row without a span structure to carry that distinction
-/// too, so styling by role waits for a renderer with something else in the
-/// row worth separating out.
-fn transcript_row(entry: &TranscriptEntry) -> Vec<Span> {
-    let speaker = match entry.role {
-        TranscriptRole::User => "You",
-        TranscriptRole::Agent => "Agent",
-    };
-    vec![Span::plain(format!("{speaker}: {}", entry.text))]
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use super::super::ai_event::ToolCallStatus;
+    use super::super::views::Span;
     use super::*;
 
     #[test]
@@ -154,6 +138,7 @@ mod tests {
         assert!(state.pending_edits.is_empty());
         assert_eq!(state.pending_permission, None);
         assert_eq!(state.local_error, None);
+        assert_eq!(state.usage, None);
     }
 
     #[test]
@@ -169,19 +154,24 @@ mod tests {
     #[test]
     fn a_transcript_entry_renders_with_its_speaker_prefix() {
         let mut state = AiPanelState::new();
-        state.transcript.push(TranscriptEntry {
-            id: "1".to_string(),
-            role: TranscriptRole::User,
-            text: "hi".to_string(),
-        });
-        state.transcript.push(TranscriptEntry {
-            id: "2".to_string(),
-            role: TranscriptRole::Agent,
-            text: "hello".to_string(),
-        });
+        state.transcript.append_or_extend(Some("1"), "hi", false);
+        state.transcript.append_or_extend(Some("2"), "hello", true);
         let view = state.view();
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0], vec![Span::plain("You: hi")]);
         assert_eq!(view.rows[1], vec![Span::plain("Agent: hello")]);
+    }
+
+    #[test]
+    fn a_tool_call_entry_renders_with_its_status_prefix() {
+        let mut state = AiPanelState::new();
+        state.transcript.upsert_tool_call(
+            "call_1".to_string(),
+            "Read file".to_string(),
+            ToolCallStatus::InProgress,
+            None,
+        );
+        let view = state.view();
+        assert_eq!(view.rows, vec![vec![Span::plain("running: Read file")]]);
     }
 }

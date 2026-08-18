@@ -356,14 +356,49 @@ fn stream_chunks(stdout: &mut std::io::Stdout) {
                 "update": {
                     "sessionUpdate": "tool_call_update",
                     "toolCallId": "call_001",
-                    "status": "completed"
+                    "status": "completed",
+                    "content": [
+                        { "type": "content", "content": { "type": "text", "text": "fn main() {}" } },
+                        { "type": "content", "content": { "type": "image" } },
+                        { "type": "terminal", "terminalId": "term_1" }
+                    ]
+                }
+            }
+        }),
+    );
+    send(
+        stdout,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess_stub",
+                "update": {
+                    "sessionUpdate": "plan",
+                    "entries": [
+                        { "content": "Read the file", "priority": "high", "status": "in_progress" }
+                    ]
+                }
+            }
+        }),
+    );
+    send(
+        stdout,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess_stub",
+                "update": {
+                    "sessionUpdate": "usage_update",
+                    "used": 100,
+                    "size": 1000,
+                    "cost": { "amount": 0.05, "currency": "USD" }
                 }
             }
         }),
     );
     for ignored in [
-        "plan",
-        "usage_update",
         "available_commands_update",
         "current_mode_update",
         "config_option_update",

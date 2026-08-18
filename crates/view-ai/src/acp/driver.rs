@@ -36,8 +36,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 use view_core::native::ai_context::{DiagnosticEntry, DiagnosticSeverity, QuickfixEntry};
 use view_core::native::ai_event::{
-    AiCommand, AiEvent, ContextBlock, FsError, PermissionOption, PermissionOptionKind,
-    PermissionOutcome, StopReason, ToolCallStatus,
+    AiCommand, AiEvent, ContextBlock, Cost, FsError, PermissionOption, PermissionOptionKind,
+    PermissionOutcome, PlanEntry, PlanEntryPriority, PlanEntryStatus, StopReason, ToolCallStatus,
 };
 
 use crate::acp::fs::PendingReply;
@@ -194,6 +194,19 @@ where
     }
 }
 
+/// One tool call's last-known title and status, held by
+/// [`Driver::tool_calls`] to fill in whatever a later `tool_call_update`
+/// omits. Carries no `content`: the wire's own omission semantics for
+/// result content are carried across the boundary as
+/// [`AiEvent::ToolCallUpdate`]'s `content: Option<Vec<String>>` instead of
+/// being flattened into a remembered copy here, so there is nothing about
+/// a call's result for the driver to remember or bound.
+#[derive(Clone)]
+struct KnownToolCall {
+    title: String,
+    status: ToolCallStatus,
+}
+
 /// The correlation state one session accumulates.
 struct Driver {
     shared: Arc<SessionShared>,
@@ -235,11 +248,18 @@ struct Driver {
     /// asked about is dropped rather than written, and so a cancel can
     /// settle every one of them.
     open_permissions: HashMap<u64, RequestId>,
-    /// The last title and status seen per tool call. A `tool_call_update`
-    /// carries only what changed, while the event vocabulary carries a
-    /// whole call, so the fields the agent omitted come from here rather
-    /// than from a placeholder the panel would display.
-    tool_calls: HashMap<String, (String, ToolCallStatus)>,
+    /// The last title and status seen per tool call -- never `content`
+    /// (see [`KnownToolCall`]'s doc for why). A `tool_call_update` carries
+    /// only what changed, while the event vocabulary carries a whole
+    /// call's title and status, so the fields the agent omitted come from
+    /// here rather than from a placeholder the panel would display. Never
+    /// removed once a call reaches [`ToolCallStatus::Completed`] or
+    /// [`ToolCallStatus::Failed`]: the capture doc permits (does not
+    /// forbid) a further `tool_call_update` after a terminal status, and
+    /// dropping the entry entirely would make that update fall back to an
+    /// empty title and `Pending`, regressing a call the panel already
+    /// rendered as finished.
+    tool_calls: HashMap<String, KnownToolCall>,
     /// Commands that arrived before the session existed, replayed in order
     /// once it does. Dropping them instead would lose a prompt the user had
     /// already typed.
@@ -483,16 +503,15 @@ impl Driver {
                 }
             }
             "tool_call" | "tool_call_update" => self.emit_tool_call(update),
+            "plan" => self.emit_plan(update),
+            "usage_update" => self.emit_usage_update(update),
             // Deliberate no-ops, each one a surface the closed vocabulary
-            // does not model: an agent's plan, its token accounting, its
-            // slash-command list, its mode, its config options, and its
-            // session metadata. Decoded and dropped rather than left to the
-            // catch-all below, so an addition to the discriminant list is
-            // still distinguishable from a surface that was weighed and
-            // left out.
-            "plan"
-            | "usage_update"
-            | "available_commands_update"
+            // does not model: an agent's slash-command list, its mode, its
+            // config options, and its session metadata. Decoded and dropped
+            // rather than left to the catch-all below, so an addition to
+            // the discriminant list is still distinguishable from a surface
+            // that was weighed and left out.
+            "available_commands_update"
             | "current_mode_update"
             | "config_option_update"
             | "session_info_update" => {}
@@ -519,21 +538,62 @@ impl Driver {
             .get("title")
             .and_then(Value::as_str)
             .map(ToString::to_string)
-            .or_else(|| known.map(|(title, _)| title.clone()))
+            .or_else(|| known.map(|k| k.title.clone()))
             .unwrap_or_default();
         let status = update
             .get("status")
             .and_then(Value::as_str)
             .and_then(tool_call_status_from_wire)
-            .or_else(|| known.map(|(_, status)| *status))
+            .or_else(|| known.map(|k| k.status))
             .unwrap_or(ToolCallStatus::Pending);
-        self.tool_calls
-            .insert(tool_call_id.to_string(), (title.clone(), status));
+        // `content` carries the wire's own omission semantics across the
+        // boundary as `Option`, rather than resolving "omitted" against a
+        // remembered copy the way `title`/`status` do above: `None` here
+        // means "this update said nothing about the result", and it is
+        // left to `Transcript::upsert_tool_call` (the one place that still
+        // holds the call's prior result) to leave that result untouched.
+        // An explicit JSON `null` is omission too, not a present-but-empty
+        // value -- the same distinction `emit_usage_update` draws for
+        // `cost`.
+        let content = update
+            .get("content")
+            .is_some_and(|c| !c.is_null())
+            .then(|| tool_call_content(update));
+        self.tool_calls.insert(
+            tool_call_id.to_string(),
+            KnownToolCall {
+                title: title.clone(),
+                status,
+            },
+        );
         self.shared.emit(AiEvent::ToolCallUpdate {
             tool_call_id: tool_call_id.to_string(),
             title,
             status,
+            content,
         });
+    }
+
+    fn emit_plan(&self, update: &Value) {
+        let Some(entries) = update.get("entries").and_then(Value::as_array) else {
+            return;
+        };
+        let entries = entries.iter().map(plan_entry).collect();
+        self.shared.emit(AiEvent::PlanUpdated { entries });
+    }
+
+    fn emit_usage_update(&self, update: &Value) {
+        let Some(used) = update.get("used").and_then(Value::as_u64) else {
+            return;
+        };
+        let Some(size) = update.get("size").and_then(Value::as_u64) else {
+            return;
+        };
+        let cost = update
+            .get("cost")
+            .filter(|c| !c.is_null())
+            .and_then(cost_from_wire);
+        self.shared.emit(AiEvent::UsageUpdated { used, size, cost });
     }
 
     fn on_request(&mut self, id: RequestId, method: &str, params: &Value) {
@@ -823,6 +883,97 @@ fn tool_call_status_from_wire(wire: &str) -> Option<ToolCallStatus> {
         "failed" => Some(ToolCallStatus::Failed),
         _ => None,
     }
+}
+
+/// A tool call's whole `content` array, each item decoded to a display
+/// string via [`tool_call_content_item`]. Empty (not dropped) when the
+/// update carries no `content` array at all.
+fn tool_call_content(update: &Value) -> Vec<String> {
+    update
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().map(tool_call_content_item).collect())
+        .unwrap_or_default()
+}
+
+/// One `ToolCallContent` item, decoded per `docs/acp-v1-wire-capture.md`'s
+/// `Content`/`Terminal` pin. A `"content"`-typed item wrapping a `"text"`
+/// `ContentBlock` becomes its own text; every other `ContentBlock` kind
+/// (`image`/`audio`/`resource_link`/`resource`), and `ToolCallContent`'s own
+/// `"diff"`/`"terminal"` variants, become `"[<kind> content]"` -- a labeled
+/// placeholder rather than a dropped item, since a client that saw content
+/// arrive and showed nothing for it looks like the call produced no output.
+/// Never guesses at unpinned field names for the placeholder kinds: it only
+/// ever reads the `type` discriminant already pinned for each of them.
+fn tool_call_content_item(item: &Value) -> String {
+    let Some(kind) = item.get("type").and_then(Value::as_str) else {
+        return "[content]".to_string();
+    };
+    if kind != "content" {
+        return format!("[{kind} content]");
+    }
+    let block = item.get("content");
+    let block_kind = block.and_then(|c| c.get("type")).and_then(Value::as_str);
+    if block_kind == Some("text") {
+        if let Some(text) = block.and_then(|c| c.get("text")).and_then(Value::as_str) {
+            return text.to_string();
+        }
+    }
+    format!("[{} content]", block_kind.unwrap_or("content"))
+}
+
+/// One `PlanEntry`, degraded to a labeled placeholder rather than dropped
+/// when a required field is missing or its `priority`/`status` string is
+/// not one the wire pins -- the same "never drop, always render something"
+/// policy [`tool_call_content_item`]'s doc states for tool-call content,
+/// applied here so a task the agent believes it announced never silently
+/// vanishes from the rendered plan. `priority`/`status` are closed,
+/// wire-pinned enums with no "unknown" member by design (see their own
+/// docs), so an undecodable value falls back to the lowest-commitment
+/// member of each (`Low`/`Pending`) rather than fabricate a variant the
+/// wire never sends; the placeholder text says so instead of rendering as
+/// if the fallback were what the agent reported.
+fn plan_entry(raw: &Value) -> PlanEntry {
+    let content = raw.get("content").and_then(Value::as_str);
+    let priority = raw
+        .get("priority")
+        .and_then(Value::as_str)
+        .and_then(|wire| match wire {
+            "high" => Some(PlanEntryPriority::High),
+            "medium" => Some(PlanEntryPriority::Medium),
+            "low" => Some(PlanEntryPriority::Low),
+            _ => None,
+        });
+    let status = raw
+        .get("status")
+        .and_then(Value::as_str)
+        .and_then(|wire| match wire {
+            "pending" => Some(PlanEntryStatus::Pending),
+            "in_progress" => Some(PlanEntryStatus::InProgress),
+            "completed" => Some(PlanEntryStatus::Completed),
+            _ => None,
+        });
+    let readable = content.is_some() && priority.is_some() && status.is_some();
+    let content = match (content, readable) {
+        (Some(text), true) => text.to_string(),
+        (Some(text), false) => format!("{text} [unreadable plan entry]"),
+        (None, _) => "[unreadable plan entry]".to_string(),
+    };
+    PlanEntry {
+        content,
+        priority: priority.unwrap_or(PlanEntryPriority::Low),
+        status: status.unwrap_or(PlanEntryStatus::Pending),
+    }
+}
+
+/// A `UsageUpdate`'s `cost` member, already filtered non-null by the
+/// caller. `None` when `amount` or `currency` is missing -- an unreadable
+/// cost is left out of the stats rather than shown as free.
+fn cost_from_wire(raw: &Value) -> Option<Cost> {
+    Some(Cost {
+        amount: raw.get("amount").and_then(Value::as_f64)?,
+        currency: raw.get("currency").and_then(Value::as_str)?.to_string(),
+    })
 }
 
 /// One offered permission option, or `None` when its kind is not one of the
@@ -1350,5 +1501,202 @@ mod tests {
         let error = frame.error.expect("a refused write answers with an error");
         assert_eq!(error.code, INTERNAL_ERROR);
         assert_eq!(error.message, fs_reason(&FsError::PermissionDenied));
+    }
+
+    fn session_update(update: Value) -> Value {
+        json!({ "sessionId": "s1", "update": update })
+    }
+
+    /// A tool call's title and status must never regress once rendered,
+    /// even though `Driver::tool_calls` prunes `content` at a terminal
+    /// status to bound memory: a further `tool_call_update` naming only
+    /// `title`/`status` (the capture doc permits, does not forbid, one)
+    /// would otherwise read `known` as absent and fall back to an empty
+    /// title and `Pending`, undoing the completed call the panel already
+    /// rendered. `content` is asserted `None` here, not resolved against a
+    /// remembered copy: the driver no longer remembers a call's content at
+    /// all (see [`KnownToolCall`]'s doc) -- leaving an omitted result
+    /// untouched is [`view_core::native::ai_panel::Transcript::upsert_tool_call`]'s
+    /// job now, pinned on that side by
+    /// `upsert_tool_call_with_no_content_leaves_the_rendered_result_rows_intact`.
+    #[test]
+    fn a_tool_call_update_after_a_terminal_status_never_regresses_the_entry() {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.on_notification(
+            "session/update",
+            &session_update(json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "c1",
+                "title": "Run tests",
+                "status": "completed",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "42 passed" } },
+                ],
+            })),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate {
+            status,
+            title,
+            content,
+            ..
+        }) = events_rx.recv().expect("the terminal update was emitted")
+        else {
+            panic!("expected ToolCallUpdate")
+        };
+        assert_eq!(status, ToolCallStatus::Completed);
+        assert_eq!(title, "Run tests");
+        assert_eq!(content, Some(vec!["42 passed".to_string()]));
+
+        // Names a property `ToolCallUpdate` carries but `content` does not
+        // -- the exact shape a post-terminal update the wire permits (a
+        // late `rawOutput` correction) actually takes.
+        driver.on_notification(
+            "session/update",
+            &session_update(json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "c1",
+                "rawOutput": { "exitCode": 0 },
+            })),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate {
+            status,
+            title,
+            content,
+            ..
+        }) = events_rx.recv().expect("the late update was emitted")
+        else {
+            panic!("expected ToolCallUpdate")
+        };
+        assert_eq!(
+            status,
+            ToolCallStatus::Completed,
+            "status must still read completed, not fall back to pending"
+        );
+        assert_eq!(
+            title, "Run tests",
+            "title must still be retained, not fall back to empty"
+        );
+        assert_eq!(
+            content, None,
+            "content must read as omitted, not as an empty result that \
+             erases the 42 passed row already on screen"
+        );
+    }
+
+    /// An explicit JSON `null` for `content` is omission, the same as the
+    /// field being absent: both emit `content: None`, never `Some(vec![])`.
+    #[test]
+    fn a_null_content_field_emits_omission_not_an_empty_result() {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.on_notification(
+            "session/update",
+            &session_update(json!({
+                "sessionUpdate": "tool_call",
+                "toolCallId": "c1",
+                "title": "Run tests",
+                "status": "in_progress",
+                "content": [
+                    { "type": "content", "content": { "type": "text", "text": "partial" } },
+                ],
+            })),
+        );
+        events_rx.recv().expect("the first update was emitted");
+
+        driver.on_notification(
+            "session/update",
+            &session_update(json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "c1",
+                "content": Value::Null,
+            })),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { content, .. }) =
+            events_rx.recv().expect("the second update was emitted")
+        else {
+            panic!("expected ToolCallUpdate")
+        };
+        assert_eq!(
+            content, None,
+            "an explicit null must read exactly as an omitted field does"
+        );
+    }
+
+    /// `plan_entry` renders a complete entry unchanged.
+    #[test]
+    fn plan_entry_decodes_a_complete_task() {
+        let entry = plan_entry(&json!({
+            "content": "Write tests",
+            "priority": "high",
+            "status": "in_progress",
+        }));
+        assert_eq!(entry.content, "Write tests");
+        assert_eq!(entry.priority, PlanEntryPriority::High);
+        assert_eq!(entry.status, PlanEntryStatus::InProgress);
+    }
+
+    /// A task with an unpinned `priority`/`status` string, or a missing
+    /// `content`, is rendered as a labeled placeholder rather than dropped
+    /// from the plan -- a plan update is a wholesale replace, so a
+    /// silently dropped task would vanish from the agent's own announced
+    /// plan without a trace, not just from one update.
+    #[test]
+    fn plan_entry_degrades_an_undecodable_task_instead_of_dropping_it() {
+        let bad_priority = plan_entry(&json!({
+            "content": "Ship it",
+            "priority": "urgent",
+            "status": "pending",
+        }));
+        assert!(bad_priority.content.contains("Ship it"));
+        assert!(bad_priority.content.contains("[unreadable plan entry]"));
+        assert_eq!(bad_priority.priority, PlanEntryPriority::Low);
+        assert_eq!(bad_priority.status, PlanEntryStatus::Pending);
+
+        let no_content = plan_entry(&json!({
+            "priority": "low",
+            "status": "pending",
+        }));
+        assert_eq!(no_content.content, "[unreadable plan entry]");
+    }
+
+    /// The plan-level entry point never shrinks the entry count: an
+    /// undecodable task among readable ones is degraded in place, not
+    /// silently filtered out from under the others.
+    #[test]
+    fn emit_plan_keeps_every_entry_including_undecodable_ones() {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+
+        driver.on_notification(
+            "session/update",
+            &session_update(json!({
+                "sessionUpdate": "plan",
+                "entries": [
+                    { "content": "Write tests", "priority": "high", "status": "pending" },
+                    { "content": "Ship it", "priority": "urgent", "status": "pending" },
+                ],
+            })),
+        );
+        let view_core::msg::Msg::Ai(AiEvent::PlanUpdated { entries }) =
+            events_rx.recv().expect("PlanUpdated was emitted")
+        else {
+            panic!("expected PlanUpdated")
+        };
+        assert_eq!(entries.len(), 2, "the undecodable entry must not vanish");
     }
 }

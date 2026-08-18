@@ -20,8 +20,10 @@
 //! `[dev-dependencies]` entry adds no edge to the direction
 //! `scripts/audit-deps.sh` enforces.
 
+use std::alloc::{GlobalAlloc, Layout, System};
 use std::ops::Deref;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// A directory under the OS temp root, owned for the fixture's lifetime and
 /// removed on every exit path via [`Drop`] -- including a panicking
@@ -87,6 +89,71 @@ impl AsRef<Path> for ScratchDir {
 impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// A [`GlobalAlloc`] that forwards every call unchanged to [`System`] while
+/// counting `alloc` calls, for a test that asserts an allocation-count
+/// budget on a hot path (a fresh `Vec`/`String` per call where amortized
+/// growth was meant to hold is the regression this exists to catch).
+///
+/// Only the counting logic lives here, not a `static` declaration: a
+/// process has exactly one `#[global_allocator]`, and setting it applies to
+/// the whole binary, so a consuming integration-test crate declares its own
+/// `static ALLOCATOR: CountingAllocator = CountingAllocator::new();` rather
+/// than this crate declaring one on every consumer's behalf -- most crates
+/// pull this crate in only for [`ScratchDir`], and swapping their allocator
+/// out from under them because one unrelated test file wanted a counter
+/// would be silent, process-wide collateral.
+pub struct CountingAllocator {
+    count: AtomicUsize,
+}
+
+impl CountingAllocator {
+    /// A fresh counter at zero. `const fn` because `#[global_allocator]`
+    /// statics must be const-initialized.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    /// Allocations counted since construction or the last [`Self::reset`].
+    /// Relaxed: a test reads this from the same thread that drove the
+    /// allocations under measurement, so no cross-thread ordering is
+    /// needed.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+
+    /// Zeroes the counter, so a test can isolate the allocations one
+    /// operation makes from whatever ran earlier in the same binary.
+    pub fn reset(&self) {
+        self.count.store(0, Ordering::Relaxed);
+    }
+}
+
+impl Default for CountingAllocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// SAFETY: every call forwards unchanged to `System`, itself a valid
+// `GlobalAlloc`; the only added behavior is a relaxed counter increment
+// around the forwarded `alloc` call, which changes nothing about what
+// memory is returned or how it must be freed.
+#[allow(unsafe_code)]
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        System.alloc(layout)
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        System.dealloc(ptr, layout)
     }
 }
 

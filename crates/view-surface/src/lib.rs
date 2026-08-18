@@ -742,7 +742,7 @@ fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Laye
 /// cannot disagree about where an overlay is. The border charset comes from
 /// the terminal's own tier, resolved once here rather than per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
-    let kind = layer_kind(&open.kind)?;
+    let kind = layer_kind(model, &open.kind)?;
     let cells = model.overlay_rect(open);
     Some(Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
@@ -759,7 +759,12 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
 /// exhaustiveness checking is not available here, and a feature variant
 /// reaching this build without a mapping paints nothing rather than failing
 /// to compile.
-fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
+///
+/// Takes `model` (unused by every other arm) because [`OverlayKind::Ai`] is
+/// a unit marker, not a payload: the session state it renders lives in
+/// [`Model::ai_panel`] instead, so that arm is the one place this function
+/// reaches past the overlay stack for what to paint.
+fn layer_kind(model: &Model, kind: &OverlayKind) -> Option<LayerKind> {
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
@@ -772,7 +777,7 @@ fn layer_kind(kind: &OverlayKind) -> Option<LayerKind> {
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not
         OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
-        OverlayKind::Ai(state) => Some(LayerKind::Ai(state.view())),
+        OverlayKind::Ai => Some(LayerKind::Ai(model.ai_panel().view())),
         _ => None,
     }
 }

@@ -626,6 +626,168 @@ Pinned `"diff"` shape: `{"type": "diff", "path": <string>, "oldText":
 <string | null>, "newText": <string>}`. `oldText` is nullable (new-file
 case) and NOT required; `path` and `newText` are required.
 
+## `Content`, `Terminal`, `Plan`, and `UsageUpdate`
+
+Re-verified staleness ahead of this capture, same two commands as
+"Source identity and staleness anchor" above: commit SHA for
+`schema/v1/schema.json` is still `ccff4e7d2e431880225804a8c136c2ccfcb313d0`,
+and `schema-v1.json` re-fetched to the same byte count, `242013`. No drift.
+
+`ToolCallContent`'s `"content"` variant merges `Content`, and its
+`"terminal"` variant merges `Terminal` (see the `oneOf` dump above); neither
+had been dumped until now. `SessionUpdate`'s `plan` and `usage_update`
+discriminants (see the 11-variant list above) merge `Plan` and
+`UsageUpdate` respectively.
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))['\$defs']
+for k in ['Content', 'Terminal', 'Plan', 'PlanEntry', 'PlanEntryPriority', 'PlanEntryStatus', 'UsageUpdate', 'Cost']:
+    print('===', k, '===')
+    print(json.dumps(d[k], indent=2))
+    print()
+"
+```
+
+Raw output:
+
+```json
+=== Content ===
+{
+  "description": "Standard content block (text, images, resources).",
+  "type": "object",
+  "properties": {
+    "content": {
+      "description": "The actual content block.",
+      "allOf": [{"$ref": "#/$defs/ContentBlock"}]
+    }
+  },
+  "required": ["content"]
+}
+
+=== Terminal ===
+{
+  "description": "Embed a terminal created with `terminal/create` by its id.\n\nThe terminal must be added before calling `terminal/release`.",
+  "type": "object",
+  "properties": {
+    "terminalId": {
+      "description": "Identifier of the terminal instance to embed in the content stream.",
+      "allOf": [{"$ref": "#/$defs/TerminalId"}]
+    }
+  },
+  "required": ["terminalId"]
+}
+
+=== Plan ===
+{
+  "description": "An execution plan for accomplishing complex tasks.",
+  "type": "object",
+  "properties": {
+    "entries": {
+      "description": "The list of tasks to be accomplished.\n\nWhen updating a plan, the agent must send a complete list of all entries\nwith their current status. The client replaces the entire plan with each update.",
+      "type": "array",
+      "items": {"$ref": "#/$defs/PlanEntry"}
+    }
+  },
+  "required": ["entries"]
+}
+
+=== PlanEntry ===
+{
+  "description": "A single entry in the execution plan.",
+  "type": "object",
+  "properties": {
+    "content": {
+      "description": "Human-readable description of what this task aims to accomplish.",
+      "type": "string"
+    },
+    "priority": {
+      "description": "The relative importance of this task.",
+      "allOf": [{"$ref": "#/$defs/PlanEntryPriority"}]
+    },
+    "status": {
+      "description": "Current execution status of this task.",
+      "allOf": [{"$ref": "#/$defs/PlanEntryStatus"}]
+    }
+  },
+  "required": ["content", "priority", "status"]
+}
+
+=== PlanEntryPriority ===
+{
+  "description": "Priority levels for plan entries.",
+  "oneOf": [
+    {"type": "string", "const": "high"},
+    {"type": "string", "const": "medium"},
+    {"type": "string", "const": "low"}
+  ]
+}
+
+=== PlanEntryStatus ===
+{
+  "description": "Status of a plan entry in the execution flow.",
+  "oneOf": [
+    {"type": "string", "const": "pending"},
+    {"type": "string", "const": "in_progress"},
+    {"type": "string", "const": "completed"}
+  ]
+}
+
+=== UsageUpdate ===
+{
+  "description": "Context window and cost update for a session.",
+  "type": "object",
+  "properties": {
+    "used": {"description": "Tokens currently in context.", "type": "integer", "format": "uint64", "minimum": 0},
+    "size": {"description": "Total context window size in tokens.", "type": "integer", "format": "uint64", "minimum": 0},
+    "cost": {
+      "description": "Cumulative session cost (optional).",
+      "anyOf": [{"$ref": "#/$defs/Cost"}, {"type": "null"}]
+    }
+  },
+  "required": ["used", "size"]
+}
+
+=== Cost ===
+{
+  "description": "Cumulative session cost information.",
+  "type": "object",
+  "properties": {
+    "amount": {"description": "The cost amount.", "type": "number", "format": "double"},
+    "currency": {"description": "The currency code (e.g., \"USD\").", "type": "string"}
+  },
+  "required": ["amount", "currency"]
+}
+```
+
+Pinned facts:
+
+- `Content` (the `ToolCallContent` `"content"` variant's merged payload):
+  one required field, `content`, itself a nested `ContentBlock` (the same
+  five-way `text`/`image`/`audio`/`resource_link`/`resource` union pinned
+  above under "`ContentBlock` and the chunk payload"). So a full
+  text-content item on the wire is
+  `{"type": "content", "content": {"type": "text", "text": "..."}}`.
+- `Terminal` (the `ToolCallContent` `"terminal"` variant's merged
+  payload): one required field, `terminalId` (a string).
+- `Plan`: one required field, `entries`, an array of `PlanEntry`. The
+  schema's own description is explicit that an update is a full replace,
+  not a delta: "the agent must send a complete list of all entries with
+  their current status. The client replaces the entire plan with each
+  update."
+- `PlanEntry`: all three of `content` (string), `priority`
+  (`PlanEntryPriority`), `status` (`PlanEntryStatus`) are required.
+- `PlanEntryPriority` is a three-way closed string enum: `high`, `medium`,
+  `low`.
+- `PlanEntryStatus` is a three-way closed string enum: `pending`,
+  `in_progress`, `completed` -- only three, unlike `ToolCallStatus`'s four
+  (no `failed` counterpart for a plan entry).
+- `UsageUpdate`: `used` and `size` (both `uint64`) are required; `cost` is
+  an optional, nullable `Cost`.
+- `Cost`: both `amount` (a double) and `currency` (a string) are required
+  whenever `cost` itself is present.
+
 ## Permission-overlap reply legitimacy (the pending-permission-request degrade path)
 
 Question: for a second `session/request_permission` arriving while a first

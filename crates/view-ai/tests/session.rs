@@ -11,7 +11,8 @@ use std::time::Duration;
 use view_ai::{AgentLaunch, AiSession};
 use view_core::msg::Msg;
 use view_core::native::ai_event::{
-    AiCommand, AiEvent, PermissionOutcome, StopReason, ToolCallStatus,
+    AiCommand, AiEvent, Cost, PermissionOutcome, PlanEntry, PlanEntryPriority, PlanEntryStatus,
+    StopReason, ToolCallStatus,
 };
 
 /// Generous enough that a loaded CI host does not flake, short enough that a
@@ -220,14 +221,37 @@ fn every_streamed_chunk_kind_reaches_its_own_arm() {
                 tool_call_id: "call_001".to_string(),
                 title: "Read a.rs".to_string(),
                 status: ToolCallStatus::Pending,
+                content: None,
             },
             // the title comes from the announcement, which this update
-            // omitted: the six discriminants with no arm produced nothing
+            // omitted; the content array mixes a text item (decoded) with
+            // an image and a terminal item (each a labeled placeholder)
             AiEvent::ToolCallUpdate {
                 tool_call_id: "call_001".to_string(),
                 title: "Read a.rs".to_string(),
                 status: ToolCallStatus::Completed,
+                content: Some(vec![
+                    "fn main() {}".to_string(),
+                    "[image content]".to_string(),
+                    "[terminal content]".to_string(),
+                ]),
             },
+            AiEvent::PlanUpdated {
+                entries: vec![PlanEntry {
+                    content: "Read the file".to_string(),
+                    priority: PlanEntryPriority::High,
+                    status: PlanEntryStatus::InProgress,
+                }],
+            },
+            AiEvent::UsageUpdated {
+                used: 100,
+                size: 1000,
+                cost: Some(Cost {
+                    amount: 0.05,
+                    currency: "USD".to_string(),
+                }),
+            },
+            // the four discriminants with no arm produced nothing
         ]
     );
 }

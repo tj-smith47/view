@@ -8,9 +8,11 @@ use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
+mod ai;
 mod supervision;
 mod ui_event;
 
+use ai::on_ai_event;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use ui_event::apply_ui_event;
 
@@ -645,13 +647,16 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
                 root,
             }]
         }
-        // The agent vocabulary crosses into the loop here, and `Model` holds
-        // no agent panel state for it to change yet, so an event arriving
-        // today is a no-op. Written as its own arm rather than folded into a
-        // wildcard on purpose: this match has none, which is what makes a
-        // later `AiEvent` arm impossible to add without every consumer of it
-        // being recompiled against the addition.
-        Msg::Ai(_) => Vec::new(),
+        // The agent vocabulary crosses into the loop here; `ai::on_ai_event`
+        // folds what the panel renders and no-ops the rest, unconditionally
+        // into `Model::ai_panel` (session state, not overlay state -- see
+        // that field's doc): a chunk streamed while the sidebar is closed
+        // still folds, and reopening finds it there. Written as its own arm
+        // rather than folded into a wildcard on purpose: this match has
+        // none, which is what makes a later `AiEvent` arm impossible to add
+        // without every consumer of it being recompiled against the
+        // addition.
+        Msg::Ai(event) => on_ai_event(model, event),
         // A write that failed after an affirmative answer folds back to
         // `trusted: false` on the same terms a declined answer does (see
         // `Effect::AiTrustSet`'s own doc): either way the durable fact is
@@ -1179,20 +1184,22 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
 /// as `Ai` itself, so stacking on top of it costs nothing.
 ///
 /// No effect either way yet: opening allocates no session, since nothing in
-/// this build binds `session_id` to a real agent process.
+/// this build binds `session_id` to a real agent process. The session state
+/// itself lives in [`Model::ai_panel`] and is never (re)constructed here --
+/// this only pushes or hides the sidebar overlay that renders it, see
+/// [`OverlayKind::Ai`]'s doc.
 fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
-    if model.ai_panel_mut().is_some() {
+    if model.ai_panel_overlay_open() {
         return Vec::new();
     }
-    let state = crate::native::ai_panel::AiPanelState::new();
     let insert_beneath = model.overlays().last().is_some_and(|overlay| {
         Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
     });
     let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Right);
     if insert_beneath {
-        model.insert_overlay_beneath_top(geometry, OverlayKind::Ai(state));
+        model.insert_overlay_beneath_top(geometry, OverlayKind::Ai);
     } else {
-        model.push_overlay(geometry, OverlayKind::Ai(state));
+        model.push_overlay(geometry, OverlayKind::Ai);
     }
     model.dirty = true;
     Vec::new()

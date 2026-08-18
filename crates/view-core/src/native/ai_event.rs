@@ -19,13 +19,16 @@ use std::path::PathBuf;
 
 /// Everything the agent side can report.
 ///
-/// `PartialEq`/`Eq` (which [`Msg`](crate::msg::Msg) itself does not carry)
-/// for the reason [`RpcCall`](crate::msg::RpcCall) carries them: a decoded
-/// event is asserted against the exact event the wire bytes meant, field
-/// for field, rather than through a hand-written `matches!` arm that
-/// silently stops checking a field the day one is added.
+/// `PartialEq` (which [`Msg`](crate::msg::Msg) itself does not carry) for
+/// the reason [`RpcCall`](crate::msg::RpcCall) carries it: a decoded event
+/// is asserted against the exact event the wire bytes meant, field for
+/// field, rather than through a hand-written `matches!` arm that silently
+/// stops checking a field the day one is added. Not `Eq`: `UsageUpdated`
+/// carries a `Cost.amount` (`f64`, pinned in `docs/acp-v1-wire-capture.md`
+/// as the wire's own `"format": "double"`), and a float has no total order
+/// to found `Eq` on.
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AiEvent {
     /// The handshake and session creation both completed; `session_id` is
     /// what every later exchange in this session is addressed to.
@@ -60,10 +63,24 @@ pub enum AiEvent {
     },
     /// A tool call was announced or its state moved. `title` is the
     /// agent's own human-readable label for the call.
+    ///
+    /// `content` is the call's result content, already decoded to display
+    /// strings: a `"text"` `ContentBlock` item becomes its own text, and
+    /// every other kind (`image`/`audio`/`resource_link`/`resource`, plus
+    /// `ToolCallContent`'s own `"diff"`/`"terminal"` variants) becomes a
+    /// labeled placeholder naming the kind it stood in for, per
+    /// `docs/acp-v1-wire-capture.md`'s `Content`/`Terminal` pin -- never
+    /// dropped silently, since a client that saw `content` on the wire and
+    /// showed nothing for it looks like the call produced no output.
+    /// `None` when the update carried no `content` member at all (or an
+    /// explicit JSON `null`): omission, not an empty result, so a consumer
+    /// must leave whatever result it already rendered for this call alone
+    /// rather than read the omission as the result having emptied out.
     ToolCallUpdate {
         tool_call_id: String,
         title: String,
         status: ToolCallStatus,
+        content: Option<Vec<String>>,
     },
     /// The agent is asking to proceed and cannot continue until answered.
     /// `request_id` is what the answering
@@ -104,6 +121,18 @@ pub enum AiEvent {
         request_id: u64,
         path: PathBuf,
         content: String,
+    },
+    /// The agent replaced its execution plan. Per the wire's own
+    /// description (`docs/acp-v1-wire-capture.md`'s `Plan` pin): "the agent
+    /// must send a complete list of all entries with their current status.
+    /// The client replaces the entire plan with each update" -- so this
+    /// carries the whole plan, never a delta to merge into one already held.
+    PlanUpdated { entries: Vec<PlanEntry> },
+    /// The session's context-window and cost accounting changed.
+    UsageUpdated {
+        used: u64,
+        size: u64,
+        cost: Option<Cost>,
     },
 }
 
@@ -163,6 +192,50 @@ pub enum ToolCallStatus {
     Completed,
     /// Finished with an error.
     Failed,
+}
+
+/// One task in the agent's execution plan, per `docs/acp-v1-wire-capture.md`'s
+/// `PlanEntry` pin.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanEntry {
+    pub content: String,
+    pub priority: PlanEntryPriority,
+    pub status: PlanEntryStatus,
+}
+
+/// A plan entry's relative importance.
+///
+/// Deliberately NOT `#[non_exhaustive]`: the wire pins exactly these three
+/// (`docs/acp-v1-wire-capture.md`'s `PlanEntryPriority` dump), so the enum
+/// is closed by the protocol, not by this crate's current needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanEntryPriority {
+    High,
+    Medium,
+    Low,
+}
+
+/// A plan entry's lifecycle state.
+///
+/// Only three, unlike [`ToolCallStatus`]'s four: the wire's
+/// `PlanEntryStatus` has no `failed` counterpart (same pin as
+/// [`PlanEntryPriority`]'s doc). NOT `#[non_exhaustive]` for the same
+/// closed-by-protocol reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanEntryStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+/// Cumulative session cost, the optional payload of
+/// [`AiEvent::UsageUpdated`]'s `cost` field, per
+/// `docs/acp-v1-wire-capture.md`'s `Cost` pin. Not `Eq`: `amount` is the
+/// wire's own `"format": "double"`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Cost {
+    pub amount: f64,
+    pub currency: String,
 }
 
 /// Why the agent stopped processing a prompt turn.
@@ -299,6 +372,8 @@ mod tests {
                 AiEvent::SessionCrashed { .. } => "session_crashed",
                 AiEvent::FsReadRequested { .. } => "fs_read_requested",
                 AiEvent::FsWriteRequested { .. } => "fs_write_requested",
+                AiEvent::PlanUpdated { .. } => "plan_updated",
+                AiEvent::UsageUpdated { .. } => "usage_updated",
             }
         }
 
@@ -319,6 +394,7 @@ mod tests {
                 tool_call_id: "call_001".to_string(),
                 title: "Read file".to_string(),
                 status: ToolCallStatus::InProgress,
+                content: Some(vec!["fn main() {}".to_string()]),
             },
             AiEvent::PermissionRequested {
                 request_id: 5,
@@ -350,6 +426,21 @@ mod tests {
                 path: PathBuf::from("/tmp/a.rs"),
                 content: "fn main() {}".to_string(),
             },
+            AiEvent::PlanUpdated {
+                entries: vec![PlanEntry {
+                    content: "Read the file".to_string(),
+                    priority: PlanEntryPriority::High,
+                    status: PlanEntryStatus::InProgress,
+                }],
+            },
+            AiEvent::UsageUpdated {
+                used: 100,
+                size: 1000,
+                cost: Some(Cost {
+                    amount: 0.05,
+                    currency: "USD".to_string(),
+                }),
+            },
         ];
 
         let seen: Vec<&'static str> = events.iter().map(describe).collect();
@@ -366,6 +457,8 @@ mod tests {
                 "session_crashed",
                 "fs_read_requested",
                 "fs_write_requested",
+                "plan_updated",
+                "usage_updated",
             ]
         );
     }
@@ -461,6 +554,20 @@ mod tests {
                 PermissionOutcome::Selected { .. } => "selected",
             }
         }
+        fn plan_priority(p: PlanEntryPriority) -> &'static str {
+            match p {
+                PlanEntryPriority::High => "high",
+                PlanEntryPriority::Medium => "medium",
+                PlanEntryPriority::Low => "low",
+            }
+        }
+        fn plan_status(s: PlanEntryStatus) -> &'static str {
+            match s {
+                PlanEntryStatus::Pending => "pending",
+                PlanEntryStatus::InProgress => "in_progress",
+                PlanEntryStatus::Completed => "completed",
+            }
+        }
 
         assert_eq!(
             [
@@ -504,6 +611,22 @@ mod tests {
                 }),
             ],
             ["cancelled", "selected"]
+        );
+        assert_eq!(
+            [
+                plan_priority(PlanEntryPriority::High),
+                plan_priority(PlanEntryPriority::Medium),
+                plan_priority(PlanEntryPriority::Low),
+            ],
+            ["high", "medium", "low"]
+        );
+        assert_eq!(
+            [
+                plan_status(PlanEntryStatus::Pending),
+                plan_status(PlanEntryStatus::InProgress),
+                plan_status(PlanEntryStatus::Completed),
+            ],
+            ["pending", "in_progress", "completed"]
         );
     }
 

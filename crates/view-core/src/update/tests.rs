@@ -2290,10 +2290,7 @@ fn a_trusted_ai_invoke_never_opens_the_trust_prompt() {
         m.overlays()
     );
     assert!(
-        matches!(
-            m.overlays().last().map(|o| &o.kind),
-            Some(OverlayKind::Ai(_))
-        ),
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
         "a trusted ai invoke must reach the panel toggle rather than \
              reopening the gate: {:?}",
         m.overlays()
@@ -2580,10 +2577,7 @@ fn ai_trust_resolved_true_re_dispatches_the_interrupted_feature_invoke() {
     // `a_trusted_ai_invoke_never_opens_the_trust_prompt`) -- proving that is
     // the whole point of this test, not merely that the gate stays shut
     assert!(
-        matches!(
-            m.overlays().last().map(|o| &o.kind),
-            Some(OverlayKind::Ai(_))
-        ),
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
         "answering Yes must complete the interrupted `ai` invoke in one flow, \
              not close the prompt with nothing behind it: {:?}",
         m.overlays()
@@ -2666,10 +2660,7 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
         m.overlays()
     );
     assert!(
-        matches!(
-            m.overlays().last().map(|o| &o.kind),
-            Some(OverlayKind::Ai(_))
-        ),
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
         "falls through to the real panel toggle: {:?}",
         m.overlays()
     );
@@ -3440,7 +3431,7 @@ fn ai_panel_toggle_pushes_then_pops_the_overlay() {
     assert!(m.dirty, "opening the panel must trigger a repaint");
     let opened = m.overlays().last().expect("the panel must be on the stack");
     assert!(
-        matches!(opened.kind, OverlayKind::Ai(_)),
+        matches!(opened.kind, OverlayKind::Ai),
         "toggling against no open overlay must push OverlayKind::Ai: {:?}",
         m.overlays()
     );
@@ -3520,7 +3511,7 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
         "the panel must open beneath the prompt, not replace it"
     );
     assert!(
-        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        matches!(m.overlays()[0].kind, OverlayKind::Ai),
         "the panel must sit beneath the prompt on the stack: {:?}",
         m.overlays()
     );
@@ -3530,7 +3521,7 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
         m.overlays()
     );
     assert!(
-        m.ai_panel_mut().is_some(),
+        m.ai_panel_overlay_open(),
         "the panel must still be reachable so a streamed transcript chunk \
              can reach it even while the prompt holds focus"
     );
@@ -3579,7 +3570,7 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
         "the panel must open beneath the picker, not replace it"
     );
     assert!(
-        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        matches!(m.overlays()[0].kind, OverlayKind::Ai),
         "the panel must sit beneath the picker on the stack: {:?}",
         m.overlays()
     );
@@ -3597,7 +3588,7 @@ fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_f
              close the picker, not the non-focus-taking panel underneath"
     );
     assert!(
-        m.ai_panel_mut().is_some(),
+        m.ai_panel_overlay_open(),
         "the panel must still be open after only the picker above it closed"
     );
 }
@@ -3635,7 +3626,7 @@ fn ai_panel_toggle_while_engine_busy_is_topmost_opens_beneath_it_without_occludi
         "the panel must open beneath the busy modal, not replace it"
     );
     assert!(
-        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        matches!(m.overlays()[0].kind, OverlayKind::Ai),
         "the panel must sit beneath the busy modal on the stack: {:?}",
         m.overlays()
     );
@@ -3771,10 +3762,7 @@ fn an_untrusted_toggle_answered_with_y_opens_the_panel_via_the_same_verb_it_star
         },
     );
     assert!(
-        matches!(
-            m.overlays().last().map(|o| &o.kind),
-            Some(OverlayKind::Ai(_))
-        ),
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
         "the interrupted toggle must re-dispatch and land the panel open: {:?}",
         m.overlays()
     );

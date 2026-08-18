@@ -2616,6 +2616,7 @@ name = "view-core"
 version = "0.0.1"
 dependencies = [
  "criterion",
+ "view-test-support",
 ]
 
 [[package]]

@@ -130,6 +130,13 @@ pub struct Model {
     /// an incrementally updated frame differ from a rebuilt one, which is
     /// exactly what the surface cache's equivalence guard exists to catch.
     pub speculate: crate::native::speculate::SpeculateState,
+    /// The agent session's transcript, pending permission, pending edits,
+    /// and stats -- session lifetime, not overlay lifetime. Kept here rather
+    /// than inside [`OverlayKind::Ai`] so that closing the sidebar only
+    /// hides it: a `session/update` chunk streamed while the panel is
+    /// closed still has somewhere to fold, and reopening finds the session
+    /// exactly as the user left it rather than a fresh, empty one.
+    pub ai_panel: crate::native::ai_panel::AiPanelState,
 }
 
 impl Model {
@@ -169,6 +176,7 @@ impl Model {
             ai_enabled: true,
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
+            ai_panel: crate::native::ai_panel::AiPanelState::new(),
         }
     }
 
@@ -255,7 +263,7 @@ impl Model {
     /// same ahead-of-`route_key` way [`crate::native::supervision`]'s busy
     /// modal already does, never by taking the stack's focus slot.
     pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
-        !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai(_))
+        !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai)
     }
 
     fn focused_overlay(&self) -> Option<&Overlay> {
@@ -387,31 +395,50 @@ impl Model {
         true
     }
 
-    /// The open agent panel's state, wherever it sits in the stack -- not
-    /// only when it is topmost, for the same reason [`Model::tree_mut`]
-    /// looks past the top: the panel never takes focus (see
-    /// [`Model::takes_focus`]), so a prompt opening over it is the ordinary
-    /// case, not the exception, and a streamed transcript chunk must still
-    /// reach the panel while that prompt holds focus.
+    /// The agent session's persistent state: transcript, pending
+    /// permission, pending edits, stats. Always present -- session lifetime
+    /// is model lifetime, not overlay lifetime (see [`Model::ai_panel`]'s
+    /// doc) -- so a streamed `session/update` chunk always has somewhere to
+    /// fold, whether or not the sidebar is currently shown.
+    ///
+    /// No `#[must_use]` of its own: [`crate::native::ai_panel::AiPanelState`]
+    /// already carries one, and a second on the accessor that returns it is
+    /// clippy's own `double_must_use`.
+    pub fn ai_panel_mut(&mut self) -> &mut crate::native::ai_panel::AiPanelState {
+        &mut self.ai_panel
+    }
+
+    /// Read-only counterpart to [`Model::ai_panel_mut`], for reading the
+    /// session without asserting mutable access to it. See that method's
+    /// doc for why this carries no `#[must_use]` of its own either.
+    pub fn ai_panel(&self) -> &crate::native::ai_panel::AiPanelState {
+        &self.ai_panel
+    }
+
+    /// Whether the agent sidebar overlay is currently on the stack -- the
+    /// overlay's own visibility, distinct from [`Model::ai_panel`], which
+    /// answers whether a session exists at all (always, once
+    /// [`Model::new`] has run). [`open_ai_panel`](crate::update)'s no-op
+    /// check and the interleave tests both need this narrower question:
+    /// the session can be live while the sidebar is closed.
     #[must_use]
-    pub fn ai_panel_mut(&mut self) -> Option<&mut crate::native::ai_panel::AiPanelState> {
+    pub fn ai_panel_overlay_open(&self) -> bool {
         self.overlays
-            .iter_mut()
-            .find_map(|overlay| match &mut overlay.kind {
-                OverlayKind::Ai(a) => Some(a),
-                _ => None,
-            })
+            .iter()
+            .any(|overlay| matches!(overlay.kind, OverlayKind::Ai))
     }
 
     /// Closes the agent panel overlay, wherever it sits in the stack, and
     /// reports whether one was found to close. See [`Model::close_tree`]'s
     /// doc for why this searches by kind rather than closing only the
-    /// topmost overlay.
+    /// topmost overlay. Hides the sidebar only: the session state in
+    /// [`Model::ai_panel`] is untouched, so reopening finds it exactly as
+    /// it was left.
     pub fn close_ai_panel(&mut self) -> bool {
         let Some(pos) = self
             .overlays
             .iter()
-            .position(|overlay| matches!(overlay.kind, OverlayKind::Ai(_)))
+            .position(|overlay| matches!(overlay.kind, OverlayKind::Ai))
         else {
             return false;
         };
@@ -1373,9 +1400,14 @@ pub enum OverlayKind {
     /// [`Model::takes_focus`]): a running agent session and the engine the
     /// user is editing in are two peers the user works with at once, not a
     /// question blocking one or the other, so an engine keystroke while the
-    /// panel is open still reaches the engine. See
+    /// panel is open still reaches the engine.
+    ///
+    /// A unit marker, not a payload: the session state it renders lives in
+    /// [`Model::ai_panel`] instead, so that closing this overlay (and
+    /// dropping this variant) never drops the transcript, pending
+    /// permission, or pending edits underneath it. See
     /// [`crate::native::ai_panel::AiPanelState`].
-    Ai(crate::native::ai_panel::AiPanelState),
+    Ai,
 }
 
 /// Opaque identifier for an open native overlay, handed out by

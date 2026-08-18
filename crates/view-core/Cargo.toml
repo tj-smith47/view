@@ -10,6 +10,7 @@ workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
 
 [[bench]]
 name = "grid_apply"
