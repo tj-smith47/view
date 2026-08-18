@@ -71,7 +71,7 @@ enum Answer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     Engine,
-    AiTrust { project_root: PathBuf },
+    AiTrust { project_root: PathBuf, verb: String },
 }
 
 /// One open confirm-class prompt: the question text plus whatever choices
@@ -110,9 +110,11 @@ impl PromptState {
     /// no paired `cmdline_show` to learn them from. `message` is the
     /// question text; owned by the caller (`update/mod.rs`'s
     /// `open_ai_trust_prompt`) so this module carries no AI-specific prose
-    /// of its own.
+    /// of its own. `verb` is the pending `Msg::FeatureInvoke`'s own field,
+    /// carried through so an affirmative answer can re-dispatch the
+    /// invocation this gate interrupted -- see [`PromptState::ai_trust_verb`].
     #[must_use]
-    pub fn ai_trust_prompt(project_root: PathBuf, message: String) -> Self {
+    pub fn ai_trust_prompt(project_root: PathBuf, verb: String, message: String) -> Self {
         Self {
             message,
             answer: Answer::Choices(vec![
@@ -127,7 +129,7 @@ impl PromptState {
                     default: false,
                 },
             ]),
-            origin: Origin::AiTrust { project_root },
+            origin: Origin::AiTrust { project_root, verb },
         }
     }
 
@@ -138,7 +140,19 @@ impl PromptState {
     pub(crate) fn ai_trust_project_root(&self) -> Option<&Path> {
         match &self.origin {
             Origin::Engine => None,
-            Origin::AiTrust { project_root } => Some(project_root),
+            Origin::AiTrust { project_root, .. } => Some(project_root),
+        }
+    }
+
+    /// The `verb` half of an open [`PromptState::ai_trust_prompt`]'s pending
+    /// `FeatureInvoke`, for a caller resolving the prompt to re-dispatch it
+    /// on an affirmative answer -- `None` for the same engine-relayed case
+    /// [`PromptState::ai_trust_project_root`] returns `None` for.
+    #[must_use]
+    pub(crate) fn ai_trust_verb(&self) -> Option<&str> {
+        match &self.origin {
+            Origin::Engine => None,
+            Origin::AiTrust { verb, .. } => Some(verb.as_str()),
         }
     }
 

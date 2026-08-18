@@ -639,10 +639,18 @@ impl<E: EngineOps> Executor<E> {
             // nothing. A write that fails, or finds no state directory to
             // write into, folds to `trusted: false` regardless of what the
             // user answered: the store did not durably record a "yes", so
-            // the model must not believe one happened either.
+            // the model must not believe one happened either. No `else`
+            // here for an unwired `toast_timer`: unlike every other effect
+            // in this match, that degrade needs `update()` itself to
+            // self-announce (the model must learn the answer was dropped,
+            // not just find nothing persisted later), and `run` has no
+            // `&mut Model` of its own to fold a `Msg` through -- see
+            // `dispatch`'s own handling of this effect, immediately below
+            // its own call to `run`, where a `Model` is in scope.
             Effect::AiTrustSet {
                 project_root,
                 trusted,
+                verb,
             } => {
                 if let Some(tx) = &self.toast_timer {
                     let tx = tx.clone();
@@ -652,7 +660,10 @@ impl<E: EngineOps> Executor<E> {
                                 store.set_trusted(&project_root, trusted).map(|()| trusted)
                             })
                             .unwrap_or(false);
-                        let _ = tx.send(Msg::AiTrustResolved { trusted: resolved });
+                        let _ = tx.send(Msg::AiTrustResolved {
+                            trusted: resolved,
+                            verb,
+                        });
                     });
                 }
                 Flow::Continue
@@ -733,6 +744,35 @@ pub(crate) fn dispatch<E: EngineOps>(
         // over a buffer nobody typed into
         if let Effect::Rpc(call) = &eff {
             note_engine_call(model, call, follow_ups.speculate);
+        }
+        // `Executor::run` cannot self-announce an unwired `toast_timer`
+        // degrade the way its every other effect arm may: this is the one
+        // effect whose degrade means "tell `update()` its answer was
+        // dropped," which needs a `Msg` folded back through `update()`
+        // itself, and `run` has no `&mut Model` of its own to do that with.
+        // `dispatch` does, so the fold happens here instead of inside
+        // `run`'s own match -- recursing into `dispatch` reuses its whole
+        // pipeline (follow-ups, speculation, vlog) for the synthesized
+        // `Msg` rather than hand-rolling a second copy of it. Never reached
+        // outside a bare test `Executor`: every real executor wires
+        // `toast_timer` (see `run`'s own comment on that, a few effects up).
+        if let Effect::AiTrustSet { verb, .. } = &eff {
+            if executor.toast_timer.is_none() {
+                let sub_flow = dispatch(
+                    model,
+                    executor,
+                    follow_ups,
+                    Msg::AiTrustResolved {
+                        trusted: false,
+                        verb: verb.clone(),
+                    },
+                );
+                if sub_flow != Flow::Continue {
+                    flow = sub_flow;
+                    break;
+                }
+                continue;
+            }
         }
         match executor.run(eff) {
             Flow::Continue => {}
@@ -2194,21 +2234,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// Restores `XDG_STATE_HOME` to whatever [`with_scratch_state_dir`]
+    /// found before it redirected it, on every exit from that function's
+    /// closure -- including a panicking assertion, the exact moment a
+    /// RED-phase test fails. A straight-line restore after `f()` returns is
+    /// skipped entirely by an unwind, leaving the redirection (and the
+    /// released mutex, since its guard drops too) in place for every later
+    /// test in the same process; a `Drop` impl runs regardless. The same
+    /// panic-safety `view-ai::trust`'s own copy of this guard gives its
+    /// suite, duplicated rather than shared: `view-core` cannot depend on
+    /// `view-ai` and this is test-only code in the bin crate, not a fit for
+    /// either crate's own public surface.
+    struct EnvRestoreGuard {
+        prev: Option<String>,
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+                None => std::env::remove_var("XDG_STATE_HOME"),
+            }
+        }
+    }
+
     /// Redirects `XDG_STATE_HOME` to a nonce-tagged scratch directory under
-    /// the guarded lock for the duration of `f`, restoring the prior value
-    /// (or removing it) before returning -- the same isolation
+    /// the guarded lock for the duration of `f` -- the same isolation
     /// `view-ai::trust`'s own suite gives `TrustStore::load`, needed here so
     /// this test never touches the real user's trust store.
     fn with_scratch_state_dir<R>(nonce: &str, f: impl FnOnce() -> R) -> R {
         let _guard = env_mutation_guard();
-        let prev = std::env::var("XDG_STATE_HOME").ok();
+        let _restore = EnvRestoreGuard {
+            prev: std::env::var("XDG_STATE_HOME").ok(),
+        };
         let dir = tree_effect_scratch(&format!("ai-trust-state-{nonce}"));
         std::env::set_var("XDG_STATE_HOME", &dir);
         let result = f();
-        match prev {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
@@ -2229,6 +2290,7 @@ mod tests {
             let flow = executor.run(Effect::AiTrustSet {
                 project_root: root.clone(),
                 trusted: true,
+                verb: String::new(),
             });
             assert!(matches!(flow, Flow::Continue));
 
@@ -2236,7 +2298,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("AiTrustResolved arrives from the worker thread");
             assert!(
-                matches!(msg, Msg::AiTrustResolved { trusted: true }),
+                matches!(msg, Msg::AiTrustResolved { trusted: true, .. }),
                 "expected AiTrustResolved{{trusted: true}}, got {msg:?}"
             );
 
@@ -2265,6 +2327,7 @@ mod tests {
             let flow = executor.run(Effect::AiTrustSet {
                 project_root: root.clone(),
                 trusted: false,
+                verb: String::new(),
             });
             assert!(matches!(flow, Flow::Continue));
 
@@ -2272,7 +2335,7 @@ mod tests {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .expect("AiTrustResolved arrives from the worker thread");
             assert!(
-                matches!(msg, Msg::AiTrustResolved { trusted: false }),
+                matches!(msg, Msg::AiTrustResolved { trusted: false, .. }),
                 "expected AiTrustResolved{{trusted: false}}, got {msg:?}"
             );
 
@@ -2283,25 +2346,69 @@ mod tests {
         });
     }
 
-    /// The disconfirm proving persistence genuinely runs through this
-    /// executor arm and not through some path `view-core` reached on its
-    /// own: with no `toast_timer` wired (every bare `FakeOps`-only
-    /// `Executor::new`, the shape every `view-core`-only test builds), the
-    /// write never happens and nothing is reported back -- a stub answer
-    /// arm here is exactly what would leave a "trusted" prompt answer
-    /// unpersisted, and the next process re-prompts.
+    /// The boundary proof this suite actually needs, driven through
+    /// `dispatch` -- the real production entry point -- rather than
+    /// `Executor::run` in isolation: an executor with no `toast_timer`
+    /// wired (every bare `FakeOps`-only `Executor::new`, the shape every
+    /// `view-core`-only test builds) neither persists the answer nor drops
+    /// it silently.
+    /// `dispatch` folds the degrade straight back through `update()` as
+    /// `Msg::AiTrustResolved{trusted: false}`, the same notice an explicit
+    /// decline produces, so the gate visibly reopens instead of going
+    /// quiet. A version of this driving `Executor::run` alone only proves
+    /// that code which never runs writes nothing, true of any code and
+    /// equally true with the `AiTrustSet` arm deleted outright.
     #[test]
-    fn ai_trust_set_without_a_toast_timer_persists_nothing() {
+    fn an_unwired_toast_timer_self_announces_the_degrade_instead_of_persisting() {
         with_scratch_state_dir("unwired", || {
             let root = tree_effect_scratch("ai-trust-project-unwired");
 
             let ops = FakeOps::default();
             let executor = Executor::new(&ops);
-            let flow = executor.run(Effect::AiTrustSet {
-                project_root: root.clone(),
-                trusted: true,
-            });
+            let mut model = Model::with_term_size(80, 24);
+            model.cwd = root.clone();
+            let mut native = NativeSession::inert();
+            let mut bridge = ThemeBridge::new(None);
+            let mut follow_ups = FollowUps {
+                native: &mut native,
+                theme: &mut bridge,
+                speculate: crate::speculate::SpeculationClock::default(),
+            };
+
+            let _ = dispatch(
+                &mut model,
+                &executor,
+                &mut follow_ups,
+                Msg::FeatureInvoke {
+                    feature: "ai".to_string(),
+                    verb: String::new(),
+                },
+            );
+            let flow = dispatch(
+                &mut model,
+                &executor,
+                &mut follow_ups,
+                Msg::Key(view_core::msg::Key {
+                    notation: "y".to_string(),
+                }),
+            );
             assert!(matches!(flow, Flow::Continue));
+
+            assert!(
+                !model.ai_trusted,
+                "an unwired executor must never leave the model believing trust was granted"
+            );
+            let entry = model
+                .engine
+                .messages
+                .entries
+                .last()
+                .expect("the degrade must self-announce a notice");
+            let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+            assert!(
+                text.contains(":View ai"),
+                "the notice must name the way back in, got {text:?}"
+            );
 
             let reloaded = view_ai::TrustStore::load().expect("reload the trust store");
             assert!(

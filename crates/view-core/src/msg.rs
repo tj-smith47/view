@@ -436,9 +436,13 @@ pub enum Msg {
     /// persistence failure after an affirmative answer: the store write is
     /// what durably grants trust, so a write that failed must not leave the
     /// in-memory model believing it succeeded anyway (see
-    /// [`Effect::AiTrustSet`]'s own doc).
+    /// [`Effect::AiTrustSet`]'s own doc). `verb` is echoed back from the
+    /// effect that produced this, unread on `trusted: false`, and used on
+    /// `trusted: true` to re-dispatch the `Msg::FeatureInvoke` the trust
+    /// gate interrupted -- see `update/mod.rs`'s `Msg::AiTrustResolved` arm.
     AiTrustResolved {
         trusted: bool,
+        verb: String,
     },
 }
 
@@ -848,10 +852,14 @@ pub enum Effect {
     /// executor, which answers with [`Msg::AiTrustResolved`] once the write
     /// (or its failure) is known. Never issued for a prompt whose answer
     /// routes to the engine instead -- see `PromptState`'s own `Origin`
-    /// distinction (`native/prompt.rs`).
+    /// distinction (`native/prompt.rs`). `verb` is the pending
+    /// `Msg::FeatureInvoke` this gate interrupted, carried through
+    /// unopened by the executor and handed straight back on
+    /// [`Msg::AiTrustResolved`] so an affirmative answer can re-dispatch it.
     AiTrustSet {
         project_root: std::path::PathBuf,
         trusted: bool,
+        verb: String,
     },
 }
 

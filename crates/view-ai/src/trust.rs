@@ -49,7 +49,12 @@ pub enum TrustError {
         /// The underlying filesystem error.
         source: std::io::Error,
     },
-    /// The store's in-memory content could not be encoded as TOML.
+    /// The store's in-memory content could not be encoded as TOML. The
+    /// common real cause: `toml`'s `PathBuf` serialization requires valid
+    /// UTF-8, so a project root containing non-UTF-8 bytes fails here on
+    /// every `set_trusted` call for it, forever -- fails closed, since the
+    /// project is simply never durably trusted, but never surfaces as this
+    /// specific cause anywhere else.
     #[error("could not encode the AI trust store: {0}")]
     Serialize(Box<toml::ser::Error>),
     /// No platform state directory could be resolved to persist trust
@@ -160,41 +165,80 @@ impl TrustStore {
     ///
     /// Returns [`TrustError`] when `project_root` cannot be canonicalized,
     /// no platform state directory was resolved at [`TrustStore::load`]
-    /// time, or the write to disk fails.
+    /// time, or the write to disk fails. On any `Err`, `self` is left
+    /// exactly as it was before the call -- the candidate set is built and
+    /// persisted first, and only committed to `self` once the write is
+    /// known to have succeeded, so the in-memory model can never claim a
+    /// grant the store does not durably hold (a caller that read
+    /// `is_trusted` straight after a failed `set_trusted` must see the same
+    /// answer it would have before calling it).
     pub fn set_trusted(&mut self, project_root: &Path, trusted: bool) -> Result<(), TrustError> {
         let key =
             std::fs::canonicalize(project_root).map_err(|source| TrustError::Canonicalize {
                 path: project_root.to_path_buf(),
                 source,
             })?;
+        let mut candidate = self.trusted.clone();
         if trusted {
-            self.trusted.insert(key);
+            candidate.insert(key);
         } else {
-            self.trusted.remove(&key);
+            candidate.remove(&key);
         }
-        self.persist()
+        persist(self.path.as_deref(), &candidate)?;
+        self.trusted = candidate;
+        Ok(())
     }
+}
 
-    fn persist(&self) -> Result<(), TrustError> {
-        let Some(path) = &self.path else {
-            return Err(TrustError::NoStateDir);
-        };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|source| TrustError::Write {
-                path: path.clone(),
+/// Writes `trusted` to `path` as TOML, or `NoStateDir` when `path` is
+/// `None`. A free function taking the state it needs rather than a
+/// `&TrustStore` method: [`TrustStore::set_trusted`] must persist a
+/// candidate set before committing to it (see that method's own doc), so
+/// this has to be callable against a set that is not `self.trusted` yet.
+///
+/// Writes to a nonce-tagged temp file in the same directory and renames it
+/// over `path`, rather than truncating `path` directly: a crash mid-write
+/// must leave whatever the store held before intact, not a half-written
+/// file that fails every later `load()` with `TrustError::Parse` and loses
+/// every prior trust record, not just the one being set. On unix the temp
+/// file is chmod'd `0600` before the rename, so the record of which
+/// projects were granted AI agent access -- a security decision -- is never
+/// briefly nor durably world-readable; there is no equivalent bit to set on
+/// the platforms this falls back to (`%LOCALAPPDATA%`), where per-user NTFS
+/// ACLs already restrict the directory.
+fn persist(path: Option<&Path>, trusted: &BTreeSet<PathBuf>) -> Result<(), TrustError> {
+    let Some(path) = path else {
+        return Err(TrustError::NoStateDir);
+    };
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent).map_err(|source| TrustError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let wire = WireStore {
+        trusted: trusted.iter().cloned().collect(),
+    };
+    let text =
+        toml::to_string_pretty(&wire).map_err(|source| TrustError::Serialize(Box::new(source)))?;
+    let tmp_path = parent.join(format!(".trusted-projects.toml.{}.tmp", std::process::id()));
+    std::fs::write(&tmp_path, &text).map_err(|source| TrustError::Write {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).map_err(
+            |source| TrustError::Write {
+                path: path.to_path_buf(),
                 source,
-            })?;
-        }
-        let wire = WireStore {
-            trusted: self.trusted.iter().cloned().collect(),
-        };
-        let text = toml::to_string_pretty(&wire)
-            .map_err(|source| TrustError::Serialize(Box::new(source)))?;
-        std::fs::write(path, text).map_err(|source| TrustError::Write {
-            path: path.clone(),
-            source,
-        })
+            },
+        )?;
     }
+    std::fs::rename(&tmp_path, path).map_err(|source| TrustError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
 }
 
 /// The `trusted-projects.toml` wire shape: one array of canonicalized
@@ -236,10 +280,31 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 /// (symlinks and `..` components included) before comparing, so a
 /// trusted-root escape via a symlink planted inside the project or a
 /// literal `../` in an agent-supplied path is caught the same way -- a
-/// prefix comparison over un-resolved paths would miss both. `Ok(false)`
-/// (never an `Err`) is the answer for "resolves outside `root`"; `Err` is
-/// reserved for a candidate that cannot be resolved at all (e.g. a
-/// dangling symlink), which callers treat as refused all the same.
+/// prefix comparison over un-resolved paths would miss both.
+///
+/// `candidate` need not exist yet -- the common case for the write side of
+/// an agent's file access is a file being created, not one already there.
+/// Only `candidate`'s deepest *existing* ancestor is canonicalized; the
+/// literal, unresolved tail beyond it (the components that do not exist on
+/// disk yet) is re-appended to that resolved ancestor before the
+/// containment comparison. A tail containing a `..` component is refused
+/// outright (`Ok(None)`) rather than joined: a `..` inside a directory that
+/// does not exist yet cannot be resolved safely, since there is nothing on
+/// disk to prove where it would actually land once created.
+///
+/// `Ok(Some(canonical))` means contained -- `canonical` is the fully
+/// resolved path the answer was computed against, and **is what a caller
+/// must open**, not the original `candidate`: this function's answer is a
+/// point-in-time fact about the filesystem, and re-deriving anything from
+/// `candidate` afterward (including a second canonicalize) re-walks the
+/// same symlinks this one already resolved, at a later instant that could
+/// disagree with this one. Operating on the returned path bounds that race
+/// to "whatever the resolved path itself does between this call and the
+/// caller's next syscall," the same residual TOCTOU window every
+/// canonicalize-then-use pattern carries and no path-containment check can
+/// close outright. `Ok(None)` is the answer for "resolves outside `root`,"
+/// or for a tail that cannot be safely resolved (see above) -- never an
+/// `Err` for either.
 ///
 /// Free function, not a `TrustStore` method: no store state is needed, and
 /// both the read and the write side of an agent's file access run this on
@@ -249,19 +314,71 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns [`TrustError::Canonicalize`] when `root` or `candidate` cannot be
-/// resolved to its canonical form.
-pub fn path_is_contained(root: &Path, candidate: &Path) -> Result<bool, TrustError> {
+/// Returns [`TrustError::Canonicalize`] when `root` cannot be resolved to
+/// its canonical form, or when `candidate`'s deepest existing ancestor has
+/// a filesystem entry that still cannot be resolved -- a dangling symlink
+/// in the existing chain, or a permission-denied directory. That case is
+/// deliberately never folded into `Ok(None)`: it means the filesystem itself
+/// cannot answer the question, not that this function found an answer and
+/// it was "outside."
+pub fn path_is_contained(root: &Path, candidate: &Path) -> Result<Option<PathBuf>, TrustError> {
     let root = std::fs::canonicalize(root).map_err(|source| TrustError::Canonicalize {
         path: root.to_path_buf(),
         source,
     })?;
-    let candidate =
-        std::fs::canonicalize(candidate).map_err(|source| TrustError::Canonicalize {
-            path: candidate.to_path_buf(),
-            source,
-        })?;
-    Ok(candidate.starts_with(&root))
+    let (base, tail) = resolve_deepest_existing_ancestor(candidate)?;
+    if tail
+        .iter()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Ok(None);
+    }
+    let mut full = base;
+    for component in &tail {
+        full.push(component.as_os_str());
+    }
+    Ok(full.starts_with(&root).then_some(full))
+}
+
+/// Splits `path` into its deepest existing ancestor, canonicalized, paired
+/// with the literal trailing components beyond it that have no filesystem
+/// entry yet -- the walk [`path_is_contained`] needs to answer for a
+/// not-yet-existing candidate instead of refusing it outright.
+///
+/// An ancestor is "existing" by [`Path::symlink_metadata`] (an `lstat`,
+/// following no symlink), not by whether it canonicalizes: a dangling
+/// symlink or a permission-denied directory *has* an entry there, so
+/// finding one stops the walk and canonicalizes it immediately, surfacing
+/// whatever error that produces rather than treating the broken entry as
+/// "not there yet" and walking past it into the tail. Only a component with
+/// no entry at all -- `symlink_metadata` failing -- is genuinely absent and
+/// gets folded into the tail instead.
+fn resolve_deepest_existing_ancestor(
+    path: &Path,
+) -> Result<(PathBuf, Vec<std::path::Component<'_>>), TrustError> {
+    let components: Vec<std::path::Component<'_>> = path.components().collect();
+    let mut split = components.len();
+    loop {
+        let prefix: PathBuf = components[..split].iter().collect();
+        if prefix.symlink_metadata().is_ok() {
+            let canonical =
+                std::fs::canonicalize(&prefix).map_err(|source| TrustError::Canonicalize {
+                    path: prefix,
+                    source,
+                })?;
+            return Ok((canonical, components[split..].to_vec()));
+        }
+        if split == 0 {
+            // nothing along this path resolves, not even the filesystem
+            // root -- canonicalize the original candidate to surface a
+            // real, specific error instead of inventing one
+            return Err(TrustError::Canonicalize {
+                path: path.to_path_buf(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            });
+        }
+        split -= 1;
+    }
 }
 
 #[cfg(test)]
@@ -281,15 +398,46 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    /// Restores one environment variable to whatever it held before a test
+    /// redirected or cleared it, on every exit from the guarded scope --
+    /// including a panicking assertion, the exact moment a RED-phase test
+    /// fails. A straight-line restore after the guarded work returns is
+    /// skipped entirely by an unwind, leaving the redirection in place (and
+    /// the mutex released, since its guard drops too) for every later test
+    /// in the same process; a `Drop` impl runs regardless. Named per-`var`
+    /// rather than hardcoded to `XDG_STATE_HOME` so the one no-state-dir
+    /// test that must also clear `HOME`/`LOCALAPPDATA` can reuse it instead
+    /// of hand-rolling a second copy.
+    struct EnvRestoreGuard {
+        var: &'static str,
+        prev: Option<String>,
+    }
+
+    impl EnvRestoreGuard {
+        fn capture(var: &'static str) -> Self {
+            Self {
+                var,
+                prev: std::env::var(var).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvRestoreGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var(self.var, v),
+                None => std::env::remove_var(self.var),
+            }
+        }
+    }
+
     /// A scratch state directory under the workspace's own `target/tmp`,
     /// nonce-tagged so parallel test binaries (and repeated runs) never
     /// collide, with `XDG_STATE_HOME` pointed at it for the guarded
-    /// duration of the closure. Restores the prior value (or removes it)
-    /// before returning, so a later test in the same process never
-    /// observes this test's redirection.
+    /// duration of the closure.
     fn with_scratch_state_dir<R>(nonce: &str, f: impl FnOnce() -> R) -> R {
         let _guard = env_mutation_guard();
-        let prev = std::env::var("XDG_STATE_HOME").ok();
+        let _restore = EnvRestoreGuard::capture("XDG_STATE_HOME");
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/tmp")
             .join(format!("view-ai-trust-{}-{}", std::process::id(), nonce));
@@ -297,10 +445,6 @@ mod tests {
         std::fs::create_dir_all(&dir).expect("create scratch state dir");
         std::env::set_var("XDG_STATE_HOME", &dir);
         let result = f();
-        match prev {
-            Some(v) => std::env::set_var("XDG_STATE_HOME", v),
-            None => std::env::remove_var("XDG_STATE_HOME"),
-        }
         let _ = std::fs::remove_dir_all(&dir);
         result
     }
@@ -354,6 +498,43 @@ mod tests {
         });
     }
 
+    /// The fail-closed contract `set_trusted`'s own doc states: a write
+    /// that cannot persist must leave `self` exactly as it was, never
+    /// insert into the in-memory set first and persist second. Cleared
+    /// rather than redirected so `store_path()` falls all the way through
+    /// to `NoStateDir` instead of finding a usable directory at any of its
+    /// three fallbacks.
+    #[test]
+    fn a_failed_persist_leaves_the_in_memory_grant_false() {
+        let _guard = env_mutation_guard();
+        let _restores: Vec<EnvRestoreGuard> = ["XDG_STATE_HOME", "HOME", "LOCALAPPDATA"]
+            .into_iter()
+            .map(EnvRestoreGuard::capture)
+            .collect();
+        for var in ["XDG_STATE_HOME", "HOME", "LOCALAPPDATA"] {
+            std::env::remove_var(var);
+        }
+
+        let root = scratch_dir("no-state-dir-root");
+        let mut store =
+            TrustStore::load().expect("no state dir still loads an empty store, not an error");
+        assert!(!store.is_trusted(&root), "a fresh store trusts nothing");
+
+        let err = store
+            .set_trusted(&root, true)
+            .expect_err("no state dir must fail the write");
+        assert!(
+            matches!(err, TrustError::NoStateDir),
+            "expected NoStateDir, got {err:?}"
+        );
+        assert!(
+            !store.is_trusted(&root),
+            "a failed persist must never leave the in-memory model believing the grant succeeded"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn a_declined_answer_is_not_durable() {
         with_scratch_state_dir("decline", || {
@@ -377,7 +558,46 @@ mod tests {
         let root = scratch_dir("contained-root");
         let inner = root.join("file.txt");
         std::fs::write(&inner, "x").expect("write inner file");
-        assert!(path_is_contained(&root, &inner).expect("must resolve"));
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        assert_eq!(
+            path_is_contained(&root, &inner).expect("must resolve"),
+            Some(canonical_root.join("file.txt"))
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The write side of an agent's file access: a candidate that does not
+    /// exist yet, inside a root that does, must still resolve -- the whole
+    /// point `path_is_contained` exists for a not-yet-created file rather
+    /// than refusing every agent file creation outright.
+    #[test]
+    fn path_is_contained_accepts_a_not_yet_existing_file_under_root() {
+        let root = scratch_dir("new-file-root");
+        let candidate = root.join("agent-created.txt");
+        assert!(!candidate.exists(), "fixture must not pre-exist");
+        let canonical_root = std::fs::canonicalize(&root).expect("canonicalize root");
+        assert_eq!(
+            path_is_contained(&root, &candidate).expect("must resolve"),
+            Some(canonical_root.join("agent-created.txt")),
+            "a new file directly under an existing root must resolve inside it"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The write-side counterpart to the `..`-escape test below: a
+    /// not-yet-existing candidate whose tail walks back out of `root` via a
+    /// literal `..` must be refused exactly like the existing-file escape
+    /// is, even though nothing on either side of the `..` exists yet.
+    #[test]
+    fn path_is_contained_rejects_a_not_yet_existing_file_escaping_via_dot_dot() {
+        let root = scratch_dir("new-file-escape-root");
+        let candidate = root.join("..").join("agent-created-outside.txt");
+        assert!(!candidate.exists(), "fixture must not pre-exist");
+        assert_eq!(
+            path_is_contained(&root, &candidate).expect("must resolve"),
+            None,
+            "a new file whose path walks out of root via `..` must be refused"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -399,8 +619,9 @@ mod tests {
         std::fs::write(&target, "x").expect("write secret.txt");
 
         let escape = root.join("..").join("root-evil").join("secret.txt");
-        assert!(
-            !path_is_contained(&root, &escape).expect("must resolve"),
+        assert_eq!(
+            path_is_contained(&root, &escape).expect("must resolve"),
+            None,
             "a `..` escape into a string-prefix-sharing sibling must be rejected"
         );
         let _ = std::fs::remove_dir_all(&base);
@@ -420,13 +641,20 @@ mod tests {
         std::os::unix::fs::symlink(&outside, &link).expect("plant the symlink");
 
         let candidate = link.join("secret.txt");
-        assert!(
-            !path_is_contained(&root, &candidate).expect("must resolve"),
+        assert_eq!(
+            path_is_contained(&root, &candidate).expect("must resolve"),
+            None,
             "a symlink planted inside root pointing outside it must resolve outside"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A dangling symlink is an *existing* entry (its own `lstat` succeeds)
+    /// that cannot be resolved -- the one case this function must still
+    /// answer `Err` for, never silently fold into `Ok(None)`: `resolve_
+    /// deepest_existing_ancestor` finds it has metadata and stops there
+    /// rather than treating it as "not created yet" and walking past it
+    /// into the tail.
     #[test]
     fn path_is_contained_errs_on_a_dangling_symlink() {
         #[cfg(unix)]
@@ -438,7 +666,7 @@ mod tests {
                 .expect("plant a dangling symlink");
             assert!(
                 path_is_contained(&root, &link).is_err(),
-                "a candidate that cannot be resolved at all must be Err, not Ok(false)"
+                "a candidate whose existing entry cannot be resolved must be Err, not Ok(None)"
             );
             let _ = std::fs::remove_dir_all(&base);
         }

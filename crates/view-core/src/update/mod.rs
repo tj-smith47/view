@@ -203,7 +203,7 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             // other feature below, since an untrusted project must never
             // reach whatever the `ai` feature does next.
             if feature == "ai" && !model.ai_trusted {
-                return open_ai_trust_prompt(model);
+                return open_ai_trust_prompt(model, verb);
             }
             if feature == "picker" {
                 if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {
@@ -638,11 +638,24 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // `Effect::AiTrustSet`'s own doc): either way the durable fact is
         // "not trusted", and this arm cannot tell the two apart from the
         // bool alone, so one notice covers both -- it names the way back in
-        // rather than claiming to know why the gate did not open.
-        Msg::AiTrustResolved { trusted } => {
+        // rather than claiming to know why the gate did not open. An
+        // affirmative answer instead completes the intent the gate
+        // interrupted: `verb` is the pending `Msg::FeatureInvoke` the prompt
+        // carried through `Effect::AiTrustSet` (see that effect's own doc),
+        // re-dispatched here now that `model.ai_trusted` reads true -- a
+        // user who types `:View ai` and answers Yes must see the `ai`
+        // feature proceed in one flow, not a closed prompt with nothing
+        // behind it that needs a second, undiscoverable invocation.
+        Msg::AiTrustResolved { trusted, verb } => {
             model.ai_trusted = trusted;
             if trusted {
-                Vec::new()
+                update(
+                    model,
+                    Msg::FeatureInvoke {
+                        feature: "ai".to_string(),
+                        verb,
+                    },
+                )
             } else {
                 model.dirty = true;
                 model.engine.record_native_notice(
@@ -741,12 +754,14 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                 }
                 if let Some(project_root) = p.ai_trust_project_root() {
                     let project_root = project_root.to_path_buf();
+                    let verb = p.ai_trust_verb().unwrap_or_default().to_string();
                     let trusted = p.accepted_is_default(&notation);
                     model.pop_focused_overlay();
                     model.dirty = true;
                     return vec![Effect::AiTrustSet {
                         project_root,
                         trusted,
+                        verb,
                     }];
                 }
                 vec![Effect::Rpc(RpcCall::Input { notation })]
@@ -959,25 +974,34 @@ fn picker_preview_request(state: &mut crate::native::picker::PickerState) -> Vec
 
 /// Opens the per-project AI trust confirm as the topmost overlay, the first
 /// time a session's `Msg::FeatureInvoke` names the `ai` feature with
-/// `model.ai_trusted` still false.
+/// `model.ai_trusted` still false. `verb` is that `FeatureInvoke`'s own
+/// field, carried into the prompt's `Origin` so an affirmative answer can
+/// re-dispatch it (see [`Msg::AiTrustResolved`]'s arm).
 ///
 /// A second `ai` invocation before the first prompt is answered replaces
-/// its state in place rather than stacking a second one, the same
-/// "topmost Prompt already open" precedent `ui_event`'s own `msg_show`
-/// handling follows. A blocked-engine `Prompt` already topmost keeps its
-/// focus instead -- the same stacking rule `open_picker`'s own doc states
-/// -- since a stray `FeatureInvoke` racing nvim's own confirm block must
-/// not steal the answer nvim is still waiting on.
-fn open_ai_trust_prompt(model: &mut Model) -> Vec<Effect> {
+/// its state in place rather than stacking a second one -- looked up by
+/// kind via [`Model::ai_trust_prompt_mut`], wherever it sits in the stack,
+/// not only when it is focused: a blocked-engine `Prompt` can have taken
+/// focus above it in the meantime (the same "keeps its focus instead"
+/// stacking rule `open_picker`'s own doc states, since a stray
+/// `FeatureInvoke` racing nvim's own confirm block must not steal the
+/// answer nvim is still waiting on), and a lookup keyed to focus alone
+/// would miss the trust prompt sitting underneath it and stack a duplicate.
+/// Only when no trust prompt exists anywhere in the stack yet does this
+/// fall to the focus-based insert-beneath/push-new choice.
+fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effect> {
     let message = format!(
         "Trust {} to launch an AI agent? Agents can read and write files in this project.",
         model.cwd.display()
     );
-    let state = crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), message);
-    match model.focused_overlay_mut().map(|ov| &mut ov.kind) {
-        Some(OverlayKind::Prompt(p)) if p.ai_trust_project_root().is_some() => {
-            *p = state;
-        }
+    let state =
+        crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), verb, message);
+    if let Some(p) = model.ai_trust_prompt_mut() {
+        *p = state;
+        model.dirty = true;
+        return Vec::new();
+    }
+    match model.focused_overlay_mut().map(|ov| &ov.kind) {
         Some(OverlayKind::Prompt(_)) => {
             model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
         }

@@ -309,6 +309,24 @@ impl Model {
             })
     }
 
+    /// The open AI-trust prompt, wherever it sits in the stack -- not only
+    /// when it is topmost, for the same reason [`Model::picker_mut`] looks
+    /// past the top: a blocked engine `Prompt` can take focus above it (see
+    /// `OverlayKind::Prompt`'s stacking rule in `update/mod.rs`'s
+    /// `open_ai_trust_prompt`), and a second `:View ai` invoke while that is
+    /// topmost must still find and replace the trust prompt underneath
+    /// rather than stacking a duplicate beside it -- `focused_overlay_mut`
+    /// alone only ever sees whatever overlay is on top.
+    #[must_use]
+    pub fn ai_trust_prompt_mut(&mut self) -> Option<&mut crate::native::prompt::PromptState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::Prompt(p) if p.ai_trust_project_root().is_some() => Some(p),
+                _ => None,
+            })
+    }
+
     /// The open tree's state, wherever it sits in the stack -- not only
     /// when it is topmost, for the same reason [`Model::picker_mut`] looks
     /// past the top: a scan or git-status reply must still be able to reach
