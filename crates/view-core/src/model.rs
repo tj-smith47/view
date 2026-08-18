@@ -242,7 +242,7 @@ impl Model {
     /// "opt out for now and revisit": a focused composer answers keys the
     /// same ahead-of-`route_key` way [`crate::native::supervision`]'s busy
     /// modal already does, never by taking the stack's focus slot.
-    const fn takes_focus(kind: &OverlayKind) -> bool {
+    pub(crate) const fn takes_focus(kind: &OverlayKind) -> bool {
         !matches!(kind, OverlayKind::EngineBusy(_) | OverlayKind::Ai(_))
     }
 

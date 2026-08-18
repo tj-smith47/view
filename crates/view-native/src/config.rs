@@ -232,10 +232,19 @@ impl NativeConfig {
     }
 
     /// Whether the feature named `id` is enabled. An id that names no
-    /// feature is not enabled: nothing in the build can act on it.
+    /// feature and is not on
+    /// [`view_core::native::mappings::is_reachable_feature`]'s exemption
+    /// list either is not enabled: nothing in the build can act on it.
+    ///
+    /// The exemption check matters for `register_plan`
+    /// ([`crate::mappings`]): `id` reaching here as `"ai"` must still
+    /// contribute its default key, since `[native]` has no `ai` switch this
+    /// struct's `disabled` list could ever carry -- `is_feature` alone would
+    /// read that structural absence as "disabled" and drop a key
+    /// `default_maps` and `:View`'s own completion both still advertise.
     #[must_use]
     pub fn enabled(&self, id: &str) -> bool {
-        registry::is_feature(id) && !self.disabled.contains(&id)
+        view_core::native::mappings::is_reachable_feature(id) && !self.disabled.contains(&id)
     }
 }
 

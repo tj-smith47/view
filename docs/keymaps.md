@@ -17,6 +17,7 @@ the keys view registers disagree.
 | `<leader>fg` | `picker` | `:View picker grep` |
 | `<leader>e` | `tree` | `:View tree toggle` |
 | `<leader>fm` | `notifications` | `:View notifications history` |
+| `<leader>a` | `ai` | `:View ai toggle` |
 
 ## Turning them off
 
@@ -32,6 +33,10 @@ With that line in `view.toml`, view registers none of the picker's keys
 and whatever your own config mapped `<leader>ff` to keeps working. The
 first time view takes a key you had mapped, it tells you so and names the
 line above verbatim.
+
+`ai` is the one exception: it has no `[native]` entry, since its own
+enabled state lives outside this table, so `<leader>a` registers every
+session regardless of what `[native]` turns off.
 
 ## `:View`
 

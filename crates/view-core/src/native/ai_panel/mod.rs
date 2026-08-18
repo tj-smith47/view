@@ -5,9 +5,10 @@
 //! boundary owns the real client, the same way `native::tree` never holds a
 //! `git2` type and `native::picker` never holds a ripgrep match struct.
 //!
-//! This module owns only the shape; the tasks that drive a live session
-//! (streaming transcript chunks, answering a permission request, running a
-//! diff review) grow it in place rather than replacing it.
+//! This module owns the shape, not the behaviour: streaming a transcript
+//! chunk, answering a permission request, and reviewing a diff all fold new
+//! state into these types in place, rather than a live session replacing
+//! them with a shape of its own.
 
 use super::views::{AiPanelView, Span};
 
@@ -109,10 +110,10 @@ const TITLE: &str = "AI Agent";
 
 /// One transcript entry's row: the speaker as a plain-text prefix, then its
 /// text. A single unstyled span, the same honest "nothing to preserve"
-/// shape a picker candidate or a tree leaf paints in -- role-based styling
-/// is a painter concern for the task that gives this row real content to
-/// distinguish, not a reason to invent a span structure with nothing yet to
-/// carry in it.
+/// shape a picker candidate or a tree leaf paints in -- `role` already
+/// distinguishes a row without a span structure to carry that distinction
+/// too, so styling by role waits for a renderer with something else in the
+/// row worth separating out.
 fn transcript_row(entry: &TranscriptEntry) -> Vec<Span> {
     let speaker = match entry.role {
         TranscriptRole::User => "You",

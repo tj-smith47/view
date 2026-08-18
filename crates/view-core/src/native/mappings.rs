@@ -61,7 +61,7 @@ pub struct MappingClaim {
 // switching user already has them in muscle memory; a claim over a user's
 // own `<leader>f` or `<leader>e` prefix is reported rather than avoided by
 // picking keys nobody uses.
-static DEFAULT_MAPS: [MappingSpec; 5] = [
+static DEFAULT_MAPS: [MappingSpec; 6] = [
     MappingSpec {
         feature: "picker",
         lhs: "<leader>ff",
@@ -86,6 +86,11 @@ static DEFAULT_MAPS: [MappingSpec; 5] = [
         feature: "notifications",
         lhs: "<leader>fm",
         verb: "history",
+    },
+    MappingSpec {
+        feature: "ai",
+        lhs: "<leader>a",
+        verb: "toggle",
     },
 ];
 
@@ -157,6 +162,29 @@ pub fn render_table() -> String {
     out
 }
 
+/// Feature ids that reach a key in [`DEFAULT_MAPS`] without a
+/// [`registry::FeatureDesc`] row -- see [`is_reachable_feature`]'s doc.
+static REGISTRY_EXEMPT_FEATURES: [&str; 1] = ["ai"];
+
+/// Whether `feature` is reachable from somewhere a reviewer, and a
+/// `[native]` config loader deciding what to register, can both find it:
+/// the registry itself, or [`REGISTRY_EXEMPT_FEATURES`] for a feature that
+/// deliberately has no registry row.
+///
+/// `ai` has no `[native]` entry: its enabled state lives in a parallel
+/// `AiStatus` mechanism, not in the registry every other feature shares, so
+/// `[native]` can never carry a switch that turns its key off -- a loader
+/// that gated registration on `registry::is_feature` alone would read that
+/// absence as "disabled" and drop the key from nvim registration, even
+/// though completion, usage, and the docs table (all read from
+/// [`default_maps`] directly) would still advertise it. A feature lands in
+/// this list in the same commit that gives it a mapping row, never a step
+/// ahead of it.
+#[must_use]
+pub fn is_reachable_feature(feature: &str) -> bool {
+    crate::native::registry::is_feature(feature) || REGISTRY_EXEMPT_FEATURES.contains(&feature)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -168,12 +196,35 @@ mod tests {
     fn every_spec_names_a_registry_feature() {
         for spec in default_maps() {
             assert!(
-                registry::is_feature(spec.feature),
-                "{} maps {} to no feature in the registry",
+                is_reachable_feature(spec.feature),
+                "{} maps {} to no feature in the registry or REGISTRY_EXEMPT_FEATURES",
                 spec.lhs,
                 spec.feature
             );
         }
+    }
+
+    #[test]
+    fn a_feature_in_neither_the_registry_nor_the_exemption_list_fails_the_check() {
+        assert!(!is_reachable_feature("nonexistent-feature"));
+    }
+
+    #[test]
+    fn the_agent_panel_key_is_discoverable_without_a_registry_entry() {
+        assert!(
+            default_maps()
+                .iter()
+                .any(|s| s.feature == "ai" && s.verb == "toggle"),
+            "ai toggle is missing from DEFAULT_MAPS"
+        );
+        assert!(
+            !registry::is_feature("ai"),
+            "ai is deliberately absent from the native feature registry"
+        );
+        let usage = render_usage();
+        assert!(usage.contains("ai toggle"), "{usage}");
+        let table = render_table();
+        assert!(table.contains(&format!(":{COMMAND} ai toggle")), "{table}");
     }
 
     #[test]

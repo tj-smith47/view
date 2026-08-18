@@ -3486,6 +3486,250 @@ fn ai_panel_toggle_while_a_blocked_prompt_is_topmost_opens_beneath_it_without_st
 }
 
 #[test]
+fn ai_panel_toggle_while_a_picker_is_topmost_opens_beneath_it_without_stealing_focus() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: "files".to_string(),
+        },
+    );
+    assert!(matches!(effects.as_slice(), [Effect::PickerQuery { .. }]));
+    let picker_id = match m.focus() {
+        Focus::Native(id) => id,
+        Focus::Engine => unreachable!("opening a picker must take focus"),
+    };
+    assert!(matches!(
+        m.overlays().last().map(|o| &o.kind),
+        Some(OverlayKind::Picker(_))
+    ));
+
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "opening beneath the picker issues no effect of its own: {effects:?}"
+    );
+    assert_eq!(
+        m.focus(),
+        Focus::Native(picker_id),
+        "an agent panel opening while a picker is topmost must not steal its focus"
+    );
+    assert_eq!(
+        m.overlays().len(),
+        2,
+        "the panel must open beneath the picker, not replace it"
+    );
+    assert!(
+        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        "the panel must sit beneath the picker on the stack: {:?}",
+        m.overlays()
+    );
+    assert!(
+        matches!(m.overlays()[1].kind, OverlayKind::Picker(_)),
+        "the picker must remain topmost: {:?}",
+        m.overlays()
+    );
+
+    let closed = m.pop_focused_overlay();
+    assert_eq!(
+        closed.map(|o| o.id),
+        Some(picker_id),
+        "closing the focused overlay while the panel sits beneath it must \
+             close the picker, not the non-focus-taking panel underneath"
+    );
+    assert!(
+        m.ai_panel_mut().is_some(),
+        "the panel must still be open after only the picker above it closed"
+    );
+}
+
+#[test]
+fn ai_panel_toggle_while_engine_busy_is_topmost_opens_beneath_it_without_occluding_the_warning() {
+    let mut m = attended_model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::EngineLiveness {
+            wedge: Some(WedgeKind::Dead),
+            observed_for: Duration::ZERO,
+        },
+    );
+    assert!(matches!(
+        m.overlays().last().map(|o| &o.kind),
+        Some(OverlayKind::EngineBusy(_))
+    ));
+
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(
+        effects.is_empty(),
+        "opening beneath the busy modal issues no effect of its own: {effects:?}"
+    );
+    assert_eq!(
+        m.overlays().len(),
+        2,
+        "the panel must open beneath the busy modal, not replace it"
+    );
+    assert!(
+        matches!(m.overlays()[0].kind, OverlayKind::Ai(_)),
+        "the panel must sit beneath the busy modal on the stack: {:?}",
+        m.overlays()
+    );
+    assert!(
+        matches!(m.overlays()[1].kind, OverlayKind::EngineBusy(_)),
+        "the busy modal must remain topmost and visible, since it cannot \
+             be reached any other way while the connection is down: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn ai_panel_open_is_a_no_op_when_the_panel_is_already_open() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert_eq!(m.overlays().len(), 1);
+
+    m.dirty = false;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(effects.is_empty());
+    assert!(
+        !m.dirty,
+        "opening an already-open panel must not trigger a spurious repaint"
+    );
+    assert_eq!(
+        m.overlays().len(),
+        1,
+        "a second open must not push a duplicate panel: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn ai_panel_close_is_a_no_op_when_the_panel_is_already_closed() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        },
+    );
+    assert!(effects.is_empty());
+    assert!(
+        !m.dirty,
+        "closing an already-closed panel must not trigger a spurious repaint"
+    );
+    assert!(m.overlays().is_empty());
+}
+
+#[test]
+fn ai_panel_close_pops_an_open_panel_and_marks_dirty() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert_eq!(m.overlays().len(), 1);
+
+    m.dirty = false;
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "close".to_string(),
+        },
+    );
+    assert!(effects.is_empty());
+    assert!(m.dirty, "closing the panel must trigger a repaint");
+    assert!(m.overlays().is_empty());
+}
+
+/// Untrusted model through to an open panel, threading the one real `verb`
+/// the trust prompt carries end to end rather than three independent
+/// placeholders: `toggle` names the interrupted invoke, survives into
+/// `Effect::AiTrustSet`, and is what `Msg::AiTrustResolved` re-dispatches.
+#[test]
+fn an_untrusted_toggle_answered_with_y_opens_the_panel_via_the_same_verb_it_started_with() {
+    let mut m = model();
+    assert!(!m.ai_trusted);
+
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "toggle".to_string(),
+        },
+    );
+    assert!(matches!(
+        m.overlays().last().map(|o| &o.kind),
+        Some(OverlayKind::Prompt(_))
+    ));
+
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+    let carried_verb = match effects.as_slice() {
+        [Effect::AiTrustSet {
+            trusted: true,
+            verb,
+            ..
+        }] => verb.clone(),
+        other => panic!("expected one AiTrustSet{{trusted: true}}, got {other:?}"),
+    };
+    assert_eq!(carried_verb, "toggle");
+
+    let _ = update(
+        &mut m,
+        Msg::AiTrustResolved {
+            trusted: true,
+            verb: carried_verb,
+        },
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Ai(_))
+        ),
+        "the interrupted toggle must re-dispatch and land the panel open: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
 fn close_tree_releases_its_own_mouse_capture_but_not_a_different_overlays() {
     let mut m = model();
     let _ = update(

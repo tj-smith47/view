@@ -594,6 +594,9 @@ fn palette_body(view: &PaletteView) -> Body {
     }
 }
 
+/// `selected` stays `None`: a transcript has no actionable row the way a
+/// picker match or a palette command does, so there is nothing here for a
+/// cursor position to point at.
 fn ai_body(view: &AiPanelView) -> Body {
     Body {
         title: view.title.clone(),

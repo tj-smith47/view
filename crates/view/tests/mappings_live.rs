@@ -217,14 +217,20 @@ fn a_disabled_feature_leaves_the_users_own_mapping_firing() {
     .unwrap();
 
     let registered = session.register(&cfg);
-    assert!(
-        registered.is_empty(),
-        "a disabled feature must contribute no key at all, got {registered:?}"
+    assert_eq!(
+        registered,
+        vec!["<leader>a".to_string()],
+        "a disabled feature must contribute no key of its own; the only \
+             survivor is ai's default key, which [native] has no switch to \
+             turn off, got {registered:?}"
     );
-    assert!(
-        session.claims().is_empty(),
-        "nothing was registered, so nothing may be claimed"
+    let claimed = session.claims();
+    assert_eq!(
+        claimed.len(),
+        1,
+        "only ai's key, which no [native] entry here names, may be claimed: {claimed:?}"
     );
+    assert_eq!(claimed[0].lhs, "<leader>a");
 
     let rhs = session.eval("maparg('<leader>ff', 'n')");
     assert!(
@@ -253,7 +259,13 @@ fn the_view_command_is_a_way_in_whatever_the_user_turned_off() {
     )
     .unwrap();
     session.register(&cfg);
-    assert!(session.claims().is_empty());
+    assert_eq!(
+        session.claims().len(),
+        1,
+        "only ai's key, which [native] cannot turn off, survives every other \
+             feature being disabled: {:?}",
+        session.claims()
+    );
 
     assert_eq!(
         session.eval("exists(':View')"),

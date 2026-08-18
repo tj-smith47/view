@@ -208,6 +208,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "ai" && verb == "toggle" {
                 return toggle_ai_panel(model);
             }
+            if feature == "ai" && verb == "open" {
+                return open_ai_panel(model);
+            }
+            if feature == "ai" && verb == "close" {
+                if model.close_ai_panel() {
+                    model.dirty = true;
+                }
+                return Vec::new();
+            }
             if feature == "picker" {
                 if let Some(source) = picker_source_for_verb(&verb, &model.cwd) {
                     return open_picker(model, source);
@@ -1137,29 +1146,47 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
     effects
 }
 
-/// Opens or closes the agent panel, anchored flush right like the tree
-/// sidebar is flush left (see [`OverlayKind::Ai`]'s doc). No effect on
-/// either edge yet: opening allocates no session and closing has no live
-/// one to tear down, since nothing in this build binds `session_id` to a
-/// real agent process.
-fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
-    if model.close_ai_panel() {
-        model.dirty = true;
+/// Opens the agent panel, anchored flush right like the tree sidebar is
+/// flush left (see [`OverlayKind::Ai`]'s doc). A no-op when the panel is
+/// already open: unlike `toggle`, `open` never closes what it finds.
+///
+/// Inserted beneath the topmost overlay when that overlay takes focus or is
+/// the busy annunciator, rather than pushed on top of it: `Ai` has no key
+/// path of its own (see [`Model::takes_focus`]'s doc on why), so it must
+/// never sit over something that can still act on a keystroke, and must
+/// never bury the one warning that has to stay visible while the engine is
+/// unresponsive. Every other topmost overlay is exactly as blind to input
+/// as `Ai` itself, so stacking on top of it costs nothing.
+///
+/// No effect either way yet: opening allocates no session, since nothing in
+/// this build binds `session_id` to a real agent process.
+fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
+    if model.ai_panel_mut().is_some() {
         return Vec::new();
     }
     let state = crate::native::ai_panel::AiPanelState::new();
-    let prompt_is_topmost = matches!(
-        model.overlays().last().map(|overlay| &overlay.kind),
-        Some(OverlayKind::Prompt(_))
-    );
+    let insert_beneath = model.overlays().last().is_some_and(|overlay| {
+        Model::takes_focus(&overlay.kind) || matches!(overlay.kind, OverlayKind::EngineBusy(_))
+    });
     let geometry = OverlayBox::new(30, 100).with_anchor(Anchor::Right);
-    if prompt_is_topmost {
+    if insert_beneath {
         model.insert_overlay_beneath_top(geometry, OverlayKind::Ai(state));
     } else {
         model.push_overlay(geometry, OverlayKind::Ai(state));
     }
     model.dirty = true;
     Vec::new()
+}
+
+/// Opens the agent panel if it is closed, closes it if it is open. Closing
+/// has no live session to tear down yet, for the same reason opening
+/// allocates none (see [`open_ai_panel`]'s doc).
+fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
+    if model.close_ai_panel() {
+        model.dirty = true;
+        return Vec::new();
+    }
+    open_ai_panel(model)
 }
 
 /// Opens the message-history overlay over a snapshot of `ToastHistory`,

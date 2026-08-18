@@ -417,7 +417,7 @@ fn a_layers_charset_is_derived_from_its_kind_and_tier() {
 ///
 /// What it does buy: a reading of both rules against each other on real
 /// values, so an arm moved to the wrong side (still exhaustive, still
-/// compiling, now wrong) is caught. Three of eleven variants -- the two
+/// compiling, now wrong) is caught. Three of thirteen variants -- the two
 /// non-overlay kinds constructible without `view-core`'s `#[non_exhaustive]`
 /// wire-state structs, plus one overlay.
 #[test]
