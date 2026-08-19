@@ -521,3 +521,33 @@ buffer named `/a` canonicalized to `//a` too and still matched), but it was
 the last spelling on which the two implementations of one algorithm could be
 observed to disagree -- and a live test now pins the whole table rather than
 prose.
+
+## 21. A trailing backslash is a real Linux filename, and the Lua chunk refuses it anyway
+
+`LOAD_HIDDEN_CHUNK` refuses both separator characters unconditionally
+(`tail == '/' or tail == '\\'`) because Lua has no portable separator
+predicate to consult. Rust's `std::path::is_separator` is platform-defined
+and answers `false` for `\` on Unix, so the two ends disagreed about exactly
+one spelling -- and on Linux that spelling names a perfectly ordinary file:
+
+```
+ls real/                               -> b.rs   'b.rs\'      -- two distinct files
+filereadable(real/b.rs\)               -> 1
+vim.uv.fs_realpath(real/b.rs\)         -> .../real/b.rs\      -- resolves, unchanged
+bufadd(real/b.rs)                      -> 2      name .../real/b.rs
+bufadd(real/b.rs\)                     -> 3      name .../real/b.rs\
+bufadd(real/b.rs/)                     -> 4      name .../real/b.rs/
+```
+
+nvim would bind buffer 3 happily; only the chunk's own guard stops it. That
+left `/path/b.rs\` passing every Rust gate, taking a hold, reaching nvim, and
+coming back `buf = 0` -- a hold with no buffer behind it, answered as
+unbindable one round-trip later than it should have been.
+
+`hidden_path_refusal` now refuses both characters unconditionally too, so the
+refused set is identical on both ends and on every platform. The cost is
+real and accepted: a Linux file whose name ends in a backslash cannot be
+reviewed in a hidden buffer. It buys a refusal set that does not vary by
+which host the agent runs on -- an ACP `path` string crosses process (and
+potentially machine) boundaries, so a rule keyed to *this* build's separator
+would refuse different spellings on either side of the wire.

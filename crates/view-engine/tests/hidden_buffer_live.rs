@@ -1518,6 +1518,80 @@ fn a_trailing_separator_is_refused_rather_than_keyed_onto_a_second_buffer() {
     );
 }
 
+/// The chunk refuses both separator characters unconditionally -- Lua has no
+/// portable separator predicate -- so the Rust gate must refuse both too, on
+/// every platform. On Unix a trailing backslash names an ordinary readable
+/// file that `bufadd` binds without complaint (case 21), which is what makes
+/// the disagreement observable: a platform-keyed Rust gate let this spelling
+/// take a hold, reach the wire, and come back `buf = 0`.
+///
+/// Unix-only because a file whose name ends in a backslash cannot be created
+/// on Windows -- there the two ends agree trivially, since `is_separator`
+/// answers for `\` as well.
+#[test]
+#[cfg(unix)]
+fn a_trailing_backslash_is_refused_here_exactly_as_the_chunk_refuses_it() {
+    let root = scratch_root("trailing-backslash");
+    let bare = root.join("nope.rs").to_string_lossy().into_owned();
+    let with_backslash = format!("{bare}\\");
+    std::fs::write(&with_backslash, "a real file on this platform\n")
+        .expect("a trailing backslash is an ordinary filename on unix");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let err = engine
+        .handle
+        .load_hidden(&with_backslash, 320)
+        .expect_err("the trailing-backslash spelling must refuse");
+    assert!(
+        matches!(
+            err,
+            EngineError::UnusablePath {
+                reason: HiddenPathRefusal::TrailingSeparator,
+                ..
+            }
+        ),
+        "a trailing backslash must refuse as unusable: {err:?}"
+    );
+    assert!(
+        rx.try_recv().is_err(),
+        "a refused spelling never reaches the wire, so nothing may answer it"
+    );
+    assert_eq!(
+        load_chunk_answer(&engine, &with_backslash),
+        0,
+        "the chunk refuses it too -- the two ends must refuse the identical set"
+    );
+    assert!(
+        !buffer_names(&engine).iter().any(|n| n.ends_with('\\')),
+        "no buffer may exist over the refused spelling: {:?}",
+        buffer_names(&engine)
+    );
+
+    engine
+        .handle
+        .release_hidden(&with_backslash)
+        .expect("a refused path's release is the same no-op an unheld path gets");
+
+    engine
+        .handle
+        .load_hidden(&bare, 321)
+        .expect("the bare spelling is still usable");
+    let (_g, buf, created, _t) = next_hidden_buffer_loaded(&rx);
+    assert!(created, "the refusal left no hold the bare spelling reuses");
+    let buf = buf.expect("the bare spelling resolves to a handle");
+    engine
+        .handle
+        .release_hidden(&bare)
+        .expect("the one real hold releases");
+    assert!(
+        !buf_still_listed_as_a_buffer(&engine, buf),
+        "the bare spelling's own hold reached zero and must have deleted its buffer"
+    );
+}
+
 /// Two implementations of one algorithm: `canonical_hidden_key` on this
 /// side of the wire and `LOAD_HIDDEN_CHUNK`'s own `canon()` on nvim's. They
 /// must answer identically for every spelling in the divergent set
@@ -1586,12 +1660,17 @@ fn a_foreign_buffer_reached_through_a_symlinked_spelling_is_neither_owned_nor_de
     let link_dir = root.join("link");
     std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
     let real_path = real_dir.join("foreign.rs");
-    std::fs::write(&real_path, "foreign content\n").expect("write fixture");
     let via_link = link_dir.join("foreign.rs").to_string_lossy().into_owned();
     assert!(
         !via_link.contains("/./") && !via_link.contains("/../"),
         "the symlinked spelling must carry no '.'/'..' component -- that is exactly \
          the case the old canon() left unresolved"
+    );
+    assert!(
+        std::fs::canonicalize(&real_path).is_err(),
+        "the leaf must not exist on disk: with the file there, fs_realpath resolves \
+         both spellings outright and the parent-only fallback -- the half that was \
+         broken, and the only half this test exists to pin -- never runs at all"
     );
 
     let mut engine = spawn();

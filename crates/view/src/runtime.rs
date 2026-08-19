@@ -1971,6 +1971,40 @@ mod tests {
         );
     }
 
+    /// The stand-in above must cover the refused path and nothing else. A
+    /// connection that died during a review's bind is a lost engine, and
+    /// answering it with a fabricated buffer-less resolve instead would
+    /// keep the loop running against a corpse: `Msg::EngineDown` would
+    /// never fire, and the user would go on typing into an editor whose
+    /// engine is gone.
+    #[test]
+    fn a_lost_engine_during_a_hidden_buffer_load_still_reads_as_a_lost_engine() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(4);
+        let ops = FakeOps::default();
+        *ops.fail_next.borrow_mut() = true;
+        let executor =
+            Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx.clone()));
+
+        let path = if cfg!(windows) {
+            "C:\\work\\main.rs"
+        } else {
+            "/work/main.rs"
+        };
+        let flow = executor.run(Effect::Rpc(RpcCall::LoadHidden {
+            path: path.to_owned(),
+            generation: 9,
+        }));
+
+        assert!(
+            matches!(flow, Flow::EngineLost),
+            "the path was usable, so this Err is the connection dying: {flow:?}"
+        );
+        assert!(
+            msg_rx.try_recv().is_err(),
+            "a dead engine must never be answered with a resolve nvim never sent"
+        );
+    }
+
     #[test]
     fn input_effect_maps_to_engine_ops_input() {
         let ops = FakeOps::default();

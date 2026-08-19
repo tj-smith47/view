@@ -1026,15 +1026,18 @@ struct DiffProposal {
 ///   of the class: nvim resolves an empty name onto its own `[No Name]`
 ///   scratch buffer, which a review would attach to and write its hunks
 ///   into (case 17);
-/// - ending in a path separator -- a directory's spelling, which nvim binds
-///   to a *second* buffer over the same file (case 18).
+/// - ending in `/` or `\` -- a directory's spelling, which nvim binds to a
+///   *second* buffer over the same file (case 18). Both characters count on
+///   every platform: the engine and its Lua both refuse the pair
+///   unconditionally, and this string crossed a process boundary from an
+///   agent whose host need not be view's (case 21).
 ///
 /// Refused here, at the boundary the agent's text crosses, rather than
 /// normalized into something plausible: a proposal names a file the user is
 /// about to accept edits into, and guessing which file an off-contract
 /// spelling meant is exactly the guess that must not be made.
 fn usable_path(path: &&str) -> bool {
-    !path.ends_with(std::path::is_separator) && std::path::Path::new(path).is_absolute()
+    !path.ends_with(['/', '\\']) && std::path::Path::new(path).is_absolute()
 }
 
 /// Every decodable `"diff"` item of one tool call's content, in wire
@@ -2163,6 +2166,7 @@ mod tests {
                     { "type": "diff", "path": "main.rs", "newText": "against nvim's cwd\n" },
                     { "type": "diff", "path": "./main.rs", "newText": "against nvim's cwd\n" },
                     { "type": "diff", "path": format!("{}/", abs("main.rs")), "newText": "a second buffer\n" },
+                    { "type": "diff", "path": format!("{}\\", abs("main.rs")), "newText": "a second buffer\n" },
                 ]),
             ),
         );

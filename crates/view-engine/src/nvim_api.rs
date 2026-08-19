@@ -530,10 +530,20 @@ pub enum HiddenPathRefusal {
     /// `Diff` schema documents `path` as "The absolute file path being
     /// modified," so an absolute spelling is what the wire promised anyway.
     Relative,
-    /// Ends in a path separator. `bufadd` keeps the separator and resolves
-    /// the spelling onto a *second* buffer over the same file, while the
-    /// key drops it -- one hold over two buffers (case 18). A trailing
+    /// Ends in `/` or `\`. `bufadd` keeps the separator and resolves the
+    /// spelling onto a *second* buffer over the same file, while the key
+    /// drops it -- one hold over two buffers (case 18). A trailing
     /// separator names a directory, and a directory is already refused.
+    ///
+    /// Both characters are refused on every platform, not just the ones
+    /// `std::path::is_separator` answers for. [`LOAD_HIDDEN_CHUNK`] has no
+    /// portable separator predicate to consult and so refuses both
+    /// unconditionally; a platform-keyed rule here would leave a Linux
+    /// file named `b.rs\` -- an ordinary readable file `bufadd` binds
+    /// without complaint -- taking a hold that nvim then answers `buf = 0`
+    /// (case 21). An ACP `path` also crosses process and machine
+    /// boundaries, so a set keyed to this build's separator would refuse
+    /// different spellings on either side of the wire.
     TrailingSeparator,
 }
 
@@ -565,7 +575,7 @@ pub fn hidden_path_refusal(path: &str) -> Option<HiddenPathRefusal> {
     if path.trim().is_empty() {
         return Some(HiddenPathRefusal::Blank);
     }
-    if path.ends_with(std::path::is_separator) {
+    if path.ends_with(['/', '\\']) {
         return Some(HiddenPathRefusal::TrailingSeparator);
     }
     if !std::path::Path::new(path).is_absolute() {
@@ -3049,6 +3059,13 @@ mod tests {
             Some(HiddenPathRefusal::TrailingSeparator),
             "a directory's own spelling is refused here, not left to the fs_stat check"
         );
+        assert_eq!(
+            hidden_path_refusal("/tmp/a/b.rs\\"),
+            Some(HiddenPathRefusal::TrailingSeparator),
+            "the Lua chunk refuses a trailing backslash on every platform, so this \
+             must too -- on Unix it is a readable file bufadd would bind, and a hold \
+             taken on it comes back buf = 0 one round-trip later"
+        );
         for usable in ["/tmp/a.rs", "/tmp/does/not/exist.rs", "/a", "/tmp/./a.rs"] {
             assert_eq!(
                 hidden_path_refusal(usable),
@@ -3064,26 +3081,29 @@ mod tests {
     #[test]
     fn a_refused_path_takes_no_hold_and_releases_without_error() {
         let (h, _cap_rx) = fake_peer_replying_with(Value::Nil);
-        let err = h.load_hidden("", 7).expect_err("a blank path must refuse");
-        assert!(
-            matches!(
-                err,
-                EngineError::UnusablePath {
-                    reason: HiddenPathRefusal::Blank,
-                    ..
-                }
-            ),
-            "a blank path must refuse as unusable, not as a lost engine: {err:?}"
-        );
-        assert!(
-            h.hidden_bufs
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty(),
-            "a refused load must leave no hold behind for a release to find"
-        );
-        h.release_hidden("")
-            .expect("releasing a refused path is the same no-op an unheld path gets");
+        for (path, reason) in [
+            ("", HiddenPathRefusal::Blank),
+            ("rel.rs", HiddenPathRefusal::Relative),
+            ("/tmp/a/b.rs/", HiddenPathRefusal::TrailingSeparator),
+            ("/tmp/a/b.rs\\", HiddenPathRefusal::TrailingSeparator),
+        ] {
+            let err = h
+                .load_hidden(path, 7)
+                .expect_err("an off-contract spelling must never take a hold");
+            assert!(
+                matches!(err, EngineError::UnusablePath { reason: got, .. } if got == reason),
+                "{path:?} must refuse as unusable, not as a lost engine: {err:?}"
+            );
+            assert!(
+                h.hidden_bufs
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_empty(),
+                "a refused load must leave no hold behind for a release to find: {path:?}"
+            );
+            h.release_hidden(path)
+                .expect("releasing a refused path is the same no-op an unheld path gets");
+        }
     }
 
     /// The Rust key never invents an answer for a spelling only nvim can
