@@ -1735,6 +1735,68 @@ impl EngineHandle {
         Ok(())
     }
 
+    /// Subscribes to `buf`'s live edit stream via `nvim_buf_attach(buf,
+    /// false, {})`, for `RpcCall::BufAttach`. `send_buffer: false` is
+    /// load-bearing, confirmed live in
+    /// `docs/nvim-buf-attach-wire-capture.md` capture #1: it is what keeps
+    /// the attach itself from streaming the whole buffer as an initial
+    /// `nvim_buf_lines_event`, so this connection's event volume for `buf`
+    /// stays proportional to the edits that follow, never to the buffer's
+    /// size at the moment of attach.
+    ///
+    /// A notify, not a request: nothing here blocks on nvim's boolean
+    /// success reply, matching every other fire-and-forget call in this
+    /// crate. `generation` is recorded locally
+    /// ([`EngineHandle::note_buf_attach`]) the instant this call is issued,
+    /// not once a reply could confirm it -- there is nothing to gain by
+    /// waiting, since a rejected attach (a stale `buf`) simply means no
+    /// `nvim_buf_lines_event` for it ever arrives to look the entry up.
+    ///
+    /// `buf` must already be the buffer's real, resolved handle -- never
+    /// `0` ("current buffer"). Capture #1 in the wire-capture doc attaches
+    /// buffer `0` and shows every resulting `nvim_buf_lines_event` naming
+    /// it `Ext(0,[1])` (the real number, 1), so `generation` recorded under
+    /// the sentinel `0` would sit under a key no event this attach produces
+    /// is ever looked up by; the caller is responsible for resolving the
+    /// handle before calling this (e.g. from a prior `ListBuffers` reply or
+    /// `nvim_get_current_buf`), the same way `RpcCall::BufSetText`'s own
+    /// `buf` is already a resolved handle by the time it reaches this
+    /// layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
+        self.note_buf_attach(buf.0, generation);
+        self.notify(
+            "nvim_buf_attach",
+            vec![
+                Value::from(buf.0),
+                Value::from(false),
+                Value::Map(Vec::new()),
+            ],
+        )
+    }
+
+    /// Unsubscribes from `buf`'s edit stream via `nvim_buf_detach`, for
+    /// `RpcCall::BufDetach`. Removes the locally recorded generation
+    /// ([`EngineHandle::note_buf_detach`]) before the notify is even sent,
+    /// so a `nvim_buf_lines_event` already in flight from before this call
+    /// finds no generation to stamp and is dropped rather than reaching a
+    /// hunk-rebase state machine the user already dismissed -- live-verified
+    /// in `docs/nvim-buf-attach-wire-capture.md` capture #4: no further
+    /// event arrives for a detached buffer regardless.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection's writer thread has
+    /// already exited.
+    pub fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        self.note_buf_detach(buf.0);
+        self.notify("nvim_buf_detach", vec![Value::from(buf.0)])
+    }
+
     /// Reads the current buffer's path and nvim-authoritative text via
     /// [`CURRENT_BUFFER_TEXT_CHUNK`], for `RpcCall::ReadCurrentBufferText`.
     ///

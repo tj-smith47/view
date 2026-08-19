@@ -272,6 +272,41 @@ pub enum Msg {
         name: String,
         modified: bool,
     },
+    /// One `nvim_buf_lines_event` notification forwarded from a buffer
+    /// attached via `RpcCall::BufAttach`. Carries nvim's own change shape
+    /// verbatim -- distinct from [`Msg::BufferChanged`] (the statusline's
+    /// narrower file-tail + modified-flag signal above, which has no
+    /// line-range field to carry this and was never built to). The
+    /// hunk-rebase state machine is its only consumer.
+    ///
+    /// `firstline`/`lastline` are 0-indexed and half-open, and name the OLD
+    /// range being replaced -- not a range sized to match `linedata`'s
+    /// length (a pure insertion has `firstline == lastline`, an empty old
+    /// range at the insertion point; see
+    /// `docs/nvim-buf-attach-wire-capture.md` capture #3). `linedata` is
+    /// the new content for that range, empty for a pure deletion.
+    /// `changedtick` is nvim's own edit counter, carried through unchanged.
+    ///
+    /// `generation` is `RpcCall::BufAttach`'s own generation, echoed back on
+    /// every event this buffer's subscription produces -- see that call's
+    /// own doc for why this is layered atop, not a substitute for, the
+    /// wire's own unambiguous `buf` field.
+    ///
+    /// Bounded to the edited range by construction, on both ends: nvim never
+    /// sends more than the changed lines (capture #1's `send_buffer: false`),
+    /// and this type carries them through without ever re-deriving or
+    /// widening the range -- so folding this into whatever state the
+    /// hunk-rebase machine keeps costs work proportional to the edit, never
+    /// to the buffer, the same key-dispatch-path latency contract every other
+    /// per-keystroke message here keeps.
+    BufTextChanged {
+        buf: BufferHandle,
+        generation: u64,
+        firstline: u64,
+        lastline: u64,
+        linedata: Vec<String>,
+        changedtick: u64,
+    },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
     /// [`MessageEntry`](crate::model::MessageEntry) `toast::route` scheduled
@@ -861,6 +896,27 @@ pub enum Effect {
         trusted: bool,
         verb: String,
     },
+    /// A prompt the user submitted from the AI panel's composer, carrying
+    /// only `text` -- never a pre-assembled [`AiCommand::Prompt`], and never
+    /// this crate's own [`Effect::Ai`]. `view-core` is pure (no I/O, no RPC),
+    /// so it cannot itself perform the four context reads
+    /// (`current_buffer`, `selection`, `cursor`, `diagnostics`, `quickfix`)
+    /// a submitted prompt is owed; nor can it depend on `view-ai` to turn
+    /// their results into [`crate::native::ai_event::ContextBlock`]s (the
+    /// dependency direction `scripts/audit-deps.sh` enforces runs the other
+    /// way). The bin's executor is what can do both: it performs the reads
+    /// off the loop thread (they are synchronous, bounded-timeout RPC
+    /// requests, not the fire-and-forget notify every other `Rpc` effect
+    /// here is -- issuing them on the loop thread would violate "the paint
+    /// loop never awaits RPC"), assembles the context via
+    /// `view_ai::context::assemble`, and only then hands the agent session
+    /// the completed [`AiCommand::Prompt`]. A read that errors, or that had
+    /// nothing to report, omits its block rather than blocking the prompt
+    /// on it -- see `EngineReadSnapshot`'s own doc for why an absent field
+    /// and a failed read are the same state.
+    AiPromptSubmit {
+        text: String,
+    },
 }
 
 /// The value side of [`RpcCall::SetOption`] and [`RpcCall::HoldOption`],
@@ -1250,5 +1306,44 @@ pub enum RpcCall {
         buf: BufferHandle,
         edits: Vec<TextEdit>,
         undojoin: bool,
+    },
+    /// Subscribes to `buf`'s live edit stream via `nvim_buf_attach(buf,
+    /// false, {})` -- `send_buffer: false` is load-bearing (see
+    /// `docs/nvim-buf-attach-wire-capture.md` capture #1): it is what keeps
+    /// attach itself from streaming the whole buffer as a first event, so
+    /// event volume stays proportional to edit size rather than buffer
+    /// size. Every subsequent `nvim_buf_lines_event` this buffer produces
+    /// decodes to `Msg::BufTextChanged`, stamped with `generation` so the
+    /// hunk-rebase state machine that asked for this attach can tell its
+    /// own buffer's events apart from a concurrent diff-review session's
+    /// events on a different buffer (capture #5) -- the same
+    /// generation-stamping discipline `PickerState`/`TreeState` already use
+    /// for their own async replies, applied here to a wire signal
+    /// (`nvim_buf_lines_event`'s own `buf` field) that is already
+    /// unambiguous on its own, not as a workaround for wire ambiguity.
+    ///
+    /// `buf` must be the buffer's real, resolved handle, never nvim's `0`
+    /// ("current buffer") sentinel: every `nvim_buf_lines_event` this
+    /// attach produces names the buffer by its actual number regardless of
+    /// what was passed to `nvim_buf_attach` (capture #1's own
+    /// `Ext(0,[1])`, for a buffer attached as `0`), so a generation
+    /// recorded under the sentinel is never the key any event this attach
+    /// produces can be looked up by.
+    BufAttach {
+        buf: BufferHandle,
+        generation: u64,
+    },
+    /// Unsubscribes from `buf`'s edit stream via `nvim_buf_detach`. After
+    /// this, no further `Msg::BufTextChanged` reaches `update()` for `buf`
+    /// (`docs/nvim-buf-attach-wire-capture.md` capture #4) -- a diff-review
+    /// session that closes must not go on paying for events, and a stray
+    /// `nvim_buf_lines_event` racing this call must not resurrect a rebase
+    /// state machine the user already dismissed.
+    ///
+    /// `buf` carries the same real-handle requirement `BufAttach`'s own doc
+    /// states -- it clears the connection's generation map by this exact
+    /// key, which only ever holds real handles.
+    BufDetach {
+        buf: BufferHandle,
     },
 }

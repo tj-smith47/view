@@ -215,6 +215,17 @@ pub struct EngineHandle {
     /// (`announced_exit`) and not merely the child's exit status.
     settled: Arc<Condvar>,
     outbox: Arc<crate::outbox::Outbox>,
+    /// Which [`Msg::BufTextChanged`] generation each live-attached buffer's
+    /// `nvim_buf_lines_event`/`nvim_buf_detach_event` notifications should be
+    /// stamped with, keyed by the buffer's own unwrapped `Ext` handle.
+    /// Populated by [`buf_attach`](Self::buf_attach) the moment the call is
+    /// issued (not once nvim's own reply confirms it -- see that method's
+    /// own doc for why waiting would buy nothing) and removed by
+    /// [`buf_detach`](Self::buf_detach) and by the reader thread itself on
+    /// an observed `nvim_buf_detach_event`, so a stray notification racing
+    /// either kind of detach cannot resurrect a generation this connection
+    /// no longer owes anyone.
+    attached_bufs: Arc<Mutex<HashMap<u64, u64>>>,
 }
 
 impl Clone for EngineHandle {
@@ -226,6 +237,7 @@ impl Clone for EngineHandle {
             announced_exit: Arc::clone(&self.announced_exit),
             settled: Arc::clone(&self.settled),
             outbox: Arc::clone(&self.outbox),
+            attached_bufs: Arc::clone(&self.attached_bufs),
         }
     }
 }
@@ -344,6 +356,7 @@ impl EngineHandle {
         let closed = Arc::new(AtomicBool::new(false));
         let announced_exit = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Condvar::new());
+        let attached_bufs: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
             closed: Arc::clone(&closed),
@@ -374,6 +387,7 @@ impl EngineHandle {
 
         let reader_pending = Arc::clone(&pending);
         let reader_outbox = Arc::clone(&outbox);
+        let reader_attached_bufs = Arc::clone(&attached_bufs);
         let reader_pump = pump;
         let reader_announced_exit = Arc::clone(&announced_exit);
         let reader_settled = Arc::clone(&settled);
@@ -631,6 +645,34 @@ impl EngineHandle {
                                 if let Some(msg) = decode_bridge_event(&params) {
                                     let _ = pump.route_msg(msg);
                                 }
+                            } else if method == "nvim_buf_lines_event" {
+                                // best-effort for the same reason
+                                // `view_bridge` is: nvim is never blocked on
+                                // this notification, and a dropped one costs
+                                // the hunk-rebase state machine one edit's
+                                // worth of staleness it can recompute from
+                                // the buffer's next event, not a wedge
+                                if let Some(msg) =
+                                    decode_buf_lines_event(&params, &reader_attached_bufs)
+                                {
+                                    let _ = pump.route_msg(msg);
+                                }
+                            } else if method == "nvim_buf_detach_event" {
+                                // clears the generation entry on nvim's own
+                                // confirmation too, not only inside
+                                // `buf_detach` -- covers a buffer nvim
+                                // detaches unasked (a wipeout, `:help
+                                // api-buffer-updates`), so a stray
+                                // `nvim_buf_lines_event` racing either kind
+                                // of detach can never resurrect a generation
+                                // this connection no longer owes anyone
+                                if let Some(buf) =
+                                    params.first().and_then(crate::ui_events::decode_ext_handle)
+                                {
+                                    if let Ok(mut attached) = reader_attached_bufs.lock() {
+                                        attached.remove(&buf);
+                                    }
+                                }
                             }
                         } else if let Some(tx) = &notif_tx {
                             if tx.send(EngineNotification { method, params }).is_err() {
@@ -744,6 +786,7 @@ impl EngineHandle {
             announced_exit,
             settled,
             outbox,
+            attached_bufs,
         }
     }
 
@@ -952,6 +995,35 @@ impl EngineHandle {
             Ok(())
         } else {
             Err(EngineError::Closed)
+        }
+    }
+
+    /// Records `buf`'s attach generation for the reader thread's
+    /// `nvim_buf_lines_event` decode to stamp onto `Msg::BufTextChanged`
+    /// (see [`decode_buf_lines_event`]). Called from
+    /// [`crate::nvim_api::EngineHandle::buf_attach`] the moment the
+    /// `nvim_buf_attach` notify is issued, not once a reply confirms it --
+    /// there is no reply to wait for (a plain notify, like every other
+    /// fire-and-forget call in this crate), and a rejected attach simply
+    /// means no `nvim_buf_lines_event` ever arrives to look this entry up,
+    /// which costs nothing beyond one unused map entry.
+    pub(crate) fn note_buf_attach(&self, buf: u64, generation: u64) {
+        if let Ok(mut attached) = self.attached_bufs.lock() {
+            attached.insert(buf, generation);
+        }
+    }
+
+    /// Removes `buf`'s attach generation, called from
+    /// [`crate::nvim_api::EngineHandle::buf_detach`] the moment the
+    /// `nvim_buf_detach` notify is issued -- proactively, on the caller's
+    /// own intent, rather than waiting for nvim's `nvim_buf_detach_event`
+    /// confirmation (the reader thread clears the same entry on that event
+    /// too, covering a buffer nvim detaches unasked; see this module's
+    /// notification-routing match). Either remover reaching an
+    /// already-removed entry first is fine -- both converge on "gone".
+    pub(crate) fn note_buf_detach(&self, buf: u64) {
+        if let Ok(mut attached) = self.attached_bufs.lock() {
+            attached.remove(&buf);
         }
     }
 
@@ -1388,6 +1460,43 @@ fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
         }
         _ => None,
     }
+}
+
+/// Decodes one `nvim_buf_lines_event` notification's `(buf, changedtick,
+/// firstline, lastline, linedata, more)` positional params (see
+/// `docs/nvim-buf-attach-wire-capture.md` capture #2) into
+/// `Msg::BufTextChanged`, or `None` when `buf` names a buffer this
+/// connection has no attach generation recorded for -- a stray event
+/// racing a detach (`buf_detach` already removed the entry before nvim's
+/// own confirmation arrives) rather than a wire-shape decode failure, so it
+/// is dropped the same way every other stale-generation reply in this
+/// crate is, not treated as malformed.
+///
+/// `more` (the trailing element) is read positionally but never carried
+/// onto `Msg::BufTextChanged`: every capture in the wire-capture doc
+/// produced `more: false` for a single `nvim_buf_set_lines` call, and this
+/// crate has no batching state to fold a `true` into yet -- a future
+/// consumer that needs it can add the field without changing this
+/// function's decode shape.
+fn decode_buf_lines_event(params: &[Value], attached: &Mutex<HashMap<u64, u64>>) -> Option<Msg> {
+    let [buf, changedtick, firstline, lastline, linedata, ..] = params else {
+        return None;
+    };
+    let buf = crate::ui_events::decode_ext_handle(buf)?;
+    let generation = attached.lock().ok()?.get(&buf).copied()?;
+    let linedata = linedata
+        .as_array()?
+        .iter()
+        .map(|v| v.as_str().map(str::to_owned))
+        .collect::<Option<Vec<String>>>()?;
+    Some(Msg::BufTextChanged {
+        buf: view_core::msg::BufferHandle(buf),
+        generation,
+        firstline: firstline.as_u64()?,
+        lastline: lastline.as_u64()?,
+        linedata,
+        changedtick: changedtick.as_u64()?,
+    })
 }
 
 /// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
@@ -2417,6 +2526,59 @@ mod tests {
             unreachable!("expected ColorSchemeChanged, got {msg:?}");
         };
         assert_eq!(name, "dracula");
+    }
+
+    /// The positive control for the guard below: a buffer with a recorded
+    /// generation decodes to `Msg::BufTextChanged` stamped with that exact
+    /// generation, proving the map lookup itself works before the next test
+    /// proves what happens when it misses.
+    #[test]
+    fn a_buf_lines_event_for_an_attached_buffer_decodes_stamped_with_its_generation() {
+        let attached: Mutex<HashMap<u64, u64>> = Mutex::new(HashMap::from([(1, 42)]));
+        let params = vec![
+            Value::Ext(0, vec![1]),
+            Value::from(9u64),
+            Value::from(0u64),
+            Value::from(1u64),
+            Value::Array(vec![Value::from("x")]),
+            Value::from(false),
+        ];
+
+        let msg = decode_buf_lines_event(&params, &attached);
+
+        let Some(Msg::BufTextChanged {
+            buf, generation, ..
+        }) = msg
+        else {
+            unreachable!("expected a decoded BufTextChanged, got {msg:?}");
+        };
+        assert_eq!(buf, view_core::msg::BufferHandle(1));
+        assert_eq!(generation, 42);
+    }
+
+    /// The mutation-check disconfirm: a buffer with NO recorded generation
+    /// -- never attached, or attached and then detached before this event
+    /// arrived -- must decode to nothing, never fall back to a default
+    /// generation. A stray event racing a detach is exactly the race
+    /// `decode_buf_lines_event`'s own doc names; this proves the guard that
+    /// defends against it actually drops the event instead of resurrecting
+    /// it under a made-up generation.
+    #[test]
+    fn a_buf_lines_event_for_a_buffer_with_no_recorded_generation_decodes_to_nothing() {
+        let attached: Mutex<HashMap<u64, u64>> = Mutex::new(HashMap::new());
+        let params = vec![
+            Value::Ext(0, vec![1]),
+            Value::from(9u64),
+            Value::from(0u64),
+            Value::from(1u64),
+            Value::Array(vec![Value::from("x")]),
+            Value::from(false),
+        ];
+
+        assert!(
+            decode_buf_lines_event(&params, &attached).is_none(),
+            "an event for a buffer with no recorded generation must decode to nothing"
+        );
     }
 
     /// A trigger the bridge carries for a consumer this build does not have

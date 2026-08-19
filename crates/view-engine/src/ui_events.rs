@@ -378,7 +378,7 @@ fn decode_msg_ruler(args: &[Value]) -> Option<UiEvent> {
 // Tabpage/Window/Buffer handles arrive as msgpack-RPC Ext values whose
 // payload is itself a msgpack-encoded integer; unwrapping it here keeps that
 // Ext detail out of view-core, which stays rmpv-free.
-fn decode_ext_handle(v: &Value) -> Option<u64> {
+pub(crate) fn decode_ext_handle(v: &Value) -> Option<u64> {
     let Value::Ext(_, data) = v else {
         return None;
     };

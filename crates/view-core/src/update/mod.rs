@@ -352,6 +352,14 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             tree_git_refresh_effect(model)
         }
+        // The hunk-rebase state machine is this message's only intended
+        // consumer, and nothing in this tree folds a `BufTextChanged` into
+        // any state yet. Discarded rather than accumulated, which costs
+        // nothing proportional to buffer size: `linedata` already bounds to
+        // the edited range at the wire (see this variant's own doc), so
+        // even a no-op arm here holds the O(edit size) contract
+        // `RpcCall::BufAttach` states.
+        Msg::BufTextChanged { .. } => Vec::new(),
         Msg::PickerResults { generation, items } => {
             let Some(p) = model.picker_mut() else {
                 return Vec::new();
