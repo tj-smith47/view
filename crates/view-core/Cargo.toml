@@ -8,6 +8,19 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# This crate's only production dependency, and a deliberate one: the diff
+# review's hunk engine runs synchronously inside `update()` on the
+# key-dispatch path, against buffer-truth data the pure core already holds,
+# so it cannot live behind an async boundary in `view-ai`. A hand-rolled
+# line diff on a path that writes bytes into a user's buffer is avoidable
+# correctness risk. `default-features = false` drops `text`/`std`/`serde`
+# and leaves a pure algorithm crate with no transitive dependencies at all
+# -- `scripts/audit-deps.sh` names every other workspace member in a
+# `check_absent similar` loop, so a second crate acquiring it fails the
+# audit rather than passing silently.
+[dependencies]
+similar = { version = "3.1.2", default-features = false }
+
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
 view-test-support = { version = "0.0.1", path = "../view-test-support" }

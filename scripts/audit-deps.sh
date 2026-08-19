@@ -113,6 +113,21 @@ for crate in view-core view-engine view-surface view-tui view-oracle view-bench;
 done
 check_absent view-native serde_json
 
+# similar is view-core's own (and only) production dependency: the diff
+# review's hunk engine, which has to run synchronously inside update() on
+# the key-dispatch path. Confined to view-core the same way arboard is
+# confined to the bin and nucleo to view-native -- the checks in this
+# script are deny-lists, so a crate with no row has no check, and without
+# this loop a second crate acquiring a diff implementation of its own would
+# pass silently while splitting the one place hunk boundaries are decided.
+# No check_transitive_reach row to go with it: every crate in the workspace
+# depends on view-core, so the resolved graph reaches similar from all of
+# them by construction and an allow-list naming all of them would assert
+# nothing. The declared-edge loop below is the whole of this confinement.
+for crate in view view-engine view-surface view-native view-ai view-tui view-oracle view-bench view-harness view-test-support; do
+  check_absent "$crate" similar
+done
+
 # view-test-support (the ScratchDir fixture, see its own module doc) is
 # dev-only by charter: it exists to be pulled in as a [dev-dependencies]
 # entry by any crate's own tests, never as a normal dependency of anything
