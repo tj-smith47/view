@@ -1463,6 +1463,48 @@ The `Error` object's own shape (`required: ['code', 'message']`, optional
 `message` and no `data`, so no byte of the refused file's content can ride
 back on the reply.
 
+A failure *inside* the boundary is a different question from a refusal *at*
+it, and the two members that matter for it, verbatim:
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))
+for m in d['\$defs']['ErrorCode']['anyOf']:
+    if m.get('const') in (-32002, -32603):
+        print(json.dumps(m, indent=2))
+"
+```
+
+```json
+{
+  "title": "Internal error",
+  "description": "**Internal error**: Internal JSON-RPC error.\nReserved for implementation-defined server errors.",
+  "type": "integer",
+  "format": "int32",
+  "const": -32603
+}
+{
+  "title": "Resource not found",
+  "description": "**Resource not found**: A given resource, such as a file, was not found.",
+  "type": "integer",
+  "format": "int32",
+  "const": -32002
+}
+```
+
+"A given resource, such as a file, was not found" is the case exactly, so a
+path *inside* the session directory that names nothing answers `-32002`. The
+leak argument above does not apply there and inverts: inside the boundary,
+whether the file exists is not a secret the client is keeping, it is the
+answer the agent asked for. The mapping this client uses:
+
+| Condition | Code | Why |
+|---|---|---|
+| Path outside the session directory, or unresolvable | `-32602` Invalid params | The refused parameter is the `path`, and the code must not vary with whether the target exists (see above). |
+| The path resolved to no readable buffer | `-32002` Resource not found | The schema's own words for it. An agent can stop asking; `-32603` would have it retry a call that can never succeed. |
+| Stale `changedtick`, an unwritable target, or any other failure carrying out a well-formed request | `-32603` Internal error | "Reserved for implementation-defined server errors" -- these are conditions on this client's side of the call, and the distinction between them lives in `message` (a moved tick is worth retrying, `E212` is not). |
+
 ## Client crate on crates.io: `agent-client-protocol`
 
 Checked because a maintained client crate would displace a hand-rolled

@@ -324,3 +324,38 @@ the same single undo entry, the same `b:changedtick` bump reported back.
 What it does not share is `BufSetText`'s bottom-to-top ordering (case 8),
 which exists for multi-hunk batches and has no meaning for a single edit
 spanning the whole buffer.
+
+## 12. A CRLF file round-trips byte-identical, on `fileformat` neither chunk names
+
+Fixture `crlf.txt` holds `b'alpha\r\nbravo\r\ncharlie\r\n'`.
+
+```
+disk before: b'alpha\r\nbravo\r\ncharlie\r\n'
+load_hidden(crlf.txt) -> { created = true, changedtick = 2, buf = 2 }
+
+nvim_get_option_value('fileformat', {buf = 2}) -> 'dos'
+nvim_get_option_value('endofline',  {buf = 2}) -> True
+
+AI_FS_READ_CHUNK(2, nil, nil)
+  -> { ok = true, lines = ['alpha', 'bravo', 'charlie'], eol = true }
+
+AI_FS_WRITE_CHUNK(2, 2, ['alpha', 'bravo', 'CHARLIE'], true)
+  -> { applied = true, saved = true, changedtick = 4 }
+
+nvim_get_option_value('fileformat', {buf = 2}) -> 'dos'
+disk after : b'alpha\r\nbravo\r\nCHARLIE\r\n'
+```
+
+The agent sees and sends LF only: `nvim_buf_get_lines` strips the carriage
+returns for a `dos` buffer and `:write` puts them back, so a read-modify-write
+of a CRLF file preserves every terminator without the agent knowing the file
+has them. This is the one behaviour in this document that neither chunk
+implements -- it rides entirely on `fileformat`, which `bufload` detects from
+the file and which the write chunk deliberately does not set.
+
+That silence is the contract: setting `fileformat` would mean deciding a
+file's line terminators from a `content` string that cannot express them,
+and the only spelling available (`unix`) would rewrite every CRLF file an
+agent touched. `endofline`/`fixendofline` are set because the trailing
+newline *is* expressible in `content` (case 7) and is otherwise lost;
+`fileformat` is not, and is therefore left where nvim put it.

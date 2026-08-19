@@ -7227,17 +7227,19 @@ fn a_queued_proposal_survives_the_turn_that_proposed_it_ending() {
 #[test]
 fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
     let mut m = entered_ai_panel_model();
-    m.ai_panel_mut().hidden_generation = 42;
+    // drawn from the one counter every holder draws from, so the review
+    // below wears a tag nothing else in this model can also be wearing
+    let generation = m.next_hidden_generation();
     m.ai_panel_mut().pending_diff = Some(crate::native::ai_panel::DiffReviewState::new(
         7,
         std::path::PathBuf::from("/tmp/empty.rs"),
-        42,
+        generation,
         Vec::new(),
     ));
     let _ = update(
         &mut m,
         Msg::HiddenBufferLoaded {
-            generation: 42,
+            generation,
             buf: Some(REVIEW_BUF),
             created: true,
             changedtick: REVIEW_TICK,

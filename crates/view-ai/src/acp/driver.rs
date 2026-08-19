@@ -45,7 +45,7 @@ use crate::acp::permission::{permission_option, permission_outcome};
 use crate::acp::session::{ChildSlot, SessionShared};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
-    INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED,
+    INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED, RESOURCE_NOT_FOUND,
 };
 
 /// The wire protocol version this client speaks, a bare integer.
@@ -785,6 +785,16 @@ impl Driver {
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
         );
+        // A synchronous walk on the task that drains the agent's stdout,
+        // deliberately: it is what resolves symlinks, and a containment
+        // check that ran anywhere else would decide against a path that had
+        // already moved. The cost is bounded to `canonicalize(cwd)` plus
+        // one `lstat` per component of the candidate that still exists --
+        // no directory listing, no recursion, no I/O proportional to the
+        // project. `spawn_blocking` would trade that bound for a scheduling
+        // hop on every filesystem request and, worse, would put the gate
+        // after the point where the handler has already committed to
+        // answering.
         match crate::trust::path_is_contained(&self.cwd, &path) {
             Ok(Some(resolved)) => Some(resolved),
             // an unresolvable path is refused with the same code as one
@@ -924,7 +934,7 @@ fn spawn_fs_reply<T, F>(
         let frame = match rx.await {
             Ok(Ok(value)) => JsonRpcMessage::response(id, to_result(value)),
             Ok(Err(error)) => {
-                JsonRpcMessage::error_response(id.clone(), INTERNAL_ERROR, &fs_reason(&error))
+                JsonRpcMessage::error_response(id.clone(), fs_code(&error), &fs_reason(&error))
             }
             // the sender was dropped without an answer: the editor is going
             // away, which for the agent is the same as its request being
@@ -933,6 +943,30 @@ fn spawn_fs_reply<T, F>(
         };
         let _ = out.send(frame);
     });
+}
+
+/// The wire code one filesystem failure answers with.
+///
+/// An agent's control flow keys on the code, not on the prose beside it, so
+/// a failure the agent can act on differently has to arrive with a
+/// different code (`docs/acp-v1-wire-capture.md`, `fs/read_text_file`
+/// case 6). `NotFound` is the pinned table's own "a given resource, such as
+/// a file, was not found" -- an agent that reads it stops asking, where
+/// `INTERNAL_ERROR` would tell it this client malfunctioned and invite it
+/// to retry a call that can never succeed.
+///
+/// Everything else stays `INTERNAL_ERROR`, the table's
+/// "implementation-defined server errors": a moved `changedtick` and an
+/// unwritable target are both conditions on this client's side of the call,
+/// and what separates them is the message. A refusal at the trust boundary
+/// never reaches here at all -- it is answered `INVALID_PARAMS` before a
+/// reply is ever registered, so its code cannot vary with whether the
+/// refused path exists.
+fn fs_code(error: &FsError) -> i64 {
+    match error {
+        FsError::NotFound => RESOURCE_NOT_FOUND,
+        _ => INTERNAL_ERROR,
+    }
 }
 
 fn fs_reason(error: &FsError) -> String {
@@ -1726,6 +1760,24 @@ mod tests {
         );
     }
 
+    /// The next event the driver emitted, or a failure naming what was
+    /// waited for.
+    ///
+    /// Bounded, never a bare `recv`: the sender lives as long as the
+    /// `Driver` the test holds, so a driver that stopped emitting blocks
+    /// forever rather than answering `RecvError`. A guard whose deletion
+    /// wedges the suite for its whole timeout reports nothing at all --
+    /// this turns that into a named failure.
+    fn next_emitted(
+        rx: &std::sync::mpsc::Receiver<view_core::msg::Msg>,
+        what: &str,
+    ) -> view_core::msg::Msg {
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(msg) => msg,
+            Err(err) => panic!("{what}: {err}"),
+        }
+    }
+
     /// A scratch directory to stand in for a session's cwd, on the same
     /// terms `trust.rs`'s own tests use one: `path_is_contained`
     /// canonicalizes, so a test needs a root that really exists on disk and
@@ -1781,8 +1833,8 @@ mod tests {
         // to report that, not to hang the suite waiting for it
         assert!(
             matches!(
-                events_rx.recv_timeout(std::time::Duration::from_secs(5)),
-                Ok(view_core::msg::Msg::Ai(AiEvent::FsReadRequested { .. }))
+                next_emitted(&events_rx, "FsReadRequested"),
+                view_core::msg::Msg::Ai(AiEvent::FsReadRequested { .. })
             ),
             "fs/read_text_file dispatched to on_fs_read"
         );
@@ -1820,7 +1872,7 @@ mod tests {
             path,
             line,
             limit,
-        }) = events_rx.recv().expect("FsReadRequested was emitted")
+        }) = next_emitted(&events_rx, "FsReadRequested was emitted")
         else {
             panic!("expected FsReadRequested")
         };
@@ -1858,9 +1910,8 @@ mod tests {
         );
 
         for expected in ["an omitted window", "an explicit null window"] {
-            let view_core::msg::Msg::Ai(AiEvent::FsReadRequested { line, limit, .. }) = events_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .expect("FsReadRequested was emitted")
+            let view_core::msg::Msg::Ai(AiEvent::FsReadRequested { line, limit, .. }) =
+                next_emitted(&events_rx, "FsReadRequested was emitted")
             else {
                 panic!("expected FsReadRequested")
             };
@@ -1885,7 +1936,7 @@ mod tests {
             request_id,
             path,
             content,
-        }) = events_rx.recv().expect("FsWriteRequested was emitted")
+        }) = next_emitted(&events_rx, "FsWriteRequested was emitted")
         else {
             panic!("expected FsWriteRequested")
         };
@@ -2009,7 +2060,7 @@ mod tests {
             title,
             content,
             ..
-        }) = events_rx.recv().expect("the terminal update was emitted")
+        }) = next_emitted(&events_rx, "the terminal update was emitted")
         else {
             panic!("expected ToolCallUpdate")
         };
@@ -2033,7 +2084,7 @@ mod tests {
             title,
             content,
             ..
-        }) = events_rx.recv().expect("the late update was emitted")
+        }) = next_emitted(&events_rx, "the late update was emitted")
         else {
             panic!("expected ToolCallUpdate")
         };
@@ -2076,7 +2127,7 @@ mod tests {
                 ],
             })),
         );
-        events_rx.recv().expect("the first update was emitted");
+        next_emitted(&events_rx, "the first update was emitted");
 
         driver.on_notification(
             "session/update",
@@ -2087,7 +2138,7 @@ mod tests {
             })),
         );
         let view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { content, .. }) =
-            events_rx.recv().expect("the second update was emitted")
+            next_emitted(&events_rx, "the second update was emitted")
         else {
             panic!("expected ToolCallUpdate")
         };
@@ -2172,7 +2223,7 @@ mod tests {
             ),
         );
 
-        let first = events_rx.recv().expect("the tool call was emitted");
+        let first = next_emitted(&events_rx, "the tool call was emitted");
         assert!(
             matches!(
                 first,
@@ -2434,7 +2485,7 @@ mod tests {
             })),
         );
         let view_core::msg::Msg::Ai(AiEvent::PlanUpdated { entries }) =
-            events_rx.recv().expect("PlanUpdated was emitted")
+            next_emitted(&events_rx, "PlanUpdated was emitted")
         else {
             panic!("expected PlanUpdated")
         };
@@ -2473,7 +2524,7 @@ mod tests {
             Ok(json!({ "sessionId": "s1" })),
         );
         let view_core::msg::Msg::Ai(AiEvent::SessionReady { .. }) =
-            events_rx.recv().expect("SessionReady was emitted")
+            next_emitted(&events_rx, "SessionReady was emitted")
         else {
             panic!("expected SessionReady")
         };
@@ -2517,7 +2568,7 @@ mod tests {
             tool_call_id,
             title,
             options,
-        }) = events_rx.recv().expect("PermissionRequested was emitted")
+        }) = next_emitted(&events_rx, "PermissionRequested was emitted")
         else {
             panic!("expected PermissionRequested")
         };
@@ -2558,7 +2609,7 @@ mod tests {
         );
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
             request_id: first, ..
-        }) = events_rx.recv().expect("first PermissionRequested")
+        }) = next_emitted(&events_rx, "first PermissionRequested")
         else {
             panic!("expected PermissionRequested")
         };
@@ -2570,7 +2621,7 @@ mod tests {
         );
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested {
             request_id: second, ..
-        }) = events_rx.recv().expect("second PermissionRequested")
+        }) = next_emitted(&events_rx, "second PermissionRequested")
         else {
             panic!("expected PermissionRequested")
         };
@@ -2623,7 +2674,7 @@ mod tests {
         );
 
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { title, .. }) =
-            events_rx.recv().expect("PermissionRequested was emitted")
+            next_emitted(&events_rx, "PermissionRequested was emitted")
         else {
             panic!("expected PermissionRequested")
         };
@@ -2650,7 +2701,7 @@ mod tests {
             &permission_request_params(),
         );
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { .. }) =
-            events_rx.recv().expect("PermissionRequested was emitted")
+            next_emitted(&events_rx, "PermissionRequested was emitted")
         else {
             panic!("expected PermissionRequested")
         };
@@ -2669,7 +2720,7 @@ mod tests {
             Some(json!({ "outcome": { "outcome": "cancelled" } }))
         );
         let view_core::msg::Msg::Ai(AiEvent::TurnEnded { .. }) =
-            events_rx.recv().expect("TurnEnded was emitted")
+            next_emitted(&events_rx, "TurnEnded was emitted")
         else {
             panic!("expected TurnEnded")
         };
@@ -2690,7 +2741,7 @@ mod tests {
             &permission_request_params(),
         );
         let view_core::msg::Msg::Ai(AiEvent::PermissionRequested { .. }) =
-            events_rx.recv().expect("PermissionRequested was emitted")
+            next_emitted(&events_rx, "PermissionRequested was emitted")
         else {
             panic!("expected PermissionRequested")
         };

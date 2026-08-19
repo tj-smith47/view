@@ -37,7 +37,8 @@
 //!   message chunk.
 //! - `read-outside` -- the same request for a path nowhere near that
 //!   directory, so the leg the client refuses can be driven over a real
-//!   wire rather than only in a unit test.
+//!   wire rather than only in a unit test. A refused read reports the
+//!   error's `code` rather than its message.
 //! - `write` -- send an `fs/write_text_file` request, also inside the
 //!   working directory, and report whether it was accepted or refused.
 //! - `refuse` -- answer the prompt with a JSON-RPC error instead of a
@@ -118,8 +119,11 @@ fn main() {
                     cancelled = false;
                 }
                 Some("fs-read-1") => {
-                    let content = if frame.get("error").is_some() {
-                        "refused".to_string()
+                    let content = if let Some(error) = frame.get("error") {
+                        // the code, not the prose: an agent's control flow
+                        // keys on it, so it is the part worth reporting
+                        // back over a real wire
+                        format!("refused {}", error["code"])
                     } else {
                         frame["result"]["content"]
                             .as_str()

@@ -233,7 +233,6 @@ fn a_windowed_read_answers_only_the_lines_the_window_names() {
     );
 
     engine.handle.release_hidden(&name).expect("release");
-    engine.handle.release_hidden(&name).expect("release");
 }
 
 /// A file with no trailing newline reads back without one. nvim's line
@@ -263,6 +262,137 @@ fn a_file_with_no_trailing_newline_reads_back_without_one() {
         result.expect("the read answers"),
         "no terminator",
         "the answer invented a trailing newline the file does not hold"
+    );
+
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// The write half of the same terminator contract: `eol = false` must reach
+/// disk with no trailing newline. `fixendofline` is what nvim consults to
+/// decide whether to *add* a missing final newline, so hard-coding either
+/// option to `true` would silently append a byte the agent never sent --
+/// which the agent's next read returns, and which it then believes it
+/// authored (capture case 7).
+#[test]
+fn a_write_with_no_trailing_newline_reaches_disk_without_one() {
+    let root = scratch_root("write-no-eol");
+    let path = root.join("terminator.txt");
+    std::fs::write(&path, "before\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let (buf, tick) = resolve(&engine, &rx, &name, 1);
+    engine
+        .handle
+        .ai_fs_write(
+            1,
+            BufferHandle(buf),
+            &["no".to_owned(), "trailing".to_owned()],
+            false,
+            tick,
+        )
+        .expect("issue the write");
+
+    let (_, result) = next_write_reply(&rx);
+    result.expect("the write is accepted");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("read the written file"),
+        "no\ntrailing",
+        "the write appended a terminator the agent did not send"
+    );
+
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// ACP's "The Client MUST create the file if it doesn't exist," and the
+/// directory above it: creating a file in a new directory is an ordinary
+/// thing an agent does, and the directory is not a second decision to put
+/// in front of the user. The buffer count still returns to baseline, so a
+/// creating write leaks no more than a read does.
+#[test]
+fn a_write_to_a_path_with_neither_file_nor_directory_creates_both() {
+    let root = scratch_root("create");
+    let path = root.join("no_such_dir").join("fresh.txt");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+    let baseline = buffer_count(&engine);
+
+    assert!(!path.exists(), "the fixture must not exist yet");
+    let (buf, tick) = resolve(&engine, &rx, &name, 1);
+    engine
+        .handle
+        .ai_fs_write(
+            1,
+            BufferHandle(buf),
+            &["created".to_owned(), "by the agent".to_owned()],
+            true,
+            tick,
+        )
+        .expect("issue the write");
+
+    let (_, result) = next_write_reply(&rx);
+    result.expect("a write to a path with no file behind it must create it");
+    assert_eq!(
+        std::fs::read_to_string(&path).expect("the file now exists"),
+        "created\nby the agent\n"
+    );
+
+    engine.handle.release_hidden(&name).expect("release");
+    assert_eq!(buffer_count(&engine), baseline);
+}
+
+/// A CRLF file survives a read-modify-write byte for byte. The agent both
+/// sees and sends LF only; the carriage returns ride on `fileformat`, which
+/// `bufload` detects and which the write chunk deliberately never sets
+/// (capture case 12) -- a `content` string cannot express a file's line
+/// terminators, so deciding them from one would rewrite every CRLF file an
+/// agent touched.
+#[test]
+fn a_crlf_file_survives_an_agent_read_modify_write_byte_for_byte() {
+    let root = scratch_root("crlf");
+    let path = root.join("dos.txt");
+    std::fs::write(&path, "alpha\r\nbravo\r\ncharlie\r\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let (buf, tick) = resolve(&engine, &rx, &name, 1);
+    engine
+        .handle
+        .ai_fs_read(1, BufferHandle(buf), None, None)
+        .expect("issue the read");
+    let (_, read) = next_read_reply(&rx);
+    assert_eq!(
+        read.expect("the read answers"),
+        "alpha\nbravo\ncharlie\n",
+        "the agent must see LF only, never the file's own carriage returns"
+    );
+
+    engine
+        .handle
+        .ai_fs_write(
+            2,
+            BufferHandle(buf),
+            &["alpha".to_owned(), "bravo".to_owned(), "CHARLIE".to_owned()],
+            true,
+            tick,
+        )
+        .expect("issue the write");
+    let (_, written) = next_write_reply(&rx);
+    written.expect("the write is accepted");
+
+    assert_eq!(
+        std::fs::read(&path).expect("read the written file"),
+        b"alpha\r\nbravo\r\nCHARLIE\r\n",
+        "the write converted the file's line terminators"
     );
 
     engine.handle.release_hidden(&name).expect("release");

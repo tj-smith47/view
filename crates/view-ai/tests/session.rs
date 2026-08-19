@@ -11,8 +11,8 @@ use std::time::{Duration, Instant};
 use view_ai::{AgentLaunch, AiSession};
 use view_core::msg::Msg;
 use view_core::native::ai_event::{
-    AiCommand, AiEvent, Cost, PermissionOutcome, PlanEntry, PlanEntryPriority, PlanEntryStatus,
-    StopReason, ToolCallStatus,
+    AiCommand, AiEvent, Cost, FsError, PermissionOutcome, PlanEntry, PlanEntryPriority,
+    PlanEntryStatus, StopReason, ToolCallStatus,
 };
 
 /// Generous enough that a loaded CI host does not flake, short enough that a
@@ -430,11 +430,43 @@ fn an_agent_read_outside_the_session_directory_never_crosses_at_all() {
         next_event(&rx, "the agent's report of the refusal"),
         AiEvent::MessageChunk {
             message_id: Some("msg_1".to_string()),
-            text: "read refused".to_string(),
+            text: "read refused -32602".to_string(),
             from_agent: true,
         },
         "a refused path must be answered by the transport itself, never \
          raised as a request the editor is asked to serve"
+    );
+}
+
+/// A path inside the session directory that names nothing readable answers
+/// the wire's own "resource not found," not "internal error." The
+/// distinction is the agent's, not this client's: `-32002` tells it to stop
+/// asking, while `-32603` reports a client malfunction and invites it to
+/// retry a call that can never succeed.
+#[test]
+fn a_read_that_found_nothing_answers_the_wires_resource_not_found_code() {
+    let (session, rx) = session();
+    ready(&rx);
+    session.send(AiCommand::Prompt {
+        text: "read".to_string(),
+        context: Vec::new(),
+    });
+
+    let AiEvent::FsReadRequested { request_id, .. } = next_event(&rx, "FsReadRequested") else {
+        panic!("expected FsReadRequested")
+    };
+    session.send(AiCommand::FsReadReply {
+        request_id,
+        result: Err(FsError::NotFound),
+    });
+
+    assert_eq!(
+        next_event(&rx, "the agent's report of the failure"),
+        AiEvent::MessageChunk {
+            message_id: Some("msg_1".to_string()),
+            text: "read refused -32002".to_string(),
+            from_agent: true,
+        }
     );
 }
 

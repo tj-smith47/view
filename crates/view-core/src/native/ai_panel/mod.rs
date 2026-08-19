@@ -144,14 +144,24 @@ pub struct AiPanelState {
     /// One counter for both, not one each: the two kinds of holder share
     /// the `Msg::HiddenBufferLoaded` reply, and separate counters would let
     /// a review and a filesystem request wear the same generation and each
-    /// claim the other's answer. Reached through
-    /// [`Model::next_hidden_generation`](crate::model::Model::next_hidden_generation)
-    /// rather than incremented at the call sites, so a future third holder
-    /// cannot start its own sequence by accident.
-    pub hidden_generation: u64,
+    /// claim the other's answer. Private, with
+    /// [`Self::next_hidden_generation`] the only way to move it, so a
+    /// future third holder cannot start its own sequence by accident.
+    hidden_generation: u64,
 }
 
 impl AiPanelState {
+    /// The next tag for a holder of `Msg::HiddenBufferLoaded`, one ahead of
+    /// the last one handed out.
+    ///
+    /// Reached from [`Model::next_hidden_generation`](crate::model::Model::next_hidden_generation),
+    /// which is where callers ask; this is the single place the counter
+    /// moves.
+    pub fn next_hidden_generation(&mut self) -> u64 {
+        self.hidden_generation += 1;
+        self.hidden_generation
+    }
+
     /// A freshly opened panel: no session bound yet, an empty transcript,
     /// nothing typed, nothing pending.
     pub fn new() -> Self {

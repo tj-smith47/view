@@ -144,7 +144,7 @@ pub struct Model {
     /// anything about it is on screen, and a request that lost its record
     /// when the sidebar closed would leave the agent waiting on an answer
     /// nothing was left to send.
-    pub ai_fs: crate::native::ai_fs::AiFsState,
+    pub(crate) ai_fs: crate::native::ai_fs::AiFsState,
 }
 
 impl Model {
@@ -196,11 +196,9 @@ impl Model {
     /// and an agent filesystem request's resolve are answered by the same
     /// `Msg::HiddenBufferLoaded`, and two counters would let both wear the
     /// same number and each fold the other's reply. See
-    /// [`AiPanelState::hidden_generation`](crate::native::ai_panel::AiPanelState::hidden_generation).
+    /// [`AiPanelState::next_hidden_generation`](crate::native::ai_panel::AiPanelState::next_hidden_generation).
     pub fn next_hidden_generation(&mut self) -> u64 {
-        let panel = self.ai_panel_mut();
-        panel.hidden_generation += 1;
-        panel.hidden_generation
+        self.ai_panel_mut().next_hidden_generation()
     }
 
     /// Like [`Model::new`], but with `term_width`/`term_height` pre-filled

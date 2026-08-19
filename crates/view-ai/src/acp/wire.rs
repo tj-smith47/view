@@ -110,6 +110,14 @@ pub const INVALID_PARAMS: i64 = -32602;
 /// carry out.
 pub const INTERNAL_ERROR: i64 = -32603;
 
+/// The reserved code for a resource -- a file, in this client's case --
+/// that was not found.
+///
+/// What a `fs/read_text_file` or `fs/write_text_file` inside the session
+/// directory answers with when the path names nothing readable, pinned
+/// beside the rest of the mapping in `docs/acp-v1-wire-capture.md`.
+pub const RESOURCE_NOT_FOUND: i64 = -32002;
+
 /// The reserved code `session/new` answers with when the agent requires
 /// `authenticate` before a session can be created, pinned in
 /// `docs/acp-v1-wire-capture.md`.

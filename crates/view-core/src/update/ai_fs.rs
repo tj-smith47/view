@@ -78,6 +78,17 @@ fn start(
     // process's own working directory: nvim resolves one against *its*
     // cwd, which `:cd` moves and this process never observes, so any answer
     // given here would be for a file nobody named.
+    //
+    // A deliberate early-out, not this client's authority on unusable
+    // paths: `view_engine::nvim_api::hidden_path_refusal` is, and it
+    // refuses blank and trailing-separator spellings this never sees, which
+    // reach the agent as `NotFound` through the buffer-less resolve
+    // instead. The invariant that keeps the two from drifting is that
+    // whatever this refuses, that set refuses too -- pinned in the one
+    // crate that can name both (`view::runtime`'s
+    // `the_cores_own_path_refusal_is_a_subset_of_the_engines`). Widening
+    // this predicate without widening that one would have this client
+    // refuse a path nvim would have opened.
     if !path.is_absolute() {
         return vec![refuse(
             request_id,
@@ -223,6 +234,7 @@ mod tests {
     use super::*;
     use crate::msg::Msg;
     use crate::native::ai_event::AiEvent;
+    use crate::native::ai_fs::MAX_IN_FLIGHT;
     use crate::update::update;
 
     fn trusted() -> Model {
@@ -591,6 +603,68 @@ mod tests {
             "the session those answers would cross into is gone"
         );
         assert!(model.ai_fs.is_empty());
+    }
+
+    /// The crash *wiring*, not the drain it calls: an agent is most likely
+    /// to die mid-tool-call, which is precisely when requests are in
+    /// flight, and a `SessionCrashed` that forgot to drain would pin one
+    /// hidden buffer per outstanding request for the rest of the editor's
+    /// run with nothing left alive to release it.
+    #[test]
+    fn a_session_crash_releases_every_hold_its_requests_were_riding() {
+        let mut model = trusted();
+        let _ = update(&mut model, read_request(1, "/p/a.rs"));
+        let _ = update(&mut model, write_request(2, "/p/b.rs", "x\n"));
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited".to_owned(),
+            }),
+        );
+
+        let released: Vec<RpcCall> = rpcs(&effects)
+            .into_iter()
+            .filter(|call| matches!(call, RpcCall::ReleaseHidden { .. }))
+            .collect();
+        assert_eq!(released.len(), 2, "one release per hold still outstanding");
+        assert!(model.ai_fs.is_empty(), "and nothing left in flight");
+        assert!(
+            !commands(&effects).iter().any(|command| matches!(
+                command,
+                AiCommand::FsReadReply { .. } | AiCommand::FsWriteReply { .. }
+            )),
+            "the session those answers would cross into is gone"
+        );
+    }
+
+    /// The in-flight cap as a *gate*, not as a container that reports
+    /// `false`: past the cap the request must be answered and no resolve
+    /// issued. A cap that let the resolve through anyway would take a hold
+    /// nothing records -- and so nothing ever releases -- while the agent's
+    /// own request went unanswered for the rest of the session, which is
+    /// worse than the leak the cap exists to prevent.
+    #[test]
+    fn a_request_past_the_in_flight_cap_is_answered_and_resolves_nothing() {
+        let mut model = trusted();
+        for request_id in 0..u64::try_from(MAX_IN_FLIGHT).unwrap_or(u64::MAX) {
+            let started = update(&mut model, read_request(request_id, "/p/a.rs"));
+            assert_eq!(rpcs(&started).len(), 1, "request {request_id} must resolve");
+        }
+
+        let refused = update(&mut model, read_request(9999, "/p/a.rs"));
+
+        assert!(
+            rpcs(&refused).is_empty(),
+            "a request past the cap must take no hold at all: {refused:?}"
+        );
+        assert!(matches!(
+            commands(&refused).as_slice(),
+            [AiCommand::FsReadReply {
+                request_id: 9999,
+                result: Err(FsError::Other { .. }),
+            }]
+        ));
     }
 
     /// An answer for a request that is no longer in flight releases

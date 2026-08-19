@@ -1961,6 +1961,55 @@ mod tests {
         );
     }
 
+    /// The agent's filesystem gate in `view-core` spells its own
+    /// "absolute?" predicate, because `view-core` cannot name
+    /// `view_engine::nvim_api::hidden_path_refusal` -- the authority on
+    /// unusable path spellings -- without inverting the dependency
+    /// direction. This bin crate can name both, so the seam is pinned here:
+    /// whatever core refuses on its own, the engine's set must refuse too.
+    ///
+    /// The subset direction is the dangerous one. A core predicate that
+    /// grew past the engine's would have this client refuse, in its own
+    /// words, a path nvim would have opened -- an agent told a file it can
+    /// see is unusable, with nothing in either crate's own suite noticing.
+    #[test]
+    fn the_cores_own_path_refusal_is_a_subset_of_the_engines() {
+        let spellings = [
+            "",
+            "relative.rs",
+            "./relative.rs",
+            "nested/relative.rs",
+            "/absolute/dir/",
+            "/absolute/dir\\",
+            "/absolute/file.rs",
+            "/absolute/no-extension",
+        ];
+
+        for path in spellings {
+            let mut model = view_core::model::Model::new();
+            model.ai_trusted = true;
+            let effects = view_core::update::update(
+                &mut model,
+                Msg::Ai(view_core::native::ai_event::AiEvent::FsReadRequested {
+                    request_id: 1,
+                    path: std::path::PathBuf::from(path),
+                    line: None,
+                    limit: None,
+                }),
+            );
+            let core_refused = !effects
+                .iter()
+                .any(|effect| matches!(effect, Effect::Rpc(RpcCall::LoadHidden { .. })));
+            if core_refused {
+                assert!(
+                    view_engine::nvim_api::hidden_path_refusal(path).is_some(),
+                    "core refuses {path:?} on its own, but the engine's \
+                     refusal set would have opened it"
+                );
+            }
+        }
+    }
+
     /// The stand-in above is only for the refusal: a usable path still
     /// reaches the wire and answers nothing here, since the reply comes
     /// back through the engine's own pump.
