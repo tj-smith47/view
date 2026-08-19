@@ -617,3 +617,148 @@ impl EngineOps for FakeOps {
             .map(|()| Vec::new())
     }
 }
+
+/// A `Send`-capable [`EngineOps`] fixture whose four `read_*` methods sleep
+/// `delay` before returning a trivial default, everything else returning
+/// `Ok(())` immediately -- the seam an off-loop-property test blocks on to
+/// prove a caller genuinely returns before the read finishes, rather than
+/// merely finishing fast because the read itself was fast.
+///
+/// [`FakeOps`] cannot serve this: its `RefCell` call log makes it neither
+/// `Send` nor safely `Clone`-shareable across threads, which
+/// `ai_context_worker::spawn`'s `E: EngineOps + Clone + Send + 'static`
+/// bound requires. `SlowOps` carries no call log at all -- a plain `Clone`,
+/// `Copy`-able `Duration` -- because the property under test is purely
+/// timing (does the caller return before the read resolves), not which
+/// calls were made.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct SlowOps {
+    delay: std::time::Duration,
+}
+
+#[cfg(test)]
+impl SlowOps {
+    /// A fixture whose reads block for `delay` before returning.
+    pub(crate) fn new(delay: std::time::Duration) -> Self {
+        Self { delay }
+    }
+}
+
+#[cfg(test)]
+impl EngineOps for SlowOps {
+    fn input(&self, _notation: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn try_resize(&self, _width: u16, _height: u16) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn paste(&self, _text: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn input_mouse(
+        &self,
+        _button: &str,
+        _action: &str,
+        _modifier: &str,
+        _row: u16,
+        _col: u16,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn set_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn hold_option(&self, _name: &str, _value: &OptionValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn reply(&self, _token: ReplyToken, _value: ReplyValue) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn probe_default_hl(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn probe_swap_recovery(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn redraw(&self) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn register_mappings(
+        &self,
+        _specs: &[MappingSpec],
+        _channel_id: u64,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn register_bridge(&self, _channel_id: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn register_clipboard(&self, _channel_id: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn list_buffers(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn preview_buffer(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn open_file(&self, _path: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn rename_file(
+        &self,
+        _old_path: &str,
+        _new_path: &str,
+        _generation: u64,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn tree_create_prompt(&self, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn tree_rename_prompt(
+        &self,
+        _old_path: &str,
+        _current_name: &str,
+        _generation: u64,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn tree_delete_confirm(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn set_buf_text(
+        &self,
+        _buf: BufferHandle,
+        _edits: &[TextEdit],
+        _undojoin: bool,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn buf_attach(&self, _buf: BufferHandle, _generation: u64) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn buf_detach(&self, _buf: BufferHandle) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        std::thread::sleep(self.delay);
+        Ok(CurrentBufferRead::new(
+            std::path::PathBuf::new(),
+            String::new(),
+        ))
+    }
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        std::thread::sleep(self.delay);
+        Ok((CursorRead::new(0, 0), None))
+    }
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        std::thread::sleep(self.delay);
+        Ok(Vec::new())
+    }
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        std::thread::sleep(self.delay);
+        Ok(Vec::new())
+    }
+}

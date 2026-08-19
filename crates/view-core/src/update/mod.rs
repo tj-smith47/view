@@ -360,6 +360,10 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         // even a no-op arm here holds the O(edit size) contract
         // `RpcCall::BufAttach` states.
         Msg::BufTextChanged { .. } => Vec::new(),
+        // Same no-op shape as `BufTextChanged` above, for the same reason:
+        // the hunk-rebase state machine is the only intended consumer, and
+        // nothing in this tree owns rebase state yet to tear down.
+        Msg::BufDetached { .. } => Vec::new(),
         Msg::PickerResults { generation, items } => {
             let Some(p) = model.picker_mut() else {
                 return Vec::new();

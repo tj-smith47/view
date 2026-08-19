@@ -108,6 +108,26 @@ fn next_buf_text_changed(rx: &mpsc::Receiver<Msg>) -> Msg {
     }
 }
 
+/// Drains `rx` for `window`, asserting no `Msg::BufTextChanged` arrives --
+/// unrelated `Msg`s (redraw traffic) are skipped rather than treated as a
+/// failure, the same tolerance `next_buf_text_changed` extends. A plain
+/// `rx.try_recv().is_err()` only proves the channel was empty at one
+/// instant; this proves it stayed empty for the whole window, which is
+/// what a "no further event" claim actually needs.
+fn assert_no_further_buf_text_changed(rx: &mpsc::Receiver<Msg>, window: Duration) {
+    let deadline = Instant::now() + window;
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(Msg::BufTextChanged { .. }) => {
+                panic!("a BufTextChanged arrived when none was expected")
+            }
+            Ok(_other) => continue,
+            Err(_timeout_or_closed) => break,
+        }
+    }
+}
+
 /// Attaching a buffer and editing one line produces exactly one
 /// `Msg::BufTextChanged` bounding that line, never the whole buffer --
 /// the falsifiable check the brief states directly. `send_buffer: false`
@@ -160,10 +180,7 @@ fn attach_then_one_edit_produces_one_event_bounding_only_the_edited_line() {
     );
     assert_eq!(linedata, vec!["LINE2".to_string()]);
 
-    assert!(
-        rx.try_recv().is_err(),
-        "a single edit must produce exactly one event, not a second one queued behind it"
-    );
+    assert_no_further_buf_text_changed(&rx, Duration::from_millis(500));
 }
 
 /// `buf_detach` stops delivery: an edit issued after detaching produces no
@@ -215,20 +232,79 @@ fn detach_stops_further_events() {
         )
         .expect("edit after detach");
 
-    // no event to wait indefinitely for -- a bounded drain window is the
-    // only honest way to prove an absence; 500ms comfortably exceeds a
-    // local nvim's round trip for one small edit
-    let deadline = Instant::now() + Duration::from_millis(500);
-    while Instant::now() < deadline {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        match rx.recv_timeout(remaining) {
-            Ok(Msg::BufTextChanged { .. }) => {
-                panic!("a BufTextChanged arrived after detach, which must never happen")
-            }
-            Ok(_other) => continue,
-            Err(_timeout_or_closed) => break,
-        }
-    }
+    // 500ms comfortably exceeds a local nvim's round trip for one small
+    // edit; this alone only proves this connection's own decode gate
+    // dropped the event locally, not that nvim itself stopped sending --
+    // see `buf_detach_stops_delivery_on_the_wire_itself` below for that
+    // stronger claim.
+    assert_no_further_buf_text_changed(&rx, Duration::from_millis(500));
+}
+
+/// `detach_stops_further_events` above proves no `Msg::BufTextChanged`
+/// reaches the consumer after `buf_detach` -- but `buf_detach` clears this
+/// connection's own attach-generation entry proactively, before its
+/// `nvim_buf_detach` notify even reaches the writer thread, so
+/// `decode_buf_lines_event`'s map-miss gate would drop every subsequent
+/// event on the LOCAL side regardless of whether nvim itself ever stopped
+/// sending them. A notify that silently never left this process (a dropped
+/// `nvim_buf_detach` send) would be indistinguishable from a genuine detach
+/// under that test alone.
+///
+/// This test closes that gap: after a real `buf_detach`, it re-arms the
+/// local entry with `note_buf_attach_for_test` -- local bookkeeping only,
+/// no wire effect -- so a still-live wire subscription (exactly what a
+/// dropped notify would leave behind) would decode and reach `rx`
+/// faithfully. Only a connection nvim genuinely detached stays silent with
+/// the local gate artificially held open.
+#[test]
+fn buf_detach_stops_delivery_on_the_wire_itself() {
+    let mut engine = spawn();
+    set_lines(&engine, 0, &["line1", "line2"]);
+    let buf = current_buf(&engine);
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .buf_attach(BufferHandle(buf), 11)
+        .expect("attach to the current buffer");
+    engine
+        .handle
+        .request(
+            "nvim_buf_set_lines",
+            vec![
+                rmpv::Value::from(buf),
+                rmpv::Value::from(0),
+                rmpv::Value::from(1),
+                rmpv::Value::from(false),
+                rmpv::Value::Array(vec![rmpv::Value::from("EDITED1")]),
+            ],
+        )
+        .expect("edit before detach");
+    let _ = next_buf_text_changed(&rx);
+
+    engine
+        .handle
+        .buf_detach(BufferHandle(buf))
+        .expect("detach from the current buffer");
+    // re-arm the local decode gate ONLY -- no `nvim_buf_attach` notify --
+    // so a still-live wire subscription would decode and be delivered
+    engine.handle.note_buf_attach_for_test(buf, 99);
+    engine
+        .handle
+        .request(
+            "nvim_buf_set_lines",
+            vec![
+                rmpv::Value::from(buf),
+                rmpv::Value::from(1),
+                rmpv::Value::from(2),
+                rmpv::Value::from(false),
+                rmpv::Value::Array(vec![rmpv::Value::from("EDITED2")]),
+            ],
+        )
+        .expect("edit after detach, with the local gate re-armed");
+
+    assert_no_further_buf_text_changed(&rx, Duration::from_millis(500));
 }
 
 /// Two buffers attached with distinct generations never cross-deliver:
@@ -303,4 +379,90 @@ fn two_concurrently_attached_buffers_never_cross_deliver_generations() {
         generation, 202,
         "buffer B's event must carry B's own generation, never A's"
     );
+}
+
+fn scratch_file(nonce_suffix: &str, contents: &str) -> std::path::PathBuf {
+    let nonce = format!(
+        "{}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+        nonce_suffix
+    );
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp");
+    std::fs::create_dir_all(&root).expect("create test root");
+    let path = root.join(format!("buf-attach-edit-bang-{nonce}.txt"));
+    std::fs::write(&path, contents).expect("seed scratch file");
+    path
+}
+
+/// Waits up to 5s for the next `Msg::BufDetached` on `rx`, skipping over any
+/// other `Msg` in the meantime -- the `Msg::BufDetached` analogue of
+/// `next_buf_text_changed`.
+fn next_buf_detached(rx: &mpsc::Receiver<Msg>) -> Msg {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            remaining > Duration::ZERO,
+            "no Msg::BufDetached arrived within 5s"
+        );
+        match rx.recv_timeout(remaining) {
+            Ok(msg @ Msg::BufDetached { .. }) => return msg,
+            Ok(_other) => continue,
+            Err(err) => panic!("channel closed before a BufDetached arrived: {err}"),
+        }
+    }
+}
+
+/// `:edit!` forcing a reload of an attached buffer is nvim deciding to
+/// detach this connection's subscription unasked -- section 7 of
+/// `docs/nvim-buf-attach-wire-capture.md` captures the raw
+/// `nvim_buf_detach_event` this produces with no `nvim_buf_detach` request
+/// ever sent by this connection. This test proves `crate::handle` surfaces
+/// that as `Msg::BufDetached`, the vocabulary a rebase state machine needs
+/// to learn its subscription died -- distinct from a self-initiated
+/// `buf_detach`, which produces no `Msg` at all (`detach_stops_further_events`
+/// above).
+#[test]
+fn nvim_initiated_detach_via_edit_bang_produces_msg_buf_detached() {
+    let mut engine = spawn();
+    let path = scratch_file("reload", "disk-line1\ndisk-line2\n");
+    engine
+        .handle
+        .request(
+            "nvim_command",
+            vec![rmpv::Value::from(format!("edit {}", path.display()))],
+        )
+        .expect("open the scratch file");
+    let buf = current_buf(&engine);
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .buf_attach(BufferHandle(buf), 42)
+        .expect("attach to the reloaded-later buffer");
+
+    // rewrite the file out from under nvim, then force a reload -- nvim
+    // itself decides to detach this buffer's subscription, unasked
+    std::fs::write(&path, "disk-line1-CHANGED\ndisk-line2\n").expect("mutate file on disk");
+    engine
+        .handle
+        .request("nvim_command", vec![rmpv::Value::from("edit!")])
+        .expect("force reload");
+
+    let Msg::BufDetached {
+        buf: event_buf,
+        generation,
+    } = next_buf_detached(&rx)
+    else {
+        unreachable!("next_buf_detached only returns this variant")
+    };
+    assert_eq!(event_buf, BufferHandle(buf));
+    assert_eq!(generation, 42);
+
+    let _ = std::fs::remove_file(&path);
 }

@@ -1,5 +1,9 @@
 //! Off-loop worker that performs a submitted prompt's four context reads
-//! and hands the assembled command to the agent session.
+//! and hands the assembled command to the agent session -- and, since both
+//! `Effect::Ai` and `Effect::AiPromptSubmit` queue onto this same worker's
+//! one channel (see [`AiContextJob`]'s own doc), the single point every
+//! command bound for the agent session passes through, in the order the
+//! loop thread queued them.
 //!
 //! `Effect::AiPromptSubmit` carries only the prompt's text -- `view-core` is
 //! pure and cannot itself issue RPC or depend on `view-ai` (see that
@@ -28,11 +32,26 @@ use view_core::native::ai_event::AiCommand;
 use crate::ai_worker::AiWorker;
 use crate::engine_ops::EngineOps;
 
-/// One prompt submission's text, queued by [`crate::runtime::Executor::run`]
-/// (`Effect::AiPromptSubmit`) for this worker to turn into a fully assembled
-/// [`AiCommand::Prompt`].
-pub struct AiContextJob {
-    pub text: String,
+/// One job queued by [`crate::runtime::Executor::run`] onto this worker's
+/// single channel. `Submit` and `Direct` share the one queue deliberately --
+/// not two separate channels -- so a `Cancel` (`Effect::Ai`) issued right
+/// after a `Submit` (`Effect::AiPromptSubmit`) can never overtake the prompt
+/// it means to cancel: both funnel through the same `mpsc::Sender`, drained
+/// in FIFO order by this worker's one thread, so "queued after" and
+/// "dispatched to the session after" are the same relation by construction.
+/// Before this type existed, `Effect::Ai` dispatched straight to
+/// [`AiWorker::dispatch`] from the loop thread while `Effect::AiPromptSubmit`
+/// queued here for the (slower, four-read) trip to the same call --
+/// overtaking was possible because they were two independent paths racing
+/// for the same destination.
+pub enum AiContextJob {
+    /// A submitted prompt's raw text -- this worker reads the four context
+    /// sources and assembles [`AiCommand::Prompt`] before dispatching.
+    Submit { text: String },
+    /// A command that needs no context assembly (`Cancel`, a permission
+    /// answer, an already-assembled `Prompt`) -- dispatched to the session
+    /// as-is, with no read in between.
+    Direct(AiCommand),
 }
 
 /// The engine-ops connection this worker reads through, re-pointable across
@@ -122,8 +141,13 @@ fn run<E: EngineOps + Clone>(
     jobs: &mpsc::Receiver<AiContextJob>,
 ) {
     while let Ok(job) = jobs.recv() {
-        let ops = route.current();
-        ai.dispatch(build_prompt(&ops, job.text));
+        match job {
+            AiContextJob::Submit { text } => {
+                let ops = route.current();
+                ai.dispatch(build_prompt(&ops, text));
+            }
+            AiContextJob::Direct(command) => ai.dispatch(command),
+        }
     }
 }
 

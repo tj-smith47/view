@@ -215,17 +215,31 @@ pub struct EngineHandle {
     /// (`announced_exit`) and not merely the child's exit status.
     settled: Arc<Condvar>,
     outbox: Arc<crate::outbox::Outbox>,
-    /// Which [`Msg::BufTextChanged`] generation each live-attached buffer's
-    /// `nvim_buf_lines_event`/`nvim_buf_detach_event` notifications should be
-    /// stamped with, keyed by the buffer's own unwrapped `Ext` handle.
-    /// Populated by [`buf_attach`](Self::buf_attach) the moment the call is
-    /// issued (not once nvim's own reply confirms it -- see that method's
-    /// own doc for why waiting would buy nothing) and removed by
+    /// Each live-attached buffer's [`Msg::BufTextChanged`] generation and
+    /// pending desync flag, keyed by the buffer's own unwrapped `Ext`
+    /// handle. Populated by [`buf_attach`](Self::buf_attach) only after the
+    /// `nvim_buf_attach` notify itself succeeds (a `Closed` notify records
+    /// nothing -- see that method's own doc) and removed by
     /// [`buf_detach`](Self::buf_detach) and by the reader thread itself on
     /// an observed `nvim_buf_detach_event`, so a stray notification racing
-    /// either kind of detach cannot resurrect a generation this connection
-    /// no longer owes anyone.
-    attached_bufs: Arc<Mutex<HashMap<u64, u64>>>,
+    /// either kind of detach cannot resurrect an entry this connection no
+    /// longer owes anyone.
+    attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>>,
+}
+
+/// One live-attached buffer's connection-side state: the generation
+/// [`Msg::BufTextChanged`]/[`Msg::BufDetached`] stamp their events with, and
+/// whether this connection knows a prior event for this buffer never
+/// reached the sink (dropped at a full `try_send`) or failed to decode --
+/// either way, the next event this buffer manages to deliver must carry
+/// `desynced: true` rather than let the gap pass as an ordinary hunk (see
+/// [`view_core::msg::Msg::BufTextChanged`]'s own doc for why "the next
+/// event" cannot recompute a diff-shaped miss the way a coalescible one
+/// could).
+#[derive(Clone, Copy)]
+struct AttachedBuf {
+    generation: u64,
+    desynced: bool,
 }
 
 impl Clone for EngineHandle {
@@ -356,7 +370,8 @@ impl EngineHandle {
         let closed = Arc::new(AtomicBool::new(false));
         let announced_exit = Arc::new(AtomicBool::new(false));
         let settled = Arc::new(Condvar::new());
-        let attached_bufs: Arc<Mutex<HashMap<u64, u64>>> = Arc::new(Mutex::new(HashMap::new()));
+        let attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
             closed: Arc::clone(&closed),
@@ -646,31 +661,74 @@ impl EngineHandle {
                                     let _ = pump.route_msg(msg);
                                 }
                             } else if method == "nvim_buf_lines_event" {
-                                // best-effort for the same reason
-                                // `view_bridge` is: nvim is never blocked on
-                                // this notification, and a dropped one costs
-                                // the hunk-rebase state machine one edit's
-                                // worth of staleness it can recompute from
-                                // the buffer's next event, not a wedge
+                                // nvim is never blocked on this notification
+                                // -- unlike `view_vim_enter` -- so a dropped
+                                // `try_send` here never wedges anything. It
+                                // is NOT recoverable from "the buffer's next
+                                // event" the way that phrase might suggest,
+                                // though: `nvim_buf_lines_event` is a diff
+                                // against a specific prior state, not a
+                                // resend of anything droppable-and-reissuable,
+                                // so a burst that outruns the sink (hundreds
+                                // of single-line events from one large `:s`)
+                                // genuinely loses that content. What keeps
+                                // this from silently corrupting the
+                                // hunk-rebase state machine's own state is
+                                // `decode_buf_lines_event`'s desync marking
+                                // plus the drop-detection below: a dropped
+                                // send marks `buf` desynced the same way a
+                                // decode failure does, so the next delivered
+                                // event for `buf` carries `desynced: true`
+                                // and obligates a full resync instead of a
+                                // fold.
                                 if let Some(msg) =
                                     decode_buf_lines_event(&params, &reader_attached_bufs)
                                 {
-                                    let _ = pump.route_msg(msg);
+                                    let buf = if let Msg::BufTextChanged { buf, .. } = &msg {
+                                        Some(buf.0)
+                                    } else {
+                                        None
+                                    };
+                                    if pump.route_msg(msg).is_err() {
+                                        if let Some(buf) = buf {
+                                            if let Ok(mut attached) = reader_attached_bufs.lock() {
+                                                if let Some(entry) = attached.get_mut(&buf) {
+                                                    entry.desynced = true;
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             } else if method == "nvim_buf_detach_event" {
-                                // clears the generation entry on nvim's own
-                                // confirmation too, not only inside
-                                // `buf_detach` -- covers a buffer nvim
-                                // detaches unasked (a wipeout, `:help
-                                // api-buffer-updates`), so a stray
-                                // `nvim_buf_lines_event` racing either kind
-                                // of detach can never resurrect a generation
-                                // this connection no longer owes anyone
+                                // clears the entry on nvim's own confirmation
+                                // too, not only inside `buf_detach` -- covers
+                                // a buffer nvim detaches unasked (a wipeout,
+                                // `:help api-buffer-updates`), so a stray
+                                // `nvim_buf_lines_event` racing either kind of
+                                // detach can never resurrect an entry this
+                                // connection no longer owes anyone. Only a
+                                // present entry emits `Msg::BufDetached`: a
+                                // detach this connection asked for itself
+                                // already removed the entry proactively
+                                // (`note_buf_detach`, called before the
+                                // notify that produces this very
+                                // confirmation), so finding nothing left here
+                                // means the caller already knows and owes the
+                                // rebase machine nothing further -- only a
+                                // detach nvim initiated on its own leaves an
+                                // entry for this arm to find and report.
                                 if let Some(buf) =
                                     params.first().and_then(crate::ui_events::decode_ext_handle)
                                 {
-                                    if let Ok(mut attached) = reader_attached_bufs.lock() {
-                                        attached.remove(&buf);
+                                    let removed = reader_attached_bufs
+                                        .lock()
+                                        .ok()
+                                        .and_then(|mut attached| attached.remove(&buf));
+                                    if let Some(entry) = removed {
+                                        let _ = pump.route_msg(Msg::BufDetached {
+                                            buf: view_core::msg::BufferHandle(buf),
+                                            generation: entry.generation,
+                                        });
                                     }
                                 }
                             }
@@ -1001,16 +1059,39 @@ impl EngineHandle {
     /// Records `buf`'s attach generation for the reader thread's
     /// `nvim_buf_lines_event` decode to stamp onto `Msg::BufTextChanged`
     /// (see [`decode_buf_lines_event`]). Called from
-    /// [`crate::nvim_api::EngineHandle::buf_attach`] the moment the
-    /// `nvim_buf_attach` notify is issued, not once a reply confirms it --
-    /// there is no reply to wait for (a plain notify, like every other
-    /// fire-and-forget call in this crate), and a rejected attach simply
-    /// means no `nvim_buf_lines_event` ever arrives to look this entry up,
-    /// which costs nothing beyond one unused map entry.
+    /// [`crate::nvim_api::EngineHandle::buf_attach`] only after the
+    /// `nvim_buf_attach` notify itself returns `Ok` -- there is still no
+    /// reply to wait for (a plain notify, like every other fire-and-forget
+    /// call in this crate), but a notify that itself fails
+    /// (`EngineError::Closed`, the writer thread already gone) must not
+    /// record an entry nothing will ever clear: with nobody left to send
+    /// `nvim_buf_detach` (or receive its confirmation), a pre-recorded
+    /// entry from a rejected attach would sit stale for the rest of this
+    /// connection's life rather than costing nothing.
     pub(crate) fn note_buf_attach(&self, buf: u64, generation: u64) {
         if let Ok(mut attached) = self.attached_bufs.lock() {
-            attached.insert(buf, generation);
+            attached.insert(
+                buf,
+                AttachedBuf {
+                    generation,
+                    desynced: false,
+                },
+            );
         }
+    }
+
+    /// Test-only re-arm of the local attach-generation entry, with no
+    /// `nvim_buf_attach` notify sent. A wire-level detach test uses this to
+    /// hold the local decode gate open across a real `buf_detach` call: if
+    /// nvim's own subscription secretly survived the detach (the exact
+    /// shape a dropped `nvim_buf_detach` notify would leave behind), a
+    /// still-live wire event decodes and reaches the consumer despite the
+    /// gate being armed for an unrelated generation; only a connection nvim
+    /// genuinely stopped sending on stays silent. Gated behind the
+    /// `test-support` feature, same as [`EngineHandle::start`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn note_buf_attach_for_test(&self, buf: u64, generation: u64) {
+        self.note_buf_attach(buf, generation);
     }
 
     /// Removes `buf`'s attach generation, called from
@@ -1466,11 +1547,21 @@ fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 /// firstline, lastline, linedata, more)` positional params (see
 /// `docs/nvim-buf-attach-wire-capture.md` capture #2) into
 /// `Msg::BufTextChanged`, or `None` when `buf` names a buffer this
-/// connection has no attach generation recorded for -- a stray event
-/// racing a detach (`buf_detach` already removed the entry before nvim's
-/// own confirmation arrives) rather than a wire-shape decode failure, so it
-/// is dropped the same way every other stale-generation reply in this
-/// crate is, not treated as malformed.
+/// connection has no attach entry recorded for -- a stray event racing a
+/// detach (`buf_detach` already removed the entry before nvim's own
+/// confirmation arrives) rather than a wire-shape decode failure, so it is
+/// dropped the same way every other stale-generation reply in this crate
+/// is, not treated as malformed.
+///
+/// A decode failure on a buffer that DOES have an entry (an unexpected
+/// shape -- e.g. `lastline` arriving as `-1`, which `.as_u64()` refuses --
+/// not merely an absent one) still returns `None` for this event, but marks
+/// the entry desynced first: this connection cannot reconstruct what that
+/// event said, and the next event it does manage to decode for this same
+/// buffer must own up to the gap rather than fold in atop state that skipped
+/// an edit. See `AttachedBuf::desynced`'s own doc for the full contract this
+/// implements, and the reader thread's own notification-routing match for
+/// the other place (a full sink's dropped `try_send`) that also marks it.
 ///
 /// `more` (the trailing element) is read positionally but never carried
 /// onto `Msg::BufTextChanged`: every capture in the wire-capture doc
@@ -1478,25 +1569,46 @@ fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 /// crate has no batching state to fold a `true` into yet -- a future
 /// consumer that needs it can add the field without changing this
 /// function's decode shape.
-fn decode_buf_lines_event(params: &[Value], attached: &Mutex<HashMap<u64, u64>>) -> Option<Msg> {
+fn decode_buf_lines_event(
+    params: &[Value],
+    attached: &Mutex<HashMap<u64, AttachedBuf>>,
+) -> Option<Msg> {
     let [buf, changedtick, firstline, lastline, linedata, ..] = params else {
         return None;
     };
     let buf = crate::ui_events::decode_ext_handle(buf)?;
-    let generation = attached.lock().ok()?.get(&buf).copied()?;
-    let linedata = linedata
-        .as_array()?
-        .iter()
-        .map(|v| v.as_str().map(str::to_owned))
-        .collect::<Option<Vec<String>>>()?;
-    Some(Msg::BufTextChanged {
-        buf: view_core::msg::BufferHandle(buf),
-        generation,
-        firstline: firstline.as_u64()?,
-        lastline: lastline.as_u64()?,
-        linedata,
-        changedtick: changedtick.as_u64()?,
-    })
+    let body = (|| -> Option<(u64, u64, Vec<String>, u64)> {
+        Some((
+            firstline.as_u64()?,
+            lastline.as_u64()?,
+            linedata
+                .as_array()?
+                .iter()
+                .map(|v| v.as_str().map(str::to_owned))
+                .collect::<Option<Vec<String>>>()?,
+            changedtick.as_u64()?,
+        ))
+    })();
+    let mut guard = attached.lock().ok()?;
+    let entry = guard.get_mut(&buf)?;
+    match body {
+        Some((firstline, lastline, linedata, changedtick)) => {
+            let desynced = std::mem::replace(&mut entry.desynced, false);
+            Some(Msg::BufTextChanged {
+                buf: view_core::msg::BufferHandle(buf),
+                generation: entry.generation,
+                firstline,
+                lastline,
+                linedata,
+                changedtick,
+                desynced,
+            })
+        }
+        None => {
+            entry.desynced = true;
+            None
+        }
+    }
 }
 
 /// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
@@ -2534,7 +2646,13 @@ mod tests {
     /// proves what happens when it misses.
     #[test]
     fn a_buf_lines_event_for_an_attached_buffer_decodes_stamped_with_its_generation() {
-        let attached: Mutex<HashMap<u64, u64>> = Mutex::new(HashMap::from([(1, 42)]));
+        let attached: Mutex<HashMap<u64, AttachedBuf>> = Mutex::new(HashMap::from([(
+            1,
+            AttachedBuf {
+                generation: 42,
+                desynced: false,
+            },
+        )]));
         let params = vec![
             Value::Ext(0, vec![1]),
             Value::from(9u64),
@@ -2547,13 +2665,17 @@ mod tests {
         let msg = decode_buf_lines_event(&params, &attached);
 
         let Some(Msg::BufTextChanged {
-            buf, generation, ..
+            buf,
+            generation,
+            desynced,
+            ..
         }) = msg
         else {
             unreachable!("expected a decoded BufTextChanged, got {msg:?}");
         };
         assert_eq!(buf, view_core::msg::BufferHandle(1));
         assert_eq!(generation, 42);
+        assert!(!desynced, "a clean entry must decode with desynced: false");
     }
 
     /// The mutation-check disconfirm: a buffer with NO recorded generation
@@ -2565,7 +2687,7 @@ mod tests {
     /// it under a made-up generation.
     #[test]
     fn a_buf_lines_event_for_a_buffer_with_no_recorded_generation_decodes_to_nothing() {
-        let attached: Mutex<HashMap<u64, u64>> = Mutex::new(HashMap::new());
+        let attached: Mutex<HashMap<u64, AttachedBuf>> = Mutex::new(HashMap::new());
         let params = vec![
             Value::Ext(0, vec![1]),
             Value::from(9u64),
@@ -2578,6 +2700,64 @@ mod tests {
         assert!(
             decode_buf_lines_event(&params, &attached).is_none(),
             "an event for a buffer with no recorded generation must decode to nothing"
+        );
+    }
+
+    /// A malformed event (`lastline` arriving as `-1`, which `.as_u64()`
+    /// refuses) for a buffer that IS attached must not merely drop silently
+    /// -- it marks the entry desynced, so the next successfully decoded
+    /// event for this same buffer owns up to the gap instead of folding in
+    /// as if nothing was missed.
+    #[test]
+    fn a_malformed_event_on_an_attached_buffer_marks_it_desynced_for_the_next_event() {
+        let attached: Mutex<HashMap<u64, AttachedBuf>> = Mutex::new(HashMap::from([(
+            1,
+            AttachedBuf {
+                generation: 7,
+                desynced: false,
+            },
+        )]));
+        let malformed_params = vec![
+            Value::Ext(0, vec![1]),
+            Value::from(9u64),
+            Value::from(0u64),
+            Value::Integer((-1i64).into()),
+            Value::Array(vec![Value::from("x")]),
+            Value::from(false),
+        ];
+        assert!(
+            decode_buf_lines_event(&malformed_params, &attached).is_none(),
+            "a malformed event still decodes to nothing for THIS event"
+        );
+
+        let clean_params = vec![
+            Value::Ext(0, vec![1]),
+            Value::from(10u64),
+            Value::from(0u64),
+            Value::from(1u64),
+            Value::Array(vec![Value::from("y")]),
+            Value::from(false),
+        ];
+        let msg = decode_buf_lines_event(&clean_params, &attached);
+        let Some(Msg::BufTextChanged { desynced, .. }) = msg else {
+            unreachable!("expected a decoded BufTextChanged, got {msg:?}");
+        };
+        assert!(
+            desynced,
+            "the event following a decode failure must carry desynced: true"
+        );
+
+        let msg2 = decode_buf_lines_event(&clean_params, &attached);
+        let Some(Msg::BufTextChanged {
+            desynced: desynced2,
+            ..
+        }) = msg2
+        else {
+            unreachable!("expected a decoded BufTextChanged, got {msg2:?}");
+        };
+        assert!(
+            !desynced2,
+            "the desync flag must clear once a delivered event has carried it"
         );
     }
 

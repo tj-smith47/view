@@ -321,6 +321,47 @@ impl<E: EngineOps> Executor<E> {
         self.ai.as_ref()
     }
 
+    /// Queues `job` on the wired context worker's one channel -- the single
+    /// FIFO both `Effect::Ai` and `Effect::AiPromptSubmit` funnel through
+    /// (see [`crate::ai_context_worker::AiContextJob`]'s own doc for why a
+    /// shared queue, not two, is what makes a `Cancel` overtaking its own
+    /// `Submit` unrepresentable). `mpsc::Sender::send` never blocks the loop
+    /// thread here: the channel behind `ai_context` is unbounded (built with
+    /// plain `mpsc::channel()`, never a `sync_channel`), so this call
+    /// returns as soon as the job is enqueued, with none of the worker's own
+    /// (possibly slow) context reads ever running on this thread.
+    ///
+    /// A send that fails -- `ai_context` unwired, or the worker thread
+    /// already gone -- degrades through the same
+    /// `Msg::Ai(AiEvent::SessionCrashed)` local-error path a genuine session
+    /// crash reports through, injected via `toast_timer`'s non-blocking
+    /// `try_send`: the same "recurse a synthesized `Msg` back through the
+    /// loop" shape `Effect::AiTrustSet`'s own degrade in `dispatch` uses,
+    /// just reachable from inside `run` itself since `try_send` (unlike a
+    /// blocking send) needs no `&mut Model` to stay non-blocking. `update()`'s
+    /// existing `SessionCrashed` arm is what actually clears
+    /// `panel.turn_in_flight` on this path -- see that arm in
+    /// `view-core/src/update/ai.rs`. With no `toast_timer` wired either (a
+    /// bare test `Executor`, never a real one -- see `LoopChannels::executor`,
+    /// which wires `toast_timer` unconditionally ahead of `ai`/`ai_context`),
+    /// this is a silent no-op, the same degrade every other unwired-channel
+    /// effect in this type falls back to.
+    fn queue_ai_job(&self, job: crate::ai_context_worker::AiContextJob) {
+        let queued = self
+            .ai_context
+            .as_ref()
+            .is_some_and(|tx| tx.send(job).is_ok());
+        if !queued {
+            if let Some(toast_timer) = &self.toast_timer {
+                let _ = toast_timer.try_send(Msg::Ai(
+                    view_core::native::ai_event::AiEvent::SessionCrashed {
+                        message: "no AI worker wired for this command".to_string(),
+                    },
+                ));
+            }
+        }
+    }
+
     /// Carries out one effect, infallibly by signature: an engine-write
     /// failure never becomes an `Err` that would abort the UI, since the
     /// `Flow::EngineLost` -> `Msg::EngineDown` path exists precisely to
@@ -725,17 +766,20 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
-            // Forwards to the live agent session, spawning one lazily on
-            // the first command this project ever issues (see
-            // `AiWorker::dispatch`'s own doc for why the spawn -- which may
-            // provision an adapter over the network -- runs on its own
-            // thread rather than this one). `None` only when `[ai]` is
-            // disabled; see the `ai` field's own doc for why nothing can
-            // reach this arm in that case.
+            // Queued onto the same single worker channel `Effect::AiPromptSubmit`
+            // below uses, never dispatched to `self.ai` directly from this
+            // thread: a direct dispatch here raced the context worker's
+            // (slower, four-read) trip for a `Submit` queued moments
+            // earlier, so a `Cancel` following right behind a prompt
+            // submission could overtake it -- reaching an idle worker
+            // before the prompt it was meant to cancel ever arrived, then
+            // spawning a fresh session for a turn nothing was left to
+            // cancel by the time the prompt caught up. Routing both through
+            // one FIFO channel makes that overtake unrepresentable rather
+            // than merely unlikely. See [`crate::ai_context_worker::AiContextJob`]'s
+            // own doc.
             Effect::Ai(command) => {
-                if let Some(worker) = &self.ai {
-                    worker.dispatch(command);
-                }
+                self.queue_ai_job(crate::ai_context_worker::AiContextJob::Direct(command));
                 Flow::Continue
             }
             // `update()` stays pure: it hands off the prompt's text, and
@@ -746,9 +790,7 @@ impl<E: EngineOps> Executor<E> {
             // do this assembly itself, and `ai_context_worker`'s module
             // doc for why the reads cannot run on this thread.
             Effect::AiPromptSubmit { text } => {
-                if let Some(tx) = &self.ai_context {
-                    let _ = tx.send(crate::ai_context_worker::AiContextJob { text });
-                }
+                self.queue_ai_job(crate::ai_context_worker::AiContextJob::Submit { text });
                 Flow::Continue
             }
             // Effect is #[non_exhaustive]: same degrade-to-no-op rule
@@ -1718,7 +1760,7 @@ mod tests {
         clippy::disallowed_methods
     )]
     use super::*;
-    use crate::engine_ops::FakeOps;
+    use crate::engine_ops::{FakeOps, SlowOps};
     use view_core::msg::{BufferHandle, OptionValue, ReplyToken, TextEdit};
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
@@ -2069,6 +2111,35 @@ mod tests {
         assert_eq!(ops.calls.borrow()[0], "set_buf_text(3,1,true)");
     }
 
+    /// `RpcCall::BufAttach`/`BufDetach` are matched explicitly in
+    /// `Executor::run` for the same reason `BufSetText` above is: falling to
+    /// the `#[non_exhaustive]` catch-all would silently no-op the request
+    /// rather than actually subscribing/unsubscribing, and a caller waiting
+    /// on the resulting `Msg::BufTextChanged` stream would simply never see
+    /// one, with no error to explain why.
+    #[test]
+    fn buf_attach_effect_maps_to_engine_ops_buf_attach() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::BufAttach {
+            buf: BufferHandle(5),
+            generation: 9,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "buf_attach(5,9)");
+    }
+
+    #[test]
+    fn buf_detach_effect_maps_to_engine_ops_buf_detach() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::BufDetach {
+            buf: BufferHandle(5),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "buf_detach(5)");
+    }
+
     #[test]
     fn rename_file_write_failure_returns_engine_lost() {
         let ops = FakeOps::default();
@@ -2137,14 +2208,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Proves `Executor::run`'s `Effect::Ai` arm genuinely forwards to a
-    /// wired [`crate::ai_worker::AiWorker`], not just that the worker
-    /// itself behaves correctly in isolation (`ai_worker.rs`'s own suite
-    /// already covers that): deleting the arm's `worker.dispatch(command)`
-    /// call, or the arm entirely, leaves `flow` unaffected (`Effect` is
-    /// `#[non_exhaustive]` and degrades to a no-op `Flow::Continue`) but
-    /// this assertion on `rx` would time out, since nothing would ever
-    /// reach the worker to report a crash.
+    /// Spawns a real `ai_context_worker` behind `ai` so a runtime-level
+    /// Ai-effect test exercises the whole pipeline `Effect::Ai`/
+    /// `Effect::AiPromptSubmit` now share: `Executor::run` -> the wired job
+    /// channel -> this worker's own thread -> `AiWorker::dispatch`. `SlowOps`
+    /// with `delay` stands in for the live engine a `Submit` job would
+    /// otherwise read through; `Direct` jobs never touch it at all. Returns
+    /// the job sender `Executor::with_ai_context` takes; the worker thread
+    /// itself is never joined, the same lifetime the real session's own
+    /// `_ai_context_worker` binding has (see `run`'s setup).
+    fn spawn_test_ai_context_worker(
+        ai: crate::ai_worker::AiWorker,
+        delay: std::time::Duration,
+    ) -> mpsc::Sender<crate::ai_context_worker::AiContextJob> {
+        let route = crate::ai_context_worker::OpsRoute::new(SlowOps::new(delay));
+        let (tx, rx) = mpsc::channel();
+        let _handle =
+            crate::ai_context_worker::spawn(route, ai, rx).expect("spawn ai context worker");
+        tx
+    }
+
+    /// Proves `Executor::run`'s `Effect::Ai` arm genuinely reaches a wired
+    /// [`crate::ai_worker::AiWorker`] through the context worker's shared
+    /// queue, not just that the worker itself behaves correctly in
+    /// isolation (`ai_worker.rs`'s own suite already covers that): deleting
+    /// `queue_ai_job`'s call for this arm, or the arm entirely, leaves
+    /// `flow` unaffected (`Effect` is `#[non_exhaustive]` and degrades to a
+    /// no-op `Flow::Continue`) but this assertion on `rx` would time out,
+    /// since nothing would ever reach the worker to report a crash.
     #[test]
     fn ai_effect_forwards_to_the_wired_worker() {
         let ops = FakeOps::default();
@@ -2156,7 +2247,8 @@ mod tests {
             std::path::PathBuf::from("."),
             crate::wake::LoopSender::new(tx),
         );
-        let executor = Executor::new(&ops).with_ai(ai);
+        let job_tx = spawn_test_ai_context_worker(ai, std::time::Duration::ZERO);
+        let executor = Executor::new(&ops).with_ai_context(job_tx);
 
         let flow = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Prompt {
             text: "hello".to_string(),
@@ -2166,7 +2258,7 @@ mod tests {
 
         let msg = rx
             .recv_timeout(std::time::Duration::from_secs(5))
-            .expect("SessionCrashed arrives from the worker the effect must have dispatched to");
+            .expect("SessionCrashed arrives from the worker the effect must have queued to");
         assert!(
             matches!(
                 &msg,
@@ -2194,7 +2286,8 @@ mod tests {
             std::path::PathBuf::from("."),
             crate::wake::LoopSender::new(tx),
         );
-        let executor = Executor::new(&ops).with_ai(ai);
+        let job_tx = spawn_test_ai_context_worker(ai, std::time::Duration::ZERO);
+        let executor = Executor::new(&ops).with_ai_context(job_tx);
 
         let flow = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Cancel));
         assert!(matches!(flow, Flow::Continue));
@@ -2209,6 +2302,70 @@ mod tests {
                     if message == "no active AI session for this command"
             ),
             "expected the idle-Cancel SessionCrashed forwarded through the effect, got {msg:?}"
+        );
+    }
+
+    /// A `Cancel` (`Effect::Ai`) issued the instant after a `Submit`
+    /// (`Effect::AiPromptSubmit`) must never overtake it: both now funnel
+    /// through the one FIFO queue `AiContextJob` describes, so the worker
+    /// drains the prompt first regardless of how slow its context reads
+    /// are. `SlowOps` delayed 200ms stands in for a live engine's reads,
+    /// giving a reverted, direct-dispatch `Effect::Ai` (bypassing the
+    /// queue entirely, back on the calling thread) an unmissable head
+    /// start -- the shape the mutation check below exercises.
+    ///
+    /// A direct-dispatch `Effect::Ai` reaches the worker's still-`Idle`
+    /// slot before the queued Submit's reads resolve, reporting the
+    /// spurious "no active AI session for this command" crash and leaving
+    /// the Submit to spawn a session for a turn already cancelled. Queued
+    /// through the shared channel instead, the ONLY crash reported is the
+    /// prompt's own genuine spawn failure (a nonexistent program), and the
+    /// buffered Cancel is dropped harmlessly along with it (see
+    /// `AiWorker::spawn_in_background`'s own doc on why a failed spawn
+    /// drops what it buffered).
+    #[test]
+    fn a_cancel_right_after_a_prompt_submit_never_overtakes_it_as_a_spurious_crash() {
+        let ops = FakeOps::default();
+        let (msg_tx, msg_rx) = mpsc::sync_channel(4);
+        let ai = crate::ai_worker::AiWorker::new(
+            view_ai::AgentSpec::Command(vec![
+                "runtime-ai-fifo-test-nonexistent-program-xyz".to_string()
+            ]),
+            std::path::PathBuf::from("."),
+            crate::wake::LoopSender::new(msg_tx),
+        );
+        // wired alongside `ai_context`, matching production
+        // (`LoopChannels::executor` wires both from the same clone): a
+        // mutation reverting `Effect::Ai` to dispatch straight to `self.ai`
+        // must find a live worker here to race against the queued Submit,
+        // not silently no-op on an unwired field.
+        let job_tx =
+            spawn_test_ai_context_worker(ai.clone(), std::time::Duration::from_millis(200));
+        let executor = Executor::new(&ops).with_ai(ai).with_ai_context(job_tx);
+
+        let flow1 = executor.run(Effect::AiPromptSubmit {
+            text: "hello".to_string(),
+        });
+        let flow2 = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Cancel));
+        assert!(matches!(flow1, Flow::Continue));
+        assert!(matches!(flow2, Flow::Continue));
+
+        let first = msg_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the submitted prompt's spawn failure must still report a crash");
+        assert!(
+            matches!(
+                &first,
+                Msg::Ai(view_core::native::ai_event::AiEvent::SessionCrashed { message })
+                    if message.contains("AI agent failed to start")
+            ),
+            "the FIRST crash reported must be the prompt's own genuine spawn failure, \
+             never the Cancel's spurious \"no active AI session\" -- got {first:?}"
+        );
+        assert!(
+            msg_rx.try_recv().is_err(),
+            "the buffered Cancel must be dropped along with the failed spawn's pending \
+             commands, never report a second, spurious crash of its own"
         );
     }
 
@@ -2233,7 +2390,131 @@ mod tests {
         let job = rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the job must reach the wired context worker channel");
-        assert_eq!(job.text, "hello");
+        match job {
+            crate::ai_context_worker::AiContextJob::Submit { text } => {
+                assert_eq!(text, "hello");
+            }
+            crate::ai_context_worker::AiContextJob::Direct(_) => {
+                panic!("expected an AiContextJob::Submit, got a Direct job instead")
+            }
+        }
+    }
+
+    /// I4: `Effect::AiPromptSubmit` must return well before the context
+    /// worker's four reads resolve, since those reads run on the worker's
+    /// own thread, never this one -- `SlowOps` blocked for 2s on every read
+    /// is the falsifiable disconfirm, the same "slow resolver" shape
+    /// `ai_worker.rs`'s own `dispatch_returns_before_a_genuinely_slow_resolver_finishes`
+    /// uses to pin `AiWorker::dispatch`'s off-thread spawn. `SlowOps` with
+    /// the same 2s delay backs both the executor's own `ops` (what an
+    /// inlined mutation would read through) and the context worker's route
+    /// (what the correct, queued path reads through), so a mutation that
+    /// inlined the reads into this arm (calling `build_prompt` directly on
+    /// the loop thread instead of queuing the job) hits the same 2s delay
+    /// and fails this assertion -- reusing `FakeOps` for `ops` here would
+    /// let such a mutation's inline read return instantly and pass anyway.
+    #[test]
+    fn ai_prompt_submit_effect_returns_well_before_the_context_workers_slow_reads_finish() {
+        let ops = SlowOps::new(std::time::Duration::from_secs(2));
+        let (msg_tx, _msg_rx) = mpsc::sync_channel(4);
+        let ai = crate::ai_worker::AiWorker::new(
+            view_ai::AgentSpec::Command(vec![
+                "runtime-ai-latency-test-nonexistent-program-xyz".to_string()
+            ]),
+            std::path::PathBuf::from("."),
+            crate::wake::LoopSender::new(msg_tx),
+        );
+        let job_tx = spawn_test_ai_context_worker(ai.clone(), std::time::Duration::from_secs(2));
+        let executor = Executor::new(&ops).with_ai(ai).with_ai_context(job_tx);
+
+        let started = std::time::Instant::now();
+        let flow = executor.run(Effect::AiPromptSubmit {
+            text: "hello".to_string(),
+        });
+        let elapsed = started.elapsed();
+
+        assert!(matches!(flow, Flow::Continue));
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "Effect::AiPromptSubmit must return well before the 2s-blocked reads finish, \
+             took {elapsed:?}"
+        );
+    }
+
+    /// I7, path one: with no context worker wired at all, `Effect::Ai`'s
+    /// failed queue attempt degrades through the same local-error path a
+    /// genuine session crash reports through -- and that synthesized
+    /// message, fed through `update()` exactly as the real loop would, must
+    /// clear `turn_in_flight`, never leaving `<C-c>` as the only way out of
+    /// a wedge nothing is actually running for.
+    #[test]
+    fn ai_effect_with_no_context_worker_wired_surfaces_a_local_error_that_clears_turn_in_flight() {
+        let ops = FakeOps::default();
+        let (toast_tx, toast_rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(toast_tx));
+
+        let flow = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Cancel));
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = toast_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("an unwired context worker must still surface a local error");
+        assert!(
+            matches!(
+                &msg,
+                Msg::Ai(view_core::native::ai_event::AiEvent::SessionCrashed { .. })
+            ),
+            "expected a synthesized SessionCrashed, got {msg:?}"
+        );
+
+        let mut model = Model::with_term_size(80, 24);
+        model.ai_panel_mut().turn_in_flight = true;
+        let _ = update(&mut model, msg);
+        assert!(
+            !model.ai_panel().turn_in_flight,
+            "the synthesized local error must clear turn_in_flight through update(), \
+             the same as any other SessionCrashed"
+        );
+    }
+
+    /// I7, path two: `ai_context` IS wired, but the worker thread is
+    /// already gone (its receiver dropped) -- a real, if rare, shutdown
+    /// race, not merely "never configured." The send itself fails, and
+    /// must degrade exactly the same way the unwired case above does.
+    #[test]
+    fn ai_prompt_submit_effect_with_a_dead_context_worker_surfaces_a_local_error_that_clears_turn_in_flight(
+    ) {
+        let ops = FakeOps::default();
+        let (toast_tx, toast_rx) = mpsc::sync_channel(4);
+        let (job_tx, job_rx) = mpsc::channel();
+        drop(job_rx);
+        let executor = Executor::new(&ops)
+            .with_toast_timer(crate::wake::LoopSender::new(toast_tx))
+            .with_ai_context(job_tx);
+
+        let flow = executor.run(Effect::AiPromptSubmit {
+            text: "hello".to_string(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = toast_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a dead context worker's failed send must still surface a local error");
+        assert!(
+            matches!(
+                &msg,
+                Msg::Ai(view_core::native::ai_event::AiEvent::SessionCrashed { .. })
+            ),
+            "expected a synthesized SessionCrashed, got {msg:?}"
+        );
+
+        let mut model = Model::with_term_size(80, 24);
+        model.ai_panel_mut().turn_in_flight = true;
+        let _ = update(&mut model, msg);
+        assert!(
+            !model.ai_panel().turn_in_flight,
+            "the synthesized local error must clear turn_in_flight through update()"
+        );
     }
 
     /// The unwired-channel degrade every other effect in this type

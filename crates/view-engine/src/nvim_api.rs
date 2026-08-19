@@ -1747,10 +1747,14 @@ impl EngineHandle {
     /// A notify, not a request: nothing here blocks on nvim's boolean
     /// success reply, matching every other fire-and-forget call in this
     /// crate. `generation` is recorded locally
-    /// ([`EngineHandle::note_buf_attach`]) the instant this call is issued,
-    /// not once a reply could confirm it -- there is nothing to gain by
-    /// waiting, since a rejected attach (a stale `buf`) simply means no
-    /// `nvim_buf_lines_event` for it ever arrives to look the entry up.
+    /// ([`EngineHandle::note_buf_attach`]) only after this notify itself
+    /// succeeds, not once nvim's own boolean reply could confirm the attach
+    /// -- there is still nothing to gain by waiting on that reply (a
+    /// rejected attach for a stale `buf` simply means no
+    /// `nvim_buf_lines_event` for it ever arrives to look the entry up), but
+    /// a notify that fails outright (`EngineError::Closed`) must not record
+    /// an entry either: with the writer thread already gone, nothing will
+    /// ever detach it.
     ///
     /// `buf` must already be the buffer's real, resolved handle -- never
     /// `0` ("current buffer"). Capture #1 in the wire-capture doc attaches
@@ -1768,7 +1772,6 @@ impl EngineHandle {
     /// Returns `EngineError::Closed` if the connection's writer thread has
     /// already exited.
     pub fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
-        self.note_buf_attach(buf.0, generation);
         self.notify(
             "nvim_buf_attach",
             vec![
@@ -1776,7 +1779,9 @@ impl EngineHandle {
                 Value::from(false),
                 Value::Map(Vec::new()),
             ],
-        )
+        )?;
+        self.note_buf_attach(buf.0, generation);
+        Ok(())
     }
 
     /// Unsubscribes from `buf`'s edit stream via `nvim_buf_detach`, for

@@ -1,8 +1,9 @@
 # Wire capture: `nvim_buf_attach` notification shape
 
 Captured live against the pinned engine per "capture, never recall." Source
-of truth for `RpcCall::BufAttach`/`BufDetach` and the `nvim_buf_lines_event`
-decode `crate::handle` routes into `Msg::BufTextChanged`.
+of truth for `RpcCall::BufAttach`/`BufDetach` and the `nvim_buf_lines_event`/
+`nvim_buf_detach_event` decode `crate::handle` routes into
+`Msg::BufTextChanged`/`Msg::BufDetached`.
 
 ## Engine identity
 
@@ -18,19 +19,22 @@ Matches `.engine-pin` (`v0.12.4`).
 ## Capture method
 
 A standalone Python msgpack-rpc client (no `pynvim`; not installed) spawns
-`nvim --clean --headless --listen <socket>`, connects over the unix socket,
-and issues raw msgpack-RPC requests (`nvim_buf_attach`, `nvim_buf_detach`,
-`nvim_buf_set_lines`), draining whatever notifications arrive on the same
-connection afterward. `nvim_buf_attach`/`nvim_buf_detach` are channel-scoped
-(`:help api-buffer-updates`): the connection that issues the attach is the
-one that receives every subsequent notification, with no `nvim_ui_attach`
-required first -- confirmed by every capture below, none of which ever
-attaches a UI.
+one `nvim --clean --headless --listen <socket>`, connects over the unix
+socket, and issues raw msgpack-RPC requests across a single continuous
+session, draining whatever notifications arrive on the same connection
+after each request. Every section below is one contiguous run of that one
+session, in the order shown -- not spliced from separate captures -- so
+buffer numbers, changedtick values, and detach events are all consistent
+with each other exactly as nvim produced them. `nvim_buf_attach`/
+`nvim_buf_detach` are channel-scoped (`:help api-buffer-updates`): the
+connection that issues the attach is the one that receives every subsequent
+notification, with no `nvim_ui_attach` required first -- confirmed by every
+capture below, none of which ever attaches a UI.
 
 ## 1. `send_buffer: false` never fires an initial whole-buffer event
 
-Buffer 0 reset to `["line1", "line2", "line3"]`, then attached with
-`send_buffer: false`:
+Buffer 1 (nvim's default buffer, resolved as `Ext(0,[1])` on the wire) reset
+to `["line1", "line2", "line3"]`, then attached with `send_buffer: false`:
 
 ```
 nvim_buf_attach(0, false, {}) -> true
@@ -38,12 +42,12 @@ nvim_buf_attach(0, false, {}) -> true
   -- NO nvim_buf_lines_event fires
 ```
 
-Contrast, same buffer state, attached with `send_buffer: true` instead:
+Contrast, same session, buffer reset to `["a", "b", "c"]` and re-attached
+(after detaching first) with `send_buffer: true` instead:
 
 ```
 nvim_buf_attach(0, true, {}) -> true
-  notification: nvim_buf_lines_event(buf=Ext(0,[1]), 5, 0, -1,
-                                      ["a", "b", "c"], false)
+  notification: nvim_buf_lines_event(buf=Ext(0,[1]), 4, 0, -1, ["a", "b", "c"], false)
 ```
 
 Confirms the brief's latency claim: `send_buffer: false` is what keeps
@@ -70,11 +74,14 @@ Method name: `"nvim_buf_lines_event"`. Positional params, in order:
   diverge).
 - `linedata` -- array of strings, the new content for the replaced range.
   Empty for a pure deletion.
-- `more` -- `bool`, `true` when this notification is one of several still
-  to arrive for a single logical change (`:help api-buffer-updates`
-  documents this for `:%s` -style batched edits); every capture below
-  produced a single `nvim_buf_lines_event` per `nvim_buf_set_lines` call
-  with `more: false`.
+- `more` -- `bool`, documented (`:help api-buffer-updates`) to mean this
+  notification is one of several still to arrive for a single logical
+  change. Every capture in this document produced `more: false`, including
+  a 200-line `:%s` substitution (section 4 below) -- this session never
+  exhibited `more: true` live. Treat it as a real wire value to read, not
+  as evidence it never fires under other conditions this capture did not
+  exercise (a `:%s` across window/fold boundaries, or a substitution nvim's
+  own batching heuristics split differently, might still produce it).
 
 ## 3. One edit produces exactly one event, bounding only the changed range
 
@@ -85,7 +92,7 @@ discarded first).
 Single-line replace (`nvim_buf_set_lines(0, 1, 2, false, ["TWO-EDITED"])`):
 
 ```
-nvim_buf_lines_event(buf, 8, 1, 2, ["TWO-EDITED"], false)
+nvim_buf_lines_event(buf, 6, 1, 2, ["TWO-EDITED"], false)
 ```
 
 Exactly one notification; `firstline: 1, lastline: 2` bounds only the
@@ -98,7 +105,7 @@ since nothing is replaced, only inserted):
 
 ```
 nvim_buf_set_lines(0, 2, 2, false, ["NEW-A", "NEW-B"])
-  -> nvim_buf_lines_event(buf, 9, 2, 2, ["NEW-A", "NEW-B"], false)
+  -> nvim_buf_lines_event(buf, 7, 2, 2, ["NEW-A", "NEW-B"], false)
 ```
 
 `firstline == lastline == 2`: an empty old range at the insertion point,
@@ -110,7 +117,7 @@ Delete a line (shrinks the buffer):
 
 ```
 nvim_buf_set_lines(0, 0, 1, false, [])
-  -> nvim_buf_lines_event(buf, 10, 0, 1, [], false)
+  -> nvim_buf_lines_event(buf, 8, 0, 1, [], false)
 ```
 
 `linedata: []`, the deletion convention `nvim_buf_set_text`'s own empty-
@@ -121,7 +128,31 @@ Final buffer read back after all three edits: `["TWO-EDITED", "NEW-A",
 confirming the events alone are sufficient to rebuild buffer state without
 a fresh whole-buffer read.
 
-## 4. `nvim_buf_detach_event` on detach; no further events reach a detached buffer
+## 4. A 200-line `:%s` produces ONE event, not several -- `more` stays `false`
+
+Same session, same buffer reset to 200 lines (`row0` .. `row199`), attached
+with `send_buffer: false`, then a single `:%s/row/ROW/` substituting every
+line:
+
+```
+nvim_command("%s/row/ROW/")
+  -> nvim_buf_lines_event(buf=Ext(0,[1]), tick=10, firstline=0, lastline=200,
+                           linedata=<200 lines>, more=false)
+```
+
+Exactly one notification for the whole substitution, `firstline: 0,
+lastline: 200` bounding the entire replaced range in one shot, `more:
+false`. This directly contradicts an earlier draft of this document, which
+attributed `more: true` to `:%s`-style batching without having captured it
+live -- that claim was never observed and is retracted. If `nvim_buf_attach`
+consumers ever need to fold `more: true` continuations, that behavior
+remains undemonstrated by this document; treat it as an open question, not
+an implemented-and-verified case.
+
+## 5. `nvim_buf_detach_event` on detach; no further events reach a detached buffer
+
+Same session, buffer reset to `["one", "two"]`, attached with
+`send_buffer: false`:
 
 ```
 nvim_buf_detach(0) -> true
@@ -132,13 +163,20 @@ nvim_buf_set_lines(0, 0, 1, false, ["A-EDITED"])   -- edit after detach
 
 Method name: `"nvim_buf_detach_event"`, single positional param (`buf`,
 the same `Ext` shape). Confirms `RpcCall::BufDetach`'s contract: once
-issued, further edits to that buffer produce no more `Msg::BufTextChanged`.
+issued, further edits to that buffer produce no more `Msg::BufTextChanged`
+-- and nvim's own confirmation event fires even for a SELF-initiated
+detach, not only a detach nvim decides to force; `crate::handle`'s reader
+thread relies on this by removing the local attach-generation entry
+proactively when `buf_detach` is called (not waiting for this event), so a
+self-initiated detach's own confirmation, arriving after the entry is
+already gone, produces no `Msg::BufDetached` -- only a detach nvim initiates
+unasked (section 7 below) finds the entry still present and emits one.
 
-## 5. Two attached buffers never cross-deliver events
+## 6. Two attached buffers never cross-deliver events
 
-Buffer 1 (`["one", ...]` from capture #3) and a freshly created buffer 2
-(`["b2-line1"]`) both attached with `send_buffer: false` on the same
-connection. Editing ONLY buffer 2:
+Same session: buffer 1 (`["one", "two"]` from section 5) still attached,
+plus a freshly created buffer 2 (`Ext(0,[2])`, `["b2-line1"]`) attached with
+`send_buffer: false`. Editing ONLY buffer 2:
 
 ```
 nvim_buf_set_lines(<buf2>, 0, 1, false, ["b2-EDITED"])
@@ -153,16 +191,46 @@ machine a `buf` maps to at the moment its `BufAttach` was issued, layered
 over an already-unambiguous wire signal, not a workaround for wire
 ambiguity.
 
+## 7. `:edit!` (nvim-initiated reload) fires `nvim_buf_detach_event` with no request from this connection
+
+Same session: opened a fresh file on disk (`/tmp/wire_capture_edit_bang.txt`,
+`["disk-line1", "disk-line2"]`) via `nvim_command("edit <path>")`, resolved
+its buffer handle (`Ext(0,[3])`), and attached it with `send_buffer: false`
+-- this connection never sent `nvim_buf_detach` for this buffer. The file
+was then rewritten on disk out from under nvim, and `:edit!` forced a
+reload of the now-attached buffer:
+
+```
+nvim_command("edit!")
+  -> nvim_buf_detach_event(buf=Ext(0,[3]))
+```
+
+One notification, no request from this connection preceded it. This is the
+nvim-INITIATED detach case `Msg::BufDetached` exists for: since this
+connection never called `buf_detach` for this buffer, the local
+attach-generation entry was still present when this event arrived, so
+`crate::handle`'s reader thread finds it, removes it, and emits
+`Msg::BufDetached { buf, generation }` -- the rebase state machine's only
+signal that its subscription died out from under it, distinct from the
+silent local-only removal a self-initiated detach performs (section 5).
+
 ## Conclusions for the implementation
 
 - `RpcCall::BufAttach` issues `nvim_buf_attach(buf, false, {})` -- `false`
-  is load-bearing per capture #1.
-- `crate::handle`'s notification router gains two new method arms:
+  is load-bearing per section 1.
+- `crate::handle`'s notification router gains two method arms:
   `"nvim_buf_lines_event"` (decoded into `Msg::BufTextChanged`, with `buf`
   resolved via `decode_ext_handle` and `generation` filled from the
   connection's own buf-to-generation map, populated by `BufAttach` and
   cleared by `BufDetach`) and `"nvim_buf_detach_event"` (clears that map
-  entry so a stray notification racing a detach cannot resurrect it).
+  entry so a stray notification racing a detach cannot resurrect it, and
+  emits `Msg::BufDetached` only when the entry was still present -- the
+  nvim-initiated case in section 7, never the self-initiated case in
+  section 5).
 - `firstline`/`lastline` carry through to `Msg::BufTextChanged` exactly as
   received -- half-open, old-range semantics, never re-derived from
   `linedata.len()`.
+- A dropped or malformed `nvim_buf_lines_event` for an attached buffer
+  cannot be silently treated as "nothing changed" -- the next successfully
+  decoded event for that buffer must own up to the gap. See
+  `Msg::BufTextChanged::desynced`'s own doc comment for the contract.

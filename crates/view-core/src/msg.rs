@@ -299,6 +299,23 @@ pub enum Msg {
     /// hunk-rebase machine keeps costs work proportional to the edit, never
     /// to the buffer, the same key-dispatch-path latency contract every other
     /// per-keystroke message here keeps.
+    ///
+    /// `desynced` is `true` when this connection knows its own delivery
+    /// cannot be trusted: either a prior event for this same `buf` was
+    /// dropped at the send site (the reader thread's sink is a bounded,
+    /// non-blocking `try_send` -- a burst of hunks from one logical edit,
+    /// e.g. hundreds of single-line events from one large `:s`, can exceed
+    /// its capacity), or a prior wire event for this `buf` failed to decode
+    /// (a shape this crate did not expect, including `lastline == -1`). Both
+    /// are marked on `buf`'s connection-side state and consumed by --
+    /// stamped onto -- the next event this same `buf` manages to deliver, so
+    /// the gap can never pass silently as an ordinary hunk: nothing recomputes
+    /// a dropped or malformed event from "the next one" the way an ordinary
+    /// per-keystroke miss might, because a `nvim_buf_lines_event` is a diff
+    /// against a specific prior state, not a full re-readable snapshot.
+    /// `desynced: true` obligates the consumer (the hunk-rebase state
+    /// machine) to a full resync of `buf` rather than folding this hunk in
+    /// atop state it can no longer trust.
     BufTextChanged {
         buf: BufferHandle,
         generation: u64,
@@ -306,6 +323,23 @@ pub enum Msg {
         lastline: u64,
         linedata: Vec<String>,
         changedtick: u64,
+        desynced: bool,
+    },
+    /// `buf`'s `nvim_buf_attach` subscription ended on nvim's own initiative
+    /// -- a `:edit!` reload, `:bwipeout`, or any other path `:help
+    /// api-buffer-updates` documents firing `nvim_buf_detach_event` for --
+    /// never emitted for a detach this connection itself asked for via
+    /// `RpcCall::BufDetach`: that caller already knows synchronously, and
+    /// `EngineHandle::note_buf_detach` clears the connection-side state
+    /// before nvim's own confirmation ever arrives (see that method's own
+    /// doc), so by the time the confirmation does arrive there is nothing
+    /// left to report here. Without this, the hunk-rebase state machine has
+    /// no way to learn its subscription died for a reason nobody on this
+    /// side chose -- it would keep believing `buf` is live and never
+    /// receive another `Msg::BufTextChanged` for it again.
+    BufDetached {
+        buf: BufferHandle,
+        generation: u64,
     },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
