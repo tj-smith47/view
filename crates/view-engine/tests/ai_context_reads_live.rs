@@ -89,7 +89,9 @@ fn read_current_buffer_text_reads_modified_content_over_a_named_buffer() {
 }
 
 /// With no visual selection active, the cursor read carries
-/// `nvim_win_get_cursor`'s own position and no selection.
+/// `nvim_win_get_cursor`'s position, renormalized to `EngineReadSnapshot`'s
+/// shared 1-indexed convention (col 0 on the wire reads back as 1 here),
+/// and no selection.
 #[test]
 fn read_cursor_context_with_no_active_selection() {
     let engine = spawn();
@@ -100,7 +102,7 @@ fn read_cursor_context_with_no_active_selection() {
         .read_cursor_context()
         .expect("read cursor context");
 
-    assert_eq!((cursor.line, cursor.col), (1, 0));
+    assert_eq!((cursor.line, cursor.col), (1, 1));
     assert_eq!(selection, None);
 }
 
@@ -120,7 +122,10 @@ fn read_cursor_context_with_an_active_forward_selection() {
         .read_cursor_context()
         .expect("read cursor context");
 
-    assert_eq!(cursor.col, 4);
+    assert_eq!(
+        cursor.col, 5,
+        "wire col 4 renormalized to the 1-indexed convention"
+    );
     let selection = selection.expect("a selection is active");
     assert_eq!(selection.text, "hello");
     assert_eq!(selection.range, (1, 1));
@@ -170,6 +175,79 @@ fn read_cursor_context_after_leaving_visual_mode_reports_no_selection() {
     assert_eq!(selection, None);
 }
 
+/// A charwise selection ending on a multi-byte character reads its full
+/// text, never `None`: `"aé bc"`'s `é` is a 2-byte UTF-8 sequence, and
+/// `getpos('.')`'s own byte column at that position is the FIRST byte of
+/// `é`, not the exclusive end `nvim_buf_get_text` needs. Fixed regression
+/// coverage for the bug where passing that raw column straight through as
+/// the exclusive end sliced off `é`'s second byte, producing a string that
+/// failed UTF-8 validation and silently decoded as no selection at all.
+#[test]
+fn read_cursor_context_selection_ending_on_a_multibyte_character_reads_the_full_character() {
+    let engine = spawn();
+    set_lines(&engine, &["a\u{e9} bc"]);
+
+    engine.handle.input("gg0v").expect("enter visual mode");
+    engine.handle.input("l").expect("extend selection onto é");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active, not silently dropped");
+    assert_eq!(selection.text, "a\u{e9}");
+}
+
+/// A linewise (`V`) selection reads every full line it spans, ignoring both
+/// endpoints' columns entirely -- linewise selections have no columns, by
+/// nvim's own definition of the mode.
+#[test]
+fn read_cursor_context_with_a_linewise_selection_reads_whole_lines() {
+    let engine = spawn();
+    set_lines(&engine, &["alpha", "beta", "gamma"]);
+
+    engine
+        .handle
+        .input("gg0V")
+        .expect("enter linewise visual mode");
+    engine.handle.input("j").expect("extend to the next line");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "alpha\nbeta");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// A blockwise (`<C-v>`) selection reads the column-range rectangle it
+/// spans, per line, clamped to each line's own length -- never the charwise
+/// span between the two endpoints, which would pull in text the block never
+/// actually covers.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_reads_the_rectangle() {
+    let engine = spawn();
+    set_lines(&engine, &["alpha", "beta", "gamma"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jl").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "al\nbe");
+    assert_eq!(selection.range, (1, 2));
+}
+
 /// No diagnostics posted reads back an empty list, not an error -- the
 /// ordinary case for a freshly opened buffer.
 #[test]
@@ -185,8 +263,11 @@ fn read_diagnostic_entries_with_none_posted_is_empty() {
     assert!(entries.is_empty());
 }
 
-/// Every field of a posted diagnostic -- 0-indexed line/col, severity, and
-/// message -- round-trips through `vim.diagnostic.get(0)` verbatim.
+/// Every field of a posted diagnostic round-trips through
+/// `vim.diagnostic.get(0)`, with `line`/`col` renormalized from that API's
+/// 0-indexed wire values onto `EngineReadSnapshot`'s shared 1-indexed
+/// convention (`lnum = 0` reads back as `line == 1`, `col = 2` as
+/// `col == 3`).
 #[test]
 fn read_diagnostic_entries_decodes_every_severity() {
     let engine = spawn();
@@ -217,12 +298,12 @@ vim.diagnostic.set(ns, 0, {
     entries.sort_by_key(|e| e.line);
 
     assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0].line, 0);
-    assert_eq!(entries[0].col, 2);
+    assert_eq!(entries[0].line, 1);
+    assert_eq!(entries[0].col, 3);
     assert_eq!(entries[0].severity, DiagnosticSeverity::Error);
     assert_eq!(entries[0].message, "error message");
-    assert_eq!(entries[1].line, 1);
-    assert_eq!(entries[1].col, 0);
+    assert_eq!(entries[1].line, 2);
+    assert_eq!(entries[1].col, 1);
     assert_eq!(entries[1].severity, DiagnosticSeverity::Warning);
     assert_eq!(entries[1].message, "warn message");
 }

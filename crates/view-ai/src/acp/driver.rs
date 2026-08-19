@@ -1179,6 +1179,46 @@ mod tests {
         assert_eq!(block["text"], "Quickfix list:\n/tmp/a.rs:5:0 TODO");
     }
 
+    /// The same physical buffer position -- line 5, column 3 -- rendered
+    /// through `Cursor`, `Diagnostics`, and `QuickfixList` must show the
+    /// identical numbers in all three. `EngineReadSnapshot`'s three position
+    /// sources are normalized onto one shared 1-indexed convention upstream,
+    /// in `view-engine`'s own reply decoders (see that type's doc); this
+    /// layer forwards whatever numbers it receives verbatim and must never
+    /// itself add or subtract an index, so a physical position an agent
+    /// reads from a cursor read, a diagnostic, and a quickfix entry all
+    /// resolve to the same place rather than three positions offset from
+    /// each other.
+    #[test]
+    fn cursor_diagnostic_and_quickfix_render_the_same_physical_position_identically() {
+        let cursor_block = context_block(&ContextBlock::Cursor { line: 5, col: 3 })
+            .expect("cursor lowers to text");
+        assert_eq!(cursor_block["text"], "Cursor at line 5, column 3");
+
+        let diagnostics = ContextBlock::Diagnostics {
+            entries: vec![DiagnosticEntry::new(
+                5,
+                3,
+                DiagnosticSeverity::Error,
+                "boom".to_string(),
+            )],
+        };
+        let diagnostics_block =
+            context_block(&diagnostics).expect("non-empty diagnostics lower to text");
+        assert_eq!(diagnostics_block["text"], "Diagnostics:\n5:3 [error] boom");
+
+        let quickfix = ContextBlock::QuickfixList {
+            entries: vec![QfEntry::new(
+                std::path::PathBuf::from("/tmp/a.rs"),
+                5,
+                3,
+                "boom".to_string(),
+            )],
+        };
+        let quickfix_block = context_block(&quickfix).expect("non-empty quickfix lowers to text");
+        assert_eq!(quickfix_block["text"], "Quickfix list:\n/tmp/a.rs:5:3 boom");
+    }
+
     #[test]
     fn entry_less_diagnostic_and_quickfix_blocks_lower_to_no_content() {
         assert!(context_block(&ContextBlock::Diagnostics { entries: vec![] }).is_none());

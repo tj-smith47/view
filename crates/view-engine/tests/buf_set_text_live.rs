@@ -189,6 +189,162 @@ fn text_edit_columns_are_byte_offsets_not_character_offsets() {
     assert_eq!(get_lines(&engine), vec!["X wörld"]);
 }
 
+/// `TextEdit.start_col` is also a 0-indexed BYTE offset, not a character
+/// offset -- the same claim `text_edit_columns_are_byte_offsets_not_character_offsets`
+/// pins for `end_col`, but every edit in that test (and every other test in
+/// this file) starts at `start_col: 0`, where byte and character confusion
+/// is invisible. `"héllo wörld"`'s `h` is 1 byte and `é` is 2, so byte
+/// offset 3 (not character offset 2) is where `llo` begins; a caller that
+/// mistakenly used the character count would splice into the middle of
+/// `é`'s encoding instead.
+#[test]
+fn text_edit_start_col_is_a_byte_offset_not_a_character_offset() {
+    let engine = spawn();
+    set_lines(&engine, &["héllo wörld"]);
+
+    engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 3, // byte offset after "h" (1) + "é" (2)
+                end_row: 0,
+                end_col: 6,
+                lines: vec!["LLO".to_owned()],
+            }],
+            false,
+        )
+        .expect("byte start-column edit");
+
+    assert_eq!(get_lines(&engine), vec!["héLLO wörld"]);
+}
+
+/// A single edit spanning multiple rows must apply with `start_row` and
+/// `end_row` in the order `TextEdit` declares them -- every other edit in
+/// this file starts and ends on the same row, so a start/end row swap in
+/// the argument-mapping code (e.g. writing `edit.end_row` under the
+/// `"start_row"` key) would pass every other test here while still sending
+/// nvim a backwards range.
+#[test]
+fn set_buf_text_applies_a_multi_row_edit_without_swapping_start_and_end_row() {
+    let engine = spawn();
+    set_lines(&engine, &["one", "two", "three"]);
+
+    engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 1,
+                end_row: 2,
+                end_col: 2,
+                lines: vec!["X".to_owned()],
+            }],
+            false,
+        )
+        .expect("multi-row edit");
+
+    assert_eq!(get_lines(&engine), vec!["oXree"]);
+}
+
+/// `undojoin: true` issued right after the user pressed `u` must not drop
+/// the edit. `:undojoin` throws `E790: undojoin is not allowed after undo`
+/// whenever the previous action was an undo (`:help undo-joining`), live-
+/// confirmed in `docs/buf-set-text-wire-capture.md`; the required fallback
+/// is to apply the edit anyway, as its own unjoined undo step, since an
+/// accepted diff hunk must never silently vanish just because it landed
+/// right after an undo.
+#[test]
+fn undojoin_true_after_an_undo_falls_back_to_applying_unjoined() {
+    let engine = spawn();
+    set_lines(&engine, &["line1", "line2"]);
+
+    engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 5,
+                lines: vec!["LINE1".to_owned()],
+            }],
+            false,
+        )
+        .expect("first edit");
+    undo(&engine);
+    assert_eq!(
+        get_lines(&engine),
+        vec!["line1", "line2"],
+        "sanity: the first edit is undone before the fallback case runs"
+    );
+
+    engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 5,
+                lines: vec!["LINE1-AGAIN".to_owned()],
+            }],
+            true,
+        )
+        .expect("undojoin:true right after an undo must still apply, not error out");
+
+    assert_eq!(get_lines(&engine), vec!["LINE1-AGAIN", "line2"]);
+
+    undo(&engine);
+    assert_eq!(
+        get_lines(&engine),
+        vec!["line1", "line2"],
+        "the fallback edit is its own undo step, since it could not join"
+    );
+}
+
+/// A batch's edits apply correctly regardless of the order the caller lists
+/// them in, because the executor sorts by descending `(start_row,
+/// start_col)` before applying: two edits on one line, listed here in
+/// ascending column order, must both land at their addressed positions
+/// rather than the first edit's length change shifting the second's
+/// now-stale column.
+#[test]
+fn set_buf_text_applies_edits_in_position_order_regardless_of_batch_order() {
+    let engine = spawn();
+    set_lines(&engine, &["aaa bbb ccc"]);
+
+    engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[
+                TextEdit {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 0,
+                    end_col: 3,
+                    lines: vec!["XXXX".to_owned()],
+                },
+                TextEdit {
+                    start_row: 0,
+                    start_col: 8,
+                    end_row: 0,
+                    end_col: 11,
+                    lines: vec!["YYYY".to_owned()],
+                },
+            ],
+            false,
+        )
+        .expect("ascending-order batch");
+
+    assert_eq!(get_lines(&engine), vec!["XXXX bbb YYYY"]);
+}
+
 /// A `BufSetText` call against a buffer handle that no longer exists
 /// (closed between an agent's proposal and the user's accept) must surface
 /// as `Err`, never a panic and never a silently dropped edit.

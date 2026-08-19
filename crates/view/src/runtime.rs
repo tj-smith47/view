@@ -356,8 +356,17 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::TreeDeleteConfirm { generation, path } => {
                         self.ops.tree_delete_confirm(&path, generation)
                     }
+                    RpcCall::BufSetText {
+                        buf,
+                        edits,
+                        undojoin,
+                    } => self.ops.set_buf_text(buf, &edits, undojoin),
                     // RpcCall is #[non_exhaustive]: a future call kind must
-                    // degrade to a no-op here rather than fail to compile
+                    // degrade to a no-op here rather than fail to compile.
+                    // BufSetText is matched explicitly above rather than
+                    // falling through here: unlike every other call this
+                    // catch-all covers, a silently no-op'd write would drop
+                    // a buffer edit the user already accepted.
                     _ => return Flow::Continue,
                 };
                 match result {
@@ -1656,7 +1665,7 @@ mod tests {
     )]
     use super::*;
     use crate::engine_ops::FakeOps;
-    use view_core::msg::{OptionValue, ReplyToken};
+    use view_core::msg::{BufferHandle, OptionValue, ReplyToken, TextEdit};
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
     /// reason `view-native::paths`' and `view-ai::trust`'s own suites each
@@ -1978,6 +1987,32 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "rename_file(a.txt,b.txt,3)");
+    }
+
+    /// `RpcCall::BufSetText` is matched explicitly in `Executor::run` rather
+    /// than falling through the `#[non_exhaustive]` catch-all -- this pins
+    /// that the dispatch actually reaches `EngineOps::set_buf_text` (and
+    /// with which arguments), so a future refactor that accidentally
+    /// deletes the explicit arm regresses back to the silent no-op every
+    /// other unmatched call kind gets, instead of losing an accepted buffer
+    /// edit unnoticed.
+    #[test]
+    fn buf_set_text_effect_maps_to_engine_ops_set_buf_text() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let flow = executor.run(Effect::Rpc(RpcCall::BufSetText {
+            buf: BufferHandle(3),
+            edits: vec![TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 1,
+                lines: vec!["x".into()],
+            }],
+            undojoin: true,
+        }));
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "set_buf_text(3,1,true)");
     }
 
     #[test]

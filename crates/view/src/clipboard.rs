@@ -646,6 +646,14 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn set_buf_text(
+            &self,
+            _buf: view_core::msg::BufferHandle,
+            _edits: &[view_core::msg::TextEdit],
+            _undojoin: bool,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
     }
 
     #[test]

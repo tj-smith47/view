@@ -22,8 +22,19 @@ use view_core::native::mappings::{default_maps, is_spellable, MappingSpec, COMMA
 /// and [`EngineHandle::read_quickfix_entries`] waits for nvim's reply. Same
 /// rationale as [`GET_MODE_TIMEOUT`]: each is a synchronous nvim-side read
 /// issued at prompt-submission time, so a wedged engine must not hang the
-/// submission indefinitely.
+/// submission indefinitely. Reads only -- [`EngineHandle::set_buf_text`], the
+/// one write in this group, bounds itself on [`BUF_SET_TEXT_TIMEOUT`]
+/// instead, matching every other purpose-named timeout in this file rather
+/// than folding a write into a constant documented as reads.
 const CONTEXT_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Upper bound on how long [`EngineHandle::set_buf_text`] waits for nvim's
+/// reply. Same 5-second bound as [`CONTEXT_READ_TIMEOUT`] (a batched
+/// `nvim_buf_set_text` application is not meaningfully slower than a read),
+/// kept as its own constant rather than shared with the reads: this is the
+/// one call in the group that mutates buffer text, and a future change to
+/// the read timeout must not silently retune how long a write blocks too.
+const BUF_SET_TEXT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
 /// reply before giving up.
@@ -557,10 +568,23 @@ return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
 /// longer exists throws inside the loop (`Invalid buffer id: N`), which
 /// `nvim_exec_lua` surfaces as this request's `Err`, exactly like any other
 /// rejected chunk here -- never a silently dropped edit.
+///
+/// The `undojoin` command itself is wrapped in `pcall`, live-confirmed
+/// necessary: `:undojoin` throws `E790: undojoin is not allowed after undo`
+/// whenever the immediately preceding action was an undo (`:help
+/// undo-joining`), not only when there is no preceding undo entry at all.
+/// An unguarded throw there aborts the whole chunk before the loop below
+/// ever runs, silently dropping every edit in the batch -- an accepted diff
+/// hunk that happened to land right after the user pressed `u` would simply
+/// never apply. `pcall`'s own success flag is deliberately discarded: on
+/// `E790` (or any other rejection) the edits still apply, just as their own
+/// unjoined undo step, which is the fallback
+/// [`view_core::msg::RpcCall::BufSetText`]'s own doc requires rather than
+/// dropping an accepted hunk.
 const BUF_SET_TEXT_CHUNK: &str = "\
 local buf, undojoin, edits = ...
 if undojoin then
-  vim.cmd('undojoin')
+  pcall(vim.cmd, 'undojoin')
 end
 for _, edit in ipairs(edits) do
   vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row, edit.end_col, edit.lines)
@@ -580,22 +604,57 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 /// Reads the buffer-space cursor and, when one is active, the visual
 /// selection for [`EngineHandle::read_cursor_context`], verified live
 /// against the pinned engine (see `docs/ai-context-reads-wire-capture.md`).
-/// `line`/`col` are `nvim_win_get_cursor`'s own values verbatim (1-indexed
-/// line, 0-indexed byte column -- nvim's own mixed convention, not
-/// renormalized here). A selection is considered active exactly when
-/// `nvim_get_mode()` reports one of the three visual submodes (`v`, `V`, or
-/// blockwise `\22`) at the moment of the call -- stale `'<`/`'>` marks left
-/// over from a selection the user already exited are deliberately not read,
-/// since those persist long after the selection that set them is gone and
-/// would otherwise misreport "active" forever. While active, the selection's
-/// endpoints come from `getpos('v')` (the anchor) and `getpos('.')` (the
-/// cursor), reordered so `selection_start <= selection_end` regardless of
-/// which direction the user selected in, and the text itself is read via
-/// `nvim_buf_get_text` on the same 0-indexed byte columns `BUF_SET_TEXT_CHUNK`
-/// uses. The `selection_*` keys are simply absent from the reply when no
+/// `line`/`col` are `nvim_win_get_cursor`'s own values as they cross the
+/// wire (1-indexed line, 0-indexed byte column -- nvim's own mixed
+/// convention); [`decode_cursor_context_reply`] is what renormalizes `col`
+/// to the single 1-indexed convention every `EngineReadSnapshot` position
+/// field shares, not this chunk. A selection is considered active exactly
+/// when `nvim_get_mode()` reports one of the three visual submodes (`v`,
+/// `V`, or blockwise `\22`) at the moment of the call -- stale `'<`/`'>`
+/// marks left over from a selection the user already exited are
+/// deliberately not read, since those persist long after the selection
+/// that set them is gone and would otherwise misreport "active" forever.
+///
+/// While active, the selection's endpoints come from `getpos('v')` (the
+/// anchor) and `getpos('.')` (the cursor), reordered so
+/// `selection_start <= selection_end` regardless of which direction the
+/// user selected in. The three submodes read their text differently, each
+/// live-verified (see `docs/ai-context-reads-wire-capture.md`):
+///
+/// - Charwise (`v`): `nvim_buf_get_text` on the endpoints' byte columns,
+///   with the end column extended past the full last character rather than
+///   `getpos`'s own byte offset of that character's first byte --
+///   live-confirmed that passing `getpos`'s raw column straight through as
+///   an exclusive end (this chunk's original, buggy form) truncates mid
+///   multi-byte UTF-8 sequence, producing an invalid string the decoder
+///   silently turns into "no selection" rather than the actual text.
+/// - Linewise (`V`): every full line from `selection_start` to
+///   `selection_end`, ignoring both endpoints' columns entirely -- a
+///   linewise selection has none, by nvim's own definition of the mode.
+/// - Blockwise (`\22`): the column-range rectangle spanned by the two
+///   endpoints' (reordered, low-to-high) columns, clamped per line to that
+///   line's own length, joined with `\n` -- never the charwise span between
+///   the endpoints, which would silently include whole lines' worth of text
+///   the block never actually covers.
+///
+/// The `selection_*` keys are simply absent from the reply when no
 /// selection is active, the same "absent key, not a null" convention
 /// `PREVIEW_CHUNK`'s `loaded: false` case uses.
 const CURSOR_CONTEXT_CHUNK: &str = "\
+local function line_text(line_number)
+  return vim.api.nvim_buf_get_lines(0, line_number - 1, line_number, false)[1] or ''
+end
+local function byte_end_of_char(line, byte_col0)
+  local charidx = vim.fn.charidx(line, byte_col0)
+  if charidx == -1 then
+    return #line
+  end
+  local nextbyte = vim.fn.byteidx(line, charidx + 1)
+  if nextbyte == -1 then
+    return #line
+  end
+  return nextbyte
+end
 local cur = vim.api.nvim_win_get_cursor(0)
 local out = { line = cur[1], col = cur[2] }
 local mode = vim.api.nvim_get_mode().mode
@@ -606,8 +665,32 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
   if srow > erow or (srow == erow and scol > ecol) then
     srow, scol, erow, ecol = erow, ecol, srow, scol
   end
-  local lines = vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, ecol, {})
-  out.selection_text = table.concat(lines, '\\n')
+  local text
+  if mode == 'V' then
+    text = table.concat(vim.api.nvim_buf_get_lines(0, srow - 1, erow, false), '\\n')
+  elseif mode == '\\22' then
+    local lo_col, hi_col = scol, ecol
+    if lo_col > hi_col then
+      lo_col, hi_col = hi_col, lo_col
+    end
+    local rows = {}
+    for row = srow, erow do
+      local line = line_text(row)
+      local lo0 = math.min(lo_col - 1, #line)
+      local hi0 = math.min(byte_end_of_char(line, hi_col - 1), #line)
+      if hi0 < lo0 then
+        hi0 = lo0
+      end
+      rows[#rows + 1] = string.sub(line, lo0 + 1, hi0)
+    end
+    text = table.concat(rows, '\\n')
+  else
+    local endline = line_text(erow)
+    local end_byte0 = byte_end_of_char(endline, ecol - 1)
+    local lines = vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, end_byte0, {})
+    text = table.concat(lines, '\\n')
+  end
+  out.selection_text = text
   out.selection_start = srow
   out.selection_end = erow
 end
@@ -616,11 +699,13 @@ return out";
 /// Reads every current entry from `vim.diagnostic.get(0)` for
 /// [`EngineHandle::read_diagnostic_entries`], verified live against the
 /// pinned engine (see `docs/ai-context-reads-wire-capture.md`): `lnum`/`col`
-/// are the diagnostic API's own 0-indexed byte positions, passed through
-/// verbatim rather than renormalized against `getqflist`'s 1-indexed
-/// convention -- [`QUICKFIX_ENTRIES_CHUNK`] keeps its own source's indexing
-/// the same way. `severity` is nvim's own `vim.diagnostic.severity` integer
-/// (`1`=Error .. `4`=Hint), mapped onto [`DiagnosticSeverity`] by
+/// cross the wire as the diagnostic API's own 0-indexed byte positions,
+/// verbatim from this chunk -- [`decode_diagnostic_entries_reply`] is what
+/// renormalizes both to the single 1-indexed convention every
+/// `EngineReadSnapshot` position field shares (matching
+/// [`QUICKFIX_ENTRIES_CHUNK`]'s source, already 1-indexed on the wire).
+/// `severity` is nvim's own `vim.diagnostic.severity` integer (`1`=Error ..
+/// `4`=Hint), mapped onto [`DiagnosticSeverity`] by
 /// [`decode_diagnostic_entries_reply`].
 const DIAGNOSTIC_ENTRIES_CHUNK: &str = "\
 local out = {}
@@ -1519,6 +1604,16 @@ impl EngineHandle {
     /// text -- see [`view_core::msg::RpcCall::BufSetText`]'s own doc for the
     /// per-hunk undo contract `undojoin` implements).
     ///
+    /// `edits` is applied in descending `(start_row, start_col)` order --
+    /// bottom of the buffer first -- regardless of the order the caller
+    /// listed them in. `edits` must be non-overlapping (see [`TextEdit`]'s
+    /// own doc); given that, applying bottom-to-top is what makes the batch
+    /// order-insensitive: an edit lower in the buffer never shifts the
+    /// still-pending row/col coordinates of one above it, whereas the
+    /// reverse order would (an earlier top edit that grows or shrinks a line
+    /// changes every column after it on that line, stale-ing any later edit
+    /// still addressing the original coordinates).
+    ///
     /// A request, not a notify, deliberately: a stale `buf` (closed between
     /// an agent's proposal and the user's accept) must surface as this
     /// call's `Err` rather than a silently dropped edit -- `notify` has no
@@ -1529,14 +1624,16 @@ impl EngineHandle {
     ///
     /// Returns the `EngineError` from the underlying request if it fails,
     /// nvim rejects the edit (including `buf` no longer existing), or the
-    /// reply does not arrive within [`CONTEXT_READ_TIMEOUT`].
+    /// reply does not arrive within [`BUF_SET_TEXT_TIMEOUT`].
     pub fn set_buf_text(
         &self,
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
     ) -> Result<(), EngineError> {
-        let edits = edits
+        let mut ordered: Vec<&TextEdit> = edits.iter().collect();
+        ordered.sort_by_key(|edit| std::cmp::Reverse((edit.start_row, edit.start_col)));
+        let edits = ordered
             .iter()
             .map(|edit| {
                 Value::Map(vec![
@@ -1566,7 +1663,7 @@ impl EngineHandle {
                     Value::Array(edits),
                 ]),
             ],
-            CONTEXT_READ_TIMEOUT,
+            BUF_SET_TEXT_TIMEOUT,
         )?;
         Ok(())
     }
@@ -1706,11 +1803,17 @@ fn decode_current_buffer_text_reply(result: &Value) -> Result<CurrentBufferRead,
 /// `docs/ai-context-reads-wire-capture.md`). `line`/`col` are unconditional
 /// (nvim always has a cursor) and a shape missing either is malformed, the
 /// same contract-violation reasoning
-/// [`decode_current_buffer_text_reply`] documents. The three
-/// `selection_*` keys are read together or not at all: the chunk only ever
-/// writes all three or none, so a reply carrying just one or two is treated
-/// as no active selection rather than a partial one built from whichever
-/// keys happened to be present.
+/// [`decode_current_buffer_text_reply`] documents. `col` crosses the wire
+/// 0-indexed (`nvim_win_get_cursor`'s own convention); this decoder adds 1
+/// so [`CursorRead::col`] carries the single 1-indexed convention every
+/// `EngineReadSnapshot` position field shares (see that type's own doc).
+/// `line` needs no such adjustment: `nvim_win_get_cursor`'s row is already
+/// 1-indexed on the wire. The three `selection_*` keys are read together or
+/// not at all: the chunk only ever writes all three or none, so a reply
+/// carrying just one or two is treated as no active selection rather than a
+/// partial one built from whichever keys happened to be present.
+/// `selection_start`/`selection_end` need no adjustment either: they are
+/// buffer line numbers, already 1-indexed the same way `line` is.
 fn decode_cursor_context_reply(
     result: &Value,
 ) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
@@ -1726,7 +1829,7 @@ fn decode_cursor_context_reply(
     let col = crate::wire::map_find(pairs, "col")
         .and_then(Value::as_u64)
         .ok_or_else(malformed)?;
-    let cursor = CursorRead::new(saturate_u32(line), saturate_u32(col));
+    let cursor = CursorRead::new(saturate_u32(line), saturate_u32(col).saturating_add(1));
     let selection = match (
         crate::wire::map_find(pairs, "selection_text").and_then(Value::as_str),
         crate::wire::map_find(pairs, "selection_start").and_then(Value::as_u64),
@@ -1749,10 +1852,16 @@ fn decode_cursor_context_reply(
 /// `Err`, matching `decode_buffer_list_reply`'s convention for a corpus that
 /// legitimately can be empty (no diagnostics currently posted) -- a row
 /// missing any of its four fields is dropped rather than failing the whole
-/// read. `severity` is `vim.diagnostic.severity`'s own closed 1-4 range
-/// (`:help diagnostic-severity`); an out-of-range value this crate has never
-/// seen from the pinned engine drops the row rather than guessing a
-/// severity nvim never reported.
+/// read. `line`/`col` cross the wire 0-indexed (`vim.diagnostic.get`'s own
+/// convention); both get +1 here so [`DiagnosticEntry::line`]/`::col` carry
+/// the same single 1-indexed convention [`decode_cursor_context_reply`]
+/// normalizes onto (see `EngineReadSnapshot`'s own doc) -- `getqflist`'s
+/// entries need no such adjustment, already 1-indexed on the wire (see
+/// [`decode_quickfix_entries_reply`]). `severity` is
+/// `vim.diagnostic.severity`'s own closed 1-4 range (`:help
+/// diagnostic-severity`); an out-of-range value this crate has never seen
+/// from the pinned engine drops the row rather than guessing a severity
+/// nvim never reported.
 fn decode_diagnostic_entries_reply(result: &Value) -> Result<Vec<DiagnosticEntry>, EngineError> {
     let Some(rows) = result.as_array() else {
         return Ok(Vec::new());
@@ -1761,8 +1870,10 @@ fn decode_diagnostic_entries_reply(result: &Value) -> Result<Vec<DiagnosticEntry
         .iter()
         .filter_map(|row| {
             let pairs = row.as_map()?;
-            let line = saturate_u32(crate::wire::map_find(pairs, "line")?.as_u64()?);
-            let col = saturate_u32(crate::wire::map_find(pairs, "col")?.as_u64()?);
+            let line =
+                saturate_u32(crate::wire::map_find(pairs, "line")?.as_u64()?).saturating_add(1);
+            let col =
+                saturate_u32(crate::wire::map_find(pairs, "col")?.as_u64()?).saturating_add(1);
             let severity = match crate::wire::map_find(pairs, "severity")?.as_u64()? {
                 1 => DiagnosticSeverity::Error,
                 2 => DiagnosticSeverity::Warning,
@@ -1783,7 +1894,10 @@ fn decode_diagnostic_entries_reply(result: &Value) -> Result<Vec<DiagnosticEntry
 /// `nvim --clean --headless` (see `docs/ai-context-reads-wire-capture.md`),
 /// on the same "non-array degrades to empty, a malformed row is dropped"
 /// terms as [`decode_diagnostic_entries_reply`] -- an empty quickfix list is
-/// the ordinary case, not an error.
+/// the ordinary case, not an error. `line`/`col` need no index adjustment
+/// here, unlike that decoder's: `getqflist()` is already 1-indexed on the
+/// wire, the same convention every `EngineReadSnapshot` position field
+/// shares.
 fn decode_quickfix_entries_reply(result: &Value) -> Result<Vec<QuickfixEntry>, EngineError> {
     let Some(rows) = result.as_array() else {
         return Ok(Vec::new());

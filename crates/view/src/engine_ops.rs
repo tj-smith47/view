@@ -4,7 +4,7 @@
 //! testable against a recording fake instead of a live nvim connection, and
 //! so growing the surface never grows the loop's own file.
 
-use view_core::msg::{OptionValue, ReplyToken, ReplyValue};
+use view_core::msg::{BufferHandle, OptionValue, ReplyToken, ReplyValue, TextEdit};
 use view_core::native::mappings::MappingSpec;
 use view_engine::handle::{EngineError, EngineHandle};
 
@@ -96,6 +96,19 @@ pub trait EngineOps {
     /// blocks, and never itself returns the answer (see
     /// `RpcCall::TreeDeleteConfirm`, `Msg::TreeDeleteConfirmReply`).
     fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError>;
+    /// Applies `edits` to `buf` via `nvim_buf_set_text`, the only path that
+    /// ever writes agent-proposed text (see `RpcCall::BufSetText`'s own doc
+    /// for the per-hunk undo contract `undojoin` implements). Explicitly
+    /// matched in `Executor::run` rather than falling through
+    /// `RpcCall`'s `#[non_exhaustive]` catch-all: unlike every other call
+    /// here, a silently no-op'd write would drop a buffer edit the user
+    /// already accepted, not just skip a read or a prompt.
+    fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -175,6 +188,14 @@ impl EngineOps for EngineHandle {
     }
     fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.tree_delete_confirm(path, generation)
+    }
+    fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError> {
+        self.set_buf_text(buf, edits, undojoin)
     }
 }
 
@@ -259,6 +280,14 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         (**self).tree_delete_confirm(path, generation)
+    }
+    fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError> {
+        (**self).set_buf_text(buf, edits, undojoin)
     }
 }
 
@@ -373,5 +402,17 @@ impl EngineOps for FakeOps {
     }
     fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
         self.record(format!("tree_delete_confirm({path},{generation})"))
+    }
+    fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "set_buf_text({},{},{undojoin})",
+            buf.0,
+            edits.len()
+        ))
     }
 }

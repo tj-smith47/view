@@ -905,6 +905,15 @@ pub struct BufferHandle(pub u64);
 /// `[end_row, end_col)` span verbatim, following `nvim_buf_set_text`'s own
 /// convention that an empty `lines` deletes the span and a `lines` with more
 /// than one entry inserts a line break.
+///
+/// A batch's edits must be non-overlapping -- applying two edits whose spans
+/// intersect is unsupported and its result unspecified, since one of them
+/// would be replacing text the other already rewrote. Callers do not have
+/// to pre-sort a batch: the `view-engine` executor that carries out
+/// [`RpcCall::BufSetText`] applies every batch in descending
+/// `(start_row, start_col)` order (bottom of the buffer first) specifically
+/// so that non-overlapping edits never shift each other's still-pending
+/// positions, regardless of the order the caller listed them in.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextEdit {
     pub start_row: u32,
@@ -1222,12 +1231,21 @@ pub enum RpcCall {
     /// Applies a batched set of line/column-range replacements to one buffer
     /// via `nvim_buf_set_text`, the only path that ever writes agent-proposed
     /// text (hard rule: nvim owns all buffer text). `undojoin` links this
-    /// call onto the immediately preceding one in the same undo group. Diff
-    /// review issues exactly one hunk's edits per call, with `undojoin: true`
-    /// for every hunk after the first in an "accept all" batch and `false`
-    /// for the first, which is what makes `u` step backward one accepted
-    /// hunk at a time -- never a whole multi-hunk accept collapsed into one
-    /// undo entry, and never one entry per line-range within a single hunk.
+    /// call onto the immediately preceding one in the same undo group, when
+    /// there is one to join -- if nvim rejects the join (`E790`, issued
+    /// right after an undo), the executor falls back to applying `edits`
+    /// unjoined rather than dropping them, since a hunk the user just
+    /// accepted must never silently vanish. Diff review issues exactly one
+    /// hunk's edits per call, with `undojoin: true` for every hunk after the
+    /// first in an "accept all" batch and `false` for the first, which is
+    /// what makes `u` step backward one accepted hunk at a time -- never a
+    /// whole multi-hunk accept collapsed into one undo entry, and never one
+    /// entry per line-range within a single hunk.
+    ///
+    /// `edits` must be non-overlapping (see [`TextEdit`]'s own doc); the
+    /// executor applies them in descending `(start_row, start_col)` order
+    /// regardless of the order they are listed in, so an earlier-applied
+    /// edit never shifts a later one's still-pending coordinates.
     BufSetText {
         buf: BufferHandle,
         edits: Vec<TextEdit>,

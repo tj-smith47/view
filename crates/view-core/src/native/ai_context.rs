@@ -49,6 +49,14 @@ impl SelectionRead {
 /// The cursor's buffer-space line and column, read from nvim's own
 /// position -- never the painted grid's cursor, which is a viewport-
 /// relative screen coordinate rather than a place in the buffer.
+///
+/// `line`/`col` are both 1-indexed, matching what the editor shows the
+/// user (`:help line()`'s own convention) -- the one indexing convention
+/// every position field on this snapshot shares, documented once on
+/// [`EngineReadSnapshot`] itself. `col` is still a byte offset, not a
+/// character offset; only the 0-vs-1 origin is normalized here, and only
+/// `view-engine`'s own reply decoders perform that normalization -- this
+/// type carries no wire-shape knowledge of its own.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorRead {
@@ -63,7 +71,11 @@ impl CursorRead {
     }
 }
 
-/// One diagnostic as `vim.diagnostic.get(0)` reports it.
+/// One diagnostic as `vim.diagnostic.get(0)` reports it, with `line`/`col`
+/// renormalized from that API's own 0-indexed wire convention onto the
+/// 1-indexed one every [`EngineReadSnapshot`] position field shares (see
+/// [`CursorRead`]'s own doc) -- `vim.diagnostic.get`'s raw 0-indexed values
+/// never reach this type.
 ///
 /// `#[non_exhaustive]`: the report this models is a 1:1 mapping onto
 /// nvim's own diagnostic entries, which carry more than these four fields
@@ -101,7 +113,10 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
-/// One entry as `getqflist()` reports it.
+/// One entry as `getqflist()` reports it. `line`/`col` need no
+/// renormalization to reach [`EngineReadSnapshot`]'s shared 1-indexed
+/// convention (see [`CursorRead`]'s own doc): `getqflist()` is already
+/// 1-indexed on the wire, unlike [`DiagnosticEntry`]'s source.
 ///
 /// `#[non_exhaustive]` for the same reason as [`DiagnosticEntry`]: nvim's
 /// own quickfix entries carry more than these four fields (`bufnr`, `type`,
@@ -134,6 +149,19 @@ impl QuickfixEntry {
 /// there is no separate error variant, because the consumer's response to
 /// "this read failed" and "there was nothing here" is identical: omit the
 /// block.
+///
+/// Every line/column position anywhere in this snapshot -- `cursor`,
+/// `diagnostics`, `quickfix` alike -- is 1-indexed, matching what the
+/// editor shows the user. Each engine source has its own native wire
+/// convention (`nvim_win_get_cursor` is 0-indexed columns,
+/// `vim.diagnostic.get` is 0-indexed both, `getqflist` is already
+/// 1-indexed), but by the time a value reaches this type it has been
+/// renormalized onto the one shared convention -- deliberately, so the
+/// same physical buffer position renders identically in a prompt's context
+/// regardless of which of the three reads reported it. `view-engine`'s own
+/// reply decoders own that renormalization; nothing here or downstream
+/// (`view-ai`'s prose renderers included) re-derives or re-adjusts an
+/// index.
 ///
 /// `#[non_exhaustive]`: a future context provider (open buffers, a git
 /// diff) adds a field here. Built from `Self::default()` plus the `with_*`
