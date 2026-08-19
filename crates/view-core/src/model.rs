@@ -137,6 +137,14 @@ pub struct Model {
     /// closed still has somewhere to fold, and reopening finds the session
     /// exactly as the user left it rather than a fresh, empty one.
     pub ai_panel: crate::native::ai_panel::AiPanelState,
+    /// The agent's own file reads and writes that are part way through.
+    ///
+    /// Beside the panel rather than inside it for the reason the panel sits
+    /// beside the overlay: an agent reads and writes files whether or not
+    /// anything about it is on screen, and a request that lost its record
+    /// when the sidebar closed would leave the agent waiting on an answer
+    /// nothing was left to send.
+    pub ai_fs: crate::native::ai_fs::AiFsState,
 }
 
 impl Model {
@@ -177,7 +185,22 @@ impl Model {
             supervision: crate::native::supervision::SupervisionState::default(),
             speculate: crate::native::speculate::SpeculateState::default(),
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
+            ai_fs: crate::native::ai_fs::AiFsState::default(),
         }
+    }
+
+    /// The next generation for a `RpcCall::LoadHidden` this crate issues,
+    /// from the one counter every hidden-buffer resolve shares.
+    ///
+    /// The single point of increment on purpose: a diff review's resolve
+    /// and an agent filesystem request's resolve are answered by the same
+    /// `Msg::HiddenBufferLoaded`, and two counters would let both wear the
+    /// same number and each fold the other's reply. See
+    /// [`AiPanelState::hidden_generation`](crate::native::ai_panel::AiPanelState::hidden_generation).
+    pub fn next_hidden_generation(&mut self) -> u64 {
+        let panel = self.ai_panel_mut();
+        panel.hidden_generation += 1;
+        panel.hidden_generation
     }
 
     /// Like [`Model::new`], but with `term_width`/`term_height` pre-filled

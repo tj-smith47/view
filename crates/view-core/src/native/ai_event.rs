@@ -119,7 +119,19 @@ pub enum AiEvent {
     /// channel every other agent-originated event already does.
     /// `request_id` is what the answering [`AiCommand::FsReadReply`] is
     /// correlated against.
-    FsReadRequested { request_id: u64, path: PathBuf },
+    ///
+    /// `line` and `limit` are the wire's own optional window into the file
+    /// -- a 1-based start line and a maximum line count, each absent for
+    /// "the whole file" (`docs/acp-v1-wire-capture.md`,
+    /// `fs/read_text_file` case 1). Carried across the boundary rather than
+    /// applied on this side of it, so a windowed read costs nvim the lines
+    /// asked for instead of the whole buffer.
+    FsReadRequested {
+        request_id: u64,
+        path: PathBuf,
+        line: Option<u32>,
+        limit: Option<u32>,
+    },
     /// The write-side twin of [`Self::FsReadRequested`], carrying the
     /// content the agent proposes to write.
     FsWriteRequested {
@@ -432,6 +444,8 @@ mod tests {
             AiEvent::FsReadRequested {
                 request_id: 7,
                 path: PathBuf::from("/tmp/a.rs"),
+                line: Some(10),
+                limit: Some(50),
             },
             AiEvent::FsWriteRequested {
                 request_id: 8,

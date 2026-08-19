@@ -515,12 +515,30 @@ impl<E: EngineOps> Executor<E> {
                         }
                     }
                     RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),
+                    RpcCall::AiFsRead {
+                        request_id,
+                        buf,
+                        line,
+                        limit,
+                    } => self.ops.ai_fs_read(request_id, buf, line, limit),
+                    RpcCall::AiFsWrite {
+                        request_id,
+                        buf,
+                        lines,
+                        eol,
+                        expected_changedtick,
+                    } => self
+                        .ops
+                        .ai_fs_write(request_id, buf, &lines, eol, expected_changedtick),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
-                    // BufSetText is matched explicitly above rather than
-                    // falling through here: unlike every other call this
-                    // catch-all covers, a silently no-op'd write would drop
-                    // a buffer edit the user already accepted.
+                    // BufSetText and the two AiFs calls are matched
+                    // explicitly above rather than falling through here:
+                    // unlike every other call this catch-all covers, a
+                    // silently no-op'd write would drop a buffer edit the
+                    // user already accepted, and a silently no-op'd
+                    // filesystem answer would leave the agent that asked
+                    // blocked on a request nothing else will ever settle.
                     _ => return Flow::Continue,
                 };
                 match result {
@@ -2303,6 +2321,35 @@ mod tests {
         }));
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "set_buf_text(3,1,true,Some(12))");
+    }
+
+    /// The two agent filesystem calls are matched explicitly for the same
+    /// reason `RpcCall::BufSetText` above is, with a sharper consequence:
+    /// a silently no-op'd read or write is not a lost edit, it is an agent
+    /// blocked forever on a JSON-RPC request nothing else will ever settle.
+    #[test]
+    fn the_agent_filesystem_effects_map_to_their_engine_ops_calls() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+
+        let read = executor.run(Effect::Rpc(RpcCall::AiFsRead {
+            request_id: 7,
+            buf: BufferHandle(3),
+            line: Some(2),
+            limit: None,
+        }));
+        let write = executor.run(Effect::Rpc(RpcCall::AiFsWrite {
+            request_id: 8,
+            buf: BufferHandle(3),
+            lines: vec!["one".into(), "two".into()],
+            eol: true,
+            expected_changedtick: 12,
+        }));
+
+        assert!(matches!(read, Flow::Continue));
+        assert!(matches!(write, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "ai_fs_read(7,3,Some(2),None)");
+        assert_eq!(ops.calls.borrow()[1], "ai_fs_write(8,3,2,true,12)");
     }
 
     /// A write nvim refuses because the buffer moved is not an engine

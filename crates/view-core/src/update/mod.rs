@@ -11,6 +11,7 @@ use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
 mod ai;
+mod ai_fs;
 mod review;
 mod supervision;
 mod ui_event;
@@ -382,12 +383,25 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             },
         ),
         Msg::BufDetached { buf, generation } => review::on_buf_detached(model, buf, generation),
+        // One counter numbers every hidden-buffer resolve this crate issues
+        // (see `Model::next_hidden_generation`), so exactly one of the two
+        // owners below ever claims a given reply: the agent's filesystem
+        // requests answer first and hand the message on untouched when the
+        // generation is not one of theirs.
         Msg::HiddenBufferLoaded {
             generation,
             buf,
             changedtick,
             created: _,
-        } => review::on_hidden_buffer_loaded(model, generation, buf, changedtick),
+        } => ai_fs::on_hidden_buffer_loaded(model, generation, buf, changedtick).unwrap_or_else(
+            || review::on_hidden_buffer_loaded(model, generation, buf, changedtick),
+        ),
+        Msg::AiFsReadReply { request_id, result } => {
+            ai_fs::on_read_reply(model, request_id, result)
+        }
+        Msg::AiFsWriteReply { request_id, result } => {
+            ai_fs::on_write_reply(model, request_id, result)
+        }
         Msg::BufWriteRefused { buf, generation } => {
             review::on_buf_write_refused(model, buf, generation)
         }

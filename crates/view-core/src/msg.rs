@@ -402,6 +402,26 @@ pub enum Msg {
         generation: u64,
         changedtick: u64,
     },
+    /// The decoded answer to one `RpcCall::AiFsRead`: the text nvim holds
+    /// for the buffer that call named, or why it could not be read.
+    ///
+    /// Correlated on `request_id` rather than generation-gated, unlike
+    /// every picker and tree reply beside it: an agent's request is never
+    /// superseded by a later one the way a keystroke supersedes a query, so
+    /// there is no stale answer to drop -- every one of these is owed an
+    /// answer back to the agent that asked, and dropping one leaves the
+    /// agent waiting forever.
+    AiFsReadReply {
+        request_id: u64,
+        result: Result<String, crate::native::ai_event::FsError>,
+    },
+    /// The decoded answer to one `RpcCall::AiFsWrite`, carrying success or
+    /// the reason nothing was written. Correlated on `request_id` on the
+    /// same terms as [`Msg::AiFsReadReply`].
+    AiFsWriteReply {
+        request_id: u64,
+        result: Result<(), crate::native::ai_event::FsError>,
+    },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
     /// [`MessageEntry`](crate::model::MessageEntry) `toast::route` scheduled
@@ -1505,5 +1525,57 @@ pub enum RpcCall {
     /// key, which only ever holds real handles.
     BufDetach {
         buf: BufferHandle,
+    },
+    /// Reads `buf`'s text for an agent's `fs/read_text_file`, answering
+    /// `Msg::AiFsReadReply` correlated on `request_id`.
+    ///
+    /// Names a buffer rather than a path because the resolve already
+    /// happened: a `RpcCall::LoadHidden` ran first and took the hold this
+    /// request rides, so re-resolving the path here would take a second
+    /// hold nothing releases. That ordering is also what makes the read
+    /// answer nvim's text rather than the file's -- the wire requires a
+    /// read to include unsaved editor state (`docs/acp-v1-wire-capture.md`,
+    /// `fs/read_text_file` case 4), and `LoadHidden` resolves onto a real
+    /// window's own modified buffer when one exists.
+    ///
+    /// `line` is the wire's 1-based start line and `limit` its maximum line
+    /// count, both `None` for the whole buffer; see
+    /// `docs/acp-fs-wire-capture.md` case 2 for how each maps onto
+    /// `nvim_buf_get_lines`'s 0-indexed, end-exclusive window and why
+    /// `line: Some(0)` and `limit: Some(0)` are values rather than
+    /// mistakes.
+    AiFsRead {
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    },
+    /// Replaces `buf`'s whole text with `lines` and saves it, for an
+    /// agent's `fs/write_text_file`, answering `Msg::AiFsWriteReply`
+    /// correlated on `request_id`.
+    ///
+    /// `expected_changedtick` carries `RpcCall::LoadHidden`'s own reported
+    /// tick and is checked inside the same chunk that writes, exactly as
+    /// [`RpcCall::BufSetText`]'s guard is: a buffer the user typed into
+    /// between the resolve and this call refuses the write with nothing
+    /// written rather than overwriting an edit the agent never saw.
+    ///
+    /// `eol` is whether the agent's `content` ended in a newline, which
+    /// decides the byte the file ends with (`docs/acp-fs-wire-capture.md`
+    /// case 7). The save is part of the call, not a separate step: the wire
+    /// requires a write to create the file if it does not exist, and a
+    /// buffer-only write to a path no window has open would be discarded
+    /// with the hidden buffer the moment its hold is released.
+    ///
+    /// No `undojoin` field, unlike `BufSetText`: an agent-initiated write
+    /// arrives at a moment the user did not choose, so it is always its own
+    /// undo step and never chained onto whatever the user last typed
+    /// (`docs/acp-fs-wire-capture.md` case 10).
+    AiFsWrite {
+        request_id: u64,
+        buf: BufferHandle,
+        lines: Vec<String>,
+        eol: bool,
+        expected_changedtick: u64,
     },
 }

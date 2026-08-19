@@ -163,6 +163,19 @@ enum Waiter {
     /// stale-reply guard `CreatePrompt` carries) and `path` (echoed back
     /// since `vim.fn.confirm`'s reply carries only the chosen button index).
     DeleteConfirm { generation: u64, path: String },
+    /// An agent's own file read or write (see
+    /// [`EngineHandle::ai_fs_read`](crate::nvim_api::EngineHandle::ai_fs_read)):
+    /// nothing is blocked on this `msgid`, so its `Response` is decoded and
+    /// routed to `pump` as `Msg::AiFsReadReply`/`Msg::AiFsWriteReply`.
+    ///
+    /// Correlated on `request_id` rather than tagged with a generation,
+    /// unlike every async reply above it: an agent's request is never
+    /// superseded by a later one the way a keystroke supersedes a query, so
+    /// there is no stale answer to drop and every one of these is owed an
+    /// answer back to the agent that asked. `write` is which of the two
+    /// replies it decodes into -- one waiter for both because the two
+    /// carry the same correlation and differ only in the shape they decode.
+    AiFs { request_id: u64, write: bool },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -614,6 +627,19 @@ impl EngineHandle {
                                         created: matches!(created, Created::Yes),
                                         changedtick,
                                     });
+                                }
+                            }
+                            Some(Waiter::AiFs { request_id, write }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // no degrade-to-default here, unlike
+                                    // every generation-gated reply beside
+                                    // it: an unanswered agent request
+                                    // blocks the agent forever, so an
+                                    // error reply becomes an answered
+                                    // refusal instead
+                                    pump.route_ai_fs(crate::nvim_api::decode_ai_fs_reply(
+                                        request_id, write, &error, &result,
+                                    ));
                                 }
                             }
                             Some(Waiter::Preview { generation, path }) => {
@@ -1437,6 +1463,26 @@ impl EngineHandle {
         path: String,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::Preview { generation, path })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into an agent's file read or write answer and routed to the
+    /// connection's pump as `Msg::AiFsReadReply`/`Msg::AiFsWriteReply` (see
+    /// [`Waiter::AiFs`]). Async on the same terms as
+    /// [`request_probe`](Self::request_probe).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn request_ai_fs(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        request_id: u64,
+        write: bool,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::AiFs { request_id, write })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded

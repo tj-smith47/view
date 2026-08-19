@@ -136,9 +136,19 @@ pub struct AiPanelState {
     /// very slot, and dropping it at `TurnEnded` would take back a diff the
     /// user was told to expect moments before they could look at it.
     pub pending_diff_next: Option<DiffReviewState>,
-    /// The generation stamped on the next review's own async replies,
-    /// bumped per review on the `PickerState::generation` precedent.
-    pub review_generation: u64,
+    /// The counter every `RpcCall::LoadHidden` this crate issues draws its
+    /// generation from -- a diff review's own resolve and an agent
+    /// filesystem request's alike -- bumped per resolve on the
+    /// `PickerState::generation` precedent.
+    ///
+    /// One counter for both, not one each: the two kinds of holder share
+    /// the `Msg::HiddenBufferLoaded` reply, and separate counters would let
+    /// a review and a filesystem request wear the same generation and each
+    /// claim the other's answer. Reached through
+    /// [`Model::next_hidden_generation`](crate::model::Model::next_hidden_generation)
+    /// rather than incremented at the call sites, so a future third holder
+    /// cannot start its own sequence by accident.
+    pub hidden_generation: u64,
 }
 
 impl AiPanelState {
@@ -157,7 +167,7 @@ impl AiPanelState {
             usage: None,
             pending_diff: None,
             pending_diff_next: None,
-            review_generation: 0,
+            hidden_generation: 0,
         }
     }
 

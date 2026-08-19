@@ -97,6 +97,15 @@ pub const REQUEST_CANCELLED: i64 = -32800;
 /// The reserved code for a method the receiver does not implement.
 pub const METHOD_NOT_FOUND: i64 = -32601;
 
+/// The reserved code for a request whose parameters the receiver will not
+/// act on.
+///
+/// This is what a refused `fs/read_text_file` or `fs/write_text_file`
+/// answers with: the `ErrorCode` table pinned in
+/// `docs/acp-v1-wire-capture.md` has no authorization code at all, and the
+/// refused parameter really is the path.
+pub const INVALID_PARAMS: i64 = -32602;
+
 /// The reserved code for a request the receiver understood and could not
 /// carry out.
 pub const INTERNAL_ERROR: i64 = -32603;

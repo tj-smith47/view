@@ -150,7 +150,11 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             let abandoned = panel.pending_diff_next.take();
             panel.local_error = Some(message.clone());
             model.dirty = true;
-            let mut effects = Vec::new();
+            // Every filesystem request the dead session left in flight owes
+            // a hold back. No answer goes with them: the session those
+            // answers would cross into is gone, and the hidden buffers they
+            // pin would otherwise outlive it for the rest of the run.
+            let mut effects = super::ai_fs::on_session_ended(model);
             if let Some(queued) = abandoned {
                 effects.extend(model.engine.record_native_notice(
                     format!(
@@ -235,8 +239,8 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
                 effects.push(Effect::Ai(AiCommand::DiscardProposal { request_id }));
                 return effects;
             }
-            panel.review_generation += 1;
-            let review = DiffReviewState::new(request_id, path, panel.review_generation, hunks);
+            let generation = model.next_hidden_generation();
+            let review = DiffReviewState::new(request_id, path, generation, hunks);
             model.dirty = true;
             // A review the user is part way through is never replaced out
             // from under them: the arriving proposal waits in the queued
@@ -260,9 +264,18 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             model.ai_panel_mut().pending_diff = Some(review);
             return effects;
         }
-        AiEvent::ThoughtChunk { .. }
-        | AiEvent::FsReadRequested { .. }
-        | AiEvent::FsWriteRequested { .. } => {}
+        AiEvent::FsReadRequested {
+            request_id,
+            path,
+            line,
+            limit,
+        } => return super::ai_fs::on_read_requested(model, request_id, path, line, limit),
+        AiEvent::FsWriteRequested {
+            request_id,
+            path,
+            content,
+        } => return super::ai_fs::on_write_requested(model, request_id, path, &content),
+        AiEvent::ThoughtChunk { .. } => {}
     }
     Vec::new()
 }

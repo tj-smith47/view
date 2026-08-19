@@ -6543,6 +6543,84 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
     );
 }
 
+/// An agent filesystem read of the very path a review already holds open
+/// takes and gives back exactly one hold of its own, and leaves the review
+/// untouched: same counter, different generations, so neither ever folds
+/// the other's resolve. The review's own accept still works afterwards --
+/// which it could not if the read's release had brought the shared buffer's
+/// count to zero and deleted it.
+#[test]
+fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
+    let mut m = live_review_model();
+    let review = review_generation(&m);
+
+    let started = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::FsReadRequested {
+            request_id: 44,
+            path: std::path::PathBuf::from("/tmp/review.rs"),
+            line: None,
+            limit: None,
+        }),
+    );
+    let calls = rpc_calls(&started);
+    let [RpcCall::LoadHidden { path, generation }] = calls.as_slice() else {
+        panic!("expected the read's own resolve, got {started:?}")
+    };
+    assert_eq!(path, "/tmp/review.rs");
+    assert_ne!(
+        *generation, review,
+        "a second holder of one path must resolve under its own tag"
+    );
+    let generation = *generation;
+
+    let resolved = update(
+        &mut m,
+        Msg::HiddenBufferLoaded {
+            generation,
+            buf: Some(REVIEW_BUF),
+            created: false,
+            changedtick: REVIEW_TICK,
+        },
+    );
+    assert!(
+        matches!(
+            rpc_calls(&resolved).as_slice(),
+            [RpcCall::AiFsRead { request_id: 44, .. }]
+        ),
+        "the read's resolve must be folded by the read, got {resolved:?}"
+    );
+    assert_eq!(
+        review_generation(&m),
+        review,
+        "the review's own binding is untouched by a read passing through"
+    );
+
+    let answered = update(
+        &mut m,
+        Msg::AiFsReadReply {
+            request_id: 44,
+            result: Ok(REVIEW_OLD.to_string()),
+        },
+    );
+    assert_eq!(
+        rpc_calls(&answered),
+        vec![RpcCall::ReleaseHidden {
+            path: "/tmp/review.rs".to_string()
+        }],
+        "one hold taken, one hold given back"
+    );
+
+    let accepted = update(&mut m, key("a"));
+    assert!(
+        matches!(
+            rpc_calls(&accepted).as_slice(),
+            [RpcCall::BufSetText { .. }]
+        ),
+        "the review's hunks must still be resolvable, got {accepted:?}"
+    );
+}
+
 /// Accept-all's one write orders its edits bottom of the buffer first.
 /// Every edit was computed against the same pre-accept buffer, so a
 /// top-down order would have the first shift the rows the second names.
@@ -7149,7 +7227,7 @@ fn a_queued_proposal_survives_the_turn_that_proposed_it_ending() {
 #[test]
 fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
     let mut m = entered_ai_panel_model();
-    m.ai_panel_mut().review_generation = 42;
+    m.ai_panel_mut().hidden_generation = 42;
     m.ai_panel_mut().pending_diff = Some(crate::native::ai_panel::DiffReviewState::new(
         7,
         std::path::PathBuf::from("/tmp/empty.rs"),

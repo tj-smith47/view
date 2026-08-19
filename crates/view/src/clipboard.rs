@@ -673,6 +673,25 @@ mod tests {
         fn release_hidden(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn ai_fs_read(
+            &self,
+            _request_id: u64,
+            _buf: view_core::msg::BufferHandle,
+            _line: Option<u32>,
+            _limit: Option<u32>,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn ai_fs_write(
+            &self,
+            _request_id: u64,
+            _buf: view_core::msg::BufferHandle,
+            _lines: &[String],
+            _eol: bool,
+            _expected_changedtick: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn buf_detach(
             &self,
             _buf: view_core::msg::BufferHandle,

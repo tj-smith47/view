@@ -31,15 +31,15 @@
 //!   turn.
 //! - `ask` -- send a `session/request_permission` request, then end the turn
 //!   once it is answered.
-//! - `read` -- send an `fs/read_text_file` request and report what came
-//!   back as a message chunk. Unreachable over the wire while the client's
-//!   `initialize` advertises `clientCapabilities.fs.readTextFile: false`:
-//!   view answers `METHOD_NOT_FOUND` rather than the shape this arm
-//!   expects. Kept so the leg can be driven over the wire again once the
-//!   capability is advertised `true`.
-//! - `write` -- send an `fs/write_text_file` request and report whether it
-//!   was accepted or refused. Unreachable for the same reason as `read`,
-//!   against `clientCapabilities.fs.writeTextFile: false`.
+//! - `read` -- send an `fs/read_text_file` request for a file inside this
+//!   process's own working directory (which is the session's, and so the
+//!   only directory the client answers for) and report what came back as a
+//!   message chunk.
+//! - `read-outside` -- the same request for a path nowhere near that
+//!   directory, so the leg the client refuses can be driven over a real
+//!   wire rather than only in a unit test.
+//! - `write` -- send an `fs/write_text_file` request, also inside the
+//!   working directory, and report whether it was accepted or refused.
 //! - `refuse` -- answer the prompt with a JSON-RPC error instead of a
 //!   result.
 //! - anything else -- end the turn straight away.
@@ -49,6 +49,20 @@ use std::io::{BufRead, Write};
 /// The wire's reserved code for `session/new` reporting that `authenticate`
 /// must be called first, pinned in `docs/acp-v1-wire-capture.md`.
 const AUTH_REQUIRED: i64 = -32000;
+
+/// The file the `read`/`write` legs name.
+///
+/// Built from this process's own working directory rather than written as a
+/// literal: the client answers filesystem requests only for paths inside
+/// the session directory, and the session directory is exactly the one it
+/// spawned this fixture in.
+fn inside_cwd() -> String {
+    std::env::current_dir()
+        .unwrap_or_default()
+        .join("view-ai-stub-fs.txt")
+        .to_string_lossy()
+        .into_owned()
+}
 
 fn main() {
     // Taken before a single frame is served, so a client that has seen this
@@ -104,10 +118,14 @@ fn main() {
                     cancelled = false;
                 }
                 Some("fs-read-1") => {
-                    let content = frame["result"]["content"]
-                        .as_str()
-                        .unwrap_or("none")
-                        .to_string();
+                    let content = if frame.get("error").is_some() {
+                        "refused".to_string()
+                    } else {
+                        frame["result"]["content"]
+                            .as_str()
+                            .unwrap_or("none")
+                            .to_string()
+                    };
                     chunk(
                         &mut stdout,
                         "agent_message_chunk",
@@ -224,6 +242,18 @@ fn main() {
                             "fs/read_text_file",
                             serde_json::json!({
                                 "sessionId": "sess_stub",
+                                "path": inside_cwd()
+                            }),
+                        );
+                    }
+                    "read-outside" => {
+                        pending_prompt = Some(id);
+                        request(
+                            &mut stdout,
+                            serde_json::json!("fs-read-1"),
+                            "fs/read_text_file",
+                            serde_json::json!({
+                                "sessionId": "sess_stub",
                                 "path": "/stub/a.rs"
                             }),
                         );
@@ -236,7 +266,7 @@ fn main() {
                             "fs/write_text_file",
                             serde_json::json!({
                                 "sessionId": "sess_stub",
-                                "path": "/stub/a.rs",
+                                "path": inside_cwd(),
                                 "content": "fn main() {}"
                             }),
                         );

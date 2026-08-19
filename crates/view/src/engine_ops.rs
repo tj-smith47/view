@@ -144,6 +144,36 @@ pub trait EngineOps {
     /// buffer a window still shows or that still has unsaved edits (see
     /// `RpcCall::ReleaseHidden`).
     fn release_hidden(&self, path: &str) -> Result<(), EngineError>;
+    /// Reads `buf`'s text -- optionally only the `limit` lines starting at
+    /// 1-based `line` -- to answer an agent's `fs/read_text_file`; never
+    /// blocks, and answers `Msg::AiFsReadReply` (see `RpcCall::AiFsRead`).
+    ///
+    /// The buffer, not the file on disk, is the text: an agent reading a
+    /// path the user is editing must see the unsaved edits, which is what
+    /// the ACP method's own wording requires.
+    fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError>;
+    /// Replaces `buf`'s text with `lines` and saves it to answer an agent's
+    /// `fs/write_text_file`, refusing if `buf` has changed past
+    /// `expected_changedtick`; never blocks, and answers
+    /// `Msg::AiFsWriteReply` (see `RpcCall::AiFsWrite`).
+    ///
+    /// `eol` carries the one thing a line list cannot: whether the file
+    /// ends with a newline, which nvim decides from `endofline` and
+    /// `fixendofline` rather than from the lines themselves.
+    fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError>;
     /// Reads the current buffer's path and nvim-authoritative text (see
     /// `EngineHandle::read_current_buffer_text`). Synchronous and
     /// bounded-timeout, not fire-and-forget -- see this trait's own doc.
@@ -261,6 +291,25 @@ impl EngineOps for EngineHandle {
     fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
         self.release_hidden(path)
     }
+    fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        self.ai_fs_read(request_id, buf, line, limit)
+    }
+    fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
+        self.ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
+    }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.read_current_buffer_text()
     }
@@ -377,6 +426,25 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
         (**self).release_hidden(path)
+    }
+    fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        (**self).ai_fs_read(request_id, buf, line, limit)
+    }
+    fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
+        (**self).ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -497,6 +565,25 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
         (**self).release_hidden(path)
+    }
+    fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        (**self).ai_fs_read(request_id, buf, line, limit)
+    }
+    fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
+        (**self).ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -664,6 +751,32 @@ impl EngineOps for FakeOps {
     fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
         self.record(format!("release_hidden({path})"))
     }
+    fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "ai_fs_read({request_id},{},{line:?},{limit:?})",
+            buf.0
+        ))
+    }
+    fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
+        self.record(format!(
+            "ai_fs_write({request_id},{},{},{eol},{expected_changedtick})",
+            buf.0,
+            lines.len()
+        ))
+    }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.record("read_current_buffer_text()".to_string())
             .map(|()| CurrentBufferRead::new(std::path::PathBuf::new(), String::new()))
@@ -811,6 +924,25 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn release_hidden(&self, _path: &str) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn ai_fs_read(
+        &self,
+        _request_id: u64,
+        _buf: BufferHandle,
+        _line: Option<u32>,
+        _limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn ai_fs_write(
+        &self,
+        _request_id: u64,
+        _buf: BufferHandle,
+        _lines: &[String],
+        _eol: bool,
+        _expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {

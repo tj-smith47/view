@@ -10,11 +10,12 @@ use crate::rpc::RpcError;
 use rmpv::Value;
 use std::path::PathBuf;
 use std::time::Duration;
-use view_core::msg::{BufferHandle, OptionValue, TextEdit};
+use view_core::msg::{BufferHandle, Msg, OptionValue, TextEdit};
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, DiagnosticSeverity, QuickfixEntry,
     SelectionRead,
 };
+use view_core::native::ai_event::FsError;
 use view_core::native::mappings::{default_maps, is_spellable, MappingSpec, COMMAND};
 
 /// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
@@ -1009,6 +1010,225 @@ for _, edit in ipairs(edits) do
   vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row, edit.end_col, edit.lines)
 end
 return { applied = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+
+/// Reads a resolved buffer's text for an agent's `fs/read_text_file`,
+/// verified live against the pinned engine (see
+/// `docs/acp-fs-wire-capture.md`). Constant, like every other chunk here:
+/// the buffer handle and the window travel as `nvim_exec_lua`'s positional
+/// varargs, never interpolated into the source.
+///
+/// Takes a buffer rather than a path because `RpcCall::LoadHidden` already
+/// resolved one and took the hold this read rides -- re-resolving here
+/// would take a second hold nothing releases. That the buffer may be a
+/// real window's own modified buffer is the point: the wire requires a read
+/// to include unsaved editor state, and a chunk that read the file instead
+/// would return the one thing the method exists not to return (capture
+/// case 4).
+///
+/// `line`/`limit` are the wire's own 1-based start and maximum count, mapped
+/// onto `nvim_buf_get_lines`'s 0-indexed, end-exclusive window here rather
+/// than on the Rust side, so the call fetches only the lines asked for. The
+/// `line > 1` guard is what makes `line = 0` (a value the schema's own
+/// `minimum: 0` admits despite the 1-based description) read from the first
+/// line rather than under-run into a negative index, and testing `limit`
+/// with `type(limit) == 'number'` rather than truthiness is what keeps an
+/// explicit `limit = 0` an empty window instead of a whole-file read
+/// (capture case 2).
+///
+/// `strict_indexing = false` is what turns a start past the end of the
+/// buffer into an empty answer instead of a thrown error: an agent asking
+/// for line 99 of a 3-line file has asked a well-formed question.
+///
+/// `eol` is computed against the window, not the file. nvim's line list
+/// carries no record of a final newline at all, so the terminator has to
+/// travel beside the lines -- but a window that stops short of the last
+/// line ends where a newline genuinely does follow, whatever the file's own
+/// `endofline` says (capture case 2).
+const AI_FS_READ_CHUNK: &str = "\
+local buf, line, limit = ...
+if not vim.api.nvim_buf_is_valid(buf) then
+  return { ok = false }
+end
+if not vim.api.nvim_buf_is_loaded(buf) then
+  vim.fn.bufload(buf)
+end
+local total = vim.api.nvim_buf_line_count(buf)
+local first = 0
+if type(line) == 'number' and line > 1 then
+  first = line - 1
+end
+local last = -1
+if type(limit) == 'number' then
+  last = first + limit
+end
+local lines = vim.api.nvim_buf_get_lines(buf, first, last, false)
+return { ok = true, lines = lines, eol = first + #lines < total or vim.bo[buf].endofline }";
+
+/// Replaces a resolved buffer's whole text and saves it, for an agent's
+/// `fs/write_text_file`, verified live against the pinned engine (see
+/// `docs/acp-fs-wire-capture.md`).
+///
+/// `nvim_buf_set_lines`, not the byte-column `nvim_buf_set_text`
+/// [`BUF_SET_TEXT_CHUNK`] uses: expressing "replace the whole buffer" in
+/// column form needs the byte length of the buffer's current last line,
+/// which the caller does not have and could only learn through an extra
+/// read whose answer could be stale by the time this ran -- reopening the
+/// exact race `expected` exists to close, in order to satisfy an API shape
+/// (capture case 11).
+///
+/// The tick guard is [`BUF_SET_TEXT_CHUNK`]'s, verbatim in intent and in
+/// its `type(expected) == 'number'` spelling: msgpack nil crosses into Lua
+/// as `vim.NIL`, a userdata sentinel that is not `nil`, so an `expected ~=
+/// nil` test reads "no expectation" as an expectation no tick can equal. It
+/// runs before the first replacement, so a refused write leaves both the
+/// buffer and the file exactly as they were.
+///
+/// No `undojoin`, unlike that chunk: a diff review's hunks are one user
+/// decision spread over several calls and belong in one undo entry, while
+/// an agent-initiated write arrives at a moment the user did not choose,
+/// and joining it onto whatever the user last typed would make a single `u`
+/// revert both (capture case 10).
+///
+/// `endofline` and `fixendofline` are both set, not just the first:
+/// `fixendofline` is what nvim consults to decide whether to *add* a
+/// missing final newline on write, so setting `endofline = false` alone
+/// still lands a trailing newline on disk. Together they make an agent's
+/// `content` string round-trip byte for byte (capture case 7).
+///
+/// The save is part of this call rather than a step after it. The wire
+/// requires a write to create the file if it does not exist, and a write
+/// that stopped at buffer text would be discarded along with the hidden
+/// buffer the moment its hold was released -- the agent's write silently
+/// lost. `mkdir` with `'p'` covers the directory the file may need, since
+/// creating a file in a new directory is an ordinary thing an agent does
+/// and `:write` alone answers `E212` for it (capture case 8).
+///
+/// The `pcall` around the write is what turns a failure into a reply
+/// instead of an `nvim_exec_lua` error, so the agent is told which failure.
+/// Its raw error is a full Lua traceback, reduced here to its first line
+/// and then to the `E<number>:` diagnostic within that line: what crosses
+/// the wire is nvim's own wording, not the call stack of the chunk that
+/// produced it (capture case 9).
+const AI_FS_WRITE_CHUNK: &str = "\
+local buf, expected, lines, eol = ...
+if not vim.api.nvim_buf_is_valid(buf) then
+  return { applied = false, saved = false, message = 'no such buffer' }
+end
+if type(expected) == 'number' and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
+  return { applied = false, saved = false, message = 'the buffer changed' }
+end
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+vim.bo[buf].endofline = eol
+vim.bo[buf].fixendofline = eol
+local name = vim.api.nvim_buf_get_name(buf)
+if name ~= '' then
+  pcall(vim.fn.mkdir, vim.fn.fnamemodify(name, ':h'), 'p')
+end
+local ok, err = pcall(function()
+  vim.api.nvim_buf_call(buf, function()
+    vim.cmd('silent keepalt write!')
+  end)
+end)
+if not ok then
+  local first = tostring(err):match('[^\\n]*') or ''
+  return { applied = true, saved = false, message = first:match('E%d+:.*') or first }
+end
+return { applied = true, saved = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+
+/// Decodes an [`AI_FS_READ_CHUNK`] or [`AI_FS_WRITE_CHUNK`] reply into the
+/// message the reader thread routes back, correlated on `request_id`.
+///
+/// Every failure becomes an [`FsError`] rather than a dropped reply: an
+/// agent's request is one this client owes an answer to, and a reply lost
+/// here leaves the agent blocked forever on a call nothing will ever
+/// settle. That is why an `nvim_exec_lua` error degrades to an answered
+/// refusal here instead of to the "safe default" every generation-gated
+/// reply beside it takes -- there is no later reply to correct a default
+/// with.
+///
+/// A read's `ok = false` is [`FsError::NotFound`]: the chunk answers it for
+/// a buffer handle that is no longer valid, which from the agent's side is
+/// a path that named nothing readable. A write carries the chunk's own
+/// wording instead, because its two refusals are different facts the agent
+/// can act on differently -- a moved tick is worth retrying, `E212` is not.
+pub(crate) fn decode_ai_fs_reply(
+    request_id: u64,
+    write: bool,
+    error: &Value,
+    result: &Value,
+) -> Msg {
+    if write {
+        return Msg::AiFsWriteReply {
+            request_id,
+            result: decode_ai_fs_write(error, result),
+        };
+    }
+    Msg::AiFsReadReply {
+        request_id,
+        result: decode_ai_fs_read(error, result),
+    }
+}
+
+fn decode_ai_fs_read(error: &Value, result: &Value) -> Result<String, FsError> {
+    if let Some(failure) = remote_failure(error) {
+        return Err(failure);
+    }
+    let pairs = result.as_map().ok_or(FsError::NotFound)?;
+    if crate::wire::map_find(pairs, "ok").and_then(Value::as_bool) != Some(true) {
+        return Err(FsError::NotFound);
+    }
+    let lines: Vec<&str> = crate::wire::map_find(pairs, "lines")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let eol = crate::wire::map_find(pairs, "eol")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut content = lines.join("\n");
+    // The line list is the same for a file ending `"a\n"` and one ending
+    // `"a"`; `eol` is the only thing that tells them apart, and appending
+    // unconditionally would hand the agent a byte the file does not hold.
+    // An empty window takes no terminator at all -- a lone "\n" would be a
+    // line the agent did not ask for.
+    if eol && !lines.is_empty() {
+        content.push('\n');
+    }
+    Ok(content)
+}
+
+fn decode_ai_fs_write(error: &Value, result: &Value) -> Result<(), FsError> {
+    if let Some(failure) = remote_failure(error) {
+        return Err(failure);
+    }
+    let pairs = result.as_map().ok_or_else(|| FsError::Other {
+        message: "the write produced no answer".to_owned(),
+    })?;
+    let applied = crate::wire::map_find(pairs, "applied").and_then(Value::as_bool) == Some(true);
+    let saved = crate::wire::map_find(pairs, "saved").and_then(Value::as_bool) == Some(true);
+    if applied && saved {
+        return Ok(());
+    }
+    Err(FsError::Other {
+        message: crate::wire::map_find(pairs, "message")
+            .and_then(Value::as_str)
+            .unwrap_or("the write could not be carried out")
+            .to_owned(),
+    })
+}
+
+/// The chunk's own thrown error, as the refusal that crosses back, or
+/// `None` when nvim answered without one.
+fn remote_failure(error: &Value) -> Option<FsError> {
+    if *error == Value::Nil {
+        return None;
+    }
+    let message = error
+        .as_array()
+        .and_then(|parts| parts.iter().find_map(Value::as_str))
+        .unwrap_or("nvim refused the request")
+        .to_owned();
+    Some(FsError::Other { message })
+}
 
 /// Reads the current buffer's path and nvim-authoritative text for
 /// [`EngineHandle::read_current_buffer_text`], verified live against the
@@ -2075,6 +2295,89 @@ impl EngineHandle {
                 Value::from(RELEASE_HIDDEN_CHUNK),
                 Value::Array(vec![Value::from(buf.0)]),
             ],
+        )
+    }
+
+    /// Issues [`AI_FS_READ_CHUNK`] as an async request correlated on
+    /// `request_id`, reading `buf`'s text for an agent's
+    /// `fs/read_text_file`. Async on the same terms as
+    /// [`preview_buffer`](Self::preview_buffer): the answer crosses back as
+    /// `Msg::AiFsReadReply` through the connection's pump, and nothing on
+    /// the loop thread waits for it.
+    ///
+    /// `line`/`limit` travel as the wire's own optional window (1-based
+    /// start line, maximum line count), unchanged; the chunk is what maps
+    /// them onto `nvim_buf_get_lines`'s 0-indexed, end-exclusive form. Each
+    /// absent value crosses as msgpack nil, which the chunk tests for with
+    /// `type(x) == 'number'` -- see `docs/acp-fs-wire-capture.md` case 3
+    /// for why a `~= nil` test reads an absent window as a requested one.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn ai_fs_read(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<(), EngineError> {
+        self.request_ai_fs(
+            "nvim_exec_lua",
+            vec![
+                Value::from(AI_FS_READ_CHUNK),
+                Value::Array(vec![
+                    Value::from(buf.0),
+                    line.map_or(Value::Nil, Value::from),
+                    limit.map_or(Value::Nil, Value::from),
+                ]),
+            ],
+            request_id,
+            false,
+        )
+    }
+
+    /// Issues [`AI_FS_WRITE_CHUNK`] as an async request correlated on
+    /// `request_id`, replacing `buf`'s whole text with `lines` and saving
+    /// it for an agent's `fs/write_text_file`. Async on the same terms as
+    /// [`ai_fs_read`](Self::ai_fs_read), answering `Msg::AiFsWriteReply`.
+    ///
+    /// `expected_changedtick` is checked inside the chunk, before the first
+    /// line is replaced, exactly as [`set_buf_text`](Self::set_buf_text)'s
+    /// own guard is: a buffer the user typed into since it was resolved
+    /// refuses the write with nothing written and nothing saved.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn ai_fs_write(
+        &self,
+        request_id: u64,
+        buf: BufferHandle,
+        lines: &[String],
+        eol: bool,
+        expected_changedtick: u64,
+    ) -> Result<(), EngineError> {
+        self.request_ai_fs(
+            "nvim_exec_lua",
+            vec![
+                Value::from(AI_FS_WRITE_CHUNK),
+                Value::Array(vec![
+                    Value::from(buf.0),
+                    Value::from(expected_changedtick),
+                    Value::Array(
+                        lines
+                            .iter()
+                            .map(|line| Value::from(line.as_str()))
+                            .collect(),
+                    ),
+                    Value::from(eol),
+                ]),
+            ],
+            request_id,
+            true,
         )
     }
 

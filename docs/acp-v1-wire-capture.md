@@ -1287,6 +1287,182 @@ carries only what changed, so a client holding a whole-call view must
 remember the announcement's `title` and `status` rather than treat their
 absence as a value.
 
+## `fs/read_text_file` and `fs/write_text_file`
+
+Captured for the client-side handlers that answer these two Agent->Client
+requests. Re-fetched at the same pinned commit
+(`ccff4e7d2e431880225804a8c136c2ccfcb313d0`, `schema-v1.json` still
+242013 bytes), so every shape below is this document's own capture, not a
+recollection of one.
+
+### 1. `ReadTextFileRequest`: `line` and `limit` are nullable, `line` is 1-based
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))['\$defs']['ReadTextFileRequest']
+for k in ['line', 'limit', 'path']:
+    print(k, '|', json.dumps(d['properties'][k]))
+print('required:', d['required'], '| x-method:', d['x-method'], '| x-side:', d['x-side'])
+"
+line | {"description": "Line number to start reading from (1-based).", "type": ["integer", "null"], "format": "uint32", "minimum": 0, "x-deserialize-default-on-error": true}
+limit | {"description": "Maximum number of lines to read.", "type": ["integer", "null"], "format": "uint32", "minimum": 0, "x-deserialize-default-on-error": true}
+path | {"description": "Absolute path to the file to read.", "type": "string"}
+required: ['sessionId', 'path'] | x-method: fs/read_text_file | x-side: client
+```
+
+Three facts a handler cannot recall its way to. `line` and `limit` each
+admit an explicit JSON `null` as well as being absent, and the two mean the
+same thing -- no window was asked for -- so a client that distinguishes
+"absent" from "null" would refuse a request a conforming agent may send.
+`line` is documented 1-based while the schema's own `minimum` is `0`, so
+`line: 0` is a value that validates and has no 1-based meaning; it is
+treated as "from the first line," never as an error and never as an
+off-by-one into line 2. `path` is contractually absolute, the same
+contract the `Diff` shape states for its own `path`.
+
+### 2. `ReadTextFileResponse` carries exactly one field, and it is required
+
+```
+$ python3 -c "
+import json
+d = json.load(open('schema-v1.json'))['\$defs']
+print('read response :', d['ReadTextFileResponse']['required'], sorted(d['ReadTextFileResponse']['properties']))
+print('write request :', d['WriteTextFileRequest']['required'], sorted(d['WriteTextFileRequest']['properties']))
+print('write response:', d['WriteTextFileResponse'].get('required', []), sorted(d['WriteTextFileResponse']['properties']))
+"
+read response : ['content'] ['_meta', 'content']
+write request : ['sessionId', 'path', 'content'] ['_meta', 'content', 'path', 'sessionId']
+write response: [] ['_meta']
+```
+
+`content` is required on the read response, which is what makes a refusal a
+JSON-RPC *error* rather than a success carrying an empty string: there is no
+shape in which a successful read reply omits content, so a client that
+refused a path by answering `{"content": ""}` would be telling the agent the
+file is empty. The write response has no required member at all -- `{}` is
+the whole success reply.
+
+### 3. The worked request/response pairs, verbatim from the protocol docs
+
+```
+$ curl -sL "https://raw.githubusercontent.com/agentclientprotocol/agent-client-protocol/ccff4e7d2e431880225804a8c136c2ccfcb313d0/docs/protocol/v1/file-system.mdx" | sed -n '31,46p;61,73p'
+```
+
+Read:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "fs/read_text_file",
+  "params": {
+    "sessionId": "sess_abc123def456",
+    "path": "/home/user/project/src/main.py",
+    "line": 10,
+    "limit": 50
+  }
+}
+```
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "result": {
+    "content": "def hello_world():\n    print('Hello, world!')\n"
+  }
+}
+```
+
+Write:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "fs/write_text_file",
+  "params": {
+    "sessionId": "sess_abc123def456",
+    "path": "/home/user/project/config.json",
+    "content": "{\n  \"debug\": true,\n  \"version\": \"1.0.0\"\n}"
+  }
+}
+```
+
+The same document's success reply for the write is `"result": null`, while
+the schema's `WriteTextFileResponse` is an object whose members are all
+optional. `{}` satisfies both readings and `null` satisfies only the prose,
+so `{}` is what this client sends.
+
+### 4. Two normative sentences the handlers implement
+
+Verbatim from the same `file-system.mdx`:
+
+- "These methods enable Agents to access **unsaved editor state** and allow
+  Clients to track file modifications made during agent execution."
+- "The `fs/read_text_file` method allows Agents to read text file contents
+  from the Client's filesystem, **including unsaved changes in the
+  editor**."
+- On `fs/write_text_file`'s `path`: "The Client **MUST** create the file if
+  it doesn't exist."
+
+The first two are the wire's own statement of the buffer-truth requirement:
+a read that answered from disk while nvim held a modified buffer for the
+same path would return the one thing this method exists not to return. The
+third is why the write path cannot stop at setting buffer text -- a write to
+a path no window has open must leave the file on disk, or the agent's write
+is silently discarded when the hidden buffer is released.
+
+### 5. Capability gating, verbatim
+
+```
+$ curl -sL ".../docs/protocol/v1/file-system.mdx" | sed -n '9,29p'
+```
+
+> Before attempting to use filesystem methods, Agents **MUST** verify that
+> the Client supports these capabilities by checking the Client Capabilities
+> field in the `initialize` response [...] If `readTextFile` or
+> `writeTextFile` is `false` or not present, the Agent **MUST NOT** attempt
+> to call the corresponding filesystem method.
+
+Read the other way round, this is the client's obligation: the flag and the
+handler are one fact, and a `true` with nothing behind it is a lie a
+conforming agent will act on. That is why the flip and the handlers land in
+one commit.
+
+### 6. The refusal code: the error-code table has no "forbidden"
+
+```
+$ python3 -c "
+import json
+for m in json.load(open('schema-v1.json'))['\$defs']['ErrorCode']['anyOf']:
+    print(m.get('const', '(any other integer)'), '|', m['title'])
+"
+-32700 | Parse error
+-32600 | Invalid request
+-32601 | Method not found
+-32602 | Invalid params
+-32603 | Internal error
+-32800 | Request cancelled
+-32000 | Authentication required
+-32002 | Resource not found
+(any other integer) | Other
+```
+
+Eight named codes and no authorization refusal among them. A path outside
+the session's trusted project root is therefore answered with `-32602`
+(Invalid params): the request was well-formed JSON-RPC naming a method this
+client implements, and the one thing wrong with it is the `path` parameter
+itself. `-32603` (Internal error) would misreport a policy decision as a
+client fault and invite the agent to retry the identical call, and `-32002`
+(Resource not found) would leak whether the refused path exists.
+
+The `Error` object's own shape (`required: ['code', 'message']`, optional
+`data`) is pinned in the `Error` `$defs` entry; a refusal carries `code` and
+`message` and no `data`, so no byte of the refused file's content can ride
+back on the reply.
+
 ## Client crate on crates.io: `agent-client-protocol`
 
 Checked because a maintained client crate would displace a hand-rolled

@@ -45,7 +45,7 @@ use crate::acp::permission::{permission_option, permission_outcome};
 use crate::acp::session::{ChildSlot, SessionShared};
 use crate::acp::wire::{
     Incoming, JsonRpcCodec, JsonRpcError, JsonRpcMessage, RequestId, AUTH_REQUIRED, INTERNAL_ERROR,
-    METHOD_NOT_FOUND, REQUEST_CANCELLED,
+    INVALID_PARAMS, METHOD_NOT_FOUND, REQUEST_CANCELLED,
 };
 
 /// The wire protocol version this client speaks, a bare integer.
@@ -311,17 +311,15 @@ impl Driver {
         let params = json!({
             "protocolVersion": PROTOCOL_VERSION,
             "clientCapabilities": {
-                // both false: this transport already answers fs/read_text_file
-                // and fs/write_text_file at the wire level, but nothing yet
-                // routes the resulting event through a trust prompt or
-                // nvim's buffer truth, so a well-behaved agent that trusted
-                // a true flag here could wait on an answer no other part of
-                // the running editor provides yet. Advertising false is
-                // truthful about the whole path, not just this file's part
-                // of it, and a fallback to the agent's own direct-disk
-                // access is the same "capability absent" behavior every ACP
-                // agent already has to support
-                "fs": { "readTextFile": false, "writeTextFile": false },
+                // both true, and the whole path behind them is what makes
+                // that truthful: on_request dispatches these two methods,
+                // every request is refused unless it falls inside the
+                // session's own cwd, and the answer comes from the nvim
+                // buffer rather than from disk -- so an agent reading a file
+                // the user is editing sees the unsaved edits, which is
+                // exactly what the capability promises and what an agent's
+                // own direct-disk fallback cannot do
+                "fs": { "readTextFile": true, "writeTextFile": true },
                 // false, and not a placeholder: the terminal methods are
                 // unimplemented here, and claiming them would have the agent
                 // wait forever on a call nothing answers
@@ -645,12 +643,8 @@ impl Driver {
     fn on_request(&mut self, id: RequestId, method: &str, params: &Value) {
         match method {
             "session/request_permission" => self.on_permission_request(id, params),
-            // `fs/read_text_file` and `fs/write_text_file` fall to the
-            // METHOD_NOT_FOUND arm below on purpose: `begin`'s advertised
-            // `clientCapabilities.fs` is false, and a client that dispatched
-            // these anyway would answer a call it told the agent it cannot
-            // handle. A conforming agent never sends them while the
-            // capability is false; the arm exists for the one that does.
+            "fs/read_text_file" => self.on_fs_read(id, params),
+            "fs/write_text_file" => self.on_fs_write(id, params),
             _ => {
                 let _ = self.out.send(JsonRpcMessage::error_response(
                     id,
@@ -717,26 +711,14 @@ impl Driver {
         }
     }
 
-    /// The `fs/read_text_file` handler body, kept live and directly tested
-    /// even though `on_request` no longer dispatches to it: the wire route
-    /// is closed while `clientCapabilities.fs.readTextFile` is false, but
-    /// the body itself -- registering the reply and emitting the event --
-    /// is exactly what the dispatch arm re-attaches to once that capability
-    /// is advertised true again, and re-deriving it at that point would be
-    /// the one place a hand-written duplicate could silently drift.
-    // this allow is the only thing keeping the whole retained fs reply path
-    // compiling: PendingFsReplies::register, spawn_fs_reply, fs_reason, and
-    // the REQUEST_CANCELLED/INTERNAL_ERROR wire constants are reachable from
-    // nowhere else, so rustc's dead-code walk needs this call site treated
-    // as live to see any of them as used
-    #[allow(dead_code)]
+    /// Answers `fs/read_text_file` from nvim's buffer truth, refusing any
+    /// path outside the session's own cwd.
     fn on_fs_read(&mut self, id: RequestId, params: &Value) {
-        let path = std::path::PathBuf::from(
-            params
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
+        let Some(path) = self.contained_path(&id, params) else {
+            return;
+        };
+        let line = fs_window_field(params, "line");
+        let limit = fs_window_field(params, "limit");
         let (tx, rx) = oneshot::channel();
         let request_id = self.next_boundary_id();
         self.shared
@@ -748,26 +730,21 @@ impl Driver {
             rx,
             |content| json!({ "content": content }),
         );
-        self.shared
-            .emit(AiEvent::FsReadRequested { request_id, path });
+        self.shared.emit(AiEvent::FsReadRequested {
+            request_id,
+            path,
+            line,
+            limit,
+        });
     }
 
-    /// The `fs/write_text_file` handler body -- see [`Self::on_fs_read`]'s
-    /// doc comment for why it stays live and directly tested with no
-    /// dispatch arm reaching it.
-    // this allow keeps the write leg of the same retained fs reply path
-    // compiling: PendingFsReplies::register (the Write variant),
-    // spawn_fs_reply, fs_reason, and the REQUEST_CANCELLED/INTERNAL_ERROR
-    // wire constants are the same shared machinery on_fs_read's allow keeps
-    // live for the read leg, reachable from nowhere but these two call sites
-    #[allow(dead_code)]
+    /// Answers `fs/write_text_file` through nvim's buffer, refusing any path
+    /// outside the session's own cwd on the identical terms
+    /// [`Self::on_fs_read`] refuses one.
     fn on_fs_write(&mut self, id: RequestId, params: &Value) {
-        let path = std::path::PathBuf::from(
-            params
-                .get("path")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-        );
+        let Some(path) = self.contained_path(&id, params) else {
+            return;
+        };
         let content = params
             .get("content")
             .and_then(Value::as_str)
@@ -784,6 +761,45 @@ impl Driver {
             path,
             content,
         });
+    }
+
+    /// Resolves `params.path` against the session's cwd, answering the wire
+    /// itself and returning `None` when the path is not inside it.
+    ///
+    /// The first thing either filesystem handler does, before a boundary id
+    /// is allocated, before a reply is registered, and before anything is
+    /// emitted: a refused request must leave no trace anywhere in the
+    /// editor, or a path the user never consented to would still show up in
+    /// the panel as a request that happened. Read and write run the exact
+    /// same check -- a client that advertises safe file access must not let
+    /// a read reach further than a write may.
+    ///
+    /// The refusal carries no `content` member, only a JSON-RPC error: the
+    /// pinned `ReadTextFileResponse` requires `content`, so answering a
+    /// refusal with an empty string would be indistinguishable from an empty
+    /// file and would have the agent act on text the file does not hold.
+    fn contained_path(&self, id: &RequestId, params: &Value) -> Option<std::path::PathBuf> {
+        let path = std::path::PathBuf::from(
+            params
+                .get("path")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+        );
+        match crate::trust::path_is_contained(&self.cwd, &path) {
+            Ok(Some(resolved)) => Some(resolved),
+            // an unresolvable path is refused with the same code as one
+            // that resolved outside: which of the two it was is a detail of
+            // this client's filesystem that an agent must not be able to
+            // probe by watching the error code change
+            Ok(None) | Err(_) => {
+                let _ = self.out.send(JsonRpcMessage::error_response(
+                    id.clone(),
+                    INVALID_PARAMS,
+                    "view answers filesystem requests only for paths inside the session directory",
+                ));
+                None
+            }
+        }
     }
 
     /// Drops one raised proposal from the call that raised it, so the same
@@ -874,6 +890,21 @@ impl Driver {
             _ => {}
         }
     }
+}
+
+/// Reads `line` or `limit` off a `fs/read_text_file` request.
+///
+/// Both are nullable in the pinned schema, and an agent that wants the whole
+/// file may either omit the member or send an explicit `null` -- absent and
+/// null therefore have to mean the same thing here, which is what
+/// `Value::as_u64` on a missing key already gives. The schema's `minimum: 0`
+/// makes a negative value out of contract, so one is treated as no window at
+/// all rather than saturated into a window the agent never asked for.
+fn fs_window_field(params: &Value, key: &str) -> Option<u32> {
+    params
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| u32::try_from(value).unwrap_or(u32::MAX))
 }
 
 /// Awaits one filesystem answer and writes the agent's reply, off the
@@ -1532,12 +1563,14 @@ mod tests {
         );
     }
 
-    /// The tripwire a later handler-landing change must flip, not delete:
-    /// until a trust-gated `fs/*` handler exists end to end, the agent must
-    /// be told these capabilities are absent, never advertised ahead of the
-    /// handler that would back them.
+    /// The capability advertisement and the handlers behind it must move
+    /// together: this flipped to `true` in the same commit that gave
+    /// `on_request` its two `fs/*` arms, and it must never read `true` while
+    /// a `fs/*` request would go unanswered, nor `false` while the handlers
+    /// stand -- either way the agent is told something the client does not
+    /// do.
     #[test]
-    fn the_outgoing_initialize_advertises_fs_capabilities_as_false() {
+    fn the_outgoing_initialize_advertises_fs_capabilities_as_true() {
         let shared = Arc::new(SessionShared::detached(Box::new(|_| {})));
         let (out_tx, mut out_rx) = mpsc::unbounded_channel();
         let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
@@ -1552,8 +1585,8 @@ mod tests {
         // that only checks the decoded value, so the wire type is the part
         // worth pinning
         assert_eq!(params["protocolVersion"], 1);
-        assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], false);
-        assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], false);
+        assert_eq!(params["clientCapabilities"]["fs"]["readTextFile"], true);
+        assert_eq!(params["clientCapabilities"]["fs"]["writeTextFile"], true);
         assert_eq!(params["clientCapabilities"]["terminal"], false);
         assert_eq!(params["clientInfo"]["name"], "view");
         assert_eq!(params["clientInfo"]["version"], env!("CARGO_PKG_VERSION"));
@@ -1693,56 +1726,106 @@ mod tests {
         );
     }
 
-    /// The wire route is closed while the `fs` capability is advertised
-    /// false, so both methods fall to the same `METHOD_NOT_FOUND` arm every
-    /// other unimplemented method does.
-    #[test]
-    fn fs_read_and_write_answer_method_not_found_over_the_wire() {
-        let (mut driver, mut out_rx) = detached_driver(false);
-
-        driver.on_request(
-            RequestId::Str("read-1".to_string()),
-            "fs/read_text_file",
-            &json!({ "path": "/stub/a.rs" }),
-        );
-        driver.on_request(
-            RequestId::Str("write-1".to_string()),
-            "fs/write_text_file",
-            &json!({ "path": "/stub/a.rs", "content": "fn main() {}" }),
-        );
-
-        for expected_id in ["read-1", "write-1"] {
-            let frame = out_rx.try_recv().expect("an error response was sent");
-            assert_eq!(frame.id, Some(RequestId::Str(expected_id.to_string())));
-            let error = frame.error.expect("the response carries an error");
-            assert_eq!(error.code, METHOD_NOT_FOUND);
-        }
+    /// A scratch directory to stand in for a session's cwd, on the same
+    /// terms `trust.rs`'s own tests use one: `path_is_contained`
+    /// canonicalizes, so a test needs a root that really exists on disk and
+    /// a canonical form to compare the emitted path against.
+    fn fs_scratch_dir(nonce: &str) -> std::path::PathBuf {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/tmp")
+            .join(format!("view-ai-driver-fs-{}-{nonce}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch cwd");
+        std::fs::canonicalize(&dir).expect("canonicalize scratch cwd")
     }
 
-    /// The `fs/read_text_file` handler body, driven directly rather than
-    /// through `on_request`: proves `on_fs_read` still registers a reply and
-    /// answers the wire correctly, independent of whether any dispatch arm
-    /// currently reaches it.
-    #[tokio::test]
-    async fn on_fs_read_registers_a_reply_and_answers_the_wire_when_it_arrives() {
+    fn fs_driver(
+        cwd: std::path::PathBuf,
+    ) -> (
+        Driver,
+        std::sync::mpsc::Receiver<view_core::msg::Msg>,
+        mpsc::UnboundedReceiver<JsonRpcMessage>,
+    ) {
         let (events_tx, events_rx) = std::sync::mpsc::channel();
         let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
             let _ = events_tx.send(msg);
         })));
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let (out_tx, out_rx) = mpsc::unbounded_channel();
+        (Driver::new(shared, out_tx, cwd, false), events_rx, out_rx)
+    }
+
+    /// Both methods reach their handlers through `on_request` itself, not
+    /// only when a test calls the handler body directly: the dispatch arms
+    /// and the `true` capability flags are one claim, and a dispatch that
+    /// fell back to `METHOD_NOT_FOUND` would make the advertisement a lie.
+    #[tokio::test]
+    async fn fs_read_and_write_dispatch_to_their_handlers() {
+        let cwd = fs_scratch_dir("dispatch");
+        let file = cwd.join("a.rs");
+        std::fs::write(&file, "fn main() {}\n").expect("write scratch file");
+        let (mut driver, events_rx, mut out_rx) = fs_driver(cwd);
+
+        driver.on_request(
+            RequestId::Str("read-1".to_string()),
+            "fs/read_text_file",
+            &json!({ "path": file }),
+        );
+        driver.on_request(
+            RequestId::Str("write-1".to_string()),
+            "fs/write_text_file",
+            &json!({ "path": file, "content": "fn main() {}" }),
+        );
+
+        // bounded, never a bare `recv`: a dispatch arm that stopped
+        // reaching its handler emits nothing at all, and this test's job is
+        // to report that, not to hang the suite waiting for it
+        assert!(
+            matches!(
+                events_rx.recv_timeout(std::time::Duration::from_secs(5)),
+                Ok(view_core::msg::Msg::Ai(AiEvent::FsReadRequested { .. }))
+            ),
+            "fs/read_text_file dispatched to on_fs_read"
+        );
+        assert!(
+            matches!(
+                events_rx.recv_timeout(std::time::Duration::from_secs(5)),
+                Ok(view_core::msg::Msg::Ai(AiEvent::FsWriteRequested { .. }))
+            ),
+            "fs/write_text_file dispatched to on_fs_write"
+        );
+        assert!(
+            out_rx.try_recv().is_err(),
+            "a dispatched request is answered by the editor later, never \
+             refused on the spot"
+        );
+    }
+
+    /// The `fs/read_text_file` handler: it registers a reply keyed by the
+    /// boundary id it emits, and the editor's answer to that id is what
+    /// reaches the wire.
+    #[tokio::test]
+    async fn on_fs_read_registers_a_reply_and_answers_the_wire_when_it_arrives() {
+        let cwd = fs_scratch_dir("read-answer");
+        let file = cwd.join("a.rs");
+        std::fs::write(&file, "fn main() {}\n").expect("write scratch file");
+        let (mut driver, events_rx, mut out_rx) = fs_driver(cwd);
 
         driver.on_fs_read(
             RequestId::Str("read-1".to_string()),
-            &json!({ "path": "/stub/a.rs" }),
+            &json!({ "path": file, "line": 3, "limit": 7 }),
         );
 
-        let view_core::msg::Msg::Ai(AiEvent::FsReadRequested { request_id, path }) =
-            events_rx.recv().expect("FsReadRequested was emitted")
+        let view_core::msg::Msg::Ai(AiEvent::FsReadRequested {
+            request_id,
+            path,
+            line,
+            limit,
+        }) = events_rx.recv().expect("FsReadRequested was emitted")
         else {
             panic!("expected FsReadRequested")
         };
-        assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
+        assert_eq!(path, file);
+        assert_eq!((line, limit), (Some(3), Some(7)));
 
         driver.on_command(AiCommand::FsReadReply {
             request_id,
@@ -1757,20 +1840,45 @@ mod tests {
         assert_eq!(frame.result, Some(json!({ "content": "fn main() {}" })));
     }
 
-    /// The `fs/write_text_file` handler body's failure leg: a refused write
-    /// must answer the wire with an error, not silently drop the request.
+    /// `line` and `limit` are nullable in the pinned schema, and an agent
+    /// asking for the whole file may omit them or send an explicit `null` --
+    /// both must read as "no window" rather than one of them becoming a
+    /// window of zero lines.
+    #[tokio::test]
+    async fn an_absent_or_null_read_window_asks_for_the_whole_file() {
+        let cwd = fs_scratch_dir("read-window");
+        let file = cwd.join("a.rs");
+        std::fs::write(&file, "fn main() {}\n").expect("write scratch file");
+        let (mut driver, events_rx, _out_rx) = fs_driver(cwd);
+
+        driver.on_fs_read(RequestId::Num(1), &json!({ "path": file }));
+        driver.on_fs_read(
+            RequestId::Num(2),
+            &json!({ "path": file, "line": Value::Null, "limit": Value::Null }),
+        );
+
+        for expected in ["an omitted window", "an explicit null window"] {
+            let view_core::msg::Msg::Ai(AiEvent::FsReadRequested { line, limit, .. }) = events_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("FsReadRequested was emitted")
+            else {
+                panic!("expected FsReadRequested")
+            };
+            assert_eq!((line, limit), (None, None), "{expected}");
+        }
+    }
+
+    /// The `fs/write_text_file` handler's failure leg: a refused write must
+    /// answer the wire with an error, not silently drop the request.
     #[tokio::test]
     async fn on_fs_write_registers_a_reply_and_answers_a_refusal_over_the_wire() {
-        let (events_tx, events_rx) = std::sync::mpsc::channel();
-        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
-            let _ = events_tx.send(msg);
-        })));
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel();
-        let mut driver = Driver::new(shared, out_tx, std::env::temp_dir(), false);
+        let cwd = fs_scratch_dir("write-refusal");
+        let file = cwd.join("a.rs");
+        let (mut driver, events_rx, mut out_rx) = fs_driver(cwd);
 
         driver.on_fs_write(
             RequestId::Str("write-1".to_string()),
-            &json!({ "path": "/stub/a.rs", "content": "fn main() {}" }),
+            &json!({ "path": file, "content": "fn main() {}" }),
         );
 
         let view_core::msg::Msg::Ai(AiEvent::FsWriteRequested {
@@ -1781,7 +1889,10 @@ mod tests {
         else {
             panic!("expected FsWriteRequested")
         };
-        assert_eq!(path, std::path::PathBuf::from("/stub/a.rs"));
+        // the file does not exist yet: ACP requires the client to create it,
+        // so a write to a not-yet-existing path inside the cwd must pass the
+        // gate rather than be refused as unresolvable
+        assert_eq!(path, file);
         assert_eq!(content, "fn main() {}");
 
         driver.on_command(AiCommand::FsWriteReply {
@@ -1797,6 +1908,64 @@ mod tests {
         let error = frame.error.expect("a refused write answers with an error");
         assert_eq!(error.code, INTERNAL_ERROR);
         assert_eq!(error.message, fs_reason(&FsError::PermissionDenied));
+    }
+
+    /// The trust boundary, on both legs and against both escapes a
+    /// containment check exists for. The refusal has to be total: no event
+    /// crosses into the editor (nothing loads the buffer, nothing shows in
+    /// the panel), and the answer carries an error with no `content` member
+    /// -- an empty-string `content` would be indistinguishable from an empty
+    /// file and would have the agent act on text that is not there.
+    #[test]
+    fn a_path_outside_the_session_directory_is_refused_on_both_legs() {
+        let cwd = fs_scratch_dir("outside");
+        let outside = fs_scratch_dir("outside-target").join("secret.txt");
+        std::fs::write(&outside, "secret\n").expect("write outside file");
+        let link = cwd.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, &link).expect("plant symlink");
+        #[cfg(not(unix))]
+        std::fs::copy(&outside, &link).expect("stand in for a symlink");
+        let dot_dot = cwd.join("..").join("escape.txt");
+        let (mut driver, events_rx, mut out_rx) = fs_driver(cwd);
+
+        let mut refusals = 0;
+        for escape in [&dot_dot, &link] {
+            #[cfg(not(unix))]
+            if escape == &link {
+                continue;
+            }
+            driver.on_request(
+                RequestId::Str(format!("read-{refusals}")),
+                "fs/read_text_file",
+                &json!({ "path": escape }),
+            );
+            driver.on_request(
+                RequestId::Str(format!("write-{refusals}")),
+                "fs/write_text_file",
+                &json!({ "path": escape, "content": "overwritten" }),
+            );
+            refusals += 2;
+        }
+
+        for _ in 0..refusals {
+            let frame = out_rx.try_recv().expect("the refusal was answered");
+            let error = frame.error.expect("the refusal carries an error");
+            assert_eq!(error.code, INVALID_PARAMS);
+            assert!(
+                frame.result.is_none(),
+                "a refusal answers with an error only, never a result an \
+                 agent could read `content` out of"
+            );
+        }
+        assert!(
+            events_rx.try_recv().is_err(),
+            "a refused request emits nothing into the editor"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&outside).expect("the outside file survives"),
+            "secret\n"
+        );
     }
 
     fn session_update(update: Value) -> Value {

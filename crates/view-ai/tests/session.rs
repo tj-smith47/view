@@ -331,6 +331,113 @@ fn a_permission_request_crosses_out_and_its_answer_crosses_back() {
     );
 }
 
+/// The file the stub's `read`/`write` legs name, as this side spells it.
+fn stub_fs_path() -> std::path::PathBuf {
+    std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonicalize the session directory")
+        .join("view-ai-stub-fs.txt")
+}
+
+/// An agent's `fs/read_text_file` crosses out as an event and its answer
+/// crosses back as the agent's own reply -- over a real child process and
+/// real pipes, which is the only place the advertised capability, the
+/// dispatch arm, and the reply correlation are all exercised at once.
+#[test]
+fn an_agent_read_crosses_out_and_its_answer_crosses_back() {
+    let (session, rx) = session();
+    ready(&rx);
+    session.send(AiCommand::Prompt {
+        text: "read".to_string(),
+        context: Vec::new(),
+    });
+
+    let AiEvent::FsReadRequested {
+        request_id,
+        path,
+        line,
+        limit,
+    } = next_event(&rx, "FsReadRequested")
+    else {
+        panic!("expected FsReadRequested")
+    };
+    assert_eq!(path, stub_fs_path());
+    assert_eq!((line, limit), (None, None));
+
+    session.send(AiCommand::FsReadReply {
+        request_id,
+        result: Ok("from the buffer\n".to_string()),
+    });
+
+    assert_eq!(
+        next_event(&rx, "the agent's report of what it read"),
+        AiEvent::MessageChunk {
+            message_id: Some("msg_1".to_string()),
+            text: "read from the buffer\n".to_string(),
+            from_agent: true,
+        }
+    );
+}
+
+/// The write leg of the same round trip.
+#[test]
+fn an_agent_write_crosses_out_and_its_answer_crosses_back() {
+    let (session, rx) = session();
+    ready(&rx);
+    session.send(AiCommand::Prompt {
+        text: "write".to_string(),
+        context: Vec::new(),
+    });
+
+    let AiEvent::FsWriteRequested {
+        request_id,
+        path,
+        content,
+    } = next_event(&rx, "FsWriteRequested")
+    else {
+        panic!("expected FsWriteRequested")
+    };
+    assert_eq!(path, stub_fs_path());
+    assert_eq!(content, "fn main() {}");
+
+    session.send(AiCommand::FsWriteReply {
+        request_id,
+        result: Ok(()),
+    });
+
+    assert_eq!(
+        next_event(&rx, "the agent's report of the write"),
+        AiEvent::MessageChunk {
+            message_id: Some("msg_1".to_string()),
+            text: "wrote".to_string(),
+            from_agent: true,
+        }
+    );
+}
+
+/// A read of a path outside the session directory is refused on the wire
+/// and never becomes an event at all: the next thing this side sees is the
+/// agent reporting the refusal, not a request it was asked to answer.
+#[test]
+fn an_agent_read_outside_the_session_directory_never_crosses_at_all() {
+    let (session, rx) = session();
+    ready(&rx);
+    session.send(AiCommand::Prompt {
+        text: "read-outside".to_string(),
+        context: Vec::new(),
+    });
+
+    assert_eq!(
+        next_event(&rx, "the agent's report of the refusal"),
+        AiEvent::MessageChunk {
+            message_id: Some("msg_1".to_string()),
+            text: "read refused".to_string(),
+            from_agent: true,
+        },
+        "a refused path must be answered by the transport itself, never \
+         raised as a request the editor is asked to serve"
+    );
+}
+
 #[test]
 fn a_command_sent_before_the_session_exists_is_replayed_not_dropped() {
     let (session, rx) = session();
