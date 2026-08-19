@@ -29,6 +29,19 @@ pub enum EngineError {
     /// The engine connection was closed before the response arrived.
     #[error("engine connection closed")]
     Closed,
+    /// A path that can never name a hidden buffer, refused by
+    /// [`EngineHandle::load_hidden`] before it takes a hold and before
+    /// anything reaches the wire. Unlike every other variant here this one
+    /// says nothing about the connection, which is untouched and still
+    /// usable: a caller that treats any `Err` as a lost engine must match
+    /// this variant out first.
+    #[error("{reason} is not a usable hidden-buffer path: {path:?}")]
+    UnusablePath {
+        /// The path exactly as the caller spelled it.
+        path: String,
+        /// Which rule refused it.
+        reason: crate::nvim_api::HiddenPathRefusal,
+    },
     /// No response arrived within the caller-supplied timeout. Raised only
     /// by [`EngineHandle::request_timeout`]; the plain
     /// [`request`](EngineHandle::request) call has no timeout and cannot

@@ -443,6 +443,36 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
+/// The `canon()` both [`LOAD_HIDDEN_CHUNK`] and
+/// [`HIDDEN_CANON_PROBE_CHUNK`] embed, as one literal rather than two
+/// copies: the probe exists to pin [`canonical_hidden_key`] against the
+/// resolution the shipped chunk actually uses, and a second copy of the
+/// algorithm would let the two drift apart in exactly the way the pin is
+/// there to catch. A macro rather than a `const` because `concat!` composes
+/// literals, not constants.
+macro_rules! hidden_canon_lua {
+    () => {
+        "\
+local function canon(p)
+  if p == '' then
+    return p
+  end
+  local real = vim.uv.fs_realpath(p)
+  if real then
+    return real
+  end
+  local head = vim.fn.fnamemodify(p, ':h')
+  local real_head = vim.uv.fs_realpath(head)
+  if real_head then
+    local sep = real_head:sub(-1) == '/' and '' or '/'
+    return real_head .. sep .. vim.fn.fnamemodify(p, ':t')
+  end
+  return p
+end
+"
+    };
+}
+
 /// Keys [`EngineHandle::hidden_bufs`](crate::handle::EngineHandle) in
 /// agreement with whatever buffer `vim.fn.bufadd` actually resolves a
 /// `load_hidden` call onto -- symlinks resolved where the target exists,
@@ -464,21 +494,84 @@ return { loaded = false }";
 /// one open/close action rather than every keystroke or repaint -- an
 /// acceptable, bounded latency cost for what stays a synchronous call.
 pub(crate) fn canonical_hidden_key(path: &str) -> String {
+    // A relative spelling has no answer on this side of the wire: nvim
+    // resolves one against its own cwd, which `:cd` moves and this process
+    // never observes (`docs/hidden-buffer-wire-capture.md` case 19). Rather
+    // than inventing a second authority from this process's cwd, the key is
+    // the spelling itself -- and `hidden_path_refusal` keeps such a
+    // spelling from ever reaching a hold in the first place.
+    if !std::path::Path::new(path).is_absolute() {
+        return path.to_owned();
+    }
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return resolved.to_string_lossy().into_owned();
     }
-    let candidate = std::path::Path::new(path);
-    let absolute = if candidate.is_absolute() {
-        candidate.to_path_buf()
-    } else {
-        match std::env::current_dir() {
-            Ok(cwd) => cwd.join(candidate),
-            Err(_) => return path.to_owned(),
-        }
-    };
-    nvim_style_absolute(&absolute)
+    nvim_style_absolute(std::path::Path::new(path))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Why a path can never name a hidden buffer. Each member is a spelling
+/// whose identity `vim.fn.bufadd` and [`canonical_hidden_key`] would answer
+/// differently, so the pair is refused outright instead of normalized: one
+/// authority decides hidden-buffer identity, and every spelling it cannot
+/// decide unambiguously is off-contract.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HiddenPathRefusal {
+    /// Empty, or nothing but whitespace. `bufadd` resolves it onto nvim's
+    /// own `[No Name]` buffer -- the user's scratch buffer, which a review
+    /// would attach to and write its hunks into
+    /// (`docs/hidden-buffer-wire-capture.md` case 17).
+    Blank,
+    /// Not absolute. nvim resolves it against its own cwd and this process
+    /// would resolve the key against its own; the two diverge the moment
+    /// the user runs `:cd` (case 19). `docs/acp-v1-wire-capture.md`'s
+    /// `Diff` schema documents `path` as "The absolute file path being
+    /// modified," so an absolute spelling is what the wire promised anyway.
+    Relative,
+    /// Ends in a path separator. `bufadd` keeps the separator and resolves
+    /// the spelling onto a *second* buffer over the same file, while the
+    /// key drops it -- one hold over two buffers (case 18). A trailing
+    /// separator names a directory, and a directory is already refused.
+    TrailingSeparator,
+}
+
+impl std::fmt::Display for HiddenPathRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Blank => "a blank path",
+            Self::Relative => "a relative path",
+            Self::TrailingSeparator => "a path ending in a separator",
+        })
+    }
+}
+
+/// Which rule refuses `path` as a hidden buffer's identity, or `None` when
+/// none does. The one predicate
+/// [`EngineHandle::load_hidden`](EngineHandle::load_hidden) and
+/// [`EngineHandle::release_hidden`](EngineHandle::release_hidden) both
+/// consult, so a spelling that cannot take a hold can never issue a release
+/// that looks for one either.
+///
+/// Mirrored on the nvim side by [`LOAD_HIDDEN_CHUNK`]'s own blank and
+/// trailing-separator refusals (the relative case has no mirror by design:
+/// nvim's cwd is the *correct* authority for a relative spelling, and the
+/// divergence is entirely on this side), and upstream of both by
+/// `view_ai`'s ACP boundary, which drops a proposal whose path is off the
+/// wire's own absolute-path contract before either is reached.
+#[must_use]
+pub fn hidden_path_refusal(path: &str) -> Option<HiddenPathRefusal> {
+    if path.trim().is_empty() {
+        return Some(HiddenPathRefusal::Blank);
+    }
+    if path.ends_with(std::path::is_separator) {
+        return Some(HiddenPathRefusal::TrailingSeparator);
+    }
+    if !std::path::Path::new(path).is_absolute() {
+        return Some(HiddenPathRefusal::Relative);
+    }
+    None
 }
 
 /// Resolves an absolute path the way `vim.fn.bufadd` resolves one that does
@@ -551,6 +644,21 @@ fn nvim_style_absolute(path: &std::path::Path) -> std::path::PathBuf {
 /// nvim's ordinary file-open autocommands (filetype detection among them),
 /// which `nvim_create_buf` never triggers.
 ///
+/// A blank path and a path ending in a separator are refused before
+/// anything else runs, the same `buf = 0` answer the directory refusal
+/// gives. Both name something no review can be bound to and both resolve
+/// to a buffer the Rust-side hold key cannot agree with: `bufadd('')` is
+/// nvim's own `[No Name]` scratch buffer, whose empty name the scan below
+/// would otherwise match (`docs/hidden-buffer-wire-capture.md` case 17),
+/// and a trailing separator is a *second* buffer over the same file that
+/// the key drops the separator from (case 18) -- one hold, two buffers.
+/// The scan skips every name-less buffer for the same reason, so no
+/// resolution without a name can ever be returned as a hit regardless of
+/// what `wanted` holds. See
+/// [`hidden_path_refusal`], which refuses the identical two spellings (and
+/// relative ones, which nvim's own cwd resolves correctly and only this
+/// side gets wrong) before either reaches the wire.
+///
 /// A path that exists but is not a regular file is refused outright, and
 /// that refusal runs first -- before the existing-buffer scan below, not
 /// after. A directory that already has a buffer (any window that ever ran
@@ -590,22 +698,13 @@ fn nvim_style_absolute(path: &std::path::Path) -> std::path::PathBuf {
 /// for an edit event to learn one -- and an edit landing between this
 /// resolve and that write moves the tick, which is exactly the case that
 /// must refuse the write.
-const LOAD_HIDDEN_CHUNK: &str = "\
-local path = ...
-local function canon(p)
-  if p == '' then
-    return p
-  end
-  local real = vim.uv.fs_realpath(p)
-  if real then
-    return real
-  end
-  local head = vim.fn.fnamemodify(p, ':h')
-  local real_head = vim.uv.fs_realpath(head)
-  if real_head then
-    return real_head .. '/' .. vim.fn.fnamemodify(p, ':t')
-  end
-  return p
+const LOAD_HIDDEN_CHUNK: &str = concat!(
+    "local path = ...\n",
+    hidden_canon_lua!(),
+    "\
+local tail = path:sub(-1)
+if path:match('^%s*$') ~= nil or tail == '/' or tail == '\\\\' then
+  return { buf = 0, created = false, changedtick = 0 }
 end
 local stat = (vim.uv or vim.loop).fs_stat(path)
 if stat ~= nil and stat.type ~= 'file' then
@@ -613,7 +712,8 @@ if stat ~= nil and stat.type ~= 'file' then
 end
 local wanted = canon(path)
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if canon(vim.api.nvim_buf_get_name(b)) == wanted then
+  local name = vim.api.nvim_buf_get_name(b)
+  if name ~= '' and canon(name) == wanted then
     if not vim.api.nvim_buf_is_loaded(b) then
       vim.fn.bufload(b)
     end
@@ -625,7 +725,46 @@ if buf == 0 then
   return { buf = 0, created = false, changedtick = 0 }
 end
 vim.fn.bufload(buf)
-return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }"
+);
+
+/// [`LOAD_HIDDEN_CHUNK`]'s `canon()` alone, returning its answer for the
+/// path it is given instead of a buffer. Composed from the identical
+/// literal the chunk itself embeds, so the live test that pins
+/// [`canonical_hidden_key`] against nvim's own resolution cannot drift from
+/// the chunk it exists to pin -- a probe carrying its own copy of `canon()`
+/// would agree with the Rust key while the shipped chunk quietly disagreed.
+///
+/// Gated behind the `test-support` feature (which this crate's own
+/// `Cargo.toml` enables for itself during `cargo test` via a self
+/// dev-dependency), like [`EngineHandle::start`](crate::handle::EngineHandle::start):
+/// nothing in a shipping build resolves a path without also resolving a
+/// buffer for it.
+#[cfg(any(test, feature = "test-support"))]
+pub const HIDDEN_CANON_PROBE_CHUNK: &str = concat!(
+    "local path = ...\n",
+    hidden_canon_lua!(),
+    "return canon(path)"
+);
+
+/// [`LOAD_HIDDEN_CHUNK`] itself, for the live tests that drive its nvim-side
+/// refusals directly rather than through
+/// [`EngineHandle::load_hidden`](EngineHandle::load_hidden) -- which refuses
+/// the same spellings first, and would otherwise leave the chunk's own half
+/// of the belt-and-braces pair unexercised against real nvim. Gated behind
+/// `test-support` for the reason [`HIDDEN_CANON_PROBE_CHUNK`] is.
+#[cfg(any(test, feature = "test-support"))]
+pub const HIDDEN_LOAD_CHUNK: &str = LOAD_HIDDEN_CHUNK;
+
+/// [`canonical_hidden_key`]'s answer, for the live test that pins it
+/// against [`HIDDEN_CANON_PROBE_CHUNK`]'s -- two implementations of one
+/// algorithm, which nothing but a test comparing them keeps in agreement.
+/// Gated behind `test-support` for the reason that chunk is.
+#[cfg(any(test, feature = "test-support"))]
+#[must_use]
+pub fn hidden_buffer_key(path: &str) -> String {
+    canonical_hidden_key(path)
+}
 
 /// Deletes `buf` for `RpcCall::ReleaseHidden`, once its hold's refcount has
 /// reached zero -- but only when nothing would be disrupted by doing so.
@@ -1843,8 +1982,19 @@ impl EngineHandle {
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
-    /// the writer thread has already exited.
+    /// the writer thread has already exited, or
+    /// `EngineError::UnusablePath` for a spelling
+    /// [`hidden_path_refusal`] refuses -- raised before any hold is taken
+    /// and before anything reaches the wire, so the connection is untouched
+    /// and the caller owes no [`release_hidden`](Self::release_hidden) for
+    /// it (that call refuses the identical spelling as a no-op regardless).
     pub fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        if let Some(reason) = hidden_path_refusal(path) {
+            return Err(EngineError::UnusablePath {
+                path: path.to_owned(),
+                reason,
+            });
+        }
         let key = canonical_hidden_key(path);
         self.note_hidden_acquire(&key);
         let sent = self.request_load_hidden(
@@ -1896,6 +2046,15 @@ impl EngineHandle {
     /// above zero, a `path` with no hold at all, or one whose buffer is not
     /// yet known, never touches the wire and always answers `Ok(())`.
     pub fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
+        // A spelling load_hidden refuses never took a hold, so there is
+        // nothing here to decrement and nothing this connection could own.
+        // Answered as the same no-op an unheld path already gets rather
+        // than as an error: a review's close still owes exactly one of
+        // these per bind, whether or not its bind was ever accepted, and a
+        // failed release would read as a lost engine to the caller.
+        if hidden_path_refusal(path).is_some() {
+            return Ok(());
+        }
         let key = canonical_hidden_key(path);
         let Some(buf) = self.note_hidden_release(&key) else {
             return Ok(());
@@ -2857,6 +3016,128 @@ mod tests {
             std::path::PathBuf::from("/a"),
             "root's parent is root -- '/..' must resolve trivially rather than being \
              left unresolved the way a nonexistent parent is"
+        );
+    }
+
+    /// Every spelling whose buffer identity `bufadd` and
+    /// `canonical_hidden_key` would answer differently, and the ordinary
+    /// ones that must still get through. A `load_hidden` these let past is
+    /// a hold keyed on a path nvim resolved somewhere else.
+    #[test]
+    fn every_spelling_the_key_and_bufadd_disagree_on_is_refused() {
+        for blank in ["", " ", "\t", "\n  "] {
+            assert_eq!(
+                hidden_path_refusal(blank),
+                Some(HiddenPathRefusal::Blank),
+                "a blank path resolves onto nvim's own [No Name] buffer: {blank:?}"
+            );
+        }
+        for relative in ["rel.rs", "./rel.rs", "../rel.rs", "a/b.rs"] {
+            assert_eq!(
+                hidden_path_refusal(relative),
+                Some(HiddenPathRefusal::Relative),
+                "nvim's cwd resolves this one and this process's cwd cannot: {relative:?}"
+            );
+        }
+        assert_eq!(
+            hidden_path_refusal("/tmp/a/b.rs/"),
+            Some(HiddenPathRefusal::TrailingSeparator),
+            "a trailing separator is a second buffer over the same file"
+        );
+        assert_eq!(
+            hidden_path_refusal("/tmp/dir/"),
+            Some(HiddenPathRefusal::TrailingSeparator),
+            "a directory's own spelling is refused here, not left to the fs_stat check"
+        );
+        for usable in ["/tmp/a.rs", "/tmp/does/not/exist.rs", "/a", "/tmp/./a.rs"] {
+            assert_eq!(
+                hidden_path_refusal(usable),
+                None,
+                "an absolute file spelling must still get through: {usable:?}"
+            );
+        }
+    }
+
+    /// A refused spelling never becomes a hold: `load_hidden` answers
+    /// before it takes one, and `release_hidden` answers before it looks
+    /// for one, so the two can never disagree about whether a hold exists.
+    #[test]
+    fn a_refused_path_takes_no_hold_and_releases_without_error() {
+        let (h, _cap_rx) = fake_peer_replying_with(Value::Nil);
+        let err = h.load_hidden("", 7).expect_err("a blank path must refuse");
+        assert!(
+            matches!(
+                err,
+                EngineError::UnusablePath {
+                    reason: HiddenPathRefusal::Blank,
+                    ..
+                }
+            ),
+            "a blank path must refuse as unusable, not as a lost engine: {err:?}"
+        );
+        assert!(
+            h.hidden_bufs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty(),
+            "a refused load must leave no hold behind for a release to find"
+        );
+        h.release_hidden("")
+            .expect("releasing a refused path is the same no-op an unheld path gets");
+    }
+
+    /// The Rust key never invents an answer for a spelling only nvim can
+    /// resolve: a relative path keeps its own spelling rather than being
+    /// joined onto this process's cwd, which nvim's `:cd` moves
+    /// independently.
+    #[test]
+    fn a_relative_spelling_never_picks_up_this_processs_cwd() {
+        // cargo runs a unit test with the package root as its cwd, so
+        // these two really do resolve against it -- which is what makes
+        // the difference observable at all: a key that consulted this
+        // process's cwd would answer them as absolute paths nvim's own cwd
+        // need never agree with.
+        assert!(
+            std::path::Path::new("Cargo.toml").exists()
+                && std::path::Path::new("src/nvim_api.rs").exists(),
+            "the fixtures must resolve against this process's cwd, or the \
+             assertions below prove nothing"
+        );
+        assert_eq!(canonical_hidden_key("Cargo.toml"), "Cargo.toml");
+        assert_eq!(canonical_hidden_key("src/nvim_api.rs"), "src/nvim_api.rs");
+        assert_eq!(
+            canonical_hidden_key("./src/nvim_api.rs"),
+            "./src/nvim_api.rs"
+        );
+        assert_eq!(canonical_hidden_key("rel.rs"), "rel.rs");
+    }
+
+    /// The two chunks that must agree share one `canon()` literal rather
+    /// than two copies, which is the whole reason the probe can pin the
+    /// Rust key at all.
+    #[test]
+    fn the_canon_probe_carries_the_same_resolution_the_load_chunk_does() {
+        let canon = hidden_canon_lua!();
+        assert!(LOAD_HIDDEN_CHUNK.contains(canon));
+        assert!(HIDDEN_CANON_PROBE_CHUNK.contains(canon));
+    }
+
+    /// The nvim-side halves of the refusal, checked as chunk text: a blank
+    /// path answered before anything resolves, and a scan that can never
+    /// return a buffer with no name.
+    #[test]
+    fn the_load_chunk_refuses_a_blank_path_and_never_matches_a_nameless_buffer() {
+        assert!(
+            LOAD_HIDDEN_CHUNK.contains("path:match('^%s*$') ~= nil"),
+            "a blank path must be refused before the scan can match [No Name]"
+        );
+        assert!(
+            LOAD_HIDDEN_CHUNK.contains("if name ~= '' and canon(name) == wanted then"),
+            "a name-less buffer must never be returned as a hidden-buffer hit"
+        );
+        assert!(
+            LOAD_HIDDEN_CHUNK.contains("tail == '/' or tail == '\\\\'"),
+            "a trailing separator resolves onto a second buffer over the same file"
         );
     }
 }

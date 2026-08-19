@@ -131,27 +131,10 @@ pub struct Executor<E: EngineOps> {
     /// while `model.ai_enabled` is false (see `notice_ai_disabled`), so no
     /// command can arrive here with nothing wired to take it.
     ai: Option<crate::ai_worker::AiWorker>,
-    /// Write outcomes (`Msg::BufWriteApplied`/`Msg::BufWriteRefused`) the
-    /// loop's message channel was too full to take, in arrival order.
-    ///
-    /// The one message this type produces on the loop thread itself, which
-    /// is also the channel's only consumer: a blocking send here deadlocks
-    /// the editor outright, and the channel is at its fullest exactly when
-    /// a write completes (an open review holds a buffer subscription, so
-    /// every keystroke in that buffer is already queueing a
-    /// `Msg::BufTextChanged` and a redraw behind it). Dropping is not the
-    /// alternative either -- a lost outcome leaves the review believing a
-    /// write is still in flight and naming a tick the buffer has moved
-    /// past, so every later accept is refused for no reason -- so a refused
-    /// outcome parks here and is carried through by
-    /// [`flush_write_outcomes`](Self::flush_write_outcomes), the same
-    /// hold-and-retry shape `view_engine`'s `Route` uses for the replies
-    /// its reader thread must deliver without blocking.
-    ///
-    /// A queue rather than a single slot: each outcome describes a distinct
-    /// write, and none supersedes the one before it. A `Mutex` for the
-    /// reason `tree_scan_cancel` above is one -- `run` takes `&self`.
-    deferred_write_outcomes: std::sync::Mutex<std::collections::VecDeque<Msg>>,
+    /// The messages this type answers an effect with itself, parked when
+    /// the loop's channel cannot take one (see
+    /// [`LoopMsgOutbox`](crate::loop_msgs::LoopMsgOutbox)).
+    loop_msgs: crate::loop_msgs::LoopMsgOutbox,
     /// The context worker's job channel
     /// (`crate::ai_context_worker::spawn`), or `None` when no worker is
     /// wired -- every test `Executor` built via plain `new`.
@@ -239,7 +222,7 @@ fn drain_pass_handoffs<S: Osc52Sink, E: EngineOps>(
     executor: &Executor<E>,
 ) {
     drain_osc52(osc52_rx, sink);
-    executor.flush_write_outcomes();
+    executor.flush_loop_msgs();
 }
 
 /// Spawns `f` on its own thread, logging rather than panicking if the OS
@@ -264,25 +247,6 @@ where
     }
 }
 
-/// Hands `parked` back to `tx` in arrival order, stopping at the first the
-/// channel still refuses: a full channel would refuse everything queued
-/// behind it too, and delivering a later outcome first would report a write
-/// as refused before the one it was joined onto was reported as applied. A
-/// disconnected channel means the loop those outcomes described is gone, so
-/// what is left goes with it rather than waiting for a delivery nothing can
-/// make.
-fn retry_write_outcomes(
-    tx: &crate::wake::LoopSender,
-    parked: &mut std::collections::VecDeque<Msg>,
-) {
-    while let Some(msg) = parked.pop_front() {
-        if let Err(mpsc::TrySendError::Full(msg)) = tx.try_send(msg) {
-            parked.push_front(msg);
-            break;
-        }
-    }
-}
-
 impl<E: EngineOps> Executor<E> {
     /// Wraps `ops` for the runtime loop to drive, with neither the
     /// clipboard worker nor the OSC52 terminal channel wired: every
@@ -299,66 +263,22 @@ impl<E: EngineOps> Executor<E> {
             toast_timer: None,
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
-            deferred_write_outcomes: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            loop_msgs: crate::loop_msgs::LoopMsgOutbox::default(),
             ai: None,
             ai_context: None,
         }
     }
 
-    /// Routes one write outcome to the loop, blocking on nothing and
-    /// dropping nothing (see [`Executor::deferred_write_outcomes`] for why
-    /// neither is available here). A refused outcome parks, and one already
-    /// parked makes this one queue behind it rather than overtake it: a
-    /// refusal reported ahead of the apply that preceded it would put hunks
-    /// back that the buffer already holds.
-    fn route_write_outcome(&self, msg: Msg) {
-        // Unwired only in a bare test `Executor`, which has no loop to
-        // deliver to at all -- the same degrade every other channel in this
-        // type takes when it is not wired.
-        let Some(tx) = &self.toast_timer else {
-            return;
-        };
-        let mut parked = self
-            .deferred_write_outcomes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        retry_write_outcomes(tx, &mut parked);
-        if !parked.is_empty() {
-            parked.push_back(msg);
-            return;
-        }
-        if let Err(mpsc::TrySendError::Full(msg)) = tx.try_send(msg) {
-            parked.push_back(msg);
-        }
+    /// [`LoopMsgOutbox::route`](crate::loop_msgs::LoopMsgOutbox::route) for
+    /// this executor's own outbox and loop channel.
+    fn route_loop_msg(&self, msg: Msg) {
+        self.loop_msgs.route(self.toast_timer.as_ref(), msg);
     }
 
-    /// Re-attempts every parked write outcome, in arrival order, stopping at
-    /// the first the channel still refuses.
-    ///
-    /// Called once per loop pass from [`drain_pass_handoffs`], at the top:
-    /// what it carries is therefore what the *previous* pass parked, and an
-    /// outcome parked later in this pass -- the resize and supervision
-    /// dispatches both run after it -- waits for the next pass. That wait
-    /// is bounded by the same fact that made the parking necessary: a
-    /// channel too full to take an outcome is a channel with something in
-    /// it, and the loop's wait returns immediately while anything is
-    /// queued, so the next pass is the next thing that happens rather than
-    /// whatever the user does next.
-    ///
-    /// Costs one uncontended lock and a `VecDeque::is_empty` per pass,
-    /// which is the whole steady state.
-    pub(crate) fn flush_write_outcomes(&self) {
-        let mut parked = self
-            .deferred_write_outcomes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if parked.is_empty() {
-            return;
-        }
-        let Some(tx) = &self.toast_timer else {
-            return;
-        };
-        retry_write_outcomes(tx, &mut parked);
+    /// [`LoopMsgOutbox::flush`](crate::loop_msgs::LoopMsgOutbox::flush) for
+    /// this executor's own outbox and loop channel.
+    pub(crate) fn flush_loop_msgs(&self) {
+        self.loop_msgs.flush(self.toast_timer.as_ref());
     }
 
     /// Wires the clipboard worker's job channel; `ClipboardRead`/
@@ -555,7 +475,7 @@ impl<E: EngineOps> Executor<E> {
                         .set_buf_text(buf, &edits, undojoin, expected_changedtick)
                     {
                         Ok(outcome) => {
-                            self.route_write_outcome(match outcome {
+                            self.route_loop_msg(match outcome {
                                 BufWriteOutcome::Applied { changedtick } => Msg::BufWriteApplied {
                                     buf,
                                     generation,
@@ -571,8 +491,28 @@ impl<E: EngineOps> Executor<E> {
                     },
                     RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
                     RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
+                    // The second call whose outcome is not just ok-or-lost:
+                    // a path the engine refuses outright (blank, relative,
+                    // or ending in a separator) never reaches the wire, so
+                    // no reply is coming to answer the review's bind. It is
+                    // stood in for here with the same buffer-less resolve
+                    // nvim's own refusal produces, so the review reads as
+                    // unbindable instead of waiting for a reply nobody
+                    // sent -- and, crucially, so a refusal of one path is
+                    // never mistaken for the connection itself being gone.
                     RpcCall::LoadHidden { path, generation } => {
-                        self.ops.load_hidden(&path, generation)
+                        match self.ops.load_hidden(&path, generation) {
+                            Err(view_engine::handle::EngineError::UnusablePath { .. }) => {
+                                self.route_loop_msg(Msg::HiddenBufferLoaded {
+                                    generation,
+                                    buf: None,
+                                    created: false,
+                                    changedtick: 0,
+                                });
+                                Ok(())
+                            }
+                            other => other,
+                        }
                     }
                     RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),
                     // RpcCall is #[non_exhaustive]: a future call kind must
@@ -1960,6 +1900,77 @@ mod tests {
             .collect()
     }
 
+    /// A path the engine refuses outright is a refusal of that path, never
+    /// a lost connection: the loop keeps running, and the review that asked
+    /// gets the same buffer-less resolve nvim's own refusal would have
+    /// produced, so it reads as unbindable instead of waiting forever for a
+    /// reply nothing sent.
+    #[test]
+    fn a_load_hidden_the_engine_refuses_answers_the_review_instead_of_losing_the_engine() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(4);
+        let ops = FakeOps::default();
+        let executor =
+            Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx.clone()));
+
+        let flow = executor.run(Effect::Rpc(RpcCall::LoadHidden {
+            path: String::new(),
+            generation: 9,
+        }));
+
+        assert!(
+            matches!(flow, Flow::Continue),
+            "a refused path must not read as a lost engine: {flow:?}"
+        );
+        assert!(
+            !ops.calls
+                .borrow()
+                .iter()
+                .any(|c| c.starts_with("load_hidden")),
+            "the refusal happens before the call reaches the wire"
+        );
+        let msg = msg_rx.try_recv().ok();
+        assert!(
+            matches!(
+                msg,
+                Some(Msg::HiddenBufferLoaded {
+                    generation: 9,
+                    buf: None,
+                    created: false,
+                    changedtick: 0,
+                })
+            ),
+            "the review that asked must be told it cannot bind, got {msg:?}"
+        );
+    }
+
+    /// The stand-in above is only for the refusal: a usable path still
+    /// reaches the wire and answers nothing here, since the reply comes
+    /// back through the engine's own pump.
+    #[test]
+    fn a_usable_load_hidden_path_still_reaches_the_engine_and_answers_nothing_locally() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(4);
+        let ops = FakeOps::default();
+        let executor =
+            Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx.clone()));
+
+        let path = if cfg!(windows) {
+            "C:\\work\\main.rs"
+        } else {
+            "/work/main.rs"
+        };
+        let flow = executor.run(Effect::Rpc(RpcCall::LoadHidden {
+            path: path.to_owned(),
+            generation: 9,
+        }));
+
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], format!("load_hidden({path},9)"));
+        assert!(
+            msg_rx.try_recv().is_err(),
+            "a call that reached the wire must wait for nvim's own reply"
+        );
+    }
+
     #[test]
     fn input_effect_maps_to_engine_ops_input() {
         let ops = FakeOps::default();
@@ -2360,7 +2371,7 @@ mod tests {
         // it believes is still in flight is what the parking exists to
         // prevent, so the outcome has to arrive once there is room for it
         assert!(matches!(msg_rx.try_recv(), Ok(Msg::RedrawReady)));
-        executor.flush_write_outcomes();
+        executor.flush_loop_msgs();
         let msg = msg_rx.try_recv().ok();
         assert!(
             matches!(
@@ -2389,12 +2400,12 @@ mod tests {
             Executor::new(SlowOps::new(std::time::Duration::ZERO)).with_toast_timer(sender);
 
         let executor = without_blocking(move || {
-            executor.route_write_outcome(Msg::BufWriteApplied {
+            executor.route_loop_msg(Msg::BufWriteApplied {
                 buf: BufferHandle(3),
                 generation: 4,
                 changedtick: 9,
             });
-            executor.route_write_outcome(Msg::BufWriteRefused {
+            executor.route_loop_msg(Msg::BufWriteRefused {
                 buf: BufferHandle(3),
                 generation: 4,
             });
@@ -2402,7 +2413,7 @@ mod tests {
         });
 
         assert!(matches!(msg_rx.try_recv(), Ok(Msg::RedrawReady)));
-        executor.flush_write_outcomes();
+        executor.flush_loop_msgs();
         assert!(matches!(
             msg_rx.try_recv(),
             Ok(Msg::BufWriteApplied {
@@ -2411,7 +2422,7 @@ mod tests {
                 ..
             })
         ));
-        executor.flush_write_outcomes();
+        executor.flush_loop_msgs();
         assert!(matches!(
             msg_rx.try_recv(),
             Ok(Msg::BufWriteRefused { generation: 4, .. })

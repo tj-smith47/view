@@ -1014,11 +1014,35 @@ struct DiffProposal {
     new_text: String,
 }
 
+/// Whether a proposal's `path` is one the wire actually promised.
+/// `docs/acp-v1-wire-capture.md`'s `Diff` schema documents `path` as "The
+/// absolute file path being modified," and the spellings refused here are
+/// the ones that resolve to a buffer nobody meant:
+///
+/// - not absolute -- resolved against nvim's cwd, which the user moves with
+///   `:cd` and view's own process never observes
+///   (`docs/hidden-buffer-wire-capture.md` case 19). A blank path is
+///   refused by this same test (nothing blank is absolute) and is the worst
+///   of the class: nvim resolves an empty name onto its own `[No Name]`
+///   scratch buffer, which a review would attach to and write its hunks
+///   into (case 17);
+/// - ending in a path separator -- a directory's spelling, which nvim binds
+///   to a *second* buffer over the same file (case 18).
+///
+/// Refused here, at the boundary the agent's text crosses, rather than
+/// normalized into something plausible: a proposal names a file the user is
+/// about to accept edits into, and guessing which file an off-contract
+/// spelling meant is exactly the guess that must not be made.
+fn usable_path(path: &&str) -> bool {
+    !path.ends_with(std::path::is_separator) && std::path::Path::new(path).is_absolute()
+}
+
 /// Every decodable `"diff"` item of one tool call's content, in wire
-/// order. An item missing a required field is skipped rather than
-/// degraded to a placeholder the way rendered content is: a proposal is
-/// something the user writes into a buffer, and there is no partial
-/// version of it that is safe to offer.
+/// order. An item missing a required field, or naming a path the wire's own
+/// absolute-path contract rules out (see [`usable_path`]), is skipped
+/// rather than degraded to a placeholder the way rendered content is: a
+/// proposal is something the user writes into a buffer, and there is no
+/// partial version of it that is safe to offer.
 fn diff_proposals(update: &Value) -> Vec<DiffProposal> {
     update
         .get("content")
@@ -1031,7 +1055,10 @@ fn diff_proposal(item: &Value) -> Option<DiffProposal> {
     if item.get("type").and_then(Value::as_str) != Some("diff") {
         return None;
     }
-    let path = item.get("path").and_then(Value::as_str)?;
+    let path = item
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(usable_path)?;
     let new_text = item.get("newText").and_then(Value::as_str)?;
     Some(DiffProposal {
         path: std::path::PathBuf::from(path),
@@ -1922,6 +1949,19 @@ mod tests {
         }))
     }
 
+    /// An absolute path in this platform's own spelling: `diff_proposal`
+    /// refuses anything the wire's absolute-path contract rules out, and a
+    /// leading `/` is *not* absolute on Windows (no drive prefix), so a
+    /// hard-coded POSIX path would silently turn every proposal test below
+    /// into a refusal test there.
+    fn abs(tail: &str) -> String {
+        if cfg!(windows) {
+            format!("C:\\work\\{tail}")
+        } else {
+            format!("/work/{tail}")
+        }
+    }
+
     /// Every `AiEvent::DiffProposed` a receiver holds, in emission order.
     fn proposals(
         events_rx: &std::sync::mpsc::Receiver<view_core::msg::Msg>,
@@ -1953,7 +1993,7 @@ mod tests {
                 "c1",
                 json!([{
                     "type": "diff",
-                    "path": "/work/main.rs",
+                    "path": abs("main.rs"),
                     "oldText": "fn main() {}\n",
                     "newText": "fn main() { run() }\n",
                 }]),
@@ -1971,7 +2011,7 @@ mod tests {
         assert_eq!(
             proposals(&events_rx),
             vec![(
-                std::path::PathBuf::from("/work/main.rs"),
+                std::path::PathBuf::from(abs("main.rs")),
                 Some("fn main() {}\n".to_string()),
                 "fn main() { run() }\n".to_string(),
             )]
@@ -1989,14 +2029,14 @@ mod tests {
             "session/update",
             &diff_update(
                 "c1",
-                json!([{ "type": "diff", "path": "/work/new.rs", "newText": "fn new() {}\n" }]),
+                json!([{ "type": "diff", "path": abs("new.rs"), "newText": "fn new() {}\n" }]),
             ),
         );
 
         assert_eq!(
             proposals(&events_rx),
             vec![(
-                std::path::PathBuf::from("/work/new.rs"),
+                std::path::PathBuf::from(abs("new.rs")),
                 None,
                 "fn new() {}\n".to_string(),
             )]
@@ -2012,7 +2052,7 @@ mod tests {
         let (mut driver, events_rx) = diff_driver();
         let first = json!([{
             "type": "diff",
-            "path": "/work/main.rs",
+            "path": abs("main.rs"),
             "oldText": "a\n",
             "newText": "b\n",
         }]);
@@ -2032,7 +2072,7 @@ mod tests {
                 "c1",
                 json!([{
                     "type": "diff",
-                    "path": "/work/main.rs",
+                    "path": abs("main.rs"),
                     "oldText": "a\n",
                     "newText": "c\n",
                 }]),
@@ -2054,7 +2094,7 @@ mod tests {
         let (mut driver, events_rx) = diff_driver();
         let content = json!([{
             "type": "diff",
-            "path": "/work/main.rs",
+            "path": abs("main.rs"),
             "oldText": "a\n",
             "newText": "b\n",
         }]);
@@ -2093,7 +2133,7 @@ mod tests {
             &diff_update(
                 "c1",
                 json!([
-                    { "type": "diff", "path": "/work/main.rs" },
+                    { "type": "diff", "path": abs("main.rs") },
                     { "type": "diff", "newText": "orphan\n" },
                     { "type": "content", "content": { "type": "text", "text": "not a diff" } },
                 ]),
@@ -2101,6 +2141,64 @@ mod tests {
         );
 
         assert!(proposals(&events_rx).is_empty());
+    }
+
+    /// A path off the wire's own absolute-path contract is skipped for the
+    /// same reason a missing field is: each of these three spellings binds
+    /// a review to a buffer nobody named -- nvim's `[No Name]` scratch
+    /// buffer, a file under whatever directory nvim's cwd happens to be, or
+    /// a second buffer over the same file -- and there is no way to guess
+    /// which file the agent meant.
+    #[test]
+    fn a_diff_item_whose_path_is_not_absolute_is_not_proposed() {
+        let (mut driver, events_rx) = diff_driver();
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([
+                    { "type": "diff", "path": "", "newText": "into [No Name]\n" },
+                    { "type": "diff", "path": "   ", "newText": "into [No Name]\n" },
+                    { "type": "diff", "path": "main.rs", "newText": "against nvim's cwd\n" },
+                    { "type": "diff", "path": "./main.rs", "newText": "against nvim's cwd\n" },
+                    { "type": "diff", "path": format!("{}/", abs("main.rs")), "newText": "a second buffer\n" },
+                ]),
+            ),
+        );
+
+        assert!(
+            proposals(&events_rx).is_empty(),
+            "every off-contract spelling must be dropped at the boundary"
+        );
+    }
+
+    /// The refusal above must not swallow the ordinary case it sits in
+    /// front of: an absolute path with a `.` component, or one that does
+    /// not exist yet, is exactly what a proposal normally carries.
+    #[test]
+    fn an_absolute_path_is_still_proposed_alongside_refused_ones() {
+        let (mut driver, events_rx) = diff_driver();
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([
+                    { "type": "diff", "path": "", "newText": "dropped\n" },
+                    { "type": "diff", "path": abs("./new.rs"), "newText": "kept\n" },
+                ]),
+            ),
+        );
+
+        assert_eq!(
+            proposals(&events_rx),
+            vec![(
+                std::path::PathBuf::from(abs("./new.rs")),
+                None,
+                "kept\n".to_string(),
+            )]
+        );
     }
 
     /// `plan_entry` renders a complete entry unchanged.

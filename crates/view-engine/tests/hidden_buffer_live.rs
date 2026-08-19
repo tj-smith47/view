@@ -16,7 +16,10 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use view_core::msg::{BufferHandle, Msg, TextEdit};
-use view_engine::nvim_api::BufWriteOutcome;
+use view_engine::handle::EngineError;
+use view_engine::nvim_api::{
+    hidden_buffer_key, hidden_path_refusal, BufWriteOutcome, HiddenPathRefusal,
+};
 use view_engine::process::{Engine, EngineConfig};
 
 /// Spawns an isolated engine with a UI attached, the same load-bearing
@@ -154,6 +157,74 @@ fn next_buf_text_changed(rx: &mpsc::Receiver<Msg>) -> Msg {
             Err(err) => panic!("channel closed before a BufTextChanged arrived: {err}"),
         }
     }
+}
+
+/// One buffer's own name, as nvim stores it.
+fn buf_name(engine: &Engine, buf: u64) -> String {
+    engine
+        .handle
+        .request("nvim_buf_get_name", vec![rmpv::Value::from(buf)])
+        .expect("read buffer name")
+        .as_str()
+        .expect("a buffer name is a string")
+        .to_owned()
+}
+
+/// Every buffer nvim currently holds, by name.
+fn buffer_names(engine: &Engine) -> Vec<String> {
+    engine
+        .handle
+        .request("nvim_list_bufs", vec![])
+        .expect("list buffers")
+        .as_array()
+        .expect("nvim_list_bufs reply is an array")
+        .iter()
+        .filter_map(decode_ext_handle)
+        .map(|handle| buf_name(engine, handle))
+        .collect()
+}
+
+/// `LOAD_HIDDEN_CHUNK`'s own answer for `path`, driven directly rather than
+/// through `load_hidden` -- which refuses the same spellings first, so the
+/// chunk's own half of the belt-and-braces pair would otherwise never run
+/// against real nvim. Answers the `buf` field, `0` being the chunk's
+/// refusal.
+fn load_chunk_answer(engine: &Engine, path: &str) -> u64 {
+    let reply = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(view_engine::nvim_api::HIDDEN_LOAD_CHUNK),
+                rmpv::Value::Array(vec![rmpv::Value::from(path)]),
+            ],
+        )
+        .expect("run the load chunk");
+    reply
+        .as_map()
+        .expect("the chunk answers a map")
+        .iter()
+        .find(|(k, _)| k.as_str() == Some("buf"))
+        .and_then(|(_, v)| v.as_u64())
+        .expect("the chunk's answer names a buf")
+}
+
+/// What `LOAD_HIDDEN_CHUNK`'s own `canon()` resolves `path` to, inside
+/// nvim, from the identical literal the chunk itself embeds.
+fn canon_in_nvim(engine: &Engine, path: &str) -> String {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(view_engine::nvim_api::HIDDEN_CANON_PROBE_CHUNK),
+                rmpv::Value::Array(vec![rmpv::Value::from(path)]),
+            ],
+        )
+        .expect("run the canon probe")
+        .as_str()
+        .expect("canon answers a string")
+        .to_owned()
 }
 
 /// Whether nvim's `nvim_list_bufs()` still names `buf`.
@@ -1298,4 +1369,277 @@ fn buf_attach_and_set_buf_text_operate_unbranched_on_a_hidden_buffer() {
         .handle
         .release_hidden(&path.to_string_lossy())
         .expect("release the one hold this test took");
+}
+
+/// An empty proposal path resolves onto nvim's own `[No Name]` buffer --
+/// the user's scratch buffer, live-confirmed as buffer 1 with an empty name
+/// (`docs/hidden-buffer-wire-capture.md` case 17). A review bound to it
+/// would attach to it and write its hunks into it. Both ends refuse: the
+/// engine before the request is even built, and the chunk itself when
+/// driven directly.
+#[test]
+fn an_empty_path_is_refused_at_both_ends_rather_than_bound_to_nvims_no_name_buffer() {
+    let mut engine = spawn();
+    let (tx, _rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    for blank in ["", "   "] {
+        let err = engine
+            .handle
+            .load_hidden(blank, 300)
+            .expect_err("a blank path must refuse rather than resolve");
+        assert!(
+            matches!(
+                err,
+                EngineError::UnusablePath {
+                    reason: HiddenPathRefusal::Blank,
+                    ..
+                }
+            ),
+            "a blank path must refuse as unusable, not as a lost engine: {err:?}"
+        );
+        assert_eq!(
+            load_chunk_answer(&engine, blank),
+            0,
+            "nvim's own [No Name] buffer must never be returned as a hidden-buffer hit"
+        );
+    }
+
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, 1),
+        "the fixture only proves anything while nvim's unnamed buffer 1 still exists"
+    );
+    assert_eq!(
+        buf_name(&engine, 1),
+        "",
+        "buffer 1 must be the unnamed scratch buffer the empty path would have matched"
+    );
+}
+
+/// A relative proposal path resolves against nvim's cwd, which `:cd` moves
+/// and view's own process never observes (case 19) -- two authorities for
+/// one buffer identity. `docs/acp-v1-wire-capture.md`'s `Diff` schema
+/// documents `path` as "The absolute file path being modified," so the
+/// spelling is off-contract and is refused rather than resolved against
+/// either cwd.
+#[test]
+fn a_relative_path_is_refused_rather_than_keyed_against_this_processs_cwd() {
+    let mut engine = spawn();
+    let (tx, _rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    for relative in ["rel.rs", "./rel.rs", "sub/rel.rs"] {
+        let err = engine
+            .handle
+            .load_hidden(relative, 301)
+            .expect_err("a relative path must refuse");
+        assert!(
+            matches!(
+                err,
+                EngineError::UnusablePath {
+                    reason: HiddenPathRefusal::Relative,
+                    ..
+                }
+            ),
+            "a relative path must refuse as unusable: {err:?}"
+        );
+        engine
+            .handle
+            .release_hidden(relative)
+            .expect("a refused path's release is the same no-op an unheld path gets");
+    }
+}
+
+/// A trailing separator is a second, distinct nvim buffer over the same
+/// file (case 18): `bufadd` keeps the separator, the hold key drops it, and
+/// the two spellings shared one hold over two buffers. Refused at both ends
+/// rather than normalized -- a trailing separator names a directory, and a
+/// directory is already refused, but the existing `fs_stat` refusal never
+/// fires for a leaf that does not exist.
+#[test]
+fn a_trailing_separator_is_refused_rather_than_keyed_onto_a_second_buffer() {
+    let root = scratch_root("trailing-separator");
+    let bare = root.join("nope.rs").to_string_lossy().into_owned();
+    let with_separator = format!("{bare}/");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&bare, 302)
+        .expect("the bare spelling loads");
+    let (_g, buf, created, _t) = next_hidden_buffer_loaded(&rx);
+    assert!(created, "the bare spelling creates the one buffer");
+    let buf = buf.expect("the bare spelling resolves to a handle");
+
+    let err = engine
+        .handle
+        .load_hidden(&with_separator, 303)
+        .expect_err("the trailing-separator spelling must refuse");
+    assert!(
+        matches!(
+            err,
+            EngineError::UnusablePath {
+                reason: HiddenPathRefusal::TrailingSeparator,
+                ..
+            }
+        ),
+        "a trailing separator must refuse as unusable: {err:?}"
+    );
+    assert_eq!(
+        load_chunk_answer(&engine, &with_separator),
+        0,
+        "the chunk itself must refuse it too -- fs_stat cannot, the leaf does not exist"
+    );
+    assert!(
+        !buffer_names(&engine).iter().any(|n| n.ends_with('/')),
+        "no second buffer may exist over the same file: {:?}",
+        buffer_names(&engine)
+    );
+
+    engine
+        .handle
+        .release_hidden(&with_separator)
+        .expect("a refused path's release is a no-op");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, buf),
+        "a refused spelling must never decrement the bare spelling's hold"
+    );
+
+    engine
+        .handle
+        .release_hidden(&bare)
+        .expect("the one real hold releases");
+    assert!(
+        !buf_still_listed_as_a_buffer(&engine, buf),
+        "the bare spelling's own hold reached zero and must have deleted its buffer"
+    );
+}
+
+/// Two implementations of one algorithm: `canonical_hidden_key` on this
+/// side of the wire and `LOAD_HIDDEN_CHUNK`'s own `canon()` on nvim's. They
+/// must answer identically for every spelling in the divergent set
+/// (`docs/hidden-buffer-wire-capture.md` cases 15, 16 and 20) or the scan
+/// misses a reuse the key shares, or shares a key the scan splits. Nothing
+/// but this test keeps them in agreement.
+///
+/// Unix-only for the same reason
+/// `two_spellings_through_a_symlinked_directory_...` is: the divergent set
+/// is built from symlinked directories, and the `/`-joined spelling the two
+/// sides agree on here is a POSIX one. What matters on every platform --
+/// two spellings nvim resolves onto one buffer share one hold -- is pinned
+/// by the reuse tests above, which are not gated.
+#[test]
+#[cfg(unix)]
+fn the_hold_key_answers_exactly_what_the_load_chunks_own_canon_answers() {
+    let root = scratch_root("canon-drift-pin");
+    let real_dir = root.join("real");
+    std::fs::create_dir_all(&real_dir).expect("create real dir");
+    let link_dir = root.join("link");
+    std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+    std::fs::write(real_dir.join("exists.rs"), "x\n").expect("write fixture");
+
+    let r = root.to_string_lossy().into_owned();
+    let spellings = [
+        format!("{r}/real/nope.rs"),
+        format!("{r}/link/nope.rs"),
+        format!("{r}/link/./nope.rs"),
+        format!("{r}/real//nope.rs"),
+        format!("{r}/real/./nope.rs"),
+        format!("{r}/real/../real/nope.rs"),
+        format!("{r}/link/sub/../nope.rs"),
+        format!("{r}/real/exists.rs"),
+        format!("{r}/link/exists.rs"),
+        "/../a".to_string(),
+    ];
+
+    let engine = spawn();
+    for spelling in &spellings {
+        assert_eq!(
+            hidden_path_refusal(spelling),
+            None,
+            "the divergent set must be spellings that actually reach a hold: {spelling}"
+        );
+        assert_eq!(
+            hidden_buffer_key(spelling),
+            canon_in_nvim(&engine, spelling),
+            "the Rust hold key and the chunk's own canon() disagree on {spelling}"
+        );
+    }
+}
+
+/// The scenario the `canon()` fix was made for, which no test covered: a
+/// foreign, unlisted buffer already sitting at the real spelling, then one
+/// `load_hidden` through the symlinked one. The old `canon()` missed the
+/// match, fell through to `bufadd` (whose `created = true` is
+/// unconditional), and handed this connection ownership of a buffer it
+/// never made -- which `release_hidden` then deleted, with neither Lua
+/// belt-check applying to an unlisted buffer no window shows.
+#[test]
+#[cfg(unix)]
+fn a_foreign_buffer_reached_through_a_symlinked_spelling_is_neither_owned_nor_deleted() {
+    let root = scratch_root("foreign-through-symlink");
+    let real_dir = root.join("real");
+    std::fs::create_dir_all(&real_dir).expect("create real dir");
+    let link_dir = root.join("link");
+    std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+    let real_path = real_dir.join("foreign.rs");
+    std::fs::write(&real_path, "foreign content\n").expect("write fixture");
+    let via_link = link_dir.join("foreign.rs").to_string_lossy().into_owned();
+    assert!(
+        !via_link.contains("/./") && !via_link.contains("/../"),
+        "the symlinked spelling must carry no '.'/'..' component -- that is exactly \
+         the case the old canon() left unresolved"
+    );
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let foreign_buf = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("local b = vim.fn.bufadd(...) vim.fn.bufload(b) return b"),
+                rmpv::Value::Array(vec![rmpv::Value::from(
+                    real_path.to_string_lossy().into_owned(),
+                )]),
+            ],
+        )
+        .expect("build a buffer this connection's own load_hidden never made")
+        .as_u64()
+        .expect("buffer handle is an integer");
+    assert_eq!(
+        buf_option(&engine, foreign_buf, "buflisted").as_bool(),
+        Some(false),
+        "the fixture must be unlisted, or the buflisted belt-check alone would \
+         protect it and this test would prove nothing about owned"
+    );
+
+    engine
+        .handle
+        .load_hidden(&via_link, 304)
+        .expect("the symlinked spelling loads");
+    let (_g, buf, created, _t) = next_hidden_buffer_loaded(&rx);
+    assert_eq!(
+        buf,
+        Some(foreign_buf),
+        "the symlinked spelling must resolve onto the buffer already at the real one"
+    );
+    assert!(
+        !created,
+        "a buffer this connection never made must never read as newly created"
+    );
+
+    engine
+        .handle
+        .release_hidden(&via_link)
+        .expect("release the one hold this test took");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, foreign_buf),
+        "a foreign buffer reached through a symlinked spelling must survive release"
+    );
 }

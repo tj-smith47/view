@@ -129,6 +129,15 @@ pub trait EngineOps {
     /// one for the same path) and takes a hold on it, tagged `generation`;
     /// never blocks, and answers `Msg::HiddenBufferLoaded` (see
     /// `RpcCall::LoadHidden`).
+    ///
+    /// A path
+    /// [`view_engine::nvim_api::hidden_path_refusal`](view_engine::nvim_api::hidden_path_refusal)
+    /// refuses answers `EngineError::UnusablePath` instead, before taking a
+    /// hold and before anything reaches the wire -- a refusal of the path,
+    /// never a lost connection, which the runtime stands in for with a
+    /// buffer-less `Msg::HiddenBufferLoaded`. Every implementation owes
+    /// that refusal, fakes included, or the caller cannot be tested against
+    /// the contract the real handle enforces.
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError>;
     /// Releases one hold taken by `load_hidden` on `path`; deletes the
     /// hidden buffer only when its hold count reaches zero, and never on a
@@ -644,6 +653,12 @@ impl EngineOps for FakeOps {
         self.record(format!("buf_detach({})", buf.0))
     }
     fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        if let Some(reason) = view_engine::nvim_api::hidden_path_refusal(path) {
+            return Err(EngineError::UnusablePath {
+                path: path.to_owned(),
+                reason,
+            });
+        }
         self.record(format!("load_hidden({path},{generation})"))
     }
     fn release_hidden(&self, path: &str) -> Result<(), EngineError> {

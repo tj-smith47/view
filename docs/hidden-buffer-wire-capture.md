@@ -385,3 +385,139 @@ closes this at the scan itself: the match is found directly, and the
 fallthrough `bufadd` branch (whose `created = true` is only ever correct
 because nothing already matched) is never reached for a path some earlier
 call, or a real window, already resolved under a different spelling.
+
+## 17. An empty path resolves onto nvim's own `[No Name]` buffer
+
+`canon('')` returns `''` unchanged (its own early return, which exists so
+every unnamed buffer does not canonicalize onto the process cwd), and nvim's
+startup buffer is itself unnamed -- so the scan's `wanted` matches it and the
+chunk answers with the user's own scratch buffer, which a review would then
+attach to and write its hunks into:
+
+```
+canon('')                  -> ''
+nvim_buf_get_name(1)       -> ''            -- nvim's own [No Name] buffer
+vim.uv.fs_stat('') == nil  -> true          -- the directory refusal never fires
+LOAD_HIDDEN_CHUNK('')      -> {buf = 1, created = false, changedtick = 2}
+```
+
+The chunk refuses a blank path outright now, before the `fs_stat` check, and
+the scan additionally skips every buffer whose name is `''` -- so a
+name-less resolution can never be returned as a hidden-buffer hit no matter
+what `wanted` holds:
+
+```
+LOAD_HIDDEN_CHUNK('')      -> {buf = 0, created = false, changedtick = 0}
+LOAD_HIDDEN_CHUNK('   ')   -> {buf = 0, created = false, changedtick = 0}
+```
+
+`docs/acp-v1-wire-capture.md`'s `Diff` schema names `path` "The absolute
+file path being modified," so a blank path is off-contract at the ACP
+boundary too, and `diff_proposal` drops the proposal there rather than
+carrying it this far.
+
+## 18. A trailing separator is a second, distinct buffer over the same file
+
+`bufadd` is spelling-sensitive about a trailing separator where
+`Path::parent()`/`Path::file_name()` (and therefore `nvim_style_absolute`)
+discard it. The two spellings are two different buffers, both of which
+`bufload` accepts, and neither the `fs_stat` refusal nor `canon` collapses
+them:
+
+```
+vim.uv.fs_stat('real/nope.rs/') == nil -> true     -- nonexistent tail: not a directory
+bufadd(real/nope.rs)                   -> 2
+bufadd(real/nope.rs/)                  -> 3        -- a second buffer over one file
+nvim_buf_get_name(3)                   -> .../real/nope.rs/   -- separator kept verbatim
+canon(real/nope.rs/)                   -> .../real/nope.rs/   -- kept here too
+vim.uv.fs_stat('real/exists.rs/')      -> nil      -- true for an existing file as well
+vim.uv.fs_stat('real/').type           -> 'directory'
+```
+
+Only the last line is caught by the existing directory refusal, so a
+trailing separator on a leaf that does not exist (or on a regular file)
+walked straight through to `bufadd` and produced the second buffer above.
+Since the Rust-side hold key drops the separator and nvim keeps it, the two
+spellings shared one hold over two buffers: the refcount reaches zero once,
+deletes whichever buffer resolved last, and leaks the other -- and a
+collision pairing a create with a foreign reuse would OR `owned = true` over
+a buffer this connection never made.
+
+A trailing separator names a directory, and directories are already refused,
+so both ends refuse the spelling outright rather than normalizing it away --
+one authority, and no spelling left that the key and `bufadd` can disagree
+about:
+
+```
+LOAD_HIDDEN_CHUNK(real/nope.rs/) -> {buf = 0, created = false, changedtick = 0}
+LOAD_HIDDEN_CHUNK(real/)         -> {buf = 0, created = false, changedtick = 0}
+```
+
+Unchanged for every ordinary spelling, re-captured against the same session:
+
+```
+LOAD_HIDDEN_CHUNK(real/exists.rs)     -> {buf = 2, created = true,  changedtick = 2}
+LOAD_HIDDEN_CHUNK(link/exists.rs)     -> {buf = 2, created = false, changedtick = 2}
+LOAD_HIDDEN_CHUNK(real/brand-new.rs)  -> {buf = 3, created = true,  changedtick = 2}
+LOAD_HIDDEN_CHUNK(link/brand-new.rs)  -> {buf = 3, created = false, changedtick = 2}
+```
+
+## 19. A relative path resolves against nvim's cwd, which view's process cwd does not track
+
+`canonical_hidden_key` joins a relative path onto `std::env::current_dir()`
+-- the *view process's* cwd. nvim resolves the same spelling against its own
+cwd, which the user moves with `:cd` at any time and which view never
+observes:
+
+```
+getcwd()                                     -> .../work/real
+nvim_buf_get_name(bufadd('rel.rs'))          -> .../work/real/rel.rs
+nvim_set_current_dir(.../work/other)
+getcwd()                                     -> .../work/other
+nvim_buf_get_name(bufadd('rel2.rs'))         -> .../work/other/rel2.rs
+bufadd('rel.rs')                             -> 6      -- a new buffer, not the earlier 4
+```
+
+Two authorities for one identity, diverging the moment the user runs `:cd`.
+`docs/acp-v1-wire-capture.md`'s `Diff` schema settles it rather than any
+normalization would: `path` is documented as "The absolute file path being
+modified," so a relative path is off-contract, `diff_proposal` drops the
+proposal, and `EngineHandle::load_hidden` refuses it as
+`EngineError::UnusablePath` before taking a hold or touching the wire. The
+Lua side carries no such check: nvim's cwd is the *correct* authority for a
+relative spelling, and the divergence is entirely on the view-process side.
+
+## 20. `canon()`'s parent-fallback join doubles the separator at root
+
+The remaining spelling where `canon()` and `canonical_hidden_key` still
+answered differently, and the only one where `canon()` also disagreed with
+the name nvim itself stores: joining a resolved parent of `/` onto a tail
+produced `//a`, where `Path::join` produces `/a` and `bufadd` names the
+buffer `/a`. Measured across the whole divergent set, old and new `canon()`
+back to back in one session, against `bufadd`'s own answer:
+
+```
+spelling                  old canon()              new canon()              bufadd
+$R/real/nope.rs           $R/real/nope.rs          $R/real/nope.rs          2
+$R/link/nope.rs           $R/real/nope.rs          $R/real/nope.rs          2
+$R/link/./nope.rs         $R/real/nope.rs          $R/real/nope.rs          2
+$R/real//nope.rs          $R/real/nope.rs          $R/real/nope.rs          2
+$R/real/./nope.rs         $R/real/nope.rs          $R/real/nope.rs          2
+$R/real/../real/nope.rs   $R/real/nope.rs          $R/real/nope.rs          2
+$R/link/sub/../nope.rs    $R/link/sub/../nope.rs   $R/link/sub/../nope.rs   3
+$R/real/exists.rs         $R/real/exists.rs        $R/real/exists.rs        4
+$R/link/exists.rs         $R/real/exists.rs        $R/real/exists.rs        4
+/../a                     //a                      /a                       5
+
+buffers: 1=            2=$R/real/nope.rs   3=$R/link/sub/../nope.rs
+         4=$R/real/exists.rs               5=/a
+```
+
+`canon()` now skips the separator when the resolved parent already ends in
+one, so every row agrees with `canonical_hidden_key` and the last row agrees
+with `nvim_buf_get_name` as well. The doubled form was harmless while it
+lasted (`canon()` is applied to both sides of the scan's comparison, so a
+buffer named `/a` canonicalized to `//a` too and still matched), but it was
+the last spelling on which the two implementations of one algorithm could be
+observed to disagree -- and a live test now pins the whole table rather than
+prose.

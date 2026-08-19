@@ -33,7 +33,9 @@ pub(crate) struct HiddenHold {
     /// set, never cleared back to `None` -- a later reply for the same path
     /// that names no buffer (a refused load racing an already-successful
     /// one) leaves a previously-resolved handle alone rather than losing
-    /// track of it.
+    /// track of it, and so does one naming a *different* buffer -- see
+    /// [`resolve_hidden_hold`] for why a second buffer under one key is
+    /// refused rather than adopted.
     pub(crate) buf: Option<view_core::msg::BufferHandle>,
     /// Whether any of this path's `load_hidden` calls reported
     /// [`Created::Yes`]. OR'd into the entry rather than overwritten on each
@@ -112,6 +114,20 @@ pub(crate) fn take_hidden_delete(
 /// `release_hidden` call that overtook its own `load_hidden`'s reply. The
 /// caller (the reader thread) is responsible for actually issuing
 /// `RELEASE_HIDDEN_CHUNK` for it, since nothing else is left to.
+///
+/// A reply naming a *different* buffer than this hold already recorded is
+/// refused rather than folded in: one key over two buffers is the exact
+/// shape that let a hold created for one buffer inherit `owned` over
+/// another, so the recorded buffer and its ownership are left exactly as
+/// they were and no delete can ever be authorized by a buffer this hold was
+/// not keyed on. The refused buffer outlives the connection unreleased,
+/// which is the safe half of the trade -- adopting it would hand this
+/// hold's delete decision to a buffer whichever holder resolved onto it is
+/// still using. Unreachable from the spellings that can reach a hold at all
+/// (`hidden_path_refusal` refuses every one `bufadd` and
+/// `canonical_hidden_key` resolve differently), and kept as an explicit
+/// branch so a future spelling that reopens the class leaks a buffer
+/// instead of reopening the foreign-buffer delete.
 pub(crate) fn resolve_hidden_hold(
     hidden_bufs: &Mutex<HashMap<String, HiddenHold>>,
     path: &str,
@@ -121,9 +137,13 @@ pub(crate) fn resolve_hidden_hold(
     let mut holds = hidden_bufs.lock().unwrap_or_else(PoisonError::into_inner);
     let hold = holds.get_mut(path)?;
     hold.answered = true;
-    if let Some(buf) = buf {
-        hold.buf = Some(buf);
-        hold.owned |= created;
+    match (hold.buf, buf) {
+        (Some(recorded), Some(named)) if recorded != named => {}
+        (_, Some(named)) => {
+            hold.buf = Some(named);
+            hold.owned |= created;
+        }
+        (_, None) => {}
     }
     take_hidden_delete(&mut holds, path)
 }
@@ -247,5 +267,67 @@ impl EngineHandle {
         let hold = holds.get_mut(path)?;
         hold.count = hold.count.saturating_sub(1);
         take_hidden_delete(&mut holds, path)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use view_core::msg::BufferHandle;
+
+    fn holds_with(hold: HiddenHold) -> Mutex<HashMap<String, HiddenHold>> {
+        Mutex::new(HashMap::from([("/tmp/one.rs".to_owned(), hold)]))
+    }
+
+    /// One key, two buffers: the reply naming the second must not become
+    /// the hold's buffer, and -- the part that matters -- must not hand the
+    /// hold `owned` over a buffer it was never keyed on. That is the
+    /// foreign-buffer delete, reached through the key instead of through
+    /// the gate.
+    #[test]
+    fn a_reply_naming_a_second_buffer_never_overwrites_the_hold_or_its_ownership() {
+        let holds = holds_with(HiddenHold {
+            buf: Some(BufferHandle(2)),
+            owned: false,
+            count: 1,
+            answered: true,
+        });
+        assert_eq!(
+            resolve_hidden_hold(&holds, "/tmp/one.rs", Some(BufferHandle(3)), true),
+            None
+        );
+        let guard = holds.lock().unwrap();
+        let hold = guard.get("/tmp/one.rs").expect("the hold survives");
+        assert_eq!(
+            hold.buf,
+            Some(BufferHandle(2)),
+            "the hold must keep the buffer it was resolved to first"
+        );
+        assert!(
+            !hold.owned,
+            "a buffer this hold was not keyed on must never authorize its delete"
+        );
+    }
+
+    /// The ordinary path is untouched: a reply naming the buffer already
+    /// recorded still folds its `created` in, so a second holder's own
+    /// create is not lost to the mismatch branch.
+    #[test]
+    fn a_reply_naming_the_recorded_buffer_still_folds_its_ownership_in() {
+        let holds = holds_with(HiddenHold {
+            buf: Some(BufferHandle(2)),
+            owned: false,
+            count: 1,
+            answered: true,
+        });
+        assert_eq!(
+            resolve_hidden_hold(&holds, "/tmp/one.rs", Some(BufferHandle(2)), true),
+            None
+        );
+        let guard = holds.lock().unwrap();
+        let hold = guard.get("/tmp/one.rs").expect("the hold survives");
+        assert_eq!(hold.buf, Some(BufferHandle(2)));
+        assert!(hold.owned, "the same buffer's own create still counts");
     }
 }

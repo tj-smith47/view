@@ -8,6 +8,7 @@ mod ai_worker;
 mod bridge;
 mod clipboard;
 mod engine_ops;
+mod loop_msgs;
 mod native;
 mod recovery;
 mod remote_guard;
