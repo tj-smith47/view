@@ -473,12 +473,20 @@ return { loaded = false }";
 /// buffer subscribes to a buffer with no lines in it, and the review would
 /// then anchor its hunks on text nvim does not yet hold.
 ///
-/// The two guards below are what keep a caller from attaching to something
-/// that cannot answer for its own text: `bufadd` answers `0` for a name it
-/// refuses, and a `bufload` that throws (a directory, an unreadable file)
-/// resolves to no handle at all rather than to a loaded-looking one.
+/// The guards are what keep a caller from attaching to something that
+/// cannot answer for its own text. A path that exists but is not a regular
+/// file is refused outright, live-observed as the one case nvim otherwise
+/// answers a handle for: `bufload` on a directory succeeds and yields a
+/// browsable listing, whose rows a review would then write its hunks over.
+/// A path that does not exist yet is not refused -- that is the new-file
+/// proposal's own case, and it resolves to the empty buffer the file will
+/// be created as. `bufadd` answers `0` for a name it refuses, and a
+/// `bufload` that throws resolves to no handle rather than to a
+/// loaded-looking one.
 const BUF_RESOLVE_CHUNK: &str = "\
 local path = ...
+local stat = (vim.uv or vim.loop).fs_stat(path)
+if stat ~= nil and stat.type ~= 'file' then return 0 end
 local buf = vim.fn.bufadd(path)
 if buf == 0 then return 0 end
 local ok = pcall(vim.fn.bufload, buf)

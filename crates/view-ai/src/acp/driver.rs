@@ -212,6 +212,12 @@ where
 struct KnownToolCall {
     title: String,
     status: ToolCallStatus,
+    /// Fingerprints of the diffs already proposed on this call. A
+    /// `tool_call_update` restates the whole `content` array, so without
+    /// this the same file modification would open a review on every
+    /// update; a genuinely revised diff hashes differently and still
+    /// proposes.
+    proposed: Vec<u64>,
 }
 
 /// The correlation state one session accumulates.
@@ -575,19 +581,40 @@ impl Driver {
             .get("content")
             .is_some_and(|c| !c.is_null())
             .then(|| tool_call_content(update));
-        self.tool_calls.insert(
-            tool_call_id.to_string(),
-            KnownToolCall {
-                title: title.clone(),
-                status,
-            },
-        );
+        let mut proposed = known.map(|k| k.proposed.clone()).unwrap_or_default();
         self.shared.emit(AiEvent::ToolCallUpdate {
             tool_call_id: tool_call_id.to_string(),
-            title,
+            title: title.clone(),
             status,
             content,
         });
+        // The diff items of the same `content` array, raised as proposals
+        // the user decides on rather than left as the placeholder row
+        // `tool_call_content_item` renders for them. The transcript entry
+        // above is emitted first so the call the proposal belongs to is
+        // already on screen when the review opens over it.
+        for proposal in diff_proposals(update) {
+            let fingerprint = fingerprint(&proposal);
+            if proposed.contains(&fingerprint) {
+                continue;
+            }
+            proposed.push(fingerprint);
+            let request_id = self.next_boundary_id();
+            self.shared.emit(AiEvent::DiffProposed {
+                request_id,
+                path: proposal.path,
+                old_text: proposal.old_text,
+                new_text: proposal.new_text,
+            });
+        }
+        self.tool_calls.insert(
+            tool_call_id.to_string(),
+            KnownToolCall {
+                title,
+                status,
+                proposed,
+            },
+        );
     }
 
     fn emit_plan(&self, update: &Value) {
@@ -955,6 +982,58 @@ fn tool_call_content_item(item: &Value) -> String {
         }
     }
     format!("[{} content]", block_kind.unwrap_or("content"))
+}
+
+/// One `ToolCallContent` `"diff"` item, decoded per
+/// `docs/acp-v1-wire-capture.md`'s pinned shape: `path` and `newText` are
+/// required, `oldText` is nullable and absent for a file that does not
+/// exist yet.
+struct DiffProposal {
+    path: std::path::PathBuf,
+    old_text: Option<String>,
+    new_text: String,
+}
+
+/// Every decodable `"diff"` item of one tool call's content, in wire
+/// order. An item missing a required field is skipped rather than
+/// degraded to a placeholder the way rendered content is: a proposal is
+/// something the user writes into a buffer, and there is no partial
+/// version of it that is safe to offer.
+fn diff_proposals(update: &Value) -> Vec<DiffProposal> {
+    update
+        .get("content")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(diff_proposal).collect())
+        .unwrap_or_default()
+}
+
+fn diff_proposal(item: &Value) -> Option<DiffProposal> {
+    if item.get("type").and_then(Value::as_str) != Some("diff") {
+        return None;
+    }
+    let path = item.get("path").and_then(Value::as_str)?;
+    let new_text = item.get("newText").and_then(Value::as_str)?;
+    Some(DiffProposal {
+        path: std::path::PathBuf::from(path),
+        old_text: item
+            .get("oldText")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        new_text: new_text.to_string(),
+    })
+}
+
+/// Identifies a proposal by content rather than by the whole text it
+/// carries: a tool call restating an unchanged diff must not open a second
+/// review, and remembering the file bodies to compare them would hold a
+/// copy of every proposed file for the life of the session.
+fn fingerprint(proposal: &DiffProposal) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    proposal.path.hash(&mut hasher);
+    proposal.old_text.hash(&mut hasher);
+    proposal.new_text.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// One `PlanEntry`, degraded to a labeled placeholder rather than dropped
@@ -1797,6 +1876,176 @@ mod tests {
             content, None,
             "an explicit null must read exactly as an omitted field does"
         );
+    }
+
+    /// A driver wired to a channel, the shape every emission test below
+    /// starts from.
+    fn diff_driver() -> (Driver, std::sync::mpsc::Receiver<view_core::msg::Msg>) {
+        let (events_tx, events_rx) = std::sync::mpsc::channel();
+        let shared = Arc::new(SessionShared::detached(Box::new(move |msg| {
+            let _ = events_tx.send(msg);
+        })));
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        (
+            Driver::new(shared, out_tx, std::env::temp_dir(), false),
+            events_rx,
+        )
+    }
+
+    fn diff_update(tool_call_id: &str, content: Value) -> Value {
+        session_update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_call_id,
+            "title": "Edit main.rs",
+            "status": "in_progress",
+            "content": content,
+        }))
+    }
+
+    /// Every `AiEvent::DiffProposed` a receiver holds, in emission order.
+    fn proposals(
+        events_rx: &std::sync::mpsc::Receiver<view_core::msg::Msg>,
+    ) -> Vec<(std::path::PathBuf, Option<String>, String)> {
+        events_rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                view_core::msg::Msg::Ai(AiEvent::DiffProposed {
+                    path,
+                    old_text,
+                    new_text,
+                    ..
+                }) => Some((path, old_text, new_text)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `"diff"` content item is a proposal the user decides on, decoded
+    /// per the wire capture's pinned shape -- not the `[diff content]`
+    /// placeholder the transcript row renders for it.
+    #[test]
+    fn a_diff_content_item_is_raised_as_a_proposal() {
+        let (mut driver, events_rx) = diff_driver();
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([{
+                    "type": "diff",
+                    "path": "/work/main.rs",
+                    "oldText": "fn main() {}\n",
+                    "newText": "fn main() { run() }\n",
+                }]),
+            ),
+        );
+
+        let first = events_rx.recv().expect("the tool call was emitted");
+        assert!(
+            matches!(
+                first,
+                view_core::msg::Msg::Ai(AiEvent::ToolCallUpdate { .. })
+            ),
+            "the call the proposal belongs to reaches the transcript first: {first:?}"
+        );
+        assert_eq!(
+            proposals(&events_rx),
+            vec![(
+                std::path::PathBuf::from("/work/main.rs"),
+                Some("fn main() {}\n".to_string()),
+                "fn main() { run() }\n".to_string(),
+            )]
+        );
+    }
+
+    /// `oldText` is absent for a file that does not exist yet -- the one
+    /// case with nothing to diff against, which the consumer reads as a
+    /// whole-file add.
+    #[test]
+    fn a_new_file_proposal_carries_no_old_text() {
+        let (mut driver, events_rx) = diff_driver();
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([{ "type": "diff", "path": "/work/new.rs", "newText": "fn new() {}\n" }]),
+            ),
+        );
+
+        assert_eq!(
+            proposals(&events_rx),
+            vec![(
+                std::path::PathBuf::from("/work/new.rs"),
+                None,
+                "fn new() {}\n".to_string(),
+            )]
+        );
+    }
+
+    /// A `tool_call_update` restates the whole content array. The same
+    /// diff restated is the same proposal, and re-proposing it would open
+    /// a second review over one the user is part way through; a revised
+    /// `newText` is a different proposal and still arrives.
+    #[test]
+    fn a_restated_diff_does_not_re_propose_but_a_revised_one_does() {
+        let (mut driver, events_rx) = diff_driver();
+        let first = json!([{
+            "type": "diff",
+            "path": "/work/main.rs",
+            "oldText": "a\n",
+            "newText": "b\n",
+        }]);
+
+        driver.on_notification("session/update", &diff_update("c1", first.clone()));
+        assert_eq!(proposals(&events_rx).len(), 1);
+
+        driver.on_notification("session/update", &diff_update("c1", first));
+        assert!(
+            proposals(&events_rx).is_empty(),
+            "the identical diff was proposed twice"
+        );
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([{
+                    "type": "diff",
+                    "path": "/work/main.rs",
+                    "oldText": "a\n",
+                    "newText": "c\n",
+                }]),
+            ),
+        );
+        assert_eq!(
+            proposals(&events_rx).len(),
+            1,
+            "a revised proposal is a new decision and must reach the user"
+        );
+    }
+
+    /// An item missing a required field is skipped rather than degraded to
+    /// a placeholder the way rendered content is: a proposal is bytes
+    /// written into a buffer, and there is no partial version of it that
+    /// is safe to offer.
+    #[test]
+    fn a_diff_item_missing_a_required_field_is_not_proposed() {
+        let (mut driver, events_rx) = diff_driver();
+
+        driver.on_notification(
+            "session/update",
+            &diff_update(
+                "c1",
+                json!([
+                    { "type": "diff", "path": "/work/main.rs" },
+                    { "type": "diff", "newText": "orphan\n" },
+                    { "type": "content", "content": { "type": "text", "text": "not a diff" } },
+                ]),
+            ),
+        );
+
+        assert!(proposals(&events_rx).is_empty());
     }
 
     /// `plan_entry` renders a complete entry unchanged.
