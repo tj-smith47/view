@@ -297,6 +297,7 @@ fn picker_split_rows(
             .collect(),
         selected: None,
         header_keep_tail: false,
+        rule: false,
     };
     let preview = lay_out(&preview_body, preview_width, height, borders);
 
@@ -411,6 +412,10 @@ enum Line {
 /// always show (a prompt line, a rule) and rows that scroll under them.
 struct Body {
     title: String,
+    /// The always-shown rows a short overlay must choose among, in
+    /// priority order -- see [`Self::header_keep_tail`] for which end
+    /// [`lay_out`] keeps first. Never includes the rule itself: see
+    /// [`Self::rule`] for why that row is never in this race at all.
     header: Vec<Line>,
     /// The scrolling rows, each carrying the selection marker once
     /// [`lay_out`] knows which of them is selected.
@@ -419,18 +424,40 @@ struct Body {
     /// Which end of `header` [`lay_out`] keeps when the overlay is too
     /// short for all of it: `false` (every kind but [`ai_body`]) keeps the
     /// first `height` rows, the shape a prompt or picker's own message-then-
-    /// input-then-rule ordering wants. `true` keeps the last `height` rows
-    /// instead -- `ai_body`'s only user, where the tail is the crash banner
-    /// and the pending permission's answerable options, and the head is
-    /// the question and composer line above them; a crashed session or a
+    /// input ordering wants. `true` keeps the last `height` rows instead --
+    /// `ai_body`'s only user, where the tail is the crash banner and the
+    /// pending permission's answerable options, and the head is the
+    /// question and composer line above them; a crashed session or a
     /// request blocking the agent's own turn cannot be shown without those,
     /// while the question is context that can be sacrificed first.
     header_keep_tail: bool,
+    /// Whether this body draws the rule that separates its header from its
+    /// scrolling items.
+    ///
+    /// For `header_keep_tail: false` (every kind but [`ai_body`]) the rule
+    /// is pure chrome, drawn only with whatever row of budget is left once
+    /// `header`'s own kept rows have had theirs -- the lowest priority in
+    /// the row, nothing to lose by disappearing first.
+    ///
+    /// For `header_keep_tail: true` ([`ai_body`]) the rule instead ranks
+    /// between the header's two tiers: below the single most-recent row
+    /// (the crash banner, or the last-pushed permission option) but above
+    /// the rest of the header (the question and composer line). A rule
+    /// folded into `header` as its own trailing [`Line::Rule`] (the shape
+    /// every one of these bodies used before this field existed) would
+    /// instead outrank the very row `header_keep_tail: true` exists to
+    /// protect: as the literal last element, a "keep the last `budget`
+    /// rows" slice would keep the rule ahead of the crash banner or the
+    /// permission options at the one-row budget an overlay squeezed thin
+    /// enough reaches, which is exactly backwards from what those two
+    /// exist to guarantee survive truncation. See [`lay_out`]'s
+    /// `header_keep_tail` branch for the exact tier order.
+    rule: bool,
 }
 
 /// Cuts `body` down to exactly `height` rows of exactly `width` cells: the
-/// header first, then a window over the items that keeps the selection on
-/// screen.
+/// header first (see [`Body::rule`] for where its own row fits into that),
+/// then a window over the items that keeps the selection on screen.
 ///
 /// The window is the smallest scroll that shows the selection: it stays at
 /// the top of the list while the selection is already visible, and
@@ -439,14 +466,41 @@ struct Body {
 /// list on every cursor move.
 fn lay_out(body: &Body, width: u16, height: u16, borders: BorderSet) -> Rows {
     let mut lines: Vec<Vec<Span>> = Vec::with_capacity(usize::from(height));
-    let header_budget = usize::from(height).min(body.header.len());
-    let header_slice = if body.header_keep_tail {
-        &body.header[body.header.len() - header_budget..]
+    let budget = usize::from(height);
+    if body.header_keep_tail {
+        // Priority order, most important first: the single most-recently
+        // pushed header row (the crash banner, or the last permission
+        // option), then the rule, then the rest of the header from most
+        // recent to least. The rule sits between those two tiers rather
+        // than outranking the row it separates from context -- see
+        // [`Body::rule`] -- so it is spent from the same `budget` the
+        // header content shares, one slot at a time, in that order.
+        let (last, rest) = body
+            .header
+            .split_last()
+            .map_or((None, &[][..]), |(last, rest)| (Some(last), rest));
+        let last_shown = last.is_some() && budget >= 1;
+        let rule_shown = body.rule && budget > usize::from(last_shown);
+        let slots_used = usize::from(last_shown) + usize::from(rule_shown);
+        let rest_budget = budget.saturating_sub(slots_used).min(rest.len());
+        let rest_start = rest.len() - rest_budget;
+        for line in &rest[rest_start..] {
+            lines.push(fit(line, width, borders));
+        }
+        if let Some(last) = last.filter(|_| last_shown) {
+            lines.push(fit(last, width, borders));
+        }
+        if rule_shown {
+            lines.push(fit(&Line::Rule, width, borders));
+        }
     } else {
-        &body.header[..header_budget]
-    };
-    for line in header_slice {
-        lines.push(fit(line, width, borders));
+        let header_budget = budget.min(body.header.len());
+        for line in &body.header[..header_budget] {
+            lines.push(fit(line, width, borders));
+        }
+        if body.rule && lines.len() < budget {
+            lines.push(fit(&Line::Rule, width, borders));
+        }
     }
     let header_rows = lines.len();
     let item_rows = usize::from(height).saturating_sub(header_rows);
@@ -506,13 +560,14 @@ fn body(kind: &LayerKind) -> Option<Body> {
 fn picker_body(view: &PickerView) -> Body {
     Body {
         title: view.title.clone(),
-        header: vec![
-            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.query))),
-            Line::Rule,
-        ],
+        header: vec![Line::Text(plain_spans(format!(
+            "{PROMPT_MARK} {}",
+            view.query
+        )))],
         items: view.rows.iter().cloned().map(Line::Text).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        rule: true,
     }
 }
 
@@ -528,6 +583,7 @@ fn tree_body(view: &TreeView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        rule: false,
     }
 }
 
@@ -572,6 +628,7 @@ fn statusline_body(view: &StatuslineView) -> Body {
         items: Vec::new(),
         selected: None,
         header_keep_tail: false,
+        rule: false,
     }
 }
 
@@ -586,7 +643,6 @@ fn prompt_body(view: &PromptView) -> Body {
         header: vec![
             Line::Text(plain_spans(view.message.clone())),
             Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.input))),
-            Line::Rule,
         ],
         items: view
             .choices
@@ -597,19 +653,21 @@ fn prompt_body(view: &PromptView) -> Body {
             .collect(),
         selected: view.selected,
         header_keep_tail: false,
+        rule: true,
     }
 }
 
 fn palette_body(view: &PaletteView) -> Body {
     Body {
         title: view.title.clone(),
-        header: vec![
-            Line::Text(plain_spans(format!("{PROMPT_MARK} {}", view.query))),
-            Line::Rule,
-        ],
+        header: vec![Line::Text(plain_spans(format!(
+            "{PROMPT_MARK} {}",
+            view.query
+        )))],
         items: view.rows.iter().map(palette_row_line).collect(),
         selected: view.selected,
         header_keep_tail: false,
+        rule: true,
     }
 }
 
@@ -633,7 +691,6 @@ fn ai_body(view: &AiPanelView) -> Body {
     )))];
     header.extend(view.local_error.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
-    header.push(Line::Rule);
     Body {
         title: view.title.clone(),
         header,
@@ -644,6 +701,7 @@ fn ai_body(view: &AiPanelView) -> Body {
         // own doc for why they must outlive the question and composer line
         // under truncation
         header_keep_tail: true,
+        rule: true,
     }
 }
 

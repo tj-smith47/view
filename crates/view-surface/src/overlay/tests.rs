@@ -494,6 +494,39 @@ fn a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first() {
     );
 }
 
+/// One row shorter still than
+/// `a_short_ai_panel_keeps_the_crash_banner_and_drops_the_composer_line_first`,
+/// where the header's one surviving row and the rule are no longer both
+/// affordable: the banner must still win that contest, not the rule. A
+/// rule folded into `header` as its own trailing `Line::Rule` -- the shape
+/// every overlay body used before `Body::rule` existed -- would keep the
+/// rule instead at this exact budget, since it was the literal last
+/// element of the vector the old "keep the last `budget` rows" slice read
+/// from; that is the defect this test exists to pin.
+#[test]
+fn a_maximally_short_ai_panel_keeps_the_crash_banner_over_the_rule() {
+    use view_core::native::views::AiPanelView;
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("draft prompt")
+            .with_local_error(vec![vec![Span::plain(
+                "Error: the agent exited (signal: 9)".to_string(),
+            )]]),
+    );
+    // interior = height - 2 = 1: room for exactly one row, and it must go
+    // to the banner, not the rule and not the composer line
+    let framed = rows(50, 3, &kind, BorderSet::ASCII);
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(
+        text.iter().any(|line| line.contains("the agent exited")),
+        "the crash banner must outrank the rule at the tightest budget: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("draft prompt")),
+        "the composer line is still context, still sacrificed first: {text:?}"
+    );
+}
+
 #[test]
 fn a_tier_maps_to_exactly_one_border_charset() {
     assert_eq!(BorderSet::for_tier(Tier::Full), BorderSet::ROUNDED);
