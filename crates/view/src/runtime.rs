@@ -295,7 +295,7 @@ impl<E: EngineOps> Executor<E> {
     /// test can confirm restart survival's identity (see
     /// `crate::ai_worker::AiWorker::is_same_worker_as`'s own doc);
     /// `Effect::Ai`'s own arm never needs a getter, only `dispatch`.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn ai_worker(&self) -> Option<&crate::ai_worker::AiWorker> {
         self.ai.as_ref()
     }

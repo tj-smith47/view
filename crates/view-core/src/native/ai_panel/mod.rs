@@ -147,7 +147,17 @@ impl AiPanelState {
             .with_input(self.input.clone())
             .with_rows(self.transcript.rendered_rows());
         if let Some(message) = &self.local_error {
-            view = view.with_local_error(vec![vec![Span::plain(format!("Error: {message}"))]]);
+            let hint = if self.focused {
+                DISMISS_KEY_HINT
+            } else {
+                DISMISS_VERB_HINT
+            };
+            // One row, not an error row plus a hint row: the overlay's
+            // tail-keep truncation would keep a trailing hint row and drop
+            // the error itself at the tightest budget.
+            view = view.with_local_error(vec![vec![Span::plain(format!(
+                "Error: {message} -- {hint}"
+            ))]]);
         }
         match &self.pending_permission {
             Some(prompt) => {
@@ -182,6 +192,18 @@ const FOCUSED_TITLE: &str = "AI Agent -- focused, Esc returns";
 /// the one state where the prompt is visible but `y`/`n`/`a`/`<Esc>` all
 /// reach the engine instead of it.
 const ENTER_HINT: &str = "Not focused -- run :View ai focus to answer";
+
+/// The banner's own way out, shown beside the error itself: the entered
+/// panel's composer consumes every printable, so the in-panel dismissal is
+/// a named notation (`update::mod`'s `<C-d>` arm), while an un-entered
+/// reader still has the `dismiss` verb. A persistent banner with no visible
+/// exit reads as a stuck state.
+const DISMISS_KEY_HINT: &str = "<C-d> dismisses";
+
+/// [`DISMISS_KEY_HINT`]'s un-entered counterpart, pointing at the verb arm
+/// (`feature == "ai" && verb == "dismiss"`) since panel keys are not routed
+/// here while un-entered.
+const DISMISS_VERB_HINT: &str = "Run :View ai dismiss to clear";
 
 #[cfg(test)]
 mod tests {
@@ -234,9 +256,33 @@ mod tests {
         let view = state.view();
         assert_eq!(
             view.local_error,
-            vec![vec![Span::plain(
-                "Error: the agent exited (signal: 9)".to_string()
-            )]]
+            vec![vec![Span::plain(format!(
+                "Error: the agent exited (signal: 9) -- {DISMISS_VERB_HINT}"
+            ))]]
+        );
+    }
+
+    /// The banner names its own way out, and the way out depends on where
+    /// the reader is: an entered panel's composer eats printables so the
+    /// hint names `<C-d>`; un-entered, keys are not routed to the panel at
+    /// all so it names the `dismiss` verb instead.
+    #[test]
+    fn the_crash_banners_dismiss_hint_follows_focus() {
+        let mut state = AiPanelState::new();
+        state.local_error = Some("gone".to_string());
+        state.focused = true;
+        assert_eq!(
+            state.view().local_error,
+            vec![vec![Span::plain(format!(
+                "Error: gone -- {DISMISS_KEY_HINT}"
+            ))]]
+        );
+        state.focused = false;
+        assert_eq!(
+            state.view().local_error,
+            vec![vec![Span::plain(format!(
+                "Error: gone -- {DISMISS_VERB_HINT}"
+            ))]]
         );
     }
 

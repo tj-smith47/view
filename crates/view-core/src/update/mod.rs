@@ -1037,6 +1037,16 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     if model.ai_panel().turn_in_flight {
                         return vec![Effect::Ai(AiCommand::Cancel)];
                     }
+                } else if notation == "<C-d>" {
+                    // The crash banner's reader is by construction inside an
+                    // entered panel, where the composer consumes every
+                    // printable -- so dismissal needs a named notation the
+                    // composer excludes, beside `<C-c>` above. The `:View ai
+                    // dismiss` verb remains the from-outside route to the
+                    // same slot.
+                    if model.ai_panel_mut().local_error.take().is_some() {
+                        model.dirty = true;
+                    }
                 } else if notation == "<CR>" {
                     let panel = model.ai_panel_mut();
                     if !panel.input.trim().is_empty() {

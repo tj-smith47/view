@@ -2877,6 +2877,37 @@ fn ctrl_c_with_a_turn_in_flight_emits_cancel() {
     );
 }
 
+/// The in-panel route to the same slot the `dismiss` verb clears: the crash
+/// banner's reader is by construction inside an entered panel, where the
+/// composer consumes every printable, so dismissal needs a named notation
+/// the composer excludes.
+#[test]
+fn ctrl_d_while_entered_clears_a_set_local_error() {
+    let mut m = entered_ai_panel_model();
+    m.ai_panel_mut().local_error = Some("the agent exited".to_string());
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<C-d>"));
+
+    assert!(effects.is_empty());
+    assert_eq!(m.ai_panel().local_error, None);
+    assert!(m.dirty);
+}
+
+/// `<C-d>` with no banner set is swallowed like any other unmapped named
+/// key: no effect, no repaint, and nothing lands in the composer.
+#[test]
+fn ctrl_d_with_no_local_error_is_a_noop_and_types_nothing() {
+    let mut m = entered_ai_panel_model();
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<C-d>"));
+
+    assert!(effects.is_empty());
+    assert_eq!(m.ai_panel().input, "");
+    assert!(!m.dirty);
+}
+
 /// A request auto-opens the panel without taking focus (see
 /// `auto_opened_permission_model`'s doc): `AiPanelState::focused` stays
 /// `false`, so `Model::takes_focus_now` never names the AI overlay and

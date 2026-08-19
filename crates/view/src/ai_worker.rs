@@ -235,7 +235,7 @@ impl AiWorker {
     /// worker, that a session observed before some event and one observed
     /// after it are the same live child, not one that quietly restarted in
     /// between.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn ready_pid_for_test(&self) -> Option<u32> {
         let slot = self.slot.lock().unwrap_or_else(PoisonError::into_inner);
         match &*slot {
@@ -251,7 +251,7 @@ impl AiWorker {
     /// that constructed a fresh `AiWorker` there instead of cloning the
     /// shared one compiles and would pass every test that never asks this
     /// question.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn is_same_worker_as(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.slot, &other.slot)
     }
