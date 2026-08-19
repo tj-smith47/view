@@ -176,6 +176,39 @@ fn a_deletion_at_the_last_row_removes_only_its_own_rows() {
     assert_eq!(lines, split_lines(new));
 }
 
+/// A proposal that drops the file's final newline along with a real change
+/// to one of its rows. `hunk::diff` collapses a trailing-newline-only
+/// difference to nothing, which is the right answer for a buffer nvim
+/// models as rows -- this pins that the collapse never reaches past that
+/// one difference: the row change still applies, and it applies to exactly
+/// the rows it named.
+#[test]
+fn a_proposal_dropping_the_final_newline_still_applies_its_row_change() {
+    let engine = spawn();
+    let old = "alpha\nbeta\ngamma\n";
+    let new = "alpha\nBETA\ngamma";
+
+    let lines = accept_all(&engine, Some(old), new);
+
+    assert_eq!(lines, vec!["alpha", "BETA", "gamma"]);
+}
+
+/// The same pair the other way round: a buffer whose text never ended in a
+/// newline, and a proposal that adds one on top of a real row change. The
+/// added newline is nvim's `'endofline'` to answer, not this crate's, so
+/// what must survive is the row change and nothing else -- no extra empty
+/// row, which would be a blank line in the saved file.
+#[test]
+fn a_proposal_adding_a_final_newline_leaves_no_extra_row() {
+    let engine = spawn();
+    let old = "alpha\nbeta\ngamma";
+    let new = "alpha\nBETA\ngamma\n";
+
+    let lines = accept_all(&engine, Some(old), new);
+
+    assert_eq!(lines, vec!["alpha", "BETA", "gamma"]);
+}
+
 /// An insertion at the very top of the file, where there is no leading row
 /// to address from.
 #[test]

@@ -123,6 +123,18 @@ pub struct AiPanelState {
     /// too (`AiCommand::DiscardProposal`) so the agent restating it later
     /// proposes it again rather than being deduplicated against a proposal
     /// nobody ever saw.
+    ///
+    /// It goes with a crashed session (`on_ai_event`'s `SessionCrashed`
+    /// arm) and survives a turn ending, unlike
+    /// [`Self::pending_permission`], which is cleared by both. The two are
+    /// not the same kind of state: a permission prompt is a question whose
+    /// answer goes back on the wire, so a turn nobody is waiting out any
+    /// more has nothing left to answer, while a review is decided entirely
+    /// against nvim and needs no session at all to be honoured. A turn
+    /// ending is also the ordinary case here rather than an edge: an agent
+    /// that edits two files in one turn queues its second proposal in this
+    /// very slot, and dropping it at `TurnEnded` would take back a diff the
+    /// user was told to expect moments before they could look at it.
     pub pending_diff_next: Option<DiffReviewState>,
     /// The generation stamped on the next review's own async replies,
     /// bumped per review on the `PickerState::generation` precedent.

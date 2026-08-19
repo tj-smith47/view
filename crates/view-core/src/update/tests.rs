@@ -7040,6 +7040,84 @@ fn a_third_proposal_is_announced_and_discarded_at_the_session() {
     );
 }
 
+/// A proposal still waiting its turn when the session dies goes with the
+/// session: it was never read, and opening it later would put the user in
+/// front of a decision made for an agent that crashed part way through its
+/// own work. It is dropped at the driver too, so a recovered session
+/// restating the same diff reaches them again.
+#[test]
+fn a_queued_proposal_is_discarded_when_the_session_crashes() {
+    let mut m = live_review_model();
+    let _ = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::SessionCrashed {
+            message: "agent exited".to_string(),
+        }),
+    );
+
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Ai(AiCommand::DiscardProposal { request_id: 2 })
+        )),
+        "the queued proposal must stop being deduplicated: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_diff_next.is_none(),
+        "the queued proposal must not outlive the session that made it"
+    );
+    assert!(
+        m.ai_panel().pending_diff.is_some(),
+        "the review already on screen is the user's to finish -- every accept \
+         it can honour is written to nvim, which needs no session"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("/tmp/second.rs")),
+        "a dropped proposal is never dropped in silence: {texts:?}"
+    );
+}
+
+/// A turn ending is not a session ending, and a queued proposal is not a
+/// permission prompt: nothing on the wire is waiting to answer it, and the
+/// accepts it offers are written to nvim. An agent that edits two files in
+/// one turn queues its second proposal in exactly this slot, so clearing it
+/// here would take the diff back before the user could look at it.
+#[test]
+fn a_queued_proposal_survives_the_turn_that_proposed_it_ending() {
+    let mut m = live_review_model();
+    let _ = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    let effects = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::TurnEnded {
+            stop_reason: crate::native::ai_event::StopReason::EndTurn,
+        }),
+    );
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Ai(AiCommand::DiscardProposal { .. }))),
+        "a queued proposal is still the user's to review: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel()
+            .pending_diff_next
+            .as_ref()
+            .map(|queued| queued.path.clone()),
+        Some(std::path::PathBuf::from("/tmp/second.rs")),
+    );
+}
+
 /// A refused accept must not swallow the effects the same key produced. A
 /// review with no hunk left to decide ends itself on any key, and the
 /// notice for the refusal that key also produced used to replace that

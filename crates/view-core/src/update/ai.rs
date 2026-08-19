@@ -138,13 +138,41 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             panel.pending_permission = None;
             panel.turn_in_flight = false;
             let never_became_ready = panel.session_id.is_none();
+            // A queued proposal is unread by construction, and the session
+            // that authored it is gone: opening it later would put the user
+            // in front of a decision made on behalf of an agent that
+            // crashed part way through its own work. It goes with the
+            // session, and is discarded at the driver so the same diff
+            // restated by a recovered session reaches the user again.
+            // The review already on screen is not touched -- the user is
+            // mid-decision on it, and every accept it can still honour is
+            // written to nvim, which needs no agent at all.
+            let abandoned = panel.pending_diff_next.take();
             panel.local_error = Some(message.clone());
             model.dirty = true;
-            if never_became_ready {
-                return model
-                    .engine
-                    .record_native_notice(format!("AI agent failed to start: {message}"), false);
+            let mut effects = Vec::new();
+            if let Some(queued) = abandoned {
+                effects.extend(model.engine.record_native_notice(
+                    format!(
+                        "AI agent's queued changes to {} were dropped -- the session ended \
+                         before that review opened",
+                        queued.path.display()
+                    ),
+                    false,
+                ));
+                effects.push(Effect::Ai(AiCommand::DiscardProposal {
+                    request_id: queued.request_id,
+                }));
             }
+            if never_became_ready {
+                effects.extend(
+                    model.engine.record_native_notice(
+                        format!("AI agent failed to start: {message}"),
+                        false,
+                    ),
+                );
+            }
+            return effects;
         }
         // The session's own recovery from whatever `local_error` recorded:
         // a session id only ever arrives once the handshake and

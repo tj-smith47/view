@@ -131,6 +131,27 @@ pub struct Executor<E: EngineOps> {
     /// while `model.ai_enabled` is false (see `notice_ai_disabled`), so no
     /// command can arrive here with nothing wired to take it.
     ai: Option<crate::ai_worker::AiWorker>,
+    /// Write outcomes (`Msg::BufWriteApplied`/`Msg::BufWriteRefused`) the
+    /// loop's message channel was too full to take, in arrival order.
+    ///
+    /// The one message this type produces on the loop thread itself, which
+    /// is also the channel's only consumer: a blocking send here deadlocks
+    /// the editor outright, and the channel is at its fullest exactly when
+    /// a write completes (an open review holds a buffer subscription, so
+    /// every keystroke in that buffer is already queueing a
+    /// `Msg::BufTextChanged` and a redraw behind it). Dropping is not the
+    /// alternative either -- a lost outcome leaves the review believing a
+    /// write is still in flight and naming a tick the buffer has moved
+    /// past, so every later accept is refused for no reason -- so a refused
+    /// outcome parks here and is carried through by
+    /// [`flush_write_outcomes`](Self::flush_write_outcomes), the same
+    /// hold-and-retry shape `view_engine`'s `Route` uses for the replies
+    /// its reader thread must deliver without blocking.
+    ///
+    /// A queue rather than a single slot: each outcome describes a distinct
+    /// write, and none supersedes the one before it. A `Mutex` for the
+    /// reason `tree_scan_cancel` above is one -- `run` takes `&self`.
+    deferred_write_outcomes: std::sync::Mutex<std::collections::VecDeque<Msg>>,
     /// The context worker's job channel
     /// (`crate::ai_context_worker::spawn`), or `None` when no worker is
     /// wired -- every test `Executor` built via plain `new`.
@@ -221,6 +242,25 @@ where
     }
 }
 
+/// Hands `parked` back to `tx` in arrival order, stopping at the first the
+/// channel still refuses: a full channel would refuse everything queued
+/// behind it too, and delivering a later outcome first would report a write
+/// as refused before the one it was joined onto was reported as applied. A
+/// disconnected channel means the loop those outcomes described is gone, so
+/// what is left goes with it rather than waiting for a delivery nothing can
+/// make.
+fn retry_write_outcomes(
+    tx: &crate::wake::LoopSender,
+    parked: &mut std::collections::VecDeque<Msg>,
+) {
+    while let Some(msg) = parked.pop_front() {
+        if let Err(mpsc::TrySendError::Full(msg)) = tx.try_send(msg) {
+            parked.push_front(msg);
+            break;
+        }
+    }
+}
+
 impl<E: EngineOps> Executor<E> {
     /// Wraps `ops` for the runtime loop to drive, with neither the
     /// clipboard worker nor the OSC52 terminal channel wired: every
@@ -237,9 +277,60 @@ impl<E: EngineOps> Executor<E> {
             toast_timer: None,
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
+            deferred_write_outcomes: std::sync::Mutex::new(std::collections::VecDeque::new()),
             ai: None,
             ai_context: None,
         }
+    }
+
+    /// Routes one write outcome to the loop, blocking on nothing and
+    /// dropping nothing (see [`Executor::deferred_write_outcomes`] for why
+    /// neither is available here). A refused outcome parks, and one already
+    /// parked makes this one queue behind it rather than overtake it: a
+    /// refusal reported ahead of the apply that preceded it would put hunks
+    /// back that the buffer already holds.
+    fn route_write_outcome(&self, msg: Msg) {
+        // Unwired only in a bare test `Executor`, which has no loop to
+        // deliver to at all -- the same degrade every other channel in this
+        // type takes when it is not wired.
+        let Some(tx) = &self.toast_timer else {
+            return;
+        };
+        let mut parked = self
+            .deferred_write_outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        retry_write_outcomes(tx, &mut parked);
+        if !parked.is_empty() {
+            parked.push_back(msg);
+            return;
+        }
+        if let Err(mpsc::TrySendError::Full(msg)) = tx.try_send(msg) {
+            parked.push_back(msg);
+        }
+    }
+
+    /// Re-attempts every parked write outcome, in arrival order, stopping at
+    /// the first the channel still refuses.
+    ///
+    /// Called once per loop pass, before the wait: a channel too full to
+    /// take an outcome is by definition a channel with something in it, and
+    /// the loop's wait returns immediately while anything is queued, so the
+    /// parked outcome lands on the very next pass rather than waiting for
+    /// whatever the user does next. Costs one uncontended lock and a
+    /// `VecDeque::is_empty` per pass, which is the whole steady state.
+    pub(crate) fn flush_write_outcomes(&self) {
+        let mut parked = self
+            .deferred_write_outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if parked.is_empty() {
+            return;
+        }
+        let Some(tx) = &self.toast_timer else {
+            return;
+        };
+        retry_write_outcomes(tx, &mut parked);
     }
 
     /// Wires the clipboard worker's job channel; `ClipboardRead`/
@@ -436,20 +527,16 @@ impl<E: EngineOps> Executor<E> {
                         .set_buf_text(buf, &edits, undojoin, expected_changedtick)
                     {
                         Ok(outcome) => {
-                            if let Some(tx) = &self.toast_timer {
-                                let _ = tx.send(match outcome {
-                                    BufWriteOutcome::Applied { changedtick } => {
-                                        Msg::BufWriteApplied {
-                                            buf,
-                                            generation,
-                                            changedtick,
-                                        }
-                                    }
-                                    BufWriteOutcome::BufferAdvanced => {
-                                        Msg::BufWriteRefused { buf, generation }
-                                    }
-                                });
-                            }
+                            self.route_write_outcome(match outcome {
+                                BufWriteOutcome::Applied { changedtick } => Msg::BufWriteApplied {
+                                    buf,
+                                    generation,
+                                    changedtick,
+                                },
+                                BufWriteOutcome::BufferAdvanced => {
+                                    Msg::BufWriteRefused { buf, generation }
+                                }
+                            });
                             Ok(())
                         }
                         Err(err) => Err(err),
@@ -1635,6 +1722,12 @@ pub fn run(
         // of one per call site. On the loop thread, same as `draw_surface`
         // below -- see `run`'s doc for the latency this costs.
         drain_osc52(&osc52_rx, term);
+        // alongside the OSC52 drain and for the same reason: one site at the
+        // top of every pass covers every dispatch this loop makes. What it
+        // carries is a write outcome the message channel was too full to
+        // take when the write completed on this very thread (see
+        // `Executor::flush_write_outcomes`).
+        executor.flush_write_outcomes();
         // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
         // Msg::Resized: folding it in here means no frame is ever painted
@@ -2185,6 +2278,128 @@ mod tests {
             ),
             "expected the refusal routed back to the review, got {msg:?}"
         );
+    }
+
+    /// Runs `f` on a thread of its own and answers what it produced, failing
+    /// the test rather than hanging it if `f` does not return within five
+    /// seconds.
+    ///
+    /// Every property below is about a send that must not wait for room, and
+    /// a send that does wait never returns at all -- on the loop thread that
+    /// is the editor frozen, and in a test run inline it would be the whole
+    /// suite stopped with no failure to read. The receiver stays on this
+    /// thread, so the panic that reports the timeout also drops it, which
+    /// releases the stuck send instead of leaving a thread wedged behind the
+    /// failure.
+    fn without_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let out = f();
+            done_tx.send(()).ok();
+            out
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a write outcome must never wait for room on the channel the loop drains");
+        worker.join().unwrap()
+    }
+
+    /// The write outcome is produced on the loop thread, which is the
+    /// message channel's only consumer: a send that waits for room waits for
+    /// a drain only this thread can perform, and the editor is frozen for
+    /// good. The channel is at its fullest exactly when this happens -- an
+    /// open review holds a buffer subscription, so the keystroke that
+    /// accepted a hunk is queueing text-change and redraw traffic of its own
+    /// -- so the outcome parks instead, and is delivered once the loop
+    /// drains. Bounded rather than merely "does not hang": a blocking send
+    /// here never returns at all, so the wait below is what turns that
+    /// freeze into a failed test.
+    #[test]
+    fn a_write_outcome_parks_instead_of_blocking_the_loop_thread() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(1);
+        let sender = crate::wake::LoopSender::new(msg_tx);
+        sender.try_send(Msg::RedrawReady).unwrap();
+        let executor =
+            Executor::new(SlowOps::new(std::time::Duration::ZERO)).with_toast_timer(sender);
+
+        let (executor, flow) = without_blocking(move || {
+            let flow = executor.run(Effect::Rpc(RpcCall::BufSetText {
+                buf: BufferHandle(3),
+                edits: vec![TextEdit {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 0,
+                    end_col: 1,
+                    lines: vec!["x".into()],
+                }],
+                undojoin: true,
+                expected_changedtick: Some(12),
+                generation: 4,
+            }));
+            (executor, flow)
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        // and it was parked, not dropped: leaving the review with a write
+        // it believes is still in flight is what the parking exists to
+        // prevent, so the outcome has to arrive once there is room for it
+        assert!(matches!(msg_rx.try_recv(), Ok(Msg::RedrawReady)));
+        executor.flush_write_outcomes();
+        let msg = msg_rx.try_recv().ok();
+        assert!(
+            matches!(
+                msg,
+                Some(Msg::BufWriteApplied {
+                    buf: BufferHandle(3),
+                    generation: 4,
+                    ..
+                })
+            ),
+            "expected the parked outcome delivered once the channel drained, got {msg:?}"
+        );
+    }
+
+    /// Ordering, not just delivery: a second outcome produced while the
+    /// first is still parked queues behind it. Sending it straight through
+    /// the moment room appears would report the later write to the review
+    /// before the earlier one, which reads as a refusal of a write that had
+    /// already applied.
+    #[test]
+    fn a_second_write_outcome_queues_behind_a_parked_one() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(1);
+        let sender = crate::wake::LoopSender::new(msg_tx);
+        sender.try_send(Msg::RedrawReady).unwrap();
+        let executor =
+            Executor::new(SlowOps::new(std::time::Duration::ZERO)).with_toast_timer(sender);
+
+        let executor = without_blocking(move || {
+            executor.route_write_outcome(Msg::BufWriteApplied {
+                buf: BufferHandle(3),
+                generation: 4,
+                changedtick: 9,
+            });
+            executor.route_write_outcome(Msg::BufWriteRefused {
+                buf: BufferHandle(3),
+                generation: 4,
+            });
+            executor
+        });
+
+        assert!(matches!(msg_rx.try_recv(), Ok(Msg::RedrawReady)));
+        executor.flush_write_outcomes();
+        assert!(matches!(
+            msg_rx.try_recv(),
+            Ok(Msg::BufWriteApplied {
+                generation: 4,
+                changedtick: 9,
+                ..
+            })
+        ));
+        executor.flush_write_outcomes();
+        assert!(matches!(
+            msg_rx.try_recv(),
+            Ok(Msg::BufWriteRefused { generation: 4, .. })
+        ));
     }
 
     /// `RpcCall::BufAttach`/`BufDetach` are matched explicitly in
