@@ -1999,9 +1999,13 @@ mod tests {
             matches!(flow, Flow::EngineLost),
             "the path was usable, so this Err is the connection dying: {flow:?}"
         );
+        let fabricated: Vec<_> = msg_rx
+            .try_iter()
+            .filter(|msg| matches!(msg, Msg::HiddenBufferLoaded { .. }))
+            .collect();
         assert!(
-            msg_rx.try_recv().is_err(),
-            "a dead engine must never be answered with a resolve nvim never sent"
+            fabricated.is_empty(),
+            "a dead engine must never be answered with a resolve nvim never sent: {fabricated:?}"
         );
     }
 
