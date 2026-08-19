@@ -291,6 +291,15 @@ impl<E: EngineOps> Executor<E> {
         self.ops
     }
 
+    /// The worker `Effect::Ai` forwards to, if wired -- exposed only so a
+    /// test can confirm restart survival's identity (see
+    /// `crate::ai_worker::AiWorker::is_same_worker_as`'s own doc);
+    /// `Effect::Ai`'s own arm never needs a getter, only `dispatch`.
+    #[cfg(test)]
+    pub(crate) fn ai_worker(&self) -> Option<&crate::ai_worker::AiWorker> {
+        self.ai.as_ref()
+    }
+
     /// Carries out one effect, infallibly by signature: an engine-write
     /// failure never becomes an `Err` that would abort the UI, since the
     /// `Flow::EngineLost` -> `Msg::EngineDown` path exists precisely to
@@ -2037,6 +2046,81 @@ mod tests {
         }
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Proves `Executor::run`'s `Effect::Ai` arm genuinely forwards to a
+    /// wired [`crate::ai_worker::AiWorker`], not just that the worker
+    /// itself behaves correctly in isolation (`ai_worker.rs`'s own suite
+    /// already covers that): deleting the arm's `worker.dispatch(command)`
+    /// call, or the arm entirely, leaves `flow` unaffected (`Effect` is
+    /// `#[non_exhaustive]` and degrades to a no-op `Flow::Continue`) but
+    /// this assertion on `rx` would time out, since nothing would ever
+    /// reach the worker to report a crash.
+    #[test]
+    fn ai_effect_forwards_to_the_wired_worker() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let ai = crate::ai_worker::AiWorker::new(
+            view_ai::AgentSpec::Command(vec![
+                "runtime-ai-effect-test-nonexistent-program-xyz".to_string()
+            ]),
+            std::path::PathBuf::from("."),
+            crate::wake::LoopSender::new(tx),
+        );
+        let executor = Executor::new(&ops).with_ai(ai);
+
+        let flow = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Prompt {
+            text: "hello".to_string(),
+            context: Vec::new(),
+        }));
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("SessionCrashed arrives from the worker the effect must have dispatched to");
+        assert!(
+            matches!(
+                &msg,
+                Msg::Ai(view_core::native::ai_event::AiEvent::SessionCrashed { message })
+                    if message.contains("AI agent failed to start")
+            ),
+            "expected a spawn-failure SessionCrashed forwarded through the effect, got {msg:?}"
+        );
+    }
+
+    /// The Cancel-shaped half of `ai_effect_forwards_to_the_wired_worker`:
+    /// an `Effect::Ai(AiCommand::Cancel)` reaching an idle worker (`[ai]`
+    /// wired but no session ever started) proves the effect really carries
+    /// through to `AiWorker::dispatch`'s own I4 handling -- "no active AI
+    /// session for this command", never a spawn attempt -- rather than only
+    /// exercising the `Prompt` shape the sibling test above already covers.
+    #[test]
+    fn ai_effect_forwards_a_cancel_to_the_wired_worker_with_no_session_running() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::sync_channel(4);
+        let ai = crate::ai_worker::AiWorker::new(
+            view_ai::AgentSpec::Command(vec![
+                "runtime-ai-cancel-effect-test-nonexistent-program-xyz".to_string(),
+            ]),
+            std::path::PathBuf::from("."),
+            crate::wake::LoopSender::new(tx),
+        );
+        let executor = Executor::new(&ops).with_ai(ai);
+
+        let flow = executor.run(Effect::Ai(view_core::native::ai_event::AiCommand::Cancel));
+        assert!(matches!(flow, Flow::Continue));
+
+        let msg = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a Cancel with nothing running must still report something visible");
+        assert!(
+            matches!(
+                &msg,
+                Msg::Ai(view_core::native::ai_event::AiEvent::SessionCrashed { message })
+                    if message == "no active AI session for this command"
+            ),
+            "expected the idle-Cancel SessionCrashed forwarded through the effect, got {msg:?}"
+        );
     }
 
     /// Same proof as `tree_scan_effect_replies_with_a_real_filesystem_listing`,

@@ -631,7 +631,18 @@ mod tests {
             clipboard,
             osc52,
             picker,
-            ai: inert_ai_worker(&msg),
+            // `cat`, not `inert_ai_worker`'s "claude-code" id: a real,
+            // provisioning-free child this test can spawn, that echoes the
+            // driver's own `initialize` request back at itself forever
+            // rather than ever answering it -- alive and `Ready` for as
+            // long as the test needs, and never crashing on its own, which
+            // is what gives the restart below a live child to prove
+            // survives it.
+            ai: crate::ai_worker::AiWorker::new(
+                view_ai::AgentSpec::Command(vec!["cat".to_string()]),
+                std::path::PathBuf::from("."),
+                msg.clone(),
+            ),
             msg,
         };
         let respawn = || view_engine::process::EngineConfig::isolated();
@@ -640,6 +651,21 @@ mod tests {
         let (_pump, _cutover) = engine.start_pump(channels.msg.clone());
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
         let dead_pid = engine.pid();
+
+        channels
+            .ai
+            .dispatch(view_core::native::ai_event::AiCommand::Prompt {
+                text: "hello".to_string(),
+                context: Vec::new(),
+            });
+        wait_until(
+            "the cat-backed AI session becomes Ready with a live child",
+            || channels.ai.ready_pid_for_test().is_some(),
+        );
+        let ai_pid_before = channels
+            .ai
+            .ready_pid_for_test()
+            .expect("just waited for this to be Some");
 
         let killed = std::process::Command::new("kill")
             .args(["-KILL", &dead_pid.to_string()])
@@ -658,6 +684,28 @@ mod tests {
         let mut model = Model::with_term_size(80, 24);
         let fresh = restart_engine(&mut engine, &respawn, &model, &channels, &route)
             .expect("a crashed engine must be replaceable");
+
+        // the AI worker the restart's executor answers through must be the
+        // very same one `channels.ai` already held, not a fresh clone --
+        // replacing `.with_ai(self.ai.clone())` with `.with_ai(AiWorker::new(...))`
+        // in `LoopChannels::executor` would compile and pass every other
+        // assertion here, since a fresh worker's `Idle` slot never touches
+        // the dying engine at all.
+        let fresh_ai = fresh
+            .executor
+            .ai_worker()
+            .expect("the restart's executor must still have an AI worker wired");
+        assert!(
+            fresh_ai.is_same_worker_as(&channels.ai),
+            "the restart must reuse the shared AiWorker, not construct a fresh one"
+        );
+        assert_eq!(
+            fresh_ai.ready_pid_for_test(),
+            Some(ai_pid_before),
+            "the restart must not have killed or replaced the live agent child -- \
+             exactly the one `cat` spawned above must still be running"
+        );
+
         // the same cutover the loop runs on the way back: a fresh engine
         // fires `VimEnter` as a blocked request, and one nobody answers
         // leaves nvim waiting inside its own startup rather than editing

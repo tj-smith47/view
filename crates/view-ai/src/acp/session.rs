@@ -228,6 +228,36 @@ impl AiSession {
     pub fn send(&self, command: AiCommand) {
         let _ = self.commands.send(command);
     }
+
+    /// Whether the session task has already ended -- the receiving half of
+    /// [`send`](Self::send)'s channel has been dropped.
+    ///
+    /// A closed session is a dead one: its task exits only after emitting
+    /// [`AiEvent::SessionCrashed`] on every path (the agent's own exit, a
+    /// decode failure, a fatal write), so a caller that observes `true` here
+    /// already has an explanation on the wire and needs this only to decide
+    /// whether a fresh session must replace this one before the next command
+    /// can go anywhere.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        self.commands.is_closed()
+    }
+
+    /// The child process's OS process id, if this session still holds it.
+    ///
+    /// `None` once the session task has taken the child out of
+    /// [`ChildSlot`] to reap it, matching [`Drop`]'s own "nothing left to
+    /// signal" state. Exists for the one thing nothing else exposes: proof,
+    /// from outside the session task, that a later observation is still the
+    /// *same* child rather than a second one quietly spawned in its place.
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.child
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .and_then(Child::id)
+    }
 }
 
 impl std::fmt::Debug for AiSession {
