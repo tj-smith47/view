@@ -962,6 +962,13 @@ fn spawn_fs_reply<T, F>(
 /// never reaches here at all -- it is answered `INVALID_PARAMS` before a
 /// reply is ever registered, so its code cannot vary with whether the
 /// refused path exists.
+///
+/// The wildcard is compelled by the type, not chosen: `FsError` is
+/// `#[non_exhaustive]` and defined in another crate, so an exhaustive
+/// match is impossible here. A new variant therefore lands on
+/// `INTERNAL_ERROR` silently; `view_core`'s
+/// `fs_error_variants_are_matched_without_a_wildcard` is the build break
+/// that should bring its author back to this mapping.
 fn fs_code(error: &FsError) -> i64 {
     match error {
         FsError::NotFound => RESOURCE_NOT_FOUND,
@@ -2017,6 +2024,27 @@ mod tests {
             std::fs::read_to_string(&outside).expect("the outside file survives"),
             "secret\n"
         );
+    }
+
+    /// The whole mapping in one place. `Other` is the arm the wire tests
+    /// never reach -- a moved `changedtick` and an unwritable target both
+    /// arrive as it -- so without this its code is asserted nowhere and
+    /// could be changed to anything with a green suite.
+    #[test]
+    fn every_fs_error_maps_to_the_code_the_pinned_table_names_for_it() {
+        let table = [
+            (FsError::NotFound, RESOURCE_NOT_FOUND),
+            (FsError::PermissionDenied, INTERNAL_ERROR),
+            (
+                FsError::Other {
+                    message: "changedtick moved".to_owned(),
+                },
+                INTERNAL_ERROR,
+            ),
+        ];
+        for (error, code) in table {
+            assert_eq!(fs_code(&error), code, "{error:?} maps to the wrong code");
+        }
     }
 
     fn session_update(update: Value) -> Value {

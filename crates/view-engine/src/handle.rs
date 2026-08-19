@@ -3424,6 +3424,73 @@ mod tests {
         assert_eq!(generation, 7);
     }
 
+    /// The same must-deliver contract for an agent's filesystem answer,
+    /// pinned at the *dispatch arm* rather than at `route_ai_fs` itself:
+    /// `route_msg` in that arm compiles, keeps the whole never-drop
+    /// mechanism covered, and still discards the answer the moment the
+    /// sink is full -- which is precisely when a grid flood makes it
+    /// full. The agent then waits on a JSON-RPC request nothing
+    /// re-issues, and the hidden buffer behind it is held for the rest of
+    /// the run.
+    #[test]
+    fn a_dropped_ai_fs_reply_is_parked_and_flushed_by_the_next_routed_message() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let _dpump = pump.attach_sink(tx.clone());
+
+        h.request_ai_fs("nvim_exec_lua", vec![], 77, false).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected the fs request to reach the peer");
+        };
+
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("ok"), Value::from(true)),
+                (
+                    Value::from("lines"),
+                    Value::Array(vec![Value::from("alpha")]),
+                ),
+                (Value::from("eol"), Value::from(true)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Msg::Resized { .. }
+            ),
+            "dummy fill must be the first message drained, proving the answer above \
+             genuinely lost its try_send race instead of landing in the channel"
+        );
+
+        let bridge_notif = RpcMessage::Notification {
+            method: "view_bridge".into(),
+            params: vec![Value::from("colorscheme"), Value::from("dracula")],
+        };
+        rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::AiFsReadReply { request_id, result } = msg else {
+            unreachable!("expected the parked Msg::AiFsReadReply to be flushed first, got {msg:?}");
+        };
+        assert_eq!(request_id, 77);
+        assert_eq!(result.unwrap(), "alpha\n");
+    }
+
     /// A trigger the bridge carries for a consumer this build does not have
     /// yet must be dropped, not routed as something else: the registration
     /// is deliberately wider than the set of consumers.
