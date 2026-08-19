@@ -2741,6 +2741,142 @@ fn esc_on_an_entered_panel_with_nothing_pending_un_enters_it_without_closing() {
     );
 }
 
+/// Opens and enters the panel the way a trusted user's own `open` invoke
+/// does, so every composer test below starts from the real focus-taking
+/// path rather than assembling `focused: true` by hand.
+fn entered_ai_panel_model() -> Model {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    assert!(m.ai_panel().focused, "open claims focus");
+    m
+}
+
+fn key(notation: &str) -> Msg {
+    Msg::Key(Key {
+        notation: notation.to_string(),
+    })
+}
+
+/// Single printable characters accumulate into the composer line one at a
+/// time, and `<BS>` removes the last one -- the plain typing path every
+/// other assertion in this block depends on already working.
+#[test]
+fn typing_and_backspacing_edit_the_composers_input_line() {
+    let mut m = entered_ai_panel_model();
+
+    for ch in ["h", "i"] {
+        let effects = update(&mut m, key(ch));
+        assert!(effects.is_empty(), "typing emits no effect of its own");
+    }
+    assert_eq!(m.ai_panel().input, "hi");
+    assert!(m.dirty);
+
+    m.dirty = false;
+    let effects = update(&mut m, key("<BS>"));
+    assert!(effects.is_empty());
+    assert_eq!(m.ai_panel().input, "h");
+    assert!(m.dirty);
+}
+
+/// `<lt>` is nvim's own escape for a literal `<`, which cannot arrive as a
+/// bare single-character notation the way every other printable character
+/// does -- without this arm it would silently fall into the swallowed-key
+/// case instead of ever reaching the composer line.
+#[test]
+fn lt_notation_inserts_a_literal_angle_bracket() {
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("<lt>"));
+    assert_eq!(m.ai_panel().input, "<");
+}
+
+/// A named key with no composer meaning (`<Up>`) is swallowed exactly as
+/// every key on this panel always was before composer input existed --
+/// never inserted, never forwarded to the engine.
+#[test]
+fn an_unmapped_named_key_on_the_composer_is_swallowed() {
+    let mut m = entered_ai_panel_model();
+    m.dirty = false;
+    let effects = update(&mut m, key("<Up>"));
+    assert!(effects.is_empty());
+    assert_eq!(m.ai_panel().input, "");
+    assert!(!m.dirty, "an unmapped key changes nothing to repaint");
+}
+
+/// `<CR>` on an empty composer has nothing to submit: no effect, no
+/// `turn_in_flight`, exactly the same as any other no-op key here. Without
+/// the emptiness guard, every `<CR>` -- including one against a composer
+/// nobody has typed into -- would spawn a session.
+#[test]
+fn enter_on_an_empty_composer_submits_nothing() {
+    let mut m = entered_ai_panel_model();
+    let effects = update(&mut m, key("<CR>"));
+    assert!(effects.is_empty());
+    assert!(!m.ai_panel().turn_in_flight);
+}
+
+/// The C2 producer this round rules into existence: `<CR>` on a non-empty
+/// composer emits `Effect::Ai(AiCommand::Prompt)`, clears the input line so
+/// the next turn starts from empty, and sets `turn_in_flight` so the
+/// cancel key below has something to gate on.
+#[test]
+fn enter_on_a_non_empty_composer_submits_a_prompt_and_clears_the_input() {
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("h"));
+    let _ = update(&mut m, key("i"));
+    m.dirty = false;
+
+    let effects = update(&mut m, key("<CR>"));
+
+    let [Effect::Ai(AiCommand::Prompt { text, context })] = effects.as_slice() else {
+        panic!("expected one AiCommand::Prompt, got {effects:?}");
+    };
+    assert_eq!(text, "hi");
+    assert!(
+        context.is_empty(),
+        "no RPC read populates context yet; a submission must say so honestly \
+         rather than fabricate one: {context:?}"
+    );
+    assert_eq!(m.ai_panel().input, "", "the composer clears on submit");
+    assert!(m.ai_panel().turn_in_flight);
+    assert!(m.dirty);
+}
+
+/// The cancel half of the same producer: `<C-c>` with nothing in flight has
+/// no turn to cancel, so it is a no-op rather than reaching
+/// `AiWorker::dispatch`'s own "no active session" surface for a key the
+/// panel itself could have refused instead.
+#[test]
+fn ctrl_c_with_no_turn_in_flight_cancels_nothing() {
+    let mut m = entered_ai_panel_model();
+    let effects = update(&mut m, key("<C-c>"));
+    assert!(effects.is_empty());
+}
+
+/// `<C-c>` while a turn is in flight emits `Effect::Ai(AiCommand::Cancel)`
+/// -- the key `<Esc>` cannot serve, since `<Esc>` already un-enters the
+/// panel on this same match arm.
+#[test]
+fn ctrl_c_with_a_turn_in_flight_emits_cancel() {
+    let mut m = entered_ai_panel_model();
+    let _ = update(&mut m, key("h"));
+    let _ = update(&mut m, key("<CR>"));
+    assert!(m.ai_panel().turn_in_flight);
+
+    let effects = update(&mut m, key("<C-c>"));
+
+    assert!(
+        matches!(effects.as_slice(), [Effect::Ai(AiCommand::Cancel)]),
+        "expected one AiCommand::Cancel, got {effects:?}"
+    );
+}
+
 /// A request auto-opens the panel without taking focus (see
 /// `auto_opened_permission_model`'s doc): `AiPanelState::focused` stays
 /// `false`, so `Model::takes_focus_now` never names the AI overlay and

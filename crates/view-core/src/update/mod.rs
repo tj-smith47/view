@@ -207,6 +207,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             if feature == "ai" && !model.ai_enabled {
                 return notice_ai_disabled(model);
             }
+            // Ahead of the trust gate below on purpose: dismissing a crash
+            // banner launches no agent and asks no permission of its own,
+            // so it needs no trust decision to reach -- routing it through
+            // `open_ai_trust_prompt` first would show "trust this project
+            // to launch an AI agent?" for an action that launches nothing.
+            if feature == "ai" && verb == "dismiss" {
+                if model.ai_panel_mut().local_error.take().is_some() {
+                    model.dirty = true;
+                }
+                return Vec::new();
+            }
             // `ai_trusted` is plain data the bin seeded (see `Model`'s own
             // doc on the field): the pure core decides the gate from it and
             // names nothing outside itself to do so. Checked ahead of every
@@ -1001,20 +1012,80 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                         },
                     })];
                 }
-                // Nothing pending: the panel has no composer key path yet
-                // (see `OverlayKind::Ai`'s own doc), so every key but
-                // <Esc> is swallowed rather than leaked to nvim -- the
-                // whole point of having deliberately entered the panel is
-                // that the engine does not see these keystrokes. <Esc>
-                // relinquishes the keyboard (clears `focused`) without
-                // closing the panel itself: it stays visible beside the
-                // buffer, the same non-modal presence it had before being
-                // entered, and the `close` verb remains the only thing
-                // that removes it from the stack.
+                // Nothing pending: the panel's own composer keys. Every key
+                // not named below is swallowed rather than leaked to nvim --
+                // the whole point of having deliberately entered the panel
+                // is that the engine does not see these keystrokes.
                 if notation == "<Esc>" {
+                    // Relinquishes the keyboard (clears `focused`) without
+                    // closing the panel itself: it stays visible beside the
+                    // buffer, the same non-modal presence it had before
+                    // being entered, and the `close` verb remains the only
+                    // thing that removes it from the stack.
                     model.ai_panel_mut().focused = false;
                     model.dirty = true;
+                } else if notation == "<C-c>" {
+                    // `<Esc>` is already taken by prompt-cancel/un-enter
+                    // above, so cancelling an in-flight turn gets the
+                    // vocabulary's other interrupt notation (see
+                    // `supervision::INTERRUPT_NOTATION`, the same key for
+                    // the same reason elsewhere in this codebase). Gated on
+                    // `turn_in_flight` so cancelling with nothing running
+                    // has no session to interrupt, rather than reaching
+                    // `AiWorker::dispatch`'s own "no active session" surface
+                    // for a key the panel itself could have refused instead.
+                    if model.ai_panel().turn_in_flight {
+                        return vec![Effect::Ai(AiCommand::Cancel)];
+                    }
+                } else if notation == "<CR>" {
+                    let panel = model.ai_panel_mut();
+                    if !panel.input.trim().is_empty() {
+                        let text = std::mem::take(&mut panel.input);
+                        panel.turn_in_flight = true;
+                        model.dirty = true;
+                        // Context is honestly empty today: every block
+                        // `view_ai::context::assemble` could turn into a
+                        // `ContextBlock` (`current_buffer`, `selection`,
+                        // `cursor`, `diagnostics`, `quickfix` -- see
+                        // `EngineReadSnapshot`'s own doc) is read over RPC,
+                        // and `view-core` can call neither `view-ai` (the
+                        // dependency direction the crate boundary enforces)
+                        // nor RPC (it does no I/O at all) to populate one.
+                        // Nothing in this tree yet issues the four reads
+                        // (`ReadCursorContext`, `ReadDiagnosticEntries`,
+                        // `ReadQuickfixEntries`, `ReadCurrentBufferText`)
+                        // that would ever fill this in; until something
+                        // does, a submitted prompt genuinely carries no
+                        // context rather than a placeholder pretending to.
+                        return vec![Effect::Ai(AiCommand::Prompt {
+                            text,
+                            context: Vec::new(),
+                        })];
+                    }
+                } else if notation == "<BS>" {
+                    if model.ai_panel_mut().input.pop().is_some() {
+                        model.dirty = true;
+                    }
+                } else if notation == "<lt>" {
+                    // nvim's own escape for a literal `<`, the one
+                    // printable character that cannot arrive as itself
+                    // (see `keys::encode_key`'s own doc).
+                    model.ai_panel_mut().input.push('<');
+                    model.dirty = true;
+                } else if let Some(ch) = {
+                    // Every other single character, including a literal
+                    // space, arrives as itself rather than a named `<...>`
+                    // notation -- the same convention the permission
+                    // options above already key off of.
+                    let mut chars = notation.chars();
+                    chars.next().filter(|_| chars.next().is_none())
+                } {
+                    model.ai_panel_mut().input.push(ch);
+                    model.dirty = true;
                 }
+                // Any other named key (`<Up>`, `<Tab>`, ...) has no
+                // composer meaning yet and is swallowed the same way it
+                // always was.
                 Vec::new()
             }
             // the key belongs to the overlay on top of the stack,
@@ -1267,11 +1338,15 @@ fn toggle_tree_sidebar(model: &mut Model) -> Vec<Effect> {
 /// unresponsive. Every other topmost overlay is exactly as blind to input
 /// as `Ai` itself, so stacking on top of it costs nothing.
 ///
-/// No effect either way yet: opening allocates no session, since nothing in
-/// this build binds `session_id` to a real agent process. The session state
-/// itself lives in [`Model::ai_panel`] and is never (re)constructed here --
-/// this only pushes or hides the sidebar overlay that renders it, see
-/// [`OverlayKind::Ai`]'s doc.
+/// Opening never itself starts (or stops) an agent session: the session's
+/// own lifecycle is independent of the overlay's, driven instead by the
+/// first non-empty `<CR>` a user submits through the panel once entered
+/// (see the `Some(OverlayKind::Ai)` arm of `route_key`) and, once bound,
+/// kept alive by `crate::ai_worker::AiWorker` regardless of whether this
+/// overlay is open, closed, or has never been opened at all -- see
+/// [`Model::ai_panel_overlay_open`]'s own doc for that split. This function
+/// only pushes or hides the sidebar overlay that renders the session state
+/// already sitting in [`Model::ai_panel`], see [`OverlayKind::Ai`]'s doc.
 fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
     if model.ai_panel_overlay_open() {
         return Vec::new();
@@ -1290,11 +1365,12 @@ fn open_ai_panel(model: &mut Model) -> Vec<Effect> {
 }
 
 /// Opens the agent panel if it is closed, closes it if it is open. Closing
-/// has no live session to tear down yet, for the same reason opening
-/// allocates none (see [`open_ai_panel`]'s doc). Either direction is an
-/// explicit user invoke, so it claims or releases the panel's keyboard
-/// focus the same way the `open`/`close` verbs do -- see
-/// `AiPanelState::focused`'s own doc.
+/// never tears down a live session, for the same reason opening never
+/// starts one (see [`open_ai_panel`]'s doc): a session already running
+/// keeps running, unattended, exactly as `close_ai_panel`'s own doc
+/// promises. Either direction is an explicit user invoke, so it claims or
+/// releases the panel's keyboard focus the same way the `open`/`close`
+/// verbs do -- see `AiPanelState::focused`'s own doc.
 fn toggle_ai_panel(model: &mut Model) -> Vec<Effect> {
     // `close_ai_panel` itself clears `AiPanelState::focused`, at the single
     // authoritative closing point

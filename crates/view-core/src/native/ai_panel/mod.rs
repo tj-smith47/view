@@ -89,6 +89,16 @@ pub struct AiPanelState {
     /// engine commands, reaches nvim exactly as if the panel were not
     /// there at all.
     pub focused: bool,
+    /// Whether a prompt this panel submitted is still awaiting
+    /// `AiEvent::TurnEnded` (or a crash that ends the turn without one).
+    /// Set only by a `<CR>` submission (`route_key`'s `Some(OverlayKind::Ai)`
+    /// arm) and cleared by `on_ai_event`'s `TurnEnded`/`SessionCrashed`
+    /// arms, regardless of which session reported them: this is a UI gate
+    /// on the cancel key, not a session identity check, so a stale flag
+    /// left set by a session that died without a `TurnEnded` is exactly
+    /// what those two arms both clearing it exists to prevent. Gates
+    /// `<C-c>`: cancelling with nothing in flight has no turn to cancel.
+    pub turn_in_flight: bool,
     /// Panel-local crash surface, deliberately not a transient toast: a
     /// crashed long-running session is easy to miss in four seconds.
     pub local_error: Option<String>,
@@ -108,6 +118,7 @@ impl AiPanelState {
             pending_edits: Vec::new(),
             pending_permission: None,
             focused: false,
+            turn_in_flight: false,
             local_error: None,
             usage: None,
         }
@@ -189,6 +200,7 @@ mod tests {
         assert!(state.pending_edits.is_empty());
         assert_eq!(state.pending_permission, None);
         assert!(!state.focused);
+        assert!(!state.turn_in_flight);
         assert_eq!(state.local_error, None);
         assert_eq!(state.usage, None);
     }

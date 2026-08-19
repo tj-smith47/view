@@ -115,7 +115,10 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         // `pending_permission` set here would show a question the agent is
         // no longer waiting on an answer to
         AiEvent::TurnEnded { .. } => {
-            if model.ai_panel_mut().pending_permission.take().is_some() {
+            let panel = model.ai_panel_mut();
+            let had_pending = panel.pending_permission.take().is_some();
+            let was_in_flight = std::mem::take(&mut panel.turn_in_flight);
+            if had_pending || was_in_flight {
                 model.dirty = true;
             }
         }
@@ -133,6 +136,7 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
         AiEvent::SessionCrashed { message } => {
             let panel = model.ai_panel_mut();
             panel.pending_permission = None;
+            panel.turn_in_flight = false;
             let never_became_ready = panel.session_id.is_none();
             panel.local_error = Some(message.clone());
             model.dirty = true;
@@ -394,6 +398,47 @@ mod tests {
         assert!(model.dirty);
     }
 
+    /// `turn_in_flight` -- the flag the `<C-c>` cancel key gates on -- must
+    /// clear the same place `pending_permission` does: a turn that ended
+    /// leaves nothing for a cancel to interrupt, and a flag left set would
+    /// wrongly let `<C-c>` reach a session with no turn running.
+    #[test]
+    fn a_turn_ending_clears_turn_in_flight() {
+        let mut model = Model::new();
+        model.ai_panel_mut().turn_in_flight = true;
+        model.dirty = false;
+
+        let effects = update(
+            &mut model,
+            Msg::Ai(AiEvent::TurnEnded {
+                stop_reason: crate::native::ai_event::StopReason::EndTurn,
+            }),
+        );
+
+        assert!(effects.is_empty());
+        assert!(!model.ai_panel().turn_in_flight);
+        assert!(model.dirty);
+    }
+
+    /// The crash-side twin: a session that dies mid-turn reports
+    /// `SessionCrashed` rather than `TurnEnded`, and the panel must not be
+    /// left thinking a turn is still in flight for a session that no
+    /// longer exists to answer a cancel.
+    #[test]
+    fn a_session_crash_clears_turn_in_flight() {
+        let mut model = Model::new();
+        model.ai_panel_mut().turn_in_flight = true;
+
+        let _ = update(
+            &mut model,
+            Msg::Ai(AiEvent::SessionCrashed {
+                message: "the agent exited".to_string(),
+            }),
+        );
+
+        assert!(!model.ai_panel().turn_in_flight);
+    }
+
     fn session_ready(session_id: &str) -> Msg {
         Msg::Ai(AiEvent::SessionReady {
             session_id: session_id.to_string(),
@@ -563,6 +608,37 @@ mod tests {
             feature: "ai".to_string(),
             verb: verb.to_string(),
         }
+    }
+
+    /// The explicit dismiss action `local_error`'s own doc promises exists
+    /// independent of the next `SessionReady` clearing it automatically: a
+    /// user who has read the crash banner and does not intend to retry can
+    /// clear it directly, reachable whether or not the panel is entered.
+    #[test]
+    fn the_dismiss_verb_clears_a_set_local_error() {
+        let mut model = Model::new();
+        model.ai_panel_mut().local_error = Some("the agent exited".to_string());
+        model.dirty = false;
+
+        let effects = update(&mut model, ai_feature_invoke("dismiss"));
+
+        assert!(effects.is_empty());
+        assert_eq!(model.ai_panel().local_error, None);
+        assert!(model.dirty);
+    }
+
+    /// Dismissing with nothing set is a true no-op: no effect, and no
+    /// spurious repaint for a banner that was never on screen.
+    #[test]
+    fn the_dismiss_verb_with_no_local_error_is_a_noop() {
+        let mut model = Model::new();
+        model.dirty = false;
+
+        let effects = update(&mut model, ai_feature_invoke("dismiss"));
+
+        assert!(effects.is_empty());
+        assert_eq!(model.ai_panel().local_error, None);
+        assert!(!model.dirty);
     }
 
     /// Pins [`Model::ai_panel`]'s headline guarantee end to end, through the
