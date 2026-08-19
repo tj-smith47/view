@@ -102,6 +102,12 @@ enum Waiter {
     /// query has since superseded can be dropped by `update()` instead of
     /// clobbering it.
     BufferList { generation: u64 },
+    /// A `RpcCall::BufResolve` reply: the real buffer handle nvim holds a
+    /// path under, routed to the pump as `Msg::BufResolved` tagged with
+    /// `generation` so a review superseded while its resolve was in flight
+    /// drops the answer instead of binding a buffer onto the wrong
+    /// proposal.
+    BufResolve { generation: u64 },
     /// An async picker-preview lookup for a candidate path (see
     /// [`EngineHandle::request_preview`]): nothing is blocked on this
     /// `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -526,6 +532,25 @@ impl EngineHandle {
                                         generation,
                                         names,
                                     });
+                                }
+                            }
+                            Some(Waiter::BufResolve { generation }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to "no
+                                    // handle", the same "safe default over
+                                    // a stuck generation" precedent
+                                    // decode_buffer_list_reply and
+                                    // decode_hl_probe_reply already follow.
+                                    // The review surfaces it as a review
+                                    // that cannot bind rather than one that
+                                    // silently offers an accept with
+                                    // nowhere to write.
+                                    let buf = if error == Value::Nil {
+                                        decode_buf_resolve_reply(&result)
+                                    } else {
+                                        None
+                                    };
+                                    pump.route_buf_resolve(Msg::BufResolved { generation, buf });
                                 }
                             }
                             Some(Waiter::Preview { generation, path }) => {
@@ -1302,6 +1327,27 @@ impl EngineHandle {
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into a buffer handle and routed to the connection's pump as
+    /// `Msg::BufResolved` (see [`Waiter::BufResolve`]). Async on the same
+    /// terms as [`request_buffer_list`](Self::request_buffer_list): a diff
+    /// review opens from the runtime loop, which must never block on a
+    /// reply.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited; the request is never written in
+    /// either case.
+    pub fn request_buf_resolve(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::BufResolve { generation })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into the picker preview pane's text for `path` and routed to the
     /// connection's pump as `Msg::PickerPreviewReply` (see
     /// [`Waiter::Preview`]). Async on the same terms as
@@ -1684,6 +1730,17 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
             Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
         })
         .collect()
+}
+
+/// Decodes a buffer-resolve reply into the handle nvim answered with. A
+/// non-positive or absent number is `None` rather than a handle: nvim's own
+/// `bufadd` answers `0` for a name it will not take, and `BufferHandle(0)`
+/// is nvim's "current buffer" sentinel, which `RpcCall::BufAttach`'s own
+/// doc forbids -- attaching under it would record a generation no event
+/// this attach produces can ever be looked up by.
+fn decode_buf_resolve_reply(result: &Value) -> Option<view_core::msg::BufferHandle> {
+    let handle = result.as_u64()?;
+    (handle > 0).then_some(view_core::msg::BufferHandle(handle))
 }
 
 /// What one connection answered about the recovery it performed while

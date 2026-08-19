@@ -5,15 +5,18 @@ use crate::msg::{
     DeleteConfirmOutcome, Effect, EngineRequest, Key, MouseInput, Msg, ReplyValue, RpcCall,
 };
 use crate::native::ai_event::{AiCommand, PermissionOutcome};
+use crate::native::diff::BufTextChangedEvent;
 use crate::native::geometry::{Anchor, OverlayBox};
 use crate::native::statusline::SegmentUpdate;
 use crate::native::supervision::WedgeKind;
 
 mod ai;
+mod review;
 mod supervision;
 mod ui_event;
 
 use ai::on_ai_event;
+use review::review_key;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use ui_event::apply_ui_event;
 
@@ -352,18 +355,34 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             model.dirty = true;
             tree_git_refresh_effect(model)
         }
-        // The hunk-rebase state machine is this message's only intended
-        // consumer, and nothing in this tree folds a `BufTextChanged` into
-        // any state yet. Discarded rather than accumulated, which costs
-        // nothing proportional to buffer size: `linedata` already bounds to
-        // the edited range at the wire (see this variant's own doc), so
-        // even a no-op arm here holds the O(edit size) contract
-        // `RpcCall::BufAttach` states.
-        Msg::BufTextChanged { .. } => Vec::new(),
-        // Same no-op shape as `BufTextChanged` above, for the same reason:
-        // the hunk-rebase state machine is the only intended consumer, and
-        // nothing in this tree owns rebase state yet to tear down.
-        Msg::BufDetached { .. } => Vec::new(),
+        // The key-dispatch-path arm: one event per keystroke in an attached
+        // buffer, folded into the open review's hunks and nothing else. The
+        // work is O(open hunks) and allocation-free for an edit outside
+        // every anchor (see `native::diff::rebase`), so this holds the
+        // O(edit size) contract `RpcCall::BufAttach` states rather than
+        // adding a term in buffer size on top of it.
+        Msg::BufTextChanged {
+            buf,
+            generation,
+            firstline,
+            lastline,
+            linedata,
+            changedtick,
+            desynced,
+        } => review::on_buf_text_changed(
+            model,
+            BufTextChangedEvent {
+                buf,
+                generation,
+                firstline,
+                lastline,
+                linedata,
+                changedtick,
+                desynced,
+            },
+        ),
+        Msg::BufDetached { buf, generation } => review::on_buf_detached(model, buf, generation),
+        Msg::BufResolved { generation, buf } => review::on_buf_resolved(model, generation, buf),
         Msg::PickerResults { generation, items } => {
             let Some(p) = model.picker_mut() else {
                 return Vec::new();
@@ -1023,6 +1042,17 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                             option_id: option.option_id,
                         },
                     })];
+                }
+                // A review owns the panel's printable keys while it is
+                // open. Deliberately total for printables rather than a
+                // few keys layered over the composer: `a` cannot mean
+                // both "accept this hunk" and "type an a", and a review
+                // is a decision the user opened the panel to make. Named
+                // notations (`<Esc>` to un-enter, `<C-c>`, `<C-d>`) fall
+                // through to the arm below, so every way out of the panel
+                // still works from inside a review.
+                if model.ai_panel().pending_diff.is_some() && !notation.starts_with('<') {
+                    return review_key(model, &notation);
                 }
                 // Nothing pending: the panel's own composer keys. Every key
                 // not named below is swallowed rather than leaked to nvim --

@@ -425,6 +425,9 @@ impl<E: EngineOps> Executor<E> {
                     } => self.ops.set_buf_text(buf, &edits, undojoin),
                     RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
                     RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
+                    RpcCall::BufResolve { path, generation } => {
+                        self.ops.buf_resolve(&path, generation)
+                    }
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
                     // BufSetText is matched explicitly above rather than

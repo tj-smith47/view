@@ -15,9 +15,11 @@
 use super::views::{AiPanelView, Span};
 
 mod permission;
+mod review;
 mod transcript;
 
 pub use permission::PermissionPrompt;
+pub use review::{AcceptRefusal, DiffReviewState, ReviewSync};
 pub use transcript::{Transcript, TranscriptEntry, TranscriptEntryKind, TranscriptRole};
 
 /// The session's context-window and cost accounting, folded from
@@ -105,6 +107,18 @@ pub struct AiPanelState {
     /// The session's last-reported context-window and cost accounting, or
     /// `None` before the first `usage_update` arrives. See [`UsageStats`].
     pub usage: Option<UsageStats>,
+    /// The diff proposal currently under review, if any.
+    ///
+    /// One slot, not a queue, on the same terms as
+    /// [`Self::pending_permission`]: a proposal is the direct consequence
+    /// of an in-flight agent turn, and a review the user is part way
+    /// through must never be replaced out from under them by a second
+    /// proposal -- `update::ai`'s own arm is what decides what the second
+    /// one is answered with.
+    pub pending_diff: Option<DiffReviewState>,
+    /// The generation stamped on the next review's own async replies,
+    /// bumped per review on the `PickerState::generation` precedent.
+    pub review_generation: u64,
 }
 
 impl AiPanelState {
@@ -121,6 +135,8 @@ impl AiPanelState {
             turn_in_flight: false,
             local_error: None,
             usage: None,
+            pending_diff: None,
+            review_generation: 0,
         }
     }
 
@@ -143,9 +159,26 @@ impl AiPanelState {
     /// one always-visible place to say how to get back out.
     #[must_use]
     pub fn view(&self) -> AiPanelView {
+        // An open review takes over the scrolling rows rather than
+        // appending to them: its scroll region is its own hunks and their
+        // context, never the whole transcript with a diff somewhere in it
+        // (and never the whole buffer -- see `DiffReviewState::hunk_rows`).
+        // The transcript is still in state and comes back the moment the
+        // review closes.
+        let rows = match &self.pending_diff {
+            Some(review) => review.hunk_rows(),
+            None => self.transcript.rendered_rows(),
+        };
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
-            .with_rows(self.transcript.rendered_rows());
+            .with_rows(rows);
+        if let Some(review) = &self.pending_diff {
+            let mut rows = review.summary_rows();
+            if !self.focused {
+                rows.push(vec![Span::plain(ENTER_HINT)]);
+            }
+            view = view.with_review(rows, review.cursor_row());
+        }
         if let Some(message) = &self.local_error {
             let hint = if self.focused {
                 DISMISS_KEY_HINT

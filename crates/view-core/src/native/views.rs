@@ -63,6 +63,18 @@ pub enum StyleRole {
     GitDeleted,
     /// A tree row's git decoration for an untracked entry.
     GitUntracked,
+    /// A diff review row proposing a line be added.
+    ///
+    /// Its own role rather than a reuse of [`Self::GitAdded`], which means
+    /// a tree entry's git state: the two resolve to the same
+    /// [`ChromeGroup`] today, but they answer different questions ("what
+    /// did git say about this file" against "what would this hunk do to
+    /// this line"), and a role whose name lies about its subject is how a
+    /// later theme change to one of them silently repaints the other.
+    DiffAdded,
+    /// A diff review row proposing a line be removed, the counterpart of
+    /// [`Self::DiffAdded`].
+    DiffRemoved,
     /// An overlay's own title, as set into its top border. Its own role
     /// rather than part of the frame it sits in: a title is the only text
     /// on that row, and painting it in the border's deliberately dimmed
@@ -86,6 +98,8 @@ impl StyleRole {
             Self::DiagnosticError => Some(ChromeGroup::ErrorMsg),
             Self::DiagnosticWarning => Some(ChromeGroup::WarningMsg),
             Self::Match => Some(ChromeGroup::IncSearch),
+            Self::DiffAdded => Some(ChromeGroup::DiffAdd),
+            Self::DiffRemoved => Some(ChromeGroup::DiffDelete),
             Self::GitModified => Some(ChromeGroup::DiffChange),
             Self::GitAdded => Some(ChromeGroup::DiffAdd),
             Self::GitDeleted => Some(ChromeGroup::DiffDelete),
@@ -597,6 +611,18 @@ pub struct AiPanelView {
     /// is never a transient toast. Empty when nothing crashed, on the same
     /// "empty means nothing extra to draw" terms `pending_permission` uses.
     pub local_error: Vec<Vec<Span>>,
+    /// The open diff review's always-visible summary: which file, which
+    /// hunk of how many, and either the review's keys or the reason it can
+    /// no longer be acted on. Empty when no review is open, on the same
+    /// "empty means nothing extra to draw" terms above.
+    pub review: Vec<Vec<Span>>,
+    /// Which of [`Self::rows`] the scroll window keeps on screen, or `None`
+    /// when nothing anchors it. Set only while a review is open, where the
+    /// rows are that review's hunks and this names the focused one's header
+    /// -- hunk-jump is the review's navigation, so the window follows the
+    /// cursor rather than offering a free scroll across a file the proposal
+    /// mostly does not touch.
+    pub selected: Option<usize>,
 }
 
 impl AiPanelView {
@@ -638,6 +664,17 @@ impl AiPanelView {
     pub fn with_local_error(self, rows: Vec<Vec<Span>>) -> Self {
         Self {
             local_error: rows,
+            ..self
+        }
+    }
+
+    /// The same panel showing `rows` as its open review's summary, with
+    /// `selected` anchoring the scroll window on the focused hunk.
+    #[must_use]
+    pub fn with_review(self, rows: Vec<Vec<Span>>, selected: Option<usize>) -> Self {
+        Self {
+            review: rows,
+            selected,
             ..self
         }
     }

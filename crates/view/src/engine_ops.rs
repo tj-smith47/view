@@ -123,6 +123,10 @@ pub trait EngineOps {
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError>;
     /// Unsubscribes from `buf`'s edit stream (see `RpcCall::BufDetach`).
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError>;
+    /// Resolves `path` to the buffer handle nvim holds it under, tagged
+    /// `generation`; never blocks, and answers `Msg::BufResolved` (see
+    /// `RpcCall::BufResolve`).
+    fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError>;
     /// Reads the current buffer's path and nvim-authoritative text (see
     /// `EngineHandle::read_current_buffer_text`). Synchronous and
     /// bounded-timeout, not fire-and-forget -- see this trait's own doc.
@@ -233,6 +237,9 @@ impl EngineOps for EngineHandle {
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         self.buf_detach(buf)
     }
+    fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.buf_resolve(path, generation)
+    }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.read_current_buffer_text()
     }
@@ -342,6 +349,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     }
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         (**self).buf_detach(buf)
+    }
+    fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).buf_resolve(path, generation)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -455,6 +465,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     }
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         (**self).buf_detach(buf)
+    }
+    fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).buf_resolve(path, generation)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -600,6 +613,9 @@ impl EngineOps for FakeOps {
     fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
         self.record(format!("buf_detach({})", buf.0))
     }
+    fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("buf_resolve({path},{generation})"))
+    }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.record("read_current_buffer_text()".to_string())
             .map(|()| CurrentBufferRead::new(std::path::PathBuf::new(), String::new()))
@@ -740,6 +756,9 @@ impl EngineOps for SlowOps {
         Ok(())
     }
     fn buf_detach(&self, _buf: BufferHandle) -> Result<(), EngineError> {
+        Ok(())
+    }
+    fn buf_resolve(&self, _path: &str, _generation: u64) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {

@@ -14,10 +14,11 @@ use super::*;
 use crate::events::UiEvent;
 use crate::hl::HlAttr;
 use crate::model::{CmdlineState, OverlayId, OverlayKind};
-use crate::msg::{ExitInfo, RegisterType, ReplyToken};
+use crate::msg::{BufferHandle, ExitInfo, RegisterType, ReplyToken};
 use crate::native::ai_event::{
     AiCommand, PermissionOption, PermissionOptionKind, PermissionOutcome,
 };
+use crate::native::ai_panel::ReviewSync;
 use crate::native::geometry::OverlayBox;
 use crate::native::supervision::{
     ReconnectProgress, SupervisionChoice, WedgeKind, AUTOMATIC_RECOVERY_ATTEMPTS,
@@ -6392,5 +6393,436 @@ fn msg_clear_retracts_what_nvim_showed_and_keeps_what_view_raised() {
     assert!(
         texts.iter().any(|line| line == "view said this"),
         "an engine redraw retracted a line it never wrote: {texts:?}"
+    );
+}
+
+/// The buffer nvim resolves the proposal's path to in the review tests
+/// below. Any non-zero handle would do; a fixed one keeps the
+/// `Msg::BufTextChanged`/`Msg::BufDetached` guards checkable against a
+/// second, wrong handle.
+const REVIEW_BUF: BufferHandle = BufferHandle(7);
+
+const REVIEW_OLD: &str = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\n";
+const REVIEW_NEW: &str = "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\nETA\ntheta\n";
+
+/// Opens a two-hunk review through the same path a real proposal takes --
+/// the AI event, then nvim's resolve reply -- so every assertion below
+/// starts from a review that was bound, never one assembled by hand.
+fn live_review_model() -> Model {
+    let mut m = entered_ai_panel_model();
+    let effects = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::DiffProposed {
+            request_id: 1,
+            path: std::path::PathBuf::from("/tmp/review.rs"),
+            old_text: Some(REVIEW_OLD.to_string()),
+            new_text: REVIEW_NEW.to_string(),
+        }),
+    );
+    let generation = match rpc_calls(&effects).as_slice() {
+        [RpcCall::BufResolve { path, generation }] => {
+            assert_eq!(path, "/tmp/review.rs");
+            *generation
+        }
+        other => panic!("expected one BufResolve, got {other:?}"),
+    };
+    let effects = update(
+        &mut m,
+        Msg::BufResolved {
+            generation,
+            buf: Some(REVIEW_BUF),
+        },
+    );
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::BufAttach {
+            buf: REVIEW_BUF,
+            generation
+        }],
+        "a resolved path subscribes before any hunk can be trusted to rebase"
+    );
+    assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().hunks.len(), 2);
+    m
+}
+
+/// `Effect` carries no `PartialEq`, so assertions name the calls rather
+/// than the effects that carry them.
+fn rpc_calls(effects: &[Effect]) -> Vec<RpcCall> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::Rpc(call) => Some(call.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn review_generation(m: &Model) -> u64 {
+    m.ai_panel().pending_diff.as_ref().unwrap().generation
+}
+
+/// One edit inside the first hunk's anchor, as nvim reports it: the old
+/// row range is half-open and `linedata` is what now stands there.
+fn buf_text_changed(m: &Model, firstline: u64, lastline: u64, linedata: &[&str]) -> Msg {
+    Msg::BufTextChanged {
+        buf: REVIEW_BUF,
+        generation: review_generation(m),
+        firstline,
+        lastline,
+        linedata: linedata.iter().map(|s| (*s).to_string()).collect(),
+        changedtick: 2,
+        desynced: false,
+    }
+}
+
+/// The whole accept path from the key the user presses: one
+/// `BufSetText` per accepted hunk, the first un-joined and the second
+/// joined onto it so the pair undoes as the one review it was.
+#[test]
+fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, key("a"));
+    match rpc_calls(&effects).as_slice() {
+        [RpcCall::BufSetText {
+            buf,
+            edits,
+            undojoin,
+        }] => {
+            assert_eq!(*buf, REVIEW_BUF);
+            assert!(
+                !undojoin,
+                "the first write of a review has nothing to join onto"
+            );
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].lines, vec!["BETA".to_string(), String::new()]);
+        }
+        other => panic!("expected one BufSetText, got {other:?}"),
+    }
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().cursor,
+        1,
+        "the cursor follows the work onto the next undecided hunk"
+    );
+
+    let effects = update(&mut m, key("a"));
+    match rpc_calls(&effects).as_slice() {
+        [RpcCall::BufSetText { undojoin, .. }] => assert!(
+            undojoin,
+            "the second hunk joins the first so one undo retracts the review"
+        ),
+        other => panic!("expected one BufSetText, got {other:?}"),
+    }
+    assert!(
+        !m.ai_panel().pending_diff.as_ref().unwrap().is_open(),
+        "both hunks are decided"
+    );
+}
+
+/// Accept-all emits its writes bottom of the buffer first. Every call is
+/// emitted before nvim reports any of them back, so a top-down order would
+/// have the first write shift the rows the second one names.
+#[test]
+fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, key("A"));
+
+    let rows: Vec<u32> = rpc_calls(&effects)
+        .iter()
+        .map(|call| match call {
+            RpcCall::BufSetText { edits, .. } => edits[0].start_row,
+            other => panic!("expected BufSetText, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows[0] > rows[1],
+        "accept-all applied top-down: {rows:?} -- each write would shift the rows the next one names"
+    );
+}
+
+/// Rejecting is terminal and writes nothing: the buffer never learns the
+/// hunk existed.
+#[test]
+fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
+    let mut m = live_review_model();
+
+    for _ in 0..2 {
+        let effects = update(&mut m, key("x"));
+        assert!(
+            rpc_calls(&effects).is_empty(),
+            "a rejection is a decision not to write: {effects:?}"
+        );
+    }
+
+    let review = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert!(!review.is_open());
+    assert!(review
+        .hunks
+        .iter()
+        .all(|h| h.status == crate::native::diff::HunkStatus::Rejected));
+}
+
+/// Hunk-jump is the review's primary navigation and it skips what is
+/// already decided -- there is nothing left to do on a rejected hunk.
+#[test]
+fn hunk_jump_keys_wrap_and_skip_decided_hunks() {
+    let mut m = live_review_model();
+
+    let _ = update(&mut m, key("]"));
+    assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().cursor, 1);
+    let _ = update(&mut m, key("]"));
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().cursor,
+        0,
+        "next from the last open hunk wraps"
+    );
+    let _ = update(&mut m, key("["));
+    assert_eq!(m.ai_panel().pending_diff.as_ref().unwrap().cursor, 1);
+
+    let _ = update(&mut m, key("x"));
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().cursor,
+        0,
+        "deciding the hunk under the cursor moves off it"
+    );
+    let _ = update(&mut m, key("]"));
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().cursor,
+        0,
+        "the only remaining open hunk is the one already under the cursor"
+    );
+}
+
+/// The mandatory disconfirm: a hunk the user's own edit made stale cannot
+/// be force-applied through the dispatch path itself. An "accept anyway"
+/// affordance added later has to change `DiffReviewState::accept` and this
+/// test rather than route around the refusal.
+#[test]
+fn accepting_a_stale_hunk_through_the_key_path_is_refused_and_says_why() {
+    let mut m = live_review_model();
+    let change = buf_text_changed(&m, 1, 2, &["beta typed over"]);
+    let _ = update(&mut m, change);
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].status,
+        crate::native::diff::HunkStatus::Stale
+    );
+
+    let effects = update(&mut m, key("a"));
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "a stale hunk's rows no longer name what it was computed against: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].status,
+        crate::native::diff::HunkStatus::Stale,
+        "the refused accept left the hunk exactly as it was"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("re-diff")),
+        "the refusal names the way forward: {texts:?}"
+    );
+
+    let _ = update(&mut m, key("R"));
+    let effects = update(&mut m, key("a"));
+    assert_eq!(
+        rpc_calls(&effects).len(),
+        1,
+        "a re-diffed hunk accepts again: {effects:?}"
+    );
+}
+
+/// A desynced event means events were dropped before it, so no incremental
+/// state survives it: every open hunk goes stale, and the review itself is
+/// no longer writable -- a re-diff would narrow against a guess.
+#[test]
+fn a_desynced_change_retires_the_whole_review_not_just_its_hunks() {
+    let mut m = live_review_model();
+    let generation = review_generation(&m);
+
+    let _ = update(
+        &mut m,
+        Msg::BufTextChanged {
+            buf: REVIEW_BUF,
+            generation,
+            firstline: 0,
+            lastline: 0,
+            linedata: Vec::new(),
+            changedtick: 9,
+            desynced: true,
+        },
+    );
+
+    let review = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert_eq!(review.sync, ReviewSync::Desynced);
+    assert!(
+        review
+            .hunks
+            .iter()
+            .all(|h| h.status == crate::native::diff::HunkStatus::Stale),
+        "an incrementally rebased hunk after a dropped event is a wrong hunk"
+    );
+
+    let effects = update(&mut m, key("a"));
+    assert!(rpc_calls(&effects).is_empty());
+    let effects = update(&mut m, key("A"));
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "accept-all is not a way around the desync refusal: {effects:?}"
+    );
+    // re-diff is refused rather than narrowing against a guess
+    let _ = update(&mut m, key("R"));
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().hunks[0].status,
+        crate::native::diff::HunkStatus::Stale,
+        "re-diff on a desynced review changed nothing"
+    );
+}
+
+/// A detach nvim initiated ends every future rebase, so the review says so
+/// visibly instead of continuing to offer accepts it can no longer honour.
+#[test]
+fn a_detached_subscription_stales_every_hunk_and_refuses_accepts() {
+    let mut m = live_review_model();
+    let generation = review_generation(&m);
+
+    let _ = update(
+        &mut m,
+        Msg::BufDetached {
+            buf: REVIEW_BUF,
+            generation,
+        },
+    );
+
+    let review = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert_eq!(review.sync, ReviewSync::Detached);
+    assert!(review.sync.notice().is_some(), "the state is on screen");
+    assert!(review
+        .hunks
+        .iter()
+        .all(|h| h.status == crate::native::diff::HunkStatus::Stale));
+
+    let effects = update(&mut m, key("a"));
+    assert!(rpc_calls(&effects).is_empty());
+}
+
+/// A change event for another buffer, or from a superseded review, is not
+/// this review's -- folding it in would rebase against edits that never
+/// touched the file under review.
+#[test]
+fn change_events_from_another_buffer_or_generation_are_ignored() {
+    let mut m = live_review_model();
+    let generation = review_generation(&m);
+
+    let _ = update(
+        &mut m,
+        Msg::BufTextChanged {
+            buf: BufferHandle(99),
+            generation,
+            firstline: 1,
+            lastline: 2,
+            linedata: vec!["elsewhere".to_string()],
+            changedtick: 3,
+            desynced: false,
+        },
+    );
+    let _ = update(
+        &mut m,
+        Msg::BufTextChanged {
+            buf: REVIEW_BUF,
+            generation: generation + 1,
+            firstline: 1,
+            lastline: 2,
+            linedata: vec!["stale reply".to_string()],
+            changedtick: 4,
+            desynced: false,
+        },
+    );
+
+    assert!(
+        m.ai_panel()
+            .pending_diff
+            .as_ref()
+            .unwrap()
+            .hunks
+            .iter()
+            .all(|h| h.status == crate::native::diff::HunkStatus::Fresh),
+        "a foreign event rebased hunks it has no bearing on"
+    );
+}
+
+/// Closing the review ends the subscription it opened. Leaving it attached
+/// would keep nvim reporting every keystroke in that buffer forever.
+#[test]
+fn closing_the_review_detaches_the_buffer_it_attached() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, key("q"));
+
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::BufDetach { buf: REVIEW_BUF }]
+    );
+    assert!(m.ai_panel().pending_diff.is_none());
+}
+
+/// A path nvim cannot resolve leaves the review visibly unbindable rather
+/// than silently offering accepts with no buffer behind them.
+#[test]
+fn an_unresolvable_path_leaves_the_review_unbindable() {
+    let mut m = entered_ai_panel_model();
+    let effects = update(
+        &mut m,
+        Msg::Ai(crate::native::ai_event::AiEvent::DiffProposed {
+            request_id: 1,
+            path: std::path::PathBuf::from("/tmp/nope.rs"),
+            old_text: Some(REVIEW_OLD.to_string()),
+            new_text: REVIEW_NEW.to_string(),
+        }),
+    );
+    let generation = match rpc_calls(&effects).as_slice() {
+        [RpcCall::BufResolve { generation, .. }] => *generation,
+        other => panic!("expected one BufResolve, got {other:?}"),
+    };
+
+    let effects = update(
+        &mut m,
+        Msg::BufResolved {
+            generation,
+            buf: None,
+        },
+    );
+
+    assert!(rpc_calls(&effects).is_empty(), "nothing to attach to");
+    let review = m.ai_panel().pending_diff.as_ref().unwrap();
+    assert_eq!(review.sync, ReviewSync::Unbindable);
+    assert!(review.sync.notice().is_some());
+
+    let effects = update(&mut m, key("a"));
+    assert!(rpc_calls(&effects).is_empty());
+}
+
+/// While a review is open it owns the panel's printable keys, and the ways
+/// out of the panel still work: a stray printable never reaches nvim to
+/// edit the very buffer under review.
+#[test]
+fn a_review_owns_printables_but_not_the_named_ways_out() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, key("z"));
+    assert!(effects.is_empty(), "{effects:?}");
+    assert_eq!(m.ai_panel().input, "", "the composer took no review key");
+
+    let _ = update(&mut m, key("<Esc>"));
+    assert!(
+        !m.ai_panel().focused,
+        "<Esc> still un-enters the panel from inside a review"
+    );
+    assert!(
+        m.ai_panel().pending_diff.is_some(),
+        "un-entering does not decide the review"
     );
 }

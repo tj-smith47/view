@@ -3,7 +3,7 @@
 use crate::model::Model;
 use crate::msg::Effect;
 use crate::native::ai_event::{AiCommand, AiEvent, PermissionOutcome};
-use crate::native::ai_panel::PermissionPrompt;
+use crate::native::ai_panel::{DiffReviewState, PermissionPrompt};
 
 /// Applies `event` to [`Model::ai_panel`].
 ///
@@ -156,8 +156,61 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             panel.local_error = None;
             model.dirty = true;
         }
+        // A proposal opens the panel's own diff review. Its hunks are
+        // computed here, synchronously, from the whole-file pair the wire
+        // carries (`docs/acp-v1-wire-capture.md`'s `Diff` pin has no hunk
+        // list in it): the protocol hands over a before/after pair, so the
+        // boundaries a user accepts one at a time are this crate's to
+        // decide.
+        //
+        // The buffer the review writes into is resolved rather than
+        // assumed: nvim owns buffer identity the same way it owns buffer
+        // text, and the proposal names only a path.
+        AiEvent::DiffProposed {
+            request_id,
+            path,
+            old_text,
+            new_text,
+        } => {
+            let hunks = crate::native::diff::hunk::diff(old_text.as_deref(), &new_text);
+            if hunks.is_empty() {
+                // Nothing to decide: the proposal's "after" is what the
+                // file already holds. The tool call it arrived on is
+                // already in the transcript, so this is not a silent drop.
+                return Vec::new();
+            }
+            // A review the user is part way through is never replaced out
+            // from under them, on the same terms
+            // `AiPanelState::pending_diff`'s own doc states: the arriving
+            // proposal is announced instead, and the user closes the one
+            // they are on when they are ready for it.
+            if model
+                .ai_panel()
+                .pending_diff
+                .as_ref()
+                .is_some_and(DiffReviewState::is_open)
+            {
+                return model.engine.record_native_notice(
+                    format!(
+                        "AI agent proposed changes to {} while a review is open",
+                        path.display()
+                    ),
+                    false,
+                );
+            }
+            let mut effects = Vec::new();
+            let panel = model.ai_panel_mut();
+            if let Some(finished) = panel.pending_diff.take() {
+                effects.extend(finished.close_effect());
+            }
+            panel.review_generation += 1;
+            let review = DiffReviewState::new(request_id, path, panel.review_generation, hunks);
+            effects.push(review.bind_effect());
+            panel.pending_diff = Some(review);
+            model.dirty = true;
+            return effects;
+        }
         AiEvent::ThoughtChunk { .. }
-        | AiEvent::DiffProposed { .. }
         | AiEvent::FsReadRequested { .. }
         | AiEvent::FsWriteRequested { .. } => {}
     }

@@ -342,6 +342,14 @@ struct Route {
     /// latest generation's answer can still be the one a live picker is
     /// waiting on.
     deferred_buffer_list: Option<Msg>,
+    /// The newest `Msg::BufResolved` an attached-but-full sink refused,
+    /// held for the next routing attempt to retry.
+    ///
+    /// One slot, on the same terms as [`Route::deferred_buffer_list`]: a
+    /// diff review resolves its buffer once per proposal and stamps the
+    /// request with its own generation, so only the latest generation's
+    /// answer can still be the one a live review is waiting on.
+    deferred_buf_resolve: Option<Msg>,
     /// The newest `Msg::PickerPreviewReply` an attached-but-full sink
     /// refused, held for the next routing attempt to retry.
     ///
@@ -408,6 +416,7 @@ enum Held {
     Heartbeat,
     Claims,
     BufferList,
+    BufResolve,
     Preview,
     Rename,
     CreatePrompt,
@@ -423,6 +432,7 @@ impl Route {
             Held::Heartbeat => &mut self.deferred_heartbeat,
             Held::Claims => &mut self.deferred_claims,
             Held::BufferList => &mut self.deferred_buffer_list,
+            Held::BufResolve => &mut self.deferred_buf_resolve,
             Held::Preview => &mut self.deferred_preview,
             Held::Rename => &mut self.deferred_rename,
             Held::CreatePrompt => &mut self.deferred_create_prompt,
@@ -441,6 +451,7 @@ impl Route {
             Held::Heartbeat,
             Held::Claims,
             Held::BufferList,
+            Held::BufResolve,
             Held::Preview,
             Held::Rename,
             Held::CreatePrompt,
@@ -665,6 +676,18 @@ impl PumpShared {
     /// "lost".
     pub(crate) fn route_buffer_list(&self, msg: Msg) {
         self.route_held(msg, Held::BufferList);
+    }
+
+    /// Routes a `Msg::BufResolved` without ever dropping it on a full sink,
+    /// and without blocking, on the same terms as
+    /// [`route_probe_reply`](Self::route_probe_reply).
+    ///
+    /// A dropped resolve reply strands the diff review that asked for it:
+    /// nothing re-issues `RpcCall::BufResolve` on its own, so the review
+    /// would sit forever with no buffer bound, unable to attach and unable
+    /// to write a hunk the user accepts.
+    pub(crate) fn route_buf_resolve(&self, msg: Msg) {
+        self.route_held(msg, Held::BufResolve);
     }
 
     /// Routes a `Msg::SwapRecovered` without ever dropping it on a full sink,

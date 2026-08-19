@@ -661,6 +661,13 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn buf_resolve(
+            &self,
+            _path: &str,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn buf_detach(
             &self,
             _buf: view_core::msg::BufferHandle,

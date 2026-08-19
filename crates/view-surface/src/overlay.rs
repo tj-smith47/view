@@ -690,12 +690,20 @@ fn ai_body(view: &AiPanelView) -> Body {
         view.input
     )))];
     header.extend(view.local_error.iter().cloned().map(Line::Text));
+    // Below the crash banner and above the permission prompt: a review is
+    // actionable content that must survive truncation, but a request
+    // blocking the agent's own turn outranks it, since that one has the
+    // agent waiting on it.
+    header.extend(view.review.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     Body {
         title: view.title.clone(),
         header,
         items: view.rows.iter().cloned().map(Line::Text).collect(),
-        selected: None,
+        // Set only by an open review, whose scroll window follows the
+        // hunk-jump cursor; the transcript has no selection and scrolls
+        // from the top the way it always did.
+        selected: view.selected,
         // the crash banner and the pending permission's options are the
         // actionable content of this header; see `Body::header_keep_tail`'s
         // own doc for why they must outlive the question and composer line

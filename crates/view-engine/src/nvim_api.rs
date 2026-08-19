@@ -461,6 +461,30 @@ return { loaded = false }";
 /// survive the platform: `fnameescape` escapes `\` because `\` is a
 /// metacharacter on Unix, and on Windows `\` is the path separator, so
 /// every Windows path arrived doubled and opened nothing at all.
+/// Resolves a path to the real buffer handle nvim holds it under, creating
+/// and loading the buffer when there is none yet, for `RpcCall::BufResolve`.
+/// Constant, like every other chunk here: the path travels as
+/// `nvim_exec_lua`'s positional varargs, never interpolated into the source.
+///
+/// `bufadd` rather than `bufnr`, because a diff review opens against a file
+/// the agent proposed changes to, which may be one no window has ever shown;
+/// `bufnr` answers `-1` for that and there would be nothing to attach to.
+/// `bufload` is the load-bearing half: `nvim_buf_attach` on an unloaded
+/// buffer subscribes to a buffer with no lines in it, and the review would
+/// then anchor its hunks on text nvim does not yet hold.
+///
+/// The two guards below are what keep a caller from attaching to something
+/// that cannot answer for its own text: `bufadd` answers `0` for a name it
+/// refuses, and a `bufload` that throws (a directory, an unreadable file)
+/// resolves to no handle at all rather than to a loaded-looking one.
+const BUF_RESOLVE_CHUNK: &str = "\
+local path = ...
+local buf = vim.fn.bufadd(path)
+if buf == 0 then return 0 end
+local ok = pcall(vim.fn.bufload, buf)
+if not ok then return 0 end
+return buf";
+
 const OPEN_FILE_CHUNK: &str = "\
 local path = ...
 vim.api.nvim_cmd({ cmd = 'edit', args = { path }, magic = { file = false, bar = false } }, {})";
@@ -1533,6 +1557,29 @@ impl EngineHandle {
             ],
             generation,
             path.to_owned(),
+        )
+    }
+
+    /// Issues [`BUF_RESOLVE_CHUNK`] as an async request tagged with
+    /// `generation`, resolving `path` to the buffer handle a diff review
+    /// attaches to and writes accepted hunks into. Async by construction,
+    /// like [`list_buffers`](Self::list_buffers): this issues the request
+    /// through [`EngineHandle::request_buf_resolve`] and returns
+    /// immediately; the handle crosses back as `Msg::BufResolved` through
+    /// the connection's pump.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.request_buf_resolve(
+            "nvim_exec_lua",
+            vec![
+                Value::from(BUF_RESOLVE_CHUNK),
+                Value::Array(vec![Value::from(path)]),
+            ],
+            generation,
         )
     }
 

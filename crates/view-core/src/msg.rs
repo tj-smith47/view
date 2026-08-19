@@ -345,6 +345,24 @@ pub enum Msg {
         buf: BufferHandle,
         generation: u64,
     },
+    /// The decoded answer to one `RpcCall::BufResolve`: the real buffer
+    /// handle nvim holds `path` under, or `None` when the engine could not
+    /// produce one.
+    ///
+    /// `generation` is the diff review's own, and must match the review's
+    /// current one or the reply is dropped as stale -- the same discipline
+    /// `Msg::PickerResults` documents, and for the same reason: a second
+    /// proposal arriving while the first was still resolving must not bind
+    /// its buffer onto the review that superseded it.
+    ///
+    /// `None` is not a protocol error but a real outcome: a path nvim
+    /// refuses to load (a directory, an unreadable file) has no handle to
+    /// give, and a review that silently believed it had one would offer an
+    /// accept with nowhere to write.
+    BufResolved {
+        generation: u64,
+        buf: Option<BufferHandle>,
+    },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
     /// [`MessageEntry`](crate::model::MessageEntry) `toast::route` scheduled
@@ -1369,6 +1387,26 @@ pub enum RpcCall {
     /// produces can be looked up by.
     BufAttach {
         buf: BufferHandle,
+        generation: u64,
+    },
+    /// Resolves `path` to the real buffer handle nvim holds it under,
+    /// creating and loading the buffer when nvim has none for it yet, and
+    /// answers `Msg::BufResolved` tagged with `generation`.
+    ///
+    /// Its own call rather than a field on `BufAttach`, because
+    /// `BufAttach`'s own doc requires a real, resolved handle and this is
+    /// the only thing that produces one: an agent proposes a diff against a
+    /// *path* (`docs/acp-v1-wire-capture.md`'s `Diff` pin has no buffer
+    /// identity in it at all), and nothing in the pure core can map that to
+    /// a handle -- nvim owns buffer identity the same way it owns buffer
+    /// text.
+    ///
+    /// Loading the buffer, not merely creating a handle for it, is the
+    /// load-bearing half: `nvim_buf_attach` on an unloaded buffer
+    /// subscribes to a buffer with no lines in it, so the first real edit
+    /// would arrive as a change against text the review never anchored on.
+    BufResolve {
+        path: String,
         generation: u64,
     },
     /// Unsubscribes from `buf`'s edit stream via `nvim_buf_detach`. After
