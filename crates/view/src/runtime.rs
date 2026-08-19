@@ -220,6 +220,28 @@ fn drain_osc52<S: Osc52Sink>(osc52_rx: &mpsc::Receiver<Osc52Job>, sink: &mut S) 
     }
 }
 
+/// One pass's handoffs: the work [`run`]'s loop owes other parties before
+/// it can paint or sleep, in one step so a pass cannot perform half of it.
+///
+/// Both halves are queued by a dispatch this thread ran and can only be
+/// carried out by this thread -- the terminal writes because only the loop
+/// owns `Term`, the write outcomes because the message channel's consumer
+/// is this loop itself. Performed at the top of the pass rather than right
+/// after the dispatch that queued them: nothing blocks between here and the
+/// bottom of the previous pass's own dispatch loop, so this is effectively
+/// immediate, and one site covers every dispatch call the loop makes
+/// (resize, supervision, and the main queue) instead of one per call site.
+/// On the loop thread, same as `draw_surface` -- see [`run`]'s doc for the
+/// latency that costs.
+fn drain_pass_handoffs<S: Osc52Sink, E: EngineOps>(
+    osc52_rx: &mpsc::Receiver<Osc52Job>,
+    sink: &mut S,
+    executor: &Executor<E>,
+) {
+    drain_osc52(osc52_rx, sink);
+    executor.flush_write_outcomes();
+}
+
 /// Spawns `f` on its own thread, logging rather than panicking if the OS
 /// refuses to create one. `std::thread::spawn` panics on that failure
 /// internally (it is `Builder::new().spawn(f).expect(...)`), which would
@@ -313,12 +335,18 @@ impl<E: EngineOps> Executor<E> {
     /// Re-attempts every parked write outcome, in arrival order, stopping at
     /// the first the channel still refuses.
     ///
-    /// Called once per loop pass, before the wait: a channel too full to
-    /// take an outcome is by definition a channel with something in it, and
-    /// the loop's wait returns immediately while anything is queued, so the
-    /// parked outcome lands on the very next pass rather than waiting for
-    /// whatever the user does next. Costs one uncontended lock and a
-    /// `VecDeque::is_empty` per pass, which is the whole steady state.
+    /// Called once per loop pass from [`drain_pass_handoffs`], at the top:
+    /// what it carries is therefore what the *previous* pass parked, and an
+    /// outcome parked later in this pass -- the resize and supervision
+    /// dispatches both run after it -- waits for the next pass. That wait
+    /// is bounded by the same fact that made the parking necessary: a
+    /// channel too full to take an outcome is a channel with something in
+    /// it, and the loop's wait returns immediately while anything is
+    /// queued, so the next pass is the next thing that happens rather than
+    /// whatever the user does next.
+    ///
+    /// Costs one uncontended lock and a `VecDeque::is_empty` per pass,
+    /// which is the whole steady state.
     pub(crate) fn flush_write_outcomes(&self) {
         let mut parked = self
             .deferred_write_outcomes
@@ -1714,20 +1742,7 @@ pub fn run(
         // reachable only when a redraw arrives could never fire during the
         // total redraw stall it exists to bound
         expire_speculation(&mut model, follow_ups.speculate);
-        // drained at the top of every pass rather than right after the
-        // dispatch that queued it: nothing blocks between here and the
-        // bottom of the previous pass's own dispatch loop, so this is
-        // effectively immediate, and one drain site covers every dispatch
-        // call this loop makes (resize, below, and the main queue) instead
-        // of one per call site. On the loop thread, same as `draw_surface`
-        // below -- see `run`'s doc for the latency this costs.
-        drain_osc52(&osc52_rx, term);
-        // alongside the OSC52 drain and for the same reason: one site at the
-        // top of every pass covers every dispatch this loop makes. What it
-        // carries is a write outcome the message channel was too full to
-        // take when the write completed on this very thread (see
-        // `Executor::flush_write_outcomes`).
-        executor.flush_write_outcomes();
+        drain_pass_handoffs(&osc52_rx, term, &executor);
         // a resize the input reader has already seen describes the terminal
         // as it is now, whatever traffic is still queued ahead of its
         // Msg::Resized: folding it in here means no frame is ever painted
@@ -2400,6 +2415,62 @@ mod tests {
             msg_rx.try_recv(),
             Ok(Msg::BufWriteRefused { generation: 4, .. })
         ));
+    }
+
+    /// The delivery guarantee is the loop's, not the executor's: a parked
+    /// outcome reaches the review only because every pass performs its
+    /// handoffs before it can paint or sleep. Driven through that step --
+    /// the one `run`'s loop calls -- rather than by flushing here, so a
+    /// pass that stops carrying write outcomes is a failing test rather
+    /// than a review whose every later accept is refused for a race that
+    /// never happened.
+    #[test]
+    fn a_loop_pass_carries_through_a_parked_write_outcome() {
+        let (msg_tx, msg_rx) = mpsc::sync_channel(1);
+        let sender = crate::wake::LoopSender::new(msg_tx);
+        sender.try_send(Msg::RedrawReady).unwrap();
+        let executor =
+            Executor::new(SlowOps::new(std::time::Duration::ZERO)).with_toast_timer(sender);
+
+        // the write completes with the channel full, which is what an
+        // accept does in a buffer whose review is subscribed: the same
+        // keystroke has a text-change and a redraw queued ahead of it
+        let (executor, flow) = without_blocking(move || {
+            let flow = executor.run(Effect::Rpc(RpcCall::BufSetText {
+                buf: BufferHandle(3),
+                edits: vec![TextEdit {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 0,
+                    end_col: 1,
+                    lines: vec!["x".into()],
+                }],
+                undojoin: true,
+                expected_changedtick: Some(12),
+                generation: 4,
+            }));
+            (executor, flow)
+        });
+        assert!(matches!(flow, Flow::Continue));
+        // and the loop consumes that traffic, as it does on every wakeup
+        assert!(matches!(msg_rx.try_recv(), Ok(Msg::RedrawReady)));
+
+        let (_osc52_tx, osc52_rx) = mpsc::channel();
+        let mut sink = FakeOsc52Sink::default();
+        drain_pass_handoffs(&osc52_rx, &mut sink, &executor);
+
+        let msg = msg_rx.try_recv().ok();
+        assert!(
+            matches!(
+                msg,
+                Some(Msg::BufWriteApplied {
+                    buf: BufferHandle(3),
+                    generation: 4,
+                    ..
+                })
+            ),
+            "the pass must carry the parked outcome through, got {msg:?}"
+        );
     }
 
     /// `RpcCall::BufAttach`/`BufDetach` are matched explicitly in
