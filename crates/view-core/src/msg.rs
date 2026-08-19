@@ -303,9 +303,13 @@ pub enum Msg {
     /// `desynced` is `true` when this connection knows its own delivery
     /// cannot be trusted: either a prior event for this same `buf` was
     /// dropped at the send site (the reader thread's sink is a bounded,
-    /// non-blocking `try_send` -- a burst of hunks from one logical edit,
-    /// e.g. hundreds of single-line events from one large `:s`, can exceed
-    /// its capacity), or a prior wire event for this `buf` failed to decode
+    /// non-blocking `try_send` -- a burst of hunks from one logical edit
+    /// can exceed its capacity; live capture
+    /// (`docs/nvim-buf-attach-wire-capture.md` #8) shows a single `:%s`
+    /// across 200 lines produces exactly ONE event, but undoing it (`u`)
+    /// produces 200 single-line events, tick-coherent -- undo, not `:s`
+    /// itself, is the realistic burst case), or a prior wire event for this
+    /// `buf` failed to decode
     /// (a shape this crate did not expect, including `lastline == -1`). Both
     /// are marked on `buf`'s connection-side state and consumed by --
     /// stamped onto -- the next event this same `buf` manages to deliver, so

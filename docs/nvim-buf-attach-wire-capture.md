@@ -214,6 +214,43 @@ attach-generation entry was still present when this event arrived, so
 signal that its subscription died out from under it, distinct from the
 silent local-only removal a self-initiated detach performs (section 5).
 
+## 8. `u` (undo) after a large `:%s` is the actual burst trigger, not `:%s` itself
+
+Same session, same 200-line buffer and `:%s/row/ROW/` from section 4 above
+(one event, `tick=4`, `firstline=0, lastline=200, more=false` -- reproduced
+identically here, confirming section 4's claim still holds). The follow-up
+`u` (`nvim_command("undo")`) that reverts it is the burst:
+
+```
+nvim_command("undo")
+  -> 200x nvim_buf_lines_event(buf=Ext(0,[1]), tick=5..204, firstline=N, lastline=N+1,
+                                linedata=[<one line>], more=false)
+     (N descending 199 -> 0, one event per line, in that order)
+  -> 1x nvim_buf_changedtick_event
+```
+
+First three: `(tick=5, firstline=199, lastline=200, linedata=["row199"])`,
+`(tick=6, firstline=198, lastline=199, linedata=["row198"])`, `(tick=7,
+firstline=197, lastline=198, linedata=["row197"])`. Last three: `(tick=202,
+firstline=2, lastline=3, linedata=["row2"])`, `(tick=203, firstline=1,
+lastline=2, linedata=["row1"])`, `(tick=204, firstline=0, lastline=1,
+linedata=["row0"])`. All 200 are single-line (`lastline - firstline == 1`,
+`linedata.len() == 1`), all `more: false`, and `tick` is strictly
+consecutive across every one of them (`5, 6, 7, ..., 204`) -- tick-coherent,
+confirming these are 200 real, individually-applied edits nvim is replaying
+one line at a time, not one logical change nvim merely reports in pieces.
+Reading the buffer back afterward confirms the full revert (`["row0",
+"row1", "row2", ...]`, 200 lines).
+
+This inverts the naive assumption section 4 might invite: the substitution
+that TOUCHES 200 lines produces exactly one event, but UNDOING it produces
+200. `:%s` itself is not the burst case a sink-overrun defense needs to
+survive -- a single `u` after ANY multi-line change is, since nvim's undo
+mechanism reverts line-by-line rather than replaying the original command.
+This is the live evidence behind `Msg::BufTextChanged::desynced` and the
+reader thread's drop-detection: the burst that can realistically outrun a
+bounded sink is an undo (or redo) of a large edit, not a large edit itself.
+
 ## Conclusions for the implementation
 
 - `RpcCall::BufAttach` issues `nvim_buf_attach(buf, false, {})` -- `false`

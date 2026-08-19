@@ -386,6 +386,19 @@ struct Route {
     /// disk does not contain with nothing on screen saying where it came
     /// from, and the report nvim wrote about it still covering the buffer.
     deferred_swap_recovery: Option<Msg>,
+    /// Every `Msg::BufDetached` an attached-but-full sink refused, held for
+    /// the next routing attempt to retry.
+    ///
+    /// A queue, not a single slot like the `deferred_*` fields above: each
+    /// carries a distinct buffer's own detach, so a second one arriving
+    /// while the first is still parked must never evict it the way a
+    /// superseded probe reply would. There is no "next event for this
+    /// buffer" to re-carry a lost `Msg::BufDetached` the way
+    /// `Msg::BufTextChanged::desynced` recovers a lost text-change (see
+    /// its own doc comment) -- once the local attach-generation entry is
+    /// removed, this is the only remaining copy, so every one queued here
+    /// must eventually be delivered, not merely the newest.
+    deferred_buf_detached: VecDeque<Msg>,
 }
 
 /// Which never-drop slot a refused `Msg` waits in.
@@ -443,6 +456,30 @@ impl Route {
                 continue;
             };
             self.hold_if_refused(which, sink.try_send(msg));
+        }
+        self.retry_deferred_buf_detached();
+    }
+
+    /// Re-attempts every held `Msg::BufDetached`, in arrival order,
+    /// stopping at the first the sink still refuses: a still-full sink
+    /// would also refuse everything queued behind it, and sending a later
+    /// one first would misreport which buffer detached before which.
+    /// Cheap when nothing is parked (the overwhelmingly common case, since
+    /// `Route` is shared with every ordinary `route_msg`/`fold_redraw`
+    /// call the reader thread makes): one `VecDeque::is_empty` check,
+    /// nothing else.
+    fn retry_deferred_buf_detached(&mut self) {
+        if self.deferred_buf_detached.is_empty() {
+            return;
+        }
+        let Some(sink) = self.sink.clone() else {
+            return;
+        };
+        while let Some(msg) = self.deferred_buf_detached.pop_front() {
+            if let Err(TrySendError::Full(msg)) = sink.try_send(msg) {
+                self.deferred_buf_detached.push_front(msg);
+                break;
+            }
         }
     }
 
@@ -544,6 +581,37 @@ impl PumpShared {
                 route.presink.push_back(msg);
                 Ok(())
             }
+        }
+    }
+
+    /// Routes a `Msg::BufDetached` without ever dropping it on a full sink.
+    ///
+    /// Unlike `route_msg`'s `Err`, which the reader thread treats as fatal
+    /// (see module docs), and unlike `Msg::BufTextChanged`'s own
+    /// drop-and-desync contract (there is always "the next event for this
+    /// buffer" to own up to a lost text-change), a detach has no such
+    /// recovery: the local attach-generation entry is already removed by
+    /// the time this is called, so there is no "this buffer's next event"
+    /// left to carry a lost `Msg::BufDetached` forward. A refused send is
+    /// queued in [`Route::deferred_buf_detached`] instead, retried at the
+    /// head of every subsequent `route_msg`/`route_buf_detached` call and
+    /// every `fold_redraw` (the reader thread's most frequent routing
+    /// attempt of all, per [`fold_redraw`](Self::fold_redraw)'s own doc).
+    pub(crate) fn route_buf_detached(&self, msg: Msg) {
+        let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
+        route.retry_deferred();
+        if !route.deferred_buf_detached.is_empty() {
+            // an older detach is still stuck behind a full sink; queue
+            // behind it rather than risk this one landing out of order
+            route.deferred_buf_detached.push_back(msg);
+            return;
+        }
+        let Some(sink) = route.sink.clone() else {
+            route.presink.push_back(msg);
+            return;
+        };
+        if let Err(TrySendError::Full(msg)) = sink.try_send(msg) {
+            route.deferred_buf_detached.push_back(msg);
         }
     }
 

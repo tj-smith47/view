@@ -43,7 +43,13 @@ use crate::engine_ops::EngineOps;
 /// [`AiWorker::dispatch`] from the loop thread while `Effect::AiPromptSubmit`
 /// queued here for the (slower, four-read) trip to the same call --
 /// overtaking was possible because they were two independent paths racing
-/// for the same destination.
+/// for the same destination. Total ordering is the deliberate point of
+/// sharing one queue: the tradeoff is a `Direct` command (e.g. `Cancel`)
+/// that happens to queue behind a slow `Submit`'s four reads waits for
+/// them, bounded added latency this worker's own thread absorbs -- never
+/// the loop thread, which only ever queues onto the channel and never
+/// blocks on what this worker does with it, so this ordering cost never
+/// reaches the paint path.
 pub enum AiContextJob {
     /// A submitted prompt's raw text -- this worker reads the four context
     /// sources and assembles [`AiCommand::Prompt`] before dispatching.

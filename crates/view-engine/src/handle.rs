@@ -669,9 +669,14 @@ impl EngineHandle {
                                 // though: `nvim_buf_lines_event` is a diff
                                 // against a specific prior state, not a
                                 // resend of anything droppable-and-reissuable,
-                                // so a burst that outruns the sink (hundreds
-                                // of single-line events from one large `:s`)
-                                // genuinely loses that content. What keeps
+                                // so a burst that outruns the sink (an undo
+                                // of one large edit -- live capture
+                                // `docs/nvim-buf-attach-wire-capture.md` #8
+                                // shows a single `:%s` across 200 lines
+                                // produces ONE event, but undoing it produces
+                                // 200 single-line events -- not `:s` itself,
+                                // which never bursts) genuinely loses that
+                                // content. What keeps
                                 // this from silently corrupting the
                                 // hunk-rebase state machine's own state is
                                 // `decode_buf_lines_event`'s desync marking
@@ -725,7 +730,18 @@ impl EngineHandle {
                                         .ok()
                                         .and_then(|mut attached| attached.remove(&buf));
                                     if let Some(entry) = removed {
-                                        let _ = pump.route_msg(Msg::BufDetached {
+                                        // must-deliver, unlike the
+                                        // best-effort `route_msg` calls
+                                        // above: the map entry above is
+                                        // already gone, so a `try_send`
+                                        // this loses has no "next event for
+                                        // this buffer" to carry a retry --
+                                        // `route_buf_detached` queues a
+                                        // refused send instead of dropping
+                                        // it, retried at the head of every
+                                        // subsequent routing attempt (see
+                                        // its own doc comment)
+                                        pump.route_buf_detached(Msg::BufDetached {
                                             buf: view_core::msg::BufferHandle(buf),
                                             generation: entry.generation,
                                         });
@@ -2759,6 +2775,162 @@ mod tests {
             !desynced2,
             "the desync flag must clear once a delivered event has carried it"
         );
+    }
+
+    /// The drop-at-sink half of the desync contract, not merely the
+    /// decode-failure half the tests above cover: a `nvim_buf_lines_event`
+    /// that decodes cleanly but loses its `try_send` race against a full
+    /// sink must still mark the entry desynced. This drives the actual
+    /// reader thread's `route_msg`-failure branch through a genuinely full
+    /// `PumpShared` sink (the established idiom from
+    /// `full_channel_on_view_vim_enter_delivers_fatal_reason_naming_the_method`),
+    /// unlike the tests above which call `decode_buf_lines_event` directly
+    /// and so can never observe this branch at all.
+    #[test]
+    fn a_buf_lines_event_dropped_by_a_full_sink_marks_the_buffer_desynced_for_the_next_delivered_event(
+    ) {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        h.note_buf_attach(1, 7);
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let _dpump = pump.attach_sink(tx.clone());
+
+        write_request(&mut peer_write, 1, "barrier_method");
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 1,
+                error: Value::from("method not supported"),
+                result: Value::Nil,
+            },
+            "barrier request must get the ordinary auto-reply before the reader is trusted \
+             to be idle and waiting for the next message"
+        );
+
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        let dropped_notif = RpcMessage::Notification {
+            method: "nvim_buf_lines_event".into(),
+            params: vec![
+                Value::Ext(0, vec![1]),
+                Value::from(9u64),
+                Value::from(0u64),
+                Value::from(1u64),
+                Value::Array(vec![Value::from("dropped")]),
+                Value::from(false),
+            ],
+        };
+        rmpv::encode::write_value(&mut peer_write, &dropped_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Msg::Resized { .. }
+            ),
+            "dummy fill must be the first message drained, proving the real event above \
+             genuinely lost its try_send race instead of landing in the channel"
+        );
+
+        let clean_notif = RpcMessage::Notification {
+            method: "nvim_buf_lines_event".into(),
+            params: vec![
+                Value::Ext(0, vec![1]),
+                Value::from(10u64),
+                Value::from(0u64),
+                Value::from(1u64),
+                Value::Array(vec![Value::from("clean")]),
+                Value::from(false),
+            ],
+        };
+        rmpv::encode::write_value(&mut peer_write, &clean_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::BufTextChanged { desynced, .. } = msg else {
+            unreachable!("expected BufTextChanged, got {msg:?}");
+        };
+        assert!(
+            desynced,
+            "the event following a drop-at-sink must carry desynced: true, the same as a \
+             decode failure would"
+        );
+    }
+
+    /// The must-deliver half of `Msg::BufDetached`'s contract: a nvim-
+    /// initiated detach that loses its `try_send` race against a full sink
+    /// must not be dropped the way `Msg::BufTextChanged` tolerates (there is
+    /// no "next event for this buffer" once the map entry is gone -- see
+    /// `PumpShared::route_buf_detached`'s own doc comment). It is parked
+    /// instead, and the very next routing attempt of ANY message -- not
+    /// only another detach -- must flush it first, ahead of whatever that
+    /// other message is.
+    #[test]
+    fn a_dropped_buf_detached_is_parked_and_flushed_by_the_next_routed_message() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        h.note_buf_attach(1, 7);
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let _dpump = pump.attach_sink(tx.clone());
+
+        write_request(&mut peer_write, 1, "barrier_method");
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        assert_eq!(
+            RpcMessage::from_value(v).unwrap(),
+            RpcMessage::Response {
+                msgid: 1,
+                error: Value::from("method not supported"),
+                result: Value::Nil,
+            },
+            "barrier request must get the ordinary auto-reply before the reader is trusted \
+             to be idle and waiting for the next message"
+        );
+
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        let detach_notif = RpcMessage::Notification {
+            method: "nvim_buf_detach_event".into(),
+            params: vec![Value::Ext(0, vec![1])],
+        };
+        rmpv::encode::write_value(&mut peer_write, &detach_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Msg::Resized { .. }
+            ),
+            "dummy fill must be the first message drained, proving the detach above \
+             genuinely lost its try_send race instead of landing in the channel"
+        );
+
+        // any other routed message -- a view_bridge notification, nothing
+        // to do with buffers or detaches -- must still flush the parked
+        // BufDetached first, ahead of itself
+        let bridge_notif = RpcMessage::Notification {
+            method: "view_bridge".into(),
+            params: vec![Value::from("colorscheme"), Value::from("dracula")],
+        };
+        rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::BufDetached { buf, generation } = msg else {
+            unreachable!("expected the parked Msg::BufDetached to be flushed first, got {msg:?}");
+        };
+        assert_eq!(buf, view_core::msg::BufferHandle(1));
+        assert_eq!(generation, 7);
     }
 
     /// A trigger the bridge carries for a consumer this build does not have
