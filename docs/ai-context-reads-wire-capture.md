@@ -446,11 +446,21 @@ end rather than looping on `virtcol2col`'s past-end-of-line clamp.
 
 The mixed-length-rows short-row case from "Fix round 2"
 (`["alphabet","be","gammaxyz"]`, columns 1-5, `"be"` contributing its full 2
-columns) is unaffected by this padding rule: running out of row (no
-character occupies the requested column at all) is not the same as a
-character being partially covered, and still contributes nothing extra, not
-padding, exactly as before -- re-verified against the same oracle,
-unchanged.
+columns) is unaffected by this padding rule: running out of row PART WAY
+THROUGH the rectangle is not the same as a character being partially
+covered, and still contributes nothing extra, not padding -- re-verified
+against the same oracle, unchanged:
+
+```
+lo_vcol = 1, hi_vcol = 5
+getreg('"') -> "alpha\nbe\ngamma"     -- row 2 contributes 2 columns, not 5
+getregtype('"') -> "\x165"
+```
+
+That result was originally read here as the general rule for every short
+row, which it is not: it holds only for a row that reaches INTO the
+rectangle. A row ending before the rectangle begins is a different case
+with a different answer, captured in "Fix round 4" below.
 
 All four fixtures above (the tab anchor low-bound case, the two right-edge
 padding cases, and the left-edge padding case) plus the existing ASCII and
@@ -458,6 +468,106 @@ single-cell-multi-byte (`é`) regression cases were captured with a
 standalone Python msgpack-rpc client against `nvim --clean --headless
 --listen <socket>` (NVIM v0.12.4), using `normal! y` + `getreg('"')` as the
 oracle, before writing any fix code.
+
+## Fix round 4 (review-driven): the `$`-block bypassed the padding walker, and a row ending before the block pads to the block's full width
+
+Two residues of round 3, both captured live against the same
+`nvim_input` + `y` + `getreg('"')` oracle before any code changed.
+
+### The `$`-block's raw byte slice skipped the padding rule at its LOW bound
+
+Round 3's `blockwise_row_text` early-returned a raw `string.sub` byte slice
+for a `$`-block, before reaching the padding walker. A `$`-block's HIGH
+bound is per-row by definition, but its LOW bound is still one shared screen
+column -- and it splits a multi-cell character exactly as readily as an
+ordinary block's does.
+
+Buffer `["abcdefgh", "\txyz"]`, `gg0lll<C-v>` then `j$` (low bound = screen
+column 4; row 2's leading tab spans columns 1-8, so column 4 lands inside
+it):
+
+```
+virtcol('v', 1) -> [4, 4]         -- 'd' on row 1, single-cell
+virtcol('.', 1) -> [12, 12]
+getcurpos()[5] -> 2147483647      -- MAXCOL: this is a $-block
+lo_vcol = 4
+virtcol({1,'$'}) -> 9,  virtcol({2,'$'}) -> 12
+
+getreg('"') -> "defgh\n     xyz"  -- row 2: FIVE pad spaces (the tab's
+                                     covered cells, columns 4-8), then "xyz"
+getregtype('"') -> "\x168"
+```
+
+Round 3's chunk returned `"defgh\n\txyz"` for the same selection -- the raw
+tab byte, an unsplit character nvim never yanks here. Routing the `$` case
+through the same walker with a per-row `hi_vcol = virtcol({row,'$'}) - 1`
+reproduces the oracle exactly, with no separate `$` logic left in the
+function. Live-verified by
+`read_cursor_context_with_a_dollar_blockwise_selection_whose_low_bound_splits_a_tab`.
+
+### A row ending BEFORE the block start pads to the block's full width
+
+Buffer `["alphabet", "ab", "gammaxyz"]`, `gg0llll<C-v>` then `jjll` (screen
+columns 5-7). Row 2 (`"ab"`, 2 columns) never reaches column 5 at all:
+
+```
+virtcol('v', 1) -> [5, 5]
+virtcol('.', 1) -> [7, 7]
+lo_vcol = 5, hi_vcol = 7
+virtcol({2,'$'}) -> 3            -- row 2 ends at column 2
+
+getreg('"') -> "abe\n   \naxy"   -- row 2: THREE pad spaces, the block's
+                                    own width, not the empty string
+getregtype('"') -> "\x163"
+```
+
+Round 3's walker (`while v <= hi_vcol and v < end_vcol`) exits immediately
+when `lo_vcol >= end_vcol`, yielding `""` for that row. An empty row behaves
+identically to `"ab"` here -- same buffer with `["alphabet", "", "gammaxyz"]`
+and the same keys yields the same `"abe\n   \naxy"`.
+
+The boundary between this case and the round-2 "short row contributes what
+it has" case is exact, and it is asymmetric. Two captures pin it, both with
+block columns 3-5 (`gg0ll<C-v>jjll`):
+
+```
+["abcdefgh", "a",  "gammaxyz"]   virtcol({2,'$'}) -> 2  (row ends at col 1)
+  getreg('"') -> "cde\n   \nmma"       -- PADDED to the block's 3 columns
+
+["abcdefgh", "ab", "gammaxyz"]   virtcol({2,'$'}) -> 3  (row ends at col 2)
+  getreg('"') -> "cde\n\nmma"          -- NOT padded, empty
+```
+
+So the predicate is `virtcol({row,'$'}) < lo_vcol` (the row ends strictly
+before the block's first column), not `lo_vcol >= end_vcol`: a row reaching
+exactly `lo_vcol - 1` is flush with the block and contributes nothing. This
+matches nvim's own `block_prep` short-line test in `ops.c`, which pads only
+when the line's total width falls short of the block's start column.
+Live-verified by
+`read_cursor_context_with_a_blockwise_selection_where_a_row_ends_before_the_block`.
+
+Both fixes live in one predicate ordering: compute `end_vcol` first, let a
+`$`-block rewrite `hi_vcol` to `end_vcol - 1`, then apply the
+ends-before-the-block padding. That ordering is what makes the two
+interact correctly for a `$`-block over a short row, where `hi_vcol` falls
+BELOW `lo_vcol` and the pad width clamps to zero -- confirmed against the
+oracle rather than assumed:
+
+```
+["abcdefgh", "ab"]  gg0lll<C-v> then j$   -> getreg('"') = "cdefgh\n"
+["abcdefgh", ""]    gg0lll<C-v> then j$   -> getreg('"') = "abcdefgh\n"
+```
+
+(Round 3's chunk returned `"cdefgh\nb"` for the first of those -- the raw
+slice clamped `lo0` to the row's length instead of yielding nothing.)
+
+All nine round-4 captures (the two review cases, the empty-row variant, the
+two boundary captures, the two `$`-block short-row guards, and the two
+unchanged round-2/round-3 controls) were taken against `nvim --clean
+--headless --listen <socket>` (NVIM v0.12.4) with a UI attached, driving the
+selection through `nvim_input` and reading `getreg('"')` after `y`. The
+candidate chunk agreed with the oracle on all nine before any source file
+was edited.
 
 ## `vim.diagnostic.get(0)`: 0-indexed, flat, closed severity range
 

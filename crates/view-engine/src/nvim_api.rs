@@ -657,7 +657,17 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 ///   never that character's raw, unsplittable bytes. A `$`-block
 ///   (`getcurpos()`'s `curswant` field, 1-indexed `getcurpos()[5]` in Lua,
 ///   equal to nvim's `MAXCOL` sentinel `2147483647`) extends every row to
-///   its own end instead of the shared screen-column bound.
+///   its own end instead of the shared screen-column bound, expressed as a
+///   per-row high bound (`virtcol({row, '$'}) - 1`) fed through that same
+///   walker rather than a raw byte slice -- a raw slice skips the padding
+///   rule, and a `$`-block's shared LOW bound splits a multi-cell
+///   character just as readily (live-confirmed against a leading tab).
+///   A row ending strictly before `lo_vcol` contributes
+///   the rectangle's full width in spaces, nvim's own padding for a line
+///   too short to reach the block at all; the boundary is exact and
+///   asymmetric -- a row reaching `lo_vcol - 1` contributes nothing, and a
+///   row merely ending INSIDE the rectangle contributes only the cells it
+///   has, never trailing padding.
 ///
 /// The `selection_*` keys are simply absent from the reply when no
 /// selection is active, the same "absent key, not a null" convention
@@ -679,11 +689,13 @@ local function byte_end_of_char(line, byte_col0)
 end
 local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block)
   local line = line_text(row)
-  if dollar_block then
-    local lo0 = math.min(vim.fn.virtcol2col(win, row, lo_vcol) - 1, #line)
-    return string.sub(line, lo0 + 1, #line)
-  end
   local end_vcol = vim.fn.virtcol({ row, '$' })
+  if dollar_block then
+    hi_vcol = end_vcol - 1
+  end
+  if end_vcol < lo_vcol then
+    return string.rep(' ', math.max(hi_vcol - lo_vcol + 1, 0))
+  end
   local parts = {}
   local v = lo_vcol
   while v <= hi_vcol and v < end_vcol do

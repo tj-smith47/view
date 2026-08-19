@@ -470,6 +470,128 @@ fn read_cursor_context_with_a_blockwise_selection_where_the_low_bound_splits_a_w
     assert_eq!(selection.range, (1, 3));
 }
 
+/// A `$`-block's HIGH bound is per-row, but its LOW bound is still one
+/// shared screen column, and it splits a multi-cell character exactly as
+/// readily as an ordinary block's does: column 4 lands inside row 2's
+/// leading tab (columns 1-8), so nvim yanks the tab's five covered cells as
+/// five spaces, never the raw tab byte. Reading the `$` case as a raw byte
+/// slice bypasses that padding entirely.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_whose_low_bound_splits_a_tab() {
+    let engine = spawn();
+    set_lines(&engine, &["abcdefgh", "\txyz"]);
+
+    engine.handle.input("gg0lll").expect("move to column 4");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("j$")
+        .expect("extend the block to a dollar-block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "defgh\n     xyz");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// A row ending BEFORE the rectangle's first column contributes the
+/// rectangle's full width in spaces -- distinct from a row that reaches
+/// into the rectangle and merely runs out part way through, which
+/// contributes only what it has. Row 2 (`"ab"`, 2 columns) never reaches
+/// the block's column 5 at all.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_where_a_row_ends_before_the_block() {
+    let engine = spawn();
+    set_lines(&engine, &["alphabet", "ab", "gammaxyz"]);
+
+    engine.handle.input("gg0llll").expect("move to column 5");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jjll")
+        .expect("extend the block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "abe\n   \naxy");
+    assert_eq!(selection.range, (1, 3));
+}
+
+/// The boundary between padding and not padding is exact and asymmetric: a
+/// row ending exactly one column short of the block (row 2's `"ab"` against
+/// a block starting at column 3) is flush with it and contributes the empty
+/// string, while the same row against a block starting at column 5 pads to
+/// the full block width. Padding every row that fails to reach the block
+/// would over-pad this one.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_where_a_row_ends_flush_with_the_block() {
+    let engine = spawn();
+    set_lines(&engine, &["abcdefgh", "ab", "gammaxyz"]);
+
+    engine.handle.input("gg0ll").expect("move to column 3");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jjll")
+        .expect("extend the block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "cde\n\nmma");
+    assert_eq!(selection.range, (1, 3));
+}
+
+/// The two rules compose on a `$`-block over a row ending before the shared
+/// low bound: the per-row upper bound falls BELOW that low bound, so the
+/// padding width clamps to zero and the row contributes nothing -- not the
+/// row's own tail, which a low-bound byte slice clamped to the row's length
+/// would wrongly emit.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_over_a_row_ending_before_the_block() {
+    let engine = spawn();
+    set_lines(&engine, &["abcdefgh", "ab"]);
+
+    engine.handle.input("gg0lll").expect("move to column 4");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("j$")
+        .expect("extend the block to a dollar-block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "cdefgh\n");
+    assert_eq!(selection.range, (1, 2));
+}
+
 /// No diagnostics posted reads back an empty list, not an error -- the
 /// ordinary case for a freshly opened buffer.
 #[test]
