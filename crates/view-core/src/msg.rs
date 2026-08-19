@@ -1483,8 +1483,9 @@ pub enum RpcCall {
     /// [`RpcCall::BufDetach`]: the caller already knows its own hold ended,
     /// and nothing here answers a reply.
     ///
-    /// A decrement-to-zero delete that nvim refuses (an unsaved edit still
-    /// sitting in the buffer, or a window somehow showing it) is not an
+    /// A decrement-to-zero delete that the engine skips -- a buffer any
+    /// window still shows, one this connection never created, or one nvim
+    /// itself refuses over an unsaved edit still sitting in it -- is not an
     /// error this call surfaces: the hold is released either way, and the
     /// buffer -- unlisted, still loaded, holding whatever it held -- simply
     /// outlives this release rather than losing content nobody asked to

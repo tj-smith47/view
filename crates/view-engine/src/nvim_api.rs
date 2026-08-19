@@ -443,6 +443,29 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
+/// Keys [`EngineHandle::hidden_bufs`](crate::handle::EngineHandle) the same
+/// way [`LOAD_HIDDEN_CHUNK`]'s own `canon()` resolves a path -- symlinks
+/// resolved where the target exists, an absolute form as the fallback for a
+/// new-file path that does not exist yet -- so two different spellings of
+/// the same file share one [`HiddenHold`](crate::handle::HiddenHold) entry
+/// instead of racing each other's cleanup. Computed independently of nvim's
+/// own resolution, on this side of the wire, rather than waiting for a reply
+/// to learn it: the hold must exist the instant [`EngineHandle::load_hidden`]
+/// is called, before any reply carrying nvim's own answer could possibly
+/// have arrived (see that method's own doc).
+pub(crate) fn canonical_hidden_key(path: &str) -> String {
+    if let Ok(resolved) = std::fs::canonicalize(path) {
+        return resolved.to_string_lossy().into_owned();
+    }
+    let candidate = std::path::Path::new(path);
+    if candidate.is_absolute() {
+        return candidate.to_string_lossy().into_owned();
+    }
+    std::env::current_dir()
+        .map(|cwd| cwd.join(candidate).to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_owned())
+}
+
 /// Resolves a path to the real buffer handle nvim holds it under, for
 /// `RpcCall::LoadHidden`. Constant, like every other chunk here: the path
 /// travels as `nvim_exec_lua`'s positional varargs, never interpolated into
@@ -458,19 +481,40 @@ return { loaded = false }";
 /// real window already has open -- all three are the same buffer identity by
 /// path, and the scan finds whichever of them already exists, unmodified or
 /// not (capture #5), before ever creating a second one over the same file.
+/// Unlike `PREVIEW_CHUNK`, the scan matches on name alone rather than
+/// requiring `nvim_buf_is_loaded`: a match that is not yet loaded (capture
+/// #13 -- a buffer an earlier session left behind, or one `:bwipeout`-ed but
+/// never deleted) is `bufload`-ed in place and still reported
+/// `created = false`, since this call did not make it exist. Skipping that
+/// case would let an unloaded match fall through to the create branch below
+/// and misreport `created = true` for a buffer this connection did not
+/// create -- exactly the fact `RpcCall::ReleaseHidden`'s ownership-gated
+/// delete depends on `created` never getting wrong.
 ///
-/// Only when nothing is found does this create: a path that exists but is
-/// not a regular file is refused outright (`bufload` on a directory
-/// succeeds and yields a browsable listing, whose rows a review would then
-/// write its hunks over). A path that does not exist yet is not refused -- the new-file
-/// proposal's own case -- and resolves to the empty buffer the file will be
-/// created as. `nvim_create_buf(false, false)` is what keeps the fresh
-/// buffer both unlisted (never in `:ls`, never in the picker's
-/// `Source::Buffers`) and file-backed (`scratch = false`, so `:w` later
-/// behaves like any other buffer's). Loading its content via
-/// `nvim_buf_set_lines` marks it modified (capture #2), which this chunk
-/// undoes immediately -- a buffer that merely mirrors disk must not read as
-/// having unsaved changes nobody made.
+/// Only when nothing is found does this create, and it creates through
+/// nvim's own `:edit`-equivalent file-open pipeline -- `vim.fn.bufadd`
+/// followed by `vim.fn.bufload` -- rather than `nvim_create_buf` plus a
+/// manual `readfile`/`nvim_buf_set_lines` population. The two are not
+/// equivalent (capture #10-#12): `bufload`'s own read is what nvim treats as
+/// the buffer's undo baseline (`undotree().seq_cur == 0`, matching a real
+/// `:edit`), where populating via `nvim_buf_set_lines` recorded that
+/// population itself as an undoable edit -- a single `u` right after loading
+/// emptied the buffer back to nothing. `bufload` also detects `fileformat`
+/// and `endofline` from the source file, where the old chunk's buffer
+/// defaulted to Unix line endings regardless of what was on disk, silently
+/// corrupting a CRLF file's line endings on the next `:write`. Both also run
+/// nvim's ordinary file-open autocommands (filetype detection among them),
+/// which `nvim_create_buf` never triggers.
+///
+/// A path that exists but is not a regular file is refused outright
+/// (`bufload` on a directory succeeds and yields a browsable listing, whose
+/// rows a review would then write its hunks over). A path that does not
+/// exist yet is not refused -- the new-file proposal's own case -- and
+/// `bufadd` resolves it to the empty buffer the file will be created as.
+/// `bufadd` alone is what keeps the buffer unlisted (`buflisted = 0`, never
+/// in `:ls`, never in the picker's `Source::Buffers`, capture #10) until
+/// something else -- a real `:edit` on the same path, capture #14 -- chooses
+/// to list it.
 ///
 /// The buffer's `b:changedtick` is read in the same chunk that resolves it,
 /// so the review's first write can name a buffer version without waiting
@@ -487,7 +531,10 @@ local function canon(p)
 end
 local wanted = canon(path)
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(b) and canon(vim.api.nvim_buf_get_name(b)) == wanted then
+  if canon(vim.api.nvim_buf_get_name(b)) == wanted then
+    if not vim.api.nvim_buf_is_loaded(b) then
+      vim.fn.bufload(b)
+    end
     return { buf = b, created = false, changedtick = vim.api.nvim_buf_get_changedtick(b) }
   end
 end
@@ -495,17 +542,11 @@ local stat = (vim.uv or vim.loop).fs_stat(path)
 if stat ~= nil and stat.type ~= 'file' then
   return { buf = 0, created = false, changedtick = 0 }
 end
-local buf = vim.api.nvim_create_buf(false, false)
+local buf = vim.fn.bufadd(path)
 if buf == 0 then
   return { buf = 0, created = false, changedtick = 0 }
 end
-vim.api.nvim_buf_set_name(buf, path)
-local ok, lines = pcall(vim.fn.readfile, path)
-if not ok then
-  lines = {}
-end
-vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-vim.bo[buf].modified = false
+vim.fn.bufload(buf)
 return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
 
 /// Deletes `buf` for `RpcCall::ReleaseHidden`, once its hold's refcount has
@@ -518,13 +559,25 @@ return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedti
 /// resolved onto a real, normally-opened window would silently swap the
 /// user's own file out from under them. `vim.fn.win_findbuf` is checked
 /// here, in Lua, before ever calling `nvim_buf_delete`, rather than trusting
-/// nvim to refuse on its own. The modified-buffer case still relies on
-/// nvim's own refusal (case 7, re-confirmed under capture #9) -- `pcall`
-/// only silences that refusal's error, which this fire-and-forget call has
-/// nowhere to report to regardless.
-const RELEASE_HIDDEN_CHUNK: &str = "\
+/// nvim to refuse on its own.
+///
+/// `buflisted` is checked alongside it (capture #14): a window can adopt a
+/// hidden buffer by `:edit`-ing its own path, flipping `buflisted` 0 -> 1,
+/// and that stays true even after every window showing it closes again --
+/// `win_findbuf` alone goes back to seeing nothing and would let this delete
+/// through for a buffer that is, by then, the user's own. This is
+/// belt-and-braces alongside `EngineHandle`'s `owned` gate (see
+/// `HiddenHold`), which already refuses to attempt this notify at all for a
+/// hold this connection never created; this second check covers the hold it
+/// did create but the user has since adopted.
+///
+/// The modified-buffer case still relies on nvim's own refusal (case 7,
+/// re-confirmed under capture #9) -- `pcall` only silences that refusal's
+/// error, which this fire-and-forget call has nowhere to report to
+/// regardless.
+pub(crate) const RELEASE_HIDDEN_CHUNK: &str = "\
 local buf = ...
-if next(vim.fn.win_findbuf(buf)) == nil then
+if next(vim.fn.win_findbuf(buf)) == nil and vim.fn.buflisted(buf) == 0 then
   pcall(vim.api.nvim_buf_delete, buf, {})
 end";
 
@@ -1681,55 +1734,92 @@ impl EngineHandle {
     /// any other holder) attaches to and writes into -- creating an
     /// unlisted, file-backed hidden buffer for it when nothing already
     /// holds it, and always taking one hold on the path's refcount
-    /// regardless of which branch resolved it. Async by construction, like
-    /// [`list_buffers`](Self::list_buffers): this issues the request
-    /// through [`EngineHandle::request_load_hidden`] and returns
-    /// immediately; the handle crosses back as `Msg::HiddenBufferLoaded`
-    /// through the connection's pump, and the hold itself is recorded by
-    /// the reader thread the moment that reply decodes a real handle -- see
-    /// `EngineHandle::hidden_bufs`.
+    /// regardless of which branch resolved it.
+    ///
+    /// The hold is recorded before the request is even sent, keyed by
+    /// [`canonical_hidden_key`] -- not after a reply decodes a handle, and
+    /// not keyed by the raw `path` string. Taking it here, synchronously, on
+    /// whichever thread called this method, is what keeps a
+    /// [`release_hidden`](Self::release_hidden) call that overtakes this
+    /// call's own reply from finding nothing to decrement: the entry already
+    /// exists the instant this method returns, so that release always has a
+    /// count to bring to zero regardless of reply timing, and the reader
+    /// thread finishes resolving the hold's buffer whenever the reply
+    /// eventually lands, attempting the delete itself if the count already
+    /// reached zero by then (see `EngineHandle::hidden_bufs`'s own doc).
+    /// Canonicalizing the key the same way nvim's own `canon()` does is what
+    /// lets two different spellings of the same path share this one entry
+    /// instead of racing each other's cleanup.
+    ///
+    /// If the request itself never reaches the wire (an `Err` below), the
+    /// hold taken above is reversed immediately rather than left to leak: no
+    /// reply is ever coming to resolve an entry for a request nvim never
+    /// received, so nothing else will ever clean it up.
+    ///
+    /// Async by construction, like [`list_buffers`](Self::list_buffers):
+    /// this issues the request through
+    /// [`EngineHandle::request_load_hidden`] and returns immediately; the
+    /// handle crosses back as `Msg::HiddenBufferLoaded` through the
+    /// connection's pump.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
     pub fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.request_load_hidden(
+        let key = canonical_hidden_key(path);
+        self.note_hidden_acquire(&key);
+        let sent = self.request_load_hidden(
             "nvim_exec_lua",
             vec![
                 Value::from(LOAD_HIDDEN_CHUNK),
                 Value::Array(vec![Value::from(path)]),
             ],
             generation,
-            path.to_owned(),
-        )
+            key.clone(),
+        );
+        if sent.is_err() {
+            self.note_hidden_acquire_failed(&key);
+        }
+        sent
     }
 
     /// Releases one hold this connection's [`load_hidden`](Self::load_hidden)
     /// acquired for `path`: decrements `path`'s in-flight holder count and,
-    /// only if that decrement brings it to zero, issues
-    /// [`RELEASE_HIDDEN_CHUNK`] for the buffer that call resolved. No reply
-    /// is awaited or needed -- a decrement-to-zero delete the chunk skips or
-    /// nvim itself refuses (an unsaved edit, or a window still showing it --
-    /// see `docs/hidden-buffer-wire-capture.md`) is not an error this call
-    /// surfaces: the hold is released either way, and the buffer simply
-    /// outlives this release rather than losing content, or a window's own
-    /// display, nobody asked to discard.
+    /// only if that decrement brings it to zero and the buffer it resolved
+    /// to is already known, issues [`RELEASE_HIDDEN_CHUNK`] for it -- and
+    /// only when this connection created that buffer itself, never for one
+    /// an earlier `load_hidden` call found already open (a real window's own
+    /// buffer, or another connection's). No reply is awaited or needed -- a
+    /// decrement-to-zero delete the chunk skips or nvim itself refuses (an
+    /// unsaved edit -- see `docs/hidden-buffer-wire-capture.md`) is not an
+    /// error this call surfaces: the hold is released either way, and the
+    /// buffer simply outlives this release rather than losing content, or a
+    /// window's own display, nobody asked to discard.
+    ///
+    /// `path` is canonicalized through the same [`canonical_hidden_key`]
+    /// [`load_hidden`](Self::load_hidden) keyed its hold with, so a release
+    /// spelled differently than its matching load still finds the same
+    /// entry.
     ///
     /// A no-op for a `path` with no recorded hold (nothing to decrement,
     /// nothing to delete) -- every caller owes exactly one of these per
     /// `load_hidden` call, but a defensive extra call must never panic or
-    /// delete a buffer this connection never created.
+    /// delete a buffer this connection never created. Also a no-op, without
+    /// deleting anything yet, when this decrement brings the count to zero
+    /// but the matching `load_hidden` call's reply has not landed yet: the
+    /// entry is left in place for the reader thread to finish once it does.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited, only when a decrement-to-zero
     /// delete was actually attempted -- a decrement that leaves the count
-    /// above zero, or a `path` with no hold at all, never touches the wire
-    /// and always answers `Ok(())`.
+    /// above zero, a `path` with no hold at all, or one whose buffer is not
+    /// yet known, never touches the wire and always answers `Ok(())`.
     pub fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
-        let Some(buf) = self.note_hidden_release(path) else {
+        let key = canonical_hidden_key(path);
+        let Some(buf) = self.note_hidden_release(&key) else {
             return Ok(());
         };
         self.notify(

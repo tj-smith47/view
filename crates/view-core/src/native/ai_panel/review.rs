@@ -179,8 +179,10 @@ impl DiffReviewState {
     /// a window already open resolves onto that same buffer (see
     /// `docs/hidden-buffer-wire-capture.md`); nothing here or in
     /// `close_effects` needs to know which case it is, since
-    /// `RpcCall::ReleaseHidden`'s own decrement-to-zero delete is refused by
-    /// nvim for a buffer any window still shows.
+    /// `RpcCall::ReleaseHidden`'s decrement-to-zero delete is guarded on the
+    /// engine side, not by nvim itself: a buffer any window still shows, or
+    /// one this connection never created, is never deleted regardless of
+    /// what this review's own count reaches.
     #[must_use]
     pub fn bind_effect(&self) -> Effect {
         Effect::Rpc(RpcCall::LoadHidden {

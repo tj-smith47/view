@@ -15,7 +15,8 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use view_core::msg::Msg;
+use view_core::msg::{BufferHandle, Msg, TextEdit};
+use view_engine::nvim_api::BufWriteOutcome;
 use view_engine::process::{Engine, EngineConfig};
 
 /// Spawns an isolated engine with a UI attached, the same load-bearing
@@ -118,6 +119,41 @@ fn decode_ext_handle(v: &rmpv::Value) -> Option<u64> {
     };
     let mut cursor = &data[..];
     rmpv::decode::read_value(&mut cursor).ok()?.as_u64()
+}
+
+/// Reads a buffer-scoped option (`&fileformat`, `&endofline`, `&filetype`,
+/// ...) via `nvim_get_option_value`, the same call the picker test already
+/// uses for `buflisted`.
+fn buf_option(engine: &Engine, buf: u64, name: &str) -> rmpv::Value {
+    engine
+        .handle
+        .request(
+            "nvim_get_option_value",
+            vec![
+                rmpv::Value::from(name),
+                rmpv::Value::Map(vec![(rmpv::Value::from("buf"), rmpv::Value::from(buf))]),
+            ],
+        )
+        .expect("read buffer-scoped option")
+}
+
+/// Waits up to 5s for the next `Msg::BufTextChanged` on `rx`, skipping the
+/// redraw traffic the UI attach produces -- the same helper
+/// `buf_attach_live.rs` uses.
+fn next_buf_text_changed(rx: &mpsc::Receiver<Msg>) -> Msg {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        assert!(
+            remaining > Duration::ZERO,
+            "no Msg::BufTextChanged arrived within 5s"
+        );
+        match rx.recv_timeout(remaining) {
+            Ok(msg @ Msg::BufTextChanged { .. }) => return msg,
+            Ok(_other) => continue,
+            Err(err) => panic!("channel closed before a BufTextChanged arrived: {err}"),
+        }
+    }
 }
 
 /// Whether nvim's `nvim_list_bufs()` still names `buf`.
@@ -529,4 +565,470 @@ fn two_concurrent_holders_on_the_same_path_leave_the_buffer_alive_until_both_rel
         !buf_still_listed_as_a_buffer(&engine, buf),
         "both holders have released -- the buffer must now be gone"
     );
+}
+
+/// The regression `bufadd`/`bufload` fixes: `nvim_buf_set_lines` populating a
+/// freshly created buffer recorded that population as an undoable edit, so
+/// the first `u` a user pressed after the file was later opened normally in
+/// that same buffer emptied it back to nothing (see
+/// `docs/hidden-buffer-wire-capture.md` capture #11). `bufload`'s own read is
+/// the buffer's undo baseline instead: `:undo` right after a `load_hidden`
+/// must be a no-op.
+#[test]
+fn undo_right_after_load_hidden_does_not_empty_the_buffer() {
+    let root = scratch_root("undo-baseline");
+    let path = root.join("undo.rs");
+    std::fs::write(&path, "one\ntwo\nthree\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 100)
+        .expect("issue the load");
+    let (_generation, buf, _created, _tick) = next_hidden_buffer_loaded(&rx);
+    let buf = buf.expect("the fixture path resolves to a handle");
+
+    let seq_cur = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("return vim.fn.undotree(...).seq_cur"),
+                rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+            ],
+        )
+        .expect("read undotree().seq_cur")
+        .as_u64();
+    assert_eq!(
+        seq_cur,
+        Some(0),
+        "bufload's own read must be the undo baseline, not an undoable edit"
+    );
+
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("vim.api.nvim_buf_call(..., function() vim.cmd('undo') end)"),
+                rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+            ],
+        )
+        .expect("issue :undo against the loaded buffer");
+    assert_eq!(
+        lines_of(&engine, buf),
+        vec!["one".to_string(), "two".to_string(), "three".to_string()],
+        "a single :undo right after load_hidden must never empty the buffer"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+}
+
+/// `bufload` preserves `fileformat`, unlike the old `nvim_create_buf` +
+/// `nvim_buf_set_lines` mechanism, which hardcoded Unix line endings
+/// regardless of the source file (`docs/hidden-buffer-wire-capture.md`
+/// capture #12) -- silently corrupting a CRLF file's line endings on its
+/// next `:write`. This proves the round-trip: writing the loaded buffer back
+/// out reproduces the exact CRLF bytes it was loaded from.
+#[test]
+fn a_crlf_fixture_writes_back_byte_identical() {
+    let root = scratch_root("crlf");
+    let path = root.join("crlf.txt");
+    std::fs::write(&path, "one\r\ntwo\r\n").expect("write CRLF fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 101)
+        .expect("issue the load");
+    let (_generation, buf, _created, _tick) = next_hidden_buffer_loaded(&rx);
+    let buf = buf.expect("the fixture path resolves to a handle");
+
+    assert_eq!(
+        buf_option(&engine, buf, "fileformat").as_str(),
+        Some("dos"),
+        "a CRLF source file must read as 'dos', not the hardcoded Unix default"
+    );
+
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("vim.api.nvim_buf_call(..., function() vim.cmd('write') end)"),
+                rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+            ],
+        )
+        .expect("write the loaded buffer back to disk");
+    assert_eq!(
+        std::fs::read(&path).expect("read fixture back off disk"),
+        b"one\r\ntwo\r\n",
+        "a CRLF file must round-trip through load_hidden + :write byte-identical"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+}
+
+/// `bufload` also reads `endofline` correctly from a source file with no
+/// trailing newline, where the old mechanism left every hidden buffer
+/// reading as if the source always had one (`docs/hidden-buffer-wire-capture.md`
+/// capture #12). `fixendofline` re-adding a trailing newline on `:write` is
+/// nvim's own default behavior, identical for a real `:edit` -- not
+/// something this test asserts against.
+#[test]
+fn a_no_trailing_newline_fixture_reports_endofline_false() {
+    let root = scratch_root("no-eol");
+    let path = root.join("no-eol.txt");
+    std::fs::write(&path, "a\nb").expect("write no-trailing-newline fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 102)
+        .expect("issue the load");
+    let (_generation, buf, _created, _tick) = next_hidden_buffer_loaded(&rx);
+    let buf = buf.expect("the fixture path resolves to a handle");
+
+    assert_eq!(
+        buf_option(&engine, buf, "endofline").as_bool(),
+        Some(false),
+        "a source file with no trailing newline must read endofline=false, \
+         not the hardcoded true the old mechanism left every hidden buffer with"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+}
+
+/// `bufload` runs nvim's ordinary file-open autocommands, which
+/// `nvim_create_buf` never triggered -- filetype detection among them. A
+/// `.rs` fixture must read as `filetype=rust` once loaded.
+#[test]
+fn a_rust_fixture_gets_filetype_detected() {
+    let root = scratch_root("filetype");
+    let path = root.join("detected.rs");
+    std::fs::write(&path, "fn main() {}\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 103)
+        .expect("issue the load");
+    let (_generation, buf, _created, _tick) = next_hidden_buffer_loaded(&rx);
+    let buf = buf.expect("the fixture path resolves to a handle");
+
+    assert_eq!(
+        buf_option(&engine, buf, "filetype").as_str(),
+        Some("rust"),
+        "nvim_create_buf never ran filetype detection at all; bufload must"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+}
+
+/// A buffer a real window already had open before this connection's own
+/// `load_hidden` ever ran must survive release even after that window moves
+/// on to a different buffer -- `win_findbuf` alone would then see nothing
+/// showing it, so the engine-side `owned` gate (never set for a buffer this
+/// connection did not create) is what has to refuse the delete instead.
+#[test]
+fn an_already_open_buffer_survives_release_even_after_its_window_moves_on() {
+    let root = scratch_root("already-open-window-closed");
+    let path = root.join("already-open.rs");
+    std::fs::write(&path, "already open content\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .open_file(&path.to_string_lossy())
+        .expect("open the file the way the user would, before any load_hidden call");
+    let user_buf = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("return vim.api.nvim_get_current_buf()"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("read current buffer")
+        .as_u64()
+        .expect("buffer handle is an integer");
+
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("vim.cmd('enew')"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("move the window's current buffer off the user's file");
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 104)
+        .expect("issue the load");
+    let (_generation, buf, created, _tick) = next_hidden_buffer_loaded(&rx);
+    assert_eq!(
+        buf,
+        Some(user_buf),
+        "the load must resolve onto the user's own already-open buffer"
+    );
+    assert!(
+        !created,
+        "a buffer the user already owns must never read as newly created"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, user_buf),
+        "releasing a hold on a buffer this connection never created must never \
+         delete it, window-visible or not"
+    );
+}
+
+/// A buffer this connection's own `load_hidden` created can still be adopted
+/// by the user afterward: a real `:edit` on the same path binds onto it and
+/// flips `buflisted` 0 -> 1 without ever creating a second buffer (capture
+/// #14). Once that happens, release must never delete it even after the
+/// window that adopted it moves on to something else, where `win_findbuf`
+/// alone would see nothing showing it. The engine-side `owned` gate alone
+/// would let this delete through -- this connection really did create the
+/// buffer -- so this specifically proves `RELEASE_HIDDEN_CHUNK`'s own
+/// `buflisted` check.
+#[test]
+fn a_buffer_this_connection_created_survives_release_once_the_user_adopts_it() {
+    let root = scratch_root("adopted-after-create");
+    let path = root.join("adopted.rs");
+    std::fs::write(&path, "adopted content\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 105)
+        .expect("issue the load");
+    let (_generation, buf, created, _tick) = next_hidden_buffer_loaded(&rx);
+    assert!(created, "a never-opened path must create its buffer");
+    let buf = buf.expect("the load resolves to a handle");
+
+    engine
+        .handle
+        .open_file(&path.to_string_lossy())
+        .expect("the user opens the same path, adopting this connection's own buffer");
+    let opened_buf = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("return vim.api.nvim_get_current_buf()"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("read current buffer")
+        .as_u64()
+        .expect("buffer handle is an integer");
+    assert_eq!(
+        opened_buf, buf,
+        "the open must adopt this connection's own hidden buffer, not create a second one"
+    );
+    assert_eq!(
+        buf_option(&engine, buf, "buflisted").as_bool(),
+        Some(true),
+        "the real :edit must have listed the adopted buffer"
+    );
+
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("vim.cmd('enew')"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("move the window off the adopted buffer");
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, buf),
+        "a buffer the user adopted after this connection created it must survive \
+         release even once no window shows it"
+    );
+}
+
+/// Two different spellings of the identical file must share one refcount
+/// entry rather than racing each other's cleanup: both resolve to the same
+/// buffer, and the buffer survives until both spellings' holds have
+/// released.
+#[test]
+fn two_spellings_of_the_same_path_share_one_hold() {
+    let root = scratch_root("dual-spelling");
+    let path = root.join("shared-spelling.rs");
+    std::fs::write(&path, "same file\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let canonical = path.to_string_lossy().into_owned();
+    let respelled = root
+        .join(".")
+        .join("shared-spelling.rs")
+        .to_string_lossy()
+        .into_owned();
+    assert_ne!(
+        canonical, respelled,
+        "the two spellings must actually differ as strings for this test to prove anything"
+    );
+
+    engine
+        .handle
+        .load_hidden(&canonical, 106)
+        .expect("first spelling's load");
+    let (_g1, buf1, _c1, _t1) = next_hidden_buffer_loaded(&rx);
+    let buf = buf1.expect("first load resolves to a handle");
+
+    engine
+        .handle
+        .load_hidden(&respelled, 107)
+        .expect("second spelling's load");
+    let (_g2, buf2, _c2, _t2) = next_hidden_buffer_loaded(&rx);
+    assert_eq!(
+        buf2,
+        Some(buf),
+        "both spellings must resolve to the identical buffer"
+    );
+
+    engine
+        .handle
+        .release_hidden(&canonical)
+        .expect("first spelling releases");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, buf),
+        "one hold remains -- the two spellings must share a single refcount entry, \
+         not race each other's cleanup"
+    );
+
+    engine
+        .handle
+        .release_hidden(&respelled)
+        .expect("second spelling releases");
+    assert!(
+        !buf_still_listed_as_a_buffer(&engine, buf),
+        "both spellings' holds have released -- the buffer must now be gone"
+    );
+}
+
+/// `BufAttach`/`BufSetText` operate unbranched on a `load_hidden`-resolved
+/// handle: nothing about it (unlisted, file-backed, `bufload`-populated) is
+/// special-cased anywhere else in the RPC surface, so attaching to it and
+/// writing through `set_buf_text` must behave exactly like any other real
+/// buffer -- an applied write at the named `changedtick`, and a correctly
+/// generation-stamped `Msg::BufTextChanged` for the edit.
+#[test]
+fn buf_attach_and_set_buf_text_operate_unbranched_on_a_hidden_buffer() {
+    let root = scratch_root("attach-and-write");
+    let path = root.join("attach.rs");
+    std::fs::write(&path, "line1\nline2\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 108)
+        .expect("issue the load");
+    let (_generation, buf, _created, tick) = next_hidden_buffer_loaded(&rx);
+    let buf = buf.expect("the fixture path resolves to a handle");
+
+    engine
+        .handle
+        .buf_attach(BufferHandle(buf), 12)
+        .expect("attach to the hidden buffer");
+
+    let outcome = engine
+        .handle
+        .set_buf_text(
+            BufferHandle(buf),
+            &[TextEdit {
+                start_row: 1,
+                start_col: 0,
+                end_row: 1,
+                end_col: 5,
+                lines: vec!["LINE2".to_string()],
+            }],
+            false,
+            Some(tick),
+        )
+        .expect("apply the edit against the hidden buffer");
+    assert!(
+        matches!(outcome, BufWriteOutcome::Applied { .. }),
+        "a write at the buffer's own just-loaded changedtick must apply, got {outcome:?}"
+    );
+
+    let Msg::BufTextChanged {
+        buf: event_buf,
+        generation,
+        firstline,
+        lastline,
+        linedata,
+        ..
+    } = next_buf_text_changed(&rx)
+    else {
+        unreachable!("next_buf_text_changed only returns this variant")
+    };
+    assert_eq!(event_buf, BufferHandle(buf));
+    assert_eq!(
+        generation, 12,
+        "the event must carry this attach's own generation"
+    );
+    assert_eq!((firstline, lastline), (1, 2));
+    assert_eq!(linedata, vec!["LINE2".to_string()]);
+    assert_eq!(
+        lines_of(&engine, buf),
+        vec!["line1".to_string(), "LINE2".to_string()]
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
 }

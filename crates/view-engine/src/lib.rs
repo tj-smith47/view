@@ -4,6 +4,7 @@ pub mod damage;
 pub mod env;
 pub mod handle;
 pub mod heartbeat;
+mod hidden_buffers;
 pub mod nvim_api;
 mod outbox;
 pub mod process;

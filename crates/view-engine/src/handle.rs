@@ -1,4 +1,5 @@
 use crate::damage::PumpShared;
+use crate::hidden_buffers::{decode_load_hidden_reply, resolve_hidden_hold, Created, HiddenHold};
 use crate::rpc::{RpcError, RpcMessage};
 use crate::ui_events::decode_redraw;
 use rmpv::Value;
@@ -234,39 +235,21 @@ pub struct EngineHandle {
     /// longer owes anyone.
     attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>>,
     /// Every path this connection currently holds a hidden buffer open for,
-    /// keyed exactly as [`load_hidden`](Self::load_hidden) was called
-    /// (never canonicalized on this side -- nvim's own chunk does the
-    /// symlink-safe comparison, see `docs/hidden-buffer-wire-capture.md`),
-    /// with the in-flight holder count [`release_hidden`](Self::release_hidden)
-    /// decrements. Populated by the reader thread once a `Waiter::LoadHidden`
-    /// reply actually names a buffer, never by the call that issues the
-    /// request -- the count must track buffers this connection has
-    /// confirmed exist, not requests still in flight.
-    hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>>,
-}
-
-/// One path's hidden-buffer hold: the buffer `RpcCall::LoadHidden` last
-/// resolved it to, and how many un-released calls are still holding it
-/// open. See `EngineHandle::hidden_bufs`.
-struct HiddenHold {
-    buf: view_core::msg::BufferHandle,
-    count: u64,
-}
-
-/// Whether one [`EngineHandle::load_hidden`] call created the buffer it
-/// resolved to, or found one already there (a previous `load_hidden` call's
-/// hold, or a real window's own buffer). Diagnostic only: it plays no part
-/// in [`EngineHandle::release_hidden`]'s decrement-to-zero delete decision,
-/// which is a pure per-path refcount -- a bare create/reuse flag would let
-/// two overlapping holders on the same path race each other's cleanup,
-/// since only one of them could ever be told "you created it, you may
-/// delete it" and the other would have nothing to decide by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Created {
-    /// This call's `nvim_create_buf` produced the buffer.
-    Yes,
-    /// This call found and reused a buffer that already existed.
-    No,
+    /// keyed by [`crate::nvim_api::canonical_hidden_key`] (the same
+    /// resolution [`load_hidden`](Self::load_hidden)'s own Lua chunk applies
+    /// to the buffer it names, computed independently on this side so the
+    /// key is available before any reply arrives), with the in-flight holder
+    /// count [`release_hidden`](Self::release_hidden) decrements. An entry
+    /// is created the instant [`load_hidden`](Self::load_hidden) is called
+    /// -- not once its reply lands -- with `buf: None` until the reader
+    /// thread fills it in; see [`crate::hidden_buffers::HiddenHold`] for why
+    /// that ordering is what keeps a fast release from orphaning its own
+    /// load. `pub(crate)`, unlike this struct's other fields: the methods
+    /// that take and release a hold live in `hidden_buffers.rs`'s own `impl
+    /// EngineHandle` block (see that module's doc) rather than here, to keep
+    /// this file's production line count under the crate's god-file
+    /// ceiling.
+    pub(crate) hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>>,
 }
 
 /// One live-attached buffer's connection-side state: the generation
@@ -587,26 +570,29 @@ impl EngineHandle {
                                 } else {
                                     (None, Created::No, 0)
                                 };
-                                // Recorded before routing, and unconditionally
-                                // of whether the pump has anywhere to put the
-                                // reply right now: the hold this call
-                                // acquired is real the moment nvim answers
-                                // with a handle, regardless of whether the
-                                // caller ever sees the reply that says so --
-                                // it still owes exactly one `release_hidden`
-                                // for this `load_hidden`, and that release
-                                // must find a count to decrement.
-                                if let Some(buf) = buf {
-                                    let mut holds = reader_hidden_bufs
-                                        .lock()
-                                        .unwrap_or_else(PoisonError::into_inner);
-                                    holds
-                                        .entry(path)
-                                        .and_modify(|hold| {
-                                            hold.buf = buf;
-                                            hold.count += 1;
-                                        })
-                                        .or_insert(HiddenHold { buf, count: 1 });
+                                // path's hold already exists -- load_hidden
+                                // takes it at issue time, not here -- so this
+                                // only ever fills it in. A Some return means
+                                // a release_hidden call already brought the
+                                // count to zero while this reply was still in
+                                // flight, and nothing else is left to issue
+                                // the delete this connection itself created
+                                // the buffer for, so this thread does it.
+                                if let Some(to_delete) = resolve_hidden_hold(
+                                    &reader_hidden_bufs,
+                                    &path,
+                                    buf,
+                                    matches!(created, Created::Yes),
+                                ) {
+                                    if let Ok(bytes) = encode_message(&RpcMessage::Notification {
+                                        method: "nvim_exec_lua".to_owned(),
+                                        params: vec![
+                                            Value::from(crate::nvim_api::RELEASE_HIDDEN_CHUNK),
+                                            Value::Array(vec![Value::from(to_delete.0)]),
+                                        ],
+                                    }) {
+                                        let _ = reader_outbox.send(bytes);
+                                    }
                                 }
                                 if let Some(pump) = &reader_pump {
                                     pump.route_hidden_buffer_loaded(Msg::HiddenBufferLoaded {
@@ -1214,29 +1200,6 @@ impl EngineHandle {
         }
     }
 
-    /// Decrements `path`'s hidden-buffer hold count, called from
-    /// [`crate::nvim_api::EngineHandle::release_hidden`]. Returns the
-    /// buffer to delete iff this decrement brought the count to zero --
-    /// `None` for a `path` with no recorded hold at all (a defensive extra
-    /// release) or one whose count is still above zero after decrementing
-    /// (another holder still needs it).
-    ///
-    /// A poisoned lock degrades to "nothing to delete" rather than
-    /// panicking or recovering the map: a caller that already owns a real
-    /// `HiddenHold` entry losing it to a poison would double-count on its
-    /// next `load_hidden`, but never deleting a buffer this connection
-    /// cannot currently prove is unreferenced is the safer of the two
-    /// wrong answers.
-    pub(crate) fn note_hidden_release(&self, path: &str) -> Option<view_core::msg::BufferHandle> {
-        let mut holds = self.hidden_bufs.lock().ok()?;
-        let hold = holds.get_mut(path)?;
-        hold.count = hold.count.saturating_sub(1);
-        if hold.count > 0 {
-            return None;
-        }
-        holds.remove(path).map(|hold| hold.buf)
-    }
-
     /// Answers a request the engine is blocked on: encodes `[1, msgid, nil,
     /// value]` and enqueues it on the writer thread's channel, same as
     /// [`notify`](Self::notify). Never blocks the caller; the actual write
@@ -1822,40 +1785,6 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
             Some(crate::wire::map_find(pairs, "name")?.as_str()?.to_owned())
         })
         .collect()
-}
-
-/// Decodes a `LOAD_HIDDEN_CHUNK` reply into the handle nvim answered with. A
-/// non-positive or absent number is `None` rather than a handle: `buf = 0`
-/// is the chunk's own "refused" answer (a directory, a name
-/// `nvim_create_buf` would not take), and `BufferHandle(0)` is separately
-/// nvim's "current buffer" sentinel, which `RpcCall::BufAttach`'s own doc
-/// forbids -- attaching under it would record a generation no event this
-/// attach produces can ever be looked up by. `created` degrades to
-/// [`Created::No`] on the same absent-handle path: there is no buffer to
-/// have created either way.
-fn decode_load_hidden_reply(
-    result: &Value,
-) -> (Option<view_core::msg::BufferHandle>, Created, u64) {
-    let Some(pairs) = result.as_map() else {
-        return (None, Created::No, 0);
-    };
-    let handle = crate::wire::map_find(pairs, "buf")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    if handle == 0 {
-        return (None, Created::No, 0);
-    }
-    let created = crate::wire::map_find(pairs, "created")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let changedtick = crate::wire::map_find(pairs, "changedtick")
-        .and_then(Value::as_u64)
-        .unwrap_or(0);
-    (
-        Some(view_core::msg::BufferHandle(handle)),
-        if created { Created::Yes } else { Created::No },
-        changedtick,
-    )
 }
 
 /// What one connection answered about the recovery it performed while
@@ -2813,6 +2742,81 @@ mod tests {
             h.note_hidden_release("/tmp/one.rs"),
             None,
             "a path with no recorded hold left must not report a buffer to delete"
+        );
+    }
+
+    /// A `release_hidden` call issued before its matching `load_hidden`'s
+    /// own reply has even been read off the wire must not orphan the hold.
+    /// `load_hidden` takes the hold synchronously at issue time (see
+    /// `EngineHandle::note_hidden_acquire`), so the release below always has
+    /// a count to decrement -- but the buffer is still unknown at that
+    /// point, so it can only leave a zero-count, buffer-unknown entry rather
+    /// than delete anything itself. The reader thread finishes the job once
+    /// the late reply lands: `resolve_hidden_hold` sees the count already at
+    /// zero and reports a buffer to delete, and the reader thread issues
+    /// `RELEASE_HIDDEN_CHUNK` for it directly, since no future
+    /// `release_hidden` call is ever coming to do it.
+    #[test]
+    fn a_release_issued_before_its_loads_reply_lands_still_deletes_once_the_reply_arrives() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+        let mut r = std::io::BufReader::new(peer_read);
+
+        h.load_hidden("/tmp/race.rs", 30).unwrap();
+        // released before the load's own request has even been read off the
+        // wire below -- the exact overtaking ordering the hold's issue-time
+        // acquire exists to survive
+        assert!(
+            h.release_hidden("/tmp/race.rs").is_ok(),
+            "a release with no buffer known yet must not touch the wire at all"
+        );
+
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, method, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected the load's own Request");
+        };
+        assert_eq!(method, "nvim_exec_lua", "expected the load_hidden request");
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("buf"), Value::from(9u64)),
+                (Value::from("created"), Value::from(true)),
+                (Value::from("changedtick"), Value::from(1u64)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        // the late reply's own resolve finds the hold already at zero and
+        // must issue the delete itself
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Notification { method, params } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected the reader thread's own delete notification");
+        };
+        assert_eq!(method, "nvim_exec_lua");
+        assert_eq!(
+            params.first().and_then(Value::as_str),
+            Some(crate::nvim_api::RELEASE_HIDDEN_CHUNK),
+            "the reader thread must issue RELEASE_HIDDEN_CHUNK, not some other call"
+        );
+        let args = params
+            .get(1)
+            .and_then(Value::as_array)
+            .expect("second positional arg is the vararg array");
+        assert_eq!(
+            args.first().and_then(Value::as_u64),
+            Some(9),
+            "the delete must target the buffer the late reply named"
+        );
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            matches!(msg, Msg::HiddenBufferLoaded { buf: Some(_), .. }),
+            "the late reply must still route to the pump even though its hold was \
+             already gone by the time it arrived, got {msg:?}"
         );
     }
 

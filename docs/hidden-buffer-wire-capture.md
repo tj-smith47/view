@@ -117,8 +117,9 @@ discarded.
 
 ## 8. `nvim_buf_delete` does NOT refuse a buffer that is visible in a window
 
-An earlier capture session recorded this as a refusal (mirroring case 7's
-modified-buffer refusal). Re-captured against the same pinned engine, in the
+`nvim_buf_delete` does not refuse a window-visible buffer, contrary to an
+earlier reading of this case that assumed it mirrored case 7's
+modified-buffer refusal. Re-captured against the same pinned engine, in the
 exact shape `release_hidden` actually faces -- a buffer opened normally via
 `:edit` (this crate's own `OPEN_FILE_CHUNK`, not a bare
 `nvim_win_set_buf`), the sole window showing it, ui-attached:
@@ -165,3 +166,108 @@ The window-visibility check runs in Lua, before ever calling
 `nvim_buf_delete`, rather than trusting nvim to refuse on its own (case 8
 disproved that trust) -- the modified-buffer case still relies on nvim's own
 refusal (case 7), which held up under this same re-capture.
+
+## 10. `vim.fn.bufadd` + `vim.fn.bufload` populate through nvim's real read pipeline
+
+`nvim_create_buf` + `readfile` + `nvim_buf_set_lines` (the mechanism cases
+1-9 above capture) never runs `BufReadPre`/`BufReadPost`, so filetype
+detection, indent/editorconfig settings and the file's own fileformat/EOL
+never happen. `bufadd`+`bufload` is nvim's own file-open path minus the
+window/current-buffer switch:
+
+```
+bufadd(path) -> buf=2
+bufload(buf)
+getbufvar(buf, '&buflisted') -> 0
+getbufvar(buf, '&filetype')  -> 'rust'   (a .rs fixture)
+getbufvar(buf, '&modified')  -> 0
+nvim_buf_get_lines(buf, 0, -1, false) -> ['fn main() {}']
+```
+
+Unlisted exactly like the `nvim_create_buf(false, false)` path (case 1) --
+`bufadd` never lists the buffer it creates -- but with filetype detection
+and every other `:edit`-triggered autocommand intact.
+
+## 11. `bufload`'s own read is the undo baseline; `nvim_buf_set_lines` is not
+
+```
+-- bufadd + bufload
+vim.fn.undotree().seq_cur -> 0
+:undo                      -> no-op, lines unchanged: ['one', 'two', 'three']
+
+-- nvim_create_buf + nvim_buf_set_lines (cases 1-9's mechanism, contrast)
+vim.fn.undotree().seq_cur -> 1
+:undo                      -> lines become [''], the buffer's own content is gone
+```
+
+`nvim_buf_set_lines` on a freshly created empty buffer is itself an
+undoable edit (from empty to the file's content); the very first `u` the
+user presses after the file is later opened normally in that same buffer
+reverts back to empty, and a save after that truncates the file on disk.
+`bufload` reads the file as nvim's own initial buffer state, the same as
+opening the file fresh with `:edit` -- there is no "from empty" edit on the
+undo tree to revert to.
+
+## 12. `bufload` preserves `fileformat` and `endofline`; the write-back correctly reproduces CRLF
+
+```
+-- CRLF fixture ("one\r\ntwo\r\n" on disk)
+bufload -> getbufvar(buf, '&fileformat') -> 'dos'
+nvim_buf_get_lines -> ['one', 'two']          -- line terminators never appear in-buffer either way
+:write -> disk bytes unchanged: "one\r\ntwo\r\n"
+
+-- no-EOL fixture ("a\nb" on disk, no trailing newline)
+bufload -> getbufvar(buf, '&endofline')    -> 0   (correctly recorded: source had none)
+           getbufvar(buf, '&fixendofline') -> 1   (nvim's own default, independent of this chunk)
+:write -> disk bytes become "a\nb\n"              -- fixendofline adds it back
+```
+
+The CRLF case round-trips byte-identical through a write because
+`fileformat` is read correctly at load time (the old chunk hardcoded
+`fileformat=unix` regardless of source, corrupting every line ending on the
+next save). The no-EOL case's write gaining a trailing newline is not a
+regression this chunk introduces -- `fixendofline` defaults to on and
+applies identically to a buffer opened by a genuine `:edit`; what matters
+is that `endofline` is read correctly (`false`) rather than hardcoded to
+`true` the way the old chunk left it, since that is the flag other code
+(and nvim's own write path) actually consults. Neither fixture's content
+changes at all through a `load_hidden` -> `release_hidden` cycle with no
+write in between -- `release_hidden` never touches the wire in a way that
+writes to disk.
+
+## 13. `bufadd` finds a pre-existing UNLOADED buffer by name rather than creating a second one
+
+```
+bufadd(path)              -> buf=5  (buflisted=1, loaded=0 -- an unloaded entry, no bufload call yet)
+bufadd(path)  -- again    -> buf=5  (same handle, still unloaded until something calls bufload)
+```
+
+`bufadd` is idempotent on the buffer's name whether or not the existing
+entry is loaded -- unlike the old chunk's own `nvim_buf_set_name`, which
+(Minor 1's own capture) silently orphaned a same-named unloaded buffer
+instead of finding it. This matters for `created`'s ownership meaning: an
+unloaded buffer that already existed for this path (the user's own prior
+session state, not anything `load_hidden` made) must never be reported as
+newly created, or the refcount's "may I delete this" bit would be wrong for
+a buffer view never made. `LOAD_HIDDEN_CHUNK`'s own scan is extended to
+match on name alone (loaded or not) rather than only loaded buffers, so
+this case is caught by the scan and reported `created = false` before
+`bufadd` is ever reached.
+
+## 14. `:edit`-ing a hidden buffer's own path adopts it: `buflisted` flips to 1
+
+```
+bufadd(path); bufload(buf) -> buf=2, buflisted=0
+:edit path                  -> nvim_get_current_buf() = 2 (the same buffer, found by name)
+                                getbufvar(2, '&buflisted') -> 1
+                                win_findbuf(2) -> non-empty
+```
+
+A buffer `load_hidden` created can become a real, listed, user-owned buffer
+the moment the user opens the same path normally, without ever becoming a
+*new* buffer number. `win_findbuf` alone catches this while the window
+stays open; `RELEASE_HIDDEN_CHUNK`'s `buflisted` check is the belt to that
+brace for the case where the user has since navigated away from the window
+(buffer hidden again, `win_findbuf` empty) but the buffer is now theirs, not
+ours, and must survive a release exactly like any other buffer nvim itself
+lists.
