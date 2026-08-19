@@ -356,6 +356,120 @@ fn read_cursor_context_with_a_blockwise_selection_where_a_row_is_shorter_than_th
     assert_eq!(selection.range, (1, 3));
 }
 
+/// A blockwise selection's low bound must come from `virtcol('v'/'.',
+/// true)`'s LIST-form START cell, never the plain SCALAR form -- the
+/// scalar form is a character's END cell (`:help virtcol()`), which is
+/// only indistinguishable from its start on a single-cell character. `你`
+/// is a wide (2-cell) character spanning screen columns 1-2; requesting
+/// columns 1-3 covers it in full plus the first (left) half of `好`
+/// (columns 3-4), which nvim pads with one space rather than emitting a
+/// raw half-character, per
+/// `docs/ai-context-reads-wire-capture.md`'s "Fix round 3" capture.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_over_a_wide_character() {
+    let engine = spawn();
+    set_lines(&engine, &["你好xy", "abcdef"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jll").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "你 \nabc");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// The same right-edge partial-coverage padding rule applies to a tab: a
+/// tab spans several screen columns (columns 2-8 here, tabstop 8), and a
+/// rectangle covering only its first three cells pads with three spaces
+/// rather than emitting the raw tab byte.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_over_a_partially_covered_tab() {
+    let engine = spawn();
+    set_lines(&engine, &["a\tbcd", "wxyzefgh"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jlll").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "a   \nwxyz");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// The severe case the review named directly: anchoring on a leading tab
+/// (screen columns 1-8) and using its SCALAR virtcol (column 8, the tab's
+/// own end cell) as the shared low bound shifts every OTHER row's
+/// rectangle 8 columns right -- here, row 2 (no tab at all) would read
+/// back as just `"h"` instead of the full `"wxyzefgh"` nvim actually
+/// yanks. The list-form start cell (column 1) fixes it.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_anchored_on_a_leading_tab() {
+    let engine = spawn();
+    set_lines(&engine, &["\tabc", "wxyzefgh"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jll").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "\ta\nwxyzefgh");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// The padding rule is symmetric, not right-edge-only: both endpoints (row
+/// 1's and row 3's single-cell `'d'`/`'D'`, column 4) agree on a rectangle
+/// whose shared column never touches row 2 at all through cursor movement
+/// -- row 2 (`"xy好z"`, `好` spanning columns 3-4) is a plain interior row of
+/// the block, not an endpoint -- so column 4 lands on `好`'s own RIGHT cell
+/// there, and the covered cell pads with a space instead of emitting `好`'s
+/// raw bytes.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_where_the_low_bound_splits_a_wide_character() {
+    let engine = spawn();
+    set_lines(&engine, &["abcd", "xy好z", "ABCD"]);
+
+    engine.handle.input("gg0lll").expect("move to column 4");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jj")
+        .expect("extend the block down through the interior row");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "d\n \nD");
+    assert_eq!(selection.range, (1, 3));
+}
+
 /// No diagnostics posted reads back an empty list, not an error -- the
 /// ordinary case for a freshly opened buffer.
 #[test]

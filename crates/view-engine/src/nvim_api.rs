@@ -631,18 +631,30 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 /// - Linewise (`V`): every full line from `selection_start` to
 ///   `selection_end`, ignoring both endpoints' columns entirely -- a
 ///   linewise selection has none, by nvim's own definition of the mode.
-/// - Blockwise (`\22`): a SCREEN-column rectangle (`virtcol('v')` and
-///   `virtcol('.')`, not `getpos`'s byte columns), converted to each row's
-///   own byte range via `vim.fn.virtcol2col(win, lnum, vcol)` and clamped
-///   per line to that line's own length, joined with `\n`. Byte columns
-///   alone (this chunk's original, round-1 form) are wrong whenever a row
-///   contains a multi-byte character: the rectangle's bounds are shared
-///   screen columns held constant across every row, and a given screen
-///   column lands at a different byte offset on each row depending on how
-///   many multi-byte characters precede it there -- live-confirmed the
-///   round-1 form sliced mid-character on such a row, producing invalid
+/// - Blockwise (`\22`): a SCREEN-column rectangle joined with `\n`. Byte
+///   columns alone (this chunk's original, round-1 form) are wrong whenever
+///   a row contains a multi-byte character: the rectangle's bounds are
+///   shared screen columns held constant across every row, and a given
+///   screen column lands at a different byte offset on each row depending
+///   on how many multi-byte characters precede it there -- live-confirmed
+///   the round-1 form sliced mid-character on such a row, producing invalid
 ///   UTF-8 the decoder silently turned into "no selection" (see
-///   `docs/ai-context-reads-wire-capture.md`, "Fix round 2"). A `$`-block
+///   `docs/ai-context-reads-wire-capture.md`, "Fix round 2"). The rectangle
+///   itself is bounded by `virtcol('v', 1)[1]`/`virtcol('.', 1)[1]` (the
+///   LIST form's START cell) for the low bound and the plain SCALAR form
+///   (the END cell) for the high bound -- never the scalar form for the low
+///   bound, which is wrong on any row not containing the multi-cell
+///   character (a tab, an East-Asian-wide character) that defines it:
+///   live-confirmed a scalar-only low bound built from a leading tab's own
+///   end cell (screen col 8) shifted every OTHER row's rectangle 8 columns
+///   right (see "Fix round 3"). `blockwise_row_text` walks each row's
+///   screen columns via `vim.fn.virtcol2col(win, lnum, vcol)` and
+///   `vim.fn.virtcol({lnum, byte}, 1)`, copying a character's raw bytes
+///   when its own span sits entirely inside `[lo_vcol, hi_vcol]` and
+///   padding with one space per covered cell when the rectangle only
+///   partially covers it (on either edge) -- nvim's own block-yank
+///   behavior for a tab or wide character split by the rectangle's edge,
+///   never that character's raw, unsplittable bytes. A `$`-block
 ///   (`getcurpos()`'s `curswant` field, 1-indexed `getcurpos()[5]` in Lua,
 ///   equal to nvim's `MAXCOL` sentinel `2147483647`) extends every row to
 ///   its own end instead of the shared screen-column bound.
@@ -665,6 +677,30 @@ local function byte_end_of_char(line, byte_col0)
   end
   return nextbyte
 end
+local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block)
+  local line = line_text(row)
+  if dollar_block then
+    local lo0 = math.min(vim.fn.virtcol2col(win, row, lo_vcol) - 1, #line)
+    return string.sub(line, lo0 + 1, #line)
+  end
+  local end_vcol = vim.fn.virtcol({ row, '$' })
+  local parts = {}
+  local v = lo_vcol
+  while v <= hi_vcol and v < end_vcol do
+    local byte1 = vim.fn.virtcol2col(win, row, v)
+    local span = vim.fn.virtcol({ row, byte1 }, 1)
+    local start_v, char_end_v = span[1], span[2]
+    local covered_end = math.min(char_end_v, hi_vcol)
+    if start_v < v or char_end_v > hi_vcol then
+      parts[#parts + 1] = string.rep(' ', covered_end - v + 1)
+    else
+      local char_end_byte = byte_end_of_char(line, byte1 - 1)
+      parts[#parts + 1] = string.sub(line, byte1, char_end_byte)
+    end
+    v = covered_end + 1
+  end
+  return table.concat(parts)
+end
 local cur = vim.api.nvim_win_get_cursor(0)
 local out = { line = cur[1], col = cur[2] }
 local mode = vim.api.nvim_get_mode().mode
@@ -680,24 +716,12 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
     text = table.concat(vim.api.nvim_buf_get_lines(0, srow - 1, erow, false), '\\n')
   elseif mode == '\\22' then
     local win = vim.api.nvim_get_current_win()
-    local lo_vcol = math.min(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
+    local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1], vim.fn.virtcol('.', 1)[1])
     local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
     local dollar_block = vim.fn.getcurpos()[5] == 2147483647
     local rows = {}
     for row = srow, erow do
-      local line = line_text(row)
-      local lo0 = math.min(vim.fn.virtcol2col(win, row, lo_vcol) - 1, #line)
-      local hi0
-      if dollar_block then
-        hi0 = #line
-      else
-        local hi_byte1 = vim.fn.virtcol2col(win, row, hi_vcol)
-        hi0 = math.min(byte_end_of_char(line, hi_byte1 - 1), #line)
-      end
-      if hi0 < lo0 then
-        hi0 = lo0
-      end
-      rows[#rows + 1] = string.sub(line, lo0 + 1, hi0)
+      rows[#rows + 1] = blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block)
     end
     text = table.concat(rows, '\\n')
   else

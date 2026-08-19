@@ -160,10 +160,17 @@ Live-verified through the fixed `CURSOR_CONTEXT_CHUNK` by
 Round 1's blockwise fix above clamped `getpos`'s raw BYTE columns per line --
 correct only because its own capture buffer (`"alpha"`/`"beta"`/`"gamma"`) is
 ASCII, where byte column and screen column never diverge. Any line containing
-a multi-byte character exposes the gap: nvim's real blockwise rectangle is
-defined in `virtcol()` (screen-column) terms, held constant across every row,
-and each row's own byte offset for a given screen column depends on how many
-multi-byte characters precede it on THAT line.
+a character whose BYTE width isn't 1 (any multi-byte UTF-8 sequence, `é`
+included) exposes the gap: nvim's real blockwise rectangle is defined in
+`virtcol()` (screen-column) terms, held constant across every row, and each
+row's own byte offset for a given screen column depends on how many
+multi-byte characters precede it on THAT line. This is a byte-width-vs-
+screen-column divergence -- a separate axis from a character's own CELL
+width (how many screen columns ONE character occupies: tabs and East-Asian-
+wide characters can occupy several), which is what "Fix round 3" below
+addresses. `é` is multi-byte (2 bytes) yet single-cell (1 screen column),
+so it exercises this round's fix but not round 3's -- the two bugs are
+independent and a fix for one does not imply the other.
 
 Buffer `["\xe9xyz", "abcd"]` (`"éxyz"`, `é` a 2-byte UTF-8 sequence),
 `gg0<C-v>` then `jl`:
@@ -288,6 +295,169 @@ The existing ASCII-uniform-width regression case
 fix -- re-verified against the same oracle, `virtcol` and byte column agree
 on every row when no row contains a multi-byte character, which is exactly
 why an ASCII-only capture was insufficient to catch the original bug.
+
+## Fix round 3 (review-driven): `virtcol()`'s SCALAR form is a character's END cell, not its START -- wrong for the LOW bound on any multi-CELL character
+
+Round 2's fix above is byte-width-correct but still screen-column-wrong on
+its own terms for the LOW bound: `vim.fn.virtcol('v')`/`vim.fn.virtcol('.')`
+(no second argument) return the SCALAR form, which `:help virtcol()`
+documents as the RIGHTMOST (end) screen column a multi-cell character
+occupies, never its start. Round 2's fixtures (`é`, byte-width 2) are all
+CELL-width 1 -- a single-cell character's start and end column are the same
+number, so the scalar form happened to be indistinguishable from the start
+there. A character whose CELL width exceeds 1 (a tab, or an East-Asian-wide
+character like `你`/`好`) exposes the gap: the scalar form overshoots the
+true low bound by however many cells that character spans.
+
+Severe case, buffer `["\tabc", "wxyzefgh"]`, `gg$<C-v>` then `j` (anchor on
+the leading tab, cursor moves down one row):
+
+```
+mode() -> "\x16"
+virtcol('v') -> 8            -- SCALAR: the tab's END cell (it spans 1-8)
+virtcol('v', 1) -> [1, 8]    -- LIST form: the tab's actual [start, end]
+virtcol('.') -> 9
+virtcol('.', 1) -> [9, 9]
+
+-- round 2 (buggy for this case): lo_vcol from the scalar form
+lo_vcol = min(virtcol('v')=8, virtcol('.')=9) = 8
+-- row 1 ("\tabc", the tab's OWN row): virtcol2col(win,1,8) resolves back to
+--   the tab's own start byte regardless of which of its 8 cells you ask for,
+--   so row 1 is unaffected by the bug here
+-- row 2 ("wxyzefgh", NOT the tab's row): virtcol2col(win,2,8) resolves to
+--   the BYTE column of row 2's OWN 8th character ('h') -- a column that has
+--   nothing to do with the tab at all
+row 2 sliced from vcol 8 -> "h"     -- WRONG: nvim actually yanks the WHOLE
+                                        row, "wxyzefgh"
+
+-- correct: nvim's own yank oracle
+getreg('"') -> "\ta\nwxyzefgh"
+getregtype('"') -> "\x169"    (blockwise, width 9)
+```
+
+This is exactly the shape of bug the review flagged: a rectangle's low bound
+is one shared screen column applied to every row, and a multi-cell
+character's scalar (end-cell) virtcol is the wrong number to share -- it
+overshoots on every OTHER row that doesn't happen to contain that same
+character at that position. The fix is the list form's START element for
+the low bound specifically; the high bound's existing use of the scalar
+(end cell) form was already correct, unchanged:
+
+```lua
+local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1], vim.fn.virtcol('.', 1)[1])
+local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
+```
+
+With `lo_vcol = min(1, 9) = 1` (the tab's own start, not its end), row 1
+(the tab's own row) still yields `"\ta"` (screen cols 1-9: the whole tab,
+cols 1-8, plus `'a'` at col 9), and row 2 now correctly starts from its own
+column 1, yielding the full `"wxyzefgh"` (only 8 columns exist; the request
+for column 9 simply runs off the end of the row, the same "short row
+contributes its own end" behavior "Fix round 2" already established, not a
+new case). Live-verified by
+`read_cursor_context_with_a_blockwise_selection_anchored_on_a_leading_tab`.
+
+### Sub-case, same fix: nvim pads a partially-covered multi-cell character with spaces, never raw bytes
+
+Closing the low-bound bug alone is not sufficient: whenever the shared
+rectangle's low or high screen-column bound lands INSIDE a multi-cell
+character (covering only some of its cells, not all), nvim does not emit
+that character's raw bytes -- there is no such thing as "half a tab" or
+"half of `你`" in a text buffer. Instead it pads the row with one space per
+covered screen cell, keeping the block visually rectangular. This is
+distinct from -- and layered on top of -- the low-bound fix above.
+
+Right-edge partial coverage, buffer `["你好xy", "abcdef"]`, `gg0<C-v>` then
+`jll` (screen columns 1-3; `好` spans columns 3-4, so column 3 covers only
+its LEFT half):
+
+```
+mode() -> "\x16"
+virtcol('v', 1) -> [1, 2]     -- anchor on 你, which spans cols 1-2
+virtcol('.', 1) -> [3, 3]     -- cursor lands on row 2's 'c' (ASCII, single-cell)
+lo_vcol = min(1, 3) = 1
+hi_vcol = max(2, 3) = 3
+
+getreg('"') -> "\xe4\xbd\xa0 \nabc"   ("你 \nabc")
+getregtype('"') -> "\x163"
+```
+
+Row 1 (`"你好xy"`) covers screen columns 1-3: `你` (cols 1-2) is fully
+covered and copied raw; `好` (cols 3-4) has only its column 3 (its left
+half) inside the rectangle -- covered cell count 1 -- so it contributes ONE
+pad space, not any raw byte of `好`. Row 2 (`"abcdef"`) covers columns 1-3
+with no multi-cell character present, so it copies raw: `"abc"`.
+Live-verified by
+`read_cursor_context_with_a_blockwise_selection_over_a_wide_character`.
+
+Right-edge partial coverage on a tab, buffer `["a\tbcd", "wxyzefgh"]`,
+`gg0<C-v>` then `jlll` (screen columns 1-4; the tab spans columns 2-8, so
+columns 2-4 are its first three cells only):
+
+```
+lo_vcol = 1, hi_vcol = 4
+getreg('"') -> "a   \nwxyz"     -- 'a' raw, then 3 pad spaces for the tab's
+                                    3 covered cells (columns 2, 3, 4)
+getregtype('"') -> "\x164"
+```
+
+Live-verified by
+`read_cursor_context_with_a_blockwise_selection_over_a_partially_covered_tab`.
+
+Left-edge partial coverage (confirms the padding rule is symmetric, not
+right-edge-only): buffer `["abcd", "xy\xe5\xa5\xbdz", "ABCD"]` (`"xy好z"`,
+`好` a 3-byte UTF-8 character spanning screen columns 3-4), both endpoints
+on the single-cell `'d'`/`'D'` at column 4 (`gg0lll<C-v>jj` -- move to
+column 4 in Normal mode first, THEN enter blockwise Visual, so `curswant`
+carries a real column rather than nvim's `$`-motion `MAXCOL` sentinel).
+Row 2 is never touched by cursor movement at all -- it is a plain interior
+row of the three-row block -- so the shared column 4 lands on `好`'s own
+RIGHT (second) cell there, never its start:
+
+```
+virtcol('v', 1) -> [4, 4]      -- 'd', single-cell
+virtcol('.', 1) -> [4, 4]      -- 'D' on row 3, single-cell
+lo_vcol = 4, hi_vcol = 4
+
+getreg('"') -> "d\n \nD"     -- row 2: 1 pad space (好's single covered
+                                 cell, column 4), nothing else
+getregtype('"') -> "\x161"
+```
+
+(A first attempt at this capture used `gg$<C-v>j` to land on row 1's `'d'`
+by way of `$`, expecting an ordinary 2-cell-wide rectangle -- but `$`
+unconditionally sets `curswant` to nvim's `MAXCOL` sentinel even when
+pressed before entering Visual mode, silently turning the whole selection
+into a `$`-block. That capture is not reused here; this section's numbers
+come from the corrected key sequence above, live-verified through the
+actual `EngineConfig::isolated()` test harness, not the standalone capture
+client.)
+
+Confirmed via a direct `virtcol2col`/`virtcol({lnum,col},1)` probe against
+`"xy好z"`: every byte column of `好` (its own 3 UTF-8 bytes) reports the
+SAME `[3, 4]` span regardless of which of those bytes -- or which of its two
+screen cells -- is queried, which is what lets a single "does this
+character's own span fall entirely inside `[lo_vcol, hi_vcol]`?" check
+(rather than separate left/right-edge special cases) decide raw-copy versus
+pad uniformly for both edges. `vim.fn.virtcol({row, '$'})` (one past a
+line's own last real column, confirmed `9` for an 8-column line and `1` for
+an empty one) is what bounds the per-row scan so it stops at the row's own
+end rather than looping on `virtcol2col`'s past-end-of-line clamp.
+
+The mixed-length-rows short-row case from "Fix round 2"
+(`["alphabet","be","gammaxyz"]`, columns 1-5, `"be"` contributing its full 2
+columns) is unaffected by this padding rule: running out of row (no
+character occupies the requested column at all) is not the same as a
+character being partially covered, and still contributes nothing extra, not
+padding, exactly as before -- re-verified against the same oracle,
+unchanged.
+
+All four fixtures above (the tab anchor low-bound case, the two right-edge
+padding cases, and the left-edge padding case) plus the existing ASCII and
+single-cell-multi-byte (`é`) regression cases were captured with a
+standalone Python msgpack-rpc client against `nvim --clean --headless
+--listen <socket>` (NVIM v0.12.4), using `normal! y` + `getreg('"')` as the
+oracle, before writing any fix code.
 
 ## `vim.diagnostic.get(0)`: 0-indexed, flat, closed severity range
 
