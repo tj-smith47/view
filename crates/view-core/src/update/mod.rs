@@ -382,11 +382,12 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             },
         ),
         Msg::BufDetached { buf, generation } => review::on_buf_detached(model, buf, generation),
-        Msg::BufResolved {
+        Msg::HiddenBufferLoaded {
             generation,
             buf,
             changedtick,
-        } => review::on_buf_resolved(model, generation, buf, changedtick),
+            created: _,
+        } => review::on_hidden_buffer_loaded(model, generation, buf, changedtick),
         Msg::BufWriteRefused { buf, generation } => {
             review::on_buf_write_refused(model, buf, generation)
         }

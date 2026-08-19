@@ -37,9 +37,11 @@ pub(super) fn on_buf_detached(
     Vec::new()
 }
 
-/// nvim answered which buffer the proposal's path names; a successful bind
-/// answers the attach that follows it.
-pub(super) fn on_buf_resolved(
+/// nvim answered which buffer the proposal's path names (creating a hidden
+/// one when none existed); a successful bind answers the attach that
+/// follows it. `created` is diagnostic only (see [`crate::msg::RpcCall::LoadHidden`]'s
+/// own doc) and plays no part in this fold.
+pub(super) fn on_hidden_buffer_loaded(
     model: &mut Model,
     generation: u64,
     buf: Option<BufferHandle>,
@@ -124,7 +126,7 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             Vec::new()
         }
         "q" => {
-            let closing = review.close_effect();
+            let closing = review.close_effects();
             // Abandoned with decisions still owed, so the session forgets
             // the proposal was ever raised: the user dismissed it unread,
             // and an agent restating the same diff later must reach them
@@ -170,7 +172,7 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     {
         let panel = model.ai_panel_mut();
         if let Some(finished) = panel.pending_diff.take() {
-            effects.extend(finished.close_effect());
+            effects.extend(finished.close_effects());
         }
         effects.extend(promote_queued(model));
     }

@@ -92,7 +92,7 @@ pub struct DiffReviewState {
     pub request_id: u64,
     /// The file the agent proposed changes to.
     pub path: PathBuf,
-    /// Stamped on this review's own `BufResolve`/`BufAttach` and matched
+    /// Stamped on this review's own `LoadHidden`/`BufAttach` and matched
     /// against every reply, on the `PickerState::generation` precedent: a
     /// reply for a review a later proposal has superseded must never bind
     /// its buffer onto the newer one.
@@ -173,18 +173,25 @@ impl DiffReviewState {
 
     /// The effect that starts the binding: nvim owns buffer identity, so
     /// the path the agent named has to be resolved there before anything
-    /// can attach to it or write into it.
+    /// can attach to it or write into it. Also acquires this review's one
+    /// hidden-buffer hold on `path` -- released exactly once, by
+    /// [`Self::close_effects`], whichever way this review ends. A path with
+    /// a window already open resolves onto that same buffer (see
+    /// `docs/hidden-buffer-wire-capture.md`); nothing here or in
+    /// `close_effects` needs to know which case it is, since
+    /// `RpcCall::ReleaseHidden`'s own decrement-to-zero delete is refused by
+    /// nvim for a buffer any window still shows.
     #[must_use]
     pub fn bind_effect(&self) -> Effect {
-        Effect::Rpc(RpcCall::BufResolve {
+        Effect::Rpc(RpcCall::LoadHidden {
             path: self.path.to_string_lossy().into_owned(),
             generation: self.generation,
         })
     }
 
-    /// Folds one `Msg::BufResolved` in, returning the attach that follows a
-    /// successful bind. A reply whose generation is not this review's is
-    /// dropped and answers no effects.
+    /// Folds one `Msg::HiddenBufferLoaded` in, returning the attach that
+    /// follows a successful bind. A reply whose generation is not this
+    /// review's is dropped and answers no effects.
     #[must_use]
     pub fn bind(
         &mut self,
@@ -208,13 +215,31 @@ impl DiffReviewState {
         })]
     }
 
-    /// The detach that ends this review's subscription, or `None` when
-    /// there is nothing attached to end.
+    /// The effects that end this review: the detach that stops its
+    /// subscription (when one is still live) and the release of the one
+    /// hidden-buffer hold [`Self::bind_effect`] acquired. Called exactly
+    /// once per review, by whichever of the two paths ends it -- an
+    /// explicit abandon (`q`) or every hunk reaching a final status -- so
+    /// the hold's acquire/release pair stays 1:1 regardless of which path
+    /// ends it or how many hunks were ever accepted.
+    ///
+    /// The release fires even for a review that never bound (`self.buffer`
+    /// is `None`): `bind_effect` and this are the one acquire/release pair
+    /// per review, so a review abandoned before its resolve ever answered
+    /// still owes the release its bind already sent.
     #[must_use]
-    pub fn close_effect(&self) -> Option<Effect> {
-        let buf = self.buffer?;
-        matches!(self.sync, ReviewSync::Live | ReviewSync::Desynced)
-            .then_some(Effect::Rpc(RpcCall::BufDetach { buf }))
+    pub fn close_effects(&self) -> Vec<Effect> {
+        let detach = self
+            .buffer
+            .filter(|_| matches!(self.sync, ReviewSync::Live | ReviewSync::Desynced));
+        let mut effects = Vec::with_capacity(2);
+        if let Some(buf) = detach {
+            effects.push(Effect::Rpc(RpcCall::BufDetach { buf }));
+        }
+        effects.push(Effect::Rpc(RpcCall::ReleaseHidden {
+            path: self.path.to_string_lossy().into_owned(),
+        }));
+        effects
     }
 
     /// Folds one buffer change into every hunk. A desynced event also
@@ -569,7 +594,7 @@ mod tests {
         let mut state = DiffReviewState::new(1, PathBuf::from("/tmp/a.rs"), 3, Vec::new());
         assert_eq!(
             rpc(&state.bind_effect()),
-            &RpcCall::BufResolve {
+            &RpcCall::LoadHidden {
                 path: "/tmp/a.rs".to_string(),
                 generation: 3,
             }
@@ -796,10 +821,41 @@ mod tests {
         assert_eq!(state.sync, ReviewSync::Detached);
         assert!(state.hunks.iter().all(|h| h.status == HunkStatus::Stale));
         assert_eq!(state.accept(0).err(), Some(AcceptRefusal::NotLive));
+        let effects = state.close_effects();
         assert!(
-            state.close_effect().is_none(),
+            !effects
+                .iter()
+                .any(|e| matches!(rpc(e), RpcCall::BufDetach { .. })),
             "nvim already ended the subscription; asking it to detach again \
              names a subscription that no longer exists"
+        );
+        assert_eq!(effects.len(), 1);
+        assert_eq!(
+            rpc(&effects[0]),
+            &RpcCall::ReleaseHidden {
+                path: "/tmp/a.rs".to_string(),
+            },
+            "the hidden-buffer hold this review's bind acquired is still owed \
+             a release even though the edit subscription already ended"
+        );
+    }
+
+    #[test]
+    fn closing_a_live_review_detaches_and_releases_the_hidden_hold() {
+        let state = review();
+        let effects = state.close_effects();
+        assert_eq!(effects.len(), 2);
+        assert_eq!(
+            rpc(&effects[0]),
+            &RpcCall::BufDetach {
+                buf: BufferHandle(9),
+            }
+        );
+        assert_eq!(
+            rpc(&effects[1]),
+            &RpcCall::ReleaseHidden {
+                path: "/tmp/a.rs".to_string(),
+            }
         );
     }
 

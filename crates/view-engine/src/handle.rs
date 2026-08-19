@@ -102,12 +102,14 @@ enum Waiter {
     /// query has since superseded can be dropped by `update()` instead of
     /// clobbering it.
     BufferList { generation: u64 },
-    /// A `RpcCall::BufResolve` reply: the real buffer handle nvim holds a
-    /// path under, routed to the pump as `Msg::BufResolved` tagged with
-    /// `generation` so a review superseded while its resolve was in flight
-    /// drops the answer instead of binding a buffer onto the wrong
-    /// proposal.
-    BufResolve { generation: u64 },
+    /// A `RpcCall::LoadHidden` reply: the real buffer handle nvim holds
+    /// `path` under, routed to the pump as `Msg::HiddenBufferLoaded` tagged
+    /// with `generation` so a review superseded while its resolve was in
+    /// flight drops the answer instead of binding a buffer onto the wrong
+    /// proposal. `path` is echoed back (the reply itself carries no path)
+    /// so the reader thread can record this call's increment against the
+    /// same key [`EngineHandle::release_hidden`] will later decrement.
+    LoadHidden { generation: u64, path: String },
     /// An async picker-preview lookup for a candidate path (see
     /// [`EngineHandle::request_preview`]): nothing is blocked on this
     /// `msgid`, so its `Response` is decoded and routed to `pump` as
@@ -231,6 +233,40 @@ pub struct EngineHandle {
     /// either kind of detach cannot resurrect an entry this connection no
     /// longer owes anyone.
     attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>>,
+    /// Every path this connection currently holds a hidden buffer open for,
+    /// keyed exactly as [`load_hidden`](Self::load_hidden) was called
+    /// (never canonicalized on this side -- nvim's own chunk does the
+    /// symlink-safe comparison, see `docs/hidden-buffer-wire-capture.md`),
+    /// with the in-flight holder count [`release_hidden`](Self::release_hidden)
+    /// decrements. Populated by the reader thread once a `Waiter::LoadHidden`
+    /// reply actually names a buffer, never by the call that issues the
+    /// request -- the count must track buffers this connection has
+    /// confirmed exist, not requests still in flight.
+    hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>>,
+}
+
+/// One path's hidden-buffer hold: the buffer `RpcCall::LoadHidden` last
+/// resolved it to, and how many un-released calls are still holding it
+/// open. See `EngineHandle::hidden_bufs`.
+struct HiddenHold {
+    buf: view_core::msg::BufferHandle,
+    count: u64,
+}
+
+/// Whether one [`EngineHandle::load_hidden`] call created the buffer it
+/// resolved to, or found one already there (a previous `load_hidden` call's
+/// hold, or a real window's own buffer). Diagnostic only: it plays no part
+/// in [`EngineHandle::release_hidden`]'s decrement-to-zero delete decision,
+/// which is a pure per-path refcount -- a bare create/reuse flag would let
+/// two overlapping holders on the same path race each other's cleanup,
+/// since only one of them could ever be told "you created it, you may
+/// delete it" and the other would have nothing to decide by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Created {
+    /// This call's `nvim_create_buf` produced the buffer.
+    Yes,
+    /// This call found and reused a buffer that already existed.
+    No,
 }
 
 /// One live-attached buffer's connection-side state: the generation
@@ -258,6 +294,7 @@ impl Clone for EngineHandle {
             settled: Arc::clone(&self.settled),
             outbox: Arc::clone(&self.outbox),
             attached_bufs: Arc::clone(&self.attached_bufs),
+            hidden_bufs: Arc::clone(&self.hidden_bufs),
         }
     }
 }
@@ -378,6 +415,8 @@ impl EngineHandle {
         let settled = Arc::new(Condvar::new());
         let attached_bufs: Arc<Mutex<HashMap<u64, AttachedBuf>>> =
             Arc::new(Mutex::new(HashMap::new()));
+        let hidden_bufs: Arc<Mutex<HashMap<String, HiddenHold>>> =
+            Arc::new(Mutex::new(HashMap::new()));
         let pending: Pending = Arc::new(Mutex::new(PendingState {
             waiters: HashMap::new(),
             closed: Arc::clone(&closed),
@@ -409,6 +448,7 @@ impl EngineHandle {
         let reader_pending = Arc::clone(&pending);
         let reader_outbox = Arc::clone(&outbox);
         let reader_attached_bufs = Arc::clone(&attached_bufs);
+        let reader_hidden_bufs = Arc::clone(&hidden_bufs);
         let reader_pump = pump;
         let reader_announced_exit = Arc::clone(&announced_exit);
         let reader_settled = Arc::clone(&settled);
@@ -534,25 +574,45 @@ impl EngineHandle {
                                     });
                                 }
                             }
-                            Some(Waiter::BufResolve { generation }) => {
+                            Some(Waiter::LoadHidden { generation, path }) => {
+                                // an error reply degrades to "no handle",
+                                // the same "safe default over a stuck
+                                // generation" precedent decode_buffer_list_reply
+                                // and decode_hl_probe_reply already follow.
+                                // The review surfaces it as a review that
+                                // cannot bind rather than one that silently
+                                // offers an accept with nowhere to write.
+                                let (buf, created, changedtick) = if error == Value::Nil {
+                                    decode_load_hidden_reply(&result)
+                                } else {
+                                    (None, Created::No, 0)
+                                };
+                                // Recorded before routing, and unconditionally
+                                // of whether the pump has anywhere to put the
+                                // reply right now: the hold this call
+                                // acquired is real the moment nvim answers
+                                // with a handle, regardless of whether the
+                                // caller ever sees the reply that says so --
+                                // it still owes exactly one `release_hidden`
+                                // for this `load_hidden`, and that release
+                                // must find a count to decrement.
+                                if let Some(buf) = buf {
+                                    let mut holds = reader_hidden_bufs
+                                        .lock()
+                                        .unwrap_or_else(PoisonError::into_inner);
+                                    holds
+                                        .entry(path)
+                                        .and_modify(|hold| {
+                                            hold.buf = buf;
+                                            hold.count += 1;
+                                        })
+                                        .or_insert(HiddenHold { buf, count: 1 });
+                                }
                                 if let Some(pump) = &reader_pump {
-                                    // an error reply degrades to "no
-                                    // handle", the same "safe default over
-                                    // a stuck generation" precedent
-                                    // decode_buffer_list_reply and
-                                    // decode_hl_probe_reply already follow.
-                                    // The review surfaces it as a review
-                                    // that cannot bind rather than one that
-                                    // silently offers an accept with
-                                    // nowhere to write.
-                                    let (buf, changedtick) = if error == Value::Nil {
-                                        decode_buf_resolve_reply(&result)
-                                    } else {
-                                        (None, 0)
-                                    };
-                                    pump.route_buf_resolve(Msg::BufResolved {
+                                    pump.route_hidden_buffer_loaded(Msg::HiddenBufferLoaded {
                                         generation,
                                         buf,
+                                        created: matches!(created, Created::Yes),
                                         changedtick,
                                     });
                                 }
@@ -890,6 +950,7 @@ impl EngineHandle {
             settled,
             outbox,
             attached_bufs,
+            hidden_bufs,
         }
     }
 
@@ -1153,6 +1214,29 @@ impl EngineHandle {
         }
     }
 
+    /// Decrements `path`'s hidden-buffer hold count, called from
+    /// [`crate::nvim_api::EngineHandle::release_hidden`]. Returns the
+    /// buffer to delete iff this decrement brought the count to zero --
+    /// `None` for a `path` with no recorded hold at all (a defensive extra
+    /// release) or one whose count is still above zero after decrementing
+    /// (another holder still needs it).
+    ///
+    /// A poisoned lock degrades to "nothing to delete" rather than
+    /// panicking or recovering the map: a caller that already owns a real
+    /// `HiddenHold` entry losing it to a poison would double-count on its
+    /// next `load_hidden`, but never deleting a buffer this connection
+    /// cannot currently prove is unreferenced is the safer of the two
+    /// wrong answers.
+    pub(crate) fn note_hidden_release(&self, path: &str) -> Option<view_core::msg::BufferHandle> {
+        let mut holds = self.hidden_bufs.lock().ok()?;
+        let hold = holds.get_mut(path)?;
+        hold.count = hold.count.saturating_sub(1);
+        if hold.count > 0 {
+            return None;
+        }
+        holds.remove(path).map(|hold| hold.buf)
+    }
+
     /// Answers a request the engine is blocked on: encodes `[1, msgid, nil,
     /// value]` and enqueues it on the writer thread's channel, same as
     /// [`notify`](Self::notify). Never blocks the caller; the actual write
@@ -1332,23 +1416,27 @@ impl EngineHandle {
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
     /// into a buffer handle and routed to the connection's pump as
-    /// `Msg::BufResolved` (see [`Waiter::BufResolve`]). Async on the same
-    /// terms as [`request_buffer_list`](Self::request_buffer_list): a diff
-    /// review opens from the runtime loop, which must never block on a
-    /// reply.
+    /// `Msg::HiddenBufferLoaded` (see [`Waiter::LoadHidden`]). Async on the
+    /// same terms as [`request_buffer_list`](Self::request_buffer_list): a
+    /// diff review opens from the runtime loop, which must never block on a
+    /// reply. Takes `path` in addition to `generation` (the same reason
+    /// [`request_preview`](Self::request_preview) takes `path`): the reader
+    /// thread needs it to record this call's hidden-buffer hold under the
+    /// same key [`EngineHandle::release_hidden`] will later look up.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited; the request is never written in
     /// either case.
-    pub fn request_buf_resolve(
+    pub fn request_load_hidden(
         &self,
         method: &str,
         params: Vec<Value>,
         generation: u64,
+        path: String,
     ) -> Result<(), EngineError> {
-        self.request_async(method, params, Waiter::BufResolve { generation })
+        self.request_async(method, params, Waiter::LoadHidden { generation, path })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -1736,26 +1824,38 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Decodes a buffer-resolve reply into the handle nvim answered with. A
-/// non-positive or absent number is `None` rather than a handle: nvim's own
-/// `bufadd` answers `0` for a name it will not take, and `BufferHandle(0)`
-/// is nvim's "current buffer" sentinel, which `RpcCall::BufAttach`'s own
-/// doc forbids -- attaching under it would record a generation no event
-/// this attach produces can ever be looked up by.
-fn decode_buf_resolve_reply(result: &Value) -> (Option<view_core::msg::BufferHandle>, u64) {
+/// Decodes a `LOAD_HIDDEN_CHUNK` reply into the handle nvim answered with. A
+/// non-positive or absent number is `None` rather than a handle: `buf = 0`
+/// is the chunk's own "refused" answer (a directory, a name
+/// `nvim_create_buf` would not take), and `BufferHandle(0)` is separately
+/// nvim's "current buffer" sentinel, which `RpcCall::BufAttach`'s own doc
+/// forbids -- attaching under it would record a generation no event this
+/// attach produces can ever be looked up by. `created` degrades to
+/// [`Created::No`] on the same absent-handle path: there is no buffer to
+/// have created either way.
+fn decode_load_hidden_reply(
+    result: &Value,
+) -> (Option<view_core::msg::BufferHandle>, Created, u64) {
     let Some(pairs) = result.as_map() else {
-        return (None, 0);
+        return (None, Created::No, 0);
     };
     let handle = crate::wire::map_find(pairs, "buf")
         .and_then(Value::as_u64)
         .unwrap_or(0);
     if handle == 0 {
-        return (None, 0);
+        return (None, Created::No, 0);
     }
+    let created = crate::wire::map_find(pairs, "created")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let changedtick = crate::wire::map_find(pairs, "changedtick")
         .and_then(Value::as_u64)
         .unwrap_or(0);
-    (Some(view_core::msg::BufferHandle(handle)), changedtick)
+    (
+        Some(view_core::msg::BufferHandle(handle)),
+        if created { Created::Yes } else { Created::No },
+        changedtick,
+    )
 }
 
 /// What one connection answered about the recovery it performed while
@@ -2449,6 +2549,56 @@ mod tests {
     }
 
     #[test]
+    fn decode_load_hidden_reply_first_call_reports_created_true() {
+        // wire-verified, docs/hidden-buffer-wire-capture.md case 3, first call
+        let result = Value::Map(vec![
+            (Value::from("buf"), Value::from(2u64)),
+            (Value::from("created"), Value::from(true)),
+            (Value::from("changedtick"), Value::from(2u64)),
+        ]);
+        assert_eq!(
+            decode_load_hidden_reply(&result),
+            (Some(view_core::msg::BufferHandle(2)), Created::Yes, 2)
+        );
+    }
+
+    #[test]
+    fn decode_load_hidden_reply_second_call_same_path_reports_created_false() {
+        // wire-verified, docs/hidden-buffer-wire-capture.md case 3, second
+        // call: identical handle, created flips to false
+        let result = Value::Map(vec![
+            (Value::from("buf"), Value::from(2u64)),
+            (Value::from("created"), Value::from(false)),
+            (Value::from("changedtick"), Value::from(2u64)),
+        ]);
+        assert_eq!(
+            decode_load_hidden_reply(&result),
+            (Some(view_core::msg::BufferHandle(2)), Created::No, 2)
+        );
+    }
+
+    #[test]
+    fn decode_load_hidden_reply_zero_handle_decodes_to_no_buffer() {
+        // wire-verified, docs/hidden-buffer-wire-capture.md: a directory (or
+        // any refused path) answers `buf = 0`, the chunk's own "refused"
+        // sentinel, never nvim's "current buffer" meaning of the same value
+        let result = Value::Map(vec![
+            (Value::from("buf"), Value::from(0u64)),
+            (Value::from("created"), Value::from(false)),
+            (Value::from("changedtick"), Value::from(0u64)),
+        ]);
+        assert_eq!(decode_load_hidden_reply(&result), (None, Created::No, 0));
+    }
+
+    #[test]
+    fn decode_load_hidden_reply_non_map_result_decodes_to_no_buffer() {
+        assert_eq!(
+            decode_load_hidden_reply(&Value::Nil),
+            (None, Created::No, 0)
+        );
+    }
+
+    #[test]
     fn decode_hl_probe_reply_transparent_fixture_has_fg_only() {
         // wire-verified against a real `nvim --embed`, `hi Normal
         // guifg=#f8f8f2` with no `guibg` set (this machine's own config):
@@ -2609,6 +2759,109 @@ mod tests {
         assert_eq!(generation, 1);
         assert_eq!(fg, None);
         assert_eq!(bg, None);
+    }
+
+    /// End-to-end through the reader thread's own routing: a `load_hidden`
+    /// reply names a real handle, routes as `Msg::HiddenBufferLoaded`, and
+    /// leaves exactly one hold recorded -- releasing it once must delete
+    /// (return the buffer); releasing an already-empty path again must not.
+    #[test]
+    fn a_single_load_hidden_reply_leaves_exactly_one_hold_to_release() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+
+        h.load_hidden("/tmp/one.rs", 3).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("buf"), Value::from(2u64)),
+                (Value::from("created"), Value::from(true)),
+                (Value::from("changedtick"), Value::from(2u64)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::HiddenBufferLoaded {
+            generation,
+            buf,
+            created,
+            changedtick,
+        } = msg
+        else {
+            unreachable!("expected HiddenBufferLoaded, got {msg:?}");
+        };
+        assert_eq!(generation, 3);
+        assert_eq!(buf, Some(view_core::msg::BufferHandle(2)));
+        assert!(created);
+        assert_eq!(changedtick, 2);
+
+        assert_eq!(
+            h.note_hidden_release("/tmp/one.rs"),
+            Some(view_core::msg::BufferHandle(2)),
+            "the one hold this reply recorded must delete on its one release"
+        );
+        assert_eq!(
+            h.note_hidden_release("/tmp/one.rs"),
+            None,
+            "a path with no recorded hold left must not report a buffer to delete"
+        );
+    }
+
+    /// The refcount half of the same contract: two `load_hidden` replies for
+    /// the same path leave a hold count of two, so the first `release_hidden`
+    /// must not report anything to delete -- only the second, decrementing
+    /// to zero, does. Deleting on the first release (the bug this pins) would
+    /// destroy a buffer a second holder still depends on.
+    #[test]
+    fn two_load_hidden_replies_for_the_same_path_require_two_releases_to_delete() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+        let mut r = std::io::BufReader::new(peer_read);
+
+        for generation in [10u64, 11u64] {
+            h.load_hidden("/tmp/two.rs", generation).unwrap();
+            let v = rmpv::decode::read_value(&mut r).unwrap();
+            let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+                unreachable!("expected a Request");
+            };
+            let reply = RpcMessage::Response {
+                msgid,
+                error: Value::Nil,
+                result: Value::Map(vec![
+                    (Value::from("buf"), Value::from(4u64)),
+                    (Value::from("created"), Value::from(generation == 10)),
+                    (Value::from("changedtick"), Value::from(2u64)),
+                ]),
+            };
+            rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+            peer_write.flush().unwrap();
+            let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert!(
+                matches!(msg, Msg::HiddenBufferLoaded { buf: Some(_), .. }),
+                "expected HiddenBufferLoaded with a handle, got {msg:?}"
+            );
+        }
+
+        assert_eq!(
+            h.note_hidden_release("/tmp/two.rs"),
+            None,
+            "the first release of two holders must not delete -- one holder remains"
+        );
+        assert_eq!(
+            h.note_hidden_release("/tmp/two.rs"),
+            Some(view_core::msg::BufferHandle(4)),
+            "the second release, decrementing to zero, must report the buffer to delete"
+        );
     }
 
     #[test]

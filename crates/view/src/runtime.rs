@@ -571,9 +571,10 @@ impl<E: EngineOps> Executor<E> {
                     },
                     RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
                     RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
-                    RpcCall::BufResolve { path, generation } => {
-                        self.ops.buf_resolve(&path, generation)
+                    RpcCall::LoadHidden { path, generation } => {
+                        self.ops.load_hidden(&path, generation)
                     }
+                    RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
                     // BufSetText is matched explicitly above rather than

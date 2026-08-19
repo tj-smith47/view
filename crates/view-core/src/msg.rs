@@ -345,9 +345,9 @@ pub enum Msg {
         buf: BufferHandle,
         generation: u64,
     },
-    /// The decoded answer to one `RpcCall::BufResolve`: the real buffer
-    /// handle nvim holds `path` under, or `None` when the engine could not
-    /// produce one.
+    /// The decoded answer to one `RpcCall::LoadHidden`: the real buffer
+    /// handle nvim holds `path` under (creating an unlisted, hidden one when
+    /// none exists yet), or `None` when the engine could not produce one.
     ///
     /// `generation` is the diff review's own, and must match the review's
     /// current one or the reply is dropped as stale -- the same discipline
@@ -359,9 +359,15 @@ pub enum Msg {
     /// refuses to load (a directory, an unreadable file) has no handle to
     /// give, and a review that silently believed it had one would offer an
     /// accept with nowhere to write.
-    BufResolved {
+    HiddenBufferLoaded {
         generation: u64,
         buf: Option<BufferHandle>,
+        /// Whether this call is the one that created the buffer, as opposed
+        /// to finding one `load_hidden` (or a real window) had already put
+        /// there. Diagnostic only -- see [`RpcCall::LoadHidden`]'s own doc
+        /// for why this never decides who may release the hold it came
+        /// with.
+        created: bool,
         /// The resolved buffer's `b:changedtick` at the moment it was
         /// resolved, so the first write can name a tick without waiting
         /// for an edit event to learn one. `0` when `buf` is `None`.
@@ -1441,8 +1447,9 @@ pub enum RpcCall {
         generation: u64,
     },
     /// Resolves `path` to the real buffer handle nvim holds it under,
-    /// creating and loading the buffer when nvim has none for it yet, and
-    /// answers `Msg::BufResolved` tagged with `generation`.
+    /// creating an unlisted, hidden buffer and loading its content when
+    /// nvim has none for it yet, and answers `Msg::HiddenBufferLoaded`
+    /// tagged with `generation`.
     ///
     /// Its own call rather than a field on `BufAttach`, because
     /// `BufAttach`'s own doc requires a real, resolved handle and this is
@@ -1456,9 +1463,34 @@ pub enum RpcCall {
     /// load-bearing half: `nvim_buf_attach` on an unloaded buffer
     /// subscribes to a buffer with no lines in it, so the first real edit
     /// would arrive as a change against text the review never anchored on.
-    BufResolve {
+    ///
+    /// Every call against a given `path` increments that path's in-flight
+    /// holder count on the engine side (creating the buffer only for the
+    /// first holder; every later call finds and reuses it), and every
+    /// holder owes exactly one paired [`RpcCall::ReleaseHidden`] once it no
+    /// longer needs the buffer -- never a bare create/reuse flag, which
+    /// would let two overlapping holders on the same path race each other's
+    /// cleanup. See `docs/hidden-buffer-wire-capture.md`.
+    LoadHidden {
         path: String,
         generation: u64,
+    },
+    /// Releases one hold this connection's `RpcCall::LoadHidden` acquired
+    /// for `path`, decrementing that path's in-flight holder count and
+    /// deleting the hidden buffer (`nvim_buf_delete`) iff the decrement
+    /// brings it to zero -- never unconditionally, since another holder on
+    /// the same path may still need it. Fire-and-forget like
+    /// [`RpcCall::BufDetach`]: the caller already knows its own hold ended,
+    /// and nothing here answers a reply.
+    ///
+    /// A decrement-to-zero delete that nvim refuses (an unsaved edit still
+    /// sitting in the buffer, or a window somehow showing it) is not an
+    /// error this call surfaces: the hold is released either way, and the
+    /// buffer -- unlisted, still loaded, holding whatever it held -- simply
+    /// outlives this release rather than losing content nobody asked to
+    /// discard. See `docs/hidden-buffer-wire-capture.md`.
+    ReleaseHidden {
+        path: String,
     },
     /// Unsubscribes from `buf`'s edit stream via `nvim_buf_detach`. After
     /// this, no further `Msg::BufTextChanged` reaches `update()` for `buf`

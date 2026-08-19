@@ -64,7 +64,7 @@ fn get_lines(engine: &Engine) -> Vec<String> {
 ///
 /// `old_text: None` is the new-file case: nothing is loaded, and the buffer
 /// stays the single empty line nvim starts a nameless buffer as -- which is
-/// exactly what `RpcCall::BufResolve` resolves such a path to.
+/// exactly what `RpcCall::LoadHidden` resolves such a path to.
 fn accept_all(engine: &Engine, old: Option<&str>, new: &str) -> Vec<String> {
     if let Some(old) = old {
         set_lines(engine, &split_lines(old));

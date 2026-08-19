@@ -6423,17 +6423,18 @@ fn live_review_model() -> Model {
         }),
     );
     let generation = match rpc_calls(&effects).as_slice() {
-        [RpcCall::BufResolve { path, generation }] => {
+        [RpcCall::LoadHidden { path, generation }] => {
             assert_eq!(path, "/tmp/review.rs");
             *generation
         }
-        other => panic!("expected one BufResolve, got {other:?}"),
+        other => panic!("expected one LoadHidden, got {other:?}"),
     };
     let effects = update(
         &mut m,
-        Msg::BufResolved {
+        Msg::HiddenBufferLoaded {
             generation,
             buf: Some(REVIEW_BUF),
+            created: true,
             changedtick: REVIEW_TICK,
         },
     );
@@ -6519,15 +6520,20 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
 
     let effects = update(&mut m, key("a"));
     match rpc_calls(&effects).as_slice() {
-        [RpcCall::BufSetText { undojoin, .. }, RpcCall::BufDetach { buf }] => {
+        [RpcCall::BufSetText { undojoin, .. }, RpcCall::BufDetach { buf }, RpcCall::ReleaseHidden { path }] =>
+        {
             assert!(
                 undojoin,
                 "the second hunk joins the first so one undo retracts the review"
             );
             assert_eq!(*buf, REVIEW_BUF);
+            assert_eq!(path, "/tmp/review.rs");
         }
         other => {
-            panic!("expected the last write and the detach that ends the review, got {other:?}")
+            panic!(
+                "expected the last write, the detach, and the hidden-buffer \
+                 release that end the review, got {other:?}"
+            )
         }
     }
     assert!(
@@ -6549,11 +6555,17 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
     let calls = rpc_calls(&effects);
     assert_eq!(
         calls.last(),
-        Some(&RpcCall::BufDetach { buf: REVIEW_BUF }),
+        Some(&RpcCall::ReleaseHidden {
+            path: "/tmp/review.rs".to_string()
+        }),
         "accepting the last hunk ends the review: {calls:?}"
     );
-    let [RpcCall::BufSetText { edits, .. }, RpcCall::BufDetach { .. }] = calls.as_slice() else {
-        panic!("expected one batched write and the detach, got {calls:?}")
+    let [RpcCall::BufSetText { edits, .. }, RpcCall::BufDetach { .. }, RpcCall::ReleaseHidden { .. }] =
+        calls.as_slice()
+    else {
+        panic!(
+            "expected one batched write, the detach, and the hidden-buffer release, got {calls:?}"
+        )
     };
     let rows: Vec<u32> = edits.iter().map(|edit| edit.start_row).collect();
     assert_eq!(rows.len(), 2);
@@ -6577,7 +6589,12 @@ fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
     let effects = update(&mut m, key("x"));
     assert_eq!(
         rpc_calls(&effects),
-        vec![RpcCall::BufDetach { buf: REVIEW_BUF }],
+        vec![
+            RpcCall::BufDetach { buf: REVIEW_BUF },
+            RpcCall::ReleaseHidden {
+                path: "/tmp/review.rs".to_string()
+            }
+        ],
         "rejecting the last hunk writes nothing and ends the review"
     );
     assert!(m.ai_panel().pending_diff.is_none());
@@ -6783,7 +6800,12 @@ fn closing_the_review_detaches_the_buffer_it_attached() {
 
     assert_eq!(
         rpc_calls(&effects),
-        vec![RpcCall::BufDetach { buf: REVIEW_BUF }]
+        vec![
+            RpcCall::BufDetach { buf: REVIEW_BUF },
+            RpcCall::ReleaseHidden {
+                path: "/tmp/review.rs".to_string(),
+            },
+        ]
     );
     assert!(m.ai_panel().pending_diff.is_none());
 }
@@ -6803,15 +6825,16 @@ fn an_unresolvable_path_leaves_the_review_unbindable() {
         }),
     );
     let generation = match rpc_calls(&effects).as_slice() {
-        [RpcCall::BufResolve { generation, .. }] => *generation,
-        other => panic!("expected one BufResolve, got {other:?}"),
+        [RpcCall::LoadHidden { generation, .. }] => *generation,
+        other => panic!("expected one LoadHidden, got {other:?}"),
     };
 
     let effects = update(
         &mut m,
-        Msg::BufResolved {
+        Msg::HiddenBufferLoaded {
             generation,
             buf: None,
+            created: false,
             changedtick: 0,
         },
     );
@@ -6956,7 +6979,7 @@ fn the_queued_proposal_opens_when_the_review_in_front_of_it_closes() {
     assert!(
         calls.iter().any(|call| matches!(
             call,
-            RpcCall::BufResolve { path, .. } if path == "/tmp/second.rs"
+            RpcCall::LoadHidden { path, .. } if path == "/tmp/second.rs"
         )),
         "the queued proposal opens on close: {calls:?}"
     );
@@ -7135,9 +7158,10 @@ fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
     ));
     let _ = update(
         &mut m,
-        Msg::BufResolved {
+        Msg::HiddenBufferLoaded {
             generation: 42,
             buf: Some(REVIEW_BUF),
+            created: true,
             changedtick: REVIEW_TICK,
         },
     );
@@ -7146,7 +7170,12 @@ fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
 
     assert_eq!(
         rpc_calls(&effects),
-        vec![RpcCall::BufDetach { buf: REVIEW_BUF }],
+        vec![
+            RpcCall::BufDetach { buf: REVIEW_BUF },
+            RpcCall::ReleaseHidden {
+                path: "/tmp/empty.rs".to_string(),
+            },
+        ],
         "the detach must survive the refusal notice: {effects:?}"
     );
     assert!(m.ai_panel().pending_diff.is_none());

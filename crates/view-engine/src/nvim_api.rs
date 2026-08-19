@@ -443,43 +443,90 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
-/// Resolves a path to the real buffer handle nvim holds it under, creating
-/// and loading the buffer when there is none yet, for `RpcCall::BufResolve`.
-/// Constant, like every other chunk here: the path travels as
-/// `nvim_exec_lua`'s positional varargs, never interpolated into the source.
+/// Resolves a path to the real buffer handle nvim holds it under, for
+/// `RpcCall::LoadHidden`. Constant, like every other chunk here: the path
+/// travels as `nvim_exec_lua`'s positional varargs, never interpolated into
+/// the source. See `docs/hidden-buffer-wire-capture.md` for every reply
+/// shape this chunk's own logic depends on.
 ///
-/// `bufadd` rather than `bufnr`, because a diff review opens against a file
-/// the agent proposed changes to, which may be one no window has ever shown;
-/// `bufnr` answers `-1` for that and there would be nothing to attach to.
-/// `bufload` is the load-bearing half: `nvim_buf_attach` on an unloaded
-/// buffer subscribes to a buffer with no lines in it, and the review would
-/// then anchor its hunks on text nvim does not yet hold.
+/// The existing-buffer lookup runs before any creation is considered,
+/// reusing `PREVIEW_CHUNK`'s own canonicalized name-match scan (symlink-safe,
+/// "loaded buffer wins over disk") rather than `bufnr`/`bufadd`'s exact-string
+/// name matching: a diff review opens against a file the agent proposed
+/// changes to, which may be one no window has ever shown, one a previous
+/// `load_hidden` call already created hidden for this same path, or one a
+/// real window already has open -- all three are the same buffer identity by
+/// path, and the scan finds whichever of them already exists, unmodified or
+/// not (capture #5), before ever creating a second one over the same file.
 ///
-/// The guards are what keep a caller from attaching to something that
-/// cannot answer for its own text. A path that exists but is not a regular
-/// file is refused outright, live-observed as the one case nvim otherwise
-/// answers a handle for: `bufload` on a directory succeeds and yields a
-/// browsable listing, whose rows a review would then write its hunks over.
-/// A path that does not exist yet is not refused -- that is the new-file
-/// proposal's own case, and it resolves to the empty buffer the file will
-/// be created as. `bufadd` answers `0` for a name it refuses, and a
-/// `bufload` that throws resolves to no handle rather than to a
-/// loaded-looking one.
+/// Only when nothing is found does this create: a path that exists but is
+/// not a regular file is refused outright (`bufload` on a directory
+/// succeeds and yields a browsable listing, whose rows a review would then
+/// write its hunks over). A path that does not exist yet is not refused -- the new-file
+/// proposal's own case -- and resolves to the empty buffer the file will be
+/// created as. `nvim_create_buf(false, false)` is what keeps the fresh
+/// buffer both unlisted (never in `:ls`, never in the picker's
+/// `Source::Buffers`) and file-backed (`scratch = false`, so `:w` later
+/// behaves like any other buffer's). Loading its content via
+/// `nvim_buf_set_lines` marks it modified (capture #2), which this chunk
+/// undoes immediately -- a buffer that merely mirrors disk must not read as
+/// having unsaved changes nobody made.
 ///
 /// The buffer's `b:changedtick` is read in the same chunk that resolves it,
 /// so the review's first write can name a buffer version without waiting
 /// for an edit event to learn one -- and an edit landing between this
 /// resolve and that write moves the tick, which is exactly the case that
 /// must refuse the write.
-const BUF_RESOLVE_CHUNK: &str = "\
+const LOAD_HIDDEN_CHUNK: &str = "\
 local path = ...
+local function canon(p)
+  if p == '' then
+    return p
+  end
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
+for _, b in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(b) and canon(vim.api.nvim_buf_get_name(b)) == wanted then
+    return { buf = b, created = false, changedtick = vim.api.nvim_buf_get_changedtick(b) }
+  end
+end
 local stat = (vim.uv or vim.loop).fs_stat(path)
-if stat ~= nil and stat.type ~= 'file' then return { buf = 0 } end
-local buf = vim.fn.bufadd(path)
-if buf == 0 then return { buf = 0 } end
-local ok = pcall(vim.fn.bufload, buf)
-if not ok then return { buf = 0 } end
-return { buf = buf, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+if stat ~= nil and stat.type ~= 'file' then
+  return { buf = 0, created = false, changedtick = 0 }
+end
+local buf = vim.api.nvim_create_buf(false, false)
+if buf == 0 then
+  return { buf = 0, created = false, changedtick = 0 }
+end
+vim.api.nvim_buf_set_name(buf, path)
+local ok, lines = pcall(vim.fn.readfile, path)
+if not ok then
+  lines = {}
+end
+vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+vim.bo[buf].modified = false
+return { buf = buf, created = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
+
+/// Deletes `buf` for `RpcCall::ReleaseHidden`, once its hold's refcount has
+/// reached zero -- but only when nothing would be disrupted by doing so.
+/// See `docs/hidden-buffer-wire-capture.md` capture #8: nvim's own
+/// `nvim_buf_delete(buf, {})` does NOT refuse a buffer a window is
+/// currently showing the way it refuses a modified one (case 7) -- it
+/// substitutes a fresh empty buffer into every window that had it and
+/// proceeds, which for a buffer `load_hidden`'s existing-buffer lookup
+/// resolved onto a real, normally-opened window would silently swap the
+/// user's own file out from under them. `vim.fn.win_findbuf` is checked
+/// here, in Lua, before ever calling `nvim_buf_delete`, rather than trusting
+/// nvim to refuse on its own. The modified-buffer case still relies on
+/// nvim's own refusal (case 7, re-confirmed under capture #9) -- `pcall`
+/// only silences that refusal's error, which this fire-and-forget call has
+/// nowhere to report to regardless.
+const RELEASE_HIDDEN_CHUNK: &str = "\
+local buf = ...
+if next(vim.fn.win_findbuf(buf)) == nil then
+  pcall(vim.api.nvim_buf_delete, buf, {})
+end";
 
 /// Opens `path` as `:edit` would, taking it as its single positional
 /// vararg. Constant, like every other chunk here: no caller data is
@@ -1629,26 +1676,68 @@ impl EngineHandle {
         )
     }
 
-    /// Issues [`BUF_RESOLVE_CHUNK`] as an async request tagged with
-    /// `generation`, resolving `path` to the buffer handle a diff review
-    /// attaches to and writes accepted hunks into. Async by construction,
-    /// like [`list_buffers`](Self::list_buffers): this issues the request
-    /// through [`EngineHandle::request_buf_resolve`] and returns
-    /// immediately; the handle crosses back as `Msg::BufResolved` through
-    /// the connection's pump.
+    /// Issues [`LOAD_HIDDEN_CHUNK`] as an async request tagged with
+    /// `generation`, resolving `path` to the buffer handle a diff review (or
+    /// any other holder) attaches to and writes into -- creating an
+    /// unlisted, file-backed hidden buffer for it when nothing already
+    /// holds it, and always taking one hold on the path's refcount
+    /// regardless of which branch resolved it. Async by construction, like
+    /// [`list_buffers`](Self::list_buffers): this issues the request
+    /// through [`EngineHandle::request_load_hidden`] and returns
+    /// immediately; the handle crosses back as `Msg::HiddenBufferLoaded`
+    /// through the connection's pump, and the hold itself is recorded by
+    /// the reader thread the moment that reply decodes a real handle -- see
+    /// `EngineHandle::hidden_bufs`.
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
-    pub fn buf_resolve(&self, path: &str, generation: u64) -> Result<(), EngineError> {
-        self.request_buf_resolve(
+    pub fn load_hidden(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        self.request_load_hidden(
             "nvim_exec_lua",
             vec![
-                Value::from(BUF_RESOLVE_CHUNK),
+                Value::from(LOAD_HIDDEN_CHUNK),
                 Value::Array(vec![Value::from(path)]),
             ],
             generation,
+            path.to_owned(),
+        )
+    }
+
+    /// Releases one hold this connection's [`load_hidden`](Self::load_hidden)
+    /// acquired for `path`: decrements `path`'s in-flight holder count and,
+    /// only if that decrement brings it to zero, issues
+    /// [`RELEASE_HIDDEN_CHUNK`] for the buffer that call resolved. No reply
+    /// is awaited or needed -- a decrement-to-zero delete the chunk skips or
+    /// nvim itself refuses (an unsaved edit, or a window still showing it --
+    /// see `docs/hidden-buffer-wire-capture.md`) is not an error this call
+    /// surfaces: the hold is released either way, and the buffer simply
+    /// outlives this release rather than losing content, or a window's own
+    /// display, nobody asked to discard.
+    ///
+    /// A no-op for a `path` with no recorded hold (nothing to decrement,
+    /// nothing to delete) -- every caller owes exactly one of these per
+    /// `load_hidden` call, but a defensive extra call must never panic or
+    /// delete a buffer this connection never created.
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited, only when a decrement-to-zero
+    /// delete was actually attempted -- a decrement that leaves the count
+    /// above zero, or a `path` with no hold at all, never touches the wire
+    /// and always answers `Ok(())`.
+    pub fn release_hidden(&self, path: &str) -> Result<(), EngineError> {
+        let Some(buf) = self.note_hidden_release(path) else {
+            return Ok(());
+        };
+        self.notify(
+            "nvim_exec_lua",
+            vec![
+                Value::from(RELEASE_HIDDEN_CHUNK),
+                Value::Array(vec![Value::from(buf.0)]),
+            ],
         )
     }
 

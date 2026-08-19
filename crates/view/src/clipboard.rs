@@ -663,11 +663,14 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
-        fn buf_resolve(
+        fn load_hidden(
             &self,
             _path: &str,
             _generation: u64,
         ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn release_hidden(&self, _path: &str) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
         fn buf_detach(
