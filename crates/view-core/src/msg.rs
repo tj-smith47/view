@@ -886,6 +886,34 @@ pub enum OptionValue {
     Str(String),
 }
 
+/// A `Buffer` handle, unwrapped from nvim's msgpack-RPC `Ext` encoding into a
+/// plain integer, following [`TabHandle`](crate::events::TabHandle)'s own
+/// precedent so `view-core` never has to model `Ext` itself. Compared rather
+/// than dereferenced: it is what tells [`RpcCall::BufSetText`] which buffer
+/// an edit targets, and what a stale-handle error (the buffer closed between
+/// an agent's proposal and the user's accept) reports back against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BufferHandle(pub u64);
+
+/// One line/column-range replacement within a [`RpcCall::BufSetText`] batch,
+/// the same shape `nvim_buf_set_text` itself takes: `start_row`/`end_row`
+/// are 0-indexed buffer lines and `start_col`/`end_col` are 0-indexed BYTE
+/// columns on those lines, not character columns -- verified against a live
+/// capture (see `docs/buf-set-text-wire-capture.md`), since a character-
+/// column caller would silently corrupt any line containing a multi-byte
+/// UTF-8 character. `lines` replaces the `[start_row, start_col)` ..
+/// `[end_row, end_col)` span verbatim, following `nvim_buf_set_text`'s own
+/// convention that an empty `lines` deletes the span and a `lines` with more
+/// than one entry inserts a line break.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextEdit {
+    pub start_row: u32,
+    pub start_col: u32,
+    pub end_row: u32,
+    pub end_col: u32,
+    pub lines: Vec<String>,
+}
+
 /// A closed vocabulary of RPC calls instead of `(method, Vec<Value>)`: core
 /// stays rmpv-free and an unencodable call is unrepresentable. Runner-up
 /// (stringly method + opaque params) rejected: re-opens the door to core
@@ -1190,5 +1218,19 @@ pub enum RpcCall {
     /// the same terms as `ReadCurrentBufferText`.
     ReadQuickfixEntries {
         generation: u64,
+    },
+    /// Applies a batched set of line/column-range replacements to one buffer
+    /// via `nvim_buf_set_text`, the only path that ever writes agent-proposed
+    /// text (hard rule: nvim owns all buffer text). `undojoin` links this
+    /// call onto the immediately preceding one in the same undo group. Diff
+    /// review issues exactly one hunk's edits per call, with `undojoin: true`
+    /// for every hunk after the first in an "accept all" batch and `false`
+    /// for the first, which is what makes `u` step backward one accepted
+    /// hunk at a time -- never a whole multi-hunk accept collapsed into one
+    /// undo entry, and never one entry per line-range within a single hunk.
+    BufSetText {
+        buf: BufferHandle,
+        edits: Vec<TextEdit>,
+        undojoin: bool,
     },
 }

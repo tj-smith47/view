@@ -4,13 +4,26 @@
 //! `view` from depending on `rmpv` directly; these methods are the sanctioned
 //! way for it to reach the same calls.
 
-use crate::handle::{EngineError, EngineHandle};
+use crate::handle::{saturate_u32, EngineError, EngineHandle};
 use crate::process::SWAP_RECOVERY_PROBE;
 use crate::rpc::RpcError;
 use rmpv::Value;
+use std::path::PathBuf;
 use std::time::Duration;
-use view_core::msg::OptionValue;
+use view_core::msg::{BufferHandle, OptionValue, TextEdit};
+use view_core::native::ai_context::{
+    CurrentBufferRead, CursorRead, DiagnosticEntry, DiagnosticSeverity, QuickfixEntry,
+    SelectionRead,
+};
 use view_core::native::mappings::{default_maps, is_spellable, MappingSpec, COMMAND};
+
+/// Upper bound on how long each of [`EngineHandle::read_current_buffer_text`],
+/// [`EngineHandle::read_cursor_context`], [`EngineHandle::read_diagnostic_entries`],
+/// and [`EngineHandle::read_quickfix_entries`] waits for nvim's reply. Same
+/// rationale as [`GET_MODE_TIMEOUT`]: each is a synchronous nvim-side read
+/// issued at prompt-submission time, so a wedged engine must not hang the
+/// submission indefinitely.
+const CONTEXT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on how long [`EngineHandle::ui_attach`] waits for nvim's
 /// reply before giving up.
@@ -533,6 +546,108 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
   end
 end
 return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
+
+/// Applies [`EngineHandle::set_buf_text`]'s batched edits via
+/// `nvim_buf_set_text`, verified live against the pinned engine (see
+/// `docs/buf-set-text-wire-capture.md`): `nvim_command('undojoin')` (`vim.cmd`
+/// here) issued immediately before the loop's first `nvim_buf_set_text` call
+/// links this whole batch onto the previous undo entry, and every row/col in
+/// `edits` is passed straight through as the 0-indexed byte columns
+/// `nvim_buf_set_text` itself expects. A batch targeting a buffer that no
+/// longer exists throws inside the loop (`Invalid buffer id: N`), which
+/// `nvim_exec_lua` surfaces as this request's `Err`, exactly like any other
+/// rejected chunk here -- never a silently dropped edit.
+const BUF_SET_TEXT_CHUNK: &str = "\
+local buf, undojoin, edits = ...
+if undojoin then
+  vim.cmd('undojoin')
+end
+for _, edit in ipairs(edits) do
+  vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row, edit.end_col, edit.lines)
+end";
+
+/// Reads the current buffer's path and nvim-authoritative text for
+/// [`EngineHandle::read_current_buffer_text`], verified live against the
+/// pinned engine (see `docs/ai-context-reads-wire-capture.md`): an unnamed
+/// scratch buffer answers with `path = ''`, matching `PREVIEW_CHUNK`'s own
+/// convention for the same case, and `text` is every line joined with `\n`
+/// -- nvim's own buffer content, never the file on disk, so an unsaved edit
+/// is what this reads.
+const CURRENT_BUFFER_TEXT_CHUNK: &str = "\
+local buf = vim.api.nvim_get_current_buf()
+return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, false), '\\n') }";
+
+/// Reads the buffer-space cursor and, when one is active, the visual
+/// selection for [`EngineHandle::read_cursor_context`], verified live
+/// against the pinned engine (see `docs/ai-context-reads-wire-capture.md`).
+/// `line`/`col` are `nvim_win_get_cursor`'s own values verbatim (1-indexed
+/// line, 0-indexed byte column -- nvim's own mixed convention, not
+/// renormalized here). A selection is considered active exactly when
+/// `nvim_get_mode()` reports one of the three visual submodes (`v`, `V`, or
+/// blockwise `\22`) at the moment of the call -- stale `'<`/`'>` marks left
+/// over from a selection the user already exited are deliberately not read,
+/// since those persist long after the selection that set them is gone and
+/// would otherwise misreport "active" forever. While active, the selection's
+/// endpoints come from `getpos('v')` (the anchor) and `getpos('.')` (the
+/// cursor), reordered so `selection_start <= selection_end` regardless of
+/// which direction the user selected in, and the text itself is read via
+/// `nvim_buf_get_text` on the same 0-indexed byte columns `BUF_SET_TEXT_CHUNK`
+/// uses. The `selection_*` keys are simply absent from the reply when no
+/// selection is active, the same "absent key, not a null" convention
+/// `PREVIEW_CHUNK`'s `loaded: false` case uses.
+const CURSOR_CONTEXT_CHUNK: &str = "\
+local cur = vim.api.nvim_win_get_cursor(0)
+local out = { line = cur[1], col = cur[2] }
+local mode = vim.api.nvim_get_mode().mode
+if mode == 'v' or mode == 'V' or mode == '\\22' then
+  local vstart = vim.fn.getpos('v')
+  local vend = vim.fn.getpos('.')
+  local srow, scol, erow, ecol = vstart[2], vstart[3], vend[2], vend[3]
+  if srow > erow or (srow == erow and scol > ecol) then
+    srow, scol, erow, ecol = erow, ecol, srow, scol
+  end
+  local lines = vim.api.nvim_buf_get_text(0, srow - 1, scol - 1, erow - 1, ecol, {})
+  out.selection_text = table.concat(lines, '\\n')
+  out.selection_start = srow
+  out.selection_end = erow
+end
+return out";
+
+/// Reads every current entry from `vim.diagnostic.get(0)` for
+/// [`EngineHandle::read_diagnostic_entries`], verified live against the
+/// pinned engine (see `docs/ai-context-reads-wire-capture.md`): `lnum`/`col`
+/// are the diagnostic API's own 0-indexed byte positions, passed through
+/// verbatim rather than renormalized against `getqflist`'s 1-indexed
+/// convention -- [`QUICKFIX_ENTRIES_CHUNK`] keeps its own source's indexing
+/// the same way. `severity` is nvim's own `vim.diagnostic.severity` integer
+/// (`1`=Error .. `4`=Hint), mapped onto [`DiagnosticSeverity`] by
+/// [`decode_diagnostic_entries_reply`].
+const DIAGNOSTIC_ENTRIES_CHUNK: &str = "\
+local out = {}
+for _, d in ipairs(vim.diagnostic.get(0)) do
+  out[#out + 1] = { line = d.lnum, col = d.col, severity = d.severity, message = d.message }
+end
+return out";
+
+/// Reads every current entry from `getqflist()` for
+/// [`EngineHandle::read_quickfix_entries`], verified live against the pinned
+/// engine (see `docs/ai-context-reads-wire-capture.md`). `getqflist()`
+/// itself carries no `filename` field per entry -- only `bufnr`, live-
+/// confirmed against the pinned engine -- so this chunk resolves each
+/// entry's path via `nvim_buf_get_name(bufnr)`, falling back to an empty
+/// string for `bufnr == 0` (an entry with no buffer at all, the same
+/// `PREVIEW_CHUNK`/`CURRENT_BUFFER_TEXT_CHUNK` convention for "no name").
+/// `lnum`/`col` are `getqflist`'s own 1-indexed values, verbatim.
+const QUICKFIX_ENTRIES_CHUNK: &str = "\
+local out = {}
+for _, item in ipairs(vim.fn.getqflist()) do
+  local path = ''
+  if item.bufnr and item.bufnr ~= 0 then
+    path = vim.api.nvim_buf_get_name(item.bufnr)
+  end
+  out[#out + 1] = { path = path, line = item.lnum, col = item.col, text = item.text }
+end
+return out";
 
 /// The `ext_*` UI capabilities [`EngineHandle::ui_attach`] requests. Public
 /// so a corpus/oracle runner attaching its own reference connection can
@@ -1398,6 +1513,127 @@ impl EngineHandle {
             path.to_owned(),
         )
     }
+
+    /// Applies `edits` to `buf` via [`BUF_SET_TEXT_CHUNK`], the only path
+    /// that ever writes agent-proposed text (hard rule: nvim owns all buffer
+    /// text -- see [`view_core::msg::RpcCall::BufSetText`]'s own doc for the
+    /// per-hunk undo contract `undojoin` implements).
+    ///
+    /// A request, not a notify, deliberately: a stale `buf` (closed between
+    /// an agent's proposal and the user's accept) must surface as this
+    /// call's `Err` rather than a silently dropped edit -- `notify` has no
+    /// reply to carry that on. See [`BUF_SET_TEXT_CHUNK`]'s own doc for the
+    /// live-captured error shape a stale handle produces.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// nvim rejects the edit (including `buf` no longer existing), or the
+    /// reply does not arrive within [`CONTEXT_READ_TIMEOUT`].
+    pub fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError> {
+        let edits = edits
+            .iter()
+            .map(|edit| {
+                Value::Map(vec![
+                    (Value::from("start_row"), Value::from(edit.start_row)),
+                    (Value::from("start_col"), Value::from(edit.start_col)),
+                    (Value::from("end_row"), Value::from(edit.end_row)),
+                    (Value::from("end_col"), Value::from(edit.end_col)),
+                    (
+                        Value::from("lines"),
+                        Value::Array(
+                            edit.lines
+                                .iter()
+                                .map(|line| Value::from(line.as_str()))
+                                .collect(),
+                        ),
+                    ),
+                ])
+            })
+            .collect();
+        self.request_timeout(
+            "nvim_exec_lua",
+            vec![
+                Value::from(BUF_SET_TEXT_CHUNK),
+                Value::Array(vec![
+                    Value::from(buf.0),
+                    Value::from(undojoin),
+                    Value::Array(edits),
+                ]),
+            ],
+            CONTEXT_READ_TIMEOUT,
+        )?;
+        Ok(())
+    }
+
+    /// Reads the current buffer's path and nvim-authoritative text via
+    /// [`CURRENT_BUFFER_TEXT_CHUNK`], for `RpcCall::ReadCurrentBufferText`.
+    ///
+    /// # Errors
+    ///
+    /// Returns the `EngineError` from the underlying request if it fails,
+    /// the reply does not arrive within [`CONTEXT_READ_TIMEOUT`], or the
+    /// reply is not the documented map shape (surfaced as
+    /// `EngineError::Rpc(RpcError::Malformed(_))`, the same convention
+    /// [`EngineHandle::get_mode`] uses).
+    pub fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        let value = self.request_timeout(
+            "nvim_exec_lua",
+            vec![Value::from(CURRENT_BUFFER_TEXT_CHUNK), Value::Array(vec![])],
+            CONTEXT_READ_TIMEOUT,
+        )?;
+        decode_current_buffer_text_reply(&value)
+    }
+
+    /// Reads the buffer-space cursor and, when one is active, the visual
+    /// selection via [`CURSOR_CONTEXT_CHUNK`], for `RpcCall::ReadCursorContext`.
+    ///
+    /// # Errors
+    ///
+    /// Same terms as [`read_current_buffer_text`](Self::read_current_buffer_text).
+    pub fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        let value = self.request_timeout(
+            "nvim_exec_lua",
+            vec![Value::from(CURSOR_CONTEXT_CHUNK), Value::Array(vec![])],
+            CONTEXT_READ_TIMEOUT,
+        )?;
+        decode_cursor_context_reply(&value)
+    }
+
+    /// Reads every current entry from `vim.diagnostic.get(0)` via
+    /// [`DIAGNOSTIC_ENTRIES_CHUNK`], for `RpcCall::ReadDiagnosticEntries`.
+    ///
+    /// # Errors
+    ///
+    /// Same terms as [`read_current_buffer_text`](Self::read_current_buffer_text).
+    pub fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        let value = self.request_timeout(
+            "nvim_exec_lua",
+            vec![Value::from(DIAGNOSTIC_ENTRIES_CHUNK), Value::Array(vec![])],
+            CONTEXT_READ_TIMEOUT,
+        )?;
+        decode_diagnostic_entries_reply(&value)
+    }
+
+    /// Reads every current entry from `getqflist()` via
+    /// [`QUICKFIX_ENTRIES_CHUNK`], for `RpcCall::ReadQuickfixEntries`.
+    ///
+    /// # Errors
+    ///
+    /// Same terms as [`read_current_buffer_text`](Self::read_current_buffer_text).
+    pub fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        let value = self.request_timeout(
+            "nvim_exec_lua",
+            vec![Value::from(QUICKFIX_ENTRIES_CHUNK), Value::Array(vec![])],
+            CONTEXT_READ_TIMEOUT,
+        )?;
+        decode_quickfix_entries_reply(&value)
+    }
 }
 
 /// Maps one [`OptionValue`] onto the msgpack value nvim's option API takes.
@@ -1438,6 +1674,132 @@ fn value_to_string(value: &Value) -> String {
         Value::F64(f) => f.to_string(),
         other => other.to_string(),
     }
+}
+
+/// Decodes [`CURRENT_BUFFER_TEXT_CHUNK`]'s `{path, text}` reply, live-
+/// verified against a real `nvim --clean --headless` (see
+/// `docs/ai-context-reads-wire-capture.md`). Unlike `decode_preview_reply`'s
+/// "absent or malformed degrades to a safe default" convention, a malformed
+/// reply here surfaces as `Err` rather than an empty `CurrentBufferRead`:
+/// the chunk's own two keys are unconditional (nvim always has a current
+/// buffer, even an unnamed scratch one), so a shape missing either is a
+/// contract violation this crate has never actually seen from the pinned
+/// engine, not an expected "nothing to read" case.
+fn decode_current_buffer_text_reply(result: &Value) -> Result<CurrentBufferRead, EngineError> {
+    let malformed = || {
+        EngineError::Rpc(RpcError::Malformed(format!(
+            "current-buffer-text reply: {result}"
+        )))
+    };
+    let pairs = result.as_map().ok_or_else(malformed)?;
+    let path = crate::wire::map_find(pairs, "path")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed)?;
+    let text = crate::wire::map_find(pairs, "text")
+        .and_then(Value::as_str)
+        .ok_or_else(malformed)?;
+    Ok(CurrentBufferRead::new(PathBuf::from(path), text.to_owned()))
+}
+
+/// Decodes [`CURSOR_CONTEXT_CHUNK`]'s `{line, col, selection_*}` reply,
+/// live-verified against a real `nvim --clean --headless` (see
+/// `docs/ai-context-reads-wire-capture.md`). `line`/`col` are unconditional
+/// (nvim always has a cursor) and a shape missing either is malformed, the
+/// same contract-violation reasoning
+/// [`decode_current_buffer_text_reply`] documents. The three
+/// `selection_*` keys are read together or not at all: the chunk only ever
+/// writes all three or none, so a reply carrying just one or two is treated
+/// as no active selection rather than a partial one built from whichever
+/// keys happened to be present.
+fn decode_cursor_context_reply(
+    result: &Value,
+) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+    let malformed = || {
+        EngineError::Rpc(RpcError::Malformed(format!(
+            "cursor-context reply: {result}"
+        )))
+    };
+    let pairs = result.as_map().ok_or_else(malformed)?;
+    let line = crate::wire::map_find(pairs, "line")
+        .and_then(Value::as_u64)
+        .ok_or_else(malformed)?;
+    let col = crate::wire::map_find(pairs, "col")
+        .and_then(Value::as_u64)
+        .ok_or_else(malformed)?;
+    let cursor = CursorRead::new(saturate_u32(line), saturate_u32(col));
+    let selection = match (
+        crate::wire::map_find(pairs, "selection_text").and_then(Value::as_str),
+        crate::wire::map_find(pairs, "selection_start").and_then(Value::as_u64),
+        crate::wire::map_find(pairs, "selection_end").and_then(Value::as_u64),
+    ) {
+        (Some(text), Some(start), Some(end)) => Some(SelectionRead::new(
+            text.to_owned(),
+            (saturate_u32(start), saturate_u32(end)),
+        )),
+        _ => None,
+    };
+    Ok((cursor, selection))
+}
+
+/// Decodes [`DIAGNOSTIC_ENTRIES_CHUNK`]'s reply, live-verified against a
+/// real `nvim --clean --headless` (see
+/// `docs/ai-context-reads-wire-capture.md`). A non-array `result` (a shape
+/// this crate has never actually seen from the pinned engine, since the
+/// chunk always returns a table) degrades to an empty list rather than an
+/// `Err`, matching `decode_buffer_list_reply`'s convention for a corpus that
+/// legitimately can be empty (no diagnostics currently posted) -- a row
+/// missing any of its four fields is dropped rather than failing the whole
+/// read. `severity` is `vim.diagnostic.severity`'s own closed 1-4 range
+/// (`:help diagnostic-severity`); an out-of-range value this crate has never
+/// seen from the pinned engine drops the row rather than guessing a
+/// severity nvim never reported.
+fn decode_diagnostic_entries_reply(result: &Value) -> Result<Vec<DiagnosticEntry>, EngineError> {
+    let Some(rows) = result.as_array() else {
+        return Ok(Vec::new());
+    };
+    let entries = rows
+        .iter()
+        .filter_map(|row| {
+            let pairs = row.as_map()?;
+            let line = saturate_u32(crate::wire::map_find(pairs, "line")?.as_u64()?);
+            let col = saturate_u32(crate::wire::map_find(pairs, "col")?.as_u64()?);
+            let severity = match crate::wire::map_find(pairs, "severity")?.as_u64()? {
+                1 => DiagnosticSeverity::Error,
+                2 => DiagnosticSeverity::Warning,
+                3 => DiagnosticSeverity::Info,
+                4 => DiagnosticSeverity::Hint,
+                _ => return None,
+            };
+            let message = crate::wire::map_find(pairs, "message")?
+                .as_str()?
+                .to_owned();
+            Some(DiagnosticEntry::new(line, col, severity, message))
+        })
+        .collect();
+    Ok(entries)
+}
+
+/// Decodes [`QUICKFIX_ENTRIES_CHUNK`]'s reply, live-verified against a real
+/// `nvim --clean --headless` (see `docs/ai-context-reads-wire-capture.md`),
+/// on the same "non-array degrades to empty, a malformed row is dropped"
+/// terms as [`decode_diagnostic_entries_reply`] -- an empty quickfix list is
+/// the ordinary case, not an error.
+fn decode_quickfix_entries_reply(result: &Value) -> Result<Vec<QuickfixEntry>, EngineError> {
+    let Some(rows) = result.as_array() else {
+        return Ok(Vec::new());
+    };
+    let entries = rows
+        .iter()
+        .filter_map(|row| {
+            let pairs = row.as_map()?;
+            let path = crate::wire::map_find(pairs, "path")?.as_str()?.to_owned();
+            let line = saturate_u32(crate::wire::map_find(pairs, "line")?.as_u64()?);
+            let col = saturate_u32(crate::wire::map_find(pairs, "col")?.as_u64()?);
+            let text = crate::wire::map_find(pairs, "text")?.as_str()?.to_owned();
+            Some(QuickfixEntry::new(PathBuf::from(path), line, col, text))
+        })
+        .collect();
+    Ok(entries)
 }
 
 #[cfg(test)]

@@ -1393,7 +1393,11 @@ fn decode_bridge_event(params: &[Value]) -> Option<Msg> {
 /// Saturates a wire `u64` count into `u32`, clamping to `u32::MAX` instead
 /// of truncating, matching `view_core::events::saturate_u16`'s convention
 /// for every other untrusted wire integer this crate decodes.
-fn saturate_u32(v: u64) -> u32 {
+///
+/// `pub(crate)`, not private: `nvim_api.rs`'s own reply decoders (cursor,
+/// diagnostics, quickfix) share this same untrusted-wire-integer conversion
+/// rather than duplicating it.
+pub(crate) fn saturate_u32(v: u64) -> u32 {
     u32::try_from(v).unwrap_or(u32::MAX)
 }
 
