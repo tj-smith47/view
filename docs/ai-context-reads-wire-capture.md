@@ -569,6 +569,95 @@ selection through `nvim_input` and reading `getreg('"')` after `y`. The
 candidate chunk agreed with the oracle on all nine before any source file
 was edited.
 
+## Fix round 5 (review-driven): a `$`-block's padding width comes from the WIDEST row in the block, not the padded row's own end
+
+Round 4 pads a row that ends before the block's first column, and derives
+the width from `hi_vcol`. For a `$`-block, round 4 had already rewritten
+`hi_vcol` to that row's OWN `end_vcol - 1` before the padding ran, so a
+short row's pad width collapsed to zero (or below) and it contributed
+nothing. nvim instead pads it against the widest row in the block.
+
+Buffer `["alphabet", "ab", "gammaxyz"]`, `gg0llll<C-v>` then `jj$`:
+
+```
+lo_vcol = 5,  curswant = 2147483647   -- $-block
+virtcol({row,'$'}) per row -> [9, 3, 9]
+
+getreg('"') -> "abet\n     \naxyz"    -- row 2: FIVE pad spaces
+getregtype('"') -> "\x164"            -- register width 4 ("abet")
+```
+
+Round 4's chunk returned `"abet\n\naxyz"`. Note the pad (5) is one MORE
+than the widest row's own contribution (`"abet"`, 4 cells) and one more
+than the register's declared blockwise width -- nvim's own arithmetic, not
+a rounding of ours. Five fixtures pin the width formula, all with
+`lo_vcol = 5`:
+
+| buffer | row-end vcols | widest contribution | pad emitted |
+|---|---|---|---|
+| `["alphabet","ab","gammaxyz"]` | `[9,3,9]` | `abet` (4) | 5 |
+| `["alphabet","","gammaxyz"]` | `[9,1,9]` | `abet` (4) | 5 |
+| `["alphabet","ab","gammaxyzABCD"]` | `[9,3,13]` | `axyzABCD` (8) | 9 |
+| `["abcdefgh","ab","gammaxyzABCD","wxyz"]` | `[9,3,13,5]` | `axyzABCD` (8) | 9 |
+| `["abcdefgh","ab","x\tyz"]` | `[9,3,11]` | `␣␣␣␣yz` (6) | 7 |
+
+So the pad width is `max(virtcol({row,'$'}) for row in srow..erow) -
+lo_vcol + 1`, computed once per block rather than per row, and the tab
+fixture confirms the maximum is taken over SCREEN columns (row 3's tab
+widens it to 11) rather than byte lengths.
+
+That maximum has to come from a scan of the block's own rows; the
+selection's shared `hi_vcol` is NOT a substitute, even though it coincides
+with the maximum in most fixtures. `hi_vcol` is built from the two ENDPOINT
+rows' virtcols, so it equals the block's true extent only when `$` happens
+to land on the widest row. The fourth fixture above separates them -- the
+widest row (12 cells) is interior while both endpoints are short, leaving
+`hi_vcol = 5` against a true extent of `13`:
+
+```
+["abcdefgh","ab","gammaxyzABCD","wxyz"]  gg0llll<C-v> jjj$
+lo_vcol = 5, hi_vcol = 5, max row-end vcol = 13
+
+getreg('"') -> "efgh\n         \naxyzABCD\n"   -- 9 pad spaces
+-- pad sized from hi_vcol instead would emit exactly ONE space
+``` The predicate that decides
+WHETHER to pad is unchanged from round 4 -- still `virtcol({row,'$'}) <
+lo_vcol`, strictly:
+
+```
+["alphabet","abcd","gammaxyz"]  gg0llll<C-v> jj$   -- row 2 ends at col 4,
+  getreg('"') -> "abet\n\naxyz"                       flush with lo_vcol 5,
+                                                      contributes nothing
+```
+
+A short row that is LAST also contributes nothing, and that needs no
+special case: in a `$`-block, `lo_vcol` is the minimum of the two
+ENDPOINTS' own virtcols, and `$` puts the cursor at its row's end, so
+neither endpoint row can end strictly before `lo_vcol` -- the padding
+branch is reachable only from an INTERIOR row. Two captures show the
+endpoint rows landing in the flush case naturally:
+
+```
+["alphabet","gammaxyz","ab"]  gg0llll<C-v> jj$  -- $ on the short last row
+  lo_vcol = 3 (pulled down by the cursor's own row), row 3 ends at col 3
+  getreg('"') -> "phabet\nmmaxyz\n"
+
+["alphabet","ab","cd"]        gg0llll<C-v> jj$
+  lo_vcol = 3, rows 2 and 3 both end at col 3
+  getreg('"') -> "phabet\n\n"
+```
+
+Both round-4 controls (an ordinary block's short interior row, still padded
+to `hi_vcol - lo_vcol + 1`; a `$`-block whose low bound splits a leading
+tab) are unchanged under this fix, captured alongside the rest.
+
+All ten round-5 captures were taken the same way as round 4's (`nvim
+--clean --headless --listen <socket>`, NVIM v0.12.4, UI attached,
+`nvim_input` to drive the selection, `getreg('"')` after `y`), running the
+committed chunk and the candidate chunk side by side against the same live
+selection. The candidate matched the oracle on all ten before any source
+file was edited.
+
 ## `vim.diagnostic.get(0)`: 0-indexed, flat, closed severity range
 
 ```lua

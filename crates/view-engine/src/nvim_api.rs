@@ -663,11 +663,19 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 ///   rule, and a `$`-block's shared LOW bound splits a multi-cell
 ///   character just as readily (live-confirmed against a leading tab).
 ///   A row ending strictly before `lo_vcol` contributes
-///   the rectangle's full width in spaces, nvim's own padding for a line
-///   too short to reach the block at all; the boundary is exact and
+///   `pad_vcol - lo_vcol + 1` spaces, nvim's own padding for a line too
+///   short to reach the block at all; the boundary is exact and
 ///   asymmetric -- a row reaching `lo_vcol - 1` contributes nothing, and a
 ///   row merely ending INSIDE the rectangle contributes only the cells it
-///   has, never trailing padding.
+///   has, never trailing padding. `pad_vcol` is the shared `hi_vcol` for an
+///   ordinary block, but for a `$`-block it is the WIDEST row's
+///   `virtcol({row, '$'})` across the whole block, computed in one pre-pass
+///   -- the per-row high bound a `$`-block otherwise uses would size a
+///   short row's padding against that row's own end, collapsing it to
+///   nothing. Only an INTERIOR row can reach that branch under a
+///   `$`-block: `lo_vcol` is the minimum of the two ENDPOINT rows' own
+///   virtcols and `$` puts the cursor at its row's end, so neither endpoint
+///   row can end strictly before it.
 ///
 /// The `selection_*` keys are simply absent from the reply when no
 /// selection is active, the same "absent key, not a null" convention
@@ -687,14 +695,14 @@ local function byte_end_of_char(line, byte_col0)
   end
   return nextbyte
 end
-local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block)
+local function blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block, pad_vcol)
   local line = line_text(row)
   local end_vcol = vim.fn.virtcol({ row, '$' })
   if dollar_block then
     hi_vcol = end_vcol - 1
   end
   if end_vcol < lo_vcol then
-    return string.rep(' ', math.max(hi_vcol - lo_vcol + 1, 0))
+    return string.rep(' ', math.max(pad_vcol - lo_vcol + 1, 0))
   end
   local parts = {}
   local v = lo_vcol
@@ -731,9 +739,16 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
     local lo_vcol = math.min(vim.fn.virtcol('v', 1)[1], vim.fn.virtcol('.', 1)[1])
     local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
     local dollar_block = vim.fn.getcurpos()[5] == 2147483647
+    local pad_vcol = hi_vcol
+    if dollar_block then
+      pad_vcol = 0
+      for row = srow, erow do
+        pad_vcol = math.max(pad_vcol, vim.fn.virtcol({ row, '$' }))
+      end
+    end
     local rows = {}
     for row = srow, erow do
-      rows[#rows + 1] = blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block)
+      rows[#rows + 1] = blockwise_row_text(win, row, lo_vcol, hi_vcol, dollar_block, pad_vcol)
     end
     text = table.concat(rows, '\\n')
   else

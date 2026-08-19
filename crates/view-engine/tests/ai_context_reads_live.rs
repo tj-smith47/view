@@ -592,6 +592,126 @@ fn read_cursor_context_with_a_dollar_blockwise_selection_over_a_row_ending_befor
     assert_eq!(selection.range, (1, 2));
 }
 
+/// A `$`-block pads a row ending before the block against the WIDEST row
+/// in the block, not against that row's own end -- sizing the padding by
+/// the per-row upper bound a `$`-block otherwise uses collapses it to
+/// nothing. Row 2 (`"ab"`) never reaches the block's column 5, and the
+/// widest row contributes four cells, which nvim pads to five.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_over_a_short_interior_row() {
+    let engine = spawn();
+    set_lines(&engine, &["alphabet", "ab", "gammaxyz"]);
+
+    engine.handle.input("gg0llll").expect("move to column 5");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jj$")
+        .expect("extend the block to a dollar-block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "abet\n     \naxyz");
+    assert_eq!(selection.range, (1, 3));
+}
+
+/// The `$`-block padding width is the widest row's own screen extent, so a
+/// longer row anywhere in the block widens every short row's padding: the
+/// 12-cell last row here pads row 2 to nine spaces where the 8-cell row of
+/// the test above pads it to five.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_pads_to_the_widest_row() {
+    let engine = spawn();
+    set_lines(&engine, &["alphabet", "ab", "gammaxyzABCD"]);
+
+    engine.handle.input("gg0llll").expect("move to column 5");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jj$")
+        .expect("extend the block to a dollar-block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "abet\n         \naxyzABCD");
+    assert_eq!(selection.range, (1, 3));
+}
+
+/// The widest row is found by scanning the whole block, not by reusing the
+/// selection's shared upper bound: that bound comes from the two ENDPOINT
+/// rows, and `$` on a short last row leaves it far below the block's real
+/// extent. Here the widest row (12 cells) is an interior one while both
+/// endpoints are short, so the shared bound would pad row 2 to a single
+/// space instead of nine.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_whose_widest_row_is_interior() {
+    let engine = spawn();
+    set_lines(&engine, &["abcdefgh", "ab", "gammaxyzABCD", "wxyz"]);
+
+    engine.handle.input("gg0llll").expect("move to column 5");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jjj$")
+        .expect("extend the block to a dollar-block across all four rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "efgh\n         \naxyzABCD\n");
+    assert_eq!(selection.range, (1, 4));
+}
+
+/// A short row that is the block's LAST row still contributes nothing, and
+/// needs no special case to: `$` puts the cursor at its own row's end, and
+/// `lo_vcol` is the minimum of the two endpoints' virtcols, so an endpoint
+/// row is never left of the block -- here the short last row pulls
+/// `lo_vcol` down to its own column 3 and lands in the flush case.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_over_a_short_last_row() {
+    let engine = spawn();
+    set_lines(&engine, &["alphabet", "gammaxyz", "ab"]);
+
+    engine.handle.input("gg0llll").expect("move to column 5");
+    engine
+        .handle
+        .input("<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jj$")
+        .expect("extend the block to a dollar-block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "phabet\nmmaxyz\n");
+    assert_eq!(selection.range, (1, 3));
+}
+
 /// No diagnostics posted reads back an empty list, not an error -- the
 /// ordinary case for a freshly opened buffer.
 #[test]
