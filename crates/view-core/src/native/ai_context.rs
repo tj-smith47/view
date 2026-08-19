@@ -32,6 +32,10 @@ impl CurrentBufferRead {
 /// range. Absent (rather than an empty string) is how "no selection is
 /// active" is represented, matching the statusline's own "empty content
 /// hides the segment" convention.
+///
+/// `range`'s two lines are both 1-indexed, matching what the editor shows
+/// the user -- the one indexing convention every position field on this
+/// snapshot shares, documented once on [`EngineReadSnapshot`] itself.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectionRead {
@@ -151,8 +155,8 @@ impl QuickfixEntry {
 /// block.
 ///
 /// Every line/column position anywhere in this snapshot -- `cursor`,
-/// `diagnostics`, `quickfix` alike -- is 1-indexed, matching what the
-/// editor shows the user. Each engine source has its own native wire
+/// `selection`, `diagnostics`, `quickfix` alike -- is 1-indexed, matching
+/// what the editor shows the user. Each engine source has its own native wire
 /// convention (`nvim_win_get_cursor` is 0-indexed columns,
 /// `vim.diagnostic.get` is 0-indexed both, `getqflist` is already
 /// 1-indexed), but by the time a value reaches this type it has been

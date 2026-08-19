@@ -631,11 +631,21 @@ return { path = vim.api.nvim_buf_get_name(buf), text = table.concat(vim.api.nvim
 /// - Linewise (`V`): every full line from `selection_start` to
 ///   `selection_end`, ignoring both endpoints' columns entirely -- a
 ///   linewise selection has none, by nvim's own definition of the mode.
-/// - Blockwise (`\22`): the column-range rectangle spanned by the two
-///   endpoints' (reordered, low-to-high) columns, clamped per line to that
-///   line's own length, joined with `\n` -- never the charwise span between
-///   the endpoints, which would silently include whole lines' worth of text
-///   the block never actually covers.
+/// - Blockwise (`\22`): a SCREEN-column rectangle (`virtcol('v')` and
+///   `virtcol('.')`, not `getpos`'s byte columns), converted to each row's
+///   own byte range via `vim.fn.virtcol2col(win, lnum, vcol)` and clamped
+///   per line to that line's own length, joined with `\n`. Byte columns
+///   alone (this chunk's original, round-1 form) are wrong whenever a row
+///   contains a multi-byte character: the rectangle's bounds are shared
+///   screen columns held constant across every row, and a given screen
+///   column lands at a different byte offset on each row depending on how
+///   many multi-byte characters precede it there -- live-confirmed the
+///   round-1 form sliced mid-character on such a row, producing invalid
+///   UTF-8 the decoder silently turned into "no selection" (see
+///   `docs/ai-context-reads-wire-capture.md`, "Fix round 2"). A `$`-block
+///   (`getcurpos()`'s `curswant` field, 1-indexed `getcurpos()[5]` in Lua,
+///   equal to nvim's `MAXCOL` sentinel `2147483647`) extends every row to
+///   its own end instead of the shared screen-column bound.
 ///
 /// The `selection_*` keys are simply absent from the reply when no
 /// selection is active, the same "absent key, not a null" convention
@@ -669,15 +679,21 @@ if mode == 'v' or mode == 'V' or mode == '\\22' then
   if mode == 'V' then
     text = table.concat(vim.api.nvim_buf_get_lines(0, srow - 1, erow, false), '\\n')
   elseif mode == '\\22' then
-    local lo_col, hi_col = scol, ecol
-    if lo_col > hi_col then
-      lo_col, hi_col = hi_col, lo_col
-    end
+    local win = vim.api.nvim_get_current_win()
+    local lo_vcol = math.min(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
+    local hi_vcol = math.max(vim.fn.virtcol('v'), vim.fn.virtcol('.'))
+    local dollar_block = vim.fn.getcurpos()[5] == 2147483647
     local rows = {}
     for row = srow, erow do
       local line = line_text(row)
-      local lo0 = math.min(lo_col - 1, #line)
-      local hi0 = math.min(byte_end_of_char(line, hi_col - 1), #line)
+      local lo0 = math.min(vim.fn.virtcol2col(win, row, lo_vcol) - 1, #line)
+      local hi0
+      if dollar_block then
+        hi0 = #line
+      else
+        local hi_byte1 = vim.fn.virtcol2col(win, row, hi_vcol)
+        hi0 = math.min(byte_end_of_char(line, hi_byte1 - 1), #line)
+      end
       if hi0 < lo0 then
         hi0 = lo0
       end

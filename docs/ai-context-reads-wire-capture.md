@@ -155,6 +155,140 @@ Live-verified through the fixed `CURSOR_CONTEXT_CHUNK` by
 `read_cursor_context_with_a_linewise_selection_reads_whole_lines` and
 `read_cursor_context_with_a_blockwise_selection_reads_the_rectangle`.
 
+## Fix round 2 (review-driven): blockwise is a SCREEN-column rectangle, not a byte-column one
+
+Round 1's blockwise fix above clamped `getpos`'s raw BYTE columns per line --
+correct only because its own capture buffer (`"alpha"`/`"beta"`/`"gamma"`) is
+ASCII, where byte column and screen column never diverge. Any line containing
+a multi-byte character exposes the gap: nvim's real blockwise rectangle is
+defined in `virtcol()` (screen-column) terms, held constant across every row,
+and each row's own byte offset for a given screen column depends on how many
+multi-byte characters precede it on THAT line.
+
+Buffer `["\xe9xyz", "abcd"]` (`"éxyz"`, `é` a 2-byte UTF-8 sequence),
+`gg0<C-v>` then `jl`:
+
+```
+mode() -> "\x16"
+getpos('v') -> [0, 1, 1, 0]      -- byte col 1
+getpos('.') -> [0, 2, 2, 0]      -- byte col 2
+virtcol('v') -> 1
+virtcol('.') -> 2                -- SCREEN col 2, same as the byte col here only
+                                     because line 2 ("abcd") has no multi-byte chars
+-- round 1 (buggy): byte columns 1..2 applied verbatim to every row
+row 1 "éxyz"[byte 1:2]  -> "\xe9"     -- one BYTE of é, not the whole character
+row 2 "abcd"[byte 1:2]  -> "ab"
+-> "\xe9\nab"                          -- WRONG, and INVALID UTF-8 besides
+
+-- correct: nvim's own yank oracle (normal! y after the same selection)
+getreg('"') -> "\xe9x\nab"    ("éx\nab")
+getregtype('"') -> "\x162"    (blockwise, width 2)
+```
+
+nvim's own yank keeps the SCREEN-column bound (2) fixed across both rows:
+row 1's screen columns 1-2 are the single character `é` (screen-width 1) plus
+`x` (screen-width 1), i.e. the substring `"éx"`; row 2's screen columns 1-2
+are the bytes `"ab"`. Round 1's byte-column rectangle instead sliced row 1 at
+byte offset 2, landing mid-character inside `é`.
+
+The fix reads `virtcol('v')`/`virtcol('.')` for the shared screen-column
+bounds (not `getpos`'s byte columns) and converts each row's own low/high
+screen column to that row's own byte column via
+`vim.fn.virtcol2col(win, lnum, vcol)`:
+
+```lua
+local win = vim.api.nvim_get_current_win()
+-- line 1 "éxyz": screen col 1 is byte 1 (é starts there); screen col 2 is
+-- byte 3 (é occupies bytes 1-2, so 'x' starts at byte 3)
+virtcol2col(win, 1, 1) -> 1
+virtcol2col(win, 1, 2) -> 3
+virtcol2col(win, 1, 3) -> 4   -- 'y'
+virtcol2col(win, 1, 4) -> 5   -- 'z'
+-- line 4 "aébc": screen col 2 is byte 2 (é starts there); screen col 3 is
+-- byte 4 (é occupies bytes 2-3, so 'b' starts at byte 4)
+virtcol2col(win, 4, 1) -> 1   -- 'a'
+virtcol2col(win, 4, 2) -> 2   -- é
+virtcol2col(win, 4, 3) -> 4   -- 'b'
+virtcol2col(win, 4, 4) -> 5   -- 'c'
+-- queried past a line's own length, it clamps to the line's own last byte
+-- column rather than erroring or extending past it
+virtcol2col(win, 2, 10) -> 4  -- line 2 "abcd" is 4 bytes long
+```
+
+A second, wider case confirms the same conversion holds for the anchor's own
+column, not just the cursor's: buffer `["a\xe9bc", "wxyz"]` (`"aébc"`),
+`gg0<C-v>` then `jll` (screen columns 1-3):
+
+```
+virtcol('v') -> 1, virtcol('.') -> 3
+getreg('"') -> "a\xe9b\nwxy"   ("aéb\nwxy")
+getregtype('"') -> "\x163"
+```
+
+Row 1's screen columns 1-3 are `"aéb"` (`a` + the 2-byte `é` + `b`, three
+screen cells, four bytes); row 2's are `"wxy"` (three bytes, screen and byte
+columns coincide with no multi-byte characters present). Live-verified end to
+end through the fixed `CURSOR_CONTEXT_CHUNK` by
+`read_cursor_context_with_a_blockwise_selection_over_a_multibyte_character`
+and `read_cursor_context_with_a_blockwise_selection_anchored_on_a_multibyte_character`.
+
+### The `$`-block case: `curswant == MAXCOL` extends every row to its own end
+
+Pressing `$` while in blockwise Visual (a "`$`-block") is a distinct nvim
+mode where every row extends to its own actual end, not to the shared
+screen-column upper bound -- the block's right edge becomes ragged, tracking
+each line's own length. `getcurpos()` (`getcurpos()[5]` in Lua's 1-indexed
+list access; `getcurpos()[4]` in VimL's 0-indexed one) carries this as its
+`curswant` field, set to nvim's `MAXCOL` sentinel (`2147483647`) exactly when
+`$` was the last motion:
+
+Buffer `["alpha", "be"]`, `gg0<C-v>` then `j$`:
+
+```
+mode() -> "\x16"
+virtcol('v') -> 1, virtcol('.') -> 3     -- cursor sits on "be"'s own last column
+getcurpos()[5] -> 2147483647             -- MAXCOL: a $-block
+getreg('"') -> "alpha\nbe"               -- BOTH rows in full, not clamped to
+                                             the shorter row's own screen width
+getregtype('"') -> "\x165"
+```
+
+Without the `curswant` check, the naive screen-column rectangle (cols 1-3)
+would clamp row 1 to `"alp"` -- visibly wrong against the oracle, which
+extends row 1 to its actual end (`"alpha"`) exactly as it does row 2.
+Live-verified by
+`read_cursor_context_with_a_dollar_blockwise_selection_reads_every_line_to_its_own_end`.
+
+### An ordinary (non-`$`) block still clamps a short row to its own end
+
+Distinct from the `$`-block case above but easy to conflate with it: even a
+plain blockwise selection whose shared screen-column upper bound exceeds one
+row's own length still yanks that row in full, from the low column to its
+own end, rather than nothing or a padded/truncated slice. Buffer
+`["alphabet", "be", "gammaxyz"]`, `gg0<C-v>` then `jjllll` (screen columns
+1-5, spanning three rows where the middle one is only two columns wide):
+
+```
+virtcol('v') -> 1, virtcol('.') -> 5
+getcurpos()[5] -> 5                        -- NOT MAXCOL; an ordinary block
+getreg('"') -> "alpha\nbe\ngamma"
+getregtype('"') -> "\x165"
+```
+
+Row 2 (`"be"`, 2 bytes) contributes its entire content (`"be"`) despite the
+block's screen-column bound reaching 5 -- the same `math.min(hi0, #line)`
+clamp round 1 already applied to byte columns carries over unchanged once
+`hi0` is derived from `virtcol2col` instead, so no new clamping logic beyond
+round 1's was needed for this case. Live-verified by
+`read_cursor_context_with_a_blockwise_selection_where_a_row_is_shorter_than_the_rectangle`.
+
+The existing ASCII-uniform-width regression case
+(`read_cursor_context_with_a_blockwise_selection_reads_the_rectangle`,
+`["alpha","beta","gamma"]`, `gg0<C-v>jl` -> `"al\nbe"`) is unchanged by this
+fix -- re-verified against the same oracle, `virtcol` and byte column agree
+on every row when no row contains a multi-byte character, which is exactly
+why an ASCII-only capture was insufficient to catch the original bug.
+
 ## `vim.diagnostic.get(0)`: 0-indexed, flat, closed severity range
 
 ```lua

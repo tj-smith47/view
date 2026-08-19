@@ -248,6 +248,114 @@ fn read_cursor_context_with_a_blockwise_selection_reads_the_rectangle() {
     assert_eq!(selection.range, (1, 2));
 }
 
+/// A blockwise selection's rectangle is bounded by SCREEN columns
+/// (`virtcol`), not byte columns: a multi-byte character on the block's
+/// first row must not split the rectangle mid-character, per
+/// `docs/ai-context-reads-wire-capture.md`'s "Fix round 2" capture, matched
+/// here against nvim's own yank (`normal! y` + `getreg`) as the oracle.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_over_a_multibyte_character() {
+    let engine = spawn();
+    set_lines(&engine, &["éxyz", "abcd"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jl").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "éx\nab");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// The same screen-column rectangle, this time with the multi-byte
+/// character inside the block rather than at its very start -- confirms
+/// the per-line byte conversion holds for every row, not just the first.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_anchored_on_a_multibyte_character() {
+    let engine = spawn();
+    set_lines(&engine, &["aébc", "wxyz"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine.handle.input("jll").expect("extend the block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "aéb\nwxy");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// A `$`-block (`<C-v>` extended with `$`) extends every row to its own
+/// actual end rather than the shared screen-column upper bound -- nvim's
+/// `getcurpos()` `curswant` field (`MAXCOL`, `2147483647`) is what marks
+/// this case, and it must not be read as an ordinary rectangle whose bound
+/// happens to reach the longer row's length.
+#[test]
+fn read_cursor_context_with_a_dollar_blockwise_selection_reads_every_line_to_its_own_end() {
+    let engine = spawn();
+    set_lines(&engine, &["alpha", "be"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("j$")
+        .expect("extend the block to a dollar-block");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "alpha\nbe");
+    assert_eq!(selection.range, (1, 2));
+}
+
+/// An ordinary (non-`$`) block whose shared screen-column upper bound
+/// exceeds one row's own length still yanks that row in full, from the low
+/// column to its own end -- distinct from the `$`-block case above, and
+/// already covered by round 1's `math.min(hi0, #line)` clamp once `hi0` is
+/// derived from `virtcol2col` instead of a raw byte column.
+#[test]
+fn read_cursor_context_with_a_blockwise_selection_where_a_row_is_shorter_than_the_rectangle() {
+    let engine = spawn();
+    set_lines(&engine, &["alphabet", "be", "gammaxyz"]);
+
+    engine
+        .handle
+        .input("gg0<C-v>")
+        .expect("enter blockwise visual mode");
+    engine
+        .handle
+        .input("jjllll")
+        .expect("extend the block across all three rows");
+
+    let (_cursor, selection) = engine
+        .handle
+        .read_cursor_context()
+        .expect("read cursor context");
+
+    let selection = selection.expect("a selection is active");
+    assert_eq!(selection.text, "alpha\nbe\ngamma");
+    assert_eq!(selection.range, (1, 3));
+}
+
 /// No diagnostics posted reads back an empty list, not an error -- the
 /// ordinary case for a freshly opened buffer.
 #[test]
