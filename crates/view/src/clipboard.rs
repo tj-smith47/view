@@ -654,6 +654,57 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn buf_attach(
+            &self,
+            _buf: view_core::msg::BufferHandle,
+            _generation: u64,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn buf_detach(
+            &self,
+            _buf: view_core::msg::BufferHandle,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
+        fn read_current_buffer_text(
+            &self,
+        ) -> Result<
+            view_core::native::ai_context::CurrentBufferRead,
+            view_engine::handle::EngineError,
+        > {
+            Ok(view_core::native::ai_context::CurrentBufferRead::new(
+                std::path::PathBuf::new(),
+                String::new(),
+            ))
+        }
+        fn read_cursor_context(
+            &self,
+        ) -> Result<
+            (
+                view_core::native::ai_context::CursorRead,
+                Option<view_core::native::ai_context::SelectionRead>,
+            ),
+            view_engine::handle::EngineError,
+        > {
+            Ok((view_core::native::ai_context::CursorRead::new(0, 0), None))
+        }
+        fn read_diagnostic_entries(
+            &self,
+        ) -> Result<
+            Vec<view_core::native::ai_context::DiagnosticEntry>,
+            view_engine::handle::EngineError,
+        > {
+            Ok(Vec::new())
+        }
+        fn read_quickfix_entries(
+            &self,
+        ) -> Result<
+            Vec<view_core::native::ai_context::QuickfixEntry>,
+            view_engine::handle::EngineError,
+        > {
+            Ok(Vec::new())
+        }
     }
 
     #[test]

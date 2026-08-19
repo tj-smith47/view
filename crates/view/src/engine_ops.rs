@@ -5,11 +5,19 @@
 //! so growing the surface never grows the loop's own file.
 
 use view_core::msg::{BufferHandle, OptionValue, ReplyToken, ReplyValue, TextEdit};
+use view_core::native::ai_context::{
+    CurrentBufferRead, CursorRead, DiagnosticEntry, QuickfixEntry, SelectionRead,
+};
 use view_core::native::mappings::MappingSpec;
 use view_engine::handle::{EngineError, EngineHandle};
 
 /// The notify surface [`crate::runtime::Executor`] drives, factored out
-/// from [`EngineHandle`] so it can be faked.
+/// from [`EngineHandle`] so it can be faked. The four `read_*` methods are
+/// the one exception to "notify": each is a synchronous, bounded-timeout
+/// RPC request (see `EngineHandle::read_current_buffer_text`'s own doc),
+/// never fire-and-forget -- callers must issue them only off the loop
+/// thread (`crate::ai_context_worker`'s own doc explains why), the same way
+/// every other blocking call in this crate stays off it.
 pub trait EngineOps {
     /// Forwards one encoded key notation via `nvim_input`.
     fn input(&self, notation: &str) -> Result<(), EngineError>;
@@ -109,6 +117,28 @@ pub trait EngineOps {
         edits: &[TextEdit],
         undojoin: bool,
     ) -> Result<(), EngineError>;
+    /// Subscribes to `buf`'s live edit stream, tagged `generation`; never
+    /// blocks, and never itself returns an event (see `RpcCall::BufAttach`,
+    /// `Msg::BufTextChanged`).
+    fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError>;
+    /// Unsubscribes from `buf`'s edit stream (see `RpcCall::BufDetach`).
+    fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError>;
+    /// Reads the current buffer's path and nvim-authoritative text (see
+    /// `EngineHandle::read_current_buffer_text`). Synchronous and
+    /// bounded-timeout, not fire-and-forget -- see this trait's own doc.
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError>;
+    /// Reads the buffer-space cursor and, when one is active, the visual
+    /// selection (see `EngineHandle::read_cursor_context`). Synchronous and
+    /// bounded-timeout -- see this trait's own doc.
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError>;
+    /// Reads every current `vim.diagnostic.get(0)` entry (see
+    /// `EngineHandle::read_diagnostic_entries`). Synchronous and
+    /// bounded-timeout -- see this trait's own doc.
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError>;
+    /// Reads every current `getqflist()` entry (see
+    /// `EngineHandle::read_quickfix_entries`). Synchronous and
+    /// bounded-timeout -- see this trait's own doc.
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError>;
 }
 
 impl EngineOps for EngineHandle {
@@ -196,6 +226,24 @@ impl EngineOps for EngineHandle {
         undojoin: bool,
     ) -> Result<(), EngineError> {
         self.set_buf_text(buf, edits, undojoin)
+    }
+    fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
+        self.buf_attach(buf, generation)
+    }
+    fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        self.buf_detach(buf)
+    }
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        self.read_current_buffer_text()
+    }
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        self.read_cursor_context()
+    }
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        self.read_diagnostic_entries()
+    }
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        self.read_quickfix_entries()
     }
 }
 
@@ -288,6 +336,137 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         undojoin: bool,
     ) -> Result<(), EngineError> {
         (**self).set_buf_text(buf, edits, undojoin)
+    }
+    fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
+        (**self).buf_attach(buf, generation)
+    }
+    fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        (**self).buf_detach(buf)
+    }
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        (**self).read_current_buffer_text()
+    }
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        (**self).read_cursor_context()
+    }
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        (**self).read_diagnostic_entries()
+    }
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        (**self).read_quickfix_entries()
+    }
+}
+
+/// The same delegation as the `&T` blanket above, over `Rc` instead of a
+/// borrow: generic code written against `E: EngineOps + Clone`
+/// (`ai_context_worker::OpsRoute`) can wrap any single-owner fake in an
+/// `Rc` to get a cheap, state-sharing `Clone` for it, without that fake
+/// having to give up its own single-owner `Clone` contract (see
+/// `FakeOps`'s own doc) or this trait growing a duplicate implementation
+/// for every type that only ever needs sharing in a test.
+impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
+    fn input(&self, notation: &str) -> Result<(), EngineError> {
+        (**self).input(notation)
+    }
+    fn try_resize(&self, width: u16, height: u16) -> Result<(), EngineError> {
+        (**self).try_resize(width, height)
+    }
+    fn paste(&self, text: &str) -> Result<(), EngineError> {
+        (**self).paste(text)
+    }
+    fn input_mouse(
+        &self,
+        button: &str,
+        action: &str,
+        modifier: &str,
+        row: u16,
+        col: u16,
+    ) -> Result<(), EngineError> {
+        (**self).input_mouse(button, action, modifier, row, col)
+    }
+    fn set_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).set_option(name, value)
+    }
+    fn hold_option(&self, name: &str, value: &OptionValue) -> Result<(), EngineError> {
+        (**self).hold_option(name, value)
+    }
+    fn reply(&self, token: ReplyToken, value: ReplyValue) -> Result<(), EngineError> {
+        (**self).reply(token, value)
+    }
+    fn probe_default_hl(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_default_hl(generation)
+    }
+    fn probe_swap_recovery(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).probe_swap_recovery(generation)
+    }
+    fn redraw(&self) -> Result<(), EngineError> {
+        (**self).redraw()
+    }
+    fn register_mappings(&self, specs: &[MappingSpec], channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_mappings(specs, channel_id)
+    }
+    fn register_bridge(&self, channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_bridge(channel_id)
+    }
+    fn register_clipboard(&self, channel_id: u64) -> Result<(), EngineError> {
+        (**self).register_clipboard(channel_id)
+    }
+    fn list_buffers(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).list_buffers(generation)
+    }
+    fn preview_buffer(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).preview_buffer(path, generation)
+    }
+    fn open_file(&self, path: &str) -> Result<(), EngineError> {
+        (**self).open_file(path)
+    }
+    fn rename_file(
+        &self,
+        old_path: &str,
+        new_path: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).rename_file(old_path, new_path, generation)
+    }
+    fn tree_create_prompt(&self, generation: u64) -> Result<(), EngineError> {
+        (**self).tree_create_prompt(generation)
+    }
+    fn tree_rename_prompt(
+        &self,
+        old_path: &str,
+        current_name: &str,
+        generation: u64,
+    ) -> Result<(), EngineError> {
+        (**self).tree_rename_prompt(old_path, current_name, generation)
+    }
+    fn tree_delete_confirm(&self, path: &str, generation: u64) -> Result<(), EngineError> {
+        (**self).tree_delete_confirm(path, generation)
+    }
+    fn set_buf_text(
+        &self,
+        buf: BufferHandle,
+        edits: &[TextEdit],
+        undojoin: bool,
+    ) -> Result<(), EngineError> {
+        (**self).set_buf_text(buf, edits, undojoin)
+    }
+    fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
+        (**self).buf_attach(buf, generation)
+    }
+    fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        (**self).buf_detach(buf)
+    }
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        (**self).read_current_buffer_text()
+    }
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        (**self).read_cursor_context()
+    }
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        (**self).read_diagnostic_entries()
+    }
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        (**self).read_quickfix_entries()
     }
 }
 
@@ -414,5 +593,27 @@ impl EngineOps for FakeOps {
             buf.0,
             edits.len()
         ))
+    }
+    fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
+        self.record(format!("buf_attach({},{generation})", buf.0))
+    }
+    fn buf_detach(&self, buf: BufferHandle) -> Result<(), EngineError> {
+        self.record(format!("buf_detach({})", buf.0))
+    }
+    fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
+        self.record("read_current_buffer_text()".to_string())
+            .map(|()| CurrentBufferRead::new(std::path::PathBuf::new(), String::new()))
+    }
+    fn read_cursor_context(&self) -> Result<(CursorRead, Option<SelectionRead>), EngineError> {
+        self.record("read_cursor_context()".to_string())
+            .map(|()| (CursorRead::new(0, 0), None))
+    }
+    fn read_diagnostic_entries(&self) -> Result<Vec<DiagnosticEntry>, EngineError> {
+        self.record("read_diagnostic_entries()".to_string())
+            .map(|()| Vec::new())
+    }
+    fn read_quickfix_entries(&self) -> Result<Vec<QuickfixEntry>, EngineError> {
+        self.record("read_quickfix_entries()".to_string())
+            .map(|()| Vec::new())
     }
 }

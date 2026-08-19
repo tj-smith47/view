@@ -3,6 +3,7 @@
 //! paint, background attach, pre-attach key buffering) lives in
 //! [`startup`]; the steady-state loop itself lives in [`runtime`].
 
+mod ai_context_worker;
 mod ai_worker;
 mod bridge;
 mod clipboard;

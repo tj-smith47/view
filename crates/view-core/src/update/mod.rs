@@ -1061,24 +1061,17 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                         let text = std::mem::take(&mut panel.input);
                         panel.turn_in_flight = true;
                         model.dirty = true;
-                        // Context is honestly empty today: every block
-                        // `view_ai::context::assemble` could turn into a
-                        // `ContextBlock` (`current_buffer`, `selection`,
-                        // `cursor`, `diagnostics`, `quickfix` -- see
-                        // `EngineReadSnapshot`'s own doc) is read over RPC,
-                        // and `view-core` can call neither `view-ai` (the
-                        // dependency direction the crate boundary enforces)
-                        // nor RPC (it does no I/O at all) to populate one.
-                        // Nothing in this tree yet issues the four reads
-                        // (`ReadCursorContext`, `ReadDiagnosticEntries`,
-                        // `ReadQuickfixEntries`, `ReadCurrentBufferText`)
-                        // that would ever fill this in; until something
-                        // does, a submitted prompt genuinely carries no
-                        // context rather than a placeholder pretending to.
-                        return vec![Effect::Ai(AiCommand::Prompt {
-                            text,
-                            context: Vec::new(),
-                        })];
+                        // `view-core` cannot assemble this prompt's context
+                        // itself: every block `view_ai::context::assemble`
+                        // could turn into a `ContextBlock` is read over RPC,
+                        // and this crate does neither I/O nor `view-ai` (see
+                        // `scripts/audit-deps.sh`'s dependency direction).
+                        // `Effect::AiPromptSubmit` carries only the text; the
+                        // bin's executor performs the four reads, assembles
+                        // the context, and only then hands the agent session
+                        // the completed `AiCommand::Prompt` -- see that
+                        // effect's own doc.
+                        return vec![Effect::AiPromptSubmit { text }];
                     }
                 } else if notation == "<BS>" {
                     if model.ai_panel_mut().input.pop().is_some() {

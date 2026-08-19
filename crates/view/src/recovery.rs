@@ -220,6 +220,11 @@ pub(crate) struct LoopChannels {
     /// must not be torn down and re-spawned just because the engine
     /// underneath it restarted.
     pub(crate) ai: crate::ai_worker::AiWorker,
+    /// The context worker's job channel -- outlives any single engine the
+    /// same way `clipboard`/`osc52`/`picker` do; the worker behind it is
+    /// re-pointed at a restart's fresh engine through its own
+    /// [`crate::ai_context_worker::OpsRoute`], not rebuilt.
+    pub(crate) ai_context: mpsc::Sender<crate::ai_context_worker::AiContextJob>,
 }
 
 impl LoopChannels {
@@ -241,6 +246,7 @@ impl LoopChannels {
             .with_toast_timer(self.msg.clone())
             .with_picker(self.picker.clone())
             .with_ai(self.ai.clone())
+            .with_ai_context(self.ai_context.clone())
     }
 }
 
@@ -313,6 +319,7 @@ pub(crate) fn restart_engine(
     model: &Model,
     channels: &LoopChannels,
     route: &crate::clipboard::ReplyRoute<EngineHandle>,
+    ai_context_route: &crate::ai_context_worker::OpsRoute<EngineHandle>,
 ) -> Result<Restarted, crate::startup::AttachFailure> {
     let (width, height) = model.grid_target();
     let mut engine = crate::startup::restart_and_attach(engine, respawn(), width, height)?;
@@ -323,6 +330,7 @@ pub(crate) fn restart_engine(
         Vec::new()
     };
     route.rebind(engine.handle.clone());
+    ai_context_route.rebind(engine.handle.clone());
     // after the rebind, so the epoch read here is the replacement's
     let executor = channels.executor(engine.handle.clone(), route.epoch());
     Ok(Restarted {
@@ -626,11 +634,13 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let (ai_context, _ai_context_jobs) = mpsc::channel();
         let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
+            ai_context,
             // `cat`, not `inert_ai_worker`'s "claude-code" id: a real,
             // provisioning-free child this test can spawn, that echoes the
             // driver's own `initialize` request back at itself forever
@@ -650,6 +660,7 @@ mod tests {
         engine.handle.ui_attach(80, 24).unwrap();
         let (_pump, _cutover) = engine.start_pump(channels.msg.clone());
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
         let dead_pid = engine.pid();
 
         channels
@@ -682,8 +693,15 @@ mod tests {
         );
 
         let mut model = Model::with_term_size(80, 24);
-        let fresh = restart_engine(&mut engine, &respawn, &model, &channels, &route)
-            .expect("a crashed engine must be replaceable");
+        let fresh = restart_engine(
+            &mut engine,
+            &respawn,
+            &model,
+            &channels,
+            &route,
+            &ai_context_route,
+        )
+        .expect("a crashed engine must be replaceable");
 
         // the AI worker the restart's executor answers through must be the
         // very same one `channels.ai` already held, not a fresh clone --
@@ -790,21 +808,31 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let (ai_context, _ai_context_jobs) = mpsc::channel();
         let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
             ai: inert_ai_worker(&msg),
+            ai_context,
             msg,
         };
         let mut engine = Engine::spawn(view_engine::process::EngineConfig::isolated()).unwrap();
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
         let respawn =
             || view_engine::process::EngineConfig::isolated().with_nvim_bin("/nonexistent/nvim");
         let model = Model::with_term_size(80, 24);
 
-        let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
+        let failed = restart_engine(
+            &mut engine,
+            &respawn,
+            &model,
+            &channels,
+            &route,
+            &ai_context_route,
+        );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
             "a restart that could not spawn must report it"
@@ -1018,12 +1046,14 @@ mod tests {
         let (clipboard, _clipboard_jobs) = mpsc::channel();
         let (osc52, _osc52_jobs) = mpsc::channel();
         let (picker, _picker_requests) = mpsc::channel();
+        let (ai_context, _ai_context_jobs) = mpsc::channel();
         let msg = crate::wake::LoopSender::new(msg_tx);
         let channels = LoopChannels {
             clipboard,
             osc52,
             picker,
             ai: inert_ai_worker(&msg),
+            ai_context,
             msg,
         };
         // the relay double, so killing the client closes the pipes the way
@@ -1037,6 +1067,7 @@ mod tests {
             "the engine under test must be a remote one"
         );
         let route = crate::clipboard::ReplyRoute::new(engine.handle.clone());
+        let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
         let killed = std::process::Command::new("kill")
             .args(["-KILL", &engine.pid().to_string()])
             .status()
@@ -1061,7 +1092,14 @@ mod tests {
                 continue;
             }
             attempts += 1;
-            let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
+            let failed = restart_engine(
+                &mut engine,
+                &respawn,
+                &model,
+                &channels,
+                &route,
+                &ai_context_route,
+            );
             assert!(
                 matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
                 "a refused client must fail the attempt rather than produce an engine"
@@ -1126,7 +1164,14 @@ mod tests {
             schedule.take_due(std::time::Instant::now()),
             "a user who has already waited out the whole sequence waits no longer"
         );
-        let failed = restart_engine(&mut engine, &respawn, &model, &channels, &route);
+        let failed = restart_engine(
+            &mut engine,
+            &respawn,
+            &model,
+            &channels,
+            &route,
+            &ai_context_route,
+        );
         assert!(
             matches!(failed, Err(crate::startup::AttachFailure::Spawn(_))),
             "the client refuses this attempt too"

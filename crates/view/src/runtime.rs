@@ -130,6 +130,15 @@ pub struct Executor<E: EngineOps> {
     /// while `model.ai_enabled` is false (see `notice_ai_disabled`), so no
     /// command can arrive here with nothing wired to take it.
     ai: Option<crate::ai_worker::AiWorker>,
+    /// The context worker's job channel
+    /// (`crate::ai_context_worker::spawn`), or `None` when no worker is
+    /// wired -- every test `Executor` built via plain `new`.
+    /// `Effect::AiPromptSubmit` carries no reply token (assembly happens
+    /// entirely off this thread; the worker calls straight into `ai` once
+    /// it has read a snapshot), so an unwired channel degrades to a silent
+    /// no-op the same way `PickerQuery` does, not the must-answer-the-token
+    /// shape `ClipboardRead`/`Write` need.
+    ai_context: Option<mpsc::Sender<crate::ai_context_worker::AiContextJob>>,
 }
 
 /// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
@@ -228,6 +237,7 @@ impl<E: EngineOps> Executor<E> {
             picker: None,
             tree_scan_cancel: std::sync::Mutex::new(None),
             ai: None,
+            ai_context: None,
         }
     }
 
@@ -280,6 +290,17 @@ impl<E: EngineOps> Executor<E> {
     #[must_use]
     pub(crate) fn with_ai(mut self, worker: crate::ai_worker::AiWorker) -> Self {
         self.ai = Some(worker);
+        self
+    }
+
+    /// Wires the context worker's job channel; `AiPromptSubmit` effects
+    /// forward to it instead of silently no-oping.
+    #[must_use]
+    pub(crate) fn with_ai_context(
+        mut self,
+        tx: mpsc::Sender<crate::ai_context_worker::AiContextJob>,
+    ) -> Self {
+        self.ai_context = Some(tx);
         self
     }
 
@@ -361,6 +382,8 @@ impl<E: EngineOps> Executor<E> {
                         edits,
                         undojoin,
                     } => self.ops.set_buf_text(buf, &edits, undojoin),
+                    RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
+                    RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
                     // BufSetText is matched explicitly above rather than
@@ -712,6 +735,19 @@ impl<E: EngineOps> Executor<E> {
             Effect::Ai(command) => {
                 if let Some(worker) = &self.ai {
                     worker.dispatch(command);
+                }
+                Flow::Continue
+            }
+            // `update()` stays pure: it hands off the prompt's text, and
+            // the context worker (off this thread) performs the four
+            // reads, assembles the context, and dispatches the resulting
+            // `AiCommand::Prompt` to the agent session itself -- see
+            // `Effect::AiPromptSubmit`'s own doc for why `view-core` cannot
+            // do this assembly itself, and `ai_context_worker`'s module
+            // doc for why the reads cannot run on this thread.
+            Effect::AiPromptSubmit { text } => {
+                if let Some(tx) = &self.ai_context {
+                    let _ = tx.send(crate::ai_context_worker::AiContextJob { text });
                 }
                 Flow::Continue
             }
@@ -1397,10 +1433,21 @@ pub fn run(
     // engine restart's fresh `Executor` re-wiring this same worker (below)
     // still targets the one project this session was ever asked about
     let ai = crate::ai_worker::AiWorker::new(ai_agent, model.cwd.clone(), msg_tx.clone());
+    let (ai_context_tx, ai_context_rx) = mpsc::channel();
+    // the route, not the handle, for the same reason `clipboard_route` is:
+    // a restart re-points this worker at the fresh engine rather than
+    // starting a second one (see `ai_context_worker::OpsRoute`)
+    let ai_context_route = crate::ai_context_worker::OpsRoute::new(engine.handle.clone());
+    // kept alive for the session's duration, the same shape as
+    // `_clipboard_worker`: the worker exits once every `ai_context_tx`
+    // clone (held by `channels`) drops at the end of this function
+    let _ai_context_worker =
+        crate::ai_context_worker::spawn(ai_context_route.clone(), ai.clone(), ai_context_rx)?;
     let channels = LoopChannels {
         clipboard: clipboard_tx,
         osc52: osc52_tx,
         picker: picker_tx,
+        ai_context: ai_context_tx,
         msg: msg_tx,
         ai,
     };
@@ -1434,7 +1481,14 @@ pub fn run(
         // the clock behind `armed`, never in front of it: a session with
         // nothing scheduled -- every pass of a healthy one -- costs the bool
         if reconnect.armed() && reconnect.take_due(std::time::Instant::now()) {
-            match restart_engine(&mut engine, respawn, &model, &channels, &clipboard_route) {
+            match restart_engine(
+                &mut engine,
+                respawn,
+                &model,
+                &channels,
+                &clipboard_route,
+                &ai_context_route,
+            ) {
                 Ok(fresh) => {
                     reconnect.clear();
                     engine = fresh.engine;
@@ -2156,6 +2210,48 @@ mod tests {
             ),
             "expected the idle-Cancel SessionCrashed forwarded through the effect, got {msg:?}"
         );
+    }
+
+    /// Proves `Executor::run`'s `Effect::AiPromptSubmit` arm genuinely
+    /// forwards to the wired context worker's job channel, carrying the
+    /// text through unchanged -- `update()`'s own `<CR>` arm never carries
+    /// context itself (see `Effect::AiPromptSubmit`'s doc for why that
+    /// assembly cannot happen in `view-core`), so this is the one place
+    /// that hand-off from the pure model to the executor is provable
+    /// without a live engine.
+    #[test]
+    fn ai_prompt_submit_effect_forwards_to_the_wired_context_worker() {
+        let ops = FakeOps::default();
+        let (tx, rx) = mpsc::channel();
+        let executor = Executor::new(&ops).with_ai_context(tx);
+
+        let flow = executor.run(Effect::AiPromptSubmit {
+            text: "hello".to_string(),
+        });
+        assert!(matches!(flow, Flow::Continue));
+
+        let job = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the job must reach the wired context worker channel");
+        assert_eq!(job.text, "hello");
+    }
+
+    /// The unwired-channel degrade every other effect in this type
+    /// documents for itself: with no context worker wired (every bare
+    /// `FakeOps`-only `Executor::new`, the shape every test above this one
+    /// uses), `Effect::AiPromptSubmit` is a silent no-op rather than a
+    /// panic -- there is nothing to forward the job to, and the loop
+    /// must keep running regardless.
+    #[test]
+    fn ai_prompt_submit_effect_with_no_worker_wired_is_a_silent_no_op() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+
+        let flow = executor.run(Effect::AiPromptSubmit {
+            text: "hello".to_string(),
+        });
+
+        assert!(matches!(flow, Flow::Continue));
     }
 
     /// Same proof as `tree_scan_effect_replies_with_a_real_filesystem_listing`,

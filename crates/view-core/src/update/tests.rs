@@ -2821,10 +2821,16 @@ fn enter_on_an_empty_composer_submits_nothing() {
     assert!(!m.ai_panel().turn_in_flight);
 }
 
-/// The C2 producer this round rules into existence: `<CR>` on a non-empty
-/// composer emits `Effect::Ai(AiCommand::Prompt)`, clears the input line so
-/// the next turn starts from empty, and sets `turn_in_flight` so the
-/// cancel key below has something to gate on.
+/// `<CR>` on a non-empty composer emits `Effect::AiPromptSubmit`, clears the
+/// input line so the next turn starts from empty, and sets `turn_in_flight`
+/// so the cancel key below has something to gate on. `update()` hands off
+/// only the text -- `view-core` cannot assemble context itself (see
+/// `Effect::AiPromptSubmit`'s own doc); the executor's context worker
+/// performs the four reads and assembles `AiCommand::Prompt` off this pure
+/// path entirely, proved end-to-end against a live engine in
+/// `view::ai_context_worker`'s own
+/// `build_prompt_against_a_live_engine_carries_real_buffer_and_cursor_context`
+/// test.
 #[test]
 fn enter_on_a_non_empty_composer_submits_a_prompt_and_clears_the_input() {
     let mut m = entered_ai_panel_model();
@@ -2834,15 +2840,10 @@ fn enter_on_a_non_empty_composer_submits_a_prompt_and_clears_the_input() {
 
     let effects = update(&mut m, key("<CR>"));
 
-    let [Effect::Ai(AiCommand::Prompt { text, context })] = effects.as_slice() else {
-        panic!("expected one AiCommand::Prompt, got {effects:?}");
+    let [Effect::AiPromptSubmit { text }] = effects.as_slice() else {
+        panic!("expected one AiPromptSubmit, got {effects:?}");
     };
     assert_eq!(text, "hi");
-    assert!(
-        context.is_empty(),
-        "no RPC read populates context yet; a submission must say so honestly \
-         rather than fabricate one: {context:?}"
-    );
     assert_eq!(m.ai_panel().input, "", "the composer clears on submit");
     assert!(m.ai_panel().turn_in_flight);
     assert!(m.dirty);
