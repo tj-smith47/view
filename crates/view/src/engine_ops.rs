@@ -174,15 +174,16 @@ pub trait EngineOps {
         eol: bool,
         expected_changedtick: u64,
     ) -> Result<(), EngineError>;
-    /// Drives nvim's own out-of-band-write disposition for `path`; never
-    /// blocks, and answers `Msg::CheckTimeReply` (see `RpcCall::Checktime`).
+    /// Drives nvim's own out-of-band-write disposition for every path in
+    /// `paths`; never blocks, and answers `Msg::CheckTimeReply` (see
+    /// `RpcCall::Checktime`).
     ///
     /// `force: false` is the out-of-band write watcher's own probe;
     /// `force: true` drives the explicit reload behind the conflict
     /// prompt's "reload, discard local edits" answer (see
     /// `view_engine::nvim_api::EngineHandle::checktime`'s own doc for why
     /// the two are not the same request replayed).
-    fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError>;
+    fn checktime(&self, request_id: u64, paths: &[String], force: bool) -> Result<(), EngineError>;
     /// Reads the current buffer's path and nvim-authoritative text (see
     /// `EngineHandle::read_current_buffer_text`). Synchronous and
     /// bounded-timeout, not fire-and-forget -- see this trait's own doc.
@@ -319,8 +320,8 @@ impl EngineOps for EngineHandle {
     ) -> Result<(), EngineError> {
         self.ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
     }
-    fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
-        self.checktime(request_id, path, force)
+    fn checktime(&self, request_id: u64, paths: &[String], force: bool) -> Result<(), EngineError> {
+        self.checktime(request_id, paths, force)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.read_current_buffer_text()
@@ -458,8 +459,8 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
     ) -> Result<(), EngineError> {
         (**self).ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
     }
-    fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
-        (**self).checktime(request_id, path, force)
+    fn checktime(&self, request_id: u64, paths: &[String], force: bool) -> Result<(), EngineError> {
+        (**self).checktime(request_id, paths, force)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -600,8 +601,8 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
     ) -> Result<(), EngineError> {
         (**self).ai_fs_write(request_id, buf, lines, eol, expected_changedtick)
     }
-    fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
-        (**self).checktime(request_id, path, force)
+    fn checktime(&self, request_id: u64, paths: &[String], force: bool) -> Result<(), EngineError> {
+        (**self).checktime(request_id, paths, force)
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         (**self).read_current_buffer_text()
@@ -795,8 +796,11 @@ impl EngineOps for FakeOps {
             lines.len()
         ))
     }
-    fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
-        self.record(format!("checktime({request_id},{path},{force})"))
+    fn checktime(&self, request_id: u64, paths: &[String], force: bool) -> Result<(), EngineError> {
+        self.record(format!(
+            "checktime({request_id},{},{force})",
+            paths.join("|")
+        ))
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {
         self.record("read_current_buffer_text()".to_string())
@@ -966,7 +970,12 @@ impl EngineOps for SlowOps {
     ) -> Result<(), EngineError> {
         Ok(())
     }
-    fn checktime(&self, _request_id: u64, _path: &str, _force: bool) -> Result<(), EngineError> {
+    fn checktime(
+        &self,
+        _request_id: u64,
+        _paths: &[String],
+        _force: bool,
+    ) -> Result<(), EngineError> {
         Ok(())
     }
     fn read_current_buffer_text(&self) -> Result<CurrentBufferRead, EngineError> {

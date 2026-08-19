@@ -14,7 +14,7 @@
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use view_core::msg::Msg;
+use view_core::msg::{CheckTimeOutcome, Msg};
 use view_engine::process::{Engine, EngineConfig};
 
 /// Spawns an isolated engine with a UI attached -- load-bearing the same way
@@ -68,8 +68,15 @@ fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> u64 {
 
 struct CheckTimeReply {
     request_id: u64,
-    found: bool,
-    fired: bool,
+    results: Vec<(std::path::PathBuf, CheckTimeOutcome)>,
+}
+
+impl CheckTimeReply {
+    /// The single entry a one-path call answers with.
+    fn only(&self) -> CheckTimeOutcome {
+        assert_eq!(self.results.len(), 1, "expected a one-path reply");
+        self.results[0].1
+    }
 }
 
 fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
@@ -83,14 +90,11 @@ fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
         match rx.recv_timeout(remaining) {
             Ok(Msg::CheckTimeReply {
                 request_id,
-                found,
-                fired,
-                ..
+                results,
             }) => {
                 return CheckTimeReply {
                     request_id,
-                    found,
-                    fired,
+                    results,
                 };
             }
             Ok(_other) => continue,
@@ -197,15 +201,15 @@ fn no_loaded_buffer_answers_found_false() {
 
     engine
         .handle
-        .checktime(1, &name, false)
+        .checktime(1, std::slice::from_ref(&name), false)
         .expect("issue the probe");
     let reply = next_checktime_reply(&rx);
     assert_eq!(reply.request_id, 1);
-    assert!(
-        !reply.found,
-        "no buffer names this path, so found must be false"
+    assert_eq!(
+        reply.only(),
+        CheckTimeOutcome::NoBuffer,
+        "no buffer names this path"
     );
-    assert!(!reply.fired);
 }
 
 /// Case 2: a loaded, UNMODIFIED buffer facing a genuine external change is
@@ -231,12 +235,12 @@ fn unmodified_buffer_reloads_silently_on_external_change() {
 
     engine
         .handle
-        .checktime(2, &name, false)
+        .checktime(2, std::slice::from_ref(&name), false)
         .expect("issue the probe");
     let reply = next_checktime_reply(&rx);
-    assert!(reply.found);
-    assert!(
-        !reply.fired,
+    assert_eq!(
+        reply.only(),
+        CheckTimeOutcome::HandledSilently,
         "an unmodified buffer's own reload must not raise FileChangedShell"
     );
     assert_eq!(
@@ -272,12 +276,12 @@ fn modified_buffer_raises_conflict_and_keeps_the_local_edit() {
 
     engine
         .handle
-        .checktime(3, &name, false)
+        .checktime(3, std::slice::from_ref(&name), false)
         .expect("issue the probe");
     let reply = next_checktime_reply(&rx);
-    assert!(reply.found);
-    assert!(
-        reply.fired,
+    assert_eq!(
+        reply.only(),
+        CheckTimeOutcome::Conflict,
         "a genuine external change against a modified buffer must fire"
     );
     assert_eq!(
@@ -317,12 +321,12 @@ fn a_self_write_then_a_local_edit_never_raises_a_false_conflict() {
 
     engine
         .handle
-        .checktime(4, &name, false)
+        .checktime(4, std::slice::from_ref(&name), false)
         .expect("issue the probe immediately after the self-write");
     let immediate = next_checktime_reply(&rx);
-    assert!(immediate.found);
-    assert!(
-        !immediate.fired,
+    assert_eq!(
+        immediate.only(),
+        CheckTimeOutcome::HandledSilently,
         "nvim's own write must never read back as an external change"
     );
 
@@ -334,12 +338,12 @@ fn a_self_write_then_a_local_edit_never_raises_a_false_conflict() {
 
     engine
         .handle
-        .checktime(5, &name, false)
+        .checktime(5, std::slice::from_ref(&name), false)
         .expect("issue the probe after the local edit");
     let after_edit = next_checktime_reply(&rx);
-    assert!(after_edit.found);
-    assert!(
-        !after_edit.fired,
+    assert_eq!(
+        after_edit.only(),
+        CheckTimeOutcome::HandledSilently,
         "the local edit alone changes nothing on disk, so FileChangedShell must not fire"
     );
 
@@ -375,19 +379,27 @@ fn force_true_discards_the_local_edit_and_takes_the_external_content() {
     // seen the prompt before answering "reload"
     engine
         .handle
-        .checktime(6, &name, false)
+        .checktime(6, std::slice::from_ref(&name), false)
         .expect("issue the probe");
     let conflict = next_checktime_reply(&rx);
-    assert!(conflict.found && conflict.fired);
+    assert_eq!(conflict.only(), CheckTimeOutcome::Conflict);
     assert_eq!(lines_of(&engine, buf), vec!["local-edit".to_string()]);
 
     engine
         .handle
-        .checktime(7, &name, true)
+        .checktime(7, std::slice::from_ref(&name), true)
         .expect("issue the forced reload");
     let forced = next_checktime_reply(&rx);
     assert_eq!(forced.request_id, 7);
-    assert!(forced.found);
+    // NOT `Conflict`: the reply to the user's own "Reload" answer must be
+    // structurally distinguishable from the fresh conflict that prompted
+    // it, or folding it re-opens the same prompt over a buffer that no
+    // longer has local edits -- forever, since only "Keep local" escapes.
+    assert_eq!(
+        forced.only(),
+        CheckTimeOutcome::Reloaded,
+        "a forced reload must never read back as a fresh conflict"
+    );
     assert_eq!(
         lines_of(&engine, buf),
         vec!["changed-externally".to_string()],

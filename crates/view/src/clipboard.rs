@@ -701,7 +701,7 @@ mod tests {
         fn checktime(
             &self,
             _request_id: u64,
-            _path: &str,
+            _paths: &[String],
             _force: bool,
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())

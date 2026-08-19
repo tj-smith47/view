@@ -10,7 +10,7 @@ use crate::rpc::RpcError;
 use rmpv::Value;
 use std::path::PathBuf;
 use std::time::Duration;
-use view_core::msg::{BufferHandle, Msg, OptionValue, TextEdit};
+use view_core::msg::{BufferHandle, CheckTimeOutcome, Msg, OptionValue, TextEdit};
 use view_core::native::ai_context::{
     CurrentBufferRead, CursorRead, DiagnosticEntry, DiagnosticSeverity, QuickfixEntry,
     SelectionRead,
@@ -1230,10 +1230,19 @@ fn remote_failure(error: &Value) -> Option<FsError> {
     Some(FsError::Other { message })
 }
 
-/// Drives nvim's own out-of-band-write disposition for one path, per
+/// Drives nvim's own out-of-band-write disposition for a LIST of paths, per
 /// `docs/checktime-wire-capture.md`'s production chunk (reproduced here
 /// byte-for-byte -- that doc is the source of truth this const must never
-/// drift from). Takes `path` and `force` as its two positional varargs.
+/// drift from, which
+/// [`the_checktime_chunk_matches_its_capture_doc_byte_for_byte`] is what
+/// keeps checkable). Takes `paths` and `force` as its two positional
+/// varargs and answers a positional `results` array.
+///
+/// A list, not one path per call: resolving the loaded-buffer set costs one
+/// `vim.uv.fs_realpath` per loaded buffer, on nvim's own single-threaded
+/// main loop, and a burst of external writes (a `git checkout`, a formatter
+/// sweep) would otherwise pay that per written file. Batched, the scan
+/// happens once however many paths the call names (capture doc, case 8).
 ///
 /// `canon()` here is deliberately narrower than [`hidden_canon_lua!`]'s own
 /// (no directory-head fallback for a not-yet-existing path): a checktime
@@ -1247,45 +1256,54 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// is registered. The scoped, one-shot autocmd this always registers first
 /// is what makes every `force: false` call safe to issue from the
 /// watcher's own probe without risking that stall.
+///
+/// The force branch answers `forced` and `ok` and never `fired`, which is
+/// what makes the user's own "reload, discard local edits" answer
+/// structurally distinguishable on the wire from the fresh conflict that
+/// prompted it -- and `ok` is `pcall`'s own result, so a reload that raised
+/// cannot read as a completed discard (capture doc, cases 7 and 7a).
 const CHECKTIME_CHUNK: &str = "\
-local path, force = ...
+local paths, force = ...
 local function canon(p)
   if p == '' then return p end
   return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
 end
-local wanted = canon(path)
-local bufnr = nil
+local loaded = {}
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(b) and canon(vim.api.nvim_buf_get_name(b)) == wanted then
-    bufnr = b
-    break
+  if vim.api.nvim_buf_is_loaded(b) then
+    loaded[canon(vim.api.nvim_buf_get_name(b))] = b
   end
 end
-if bufnr == nil then
-  return { found = false }
+local results = {}
+for i, path in ipairs(paths) do
+  local bufnr = loaded[canon(path)]
+  if bufnr == nil then
+    results[i] = { found = false }
+  elseif force then
+    local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+  else
+    local fired = false
+    local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+    vim.api.nvim_create_autocmd('FileChangedShell', {
+      group = group,
+      buffer = bufnr,
+      once = true,
+      callback = function()
+        fired = true
+        if vim.bo[bufnr].modified then
+          vim.v.fcs_choice = ''
+        else
+          vim.v.fcs_choice = 'reload'
+        end
+      end,
+    })
+    vim.cmd('checktime ' .. bufnr)
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    results[i] = { found = true, fired = fired, modified = vim.bo[bufnr].modified }
+  end
 end
-if force then
-  pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-  return { found = true, fired = true, modified = vim.bo[bufnr].modified }
-end
-local fired = false
-local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
-vim.api.nvim_create_autocmd('FileChangedShell', {
-  group = group,
-  buffer = bufnr,
-  once = true,
-  callback = function()
-    fired = true
-    if vim.bo[bufnr].modified then
-      vim.v.fcs_choice = ''
-    else
-      vim.v.fcs_choice = 'reload'
-    end
-  end,
-})
-vim.cmd('checktime ' .. bufnr)
-pcall(vim.api.nvim_del_augroup_by_id, group)
-return { found = true, fired = fired, modified = vim.bo[bufnr].modified }";
+return { results = results }";
 
 /// [`CHECKTIME_CHUNK`] itself, for the live wire-capture tests that drive it
 /// directly rather than through
@@ -1294,38 +1312,78 @@ return { found = true, fired = fired, modified = vim.bo[bufnr].modified }";
 #[cfg(any(test, feature = "test-support"))]
 pub const CHECKTIME_PROBE_CHUNK: &str = CHECKTIME_CHUNK;
 
+/// Decodes one entry of [`CHECKTIME_CHUNK`]'s own `results` array into the
+/// outcome it describes (`docs/checktime-wire-capture.md`'s outcome table).
+///
+/// `forced` is read from the entry itself rather than from what the caller
+/// asked for: the force branch is the only one that reports it, so a
+/// completed reload can never decode to the [`CheckTimeOutcome::Conflict`]
+/// that would re-raise the prompt the user just answered.
+fn decode_checktime_entry(entry: &Value) -> CheckTimeOutcome {
+    let pairs = entry.as_map().map_or(&[][..], Vec::as_slice);
+    let flag =
+        |name: &str| crate::wire::map_find(pairs, name).and_then(Value::as_bool) == Some(true);
+    if !flag("found") {
+        return CheckTimeOutcome::NoBuffer;
+    }
+    if flag("forced") {
+        return if flag("ok") {
+            CheckTimeOutcome::Reloaded
+        } else {
+            CheckTimeOutcome::ReloadFailed
+        };
+    }
+    if flag("fired") {
+        CheckTimeOutcome::Conflict
+    } else {
+        CheckTimeOutcome::HandledSilently
+    }
+}
+
 /// Decodes a [`CHECKTIME_CHUNK`] `Response` into `Msg::CheckTimeReply`.
-/// `path` is echoed back from the waiter rather than decoded from the
-/// reply (the chunk's own answer carries no path -- it was already
+/// `paths` are echoed back from the waiter rather than decoded from the
+/// reply (the chunk's own answer is positional -- each path was already
 /// resolved to a `bufnr` before nvim ever executed), the same reason
 /// [`Waiter::Preview`] and [`Waiter::LoadHidden`] carry `path` themselves.
 ///
-/// `error` degrading to `found: false, fired: false` (rather than
-/// propagating a decode failure) matches every other async waiter's "safe
-/// default over a stuck generation" precedent: a probe that could not even
-/// ask must never read as a genuine conflict.
+/// An entry the reply does not carry at all (a short array, or an `error`
+/// reply with no array) degrades to [`CheckTimeOutcome::NoBuffer`] for a
+/// probe -- every other async waiter's "safe default over a stuck
+/// generation" precedent, since a probe that could not even ask must never
+/// read as a genuine conflict -- but to [`CheckTimeOutcome::ReloadFailed`]
+/// for a forced call, because there the user asked for something
+/// destructive and silence would read as it having happened.
 pub(crate) fn decode_checktime_reply(
-    request_id: u64,
-    path: std::path::PathBuf,
+    call: crate::handle::CheckTimeCall,
     error: &Value,
     result: &Value,
 ) -> Msg {
-    if *error != Value::Nil {
-        return Msg::CheckTimeReply {
-            request_id,
-            path,
-            found: false,
-            fired: false,
-        };
-    }
-    let pairs = result.as_map().map_or(&[][..], Vec::as_slice);
-    let found = crate::wire::map_find(pairs, "found").and_then(Value::as_bool) == Some(true);
-    let fired = crate::wire::map_find(pairs, "fired").and_then(Value::as_bool) == Some(true);
+    let missing = if call.forced {
+        CheckTimeOutcome::ReloadFailed
+    } else {
+        CheckTimeOutcome::NoBuffer
+    };
+    let entries = if *error == Value::Nil {
+        result
+            .as_map()
+            .and_then(|pairs| crate::wire::map_find(pairs, "results"))
+            .and_then(Value::as_array)
+            .map_or(&[][..], Vec::as_slice)
+    } else {
+        &[][..]
+    };
+    let results = call
+        .paths
+        .into_iter()
+        .enumerate()
+        .map(|(i, path)| {
+            let outcome = entries.get(i).map_or(missing, decode_checktime_entry);
+            (path, outcome)
+        })
+        .collect();
     Msg::CheckTimeReply {
-        request_id,
-        path,
-        found,
-        fired,
+        request_id: call.request_id,
+        results,
     }
 }
 
@@ -2487,26 +2545,39 @@ impl EngineHandle {
     ///
     /// `force: false` is the watcher's own probe -- always safe to issue,
     /// per the scoped one-shot autocmd [`CHECKTIME_CHUNK`]'s own doc
-    /// describes. `force: true` is issued only in answer to the user's
-    /// "reload, discard local edits" choice on an already-open conflict
-    /// prompt, driving an explicit `:edit!` rather than re-attempting
-    /// `:checktime` itself (`docs/checktime-wire-capture.md` case 7: a
-    /// second `:checktime` against a mtime nvim already dispositioned on
-    /// the first call is a no-op, not a re-decision).
+    /// describes -- and carries however many paths one detection batch
+    /// collected, so nvim resolves its buffer set once for all of them.
+    /// `force: true` is issued only in answer to the user's "reload,
+    /// discard local edits" choice on an already-open conflict prompt, for
+    /// that one path, driving an explicit `:edit!` rather than
+    /// re-attempting `:checktime` itself (`docs/checktime-wire-capture.md`
+    /// case 7: a second `:checktime` against a mtime nvim already
+    /// dispositioned on the first call is a no-op, not a re-decision).
     ///
     /// # Errors
     ///
     /// Returns `EngineError::Closed` if the connection is already closed or
     /// the writer thread has already exited.
-    pub fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
+    pub fn checktime(
+        &self,
+        request_id: u64,
+        paths: &[String],
+        force: bool,
+    ) -> Result<(), EngineError> {
         self.request_checktime(
             "nvim_exec_lua",
             vec![
                 Value::from(CHECKTIME_CHUNK),
-                Value::Array(vec![Value::from(path), Value::from(force)]),
+                Value::Array(vec![
+                    Value::Array(paths.iter().map(|p| Value::from(p.as_str())).collect()),
+                    Value::from(force),
+                ]),
             ],
-            request_id,
-            std::path::PathBuf::from(path),
+            crate::handle::CheckTimeCall {
+                request_id,
+                paths: paths.iter().map(std::path::PathBuf::from).collect(),
+                forced: force,
+            },
         )
     }
 
@@ -3032,6 +3103,105 @@ mod tests {
     use super::*;
     use crate::rpc::RpcMessage;
     use std::io::{BufReader, Write};
+
+    /// The chunk this crate ships and the chunk the capture doc records are
+    /// the same bytes. Both this const's own doc and the design claim it,
+    /// and nothing checked it: the last drift (a dropped `local ok =`) was
+    /// found by hand, and the next one would have been silent too. The doc
+    /// is the source; a mismatch means the code drifted from the capture,
+    /// not the other way round.
+    #[test]
+    fn the_checktime_chunk_matches_its_capture_doc_byte_for_byte() {
+        let doc = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../docs/checktime-wire-capture.md"),
+        )
+        .expect("the capture doc must be readable");
+        let marker = "## Production chunk shape";
+        let after = doc
+            .split_once(marker)
+            .expect("the capture doc must carry a production chunk section")
+            .1;
+        let fenced = after
+            .split_once("```lua\n")
+            .expect("the production chunk must be a lua fence")
+            .1;
+        let captured = fenced
+            .split_once("```")
+            .expect("the lua fence must be closed")
+            .0;
+        assert_eq!(
+            captured.trim_end_matches('\n'),
+            CHECKTIME_CHUNK,
+            "CHECKTIME_CHUNK has drifted from docs/checktime-wire-capture.md"
+        );
+    }
+
+    /// Every outcome the wire can describe, decoded from the exact reply
+    /// entries `docs/checktime-wire-capture.md` captured. The forced pair is
+    /// the load-bearing half: a force branch that reported `fired` instead
+    /// of `forced` would decode to `Conflict` and re-raise the prompt the
+    /// user just answered.
+    #[test]
+    fn each_captured_reply_entry_decodes_to_its_outcome() {
+        let entry = |pairs: &[(&str, bool)]| {
+            Value::Map(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (Value::from(*k), Value::from(*v)))
+                    .collect(),
+            )
+        };
+        let cases = [
+            (vec![("found", false)], CheckTimeOutcome::NoBuffer),
+            (
+                vec![("found", true), ("fired", false)],
+                CheckTimeOutcome::HandledSilently,
+            ),
+            (
+                vec![("found", true), ("fired", true)],
+                CheckTimeOutcome::Conflict,
+            ),
+            (
+                vec![("found", true), ("forced", true), ("ok", true)],
+                CheckTimeOutcome::Reloaded,
+            ),
+            (
+                vec![("found", true), ("forced", true), ("ok", false)],
+                CheckTimeOutcome::ReloadFailed,
+            ),
+        ];
+        for (pairs, expected) in cases {
+            assert_eq!(
+                decode_checktime_entry(&entry(&pairs)),
+                expected,
+                "{pairs:?}"
+            );
+        }
+    }
+
+    /// A reply that never arrived degrades in the direction that cannot
+    /// mislead: silence for a probe, "the reload failed" for the forced
+    /// call, because there the user already asked for something destructive
+    /// and hearing nothing reads as it having happened.
+    #[test]
+    fn an_error_reply_degrades_by_which_call_it_answers() {
+        let call = |forced| crate::handle::CheckTimeCall {
+            request_id: 1,
+            paths: vec![std::path::PathBuf::from("a.rs")],
+            forced,
+        };
+        let outcome = |forced| {
+            let Msg::CheckTimeReply { results, .. } =
+                decode_checktime_reply(call(forced), &Value::from("nvim refused"), &Value::Nil)
+            else {
+                return None;
+            };
+            results.first().map(|(_, outcome)| *outcome)
+        };
+        assert_eq!(outcome(false), Some(CheckTimeOutcome::NoBuffer));
+        assert_eq!(outcome(true), Some(CheckTimeOutcome::ReloadFailed));
+    }
 
     /// A minimal fake peer that answers every incoming request with
     /// `result` and forwards `(method, params)` to the returned channel, so

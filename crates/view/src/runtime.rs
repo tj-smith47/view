@@ -532,9 +532,9 @@ impl<E: EngineOps> Executor<E> {
                         .ai_fs_write(request_id, buf, &lines, eol, expected_changedtick),
                     RpcCall::Checktime {
                         request_id,
-                        path,
+                        paths,
                         force,
-                    } => self.ops.checktime(request_id, &path, force),
+                    } => self.ops.checktime(request_id, &paths, force),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
                     // BufSetText, the two AiFs calls, and Checktime are
@@ -2407,6 +2407,36 @@ mod tests {
         assert!(matches!(write, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "ai_fs_read(7,3,Some(2),None)");
         assert_eq!(ops.calls.borrow()[1], "ai_fs_write(8,3,2,true,12)");
+    }
+
+    /// The `Checktime` arm is matched explicitly for the same reason the
+    /// two above are: a silently no-op'd probe drops an external write the
+    /// user never learns about, and a silently no-op'd forced call drops
+    /// the reload-and-discard-the-local-edits answer they already gave.
+    /// Driven through the real executor, not through `FakeOps` directly --
+    /// deleting the arm and letting `RpcCall` fall into the
+    /// `#[non_exhaustive]` catch-all is exactly the mutation this exists to
+    /// fail on.
+    #[test]
+    fn the_checktime_effects_map_to_their_engine_ops_calls() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+
+        let probe = executor.run(Effect::Rpc(RpcCall::Checktime {
+            request_id: 5,
+            paths: vec!["a.rs".to_string(), "b.rs".to_string()],
+            force: false,
+        }));
+        let forced = executor.run(Effect::Rpc(RpcCall::Checktime {
+            request_id: 6,
+            paths: vec!["a.rs".to_string()],
+            force: true,
+        }));
+
+        assert!(matches!(probe, Flow::Continue));
+        assert!(matches!(forced, Flow::Continue));
+        assert_eq!(ops.calls.borrow()[0], "checktime(5,a.rs|b.rs,false)");
+        assert_eq!(ops.calls.borrow()[1], "checktime(6,a.rs,true)");
     }
 
     /// A write nvim refuses because the buffer moved is not an engine

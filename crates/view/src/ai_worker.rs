@@ -113,35 +113,101 @@ fn resolve_launch(spec: &AgentSpec, cwd: &Path) -> Result<AgentLaunch, SpawnFail
     }
 }
 
-/// Starts the out-of-band write watcher over `cwd`, publishing the handle
-/// into `watch` on success.
+/// The one slot an [`AiWorker`] and every clone of it share for whichever
+/// out-of-band write watch is currently running.
 ///
-/// Best-effort: a platform limit on watch descriptors, or a root that
-/// briefly stops being readable, both leave `watch` at `None` rather than
-/// failing the spawn this runs after. The watcher is the safety net for a
-/// write path ACP itself cannot see or route (an agent's own shell tool);
-/// it is not a precondition for the writes ACP *can* route, which already
-/// work with no watch running at all. Silently degrading here trades a
-/// diagnostic this crate has nowhere to surface (there is no session yet
-/// to report a panel-local error into, and reusing `SessionCrashed` for a
-/// watch-only failure would wrongly read as the agent itself having died)
-/// for a session that still starts and still does everything ACP-routed.
-fn start_watch(watch: &Arc<Mutex<Option<WatchHandle>>>, cwd: &Path, msg: &LoopSender) {
-    let emit = msg.clone();
-    if let Ok(handle) = view_ai::spawn_watch(cwd, move |m| {
-        let _ = emit.send(m);
-    }) {
-        let mut guard = watch.lock().unwrap_or_else(PoisonError::into_inner);
-        *guard = Some(handle);
-    }
+/// `generation` and `stopped` are what make start-versus-stop ordering
+/// irrelevant instead of load-bearing. `AiSession::spawn` returns before
+/// its own async event loop has necessarily run, so a child that exits as
+/// fast as `true` can have the crash-forwarding closure ask for a stop
+/// before the spawning thread has published anything at all -- and a stop
+/// that arrives first must still be honoured, or the watch outlives the
+/// session it belonged to with nothing left to stop it. Recording the stop
+/// against the generation it was meant for gives that answer by
+/// construction, on any interleaving, with no ordering constraint left on
+/// the caller.
+#[derive(Default)]
+struct WatchSlot {
+    /// The live watch for [`Self::generation`], once one has been published
+    /// and not yet stopped.
+    handle: Option<WatchHandle>,
+    /// Which spawn attempt this slot currently belongs to. A stop or a
+    /// publish naming an older generation is a late message from a session
+    /// that is already gone, and is ignored rather than allowed to tear
+    /// down its successor's watch.
+    generation: u64,
+    /// Whether [`Self::generation`]'s watch has already been asked to stop.
+    stopped: bool,
 }
 
-/// Stops whatever out-of-band write watch is currently running, if any.
-/// Idempotent: a second call (the shape a session that never started a
-/// watch, then crashes, produces) is a no-op on an already-`None` slot.
-fn stop_watch(watch: &Arc<Mutex<Option<WatchHandle>>>) {
-    let mut guard = watch.lock().unwrap_or_else(PoisonError::into_inner);
-    *guard = None;
+type Watch = Arc<Mutex<WatchSlot>>;
+
+fn lock(watch: &Watch) -> std::sync::MutexGuard<'_, WatchSlot> {
+    watch.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Claims the slot for a new spawn attempt, stopping whatever the previous
+/// one left running, and answers the generation every later [`start_watch`]
+/// and [`stop_watch`] call for that attempt must name.
+fn begin_watch(watch: &Watch) -> u64 {
+    let mut slot = lock(watch);
+    if let Some(handle) = slot.handle.take() {
+        handle.stop();
+    }
+    slot.generation += 1;
+    slot.stopped = false;
+    slot.generation
+}
+
+/// Starts the out-of-band write watcher over `cwd` and publishes it into
+/// `watch` for `generation`.
+///
+/// A watch published into a slot that has already been stopped -- or that
+/// a newer spawn attempt has already claimed -- is torn down here and now
+/// rather than left running: that is the whole point of the generation, and
+/// it is why nothing outside this function has to care whether a start
+/// races its own session's crash.
+///
+/// Starting is best-effort in that a failure never fails the spawn: the
+/// watcher is the safety net for a write path ACP itself cannot see or
+/// route (an agent's own shell tool), not a precondition for the writes ACP
+/// *can* route, which work with no watch running at all. It is not silent,
+/// though -- `docs/ai.md` tells the user detection is on, so a session
+/// running without it says so through `Msg::ExternalWatchDegraded`.
+fn start_watch(watch: &Watch, generation: u64, cwd: &Path, msg: &LoopSender) {
+    let emit = msg.clone();
+    let handle = match view_ai::spawn_watch(cwd, move |m| {
+        let _ = emit.send(m);
+    }) {
+        Ok(handle) => handle,
+        Err(err) => {
+            let _ = msg.send(Msg::ExternalWatchDegraded {
+                reason: format!("{err}"),
+            });
+            return;
+        }
+    };
+    let mut slot = lock(watch);
+    if slot.generation != generation || slot.stopped {
+        drop(slot);
+        handle.stop();
+        return;
+    }
+    slot.handle = Some(handle);
+}
+
+/// Stops `generation`'s out-of-band write watch, whether or not it has been
+/// published yet. Idempotent, and a no-op for a generation the slot has
+/// already moved past.
+fn stop_watch(watch: &Watch, generation: u64) {
+    let mut slot = lock(watch);
+    if slot.generation != generation {
+        return;
+    }
+    slot.stopped = true;
+    if let Some(handle) = slot.handle.take() {
+        handle.stop();
+    }
 }
 
 /// The bin's handle on one project's agent session.
@@ -160,13 +226,12 @@ pub(crate) struct AiWorker {
     resolver: Resolver,
     spawner: Spawner,
     /// The out-of-band write watcher for whichever session is currently
-    /// `Ready`, or `None` when nothing is watching (`Idle`/`Spawning`, or a
-    /// `Ready` session whose watch failed to start). Started the moment a
-    /// spawn succeeds and stopped the moment that session's own
-    /// `SessionCrashed` is observed -- see [`Self::spawn_in_background`]'s
-    /// own doc for why that is eager, not the lazy `Ready`-to-`Idle`
-    /// demotion [`Self::dispatch`] does for the slot itself.
-    watch: Arc<Mutex<Option<WatchHandle>>>,
+    /// `Ready`. Started as a spawn begins and stopped the moment that
+    /// session's own `SessionCrashed` is observed -- see
+    /// [`Self::spawn_in_background`]'s own doc for why that is eager, not
+    /// the lazy `Ready`-to-`Idle` demotion [`Self::dispatch`] does for the
+    /// slot itself, and [`WatchSlot`]'s for why the two never race.
+    watch: Watch,
 }
 
 impl AiWorker {
@@ -195,7 +260,7 @@ impl AiWorker {
             slot: Arc::new(Mutex::new(AiSlot::Idle)),
             resolver,
             spawner,
-            watch: Arc::new(Mutex::new(None)),
+            watch: Watch::default(),
         }
     }
 
@@ -295,7 +360,17 @@ impl AiWorker {
     /// question.
     #[cfg(all(test, unix))]
     pub(crate) fn is_same_worker_as(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.slot, &other.slot)
+        Arc::ptr_eq(&self.slot, &other.slot) && Arc::ptr_eq(&self.watch, &other.watch)
+    }
+
+    /// Whether an out-of-band write watch is currently published for this
+    /// worker. The falsifiable handle on the watcher's own lifetime:
+    /// "untrusted project, no watch", "a live session watches", "a crashed
+    /// session does not", and "a restarted engine keeps the one it had" are
+    /// all one question asked from outside the worker.
+    #[cfg(test)]
+    pub(crate) fn watch_is_running(&self) -> bool {
+        lock(&self.watch).handle.is_some()
     }
 
     /// Runs [`resolve_launch`] and [`AiSession::spawn`] on their own thread,
@@ -333,31 +408,33 @@ impl AiWorker {
     /// -- already the trusted project root, since [`AiCommand::Prompt`]
     /// cannot reach this worker until `view-core`'s own trust gate has
     /// granted it (`update/mod.rs`'s `open_ai_trust_prompt` arm) -- so no
-    /// separate trust check belongs here. It starts just before
-    /// `AiSession::spawn`, not after `Ready` is published: that call
-    /// returns before its own async event loop has necessarily run, so a
-    /// child that exits as fast as `true` can reach the forwarding
-    /// closure's `stop_watch` before a post-`Ready` start call would ever
-    /// run, permanently orphaning a watch nothing would be left to stop.
-    /// Starting first guarantees every `stop_watch` this thread or the
-    /// closure below issues runs after `watch` is already populated, never
-    /// before. The watch is stopped eagerly -- inside the per-event closure
-    /// the instant that session's own `SessionCrashed` is observed, and
-    /// again on this thread if resolving succeeded but the spawn itself
-    /// failed -- rather than left to [`Self::dispatch`]'s lazy
-    /// `Ready`-to-`Idle` demotion: that demotion only runs on the *next*
-    /// command, which may be arbitrarily far in the future (or never), and
-    /// a watcher left running past its session's death would go on driving
-    /// `checktime` (and popping conflict prompts) for writes no agent is
-    /// left to have made.
+    /// separate trust check belongs here. Which side of `AiSession::spawn`
+    /// it starts on is deliberately not load-bearing: the generation
+    /// [`begin_watch`] claims on the dispatching thread is what makes a
+    /// stop that arrives before the start still win (see [`WatchSlot`]),
+    /// so a child that exits as fast as `true` cannot leave a watch running
+    /// past the session it belonged to on any interleaving.
     ///
-    /// Starting the watch is best-effort: [`start_watch`]'s own doc covers
-    /// why a failure here degrades gracefully instead of failing the spawn.
+    /// The watch is stopped eagerly -- inside the per-event closure the
+    /// instant that session's own `SessionCrashed` is observed, and again
+    /// on this thread if resolving succeeded but the spawn itself failed --
+    /// rather than left to [`Self::dispatch`]'s lazy `Ready`-to-`Idle`
+    /// demotion: that demotion only runs on the *next* command, which may
+    /// be arbitrarily far in the future (or never), and a watcher left
+    /// running past its session's death would go on driving `checktime`
+    /// (and popping conflict prompts) for writes no agent is left to have
+    /// made.
+    ///
+    /// Registering the tree is not on this path at all: `spawn_watch`
+    /// returns as soon as the backend and its thread exist and walks the
+    /// project on that thread (see `view_ai::watch::spawn`), so the user's
+    /// first prompt never waits on it.
     fn spawn_in_background(&self) {
         let agent_spec = self.agent_spec.clone();
         let cwd = self.cwd.clone();
         let slot = Arc::clone(&self.slot);
         let watch = Arc::clone(&self.watch);
+        let watch_generation = begin_watch(&watch);
         let msg = self.msg.clone();
         let resolver = Arc::clone(&self.resolver);
         let started = (self.spawner)(Box::new(move || {
@@ -368,23 +445,17 @@ impl AiWorker {
             let cwd_for_start = cwd.clone();
             let result = resolver(&agent_spec, &cwd).and_then(|launch| {
                 let emit_tx = msg.clone();
-                // Started here, before the child is even spawned, rather
-                // than after `Ok(session)` below: `AiSession::spawn`
-                // returns before its own async event loop has necessarily
-                // run, so a child that exits as fast as `true` can have
-                // the forwarding closure's `stop_watch` observe
-                // `SessionCrashed` -- and no-op on a still-empty `watch`
-                // -- before this thread ever reaches a post-spawn start
-                // call, orphaning a watch nothing will ever stop again.
-                // Starting first closes that window: any `stop_watch` the
-                // closure runs is now guaranteed to run after `watch` is
-                // populated, never before.
-                start_watch(&watch_for_start, &cwd_for_start, &msg_for_start);
+                start_watch(
+                    &watch_for_start,
+                    watch_generation,
+                    &cwd_for_start,
+                    &msg_for_start,
+                );
                 AiSession::spawn(
                     launch,
                     Box::new(move |event| {
                         if matches!(&event, Msg::Ai(AiEvent::SessionCrashed { .. })) {
-                            stop_watch(&watch_for_events);
+                            stop_watch(&watch_for_events, watch_generation);
                         }
                         let _ = emit_tx.send(event);
                     }),
@@ -417,7 +488,7 @@ impl AiWorker {
                     // before or after the `start_watch` call above (a
                     // resolver failure never reaches it at all; a spawn
                     // failure after a successful resolve did)
-                    stop_watch(&watch);
+                    stop_watch(&watch, watch_generation);
                     let _ = emit_tx.send(Msg::Ai(AiEvent::SessionCrashed {
                         message: format!("AI agent failed to start: {err}"),
                     }));
@@ -779,12 +850,123 @@ mod tests {
         );
         assert!(settled, "the session never reached a live Ready state");
         assert!(
-            worker.watch.lock().unwrap().is_some(),
+            worker.watch_is_running(),
             "a live session's watch must be running"
         );
 
         drop(worker);
         drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A running watch survives an engine restart. The restart re-wires a
+    /// fresh executor to a CLONE of the shared worker (`recovery.rs`
+    /// asserts that reuse directly), so the property that matters here is
+    /// that a clone observes the same live watch -- a worker rebuilt from
+    /// scratch instead would leave the surviving agent's own shell writes
+    /// unnoticed for the rest of the run, with nothing anywhere saying so.
+    #[test]
+    fn a_clone_of_a_running_worker_shares_its_live_watch() {
+        let dir = watch_tempdir("restart");
+        let (tx, rx) = mpsc::sync_channel(8);
+        let worker = AiWorker::new(
+            AgentSpec::Command(vec!["sleep".to_string(), "5".to_string()]),
+            dir.clone(),
+            LoopSender::new(tx),
+        );
+
+        worker.dispatch(AiCommand::Prompt {
+            text: "hello".to_string(),
+            context: Vec::new(),
+        });
+        assert!(
+            wait_until(|| worker.watch_is_running(), Duration::from_secs(3)),
+            "the live session never started its watch"
+        );
+
+        let survivor = worker.clone();
+        assert!(survivor.is_same_worker_as(&worker));
+        assert!(
+            survivor.watch_is_running(),
+            "a restart's re-wired worker must keep the watch its session already had"
+        );
+
+        drop(worker);
+        drop(survivor);
+        drop(rx);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stop that arrives BEFORE its own start still wins. This is the
+    /// whole TOCTOU property, asked synchronously: no child process, no
+    /// channel, no interleaving to be lucky about. The previous shape of
+    /// this guard read the slot at the instant a crash message arrived and
+    /// passed under both orderings, which is the "timing-shaped assertion
+    /// that fails open" class -- it protected nothing.
+    #[test]
+    fn a_watch_stopped_before_it_starts_never_ends_up_running() {
+        let dir = watch_tempdir("stop-first");
+        let (tx, _rx) = mpsc::sync_channel(8);
+        let msg = LoopSender::new(tx);
+        let watch = Watch::default();
+
+        let generation = begin_watch(&watch);
+        stop_watch(&watch, generation);
+        start_watch(&watch, generation, &dir, &msg);
+
+        assert!(
+            lock(&watch).handle.is_none(),
+            "a watch published into an already-stopped slot must be torn down, not left running"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A late stop from a session that is already gone never tears down its
+    /// successor's watch: the generation is what tells the two apart, and
+    /// without it a slow crash-forwarding closure silently disables
+    /// detection for the session the user just started.
+    #[test]
+    fn a_stale_generations_stop_leaves_the_current_watch_alone() {
+        let dir = watch_tempdir("stale-stop");
+        let (tx, _rx) = mpsc::sync_channel(8);
+        let msg = LoopSender::new(tx);
+        let watch = Watch::default();
+
+        let first = begin_watch(&watch);
+        let second = begin_watch(&watch);
+        start_watch(&watch, second, &dir, &msg);
+        stop_watch(&watch, first);
+
+        assert!(
+            lock(&watch).handle.is_some(),
+            "a dead session's stop must not reach the watch of the one that replaced it"
+        );
+        stop_watch(&watch, second);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// No watch without a session, and therefore none without trust: the
+    /// only command that ever starts one is `Prompt`, which `view-core`'s
+    /// own trust gate is what lets reach this worker at all. Asked here at
+    /// the watcher level rather than inferred from the call chain, so a
+    /// future caller that dispatched some other command into a spawn would
+    /// fail this instead of quietly watching an untrusted root.
+    #[test]
+    fn a_command_that_starts_no_session_starts_no_watch() {
+        let dir = watch_tempdir("untrusted");
+        let (tx, rx) = mpsc::sync_channel(8);
+        let worker = AiWorker::new(missing_program_spec(), dir.clone(), LoopSender::new(tx));
+
+        assert!(!worker.watch_is_running(), "an idle worker watches nothing");
+        worker.dispatch(AiCommand::Cancel);
+        let _ = rx.recv_timeout(Duration::from_secs(5));
+
+        assert!(
+            !worker.watch_is_running(),
+            "a command that starts no session must never start a watch"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -827,7 +1009,7 @@ mod tests {
         // time the message above has been received, `watch` is already
         // settled -- no `wait_until` needed
         assert!(
-            worker.watch.lock().unwrap().is_none(),
+            !worker.watch_is_running(),
             "the watch must not outlive its own session's crash"
         );
 

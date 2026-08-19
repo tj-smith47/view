@@ -83,19 +83,26 @@ for crate in view-core view-engine view-surface view-native view-tui view-oracle
   check_absent "$crate" notify
 done
 
-# nucleo (the picker's matcher engine, spec §18), ignore (the Files
-# source's .gitignore-respecting walker), and grep-searcher/grep-regex (the
-# live-grep source's in-process search, ripgrep's own constituent crates)
-# are confined to view-native's own matcher worker thread
+# nucleo (the picker's matcher engine, spec §18) and grep-searcher/grep-regex
+# (the live-grep source's in-process search, ripgrep's own constituent
+# crates) are confined to view-native's own matcher worker thread
 # (crates/view-native/src/picker/matcher.rs and sources.rs) on the same
 # terms as arboard above: view-core stays free of a matching-library
 # dependency (its PickerState only ever asks the worker, never matches
 # itself), and no other crate needs any of them.
 for crate in view-core view-engine view-surface view-ai view-tui view-oracle view-bench view view-harness; do
   check_absent "$crate" nucleo
-  check_absent "$crate" ignore
   check_absent "$crate" grep-searcher
   check_absent "$crate" grep-regex
+done
+# ignore (the .gitignore-respecting walker) is shared by exactly two
+# owners, each walking a project tree with the project's own ignore rules:
+# view-native's Files source (crates/view-native/src/picker/sources.rs) and
+# view-ai's out-of-band write watcher (crates/view-ai/src/watch.rs), which
+# registers a platform watch descriptor per directory and so must skip the
+# same build output the picker does. Every other lib crate stays free of it.
+for crate in view-core view-engine view-surface view-tui view-oracle view-bench view view-harness; do
+  check_absent "$crate" ignore
 done
 # serde + toml exist for the theme cache file, the corpus loader, and the
 # [native] table of view.toml, confined to the crates that own a file

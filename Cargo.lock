@@ -2667,6 +2667,7 @@ name = "view-ai"
 version = "0.0.1"
 dependencies = [
  "flate2",
+ "ignore",
  "notify",
  "serde",
  "serde_json",

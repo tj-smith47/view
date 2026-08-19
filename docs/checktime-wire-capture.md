@@ -18,16 +18,21 @@ Matches `.engine-pin` (`v0.12.4`).
 ## Capture method
 
 A standalone Python msgpack-rpc client (no `pynvim`; not installed) spawns
-`nvim --clean --embed --listen <socket>` -- `--embed`, not `--headless`,
-because view always attaches a UI (`nvim_ui_attach`) before issuing any RPC
-call, and (see capture 0 below) that materially changes `:checktime`'s
-blocking behavior versus a headless connection with no UI attached. The same
-hermetic `HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses is applied.
-Every capture issues `nvim_exec_lua` running the exact chunk text
+`nvim --clean --embed` -- `--embed`, not `--headless`, because view always
+attaches a UI (`nvim_ui_attach`) before issuing any RPC call, and (see
+capture 0 below) that materially changes `:checktime`'s blocking behavior
+versus a headless connection with no UI attached. The same hermetic
+`HOME`/`XDG_*` isolation `EngineConfig::isolated()` uses is applied. Every
+capture issues `nvim_exec_lua` running the exact chunk text
 `CHECKTIME_CHUNK` embeds, with a `time.sleep(1.1)` between an initial write
 and the "external" write in every case that needs two distinct disk mtimes
 (coarse-grained filesystem mtime resolution can otherwise leave two writes
 inside the same clock tick indistinguishable to nvim's own check).
+
+The chunk takes a LIST of paths and answers a `results` array in the same
+order (see capture 8 for why): every call resolves the loaded-buffer set
+once, so a burst of writes costs nvim's main loop one buffer scan rather
+than one per path.
 
 ## 0. Without a `FileChangedShell` handler, `:checktime` on a modified buffer BLOCKS the connection when a UI is attached
 
@@ -60,8 +65,8 @@ unguarded.
 ## 1. No loaded buffer for the changed path
 
 ```
-CHECKTIME_CHUNK(path="case1_no_buffer.txt", force=false)
-  -> { found = false }
+CHUNK(paths={"case1_no_buffer.txt"}, force=false)
+  -> { results = { { found = false } } }
 ```
 
 Nothing else runs -- `:checktime` itself is never issued. This is the
@@ -72,9 +77,9 @@ Nothing else runs -- `:checktime` itself is never issued. This is the
 Buffer opened unmodified; the file is overwritten on disk from outside.
 
 ```
-CHECKTIME_CHUNK(path="case2_unmodified.txt", force=false)
-  -> { found = true, fired = false, modified_before = false,
-       modified_after = false, lines = ["changed-externally"] }
+CHUNK(paths={"case2_unmodified.txt"}, force=false)
+  -> { results = { { found = true, fired = false, modified = false } } }
+  lines after -> ["changed-externally"]
 ```
 
 `fired = false` but the buffer's own text visibly changed to the new disk
@@ -90,33 +95,31 @@ brief's falsifiable check needs no extra logic beyond calling `:checktime`.
 Buffer opened, edited (`modified = true`), then the file changes on disk.
 
 ```
-CHECKTIME_CHUNK(path="case3_modified.txt", force=false)
-  -> { found = true, fired = true, modified_before = true,
-       modified_after = true, lines = ["originallocal-edit"] }
+CHUNK(paths={"case3_modified.txt"}, force=false)
+  -> { results = { { found = true, fired = true, modified = true } } }
+  lines after -> ["originallocal-edit"]
 ```
 
 `fired = true`: `FileChangedShell` DOES trigger for a modified buffer facing
 a genuine external change (the case case 0 shows would otherwise block).
 The chunk's handler sets `v:fcs_choice = ''` (do nothing) because
 `vim.bo[bufnr].modified` was true when it ran, so nvim neither reloads nor
-touches the buffer -- `lines` is exactly the local edit, untouched, and
-`modified_after` is unchanged from `modified_before`. This is the signal
-`RpcCall::Checktime`'s caller uses to raise the conflict prompt: `fired = true`
-(equivalently, `found && modified_after` together with `fired`, since `fired`
-alone already implies the buffer was modified -- the chunk only ever reaches
-the modified branch of its own handler when `vim.bo[bufnr].modified` was true
-at the moment `FileChangedShell` ran).
+touches the buffer -- `lines` is exactly the local edit, untouched. This is
+the signal `RpcCall::Checktime`'s caller decodes as `CheckTimeOutcome::Conflict`
+and raises the conflict prompt for: `fired` alone already implies the buffer
+was modified, since the chunk only ever reaches the modified branch of its own
+handler when `vim.bo[bufnr].modified` was true at the moment `FileChangedShell`
+ran.
 
 ## 4. Self-write: nvim's own `:w`, `checktime` immediately after -- a no-op
 
-Buffer opened, then nvim itself writes it (`nvim_command("write")`, the same
-mechanism `AiFsWrite`'s `silent keepalt write!` and a user's bare `:w` both
-use). `:checktime` runs right after, with nothing else touching the file:
+Buffer opened, then nvim itself writes it (`nvim_buf_call` + `:write`, the
+same mechanism `AiFsWrite`'s `silent keepalt write!` and a user's bare `:w`
+both use). `:checktime` runs right after, with nothing else touching the file:
 
 ```
-CHECKTIME_CHUNK(path="case4_self_write.txt", force=false)
-  -> { found = true, fired = false, modified_before = false,
-       modified_after = false, lines = ["original"] }
+CHUNK(paths={"case4_self_write.txt"}, force=false)
+  -> { results = { { found = true, fired = false, modified = false } } }
 ```
 
 `fired = false` and the content is untouched: nvim's own `:checktime`
@@ -135,17 +138,16 @@ write, immediately followed by unrelated typing, must not read as an
 external conflict).
 
 ```
-CHECKTIME_CHUNK(path="case5_self_write_then_edit.txt", force=false)
-  -> { found = true, fired = false, modified_before = true,
-       modified_after = true, lines = ["originalmore-local-edits"] }
+CHUNK(paths={"case5_self_write_then_edit.txt"}, force=false)
+  -> { results = { { found = true, fired = false, modified = true } } }
 ```
 
-`modified_before = true` (the same shape as case 3's conflict) but
-`fired = false`: `FileChangedShell` never fires because the file's on-disk
-mtime still matches what nvim itself last wrote -- the local edit alone
-does not change what is on disk. This is the proof that `fired`, not
-`modified`, is what must gate the conflict UI: a naive
-`found && modified_after` check would misread this exact case as a conflict.
+`modified = true` (the same shape as case 3's conflict) but `fired = false`:
+`FileChangedShell` never fires because the file's on-disk mtime still matches
+what nvim itself last wrote -- the local edit alone does not change what is on
+disk. This is the proof that `fired`, not `modified`, is what must gate the
+conflict UI: a naive `found && modified` check would misread this exact case
+as a conflict.
 
 ## 6. Buffer opened through a symlinked directory; the watcher observes the realpath'd write
 
@@ -156,9 +158,9 @@ opened via `<workdir>/linked_dir/target.txt` (a symlink to
 reports, since `notify` resolves symlinked roots to their real path.
 
 ```
-CHECKTIME_CHUNK(path="<workdir>/real_target_dir/target.txt", force=false)
-  -> { found = true, fired = false, modified_before = false,
-       modified_after = false, lines = ["changed-through-realpath"] }
+CHUNK(paths={"<workdir>/real_target_dir/target.txt"}, force=false)
+  -> { results = { { found = true, fired = false, modified = false } } }
+  lines after -> ["changed-through-realpath"]
 ```
 
 `found = true` despite the buffer's own name being the *unresolved* symlinked
@@ -169,13 +171,16 @@ realpath'd event path resolve to the same key before comparison.
 
 ## 7. `force = true`: driving the user's "reload, discarding local edits" answer
 
-Naive idea (rejected): call `CHECKTIME_CHUNK` a second time with
+Naive idea (rejected): call the chunk a second time with
 `vim.bo[bufnr].modified` cleared first, hoping a second `:checktime` reloads
 it the way case 2 did unprompted. Captured and found NOT to work:
 
 ```
-probe (force=false)        -> { fired = true, modified = true,  lines = ["originallocal-edit"] }
-"clear modified, checktime again" -> { fired = false, modified = false, lines = ["originallocal-edit"] }
+CHUNK(paths={"force_reject.txt"}, force=false)
+  -> { results = { { found = true, fired = true, modified = true } } }
+"clear modified, checktime again"
+  -> { results = { { found = true, fired = false, modified = false } } }
+  lines after -> ["originallocal-edit"]
 ```
 
 The second call's `fired = false` and the lines are UNCHANGED -- nvim's own
@@ -191,74 +196,137 @@ The working mechanism, verified instead: `force = true` skips the
 file unconditionally regardless of any prior checktime state:
 
 ```
-CHECKTIME_CHUNK(path="force_discard2.txt", force=true)  -- after case-3-shape conflict
-  -> { found = true, fired = true, forced = true, ok = true,
-       modified = false, lines = ["changed-externally"] }
+CHUNK(paths={"force_discard.txt"}, force=false)  -- establish the conflict
+  -> { results = { { found = true, fired = true, modified = true } } }
+CHUNK(paths={"force_discard.txt"}, force=true)
+  -> { results = { { found = true, forced = true, ok = true, modified = false } } }
+  lines after -> ["changed-externally"]
 ```
+
+`forced = true` is what makes a forced reply structurally distinguishable
+from a probe reply on the wire itself: the force branch never reports
+`fired`, so nothing downstream can read the reload the user just asked for as
+a fresh conflict to prompt about again.
 
 Also verified safe as a no-op-equivalent when nothing external actually
 changed (`force = true` on an untouched, unmodified buffer just re-reads its
-own unchanged content, `modified` stays `false`):
+own unchanged content, `modified` stays `false`), and as a `found = false`
+when the buffer went away between the prompt and the answer:
 
 ```
-CHECKTIME_CHUNK(path="force_noop.txt", force=true)
-  -> { found = true, forced = true, ok = true, modified = false,
-       lines = ["steady"] }
+CHUNK(paths={"force_noop.txt"}, force=true)
+  -> { results = { { found = true, forced = true, ok = true, modified = false } } }
+  lines after -> ["steady"]
+CHUNK(paths={"force_no_buffer.txt"}, force=true)
+  -> { results = { { found = false } } }
 ```
+
+## 7a. `ok = false`: the forced reload that did not complete
+
+`pcall`'s own result, carried rather than discarded. Captured by registering
+a `BufReadPost` autocmd on the target buffer that raises, then forcing:
+
+```
+CHUNK(paths={"force_fails.txt"}, force=true) with a raising BufReadPost autocmd
+  -> { results = { { found = true, forced = true, ok = false, modified = false } } }
+```
+
+The user's answer to the conflict prompt is destructive ("discard my local
+edits"), so a forced reload that raised must be reported rather than read as
+a completed discard. `ok` is what `CheckTimeOutcome::ReloadFailed` decodes
+from.
+
+## 8. One batched call over several paths at once
+
+The reason the chunk takes a list: each call resolves every loaded buffer's
+name through `vim.uv.fs_realpath` ONCE and then answers each requested path
+from that map, so a burst of external writes costs nvim's single-threaded
+main loop one buffer scan instead of one per path. Three paths, one call, one
+scan -- a missing buffer, a silent reload, and a conflict, each dispositioned
+independently:
+
+```
+CHUNK(paths={"batch_a_no_buffer.txt", "batch_b_unmodified.txt", "batch_c_modified.txt"},
+      force=false)
+  -> { results = { { found = false },
+                   { found = true, fired = false, modified = false },
+                   { found = true, fired = true,  modified = true } } }
+  batch_b lines after -> ["changed-externally"]
+  batch_c lines after -> ["local-edit"]
+```
+
+`results` is positional: entry `i` answers `paths[i]`, which is what lets the
+reply carry no path strings of its own (the waiter already holds the list it
+sent, the same way `Waiter::Preview` holds its own `path`).
+
+## 9. An empty path list
+
+```
+CHUNK(paths={}, force=false)
+  -> { results = {} }
+```
+
+Answers rather than errors, so a caller never has to special-case it.
 
 ## Production chunk shape
 
 ```lua
-local path, force = ...
+local paths, force = ...
 local function canon(p)
   if p == '' then return p end
   return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
 end
-local wanted = canon(path)
-local bufnr = nil
+local loaded = {}
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
-  if vim.api.nvim_buf_is_loaded(b) and canon(vim.api.nvim_buf_get_name(b)) == wanted then
-    bufnr = b
-    break
+  if vim.api.nvim_buf_is_loaded(b) then
+    loaded[canon(vim.api.nvim_buf_get_name(b))] = b
   end
 end
-if bufnr == nil then
-  return { found = false }
+local results = {}
+for i, path in ipairs(paths) do
+  local bufnr = loaded[canon(path)]
+  if bufnr == nil then
+    results[i] = { found = false }
+  elseif force then
+    local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+  else
+    local fired = false
+    local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+    vim.api.nvim_create_autocmd('FileChangedShell', {
+      group = group,
+      buffer = bufnr,
+      once = true,
+      callback = function()
+        fired = true
+        if vim.bo[bufnr].modified then
+          vim.v.fcs_choice = ''
+        else
+          vim.v.fcs_choice = 'reload'
+        end
+      end,
+    })
+    vim.cmd('checktime ' .. bufnr)
+    pcall(vim.api.nvim_del_augroup_by_id, group)
+    results[i] = { found = true, fired = fired, modified = vim.bo[bufnr].modified }
+  end
 end
-if force then
-  local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-  return { found = true, fired = true, modified = vim.bo[bufnr].modified }
-end
-local fired = false
-local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
-vim.api.nvim_create_autocmd('FileChangedShell', {
-  group = group,
-  buffer = bufnr,
-  once = true,
-  callback = function()
-    fired = true
-    if vim.bo[bufnr].modified then
-      vim.v.fcs_choice = ''
-    else
-      vim.v.fcs_choice = 'reload'
-    end
-  end,
-})
-vim.cmd('checktime ' .. bufnr)
-pcall(vim.api.nvim_del_augroup_by_id, group)
-return { found = true, fired = fired, modified = vim.bo[bufnr].modified }
+return { results = results }
 ```
 
-`found`/`fired`/`modified` is the reply `RpcCall::Checktime`'s caller decodes
-into `Msg::CheckTimeReply`. The three-way branch the brief's falsifiable
-check names:
+Each `results` entry decodes into one `CheckTimeOutcome`, and the five
+outcomes are the whole vocabulary -- a reply that reports both a fresh
+conflict and a completed forced reload is unrepresentable rather than merely
+unexpected:
 
-| `found` | `fired` | outcome |
+| entry | outcome | UI |
 |---|---|---|
-| `false` | -- | no buffer loaded; no UI (case 1) |
-| `true` | `false` | silently handled by nvim itself -- a real unmodified reload (case 2/6) or a self-write no-op (case 4/5); no UI either way |
-| `true` | `true` | genuine conflict: buffer has local edits nvim did not touch; conflict prompt |
+| `found = false` | `NoBuffer` | nothing -- no buffer loaded (cases 1, 7) |
+| `found = true, fired = false` | `HandledSilently` | nothing -- nvim's own unmodified reload (cases 2/6/8) or a self-write no-op (cases 4/5) |
+| `found = true, fired = true` | `Conflict` | the conflict prompt (cases 3/8) |
+| `found = true, forced = true, ok = true` | `Reloaded` | nothing -- the answer the user already gave, carried out (case 7) |
+| `found = true, forced = true, ok = false` | `ReloadFailed` | a notice: the discard the user asked for did not happen (case 7a) |
 
 `force = true` is issued only in answer to the user's own "reload, discard
 local edits" choice on an already-open conflict prompt, never as part of the
-watcher's own probe.
+watcher's own probe -- so a forced call always carries exactly one path.

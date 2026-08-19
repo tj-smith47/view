@@ -21,7 +21,7 @@ use ai::{on_ai_event, open_ai_trust_prompt};
 use review::review_key;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use ui_event::apply_ui_event;
-use watch::{on_checktime_reply, on_external_write_detected};
+use watch::{on_checktime_reply, on_external_watch_degraded, on_external_writes_detected};
 
 /// Converts a filesystem path to the UTF-8 string an `RpcCall` path field
 /// carries, substituting the replacement character for any byte sequence
@@ -404,13 +404,17 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::AiFsWriteReply { request_id, result } => {
             ai_fs::on_write_reply(model, request_id, result)
         }
-        Msg::ExternalWriteDetected { path } => on_external_write_detected(model, path),
+        Msg::ExternalWritesDetected { paths } => on_external_writes_detected(model, paths),
+        Msg::ExternalWatchDegraded { reason } => on_external_watch_degraded(model, reason),
+        // `request_id` is the engine's own correlation key, consumed by the
+        // waiter table that produced `results`; by the time a reply is a
+        // `Msg` there is no per-request state left in this crate for it to
+        // name, and what a forced reload's reply must be told apart from
+        // lives in `CheckTimeOutcome` rather than in a remembered id
         Msg::CheckTimeReply {
             request_id: _,
-            path,
-            found,
-            fired,
-        } => on_checktime_reply(model, path, found, fired),
+            results,
+        } => on_checktime_reply(model, results),
         Msg::BufWriteRefused { buf, generation } => {
             review::on_buf_write_refused(model, buf, generation)
         }
@@ -912,7 +916,7 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     let request_id = model.next_checktime_request_id();
                     return vec![Effect::Rpc(RpcCall::Checktime {
                         request_id,
-                        path: path_to_wire(&path),
+                        paths: vec![path_to_wire(&path)],
                         force: true,
                     })];
                 }

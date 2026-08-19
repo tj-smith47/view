@@ -605,32 +605,74 @@ pub enum Msg {
     /// filesystem path already keeps), so this is purely the trigger to
     /// drive nvim's own decision via `RpcCall::Checktime` -- see
     /// `docs/checktime-wire-capture.md`.
-    ExternalWriteDetected {
-        path: std::path::PathBuf,
+    ///
+    /// A batch rather than a single path: every probe costs nvim's own
+    /// single-threaded main loop one pass over every loaded buffer, so the
+    /// watcher collects whatever a short window brings and hands them over
+    /// together (see `view_ai::watch`'s own doc, and the capture doc's
+    /// case 8 for the reply shape that answers a batch).
+    ExternalWritesDetected {
+        paths: Vec<std::path::PathBuf>,
+    },
+    /// The watch over the trusted project root is not covering everything
+    /// it is documented to cover: the platform's watch limit was reached
+    /// part way through registering, the backend reported lost events, or
+    /// it could not be started at all.
+    ///
+    /// Its own message rather than a silent `None`: after any of those the
+    /// session keeps running with out-of-band detection partly or wholly
+    /// off, while `docs/ai.md` tells the user it is on. `reason` is written
+    /// for that user, not for a log.
+    ExternalWatchDegraded {
+        reason: String,
     },
     /// The decoded answer to one `RpcCall::Checktime`, correlated on
-    /// `request_id`. `path` echoes the call back, since a reply carries
-    /// nothing else identifying, on the same terms
+    /// `request_id`. One entry per path the call carried, in the order it
+    /// carried them; each path echoes the call back, since the reply itself
+    /// carries nothing identifying, on the same terms
     /// [`Msg::PickerPreviewReply`]'s own `path` field does.
-    ///
-    /// `found` is `false` when no loaded buffer names `path` at all --
-    /// nothing to conflict with, no UI (`docs/checktime-wire-capture.md`
-    /// case 1). `fired` is `true` only when nvim's own `FileChangedShell`
-    /// autocmd actually triggered during the call: nvim's own mtime
-    /// bookkeeping found a genuine external change against a buffer
-    /// carrying local edits it therefore left untouched -- the one shape
-    /// that must raise the conflict prompt (case 3). `found && !fired`
-    /// covers both nvim's own silent reload (an unmodified buffer facing a
-    /// real external change, case 2/6) and a self-write no-op (nvim's own
-    /// last-written mtime already matches the file, case 4/5) uniformly:
-    /// neither needs UI, and neither is this crate's to tell apart -- nvim
-    /// already decided by the time this reply exists.
     CheckTimeReply {
         request_id: u64,
-        path: std::path::PathBuf,
-        found: bool,
-        fired: bool,
+        results: Vec<(std::path::PathBuf, CheckTimeOutcome)>,
     },
+}
+
+/// What nvim did about one path in a `RpcCall::Checktime`.
+///
+/// A closed vocabulary rather than the wire's own `found`/`fired`/`forced`/
+/// `ok` flags, because the combinations that matter are exactly these five
+/// and the ones that do not are unrepresentable here: in particular a
+/// forced reload -- the user's own answer to a conflict prompt -- can never
+/// decode to the same value a fresh conflict does, which is what would
+/// otherwise re-raise the prompt the user just answered, forever. See
+/// `docs/checktime-wire-capture.md`'s outcome table for the wire shape each
+/// one decodes from.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckTimeOutcome {
+    /// No loaded buffer names the path at all -- nothing to conflict with,
+    /// no UI (capture doc case 1).
+    NoBuffer,
+    /// nvim handled it by itself and said so by not raising
+    /// `FileChangedShell`: either its own silent reload of an unmodified
+    /// buffer facing a real external change (cases 2/6), or a self-write
+    /// no-op where its own last-written mtime already matches the file
+    /// (cases 4/5). Neither needs UI, and neither is this crate's to tell
+    /// apart -- nvim already decided by the time this reply exists.
+    HandledSilently,
+    /// A genuine external change against a buffer carrying local edits nvim
+    /// therefore left untouched -- the one shape that raises the conflict
+    /// prompt (case 3).
+    Conflict,
+    /// The forced `:edit!` behind the user's own "reload, discard local
+    /// edits" answer completed (case 7). Nothing to show: the prompt that
+    /// asked for it is already closed and the buffer already holds the
+    /// file's content.
+    Reloaded,
+    /// The forced `:edit!` raised instead (case 7a). The user's answer was
+    /// destructive, so a discard that did not happen is reported rather
+    /// than left to look like one that did.
+    ReloadFailed,
 }
 
 /// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
@@ -1615,12 +1657,16 @@ pub enum RpcCall {
         eol: bool,
         expected_changedtick: u64,
     },
-    /// Drives nvim's own out-of-band-write decision for `path`, correlated
-    /// on `request_id` and answered by [`Msg::CheckTimeReply`]. Verified
-    /// live against the pinned engine -- see `docs/checktime-wire-capture.md`
-    /// for the chunk this issues and the three-way outcome (no buffer /
-    /// silently handled / genuine conflict) its `found`/`fired` reply
-    /// decodes into.
+    /// Drives nvim's own out-of-band-write decision for every path in
+    /// `paths`, correlated on `request_id` and answered by
+    /// [`Msg::CheckTimeReply`]. Verified live against the pinned engine --
+    /// see `docs/checktime-wire-capture.md` for the chunk this issues and
+    /// the outcome each reply entry decodes into.
+    ///
+    /// Many paths per call, not one: the chunk resolves the loaded-buffer
+    /// set once and answers every path from it, so a burst of external
+    /// writes costs nvim's single-threaded main loop one pass over its
+    /// buffers instead of one per write (capture doc, case 8).
     ///
     /// `force: false` is the watcher's own probe: a scoped, one-shot
     /// `FileChangedShell` handler answers the wire's own choice
@@ -1630,14 +1676,15 @@ pub enum RpcCall {
     /// decides silent-reload vs. leave-untouched, never this call site.
     ///
     /// `force: true` is issued only in answer to the user's own "reload,
-    /// discarding local edits" choice on an already-open conflict prompt:
-    /// a bare second `:checktime` cannot re-drive a disposition nvim
-    /// already made for the same mtime (capture doc, case 7's rejected
-    /// attempt), so this instead issues an explicit `:edit!` against the
-    /// resolved buffer, unconditionally re-reading its file.
+    /// discarding local edits" choice on an already-open conflict prompt,
+    /// and always carries exactly one path: a bare second `:checktime`
+    /// cannot re-drive a disposition nvim already made for the same mtime
+    /// (capture doc, case 7's rejected attempt), so this instead issues an
+    /// explicit `:edit!` against the resolved buffer, unconditionally
+    /// re-reading its file.
     Checktime {
         request_id: u64,
-        path: String,
+        paths: Vec<String>,
         force: bool,
     },
 }

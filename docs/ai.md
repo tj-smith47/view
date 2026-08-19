@@ -22,11 +22,41 @@ An agent can touch a file two ways, and view treats them differently:
   the same way you see any other buffer change.
 - **Out-of-band** -- an agent's own shell tool (`sed`, `cat >`, a build
   script, `git checkout`) writing a file directly. No ACP message describes
-  this; no client, view included, can see it as it happens. view still
-  catches it: a filesystem watcher over the trusted project root notices
-  the write and drives nvim's own `:checktime` for it, the same mechanism
-  that already runs when you switch back to view after editing a file in
-  another terminal.
+  this; no client, view included, can see it as it happens. view catches it
+  a different way: while an agent session is running, a filesystem watcher
+  over the trusted project root notices the write and drives nvim's own
+  `:checktime` for it, the same mechanism that already runs when you switch
+  back to view after editing a file in another terminal.
+
+### When the watcher is running, and what it covers
+
+The watcher exists for the agent's blind spot, so it lives and dies with
+the agent session:
+
+| | detected? |
+| --- | --- |
+| an agent session is running | yes, anywhere under the trusted project root |
+| no agent session has started yet, or the last one ended | no |
+| a path outside the trusted project root | no |
+| `.git/`, `target/`, `node_modules/`, `.venv/`, or anything your `.gitignore` covers | no |
+
+Editing a file in a second editor, or a `git` command in another terminal,
+is detected on exactly those terms -- during a session, inside the root,
+outside the skipped directories. With no session running, view notices the
+change the way nvim always has: when you next write, reload, or switch to
+that buffer.
+
+If the watcher cannot cover the whole root -- most often because the
+operating system's own limit on watched directories was reached
+(`fs.inotify.max_user_watches` on Linux) -- view says so:
+
+```
+out-of-band write detection is degraded: the platform's watch limit was
+reached while registering /home/you/project/crates (raise
+fs.inotify.max_user_watches); writes under it will not be noticed
+```
+
+It never goes quiet and leaves you believing detection is on.
 
 Both paths end up in the same place -- nvim's own file-changed handling --
 so the outcome depends only on the buffer's own state when the write lands,
@@ -52,6 +82,13 @@ change?
 - **Keep local** leaves your edits exactly as they are and ignores the
   external change; the file on disk is not touched by this choice.
 
-Nothing about this depends on which tool made the external change -- an
-agent's shell command, a `git` operation run in another terminal, or you
-editing the same file in a second editor are all the same case to view.
+If a reload cannot be carried out -- the file was removed between the
+prompt and your answer, or something refused the re-read -- view says that
+too, and your local edits stay in the buffer rather than silently being
+treated as discarded.
+
+Nothing about the *outcome* depends on which tool made the change: once
+view knows a file changed on disk, an agent's shell command, a `git`
+operation in another terminal, and a second editor all take the identical
+path through nvim's own file-changed handling. What differs is only whether
+view found out at the time -- see the table above.

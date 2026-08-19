@@ -185,14 +185,12 @@ enum Waiter {
     /// the watcher's detection this answers is never superseded by a later
     /// one the way a keystroke supersedes a query, and the conflict prompt
     /// it may raise must not silently vanish because a newer probe happened
-    /// to land first. `path` is echoed back the same way [`Preview`](Self::Preview)
-    /// and [`LoadHidden`](Self::LoadHidden) carry their own: the chunk's
-    /// reply carries no path of its own (see
-    /// `nvim_api::decode_checktime_reply`'s own doc).
-    Checktime {
-        request_id: u64,
-        path: std::path::PathBuf,
-    },
+    /// to land first. `paths` are echoed back the same way
+    /// [`Preview`](Self::Preview) and [`LoadHidden`](Self::LoadHidden) carry
+    /// their own: the chunk's reply is positional and carries no path of its
+    /// own (see `nvim_api::decode_checktime_reply`'s own doc).
+    ///
+    Checktime(CheckTimeCall),
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -215,6 +213,22 @@ struct PendingState {
 }
 
 type Pending = Arc<Mutex<PendingState>>;
+
+/// What one in-flight `RpcCall::Checktime` needs to decode its own reply.
+///
+/// `paths` are echoed back the same way [`Waiter::Preview`] and
+/// [`Waiter::LoadHidden`] carry their own: the chunk's reply is positional
+/// and carries no path of its own (see
+/// `nvim_api::decode_checktime_reply`'s doc). `forced` records which kind
+/// of call this answers, for the one case the reply itself cannot say: an
+/// `error` reply carries no `results` array at all, and a forced reload
+/// that never ran must degrade to "the discard did not happen" rather than
+/// to a probe's silence.
+pub struct CheckTimeCall {
+    pub request_id: u64,
+    pub paths: Vec<std::path::PathBuf>,
+    pub forced: bool,
+}
 
 /// An RPC client for the embedded Neovim process, with request correlation
 /// and a flood-proof notification reader.
@@ -659,16 +673,19 @@ impl EngineHandle {
                                     ));
                                 }
                             }
-                            Some(Waiter::Checktime { request_id, path }) => {
+                            Some(Waiter::Checktime(call)) => {
                                 if let Some(pump) = &reader_pump {
-                                    // an error reply degrades to `found:
-                                    // false`, the same "safe default" every
-                                    // generation-gated reply above follows:
-                                    // a probe that could not even ask
-                                    // raises no conflict rather than one
-                                    // reads as a real answer.
+                                    // an error reply degrades to "no
+                                    // buffer" for a probe, the same "safe
+                                    // default" every generation-gated reply
+                                    // above follows: a probe that could not
+                                    // even ask raises no conflict rather
+                                    // than one that reads as a real answer.
+                                    // A forced reload degrades the other
+                                    // way, to "the reload failed" -- see
+                                    // decode_checktime_reply's own doc.
                                     pump.route_checktime(crate::nvim_api::decode_checktime_reply(
-                                        request_id, path, &error, &result,
+                                        call, &error, &result,
                                     ));
                                 }
                             }
@@ -1528,10 +1545,9 @@ impl EngineHandle {
         &self,
         method: &str,
         params: Vec<Value>,
-        request_id: u64,
-        path: std::path::PathBuf,
+        call: CheckTimeCall,
     ) -> Result<(), EngineError> {
-        self.request_async(method, params, Waiter::Checktime { request_id, path })
+        self.request_async(method, params, Waiter::Checktime(call))
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -3550,7 +3566,8 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel::<Msg>(1);
         let _dpump = pump.attach_sink(tx.clone());
 
-        h.checktime(91, "conflict.rs", false).unwrap();
+        h.checktime(91, &["conflict.rs".to_string()], false)
+            .unwrap();
         let mut r = std::io::BufReader::new(peer_read);
         let v = rmpv::decode::read_value(&mut r).unwrap();
         let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
@@ -3566,10 +3583,13 @@ mod tests {
         let reply = RpcMessage::Response {
             msgid,
             error: Value::Nil,
-            result: Value::Map(vec![
-                (Value::from("found"), Value::from(true)),
-                (Value::from("fired"), Value::from(true)),
-            ]),
+            result: Value::Map(vec![(
+                Value::from("results"),
+                Value::Array(vec![Value::Map(vec![
+                    (Value::from("found"), Value::from(true)),
+                    (Value::from("fired"), Value::from(true)),
+                ])]),
+            )]),
         };
         rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
         peer_write.flush().unwrap();
@@ -3594,9 +3614,7 @@ mod tests {
         let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let Msg::CheckTimeReply {
             request_id,
-            path,
-            found,
-            fired,
+            results,
         } = msg
         else {
             unreachable!(
@@ -3604,9 +3622,13 @@ mod tests {
             );
         };
         assert_eq!(request_id, 91);
-        assert_eq!(path, std::path::PathBuf::from("conflict.rs"));
-        assert!(found);
-        assert!(fired);
+        assert_eq!(
+            results,
+            vec![(
+                std::path::PathBuf::from("conflict.rs"),
+                view_core::msg::CheckTimeOutcome::Conflict
+            )]
+        );
     }
 
     /// A trigger the bridge carries for a consumer this build does not have

@@ -81,6 +81,16 @@ view-core = { version = "0.0.1", path = "../view-core" }
 # every other lib crate stays free of a watcher dependency it has no use
 # for.
 notify = "8.2.0"
+# `watch.rs`'s registration walk. The watcher places one platform
+# descriptor per directory, so what it walks decides both how long starting
+# a session takes and whether the host's watch limit is reached at all: a
+# project's own ignore rules are the description of "output no buffer will
+# ever name" that already exists, and this is the walker that honours them.
+# The same crate the picker's Files source already walks with -- a second
+# gitignore parser in this workspace would be two answers to one question,
+# free to disagree. Shared with view-native by `scripts/audit-deps.sh`;
+# every other lib crate stays free of it.
+ignore = "0.4.33"
 
 [dev-dependencies]
 # `time` is test-only: nothing in the shipped crate uses a timer, and the
