@@ -633,6 +633,19 @@ impl PumpShared {
         self.route_queued(msg);
     }
 
+    /// Routes a `Msg::CheckTimeReply` without ever dropping it on a full
+    /// sink, on the identical never-drop, never-reorder terms
+    /// [`route_ai_fs`](Self::route_ai_fs) states.
+    ///
+    /// A dropped reply here is a missed conflict: the watcher saw a write
+    /// nothing else observed, and if this answer never reaches `update()`
+    /// the modified buffer it names is left silently diverged from disk,
+    /// with nothing left to raise the prompt that was the whole point of
+    /// the round trip.
+    pub(crate) fn route_checktime(&self, msg: Msg) {
+        self.route_queued(msg);
+    }
+
     fn route_queued(&self, msg: Msg) {
         let mut route = self.route.lock().unwrap_or_else(PoisonError::into_inner);
         route.retry_deferred();

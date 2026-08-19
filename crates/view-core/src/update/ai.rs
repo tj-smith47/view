@@ -280,6 +280,50 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
     Vec::new()
 }
 
+/// Opens the per-project AI trust confirm as the topmost overlay, the first
+/// time a session's `Msg::FeatureInvoke` names the `ai` feature with
+/// `model.ai_trusted` still false. `verb` is that `FeatureInvoke`'s own
+/// field, carried into the prompt's `Origin` so an affirmative answer can
+/// re-dispatch it (see [`crate::msg::Msg::AiTrustResolved`]'s arm).
+///
+/// A second `ai` invocation before the first prompt is answered replaces
+/// its state in place rather than stacking a second one -- looked up by
+/// kind via [`Model::ai_trust_prompt_mut`], wherever it sits in the stack,
+/// not only when it is focused: a blocked-engine `Prompt` can have taken
+/// focus above it in the meantime (the same "keeps its focus instead"
+/// stacking rule `open_picker`'s own doc states, since a stray
+/// `FeatureInvoke` racing nvim's own confirm block must not steal the
+/// answer nvim is still waiting on), and a lookup keyed to focus alone
+/// would miss the trust prompt sitting underneath it and stack a duplicate.
+/// Only when no trust prompt exists anywhere in the stack yet does this
+/// fall to the focus-based insert-beneath/push-new choice.
+pub(super) fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effect> {
+    use crate::model::OverlayKind;
+    use crate::native::geometry::OverlayBox;
+
+    let message = format!(
+        "Trust {} to launch an AI agent? Agents can read and write files in this project.",
+        model.cwd.display()
+    );
+    let state =
+        crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), verb, message);
+    if let Some(p) = model.ai_trust_prompt_mut() {
+        *p = state;
+        model.dirty = true;
+        return Vec::new();
+    }
+    match model.focused_overlay_mut().map(|ov| &ov.kind) {
+        Some(OverlayKind::Prompt(_)) => {
+            model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+        }
+        _ => {
+            model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
+        }
+    }
+    model.dirty = true;
+    Vec::new()
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]

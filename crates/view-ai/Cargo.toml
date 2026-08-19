@@ -70,6 +70,17 @@ tar = { version = "0.4", default-features = false }
 # crate's build reproducible across the platforms `view` ships on.
 flate2 = "1"
 view-core = { version = "0.0.1", path = "../view-core" }
+# `watch.rs`'s own out-of-band write watcher, over the trusted project root
+# only (never a bare user path): the platform-native backend (inotify on
+# Linux, FSEvents on macOS, ReadDirectoryChangesW on Windows) is what lets
+# an agent's own shell tool -- the one write path no ACP client can see or
+# route -- still reach `RpcCall::Checktime` instead of going unnoticed
+# until the user happens to look at the file again. Confined to this crate
+# by `scripts/audit-deps.sh`, on the same terms `sha2`/`tar`/`flate2` above
+# are: `view-core` stays pure (no filesystem, no threads of its own) and
+# every other lib crate stays free of a watcher dependency it has no use
+# for.
+notify = "8.2.0"
 
 [dev-dependencies]
 # `time` is test-only: nothing in the shipped crate uses a timer, and the

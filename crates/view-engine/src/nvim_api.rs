@@ -1230,6 +1230,105 @@ fn remote_failure(error: &Value) -> Option<FsError> {
     Some(FsError::Other { message })
 }
 
+/// Drives nvim's own out-of-band-write disposition for one path, per
+/// `docs/checktime-wire-capture.md`'s production chunk (reproduced here
+/// byte-for-byte -- that doc is the source of truth this const must never
+/// drift from). Takes `path` and `force` as its two positional varargs.
+///
+/// `canon()` here is deliberately narrower than [`hidden_canon_lua!`]'s own
+/// (no directory-head fallback for a not-yet-existing path): a checktime
+/// probe only ever fires for a path the watcher just observed a write
+/// under, which by construction already exists, so the fallback
+/// `LOAD_HIDDEN_CHUNK` needs for a target `:edit` might create has nothing
+/// to resolve here.
+///
+/// Never issues a bare `:checktime` -- capture 0 proved that blocks the
+/// whole connection when a UI is attached and no `FileChangedShell` handler
+/// is registered. The scoped, one-shot autocmd this always registers first
+/// is what makes every `force: false` call safe to issue from the
+/// watcher's own probe without risking that stall.
+const CHECKTIME_CHUNK: &str = "\
+local path, force = ...
+local function canon(p)
+  if p == '' then return p end
+  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+end
+local wanted = canon(path)
+local bufnr = nil
+for _, b in ipairs(vim.api.nvim_list_bufs()) do
+  if vim.api.nvim_buf_is_loaded(b) and canon(vim.api.nvim_buf_get_name(b)) == wanted then
+    bufnr = b
+    break
+  end
+end
+if bufnr == nil then
+  return { found = false }
+end
+if force then
+  pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+  return { found = true, fired = true, modified = vim.bo[bufnr].modified }
+end
+local fired = false
+local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+vim.api.nvim_create_autocmd('FileChangedShell', {
+  group = group,
+  buffer = bufnr,
+  once = true,
+  callback = function()
+    fired = true
+    if vim.bo[bufnr].modified then
+      vim.v.fcs_choice = ''
+    else
+      vim.v.fcs_choice = 'reload'
+    end
+  end,
+})
+vim.cmd('checktime ' .. bufnr)
+pcall(vim.api.nvim_del_augroup_by_id, group)
+return { found = true, fired = fired, modified = vim.bo[bufnr].modified }";
+
+/// [`CHECKTIME_CHUNK`] itself, for the live wire-capture tests that drive it
+/// directly rather than through
+/// [`EngineHandle::checktime`](EngineHandle::checktime). Gated behind
+/// `test-support` for the reason [`HIDDEN_LOAD_CHUNK`] is.
+#[cfg(any(test, feature = "test-support"))]
+pub const CHECKTIME_PROBE_CHUNK: &str = CHECKTIME_CHUNK;
+
+/// Decodes a [`CHECKTIME_CHUNK`] `Response` into `Msg::CheckTimeReply`.
+/// `path` is echoed back from the waiter rather than decoded from the
+/// reply (the chunk's own answer carries no path -- it was already
+/// resolved to a `bufnr` before nvim ever executed), the same reason
+/// [`Waiter::Preview`] and [`Waiter::LoadHidden`] carry `path` themselves.
+///
+/// `error` degrading to `found: false, fired: false` (rather than
+/// propagating a decode failure) matches every other async waiter's "safe
+/// default over a stuck generation" precedent: a probe that could not even
+/// ask must never read as a genuine conflict.
+pub(crate) fn decode_checktime_reply(
+    request_id: u64,
+    path: std::path::PathBuf,
+    error: &Value,
+    result: &Value,
+) -> Msg {
+    if *error != Value::Nil {
+        return Msg::CheckTimeReply {
+            request_id,
+            path,
+            found: false,
+            fired: false,
+        };
+    }
+    let pairs = result.as_map().map_or(&[][..], Vec::as_slice);
+    let found = crate::wire::map_find(pairs, "found").and_then(Value::as_bool) == Some(true);
+    let fired = crate::wire::map_find(pairs, "fired").and_then(Value::as_bool) == Some(true);
+    Msg::CheckTimeReply {
+        request_id,
+        path,
+        found,
+        fired,
+    }
+}
+
 /// Reads the current buffer's path and nvim-authoritative text for
 /// [`EngineHandle::read_current_buffer_text`], verified live against the
 /// pinned engine (see `docs/ai-context-reads-wire-capture.md`): an unnamed
@@ -2378,6 +2477,36 @@ impl EngineHandle {
             ],
             request_id,
             true,
+        )
+    }
+
+    /// Issues [`CHECKTIME_CHUNK`] as an async request correlated on
+    /// `request_id`, driving nvim's own out-of-band-write disposition for
+    /// `path` and answering `Msg::CheckTimeReply`. Async on the same terms
+    /// as [`ai_fs_read`](Self::ai_fs_read).
+    ///
+    /// `force: false` is the watcher's own probe -- always safe to issue,
+    /// per the scoped one-shot autocmd [`CHECKTIME_CHUNK`]'s own doc
+    /// describes. `force: true` is issued only in answer to the user's
+    /// "reload, discard local edits" choice on an already-open conflict
+    /// prompt, driving an explicit `:edit!` rather than re-attempting
+    /// `:checktime` itself (`docs/checktime-wire-capture.md` case 7: a
+    /// second `:checktime` against a mtime nvim already dispositioned on
+    /// the first call is a no-op, not a re-decision).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn checktime(&self, request_id: u64, path: &str, force: bool) -> Result<(), EngineError> {
+        self.request_checktime(
+            "nvim_exec_lua",
+            vec![
+                Value::from(CHECKTIME_CHUNK),
+                Value::Array(vec![Value::from(path), Value::from(force)]),
+            ],
+            request_id,
+            std::path::PathBuf::from(path),
         )
     }
 

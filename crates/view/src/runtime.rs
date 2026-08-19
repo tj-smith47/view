@@ -530,15 +530,23 @@ impl<E: EngineOps> Executor<E> {
                     } => self
                         .ops
                         .ai_fs_write(request_id, buf, &lines, eol, expected_changedtick),
+                    RpcCall::Checktime {
+                        request_id,
+                        path,
+                        force,
+                    } => self.ops.checktime(request_id, &path, force),
                     // RpcCall is #[non_exhaustive]: a future call kind must
                     // degrade to a no-op here rather than fail to compile.
-                    // BufSetText and the two AiFs calls are matched
-                    // explicitly above rather than falling through here:
-                    // unlike every other call this catch-all covers, a
+                    // BufSetText, the two AiFs calls, and Checktime are
+                    // matched explicitly above rather than falling through
+                    // here: unlike every other call this catch-all covers, a
                     // silently no-op'd write would drop a buffer edit the
-                    // user already accepted, and a silently no-op'd
-                    // filesystem answer would leave the agent that asked
-                    // blocked on a request nothing else will ever settle.
+                    // user already accepted, a silently no-op'd filesystem
+                    // answer would leave the agent that asked blocked on a
+                    // request nothing else will ever settle, and a silently
+                    // no-op'd checktime would leave a watcher-detected write
+                    // -- or the user's own "reload, discard local edits"
+                    // answer to a conflict prompt -- never carried out.
                     _ => return Flow::Continue,
                 };
                 match result {

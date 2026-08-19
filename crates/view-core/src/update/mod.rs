@@ -15,11 +15,13 @@ mod ai_fs;
 mod review;
 mod supervision;
 mod ui_event;
+mod watch;
 
-use ai::on_ai_event;
+use ai::{on_ai_event, open_ai_trust_prompt};
 use review::review_key;
 use supervision::{note_engine_liveness, note_supervision_choice};
 use ui_event::apply_ui_event;
+use watch::{on_checktime_reply, on_external_write_detected};
 
 /// Converts a filesystem path to the UTF-8 string an `RpcCall` path field
 /// carries, substituting the replacement character for any byte sequence
@@ -402,6 +404,13 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::AiFsWriteReply { request_id, result } => {
             ai_fs::on_write_reply(model, request_id, result)
         }
+        Msg::ExternalWriteDetected { path } => on_external_write_detected(model, path),
+        Msg::CheckTimeReply {
+            request_id: _,
+            path,
+            found,
+            fired,
+        } => on_checktime_reply(model, path, found, fired),
         Msg::BufWriteRefused { buf, generation } => {
             review::on_buf_write_refused(model, buf, generation)
         }
@@ -816,14 +825,17 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
     // keypress observed after the cmdline has actually stayed
     // closed, exactly when the toast falls back to ordinary
     // transient rules
-    // excludes the AI trust prompt: it has no paired cmdline_show to have
-    // gone quiet, so `cmdline_open` reads `false` for it from the moment it
-    // opens, and this heuristic would otherwise pop it before the answer
-    // arm below ever sees the keystroke meant to resolve it
+    // excludes the AI trust prompt and the external-write conflict prompt:
+    // neither has a paired cmdline_show to have gone quiet, so
+    // `cmdline_open` reads `false` for either from the moment it opens, and
+    // this heuristic would otherwise pop it before the answer arm below
+    // ever sees the keystroke meant to resolve it
     if !cmdline_open
         && matches!(
             model.focused_overlay_mut().map(|ov| &ov.kind),
-            Some(OverlayKind::Prompt(p)) if p.ai_trust_project_root().is_none()
+            Some(OverlayKind::Prompt(p))
+                if p.ai_trust_project_root().is_none()
+                    && p.external_write_conflict_path().is_none()
         )
     {
         model.pop_focused_overlay();
@@ -880,6 +892,29 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                         trusted,
                         verb,
                     }];
+                }
+                // the external-write conflict prompt resolves locally too,
+                // on the same terms the AI trust prompt does: "Reload" (the
+                // bracketed default) re-drives `RpcCall::Checktime` with
+                // `force: true` (see that field's own doc for why a bare
+                // second checktime cannot re-decide what the first already
+                // did), and "Keep local" issues nothing at all -- the
+                // buffer's local edits are exactly what checktime's own
+                // conflict branch already guaranteed it left untouched
+                if let Some(path) = p.external_write_conflict_path() {
+                    let path = path.to_path_buf();
+                    let reload = p.accepted_is_default(&notation);
+                    model.pop_focused_overlay();
+                    model.dirty = true;
+                    if !reload {
+                        return Vec::new();
+                    }
+                    let request_id = model.next_checktime_request_id();
+                    return vec![Effect::Rpc(RpcCall::Checktime {
+                        request_id,
+                        path: path_to_wire(&path),
+                        force: true,
+                    })];
                 }
                 vec![Effect::Rpc(RpcCall::Input { notation })]
             }
@@ -1234,47 +1269,6 @@ fn notice_ai_disabled(model: &mut Model) -> Vec<Effect> {
             .to_string(),
         false,
     )
-}
-
-/// Opens the per-project AI trust confirm as the topmost overlay, the first
-/// time a session's `Msg::FeatureInvoke` names the `ai` feature with
-/// `model.ai_trusted` still false. `verb` is that `FeatureInvoke`'s own
-/// field, carried into the prompt's `Origin` so an affirmative answer can
-/// re-dispatch it (see [`Msg::AiTrustResolved`]'s arm).
-///
-/// A second `ai` invocation before the first prompt is answered replaces
-/// its state in place rather than stacking a second one -- looked up by
-/// kind via [`Model::ai_trust_prompt_mut`], wherever it sits in the stack,
-/// not only when it is focused: a blocked-engine `Prompt` can have taken
-/// focus above it in the meantime (the same "keeps its focus instead"
-/// stacking rule `open_picker`'s own doc states, since a stray
-/// `FeatureInvoke` racing nvim's own confirm block must not steal the
-/// answer nvim is still waiting on), and a lookup keyed to focus alone
-/// would miss the trust prompt sitting underneath it and stack a duplicate.
-/// Only when no trust prompt exists anywhere in the stack yet does this
-/// fall to the focus-based insert-beneath/push-new choice.
-fn open_ai_trust_prompt(model: &mut Model, verb: String) -> Vec<Effect> {
-    let message = format!(
-        "Trust {} to launch an AI agent? Agents can read and write files in this project.",
-        model.cwd.display()
-    );
-    let state =
-        crate::native::prompt::PromptState::ai_trust_prompt(model.cwd.clone(), verb, message);
-    if let Some(p) = model.ai_trust_prompt_mut() {
-        *p = state;
-        model.dirty = true;
-        return Vec::new();
-    }
-    match model.focused_overlay_mut().map(|ov| &ov.kind) {
-        Some(OverlayKind::Prompt(_)) => {
-            model.insert_overlay_beneath_top(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
-        }
-        _ => {
-            model.push_overlay(OverlayBox::new(60, 40), OverlayKind::Prompt(state));
-        }
-    }
-    model.dirty = true;
-    Vec::new()
 }
 
 /// The picker source `verb` names, or `None` when `verb` is not one of the

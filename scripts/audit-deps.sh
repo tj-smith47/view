@@ -73,6 +73,16 @@ for crate in view-core view-engine view-surface view-native view-tui view-oracle
   check_absent "$crate" tar
   check_absent "$crate" flate2
 done
+# notify (the out-of-band write watcher, crates/view-ai/src/watch.rs) is
+# confined to view-ai the same way ureq/sha2/tar/flate2 above are: nothing
+# else in the workspace watches the filesystem, so no other crate has any
+# business depending on a watcher backend. No check_transitive_reach row:
+# same reasoning as similar's own row below -- every crate depends on
+# view-core, not on view-ai, so there is no shared-graph reach to assert.
+for crate in view-core view-engine view-surface view-native view-tui view-oracle view-bench view view-harness view-test-support; do
+  check_absent "$crate" notify
+done
+
 # nucleo (the picker's matcher engine, spec §18), ignore (the Files
 # source's .gitignore-respecting walker), and grep-searcher/grep-regex (the
 # live-grep source's in-process search, ripgrep's own constituent crates)

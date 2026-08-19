@@ -61,17 +61,19 @@ enum Answer {
 ///
 /// Every prompt built through [`PromptState::from_entry`] is relayed from a
 /// real nvim `msg_show`, blocked in its own input loop until the accepted
-/// key reaches it as `RpcCall::Input`. [`PromptState::ai_trust_prompt`] is
-/// the one exception: view raises that question itself, with nothing on the
-/// wire waiting for an answer, so it resolves locally instead.
-/// `update()`'s key-routing arm reads this to decide which of the two an
-/// accepted key does, and the lazy-dismiss timing `Msg::Key` applies to a
-/// resolved nvim prompt (see that arm's own doc) must never fire for the
-/// local case, since there is no paired `cmdline_show` to have gone quiet.
+/// key reaches it as `RpcCall::Input`. [`PromptState::ai_trust_prompt`] and
+/// [`PromptState::external_write_conflict_prompt`] are the two exceptions:
+/// view raises both questions itself, with nothing on the wire waiting for
+/// an answer, so each resolves locally instead. `update()`'s key-routing arm
+/// reads this to decide which of the two an accepted key does, and the
+/// lazy-dismiss timing `Msg::Key` applies to a resolved nvim prompt (see
+/// that arm's own doc) must never fire for either local case, since neither
+/// has a paired `cmdline_show` to have gone quiet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Origin {
     Engine,
     AiTrust { project_root: PathBuf, verb: String },
+    ExternalWriteConflict { path: PathBuf },
 }
 
 /// One open confirm-class prompt: the question text plus whatever choices
@@ -133,13 +135,44 @@ impl PromptState {
         }
     }
 
+    /// The out-of-band write conflict confirm: view raises this itself when
+    /// `RpcCall::Checktime` answers `found: true, fired: true` for `path` --
+    /// nvim's own mtime bookkeeping found a genuine external change against
+    /// a buffer carrying local edits it left untouched (see
+    /// `docs/checktime-wire-capture.md`, case 3). Its choices are known up
+    /// front the same way [`PromptState::ai_trust_prompt`]'s are, bracketed
+    /// default first: "Reload" discards the local edits (re-drives
+    /// `RpcCall::Checktime` with `force: true`), "Keep local" leaves the
+    /// buffer exactly as it is and issues nothing further. `message` is
+    /// owned by the caller (`update/mod.rs`) so this module carries no
+    /// AI-specific prose of its own.
+    #[must_use]
+    pub fn external_write_conflict_prompt(path: PathBuf, message: String) -> Self {
+        Self {
+            message,
+            answer: Answer::Choices(vec![
+                Choice {
+                    key: 'r',
+                    label: "Reload".to_string(),
+                    default: true,
+                },
+                Choice {
+                    key: 'k',
+                    label: "Keep local".to_string(),
+                    default: false,
+                },
+            ]),
+            origin: Origin::ExternalWriteConflict { path },
+        }
+    }
+
     /// `Some` when this prompt resolves locally instead of forwarding an
     /// accepted key to the engine as `RpcCall::Input` -- the project root
     /// the AI trust decision applies to. See [`Origin`]'s own doc.
     #[must_use]
     pub(crate) fn ai_trust_project_root(&self) -> Option<&Path> {
         match &self.origin {
-            Origin::Engine => None,
+            Origin::Engine | Origin::ExternalWriteConflict { .. } => None,
             Origin::AiTrust { project_root, .. } => Some(project_root),
         }
     }
@@ -151,8 +184,19 @@ impl PromptState {
     #[must_use]
     pub(crate) fn ai_trust_verb(&self) -> Option<&str> {
         match &self.origin {
-            Origin::Engine => None,
+            Origin::Engine | Origin::ExternalWriteConflict { .. } => None,
             Origin::AiTrust { verb, .. } => Some(verb.as_str()),
+        }
+    }
+
+    /// `Some` when this prompt resolves locally to an
+    /// [`PromptState::external_write_conflict_prompt`] answer -- the path
+    /// the conflict applies to. See [`Origin`]'s own doc.
+    #[must_use]
+    pub(crate) fn external_write_conflict_path(&self) -> Option<&Path> {
+        match &self.origin {
+            Origin::Engine | Origin::AiTrust { .. } => None,
+            Origin::ExternalWriteConflict { path } => Some(path),
         }
     }
 

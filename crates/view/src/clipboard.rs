@@ -698,6 +698,14 @@ mod tests {
         ) -> Result<(), view_engine::handle::EngineError> {
             Ok(())
         }
+        fn checktime(
+            &self,
+            _request_id: u64,
+            _path: &str,
+            _force: bool,
+        ) -> Result<(), view_engine::handle::EngineError> {
+            Ok(())
+        }
         fn read_current_buffer_text(
             &self,
         ) -> Result<

@@ -176,6 +176,23 @@ enum Waiter {
     /// replies it decodes into -- one waiter for both because the two
     /// carry the same correlation and differ only in the shape they decode.
     AiFs { request_id: u64, write: bool },
+    /// A `RpcCall::Checktime` probe or forced reload (see
+    /// [`EngineHandle::checktime`](crate::nvim_api::EngineHandle::checktime)):
+    /// nothing is blocked on this `msgid`, so its `Response` is decoded and
+    /// routed to `pump` as `Msg::CheckTimeReply`.
+    ///
+    /// Correlated on `request_id`, the same reason [`AiFs`](Self::AiFs) is:
+    /// the watcher's detection this answers is never superseded by a later
+    /// one the way a keystroke supersedes a query, and the conflict prompt
+    /// it may raise must not silently vanish because a newer probe happened
+    /// to land first. `path` is echoed back the same way [`Preview`](Self::Preview)
+    /// and [`LoadHidden`](Self::LoadHidden) carry their own: the chunk's
+    /// reply carries no path of its own (see
+    /// `nvim_api::decode_checktime_reply`'s own doc).
+    Checktime {
+        request_id: u64,
+        path: std::path::PathBuf,
+    },
 }
 
 /// The set of in-flight request waiters plus a `closed` flag, guarded by a
@@ -639,6 +656,19 @@ impl EngineHandle {
                                     // refusal instead
                                     pump.route_ai_fs(crate::nvim_api::decode_ai_fs_reply(
                                         request_id, write, &error, &result,
+                                    ));
+                                }
+                            }
+                            Some(Waiter::Checktime { request_id, path }) => {
+                                if let Some(pump) = &reader_pump {
+                                    // an error reply degrades to `found:
+                                    // false`, the same "safe default" every
+                                    // generation-gated reply above follows:
+                                    // a probe that could not even ask
+                                    // raises no conflict rather than one
+                                    // reads as a real answer.
+                                    pump.route_checktime(crate::nvim_api::decode_checktime_reply(
+                                        request_id, path, &error, &result,
                                     ));
                                 }
                             }
@@ -1483,6 +1513,25 @@ impl EngineHandle {
         write: bool,
     ) -> Result<(), EngineError> {
         self.request_async(method, params, Waiter::AiFs { request_id, write })
+    }
+
+    /// Issues `method`/`params` as a request whose `Response` is decoded
+    /// into an out-of-band write's disposition and routed to the
+    /// connection's pump as `Msg::CheckTimeReply` (see [`Waiter::Checktime`]).
+    /// Async on the same terms as [`request_probe`](Self::request_probe).
+    ///
+    /// # Errors
+    ///
+    /// Returns `EngineError::Closed` if the connection is already closed or
+    /// the writer thread has already exited.
+    pub fn request_checktime(
+        &self,
+        method: &str,
+        params: Vec<Value>,
+        request_id: u64,
+        path: std::path::PathBuf,
+    ) -> Result<(), EngineError> {
+        self.request_async(method, params, Waiter::Checktime { request_id, path })
     }
 
     /// Issues `method`/`params` as a request whose `Response` is decoded
@@ -3489,6 +3538,75 @@ mod tests {
         };
         assert_eq!(request_id, 77);
         assert_eq!(result.unwrap(), "alpha\n");
+    }
+
+    /// The same must-deliver contract for `Msg::CheckTimeReply`: a dropped
+    /// reply here is a missed conflict, not merely a stale one (see
+    /// `PumpShared::route_checktime`'s own doc), so it must survive a full
+    /// sink the identical way an agent's filesystem answer does.
+    #[test]
+    fn a_dropped_checktime_reply_is_parked_and_flushed_by_the_next_routed_message() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel::<Msg>(1);
+        let _dpump = pump.attach_sink(tx.clone());
+
+        h.checktime(91, "conflict.rs", false).unwrap();
+        let mut r = std::io::BufReader::new(peer_read);
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected the checktime request to reach the peer");
+        };
+
+        tx.try_send(Msg::Resized {
+            width: 1,
+            height: 1,
+        })
+        .expect("channel has capacity for the dummy fill");
+
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::Nil,
+            result: Value::Map(vec![
+                (Value::from("found"), Value::from(true)),
+                (Value::from("fired"), Value::from(true)),
+            ]),
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+
+        assert!(
+            matches!(
+                rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+                Msg::Resized { .. }
+            ),
+            "dummy fill must be the first message drained, proving the reply above \
+             genuinely lost its try_send race instead of landing in the channel"
+        );
+
+        let bridge_notif = RpcMessage::Notification {
+            method: "view_bridge".into(),
+            params: vec![Value::from("colorscheme"), Value::from("dracula")],
+        };
+        rmpv::encode::write_value(&mut peer_write, &bridge_notif.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let Msg::CheckTimeReply {
+            request_id,
+            path,
+            found,
+            fired,
+        } = msg
+        else {
+            unreachable!(
+                "expected the parked Msg::CheckTimeReply to be flushed first, got {msg:?}"
+            );
+        };
+        assert_eq!(request_id, 91);
+        assert_eq!(path, std::path::PathBuf::from("conflict.rs"));
+        assert!(found);
+        assert!(fired);
     }
 
     /// A trigger the bridge carries for a consumer this build does not have

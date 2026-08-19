@@ -13,12 +13,14 @@ mod config;
 mod context;
 mod provision;
 mod trust;
+mod watch;
 
 pub use acp::session::{AgentAdapter, AiSession, ClaudeCodeAdapter};
 pub use config::{AgentSpec, AiConfig, AiConfigError};
 pub use context::assemble;
 pub use provision::{ensure_adapter, pinned_version, AdapterPin, ProvisionError};
 pub use trust::{path_is_contained, TrustError, TrustStore};
+pub use watch::{spawn as spawn_watch, WatchError, WatchHandle};
 
 /// Where the agent comes from and where it runs.
 #[non_exhaustive]

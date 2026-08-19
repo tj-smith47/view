@@ -145,6 +145,17 @@ pub struct Model {
     /// when the sidebar closed would leave the agent waiting on an answer
     /// nothing was left to send.
     pub(crate) ai_fs: crate::native::ai_fs::AiFsState,
+    /// The next `request_id` for a `RpcCall::Checktime` this crate issues.
+    ///
+    /// Its own counter, not [`Model::next_hidden_generation`]'s: that one is
+    /// shared specifically because two different callers both resolve
+    /// through the identical `Msg::HiddenBufferLoaded` reply and a second
+    /// counter would let them collide on it. `Msg::CheckTimeReply` is a
+    /// distinct reply type nothing else answers into, so there is no
+    /// collision to avoid sharing against -- a counter of its own keeps
+    /// that ownership legible rather than borrowing one whose doc explains a
+    /// reason that does not apply here.
+    checktime_generation: u64,
 }
 
 impl Model {
@@ -186,7 +197,17 @@ impl Model {
             speculate: crate::native::speculate::SpeculateState::default(),
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
             ai_fs: crate::native::ai_fs::AiFsState::default(),
+            checktime_generation: 0,
         }
+    }
+
+    /// The next `request_id` for a `RpcCall::Checktime` this crate issues,
+    /// from its own counter rather than [`Model::next_hidden_generation`]:
+    /// `Msg::CheckTimeReply` is a reply type nothing else answers into, so
+    /// there is no collision with another caller to avoid by sharing one.
+    pub fn next_checktime_request_id(&mut self) -> u64 {
+        self.checktime_generation += 1;
+        self.checktime_generation
     }
 
     /// The next generation for a `RpcCall::LoadHidden` this crate issues,
@@ -398,6 +419,25 @@ impl Model {
             .iter_mut()
             .find_map(|overlay| match &mut overlay.kind {
                 OverlayKind::Prompt(p) if p.ai_trust_project_root().is_some() => Some(p),
+                _ => None,
+            })
+    }
+
+    /// The open external-write conflict prompt for `path`, wherever it sits
+    /// in the stack, on the same "not only when topmost" terms
+    /// [`Model::ai_trust_prompt_mut`] documents. Keyed by `path`, unlike
+    /// that single global prompt: two different files can each have their
+    /// own pending conflict at once, and a caller resolving one `Checktime`
+    /// reply must never touch another file's still-open prompt.
+    #[must_use]
+    pub fn external_write_conflict_prompt_mut(
+        &mut self,
+        path: &std::path::Path,
+    ) -> Option<&mut crate::native::prompt::PromptState> {
+        self.overlays
+            .iter_mut()
+            .find_map(|overlay| match &mut overlay.kind {
+                OverlayKind::Prompt(p) if p.external_write_conflict_path() == Some(path) => Some(p),
                 _ => None,
             })
     }
