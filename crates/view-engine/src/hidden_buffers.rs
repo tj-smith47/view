@@ -23,8 +23,8 @@ use std::sync::{Mutex, PoisonError};
 /// `load_hidden` issue time, before any request has even reached the wire,
 /// and only ever updated afterward -- never re-inserted -- by whichever of
 /// `EngineHandle::note_hidden_release` (a caller decrementing the count) or
-/// the reader thread's own resolve (filling in `buf`/`owned` once
-/// `load_hidden`'s reply decodes) reaches a zero count with a known buffer
+/// the reader thread's own resolve (filling in `buf`/`owned`/`answered` once
+/// `load_hidden`'s reply decodes) reaches a zero count with its reply landed
 /// last. Symmetric by construction: every `load_hidden` call takes exactly
 /// one hold up front, so every matching `release_hidden` call always has a
 /// count to decrement no matter which of the two arrives first.
@@ -47,6 +47,14 @@ pub(crate) struct HiddenHold {
     /// it, you may delete it" and the other would have nothing to decide by.
     pub(crate) owned: bool,
     pub(crate) count: u64,
+    /// Whether a `load_hidden` reply for this path has landed yet, set once
+    /// by [`resolve_hidden_hold`] regardless of what it decoded. A refused
+    /// or errored load still answers `buf: None`, and without this flag
+    /// [`take_hidden_delete`] could not tell that apart from a reply still
+    /// in flight -- the former must let a zero-count entry be removed once
+    /// and for all, the latter must leave it for the reply that is still
+    /// coming.
+    pub(crate) answered: bool,
 }
 
 impl HiddenHold {
@@ -55,26 +63,32 @@ impl HiddenHold {
             buf: None,
             owned: false,
             count: 1,
+            answered: false,
         }
     }
 }
 
-/// If `path`'s hold in `holds` has both a zero count and a known buffer,
+/// If `path`'s hold in `holds` has both a zero count and a landed reply,
 /// decides whether to delete it and removes the entry either way. Shared
 /// tail for `EngineHandle::note_hidden_release` (whose own decrement can
-/// bring the count to zero) and [`resolve_hidden_hold`] (whose buffer
-/// resolution can be the one that arrives after the count already reached
-/// zero) -- both need the identical "count zero, buffer known, only delete
-/// what this connection made" decision, just reached from different
-/// directions, and the entry must be removed by whichever of the two
-/// resolves last so the other is never left recording an already-decided
-/// hold.
+/// bring the count to zero) and [`resolve_hidden_hold`] (whose reply can be
+/// the one that lands after the count already reached zero) -- both need
+/// the identical "count zero, reply landed, only delete what this
+/// connection made" decision, just reached from different directions, and
+/// the entry must be removed by whichever of the two resolves last so the
+/// other is never left recording an already-decided hold.
+///
+/// Gating removal on `answered` rather than `buf.is_some()` is what lets a
+/// refused or errored load's entry be cleared too: `buf` stays `None` for
+/// that reply exactly like one still in flight, and only `answered`
+/// distinguishes "nothing is ever coming to name a buffer here" from "the
+/// reply has not landed yet, wait for it."
 pub(crate) fn take_hidden_delete(
     holds: &mut HashMap<String, HiddenHold>,
     path: &str,
 ) -> Option<view_core::msg::BufferHandle> {
     let hold = holds.get(path)?;
-    if hold.count > 0 || hold.buf.is_none() {
+    if hold.count > 0 || !hold.answered {
         return None;
     }
     let resolved = holds.remove(path)?;
@@ -106,6 +120,7 @@ pub(crate) fn resolve_hidden_hold(
 ) -> Option<view_core::msg::BufferHandle> {
     let mut holds = hidden_bufs.lock().unwrap_or_else(PoisonError::into_inner);
     let hold = holds.get_mut(path)?;
+    hold.answered = true;
     if let Some(buf) = buf {
         hold.buf = Some(buf);
         hold.owned |= created;
@@ -203,14 +218,16 @@ impl EngineHandle {
 
     /// Decrements `path`'s hidden-buffer hold count, called from
     /// [`crate::nvim_api::EngineHandle::release_hidden`]. Returns the
-    /// buffer to delete iff this decrement brought the count to zero and
-    /// the matching `load_hidden` call's reply has already named a buffer
-    /// -- `None` for a `path` with no recorded hold at all (a defensive
-    /// extra release), one whose count is still above zero after
-    /// decrementing (another holder still needs it), or one whose buffer
-    /// this connection does not know yet (the reply is still in flight;
-    /// [`resolve_hidden_hold`] finishes the decision when it lands, from the
-    /// reader thread).
+    /// buffer to delete iff this decrement brought the count to zero, the
+    /// matching `load_hidden` call's reply has already landed, and that
+    /// reply named a buffer this connection owns -- `None` for a `path` with
+    /// no recorded hold at all (a defensive extra release), one whose count
+    /// is still above zero after decrementing (another holder still needs
+    /// it), one whose reply has not landed yet ([`resolve_hidden_hold`]
+    /// finishes the decision when it lands, from the reader thread), or one
+    /// whose reply already landed naming no buffer at all (a refused or
+    /// errored load -- nothing to delete, and the entry is still removed so
+    /// it does not linger for the rest of this connection's life).
     ///
     /// A poisoned lock is recovered rather than degrading to "nothing to
     /// delete": the reader thread's own handling of this same map already

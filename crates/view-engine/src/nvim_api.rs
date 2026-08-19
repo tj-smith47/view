@@ -445,25 +445,70 @@ return { loaded = false }";
 
 /// Keys [`EngineHandle::hidden_bufs`](crate::handle::EngineHandle) the same
 /// way [`LOAD_HIDDEN_CHUNK`]'s own `canon()` resolves a path -- symlinks
-/// resolved where the target exists, an absolute form as the fallback for a
-/// new-file path that does not exist yet -- so two different spellings of
-/// the same file share one [`HiddenHold`](crate::handle::HiddenHold) entry
-/// instead of racing each other's cleanup. Computed independently of nvim's
-/// own resolution, on this side of the wire, rather than waiting for a reply
-/// to learn it: the hold must exist the instant [`EngineHandle::load_hidden`]
-/// is called, before any reply carrying nvim's own answer could possibly
-/// have arrived (see that method's own doc).
+/// resolved where the target exists, a lexically normalized absolute form
+/// (via [`lexically_normalize`], matching `fnamemodify(p, ':p')` rather than
+/// `realpath`) as the fallback for a path that does not exist yet -- so two
+/// different spellings of the same file, existing or not, share one
+/// [`HiddenHold`](crate::hidden_buffers::HiddenHold) entry instead of racing
+/// each other's cleanup. Computed independently of nvim's own resolution, on
+/// this side of the wire, rather than waiting for a reply to learn it: the
+/// hold must exist the instant [`EngineHandle::load_hidden`] is called,
+/// before any reply carrying nvim's own answer could possibly have arrived
+/// (see that method's own doc).
+///
+/// `std::fs::canonicalize` is a blocking `stat` walk run inline on whichever
+/// thread calls `load_hidden`/`release_hidden` -- the single-threaded
+/// executor in `view::runtime`, off the paint loop and off the per-keystroke
+/// key-dispatch path. It fires once per diff review opened or closed, not
+/// once per frame or per keystroke, so a slow filesystem stalls only that
+/// one open/close action rather than every keystroke or repaint -- an
+/// acceptable, bounded latency cost for what stays a synchronous call.
 pub(crate) fn canonical_hidden_key(path: &str) -> String {
     if let Ok(resolved) = std::fs::canonicalize(path) {
         return resolved.to_string_lossy().into_owned();
     }
     let candidate = std::path::Path::new(path);
-    if candidate.is_absolute() {
-        return candidate.to_string_lossy().into_owned();
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        match std::env::current_dir() {
+            Ok(cwd) => cwd.join(candidate),
+            Err(_) => return path.to_owned(),
+        }
+    };
+    lexically_normalize(&absolute)
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Collapses `.` and `..` components out of an absolute path without
+/// touching the filesystem, the same textual simplification
+/// `vim.fn.fnamemodify(p, ':p')` performs -- and, unlike `realpath`, does
+/// *not* perform: it never resolves symlinks, since a path segment that
+/// does not exist yet (the reason [`canonical_hidden_key`] fell back to
+/// this at all) rules out `realpath` succeeding on any of it either. Two
+/// spellings of a not-yet-existing new-file path (`brand-new.rs` and
+/// `./brand-new.rs`) must land on the identical key here for the same
+/// reason `std::fs::canonicalize` already gives that guarantee for a path
+/// that does exist -- otherwise they take two separate
+/// [`HiddenHold`](crate::hidden_buffers::HiddenHold) entries over the one
+/// buffer nvim itself resolves both spellings onto, and the first
+/// `release_hidden` deletes it out from under the second holder.
+fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    normalized.push(component);
+                }
+            }
+            other => normalized.push(other),
+        }
     }
-    std::env::current_dir()
-        .map(|cwd| cwd.join(candidate).to_string_lossy().into_owned())
-        .unwrap_or_else(|_| path.to_owned())
+    normalized
 }
 
 /// Resolves a path to the real buffer handle nvim holds it under, for
@@ -506,9 +551,13 @@ pub(crate) fn canonical_hidden_key(path: &str) -> String {
 /// nvim's ordinary file-open autocommands (filetype detection among them),
 /// which `nvim_create_buf` never triggers.
 ///
-/// A path that exists but is not a regular file is refused outright
-/// (`bufload` on a directory succeeds and yields a browsable listing, whose
-/// rows a review would then write its hunks over). A path that does not
+/// A path that exists but is not a regular file is refused outright, and
+/// that refusal runs first -- before the existing-buffer scan below, not
+/// after. A directory that already has a buffer (any window that ever ran
+/// `:edit <dir>` leaves one) would otherwise pass straight through the scan
+/// and resolve onto that buffer instead of hitting the refusal at all:
+/// `bufload` on a directory succeeds and yields a browsable listing, whose
+/// rows a review would then write its hunks over. A path that does not
 /// exist yet is not refused -- the new-file proposal's own case -- and
 /// `bufadd` resolves it to the empty buffer the file will be created as.
 /// `bufadd` alone is what keeps the buffer unlisted (`buflisted = 0`, never
@@ -529,6 +578,10 @@ local function canon(p)
   end
   return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
 end
+local stat = (vim.uv or vim.loop).fs_stat(path)
+if stat ~= nil and stat.type ~= 'file' then
+  return { buf = 0, created = false, changedtick = 0 }
+end
 local wanted = canon(path)
 for _, b in ipairs(vim.api.nvim_list_bufs()) do
   if canon(vim.api.nvim_buf_get_name(b)) == wanted then
@@ -537,10 +590,6 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
     end
     return { buf = b, created = false, changedtick = vim.api.nvim_buf_get_changedtick(b) }
   end
-end
-local stat = (vim.uv or vim.loop).fs_stat(path)
-if stat ~= nil and stat.type ~= 'file' then
-  return { buf = 0, created = false, changedtick = 0 }
 end
 local buf = vim.fn.bufadd(path)
 if buf == 0 then

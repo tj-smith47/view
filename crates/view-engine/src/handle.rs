@@ -2868,6 +2868,57 @@ mod tests {
         );
     }
 
+    /// A refused or errored `load_hidden` reply names no buffer, and in the
+    /// ordinary (non-race) ordering `release_hidden` runs after that reply
+    /// has already landed -- `hold.buf` stays `None` forever, so without
+    /// tracking that the reply itself arrived, `take_hidden_delete` would
+    /// bail on every call for this path and the entry would sit in the map
+    /// for the rest of the connection's life. `resolve_hidden_hold` marking
+    /// the hold `answered` regardless of what it decoded is what lets the
+    /// zero-count, buffer-unknown entry be removed once `release_hidden`
+    /// brings the count down, rather than waiting forever for a buffer that
+    /// is never coming.
+    #[test]
+    fn a_refused_loads_entry_is_removed_once_its_one_release_lands() {
+        let (h, pump, peer_read, mut peer_write) = pumped_peer();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let _dpump = pump.attach_sink(tx);
+        let mut r = std::io::BufReader::new(peer_read);
+
+        h.load_hidden("/tmp/refused.rs", 40).unwrap();
+        let v = rmpv::decode::read_value(&mut r).unwrap();
+        let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
+            unreachable!("expected a Request");
+        };
+        let reply = RpcMessage::Response {
+            msgid,
+            error: Value::from("boom"),
+            result: Value::Nil,
+        };
+        rmpv::encode::write_value(&mut peer_write, &reply.to_value()).unwrap();
+        peer_write.flush().unwrap();
+
+        let msg = rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(
+            matches!(msg, Msg::HiddenBufferLoaded { buf: None, .. }),
+            "an error reply must still route as HiddenBufferLoaded with no buffer, got {msg:?}"
+        );
+
+        assert_eq!(
+            h.note_hidden_release("/tmp/refused.rs"),
+            None,
+            "a refused load has no buffer to delete"
+        );
+        assert!(
+            !h.hidden_bufs
+                .lock()
+                .unwrap()
+                .contains_key("/tmp/refused.rs"),
+            "the entry must be removed once its one release lands, not left \
+             behind for the rest of the connection's life"
+        );
+    }
+
     #[test]
     fn request_heartbeat_sends_the_pinned_wire_shape() {
         let (h, _pump, peer_read, _peer_write) = pumped_peer();

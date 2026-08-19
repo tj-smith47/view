@@ -27,6 +27,10 @@ chunk text `LOAD_HIDDEN_CHUNK` embeds.
 
 ## 1. `nvim_create_buf(false, false)` never lists the buffer
 
+Superseded by case 10: the shipped `LOAD_HIDDEN_CHUNK` no longer calls
+`nvim_create_buf` at all. Kept for the unlisted-by-default fact this case
+still establishes, which case 10 confirms `bufadd` shares.
+
 ```
 nvim_create_buf(false, false) -> buf=2
 nvim_get_option_value('buflisted', {buf=2}) -> false
@@ -40,6 +44,11 @@ shows up. Confirms the falsifiable check: a hidden buffer never reaches
 
 ## 2. `nvim_buf_set_lines` marks the buffer modified -- `bufload` does not
 
+Superseded by case 10: the shipped chunk populates through `bufload`, which
+never marks the buffer modified in the first place, so the reset this case
+describes no longer exists in the code. Kept as the reason `bufload`
+replaced this mechanism at all.
+
 Loading a file's content into a freshly created buffer via
 `vim.api.nvim_buf_set_lines` (the only way to populate a buffer whose
 content this chunk itself reads through `vim.fn.readfile`, since
@@ -51,6 +60,12 @@ what is already on disk must not read as having unsaved changes nobody
 made.
 
 ## 3. The existing-buffer lookup, scanned before `nvim_create_buf`
+
+Superseded by case 10 for the creation mechanism (`bufadd`, not
+`nvim_create_buf`) and by case 13 for the idempotency claim (`bufadd` itself
+is idempotent by name; the scan below no longer needs to lean on
+`nvim_buf_set_name` for it). Kept for the "scan before creating" ordering,
+which the shipped chunk still preserves.
 
 Reusing `PREVIEW_CHUNK`'s own canonicalized name-match scan over
 `nvim_list_bufs()` (symlink-safe, `loaded buffer wins over disk`):
@@ -69,6 +84,12 @@ no second read of the file. `created` tells only which call made the
 buffer; both calls return the identical handle.
 
 ## 4. A path with no file on disk yet resolves to an empty, unmodified buffer
+
+Superseded by case 10: the shipped chunk reaches this outcome through
+`bufadd` resolving the nonexistent path directly, not through a
+`vim.fn.readfile` call caught by `pcall` -- that call no longer exists in
+the chunk at all. Kept for the outcome itself (empty, unmodified buffer for
+a not-yet-existing path), which still holds under `bufadd`+`bufload`.
 
 ```
 LOAD_HIDDEN_CHUNK(new_file_path) -> { buf = 3, created = true, changedtick = 2 }
@@ -238,9 +259,16 @@ writes to disk.
 ## 13. `bufadd` finds a pre-existing UNLOADED buffer by name rather than creating a second one
 
 ```
-bufadd(path)              -> buf=5  (buflisted=1, loaded=0 -- an unloaded entry, no bufload call yet)
+bufadd(path)              -> buf=5  (buflisted=0, loaded=0 -- an unloaded entry, no bufload call yet)
 bufadd(path)  -- again    -> buf=5  (same handle, still unloaded until something calls bufload)
 ```
+
+`buflisted=0` here, matching case 10 and `:help bufadd`: `bufadd` alone never
+lists a buffer regardless of whether it created it fresh or found an
+existing unloaded one. This matters beyond a typo now that `buflisted` is a
+guard input to `RELEASE_HIDDEN_CHUNK`'s belt-and-braces check (case 14) --
+every `bufadd`ed buffer starts unprotected by that check, listed only once
+something else (a real `:edit`) chooses to list it.
 
 `bufadd` is idempotent on the buffer's name whether or not the existing
 entry is loaded -- unlike the old chunk's own `nvim_buf_set_name`, which

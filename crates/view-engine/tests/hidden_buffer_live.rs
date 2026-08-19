@@ -320,6 +320,42 @@ fn an_unloadable_path_resolves_to_no_handle() {
     assert!(!created, "nothing was created for a refused path");
 }
 
+/// The directory refusal above still has to hold when a buffer already
+/// exists for that path -- an earlier `:edit <dir>` in the same session
+/// leaves nvim holding a browsable directory-listing buffer under that
+/// exact name, and `LOAD_HIDDEN_CHUNK`'s existing-buffer scan must never be
+/// allowed to find it before the `fs_stat` refusal ever runs. Getting the
+/// order backward would resolve this call onto the directory-listing
+/// buffer instead of refusing, and a review would then write its hunks over
+/// the listing's own rows.
+#[test]
+fn a_directory_with_an_existing_buffer_is_still_refused() {
+    let root = scratch_root("directory-with-buffer");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .open_file(&root.to_string_lossy())
+        .expect("open the directory the way :edit would, leaving a buffer behind");
+
+    engine
+        .handle
+        .load_hidden(&root.to_string_lossy(), 51)
+        .expect("issue the load");
+
+    let (generation, buf, created, _tick) = next_hidden_buffer_loaded(&rx);
+    assert_eq!(generation, 51);
+    assert_eq!(
+        buf, None,
+        "a directory that already has a buffer must still be refused, not \
+         resolved onto that buffer's directory listing"
+    );
+    assert!(!created, "nothing was created for a refused path");
+}
+
 /// A file that does not exist yet resolves to a handle: that is the
 /// new-file proposal's own case (`old_text: None`), where the review
 /// writes the whole file into the buffer nvim will create it from. Only a
@@ -818,6 +854,73 @@ fn an_already_open_buffer_survives_release_even_after_its_window_moves_on() {
     );
 }
 
+/// The `owned` gate's own protection zone, distinct from
+/// `an_already_open_buffer_survives_release_even_after_its_window_moves_on`
+/// above: that test's fixture is `buflisted=1` (opened through
+/// `OPEN_FILE_CHUNK`), so `RELEASE_HIDDEN_CHUNK`'s own `buflisted` check
+/// alone already refuses the delete, whether or not the engine-side `owned`
+/// gate exists. This one instead builds a buffer directly through
+/// `bufadd`+`bufload` -- unlisted, hidden, never opened through this
+/// connection's own `open_file` -- so nothing in Lua would refuse the
+/// delete on its own; only the engine's `owned` gate (never set for a
+/// `load_hidden` reply that resolved onto a buffer it did not create) is
+/// what keeps `RELEASE_HIDDEN_CHUNK` from ever being sent for it at all.
+#[test]
+fn an_unlisted_foreign_buffer_survives_release_with_no_lua_guard_protecting_it() {
+    let root = scratch_root("foreign-unlisted");
+    let path = root.join("foreign.rs");
+    std::fs::write(&path, "foreign content\n").expect("write fixture");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let foreign_buf = engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("local b = vim.fn.bufadd(...) vim.fn.bufload(b) return b"),
+                rmpv::Value::Array(vec![rmpv::Value::from(path.to_string_lossy().into_owned())]),
+            ],
+        )
+        .expect("build a buffer this connection's own load_hidden never made")
+        .as_u64()
+        .expect("buffer handle is an integer");
+    assert_eq!(
+        buf_option(&engine, foreign_buf, "buflisted").as_bool(),
+        Some(false),
+        "the fixture must be unlisted, or the buflisted belt-check alone \
+         would protect it and this test would prove nothing about owned"
+    );
+
+    engine
+        .handle
+        .load_hidden(&path.to_string_lossy(), 200)
+        .expect("issue the load");
+    let (_generation, buf, created, _tick) = next_hidden_buffer_loaded(&rx);
+    assert_eq!(
+        buf,
+        Some(foreign_buf),
+        "the load must resolve onto the buffer already sitting at this path"
+    );
+    assert!(
+        !created,
+        "a buffer this connection's own load_hidden did not make must never \
+         read as newly created"
+    );
+
+    engine
+        .handle
+        .release_hidden(&path.to_string_lossy())
+        .expect("release the one hold this test took");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, foreign_buf),
+        "releasing a hold on a buffer this connection never created must \
+         never delete it, even when nothing in Lua would have refused to"
+    );
+}
+
 /// A buffer this connection's own `load_hidden` created can still be adopted
 /// by the user afterward: a real `:edit` on the same path binds onto it and
 /// flips `buflisted` 0 -> 1 without ever creating a second buffer (capture
@@ -944,6 +1047,84 @@ fn two_spellings_of_the_same_path_share_one_hold() {
         buf_still_listed_as_a_buffer(&engine, buf),
         "one hold remains -- the two spellings must share a single refcount entry, \
          not race each other's cleanup"
+    );
+
+    engine
+        .handle
+        .release_hidden(&respelled)
+        .expect("second spelling releases");
+    assert!(
+        !buf_still_listed_as_a_buffer(&engine, buf),
+        "both spellings' holds have released -- the buffer must now be gone"
+    );
+}
+
+/// The same sharing `two_spellings_of_the_same_path_share_one_hold` proves
+/// for a file that already exists on disk, for one that does not yet exist
+/// -- the new-file proposal's own case. `std::fs::canonicalize` fails for
+/// both spellings here (neither exists), so `canonical_hidden_key` falls
+/// back to a lexical normalization rather than a filesystem-backed one; if
+/// that fallback left `.`/`..` uncollapsed the two spellings would key two
+/// separate holds over the one buffer nvim itself resolves both onto (nvim's
+/// own `canon()` falls back to `fnamemodify(p, ':p')`, which does collapse
+/// them), and the first `release_hidden` would delete that buffer while the
+/// second spelling's hold still thinks it owns it.
+#[test]
+fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
+    let root = scratch_root("dual-spelling-new-file");
+    let path = root.join("brand-new.rs");
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let canonical = path.to_string_lossy().into_owned();
+    let respelled = root
+        .join(".")
+        .join("brand-new.rs")
+        .to_string_lossy()
+        .into_owned();
+    assert_ne!(
+        canonical, respelled,
+        "the two spellings must actually differ as strings for this test to prove anything"
+    );
+    assert!(
+        std::fs::canonicalize(&path).is_err(),
+        "the fixture must not exist on disk, or this test would exercise the \
+         canonicalize-succeeds path instead of its fallback"
+    );
+
+    engine
+        .handle
+        .load_hidden(&canonical, 200)
+        .expect("first spelling's load");
+    let (_g1, buf1, c1, _t1) = next_hidden_buffer_loaded(&rx);
+    assert!(c1, "the first load over a never-proposed path must create");
+    let buf = buf1.expect("first load resolves to a handle");
+
+    engine
+        .handle
+        .load_hidden(&respelled, 201)
+        .expect("second spelling's load");
+    let (_g2, buf2, c2, _t2) = next_hidden_buffer_loaded(&rx);
+    assert!(
+        !c2,
+        "the second spelling must reuse the buffer the first spelling created"
+    );
+    assert_eq!(
+        buf2,
+        Some(buf),
+        "both spellings of the not-yet-existing path must resolve to the identical buffer"
+    );
+
+    engine
+        .handle
+        .release_hidden(&canonical)
+        .expect("first spelling releases");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, buf),
+        "one hold remains -- an unnormalized fallback key would let this release \
+         delete the buffer the second spelling's hold still needs"
     );
 
     engine
