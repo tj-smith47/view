@@ -175,34 +175,61 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             let hunks = crate::native::diff::hunk::diff(old_text.as_deref(), &new_text);
             if hunks.is_empty() {
                 // Nothing to decide: the proposal's "after" is what the
-                // file already holds. The tool call it arrived on is
-                // already in the transcript, so this is not a silent drop.
-                return Vec::new();
-            }
-            // A review the user is part way through is never replaced out
-            // from under them, on the same terms
-            // `AiPanelState::pending_diff`'s own doc states: the arriving
-            // proposal is announced instead, and the user closes the one
-            // they are on when they are ready for it. Any review still on
-            // screen is one the user still owns -- a review whose every
-            // hunk is decided closes itself (see `update::review`), so
-            // there is no finished one left here to swap out.
-            if model.ai_panel().pending_diff.is_some() {
+                // file already holds, or differs from it only by a
+                // trailing newline (see `hunk::diff`'s own doc for why
+                // that is the same thing to nvim). Announced rather than
+                // dropped in silence: the agent believes it changed the
+                // file, and a review that never opened would otherwise
+                // look like a lost proposal.
                 return model.engine.record_native_notice(
                     format!(
-                        "AI agent proposed changes to {} while a review is open",
+                        "AI agent proposed no change to {} -- the file already matches",
                         path.display()
                     ),
                     false,
                 );
             }
-            let mut effects = Vec::new();
             let panel = model.ai_panel_mut();
+            if panel.pending_diff.is_some() && panel.pending_diff_next.is_some() {
+                // Both slots full. This is the one proposal that is
+                // announced and dropped, and it is dropped at the driver
+                // too so the agent restating it later reaches the user
+                // instead of being deduplicated against a proposal nobody
+                // ever saw.
+                let notice = model.engine.record_native_notice(
+                    format!(
+                        "AI agent proposed changes to {} -- dropped, two reviews already waiting",
+                        path.display()
+                    ),
+                    false,
+                );
+                let mut effects = notice;
+                effects.push(Effect::Ai(AiCommand::DiscardProposal { request_id }));
+                return effects;
+            }
             panel.review_generation += 1;
             let review = DiffReviewState::new(request_id, path, panel.review_generation, hunks);
-            effects.push(review.bind_effect());
-            panel.pending_diff = Some(review);
             model.dirty = true;
+            // A review the user is part way through is never replaced out
+            // from under them: the arriving proposal waits in the queued
+            // slot and opens itself the moment that review ends (see
+            // `update::review::promote_queued`). Only the review that is
+            // actually opening binds now -- a queued one resolves and
+            // attaches when its turn comes, so nothing is subscribed to a
+            // buffer whose review is not on screen.
+            if model.ai_panel().pending_diff.is_some() {
+                let path = review.path.clone();
+                model.ai_panel_mut().pending_diff_next = Some(review);
+                return model.engine.record_native_notice(
+                    format!(
+                        "AI agent proposed changes to {} -- queued behind the open review",
+                        path.display()
+                    ),
+                    false,
+                );
+            }
+            let effects = vec![review.bind_effect()];
+            model.ai_panel_mut().pending_diff = Some(review);
             return effects;
         }
         AiEvent::ThoughtChunk { .. }

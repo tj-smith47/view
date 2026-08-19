@@ -8,6 +8,7 @@
 
 use view_core::msg::{BufferHandle, TextEdit};
 use view_engine::handle::EngineError;
+use view_engine::nvim_api::BufWriteOutcome;
 use view_engine::process::{Engine, EngineConfig};
 
 /// Spawns an isolated engine with a UI attached and returns its handle. The
@@ -89,6 +90,7 @@ fn undojoin_true_joins_the_second_edit_onto_the_first() {
                 lines: vec!["LINE1".to_owned()],
             }],
             false,
+            None,
         )
         .expect("first edit (undojoin: false)");
     engine
@@ -103,6 +105,7 @@ fn undojoin_true_joins_the_second_edit_onto_the_first() {
                 lines: vec!["LINE2".to_owned()],
             }],
             true,
+            None,
         )
         .expect("second edit (undojoin: true)");
 
@@ -134,6 +137,7 @@ fn undojoin_false_keeps_the_second_edit_as_its_own_undo_step() {
                 lines: vec!["LINE1".to_owned()],
             }],
             false,
+            None,
         )
         .expect("first edit");
     engine
@@ -148,6 +152,7 @@ fn undojoin_false_keeps_the_second_edit_as_its_own_undo_step() {
                 lines: vec!["LINE2".to_owned()],
             }],
             false,
+            None,
         )
         .expect("second edit (undojoin: false)");
 
@@ -183,6 +188,7 @@ fn text_edit_columns_are_byte_offsets_not_character_offsets() {
                 lines: vec!["X".to_owned()],
             }],
             false,
+            None,
         )
         .expect("byte-column edit");
 
@@ -214,6 +220,7 @@ fn text_edit_start_col_is_a_byte_offset_not_a_character_offset() {
                 lines: vec!["LLO".to_owned()],
             }],
             false,
+            None,
         )
         .expect("byte start-column edit");
 
@@ -243,6 +250,7 @@ fn set_buf_text_applies_a_multi_row_edit_without_swapping_start_and_end_row() {
                 lines: vec!["X".to_owned()],
             }],
             false,
+            None,
         )
         .expect("multi-row edit");
 
@@ -273,6 +281,7 @@ fn undojoin_true_after_an_undo_falls_back_to_applying_unjoined() {
                 lines: vec!["LINE1".to_owned()],
             }],
             false,
+            None,
         )
         .expect("first edit");
     undo(&engine);
@@ -294,6 +303,7 @@ fn undojoin_true_after_an_undo_falls_back_to_applying_unjoined() {
                 lines: vec!["LINE1-AGAIN".to_owned()],
             }],
             true,
+            None,
         )
         .expect("undojoin:true right after an undo must still apply, not error out");
 
@@ -339,6 +349,7 @@ fn set_buf_text_applies_edits_in_position_order_regardless_of_batch_order() {
                 },
             ],
             false,
+            None,
         )
         .expect("ascending-order batch");
 
@@ -385,10 +396,97 @@ fn stale_buffer_handle_surfaces_as_an_error_not_a_panic() {
             lines: vec!["x".to_owned()],
         }],
         false,
+        None,
     );
 
     match result {
         Err(EngineError::Remote(_)) => {}
         other => panic!("expected EngineError::Remote for a stale buffer handle, got {other:?}"),
     }
+}
+
+/// The accept race, made unrepresentable. A write names the
+/// `b:changedtick` its rows were computed against; if the buffer moved in
+/// between -- the user typing while a proposal was being accepted -- nvim
+/// refuses the whole batch and writes nothing at all. The check lives in
+/// the same chunk as the apply for exactly this reason: no check on the
+/// caller's side of the wire can close the window between itself and the
+/// apply.
+#[test]
+fn a_write_naming_a_stale_changedtick_is_refused_and_writes_nothing() {
+    let engine = spawn();
+    set_lines(&engine, &["one", "two"]);
+    let stamped = changedtick(&engine);
+
+    // the user's own edit, between the moment the caller read the tick and
+    // the moment its write would land
+    set_lines(&engine, &["one", "two", "three"]);
+
+    let outcome = engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 3,
+                lines: vec!["ONE".to_string()],
+            }],
+            false,
+            Some(stamped),
+        )
+        .expect("the refusal is an outcome, never an error");
+
+    assert_eq!(outcome, BufWriteOutcome::BufferAdvanced);
+    assert_eq!(
+        get_lines(&engine),
+        vec!["one".to_string(), "two".to_string(), "three".to_string()],
+        "a refused write must leave the buffer byte-identical"
+    );
+}
+
+/// The same call with the tick the buffer actually holds applies normally:
+/// the guard refuses a stale expectation, never a current one.
+#[test]
+fn a_write_naming_the_current_changedtick_applies() {
+    let engine = spawn();
+    set_lines(&engine, &["one", "two"]);
+
+    let outcome = engine
+        .handle
+        .set_buf_text(
+            BufferHandle(0),
+            &[TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 3,
+                lines: vec!["ONE".to_string()],
+            }],
+            false,
+            Some(changedtick(&engine)),
+        )
+        .expect("apply");
+
+    assert!(matches!(outcome, BufWriteOutcome::Applied { .. }));
+    assert_eq!(
+        get_lines(&engine),
+        vec!["ONE".to_string(), "two".to_string()]
+    );
+}
+
+fn changedtick(engine: &Engine) -> u64 {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from("return vim.api.nvim_buf_get_changedtick(0)"),
+                rmpv::Value::Array(vec![]),
+            ],
+        )
+        .expect("read changedtick")
+        .as_u64()
+        .expect("changedtick is an integer")
 }

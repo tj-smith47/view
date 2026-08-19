@@ -685,17 +685,22 @@ fn palette_body(view: &PaletteView) -> Body {
 /// together, and this ordering is what a future case where they did would
 /// fall back to.
 fn ai_body(view: &AiPanelView) -> Body {
+    // Header order is truncation order, because `header_keep_tail` keeps
+    // the tail: the first row here is the first sacrificed and the last is
+    // the last standing. Composer line first (context -- what the user is
+    // typing survives in the state whether or not it is painted), then the
+    // review's own summary, then a pending permission's question and
+    // options, and the crash banner last of all. A dead session is the one
+    // thing that explains why nothing else on this panel will ever answer,
+    // so it outranks a review the user can still scroll to and a request
+    // whose agent is already gone.
     let mut header = vec![Line::Text(plain_spans(format!(
         "{PROMPT_MARK} {}",
         view.input
     )))];
-    header.extend(view.local_error.iter().cloned().map(Line::Text));
-    // Below the crash banner and above the permission prompt: a review is
-    // actionable content that must survive truncation, but a request
-    // blocking the agent's own turn outranks it, since that one has the
-    // agent waiting on it.
     header.extend(view.review.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
+    header.extend(view.local_error.iter().cloned().map(Line::Text));
     Body {
         title: view.title.clone(),
         header,
@@ -704,10 +709,10 @@ fn ai_body(view: &AiPanelView) -> Body {
         // hunk-jump cursor; the transcript has no selection and scrolls
         // from the top the way it always did.
         selected: view.selected,
-        // the crash banner and the pending permission's options are the
-        // actionable content of this header; see `Body::header_keep_tail`'s
-        // own doc for why they must outlive the question and composer line
-        // under truncation
+        // the crash banner, the pending permission's options and the
+        // review's summary are the actionable content of this header; see
+        // `Body::header_keep_tail`'s own doc for why they must outlive the
+        // question and composer line under truncation
         header_keep_tail: true,
         rule: true,
     }

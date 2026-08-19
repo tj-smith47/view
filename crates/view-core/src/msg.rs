@@ -362,6 +362,39 @@ pub enum Msg {
     BufResolved {
         generation: u64,
         buf: Option<BufferHandle>,
+        /// The resolved buffer's `b:changedtick` at the moment it was
+        /// resolved, so the first write can name a tick without waiting
+        /// for an edit event to learn one. `0` when `buf` is `None`.
+        changedtick: u64,
+    },
+    /// nvim refused an `RpcCall::BufSetText` because the buffer's
+    /// `b:changedtick` had moved past the one the call named: the text the
+    /// edits were computed against is not the text in the buffer, so
+    /// nothing was written.
+    ///
+    /// Not an error the user has to act on and not an engine failure --
+    /// the ordinary outcome of typing in the buffer while a proposal was
+    /// being accepted. The review that issued the write puts the hunks it
+    /// had marked accepted back to stale, and the edit event that caused
+    /// the tick to move re-anchors them a moment later.
+    BufWriteRefused {
+        buf: BufferHandle,
+        generation: u64,
+    },
+    /// nvim applied an `RpcCall::BufSetText`, and the buffer's
+    /// `b:changedtick` is now `changedtick`.
+    ///
+    /// The write's own confirmation, carried back rather than inferred from
+    /// the edit event that follows it: that event arrives on the reader
+    /// thread and is folded whenever the loop gets to it, so a second
+    /// accept issued in the meantime would name a tick the buffer had
+    /// already moved past and be refused for no reason. This is what makes
+    /// two accepts in a row deterministic instead of a race with the
+    /// editor's own event traffic.
+    BufWriteApplied {
+        buf: BufferHandle,
+        generation: u64,
+        changedtick: u64,
     },
     /// A `Route::Transient` toast's idle timeout elapsed with no other input
     /// to have dismissed it another way. `id` names the exact
@@ -1362,6 +1395,24 @@ pub enum RpcCall {
         buf: BufferHandle,
         edits: Vec<TextEdit>,
         undojoin: bool,
+        /// The `b:changedtick` the caller computed these edits against, or
+        /// `None` for a caller with no such expectation.
+        ///
+        /// Checked by nvim itself, in the same chunk that applies the
+        /// edits, before the first one runs: a buffer whose tick has moved
+        /// on holds text these row/column spans were never computed
+        /// against, and applying them would write the caller's bytes over
+        /// rows that are no longer the rows it read. The whole batch is
+        /// then refused as a unit and answers `Msg::BufWriteRefused`
+        /// instead -- nothing partial, since the check happens before any
+        /// edit. Checking on this side of the wire could not close the
+        /// race: the buffer can move between a check here and the apply
+        /// there.
+        expected_changedtick: Option<u64>,
+        /// The issuing review's own generation, echoed back on
+        /// `Msg::BufWriteRefused` so a refusal is answered by the review
+        /// that asked for the write and never by a later one.
+        generation: u64,
     },
     /// Subscribes to `buf`'s live edit stream via `nvim_buf_attach(buf,
     /// false, {})` -- `send_buffer: false` is load-bearing (see

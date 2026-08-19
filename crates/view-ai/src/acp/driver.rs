@@ -212,12 +212,15 @@ where
 struct KnownToolCall {
     title: String,
     status: ToolCallStatus,
-    /// Fingerprints of the diffs already proposed on this call. A
-    /// `tool_call_update` restates the whole `content` array, so without
-    /// this the same file modification would open a review on every
-    /// update; a genuinely revised diff hashes differently and still
-    /// proposes.
-    proposed: Vec<u64>,
+    /// The proposals already raised on this call, as
+    /// `(request_id, fingerprint)`. A `tool_call_update` restates the whole
+    /// `content` array, so without the fingerprint the same file
+    /// modification would open a review on every update; a genuinely
+    /// revised diff hashes differently and still proposes. The request id
+    /// is what [`AiCommand::DiscardProposal`] names to drop an entry again,
+    /// so a proposal the panel could not take stops being deduplicated
+    /// against.
+    proposed: Vec<(u64, u64)>,
 }
 
 /// The correlation state one session accumulates.
@@ -595,11 +598,11 @@ impl Driver {
         // already on screen when the review opens over it.
         for proposal in diff_proposals(update) {
             let fingerprint = fingerprint(&proposal);
-            if proposed.contains(&fingerprint) {
+            if proposed.iter().any(|(_, seen)| *seen == fingerprint) {
                 continue;
             }
-            proposed.push(fingerprint);
             let request_id = self.next_boundary_id();
+            proposed.push((request_id, fingerprint));
             self.shared.emit(AiEvent::DiffProposed {
                 request_id,
                 path: proposal.path,
@@ -783,6 +786,16 @@ impl Driver {
         });
     }
 
+    /// Drops one raised proposal from the call that raised it, so the same
+    /// diff restated later proposes again. Called for a proposal the panel
+    /// refused to take: the user never saw it, so the session must not go
+    /// on treating it as already shown.
+    fn forget_proposal(&mut self, request_id: u64) {
+        for known in self.tool_calls.values_mut() {
+            known.proposed.retain(|(id, _)| *id != request_id);
+        }
+    }
+
     fn on_command(&mut self, command: AiCommand) {
         let Some(session_id) = self.session_id.clone() else {
             // filesystem answers are correlated inside this crate and need
@@ -792,11 +805,18 @@ impl Driver {
                 AiCommand::FsReadReply { .. } | AiCommand::FsWriteReply { .. } => {
                     self.answer_fs(command);
                 }
+                // Correlated inside this crate against state that exists
+                // before any session does, the same as the filesystem
+                // answers above: deferring it would leave the discarded
+                // proposal deduplicating restatements in the meantime,
+                // which is the whole thing it exists to stop.
+                AiCommand::DiscardProposal { request_id } => self.forget_proposal(request_id),
                 other => self.deferred.push(other),
             }
             return;
         };
         match command {
+            AiCommand::DiscardProposal { request_id } => self.forget_proposal(request_id),
             AiCommand::Prompt { text, context } => {
                 let mut blocks = vec![json!({ "type": "text", "text": text })];
                 blocks.extend(context.iter().filter_map(context_block));
@@ -2022,6 +2042,41 @@ mod tests {
             proposals(&events_rx).len(),
             1,
             "a revised proposal is a new decision and must reach the user"
+        );
+    }
+
+    /// A proposal the panel could not take is forgotten here, so the same
+    /// diff restated on a later `tool_call_update` proposes again. Without
+    /// the clearing it would stay deduplicated forever against a proposal
+    /// the user never saw.
+    #[test]
+    fn a_discarded_proposal_is_proposed_again_when_the_agent_restates_it() {
+        let (mut driver, events_rx) = diff_driver();
+        let content = json!([{
+            "type": "diff",
+            "path": "/work/main.rs",
+            "oldText": "a\n",
+            "newText": "b\n",
+        }]);
+
+        driver.on_notification("session/update", &diff_update("c1", content.clone()));
+        let raised = proposals(&events_rx);
+        assert_eq!(raised.len(), 1);
+        let request_id = 1;
+
+        driver.on_notification("session/update", &diff_update("c1", content.clone()));
+        assert!(
+            proposals(&events_rx).is_empty(),
+            "still deduplicated while the proposal stands"
+        );
+
+        driver.on_command(AiCommand::DiscardProposal { request_id });
+        driver.on_notification("session/update", &diff_update("c1", content));
+
+        assert_eq!(
+            proposals(&events_rx).len(),
+            1,
+            "a discarded proposal must be raisable again"
         );
     }
 

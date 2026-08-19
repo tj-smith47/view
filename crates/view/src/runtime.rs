@@ -41,6 +41,7 @@ use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::EngineHandle;
 use view_engine::heartbeat::{wedge_kind, HeartbeatWatch};
+use view_engine::nvim_api::BufWriteOutcome;
 use view_engine::process::Engine;
 use view_engine::stall::OutboxStallWatch;
 use view_tui::terminal::Term;
@@ -418,11 +419,41 @@ impl<E: EngineOps> Executor<E> {
                     RpcCall::TreeDeleteConfirm { generation, path } => {
                         self.ops.tree_delete_confirm(&path, generation)
                     }
+                    // The one call whose outcome is not just ok-or-lost: a
+                    // buffer that moved past the tick the review named
+                    // refuses the write, which is an ordinary race with the
+                    // user's own typing, not an engine failure. It is
+                    // routed back as `Msg::BufWriteRefused` so the review
+                    // puts the hunks back rather than believing they landed.
                     RpcCall::BufSetText {
                         buf,
                         edits,
                         undojoin,
-                    } => self.ops.set_buf_text(buf, &edits, undojoin),
+                        expected_changedtick,
+                        generation,
+                    } => match self
+                        .ops
+                        .set_buf_text(buf, &edits, undojoin, expected_changedtick)
+                    {
+                        Ok(outcome) => {
+                            if let Some(tx) = &self.toast_timer {
+                                let _ = tx.send(match outcome {
+                                    BufWriteOutcome::Applied { changedtick } => {
+                                        Msg::BufWriteApplied {
+                                            buf,
+                                            generation,
+                                            changedtick,
+                                        }
+                                    }
+                                    BufWriteOutcome::BufferAdvanced => {
+                                        Msg::BufWriteRefused { buf, generation }
+                                    }
+                                });
+                            }
+                            Ok(())
+                        }
+                        Err(err) => Err(err),
+                    },
                     RpcCall::BufAttach { buf, generation } => self.ops.buf_attach(buf, generation),
                     RpcCall::BufDetach { buf } => self.ops.buf_detach(buf),
                     RpcCall::BufResolve { path, generation } => {
@@ -2109,9 +2140,51 @@ mod tests {
                 lines: vec!["x".into()],
             }],
             undojoin: true,
+            expected_changedtick: Some(12),
+            generation: 4,
         }));
         assert!(matches!(flow, Flow::Continue));
-        assert_eq!(ops.calls.borrow()[0], "set_buf_text(3,1,true)");
+        assert_eq!(ops.calls.borrow()[0], "set_buf_text(3,1,true,Some(12))");
+    }
+
+    /// A write nvim refuses because the buffer moved is not an engine
+    /// failure: the loop carries on and the refusal reaches the review as
+    /// `Msg::BufWriteRefused`, which is what puts the hunks it claimed back
+    /// on screen as undecided. Reporting `EngineLost` here would tear down
+    /// a healthy session over the user typing while a proposal was open.
+    #[test]
+    fn a_refused_buf_set_text_routes_a_message_and_keeps_the_session() {
+        let ops = FakeOps::default();
+        *ops.refuse_next_write.borrow_mut() = true;
+        let (msg_tx, msg_rx) = mpsc::sync_channel(4);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
+
+        let flow = executor.run(Effect::Rpc(RpcCall::BufSetText {
+            buf: BufferHandle(3),
+            edits: vec![TextEdit {
+                start_row: 0,
+                start_col: 0,
+                end_row: 0,
+                end_col: 1,
+                lines: vec!["x".into()],
+            }],
+            undojoin: true,
+            expected_changedtick: Some(12),
+            generation: 4,
+        }));
+
+        assert!(matches!(flow, Flow::Continue));
+        let msg = msg_rx.try_recv().ok();
+        assert!(
+            matches!(
+                msg,
+                Some(Msg::BufWriteRefused {
+                    buf: BufferHandle(3),
+                    generation: 4,
+                })
+            ),
+            "expected the refusal routed back to the review, got {msg:?}"
+        );
     }
 
     /// `RpcCall::BufAttach`/`BufDetach` are matched explicitly in

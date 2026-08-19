@@ -443,24 +443,6 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
-/// Opens `path` as `:edit` would, taking it as its single positional
-/// vararg. Constant, like every other chunk here: no caller data is
-/// interpolated into the source itself.
-///
-/// `path` reaches nvim as a parsed argument with filename magic switched
-/// off, rather than as text an ex command re-parses: a space, `%`, `#` or a
-/// leading `+` in a filename is command syntax to `:edit`. The two halves
-/// carry different characters -- the argument list is what keeps the space
-/// and the leading `+` out of command parsing, and `magic.file = false` is
-/// what stops `%`, `#` and `\` from expanding as filename magic on top of
-/// it -- each half measured separately in
-/// `docs/tree-open-file-wire-capture.md`, including the magic-left-on
-/// negative control.
-///
-/// Escaping the text was the other way to get there and it does not
-/// survive the platform: `fnameescape` escapes `\` because `\` is a
-/// metacharacter on Unix, and on Windows `\` is the path separator, so
-/// every Windows path arrived doubled and opened nothing at all.
 /// Resolves a path to the real buffer handle nvim holds it under, creating
 /// and loading the buffer when there is none yet, for `RpcCall::BufResolve`.
 /// Constant, like every other chunk here: the path travels as
@@ -483,16 +465,40 @@ return { loaded = false }";
 /// be created as. `bufadd` answers `0` for a name it refuses, and a
 /// `bufload` that throws resolves to no handle rather than to a
 /// loaded-looking one.
+///
+/// The buffer's `b:changedtick` is read in the same chunk that resolves it,
+/// so the review's first write can name a buffer version without waiting
+/// for an edit event to learn one -- and an edit landing between this
+/// resolve and that write moves the tick, which is exactly the case that
+/// must refuse the write.
 const BUF_RESOLVE_CHUNK: &str = "\
 local path = ...
 local stat = (vim.uv or vim.loop).fs_stat(path)
-if stat ~= nil and stat.type ~= 'file' then return 0 end
+if stat ~= nil and stat.type ~= 'file' then return { buf = 0 } end
 local buf = vim.fn.bufadd(path)
-if buf == 0 then return 0 end
+if buf == 0 then return { buf = 0 } end
 local ok = pcall(vim.fn.bufload, buf)
-if not ok then return 0 end
-return buf";
+if not ok then return { buf = 0 } end
+return { buf = buf, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
 
+/// Opens `path` as `:edit` would, taking it as its single positional
+/// vararg. Constant, like every other chunk here: no caller data is
+/// interpolated into the source itself.
+///
+/// `path` reaches nvim as a parsed argument with filename magic switched
+/// off, rather than as text an ex command re-parses: a space, `%`, `#` or a
+/// leading `+` in a filename is command syntax to `:edit`. The two halves
+/// carry different characters -- the argument list is what keeps the space
+/// and the leading `+` out of command parsing, and `magic.file = false` is
+/// what stops `%`, `#` and `\` from expanding as filename magic on top of
+/// it -- each half measured separately in
+/// `docs/tree-open-file-wire-capture.md`, including the magic-left-on
+/// negative control.
+///
+/// Escaping the text was the other way to get there and it does not
+/// survive the platform: `fnameescape` escapes `\` because `\` is a
+/// metacharacter on Unix, and on Windows `\` is the path separator, so
+/// every Windows path arrived doubled and opened nothing at all.
 const OPEN_FILE_CHUNK: &str = "\
 local path = ...
 vim.api.nvim_cmd({ cmd = 'edit', args = { path }, magic = { file = false, bar = false } }, {})";
@@ -590,6 +596,44 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
 
+/// What nvim did with an [`EngineHandle::set_buf_text`] batch.
+///
+/// A refusal is not an error: it is the ordinary outcome of the buffer
+/// moving between the moment a caller computed its edits and the moment
+/// nvim would have applied them, and the caller answers it by recomputing,
+/// never by retrying the same rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BufWriteOutcome {
+    /// Every edit in the batch was applied, leaving the buffer at this
+    /// `b:changedtick` -- what the caller's next write names, so it does
+    /// not have to wait for the edit event still on its way to it.
+    Applied { changedtick: u64 },
+    /// Nothing was written: the buffer's `b:changedtick` had moved past the
+    /// one the call named.
+    BufferAdvanced,
+}
+
+/// Decodes [`BUF_SET_TEXT_CHUNK`]'s reply. Anything but an explicit
+/// `applied = false` reads as applied: the chunk answers that key on every
+/// path it takes, so a reply without it can only be a shape this crate has
+/// never seen from the pinned engine, and treating an applied write as
+/// refused would put an accepted hunk back on screen as undecided.
+fn decode_buf_set_text_reply(reply: &Value) -> BufWriteOutcome {
+    let applied = reply
+        .as_map()
+        .and_then(|pairs| crate::wire::map_find(pairs, "applied"))
+        .and_then(Value::as_bool);
+    if applied == Some(false) {
+        return BufWriteOutcome::BufferAdvanced;
+    }
+    let changedtick = reply
+        .as_map()
+        .and_then(|pairs| crate::wire::map_find(pairs, "changedtick"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    BufWriteOutcome::Applied { changedtick }
+}
+
 /// Applies [`EngineHandle::set_buf_text`]'s batched edits via
 /// `nvim_buf_set_text`, verified live against the pinned engine (see
 /// `docs/buf-set-text-wire-capture.md`): `nvim_command('undojoin')` (`vim.cmd`
@@ -600,6 +644,19 @@ return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
 /// longer exists throws inside the loop (`Invalid buffer id: N`), which
 /// `nvim_exec_lua` surfaces as this request's `Err`, exactly like any other
 /// rejected chunk here -- never a silently dropped edit.
+///
+/// The `expected` tick, when the caller names one, is checked here rather
+/// than on the Rust side, and before the first edit runs: a check on the
+/// caller's side of the wire cannot close the race, since the buffer can
+/// move between that check and this apply, and checking mid-loop could
+/// leave a batch half applied. A buffer whose tick has moved answers
+/// `applied = false` with nothing written at all.
+///
+/// The guard is `type(expected) == 'number'`, not `expected ~= nil`:
+/// msgpack's nil crosses into Lua as `vim.NIL`, a userdata sentinel that
+/// is not `nil`, so an `expected ~= nil` test reads "no expectation" as an
+/// expectation no tick can equal -- live-observed as every unstamped write
+/// being refused.
 ///
 /// The `undojoin` command itself is wrapped in `pcall`, live-confirmed
 /// necessary: `:undojoin` throws `E790: undojoin is not allowed after undo`
@@ -614,13 +671,17 @@ return { choice = vim.fn.confirm(prompt, '&Yes\\n&No') }";
 /// [`view_core::msg::RpcCall::BufSetText`]'s own doc requires rather than
 /// dropping an accepted hunk.
 const BUF_SET_TEXT_CHUNK: &str = "\
-local buf, undojoin, edits = ...
+local buf, undojoin, expected, edits = ...
+if type(expected) == 'number' and vim.api.nvim_buf_get_changedtick(buf) ~= expected then
+  return { applied = false }
+end
 if undojoin then
   pcall(vim.cmd, 'undojoin')
 end
 for _, edit in ipairs(edits) do
   vim.api.nvim_buf_set_text(buf, edit.start_row, edit.start_col, edit.end_row, edit.end_col, edit.lines)
-end";
+end
+return { applied = true, changedtick = vim.api.nvim_buf_get_changedtick(buf) }";
 
 /// Reads the current buffer's path and nvim-authoritative text for
 /// [`EngineHandle::read_current_buffer_text`], verified live against the
@@ -1752,7 +1813,8 @@ impl EngineHandle {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError> {
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
         let mut ordered: Vec<&TextEdit> = edits.iter().collect();
         ordered.sort_by_key(|edit| std::cmp::Reverse((edit.start_row, edit.start_col)));
         let edits = ordered
@@ -1775,19 +1837,20 @@ impl EngineHandle {
                 ])
             })
             .collect();
-        self.request_timeout(
+        let reply = self.request_timeout(
             "nvim_exec_lua",
             vec![
                 Value::from(BUF_SET_TEXT_CHUNK),
                 Value::Array(vec![
                     Value::from(buf.0),
                     Value::from(undojoin),
+                    expected_changedtick.map_or(Value::Nil, Value::from),
                     Value::Array(edits),
                 ]),
             ],
             BUF_SET_TEXT_TIMEOUT,
         )?;
-        Ok(())
+        Ok(decode_buf_set_text_reply(&reply))
     }
 
     /// Subscribes to `buf`'s live edit stream via `nvim_buf_attach(buf,

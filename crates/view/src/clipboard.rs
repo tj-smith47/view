@@ -651,8 +651,10 @@ mod tests {
             _buf: view_core::msg::BufferHandle,
             _edits: &[view_core::msg::TextEdit],
             _undojoin: bool,
-        ) -> Result<(), view_engine::handle::EngineError> {
-            Ok(())
+            _expected_changedtick: Option<u64>,
+        ) -> Result<view_engine::nvim_api::BufWriteOutcome, view_engine::handle::EngineError>
+        {
+            Ok(view_engine::nvim_api::BufWriteOutcome::Applied { changedtick: 0 })
         }
         fn buf_attach(
             &self,

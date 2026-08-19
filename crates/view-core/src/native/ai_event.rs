@@ -179,6 +179,12 @@ pub enum AiCommand {
         request_id: u64,
         result: Result<(), FsError>,
     },
+    /// An [`AiEvent::DiffProposed`] the panel could not take: one review is
+    /// open and a second is already queued behind it. The session forgets
+    /// it was ever proposed, so the agent restating the same diff on a
+    /// later `tool_call_update` proposes it again instead of being
+    /// deduplicated against a proposal the user never saw.
+    DiscardProposal { request_id: u64 },
 }
 
 /// Where a tool call stands in its lifecycle.
@@ -478,6 +484,7 @@ mod tests {
                 AiCommand::Cancel => "cancel",
                 AiCommand::FsReadReply { .. } => "fs_read_reply",
                 AiCommand::FsWriteReply { .. } => "fs_write_reply",
+                AiCommand::DiscardProposal { .. } => "discard_proposal",
             }
         }
 
@@ -509,6 +516,7 @@ mod tests {
                 request_id: 8,
                 result: Err(FsError::PermissionDenied),
             },
+            AiCommand::DiscardProposal { request_id: 9 },
         ];
 
         let seen: Vec<&'static str> = commands.iter().map(describe).collect();
@@ -520,6 +528,7 @@ mod tests {
                 "cancel",
                 "fs_read_reply",
                 "fs_write_reply",
+                "discard_proposal",
             ]
         );
     }

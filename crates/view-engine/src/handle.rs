@@ -545,12 +545,16 @@ impl EngineHandle {
                                     // that cannot bind rather than one that
                                     // silently offers an accept with
                                     // nowhere to write.
-                                    let buf = if error == Value::Nil {
+                                    let (buf, changedtick) = if error == Value::Nil {
                                         decode_buf_resolve_reply(&result)
                                     } else {
-                                        None
+                                        (None, 0)
                                     };
-                                    pump.route_buf_resolve(Msg::BufResolved { generation, buf });
+                                    pump.route_buf_resolve(Msg::BufResolved {
+                                        generation,
+                                        buf,
+                                        changedtick,
+                                    });
                                 }
                             }
                             Some(Waiter::Preview { generation, path }) => {
@@ -1738,9 +1742,20 @@ fn decode_buffer_list_reply(result: &Value) -> Vec<String> {
 /// is nvim's "current buffer" sentinel, which `RpcCall::BufAttach`'s own
 /// doc forbids -- attaching under it would record a generation no event
 /// this attach produces can ever be looked up by.
-fn decode_buf_resolve_reply(result: &Value) -> Option<view_core::msg::BufferHandle> {
-    let handle = result.as_u64()?;
-    (handle > 0).then_some(view_core::msg::BufferHandle(handle))
+fn decode_buf_resolve_reply(result: &Value) -> (Option<view_core::msg::BufferHandle>, u64) {
+    let Some(pairs) = result.as_map() else {
+        return (None, 0);
+    };
+    let handle = crate::wire::map_find(pairs, "buf")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if handle == 0 {
+        return (None, 0);
+    }
+    let changedtick = crate::wire::map_find(pairs, "changedtick")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (Some(view_core::msg::BufferHandle(handle)), changedtick)
 }
 
 /// What one connection answered about the recovery it performed while

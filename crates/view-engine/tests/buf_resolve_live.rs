@@ -45,7 +45,7 @@ fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
 
 /// Waits up to 5s for the next `Msg::BufResolved`, skipping the redraw
 /// traffic the UI attach produces.
-fn next_buf_resolved(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>) {
+fn next_buf_resolved(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>, u64) {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
@@ -54,7 +54,11 @@ fn next_buf_resolved(rx: &mpsc::Receiver<Msg>) -> (u64, Option<u64>) {
             "no Msg::BufResolved arrived within 5s"
         );
         match rx.recv_timeout(remaining) {
-            Ok(Msg::BufResolved { generation, buf }) => return (generation, buf.map(|b| b.0)),
+            Ok(Msg::BufResolved {
+                generation,
+                buf,
+                changedtick,
+            }) => return (generation, buf.map(|b| b.0), changedtick),
             Ok(_other) => continue,
             Err(err) => panic!("channel closed before a BufResolved arrived: {err}"),
         }
@@ -100,10 +104,27 @@ fn a_file_on_disk_resolves_to_a_loaded_buffer() {
         .buf_resolve(&path.to_string_lossy(), 3)
         .expect("issue the resolve");
 
-    let (generation, buf) = next_buf_resolved(&rx);
+    let (generation, buf, tick) = next_buf_resolved(&rx);
     assert_eq!(generation, 3, "the reply carries the review's generation");
     let buf = buf.expect("an existing file resolves to a handle");
     assert!(buf > 0, "handle {buf} is not addressable");
+    assert_eq!(
+        tick,
+        engine
+            .handle
+            .request(
+                "nvim_exec_lua",
+                vec![
+                    rmpv::Value::from("return vim.api.nvim_buf_get_changedtick(...)"),
+                    rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+                ],
+            )
+            .expect("read changedtick")
+            .as_u64()
+            .expect("changedtick is an integer"),
+        "the resolve reports the buffer's own tick, which is what the \
+         review's first write names"
+    );
     assert_eq!(
         lines_of(&engine, buf),
         vec!["fn main() {}".to_string(), "fn other() {}".to_string()],
@@ -147,7 +168,7 @@ fn an_already_open_file_resolves_to_the_buffer_already_holding_it() {
         .buf_resolve(&path.to_string_lossy(), 4)
         .expect("issue the resolve");
 
-    let (_generation, buf) = next_buf_resolved(&rx);
+    let (_generation, buf, _tick) = next_buf_resolved(&rx);
     assert_eq!(
         buf,
         Some(open_buf),
@@ -172,7 +193,7 @@ fn an_unloadable_path_resolves_to_no_handle() {
         .buf_resolve(&root.to_string_lossy(), 5)
         .expect("issue the resolve");
 
-    let (generation, buf) = next_buf_resolved(&rx);
+    let (generation, buf, _tick) = next_buf_resolved(&rx);
     assert_eq!(generation, 5);
     assert_eq!(buf, None, "a directory answered a writable buffer handle");
 }
@@ -195,7 +216,7 @@ fn a_not_yet_existing_file_resolves_to_an_empty_buffer() {
         .buf_resolve(&path.to_string_lossy(), 6)
         .expect("issue the resolve");
 
-    let (_generation, buf) = next_buf_resolved(&rx);
+    let (_generation, buf, _tick) = next_buf_resolved(&rx);
     let buf = buf.expect("a file the agent proposes creating still resolves");
     assert_eq!(
         lines_of(&engine, buf),

@@ -446,6 +446,64 @@ fn an_ai_panel_with_an_open_review_paints_its_hunks_and_follows_the_cursor() {
     );
 }
 
+/// The three-way protection order, pinned end to end. A panel too short
+/// for all of it keeps the crash banner first, then the permission's
+/// options, and sacrifices the review summary before either: a dead
+/// session is what explains why nothing else here will ever answer, and a
+/// review is a decision the user can still come back to.
+#[test]
+fn a_short_ai_panel_keeps_the_crash_banner_over_the_permission_and_the_review() {
+    use view_core::native::views::AiPanelView;
+    let panel = AiPanelView::new("AI Agent")
+        .with_input("draft prompt")
+        .with_review(
+            vec![vec![Span::plain(
+                "Review src/main.rs -- hunk 1/2".to_string(),
+            )]],
+            Some(0),
+        )
+        .with_pending_permission(vec![vec![Span::plain(
+            "  Allow once (allow_once)".to_string(),
+        )]])
+        .with_local_error(vec![vec![Span::plain(
+            "Error: the agent exited -- dismiss".to_string(),
+        )]]);
+
+    // interior = height - 2 = 2: one header row and the rule
+    let text: Vec<String> = rows(60, 4, &LayerKind::Ai(panel.clone()), BorderSet::ASCII)
+        .lines
+        .iter()
+        .map(|line| line_text(line))
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("the agent exited")),
+        "the crash banner is the last row standing: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("Review src/main.rs")),
+        "the review summary is sacrificed before the banner: {text:?}"
+    );
+
+    // one row more: the permission's option joins it, the review still not
+    let text: Vec<String> = rows(60, 5, &LayerKind::Ai(panel), BorderSet::ASCII)
+        .lines
+        .iter()
+        .map(|line| line_text(line))
+        .collect();
+    assert!(
+        text.iter().any(|line| line.contains("the agent exited")),
+        "{text:?}"
+    );
+    assert!(
+        text.iter().any(|line| line.contains("Allow once")),
+        "the answerable option outranks the review summary: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("Review src/main.rs")),
+        "{text:?}"
+    );
+}
+
 /// A request blocking the agent's own turn is unanswerable if the overlay
 /// is too short to show how to answer it: the option must survive, and the
 /// question and composer line -- context, not action -- are what a short

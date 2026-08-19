@@ -339,6 +339,16 @@ pub fn split_lines(text: &str) -> Vec<&str> {
 /// anchor on at all: the whole proposal is one insertion hunk at row 0, and
 /// its empty anchor is what [`super::rebase::rebase`] reads as "this
 /// buffer was empty" (any text arriving in it invalidates the premise).
+///
+/// A proposal that differs only in its trailing newline yields no hunks at
+/// all, and that is deliberate: nvim's buffer model has no end-of-file
+/// newline in it -- `nvim_buf_set_text` addresses rows, and whether the
+/// file ends with a newline is `'endofline'`/`'fixendofline'`, a buffer
+/// option no `set_text` call can carry. `"a\nb"` and `"a\nb\n"` are the
+/// same two rows to nvim, so there is no edit this crate could emit that
+/// would make the difference, and offering an accept that provably writes
+/// nothing would be the lie. The caller announces it (see `update::ai`)
+/// rather than opening an empty review.
 #[must_use]
 pub fn diff(old_text: Option<&str>, new_text: &str) -> Vec<Hunk> {
     let old_rows = old_text.map(split_lines).unwrap_or_default();
@@ -380,6 +390,26 @@ mod tests {
 
     fn owned(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|l| (*l).to_string()).collect()
+    }
+
+    /// A proposal that only adds or removes the file's trailing newline
+    /// yields nothing to review, in both directions. nvim's buffer holds
+    /// rows, not an end-of-file newline, so there is no `set_text` call
+    /// that would apply this -- an accept would provably write nothing.
+    #[test]
+    fn a_trailing_newline_only_proposal_yields_no_hunks() {
+        assert!(
+            diff(Some("a\nb"), "a\nb\n").is_empty(),
+            "adding the trailing newline is not a row edit"
+        );
+        assert!(
+            diff(Some("a\nb\n"), "a\nb").is_empty(),
+            "removing it is not one either"
+        );
+        assert!(
+            !diff(Some("a\nb\n"), "a\nb\nc\n").is_empty(),
+            "a real added row still proposes"
+        );
     }
 
     #[test]

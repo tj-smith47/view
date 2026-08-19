@@ -382,7 +382,19 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             },
         ),
         Msg::BufDetached { buf, generation } => review::on_buf_detached(model, buf, generation),
-        Msg::BufResolved { generation, buf } => review::on_buf_resolved(model, generation, buf),
+        Msg::BufResolved {
+            generation,
+            buf,
+            changedtick,
+        } => review::on_buf_resolved(model, generation, buf, changedtick),
+        Msg::BufWriteRefused { buf, generation } => {
+            review::on_buf_write_refused(model, buf, generation)
+        }
+        Msg::BufWriteApplied {
+            buf,
+            generation,
+            changedtick,
+        } => review::on_buf_write_applied(model, buf, generation, changedtick),
         Msg::PickerResults { generation, items } => {
             let Some(p) = model.picker_mut() else {
                 return Vec::new();

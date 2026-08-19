@@ -6402,6 +6402,9 @@ fn msg_clear_retracts_what_nvim_showed_and_keeps_what_view_raised() {
 /// second, wrong handle.
 const REVIEW_BUF: BufferHandle = BufferHandle(7);
 
+/// The `b:changedtick` nvim reports for `REVIEW_BUF` when it resolves.
+const REVIEW_TICK: u64 = 4;
+
 const REVIEW_OLD: &str = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\n";
 const REVIEW_NEW: &str = "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\nETA\ntheta\n";
 
@@ -6431,6 +6434,7 @@ fn live_review_model() -> Model {
         Msg::BufResolved {
             generation,
             buf: Some(REVIEW_BUF),
+            changedtick: REVIEW_TICK,
         },
     );
     assert_eq!(
@@ -6470,7 +6474,7 @@ fn buf_text_changed(m: &Model, firstline: u64, lastline: u64, linedata: &[&str])
         firstline,
         lastline,
         linedata: linedata.iter().map(|s| (*s).to_string()).collect(),
-        changedtick: 2,
+        changedtick: REVIEW_TICK + 1,
         desynced: false,
     }
 }
@@ -6488,7 +6492,15 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
             buf,
             edits,
             undojoin,
+            expected_changedtick,
+            ..
         }] => {
+            assert_eq!(
+                *expected_changedtick,
+                Some(REVIEW_TICK),
+                "the write names the buffer version its rows were computed \
+                 against, so nvim refuses it if the buffer moved"
+            );
             assert_eq!(*buf, REVIEW_BUF);
             assert!(
                 !undojoin,
@@ -6525,9 +6537,9 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
     );
 }
 
-/// Accept-all emits its writes bottom of the buffer first. Every call is
-/// emitted before nvim reports any of them back, so a top-down order would
-/// have the first write shift the rows the second one names.
+/// Accept-all's one write orders its edits bottom of the buffer first.
+/// Every edit was computed against the same pre-accept buffer, so a
+/// top-down order would have the first shift the rows the second names.
 #[test]
 fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
     let mut m = live_review_model();
@@ -6540,13 +6552,10 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
         Some(&RpcCall::BufDetach { buf: REVIEW_BUF }),
         "accepting the last hunk ends the review: {calls:?}"
     );
-    let rows: Vec<u32> = calls
-        .iter()
-        .filter_map(|call| match call {
-            RpcCall::BufSetText { edits, .. } => Some(edits[0].start_row),
-            _ => None,
-        })
-        .collect();
+    let [RpcCall::BufSetText { edits, .. }, RpcCall::BufDetach { .. }] = calls.as_slice() else {
+        panic!("expected one batched write and the detach, got {calls:?}")
+    };
+    let rows: Vec<u32> = edits.iter().map(|edit| edit.start_row).collect();
     assert_eq!(rows.len(), 2);
     assert!(
         rows[0] > rows[1],
@@ -6803,6 +6812,7 @@ fn an_unresolvable_path_leaves_the_review_unbindable() {
         Msg::BufResolved {
             generation,
             buf: None,
+            changedtick: 0,
         },
     );
 
@@ -6834,5 +6844,237 @@ fn a_review_owns_printables_but_not_the_named_ways_out() {
     assert!(
         m.ai_panel().pending_diff.is_some(),
         "un-entering does not decide the review"
+    );
+}
+
+/// One `AiEvent::DiffProposed`, as the driver raises it.
+fn diff_proposed(request_id: u64, path: &str, old: Option<&str>, new: &str) -> Msg {
+    Msg::Ai(crate::native::ai_event::AiEvent::DiffProposed {
+        request_id,
+        path: std::path::PathBuf::from(path),
+        old_text: old.map(ToString::to_string),
+        new_text: new.to_string(),
+    })
+}
+
+/// A proposal whose "after" is what the file already holds opens nothing
+/// and attaches nothing -- and says so, because the agent believes it
+/// changed the file and a review that never appeared would otherwise look
+/// like a lost proposal.
+#[test]
+fn a_proposal_that_changes_nothing_is_announced_and_opens_no_review() {
+    let mut m = entered_ai_panel_model();
+
+    let effects = update(
+        &mut m,
+        diff_proposed(1, "/tmp/same.rs", Some(REVIEW_OLD), REVIEW_OLD),
+    );
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "nothing to resolve or attach: {effects:?}"
+    );
+    assert!(m.ai_panel().pending_diff.is_none());
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("no change")),
+        "the proposal must be announced, not dropped in silence: {texts:?}"
+    );
+}
+
+/// The trailing-newline case reaches the same place: nvim's buffer has no
+/// end-of-file newline in it, so there is no edit that would apply this
+/// and no review to open (see `hunk::diff`'s own doc).
+#[test]
+fn a_trailing_newline_only_proposal_opens_no_review() {
+    let mut m = entered_ai_panel_model();
+
+    let effects = update(
+        &mut m,
+        diff_proposed(1, "/tmp/eol.rs", Some("a\nb\n"), "a\nb"),
+    );
+
+    assert!(rpc_calls(&effects).is_empty(), "{effects:?}");
+    assert!(m.ai_panel().pending_diff.is_none());
+}
+
+/// A proposal arriving while a review is open never replaces it: it parks
+/// in the queued slot, binds nothing yet, and says so. Removing that guard
+/// is exactly what this fails under -- the second proposal would take over
+/// the panel while the user was part way through deciding the first.
+#[test]
+fn a_second_proposal_queues_behind_the_open_review_instead_of_replacing_it() {
+    let mut m = live_review_model();
+    let first_path = m.ai_panel().pending_diff.as_ref().unwrap().path.clone();
+
+    let effects = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "a queued proposal binds nothing until its turn: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().path,
+        first_path,
+        "the open review was replaced out from under the user"
+    );
+    assert_eq!(
+        m.ai_panel()
+            .pending_diff_next
+            .as_ref()
+            .map(|queued| queued.path.clone()),
+        Some(std::path::PathBuf::from("/tmp/second.rs"))
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("queued")),
+        "the user is told a proposal is waiting: {texts:?}"
+    );
+}
+
+/// The queued proposal is not an announcement the user never hears of
+/// again: it opens -- resolve and all -- the moment the review in front of
+/// it ends.
+#[test]
+fn the_queued_proposal_opens_when_the_review_in_front_of_it_closes() {
+    let mut m = live_review_model();
+    let _ = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    let effects = update(&mut m, key("q"));
+
+    let calls = rpc_calls(&effects);
+    assert!(
+        calls.contains(&RpcCall::BufDetach { buf: REVIEW_BUF }),
+        "the closed review still ends its own subscription: {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| matches!(
+            call,
+            RpcCall::BufResolve { path, .. } if path == "/tmp/second.rs"
+        )),
+        "the queued proposal opens on close: {calls:?}"
+    );
+    assert_eq!(
+        m.ai_panel().pending_diff.as_ref().unwrap().path,
+        std::path::PathBuf::from("/tmp/second.rs")
+    );
+    assert!(m.ai_panel().pending_diff_next.is_none());
+}
+
+/// A review the user abandoned with decisions still owed is forgotten at
+/// the session too, so the agent restating the same diff later reaches
+/// them again instead of being deduplicated against a proposal they
+/// dismissed.
+#[test]
+fn closing_a_review_with_hunks_left_discards_the_proposal_at_the_session() {
+    let mut m = live_review_model();
+    let request_id = m.ai_panel().pending_diff.as_ref().unwrap().request_id;
+
+    let effects = update(&mut m, key("q"));
+
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Ai(AiCommand::DiscardProposal { request_id: id }) if *id == request_id
+        )),
+        "expected the proposal discarded at the driver, got {effects:?}"
+    );
+}
+
+/// A review whose every hunk was decided is not discarded: the user saw it
+/// and answered it, so the session is right to remember it.
+#[test]
+fn a_fully_decided_review_is_not_discarded_at_the_session() {
+    let mut m = live_review_model();
+    let _ = update(&mut m, key("x"));
+    let effects = update(&mut m, key("x"));
+
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Ai(AiCommand::DiscardProposal { .. }))),
+        "a decided review must stay deduplicated: {effects:?}"
+    );
+}
+
+/// Both slots full is the one case a proposal is dropped -- and it is
+/// dropped at the driver too, so a restatement can raise it again.
+#[test]
+fn a_third_proposal_is_announced_and_discarded_at_the_session() {
+    let mut m = live_review_model();
+    let _ = update(
+        &mut m,
+        diff_proposed(2, "/tmp/second.rs", Some("x\n"), "y\n"),
+    );
+
+    let effects = update(
+        &mut m,
+        diff_proposed(3, "/tmp/third.rs", Some("p\n"), "q\n"),
+    );
+
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::Ai(AiCommand::DiscardProposal { request_id: 3 })
+        )),
+        "a dropped proposal must stop being deduplicated: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel()
+            .pending_diff_next
+            .as_ref()
+            .map(|queued| queued.path.clone()),
+        Some(std::path::PathBuf::from("/tmp/second.rs")),
+        "the queued proposal is not replaced by the dropped one"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("dropped")),
+        "{texts:?}"
+    );
+}
+
+/// A refused accept must not swallow the effects the same key produced. A
+/// review with no hunk left to decide ends itself on any key, and the
+/// notice for the refusal that key also produced used to replace that
+/// detach outright -- leaving nvim reporting every keystroke in the buffer
+/// to a review that no longer exists.
+#[test]
+fn a_refusal_notice_never_swallows_the_detach_the_same_key_produced() {
+    let mut m = entered_ai_panel_model();
+    m.ai_panel_mut().review_generation = 42;
+    m.ai_panel_mut().pending_diff = Some(crate::native::ai_panel::DiffReviewState::new(
+        7,
+        std::path::PathBuf::from("/tmp/empty.rs"),
+        42,
+        Vec::new(),
+    ));
+    let _ = update(
+        &mut m,
+        Msg::BufResolved {
+            generation: 42,
+            buf: Some(REVIEW_BUF),
+            changedtick: REVIEW_TICK,
+        },
+    );
+
+    let effects = update(&mut m, key("a"));
+
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::BufDetach { buf: REVIEW_BUF }],
+        "the detach must survive the refusal notice: {effects:?}"
+    );
+    assert!(m.ai_panel().pending_diff.is_none());
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("not fresh")),
+        "the refusal is still reported: {texts:?}"
     );
 }

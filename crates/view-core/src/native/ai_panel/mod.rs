@@ -109,13 +109,21 @@ pub struct AiPanelState {
     pub usage: Option<UsageStats>,
     /// The diff proposal currently under review, if any.
     ///
-    /// One slot, not a queue, on the same terms as
-    /// [`Self::pending_permission`]: a proposal is the direct consequence
-    /// of an in-flight agent turn, and a review the user is part way
-    /// through must never be replaced out from under them by a second
-    /// proposal -- `update::ai`'s own arm is what decides what the second
-    /// one is answered with.
+    /// A review the user is part way through is never replaced out from
+    /// under them: a proposal arriving while this slot is full waits in
+    /// [`Self::pending_diff_next`] instead.
     pub pending_diff: Option<DiffReviewState>,
+    /// The one proposal waiting for the open review to end, on the
+    /// [`Self::pending_permission`] precedent: a single slot, not a queue.
+    ///
+    /// It opens -- resolve, attach, and all -- the moment [`Self::pending_diff`]
+    /// clears, so an announcement is never the last the user hears of a
+    /// proposal. A third proposal, with this slot already full, is the one
+    /// case that is announced and dropped, and it is dropped at the driver
+    /// too (`AiCommand::DiscardProposal`) so the agent restating it later
+    /// proposes it again rather than being deduplicated against a proposal
+    /// nobody ever saw.
+    pub pending_diff_next: Option<DiffReviewState>,
     /// The generation stamped on the next review's own async replies,
     /// bumped per review on the `PickerState::generation` precedent.
     pub review_generation: u64,
@@ -136,6 +144,7 @@ impl AiPanelState {
             local_error: None,
             usage: None,
             pending_diff: None,
+            pending_diff_next: None,
             review_generation: 0,
         }
     }
@@ -174,6 +183,12 @@ impl AiPanelState {
             .with_rows(rows);
         if let Some(review) = &self.pending_diff {
             let mut rows = review.summary_rows();
+            if let Some(queued) = &self.pending_diff_next {
+                rows.push(vec![Span::plain(format!(
+                    "{} is queued and opens when this review ends",
+                    queued.path.display()
+                ))]);
+            }
             if !self.focused {
                 rows.push(vec![Span::plain(ENTER_HINT)]);
             }

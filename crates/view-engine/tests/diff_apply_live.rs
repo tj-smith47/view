@@ -59,8 +59,8 @@ fn get_lines(engine: &Engine) -> Vec<String> {
 }
 
 /// Loads `old` into the current buffer, computes the review's hunks for the
-/// `old` -> `new` proposal, accepts every one of them bottom of the buffer
-/// first, and returns what nvim then holds.
+/// `old` -> `new` proposal, accepts all of them as the one batched write
+/// `DiffReviewState::accept_all` emits, and returns what nvim then holds.
 ///
 /// `old_text: None` is the new-file case: nothing is loaded, and the buffer
 /// stays the single empty line nvim starts a nameless buffer as -- which is
@@ -74,12 +74,11 @@ fn accept_all(engine: &Engine, old: Option<&str>, new: &str) -> Vec<String> {
     let mut hunks = diff(old, new);
     assert!(!hunks.is_empty(), "the fixture proposes no change");
     hunks.sort_by_key(|hunk| std::cmp::Reverse(hunk.old_range));
-    for (index, hunk) in hunks.iter().enumerate() {
-        engine
-            .handle
-            .set_buf_text(BufferHandle(0), &hunk.edits(), index > 0)
-            .expect("apply one accepted hunk");
-    }
+    let edits: Vec<view_core::msg::TextEdit> = hunks.iter().flat_map(|hunk| hunk.edits()).collect();
+    engine
+        .handle
+        .set_buf_text(BufferHandle(0), &edits, false, None)
+        .expect("apply the accepted hunks");
     get_lines(engine)
 }
 

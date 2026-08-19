@@ -10,6 +10,7 @@ use view_core::native::ai_context::{
 };
 use view_core::native::mappings::MappingSpec;
 use view_engine::handle::{EngineError, EngineHandle};
+use view_engine::nvim_api::BufWriteOutcome;
 
 /// The notify surface [`crate::runtime::Executor`] drives, factored out
 /// from [`EngineHandle`] so it can be faked. The four `read_*` methods are
@@ -116,7 +117,8 @@ pub trait EngineOps {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError>;
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError>;
     /// Subscribes to `buf`'s live edit stream, tagged `generation`; never
     /// blocks, and never itself returns an event (see `RpcCall::BufAttach`,
     /// `Msg::BufTextChanged`).
@@ -228,8 +230,9 @@ impl EngineOps for EngineHandle {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError> {
-        self.set_buf_text(buf, edits, undojoin)
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
+        self.set_buf_text(buf, edits, undojoin, expected_changedtick)
     }
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
         self.buf_attach(buf, generation)
@@ -341,8 +344,9 @@ impl<T: EngineOps + ?Sized> EngineOps for &T {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError> {
-        (**self).set_buf_text(buf, edits, undojoin)
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
+        (**self).set_buf_text(buf, edits, undojoin, expected_changedtick)
     }
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
         (**self).buf_attach(buf, generation)
@@ -457,8 +461,9 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError> {
-        (**self).set_buf_text(buf, edits, undojoin)
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
+        (**self).set_buf_text(buf, edits, undojoin, expected_changedtick)
     }
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
         (**self).buf_attach(buf, generation)
@@ -494,6 +499,10 @@ impl<T: EngineOps + ?Sized> EngineOps for std::rc::Rc<T> {
 pub(crate) struct FakeOps {
     pub(crate) calls: std::cell::RefCell<Vec<String>>,
     pub(crate) fail_next: std::cell::RefCell<bool>,
+    /// Makes the next `set_buf_text` answer `BufferAdvanced` -- nvim
+    /// refusing a write whose named tick the buffer has moved past, which
+    /// is a routed message rather than a failure.
+    pub(crate) refuse_next_write: std::cell::RefCell<bool>,
 }
 
 #[cfg(test)]
@@ -600,12 +609,18 @@ impl EngineOps for FakeOps {
         buf: BufferHandle,
         edits: &[TextEdit],
         undojoin: bool,
-    ) -> Result<(), EngineError> {
+        expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
         self.record(format!(
-            "set_buf_text({},{},{undojoin})",
+            "set_buf_text({},{},{undojoin},{expected_changedtick:?})",
             buf.0,
             edits.len()
-        ))
+        ))?;
+        if *self.refuse_next_write.borrow() {
+            Ok(BufWriteOutcome::BufferAdvanced)
+        } else {
+            Ok(BufWriteOutcome::Applied { changedtick: 0 })
+        }
     }
     fn buf_attach(&self, buf: BufferHandle, generation: u64) -> Result<(), EngineError> {
         self.record(format!("buf_attach({},{generation})", buf.0))
@@ -749,8 +764,9 @@ impl EngineOps for SlowOps {
         _buf: BufferHandle,
         _edits: &[TextEdit],
         _undojoin: bool,
-    ) -> Result<(), EngineError> {
-        Ok(())
+        _expected_changedtick: Option<u64>,
+    ) -> Result<BufWriteOutcome, EngineError> {
+        Ok(BufWriteOutcome::Applied { changedtick: 0 })
     }
     fn buf_attach(&self, _buf: BufferHandle, _generation: u64) -> Result<(), EngineError> {
         Ok(())

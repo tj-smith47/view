@@ -109,8 +109,48 @@ pub struct DiffReviewState {
     /// Whether this review has already written a hunk. What decides the
     /// next accept's `undojoin`: the first write of a review opens its own
     /// undo entry and every later one joins onto it, per
-    /// [`RpcCall::BufSetText`]'s own per-hunk undo contract.
+    /// [`RpcCall::BufSetText`]'s own per-hunk undo contract, so one `u`
+    /// retracts the review the user decided rather than one hunk of it
+    /// (proven live in `crates/view-engine/tests/diff_review_undo_live.rs`).
+    ///
+    /// One case does not compose, and it is nvim's, not this state's: an
+    /// accept issued when the user's immediately preceding action was an
+    /// undo cannot join, because `:undojoin` throws `E790` there and the
+    /// engine's documented fallback is to apply the batch un-joined rather
+    /// than drop an accepted hunk (see [`RpcCall::BufSetText`] and
+    /// `undojoin_true_after_an_undo_falls_back_to_applying_unjoined`). The
+    /// hunks accepted before that point stay in their own entry, so the
+    /// review then undoes in two steps instead of one. That is the honest
+    /// outcome of the user having undone mid-review -- their `u` is what
+    /// broke the chain -- and it is why the accept path never treats an
+    /// un-joined apply as a failure: the alternative is refusing an accept
+    /// the user just made.
     pub written: bool,
+    /// The buffer's `b:changedtick` as this review last saw it -- from the
+    /// resolve that bound it, then from every edit event folded since.
+    ///
+    /// Stamped on every write so nvim refuses one computed against text the
+    /// buffer no longer holds. It is deliberately the last *seen* tick and
+    /// not a re-read: the point is to name the version whose rows these
+    /// hunks were computed against, so an edit this review has not folded
+    /// yet is exactly what must make the write fail.
+    pub changedtick: u64,
+    /// The hunks of the write currently on the wire, and what
+    /// [`Self::written`] was before it -- everything needed to put the
+    /// review back the way it was if nvim refuses that write.
+    pub in_flight: Option<InFlight>,
+}
+
+/// One issued [`RpcCall::BufSetText`]'s undo state, kept until nvim either
+/// applies it (the edit event lands) or refuses it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InFlight {
+    /// The hunks this write marked [`HunkStatus::Accepted`].
+    pub hunks: Vec<usize>,
+    /// [`DiffReviewState::written`] before the write. Restored on a
+    /// refusal: a write that never applied must not leave the next one
+    /// joining its undo entry onto whatever the user's own last edit was.
+    pub written_before: bool,
 }
 
 impl DiffReviewState {
@@ -126,6 +166,8 @@ impl DiffReviewState {
             cursor: 0,
             sync: ReviewSync::Binding,
             written: false,
+            changedtick: 0,
+            in_flight: None,
         }
     }
 
@@ -144,7 +186,12 @@ impl DiffReviewState {
     /// successful bind. A reply whose generation is not this review's is
     /// dropped and answers no effects.
     #[must_use]
-    pub fn bind(&mut self, generation: u64, buf: Option<BufferHandle>) -> Vec<Effect> {
+    pub fn bind(
+        &mut self,
+        generation: u64,
+        buf: Option<BufferHandle>,
+        changedtick: u64,
+    ) -> Vec<Effect> {
         if generation != self.generation || self.sync != ReviewSync::Binding {
             return Vec::new();
         }
@@ -153,6 +200,7 @@ impl DiffReviewState {
             return Vec::new();
         };
         self.buffer = Some(buf);
+        self.changedtick = changedtick;
         self.sync = ReviewSync::Live;
         vec![Effect::Rpc(RpcCall::BufAttach {
             buf,
@@ -178,6 +226,11 @@ impl DiffReviewState {
             return;
         }
         rebase(&mut self.hunks, change);
+        self.changedtick = change.changedtick;
+        // The edit that lands after a write is that write's own
+        // confirmation: nothing is left to roll back once the buffer has
+        // moved to a tick this review has seen.
+        self.in_flight = None;
         if change.desynced {
             self.sync = ReviewSync::Desynced;
         }
@@ -249,43 +302,102 @@ impl DiffReviewState {
         if hunk.status != HunkStatus::Fresh {
             return Err(AcceptRefusal::NotFresh);
         }
-        let edits = hunk.edits();
-        hunk.status = HunkStatus::Accepted;
+        Ok(self.write(buf, &[index]))
+    }
+
+    /// Marks `indices` accepted and answers the one write that applies all
+    /// of them.
+    ///
+    /// One call, never one per hunk: the batch's edits are applied bottom
+    /// of the buffer first inside nvim's own chunk, so no hunk's rows can
+    /// shift before a later hunk in the same batch is written, and the
+    /// whole batch stands or falls on a single `expected_changedtick`
+    /// check. Emitting a call per hunk would leave every call after the
+    /// first unguarded -- the first call's own apply moves the tick, so
+    /// only the first could carry an expectation at all.
+    fn write(&mut self, buf: BufferHandle, indices: &[usize]) -> Vec<Effect> {
+        let mut edits = Vec::new();
+        for index in indices {
+            let Some(hunk) = self.hunks.get_mut(*index) else {
+                continue;
+            };
+            edits.extend(hunk.edits());
+            hunk.status = HunkStatus::Accepted;
+        }
+        if edits.is_empty() {
+            return Vec::new();
+        }
         let undojoin = self.written;
+        self.in_flight = Some(InFlight {
+            hunks: indices.to_vec(),
+            written_before: self.written,
+        });
         self.written = true;
-        Ok(vec![Effect::Rpc(RpcCall::BufSetText {
+        vec![Effect::Rpc(RpcCall::BufSetText {
             buf,
             edits,
             undojoin,
-        })])
+            expected_changedtick: Some(self.changedtick),
+            generation: self.generation,
+        })]
     }
 
-    /// Accepts every [`HunkStatus::Fresh`] hunk, bottom of the buffer
-    /// first.
+    /// Folds one `Msg::BufWriteApplied` in: the write landed, so there is
+    /// nothing left to roll back and the next write names the tick this
+    /// one produced -- never the tick from before it, which the buffer has
+    /// already moved past.
+    pub fn note_write_applied(&mut self, buf: BufferHandle, generation: u64, changedtick: u64) {
+        if self.buffer != Some(buf) || generation != self.generation {
+            return;
+        }
+        self.in_flight = None;
+        self.changedtick = changedtick;
+    }
+
+    /// Folds one `Msg::BufWriteRefused` in: the write never applied, so the
+    /// hunks it claimed go back to being decisions the user owes, and the
+    /// undo state goes back to what it was. They come back
+    /// [`HunkStatus::Stale`] rather than `Fresh` because the buffer
+    /// provably moved under them -- the edit that moved it is on its way
+    /// here and re-anchors them, and re-diff (`R`) is what makes them
+    /// writable again.
+    pub fn note_write_refused(&mut self, buf: BufferHandle, generation: u64) {
+        if self.buffer != Some(buf) || generation != self.generation {
+            return;
+        }
+        let Some(in_flight) = self.in_flight.take() else {
+            return;
+        };
+        self.written = in_flight.written_before;
+        for index in in_flight.hunks {
+            if let Some(hunk) = self.hunks.get_mut(index) {
+                if hunk.status == HunkStatus::Accepted {
+                    hunk.status = HunkStatus::Stale;
+                }
+            }
+        }
+    }
+
+    /// Accepts every [`HunkStatus::Fresh`] hunk as one write, bottom of the
+    /// buffer first.
     ///
-    /// The order is load-bearing and is this function's whole reason to
-    /// exist separately from a loop over [`Self::accept`]: all of these
-    /// calls are emitted before nvim reports a single one of them back, so
-    /// no rebase runs in between and every later hunk's rows are still the
-    /// ones computed against the pre-accept buffer. Applying top-down would
-    /// have each accepted hunk shift the rows of every hunk below it that
-    /// has already been addressed.
+    /// The order is load-bearing: every edit in the batch was computed
+    /// against the same pre-accept buffer, so applying top-down would have
+    /// each accepted hunk shift the rows of every hunk below it. The
+    /// executor sorts a batch descending for exactly this reason; the order
+    /// is stated here as well so the batch reads the way it applies.
     pub fn accept_all(&mut self) -> Vec<Effect> {
         if !self.sync.can_apply() {
             return Vec::new();
         }
+        let Some(buf) = self.buffer else {
+            return Vec::new();
+        };
         let mut order: Vec<usize> = (0..self.hunks.len())
             .filter(|i| self.hunks[*i].status == HunkStatus::Fresh)
             .collect();
         order.sort_by_key(|i| std::cmp::Reverse(self.hunks[*i].old_range));
-        let mut effects = Vec::with_capacity(order.len());
-        for index in order {
-            match self.accept(index) {
-                Ok(one) => effects.extend(one),
-                Err(_) => continue,
-            }
-        }
-        effects
+        self.write(buf, &order)
     }
 
     /// Declines the hunk at `index`. Terminal: a later re-diff of this
@@ -448,7 +560,7 @@ mod tests {
             3,
             hunk::diff(Some("a\nb\nc\nd\ne\nf\ng\n"), "a\nB\nc\nd\ne\nF\ng\n"),
         );
-        assert_eq!(state.bind(3, Some(BufferHandle(9))).len(), 1);
+        assert_eq!(state.bind(3, Some(BufferHandle(9)), 11).len(), 1);
         state
     }
 
@@ -462,7 +574,7 @@ mod tests {
                 generation: 3,
             }
         );
-        let effects = state.bind(3, Some(BufferHandle(9)));
+        let effects = state.bind(3, Some(BufferHandle(9)), 11);
         assert_eq!(effects.len(), 1);
         assert_eq!(
             rpc(&effects[0]),
@@ -477,7 +589,7 @@ mod tests {
     #[test]
     fn a_bind_reply_for_a_superseded_generation_is_dropped() {
         let mut state = DiffReviewState::new(1, PathBuf::from("/tmp/a.rs"), 3, Vec::new());
-        assert!(state.bind(2, Some(BufferHandle(9))).is_empty());
+        assert!(state.bind(2, Some(BufferHandle(9)), 11).is_empty());
         assert_eq!(state.buffer, None);
         assert_eq!(state.sync, ReviewSync::Binding);
     }
@@ -485,7 +597,7 @@ mod tests {
     #[test]
     fn a_path_with_no_buffer_leaves_the_review_unbindable() {
         let mut state = DiffReviewState::new(1, PathBuf::from("/tmp/a.rs"), 3, Vec::new());
-        assert!(state.bind(3, None).is_empty());
+        assert!(state.bind(3, None, 0).is_empty());
         assert_eq!(state.sync, ReviewSync::Unbindable);
         assert!(!state.sync.can_apply());
     }
@@ -502,6 +614,8 @@ mod tests {
                 buf: BufferHandle(9),
                 edits: expected,
                 undojoin: false,
+                expected_changedtick: Some(11),
+                generation: 3,
             }
         );
         assert_eq!(state.hunks[0].status, HunkStatus::Accepted);
@@ -532,37 +646,100 @@ mod tests {
         assert_eq!(state.hunks[0].status, HunkStatus::Fresh);
     }
 
-    /// The ordering contract: every call is emitted before nvim reports any
-    /// of them back, so the batch has to be bottom-up or the later hunks'
-    /// rows are wrong by the time they are applied.
+    /// The ordering contract: every edit in the batch was computed against
+    /// the same pre-accept buffer, so it has to apply bottom-up or the
+    /// later hunks' rows are wrong by the time they are written. One call,
+    /// not one per hunk: a per-hunk call after the first could carry no
+    /// `expected_changedtick` at all, since the first call's own apply
+    /// moves the tick.
     #[test]
-    fn accept_all_issues_one_call_per_hunk_bottom_of_the_buffer_first() {
+    fn accept_all_issues_one_batched_call_bottom_of_the_buffer_first() {
         let mut state = review();
         let effects = state.accept_all();
-        assert_eq!(effects.len(), 2);
-        let rows: Vec<u32> = effects
-            .iter()
-            .map(|effect| {
-                let RpcCall::BufSetText { edits, .. } = rpc(effect) else {
-                    panic!("accept_all emits only BufSetText")
-                };
-                edits[0].start_row
-            })
-            .collect();
+        assert_eq!(effects.len(), 1, "one write, not one per hunk");
+        let RpcCall::BufSetText {
+            edits,
+            undojoin,
+            expected_changedtick,
+            ..
+        } = rpc(&effects[0])
+        else {
+            panic!("accept_all emits only BufSetText")
+        };
+        let rows: Vec<u32> = edits.iter().map(|edit| edit.start_row).collect();
         assert!(
             rows[0] > rows[1],
             "accept-all must apply bottom-up; got start rows {rows:?}"
         );
-        let joins: Vec<bool> = effects
-            .iter()
-            .map(|effect| {
-                let RpcCall::BufSetText { undojoin, .. } = rpc(effect) else {
-                    panic!("accept_all emits only BufSetText")
-                };
-                *undojoin
-            })
-            .collect();
-        assert_eq!(joins, vec![false, true]);
+        assert!(!undojoin, "the first write of a review joins nothing");
+        assert_eq!(
+            *expected_changedtick,
+            Some(11),
+            "the batch stands or falls on the tick it was computed against"
+        );
+    }
+
+    /// A write nvim refuses never happened: the hunks it claimed go back to
+    /// being decisions the user owes, and the undo state goes back too --
+    /// otherwise the next accept would join its undo entry onto whatever
+    /// the user's own last edit was.
+    #[test]
+    fn a_refused_write_puts_its_hunks_and_the_undo_state_back() {
+        let mut state = review();
+        let _ = state.accept(0).unwrap();
+        assert_eq!(state.hunks[0].status, HunkStatus::Accepted);
+        assert!(state.written);
+
+        state.note_write_refused(BufferHandle(9), 3);
+
+        assert_eq!(
+            state.hunks[0].status,
+            HunkStatus::Stale,
+            "a hunk whose write was refused is not applied, and the buffer \
+             provably moved under it"
+        );
+        assert!(
+            !state.written,
+            "a write that never applied must not make the next one join"
+        );
+        assert_eq!(state.in_flight, None);
+    }
+
+    /// A refusal naming another buffer, or a superseded review, is not this
+    /// review's to answer.
+    #[test]
+    fn a_refusal_for_another_buffer_or_generation_is_ignored() {
+        let mut state = review();
+        let _ = state.accept(0).unwrap();
+        state.note_write_refused(BufferHandle(11), 3);
+        state.note_write_refused(BufferHandle(9), 4);
+        assert_eq!(state.hunks[0].status, HunkStatus::Accepted);
+    }
+
+    /// The edit event that lands after a write is that write's own
+    /// confirmation: there is nothing left to roll back, and the tick the
+    /// next write names is the one that event carried.
+    #[test]
+    fn a_folded_edit_confirms_the_write_and_advances_the_stamp() {
+        let mut state = review();
+        let _ = state.accept(0).unwrap();
+        state.apply_change(&BufTextChangedEvent {
+            buf: BufferHandle(9),
+            generation: 3,
+            firstline: 1,
+            lastline: 2,
+            linedata: vec!["B".to_string()],
+            changedtick: 12,
+            desynced: false,
+        });
+        assert_eq!(state.in_flight, None);
+        assert_eq!(state.changedtick, 12);
+        state.note_write_refused(BufferHandle(9), 3);
+        assert_eq!(
+            state.hunks[0].status,
+            HunkStatus::Accepted,
+            "a confirmed write is not rolled back by a later stray refusal"
+        );
     }
 
     #[test]
@@ -570,7 +747,10 @@ mod tests {
         let mut state = review();
         state.hunks[1].status = HunkStatus::Stale;
         let effects = state.accept_all();
-        assert_eq!(effects.len(), 1);
+        let RpcCall::BufSetText { edits, .. } = rpc(&effects[0]) else {
+            panic!("accept_all emits only BufSetText")
+        };
+        assert_eq!(edits.len(), 1, "only the fresh hunk is in the batch");
         assert_eq!(state.hunks[1].status, HunkStatus::Stale);
     }
 

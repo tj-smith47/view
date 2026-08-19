@@ -3,6 +3,7 @@
 
 use crate::model::Model;
 use crate::msg::{BufferHandle, Effect};
+use crate::native::ai_event::AiCommand;
 use crate::native::ai_panel::AcceptRefusal;
 use crate::native::diff::BufTextChangedEvent;
 
@@ -42,13 +43,45 @@ pub(super) fn on_buf_resolved(
     model: &mut Model,
     generation: u64,
     buf: Option<BufferHandle>,
+    changedtick: u64,
 ) -> Vec<Effect> {
     let Some(review) = model.ai_panel_mut().pending_diff.as_mut() else {
         return Vec::new();
     };
-    let effects = review.bind(generation, buf);
+    let effects = review.bind(generation, buf, changedtick);
     model.dirty = true;
     effects
+}
+
+/// nvim applied a write. The tick it produced is what the next write
+/// names, so the accept after this one is not a race with the edit event
+/// still on its way here.
+pub(super) fn on_buf_write_applied(
+    model: &mut Model,
+    buf: BufferHandle,
+    generation: u64,
+    changedtick: u64,
+) -> Vec<Effect> {
+    if let Some(review) = model.ai_panel_mut().pending_diff.as_mut() {
+        review.note_write_applied(buf, generation, changedtick);
+    }
+    Vec::new()
+}
+
+/// nvim refused a write because the buffer had moved past the tick the
+/// review named. Nothing was written, so the hunks that write claimed go
+/// back to being decisions the user owes.
+pub(super) fn on_buf_write_refused(
+    model: &mut Model,
+    buf: BufferHandle,
+    generation: u64,
+) -> Vec<Effect> {
+    let Some(review) = model.ai_panel_mut().pending_diff.as_mut() else {
+        return Vec::new();
+    };
+    review.note_write_refused(buf, generation);
+    model.dirty = true;
+    Vec::new()
 }
 
 /// One printable key inside an open diff review.
@@ -92,8 +125,19 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         }
         "q" => {
             let closing = review.close_effect();
+            // Abandoned with decisions still owed, so the session forgets
+            // the proposal was ever raised: the user dismissed it unread,
+            // and an agent restating the same diff later must reach them
+            // again rather than be deduplicated against this one.
+            let abandoned = review
+                .is_open()
+                .then_some(Effect::Ai(AiCommand::DiscardProposal {
+                    request_id: review.request_id,
+                }));
             model.ai_panel_mut().pending_diff = None;
-            return closing.into_iter().collect();
+            let mut effects: Vec<Effect> = closing.into_iter().chain(abandoned).collect();
+            effects.extend(promote_queued(model));
+            return effects;
         }
         // Every other printable is swallowed, the same way an unmatched key
         // on a pending permission prompt is: a review is a decision, and
@@ -128,13 +172,37 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         if let Some(finished) = panel.pending_diff.take() {
             effects.extend(finished.close_effect());
         }
+        effects.extend(promote_queued(model));
     }
-    match refusal {
-        Some(why) => model
-            .engine
-            .record_native_notice(refusal_notice(why), false),
-        None => effects,
+    // The notice joins the effects rather than replacing them: the block
+    // above can have produced the detach that ends a review with nothing
+    // left to decide, and dropping it here would leave nvim reporting
+    // every keystroke in that buffer to a review that is gone.
+    if let Some(why) = refusal {
+        effects.extend(
+            model
+                .engine
+                .record_native_notice(refusal_notice(why), false),
+        );
     }
+    effects
+}
+
+/// Opens the proposal that was waiting behind the review that just ended,
+/// if there is one. A queued proposal binds here rather than when it
+/// arrived: nothing is subscribed to a buffer whose review is not the one
+/// on screen.
+fn promote_queued(model: &mut Model) -> Vec<Effect> {
+    let panel = model.ai_panel_mut();
+    if panel.pending_diff.is_some() {
+        return Vec::new();
+    }
+    let Some(queued) = panel.pending_diff_next.take() else {
+        return Vec::new();
+    };
+    let effects = vec![queued.bind_effect()];
+    panel.pending_diff = Some(queued);
+    effects
 }
 
 /// What the user is told when an accept is refused. Names the state that
