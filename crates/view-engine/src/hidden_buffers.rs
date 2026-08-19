@@ -196,13 +196,21 @@ impl EngineHandle {
     }
 
     /// Reverses [`note_hidden_acquire`](Self::note_hidden_acquire) for a
-    /// `load_hidden` call whose request never reached the wire, called from
-    /// [`crate::nvim_api::EngineHandle::load_hidden`] only on that `Err`
-    /// path. No reply is ever coming for a request nvim never received, so
-    /// unlike an ordinary release this cannot leave a zero-count,
-    /// buffer-unknown entry for a later resolve to finish -- nothing will
-    /// ever resolve it -- and removes the entry outright once the count
-    /// reaches zero with no buffer recorded yet.
+    /// `load_hidden` call whose own request never reached the wire, called
+    /// from [`crate::nvim_api::EngineHandle::load_hidden`] only on that
+    /// `Err` path. That one call's own request has no reply coming, but
+    /// `path`'s entry can still be shared with a concurrent `load_hidden`
+    /// call whose request *did* reach the wire and whose reply has not
+    /// landed yet -- so the removal decision below goes through
+    /// [`take_hidden_delete`], the identical `!hold.answered`-gated check
+    /// [`note_hidden_release`](Self::note_hidden_release) and
+    /// [`resolve_hidden_hold`] already share, rather than a third copy of
+    /// its own that could drift from theirs. Gating on `hold.buf.is_none()`
+    /// here (as this used to) is exactly the bug [`HiddenHold::answered`]
+    /// exists to close: it cannot tell a reply that has not landed yet from
+    /// one that landed naming no buffer, so a still-pending concurrent
+    /// reply's entry could be removed out from under it by this call's own
+    /// unrelated send failure.
     pub(crate) fn note_hidden_acquire_failed(&self, path: &str) {
         let mut holds = self
             .hidden_bufs
@@ -210,10 +218,8 @@ impl EngineHandle {
             .unwrap_or_else(PoisonError::into_inner);
         if let Some(hold) = holds.get_mut(path) {
             hold.count = hold.count.saturating_sub(1);
-            if hold.count == 0 && hold.buf.is_none() {
-                holds.remove(path);
-            }
         }
+        take_hidden_delete(&mut holds, path);
     }
 
     /// Decrements `path`'s hidden-buffer hold count, called from

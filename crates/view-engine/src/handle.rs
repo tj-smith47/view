@@ -2919,6 +2919,58 @@ mod tests {
         );
     }
 
+    /// The ordering `note_hidden_acquire_failed` used to get wrong: a first
+    /// `load_hidden` for a path is still in flight (its request on the wire,
+    /// no reply yet) when a second `load_hidden` for the *same* path fails
+    /// to reach the wire at all (the connection closes between the two).
+    /// Gating removal on `hold.buf.is_none()` (the predicate this pins
+    /// against) cannot tell that still-in-flight first call apart from
+    /// "nothing is ever coming" and deletes the shared entry out from under
+    /// it; gating on `!hold.answered` (what `note_hidden_acquire_failed` now
+    /// shares with `note_hidden_release`/`resolve_hidden_hold` via
+    /// `take_hidden_delete`) leaves it for the first call's reply, which
+    /// still lands afterward and must resolve and remove it normally.
+    #[test]
+    fn a_second_loads_send_failure_does_not_orphan_the_first_loads_still_pending_reply() {
+        let (h, _pump, peer_read, peer_write) = pumped_peer();
+        let path = "/tmp/orphan-guard-r3.rs";
+
+        h.load_hidden(path, 50).unwrap();
+        // brings the first load's hold to a zero count with no reply landed
+        // yet -- the exact state `note_hidden_acquire_failed`'s old
+        // `hold.buf.is_none()` gate could not tell apart from "nothing is
+        // ever coming"
+        assert!(
+            h.release_hidden(path).is_ok(),
+            "a release with no buffer known yet must not touch the wire at all"
+        );
+
+        // severs both directions so the reader thread's own EOF closes the
+        // connection deterministically, the same pattern
+        // `is_closed_reads_true_by_the_time_a_pending_waiter_has_been_failed`
+        // uses -- a blocking call on the now-dead connection cannot return
+        // until that close has actually happened
+        drop(peer_write);
+        drop(peer_read);
+        let err = h.request("nvim_get_mode", vec![]).unwrap_err();
+        assert!(matches!(err, EngineError::Closed), "{err:?}");
+        assert!(h.is_closed());
+
+        // a second, unrelated load_hidden for the same path: its own
+        // request never reaches the wire (the connection is already
+        // closed), driving `note_hidden_acquire_failed` for a path whose
+        // first load is still unanswered
+        assert!(
+            matches!(h.load_hidden(path, 51), Err(EngineError::Closed)),
+            "a load_hidden on a closed connection must fail deterministically"
+        );
+        assert!(
+            h.hidden_bufs.lock().unwrap().contains_key(path),
+            "the first load's still-unanswered hold must survive the second \
+             load's unrelated send failure"
+        );
+    }
+
     #[test]
     fn request_heartbeat_sends_the_pinned_wire_shape() {
         let (h, _pump, peer_read, _peer_write) = pumped_peer();

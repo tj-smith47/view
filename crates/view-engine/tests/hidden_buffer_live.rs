@@ -1137,6 +1137,92 @@ fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
     );
 }
 
+/// The live-probe case `docs/hidden-buffer-wire-capture.md` case 15
+/// measured directly against `bufadd`, and the one the original
+/// shared-buffer-deleted bug actually reproduced on: a symlinked directory
+/// with a leaf that does not exist yet, and -- critically -- no `.`/`..`
+/// component anywhere in either spelling. `fnamemodify(p, ':p')` (what
+/// `LOAD_HIDDEN_CHUNK`'s own `canon()` falls back to in its scan loop) never
+/// resolves the symlink for a dot-free spelling like this, but `bufadd`'s
+/// own identity check has no such gate and resolves it anyway -- so
+/// `canonical_hidden_key`'s fallback must match `bufadd`, not
+/// `fnamemodify`, or the two spellings below key two separate holds over
+/// the one buffer nvim itself resolves both onto, and the first
+/// `release_hidden` deletes it out from under the second spelling's still-
+/// live hold.
+#[test]
+#[cfg(unix)]
+fn two_spellings_through_a_symlinked_directory_with_no_dot_component_share_one_hold() {
+    let root = scratch_root("dual-spelling-symlink-no-dot");
+    let real_dir = root.join("real");
+    std::fs::create_dir_all(&real_dir).expect("create real dir");
+    let link_dir = root.join("link");
+    std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create symlink");
+
+    let via_real = real_dir.join("brand-new.rs").to_string_lossy().into_owned();
+    let via_link = link_dir.join("brand-new.rs").to_string_lossy().into_owned();
+    assert_ne!(
+        via_real, via_link,
+        "the two spellings must actually differ as strings for this test to prove anything"
+    );
+    assert!(
+        !via_link.contains("/./") && !via_link.contains("/../"),
+        "the symlinked spelling must carry no '.'/'..' component -- that is \
+         exactly the case fnamemodify(':p') leaves unresolved but bufadd does not"
+    );
+    assert!(
+        std::fs::canonicalize(link_dir.join("brand-new.rs")).is_err(),
+        "the fixture must not exist on disk, or this test exercises the \
+         canonicalize-succeeds path instead of its fallback"
+    );
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    engine
+        .handle
+        .load_hidden(&via_real, 210)
+        .expect("real spelling's load");
+    let (_g1, buf1, c1, _t1) = next_hidden_buffer_loaded(&rx);
+    assert!(c1, "the first load over a never-proposed path must create");
+    let buf = buf1.expect("first load resolves to a handle");
+
+    engine
+        .handle
+        .load_hidden(&via_link, 211)
+        .expect("symlinked spelling's load");
+    let (_g2, buf2, c2, _t2) = next_hidden_buffer_loaded(&rx);
+    assert!(
+        !c2,
+        "the symlinked spelling must reuse the buffer the real spelling created"
+    );
+    assert_eq!(
+        buf2,
+        Some(buf),
+        "both spellings must resolve to the identical buffer"
+    );
+
+    engine
+        .handle
+        .release_hidden(&via_real)
+        .expect("real spelling releases");
+    assert!(
+        buf_still_listed_as_a_buffer(&engine, buf),
+        "one hold remains -- the symlinked spelling's hold must not have been \
+         orphaned by a key that failed to match the real spelling's"
+    );
+
+    engine
+        .handle
+        .release_hidden(&via_link)
+        .expect("symlinked spelling releases");
+    assert!(
+        !buf_still_listed_as_a_buffer(&engine, buf),
+        "both spellings' holds have released -- the buffer must now be gone"
+    );
+}
+
 /// `BufAttach`/`BufSetText` operate unbranched on a `load_hidden`-resolved
 /// handle: nothing about it (unlisted, file-backed, `bufload`-populated) is
 /// special-cased anywhere else in the RPC surface, so attaching to it and

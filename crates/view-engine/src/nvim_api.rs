@@ -443,12 +443,12 @@ for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 end
 return { loaded = false }";
 
-/// Keys [`EngineHandle::hidden_bufs`](crate::handle::EngineHandle) the same
-/// way [`LOAD_HIDDEN_CHUNK`]'s own `canon()` resolves a path -- symlinks
-/// resolved where the target exists, a lexically normalized absolute form
-/// (via [`lexically_normalize`], matching `fnamemodify(p, ':p')` rather than
-/// `realpath`) as the fallback for a path that does not exist yet -- so two
-/// different spellings of the same file, existing or not, share one
+/// Keys [`EngineHandle::hidden_bufs`](crate::handle::EngineHandle) in
+/// agreement with whatever buffer `vim.fn.bufadd` actually resolves a
+/// `load_hidden` call onto -- symlinks resolved where the target exists,
+/// [`nvim_style_absolute`]'s own parent-resolution as the fallback for a
+/// path that does not exist yet -- so two different spellings of the same
+/// file, existing or not, share one
 /// [`HiddenHold`](crate::hidden_buffers::HiddenHold) entry instead of racing
 /// each other's cleanup. Computed independently of nvim's own resolution, on
 /// this side of the wire, rather than waiting for a reply to learn it: the
@@ -476,39 +476,39 @@ pub(crate) fn canonical_hidden_key(path: &str) -> String {
             Err(_) => return path.to_owned(),
         }
     };
-    lexically_normalize(&absolute)
+    nvim_style_absolute(&absolute)
         .to_string_lossy()
         .into_owned()
 }
 
-/// Collapses `.` and `..` components out of an absolute path without
-/// touching the filesystem, the same textual simplification
-/// `vim.fn.fnamemodify(p, ':p')` performs -- and, unlike `realpath`, does
-/// *not* perform: it never resolves symlinks, since a path segment that
-/// does not exist yet (the reason [`canonical_hidden_key`] fell back to
-/// this at all) rules out `realpath` succeeding on any of it either. Two
-/// spellings of a not-yet-existing new-file path (`brand-new.rs` and
-/// `./brand-new.rs`) must land on the identical key here for the same
-/// reason `std::fs::canonicalize` already gives that guarantee for a path
-/// that does exist -- otherwise they take two separate
-/// [`HiddenHold`](crate::hidden_buffers::HiddenHold) entries over the one
-/// buffer nvim itself resolves both spellings onto, and the first
-/// `release_hidden` deletes it out from under the second holder.
-fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
-    use std::path::Component;
-    let mut normalized = std::path::PathBuf::new();
-    for component in path.components() {
-        match component {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !normalized.pop() {
-                    normalized.push(component);
-                }
-            }
-            other => normalized.push(other),
-        }
-    }
-    normalized
+/// Resolves an absolute path the way `vim.fn.bufadd` resolves one that does
+/// not fully exist -- see `docs/hidden-buffer-wire-capture.md` case 15,
+/// which measured this directly against `bufadd` itself rather than against
+/// `vim.fn.fnamemodify(p, ':p')` (a different, weaker function that does
+/// *not* resolve a symlinked directory unless a `.`/`..` component happens
+/// to force it to actually walk the directory chain -- `bufadd`'s own
+/// identity check carries no such gate, and neither does
+/// `LOAD_HIDDEN_CHUNK`'s own `canon()`, which mirrors this same
+/// parent-realpath resolution for exactly this reason -- see that chunk's
+/// own doc).
+///
+/// `bufadd` resolves the entire immediate parent directory as one unit --
+/// equivalent to a `chdir` into it succeeding, which resolves any symlinks
+/// in it as a side effect -- and joins the resolved parent with the file
+/// name. If that whole-parent resolution fails (any single component of the
+/// parent does not exist), the path is left completely unresolved: there is
+/// no fallback to a shallower existing ancestor. `std::fs::canonicalize` on
+/// the parent alone reproduces exactly this -- success or failure, in one
+/// step, with no separate lexical collapsing of `.`/`..` needed (resolving
+/// the parent removes them as an intrinsic part of resolving it) and no
+/// multi-level ancestor walk to write.
+fn nvim_style_absolute(path: &std::path::Path) -> std::path::PathBuf {
+    let (Some(parent), Some(file_name)) = (path.parent(), path.file_name()) else {
+        return path.to_path_buf();
+    };
+    std::fs::canonicalize(parent)
+        .map(|resolved_parent| resolved_parent.join(file_name))
+        .unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Resolves a path to the real buffer handle nvim holds it under, for
@@ -565,6 +565,26 @@ fn lexically_normalize(path: &std::path::Path) -> std::path::PathBuf {
 /// something else -- a real `:edit` on the same path, capture #14 -- chooses
 /// to list it.
 ///
+/// `canon()`'s own fallback (for a path `fs_realpath` cannot resolve
+/// outright, because the leaf does not exist yet) resolves only the
+/// immediate parent directory and joins the file name back on, rather than
+/// `fnamemodify(p, ':p')` -- which does not resolve a symlinked directory at
+/// all unless a `.`/`..` component happens to force it to actually walk the
+/// chain (`docs/hidden-buffer-wire-capture.md` case 15). `bufadd` carries no
+/// such gate: it resolves the whole parent as a unit regardless of what the
+/// spelling looks like. A `canon()` that disagreed with `bufadd` here would
+/// still let two spellings resolve onto the identical buffer (`bufadd`
+/// itself decides that, not this scan), but the scan's own match would miss
+/// it, fall through to the `bufadd` branch below, and misreport
+/// `created = true` for a reuse the scan simply failed to see -- corrupting
+/// `RpcCall::ReleaseHidden`'s ownership gate exactly as a genuinely wrong
+/// `created` would (see the paragraph above): a connection would believe it
+/// owns, and may delete, a buffer a real window or another connection
+/// created. Matching `bufadd`'s own resolution here is what lets the scan
+/// catch the reuse directly, so `created` is never reported by the
+/// fallthrough branch for a buffer that already existed under a different
+/// spelling of the same path.
+///
 /// The buffer's `b:changedtick` is read in the same chunk that resolves it,
 /// so the review's first write can name a buffer version without waiting
 /// for an edit event to learn one -- and an edit landing between this
@@ -576,7 +596,16 @@ local function canon(p)
   if p == '' then
     return p
   end
-  return vim.uv.fs_realpath(p) or vim.fn.fnamemodify(p, ':p')
+  local real = vim.uv.fs_realpath(p)
+  if real then
+    return real
+  end
+  local head = vim.fn.fnamemodify(p, ':h')
+  local real_head = vim.uv.fs_realpath(head)
+  if real_head then
+    return real_head .. '/' .. vim.fn.fnamemodify(p, ':t')
+  end
+  return p
 end
 local stat = (vim.uv or vim.loop).fs_stat(path)
 if stat ~= nil and stat.type ~= 'file' then
@@ -2779,5 +2808,55 @@ mod tests {
     fn eval_str_renders_an_integer_result_as_decimal() {
         let (h, _cap_rx) = fake_peer_replying_with(Value::from(42));
         assert_eq!(h.eval_str("line('.')").unwrap(), "42");
+    }
+
+    /// The divergent table `docs/hidden-buffer-wire-capture.md` case 15
+    /// measured between `fnamemodify(p, ':p')` and `bufadd`'s own identity
+    /// resolution: a nonexistent parent leaves the whole path untouched
+    /// (`.`/`..` and all), and `/../a`'s parent (`/..`) trivially resolves
+    /// to root regardless of whether `a` itself exists. None of these three
+    /// go anywhere near a symlink -- `nvim_style_absolute`'s symlink half is
+    /// exercised live in `hidden_buffer_live.rs`, where an in-process check
+    /// against a plain nonexistent directory cannot prove anything about
+    /// `bufadd`'s own symlink handling.
+    #[test]
+    fn nvim_style_absolute_leaves_a_nonexistent_parent_completely_untouched() {
+        let nonce = format!(
+            "definitely-not-a-real-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default()
+        );
+        assert!(
+            !std::path::Path::new(&format!("/{nonce}")).exists(),
+            "the nonce directory name must not already exist, or this test proves nothing"
+        );
+
+        let dot = std::path::PathBuf::from(format!("/{nonce}/./b"));
+        assert_eq!(
+            nvim_style_absolute(&dot),
+            dot,
+            "a '.' component under a nonexistent parent must be left exactly as given"
+        );
+
+        let dotdot = std::path::PathBuf::from(format!("/{nonce}/../b"));
+        assert_eq!(
+            nvim_style_absolute(&dotdot),
+            dotdot,
+            "a '..' component under a nonexistent parent must be left exactly as given"
+        );
+    }
+
+    #[test]
+    fn nvim_style_absolute_resolves_dotdot_at_root_to_root_itself() {
+        let path = std::path::PathBuf::from("/../a");
+        assert_eq!(
+            nvim_style_absolute(&path),
+            std::path::PathBuf::from("/a"),
+            "root's parent is root -- '/..' must resolve trivially rather than being \
+             left unresolved the way a nonexistent parent is"
+        );
     }
 }

@@ -299,3 +299,89 @@ brace for the case where the user has since navigated away from the window
 (buffer hidden again, `win_findbuf` empty) but the buffer is now theirs, not
 ours, and must survive a release exactly like any other buffer nvim itself
 lists.
+
+## 15. `bufadd`'s own identity resolution for a not-yet-existing path is a different, stronger mechanism than `fnamemodify(p, ':p')`
+
+`canonical_hidden_key`'s job is to key `EngineHandle::hidden_bufs` in
+agreement with whatever buffer `bufadd` actually resolves a `load_hidden`
+call onto -- not to reproduce `fnamemodify(p, ':p')`, which is a different,
+weaker function `LOAD_HIDDEN_CHUNK`'s own `canon()` also happens to fall
+back to (its scan loop, not `bufadd` itself). The two disagree on exactly
+the case that matters here: a symlinked directory, no `.`/`..` component
+anywhere in the path, and a leaf that does not exist yet.
+
+```
+-- fnamemodify(':p') never resolves a symlink unless a '.'/'..' component
+-- forces it to actually walk the directory chain:
+fnamemodify(link/nope.rs, ':p')    -> link/nope.rs      -- unresolved, no dot present
+fnamemodify(link/./nope.rs, ':p')  -> real/nope.rs       -- resolved, the '.' triggers it
+
+-- bufadd resolves the same no-dot spelling anyway -- its own identity
+-- check is not gated on '.'/'..' at all:
+bufadd(real/brand-new.rs) -> 2
+bufadd(link/brand-new.rs) -> 2                          -- same buffer, no dot involved
+nvim_buf_get_name(2)      -> .../real/brand-new.rs        -- stored in resolved form
+```
+
+`bufadd`'s resolution is whole-parent-or-nothing: it succeeds only when the
+*entire* immediate parent directory exists (equivalent to a `chdir` into it
+succeeding, symlinks resolved as a side effect), and otherwise leaves the
+path completely unresolved -- it does not fall back to a shallower existing
+ancestor when the immediate parent itself does not fully exist:
+
+```
+bufadd(real/brand-new4.rs)         -> 3
+bufadd(link/sub2/../brand-new4.rs) -> 4   -- sub2 does not exist under link
+                                              -- (real/sub2 does not exist either)
+same buffer? false                          -- no fallback to resolving through
+                                                link alone once sub2 fails
+nvim_buf_get_name(4) -> link/sub2/../brand-new4.rs   -- left completely as given
+```
+
+`canonical_hidden_key`'s fallback (for a path `std::fs::canonicalize` cannot
+resolve outright) mirrors exactly this: canonicalize the path's immediate
+parent as a whole, and only that -- succeed and join the file name, or fail
+and leave the path exactly as given. No lexical collapsing of `.`/`..` (the
+resolved cases above never have any left over -- canonicalizing the parent
+removes them as an intrinsic part of resolving it, not a separate textual
+pass) and no multi-level ancestor fallback (the `sub2`-missing case above
+shows `bufadd` itself has none either -- it does not fall back to resolving
+through `link` alone once the deeper component fails).
+
+## 16. `LOAD_HIDDEN_CHUNK`'s own `canon()` must mirror `bufadd`'s resolution too, or its `created` flag lies
+
+Case 15's divergence is not only a Rust-side key problem: `LOAD_HIDDEN_CHUNK`
+runs the identical `fnamemodify(p, ':p')`-falling-back `canon()` in its own
+existing-buffer scan, on the nvim side, to decide whether a `load_hidden`
+call is a reuse or a fresh create. Two spellings through a symlinked
+directory, no `.`/`..` component, no fixture that exists yet -- the same
+shape as case 15 -- make that scan miss a buffer it should have found, and
+the fallthrough branch's `created = true` is unconditional, so a genuine
+*reuse* (`bufadd` still resolves onto the identical buffer either way) gets
+reported as a *create*:
+
+```
+-- old canon(): fs_realpath(p) or fnamemodify(p, ':p')
+load via_real: buf=2 created=true
+load via_link: buf=2 created=true    -- same buffer, but reported as a second create
+
+-- new canon(): fs_realpath(p) or (fs_realpath(parent) .. '/' .. tail)
+load via_real: buf=3 created=true
+load via_link: buf=3 created=false   -- same buffer, correctly reported as a reuse
+```
+
+A wrongly-`true` `created` is not cosmetic: `RpcCall::ReleaseHidden`'s
+delete is gated on `HiddenHold::owned`, which is OR'd from every reply's
+`created` flag for that path. Whenever the *first* reply for a path is a
+genuine create, the wrong flag from a later reused-spelling reply is
+harmless (owned is already `true`). But had the *first* connection to see
+this path been a real window's own `:edit`, or a different connection's
+`load_hidden` -- both cases this scan exists to catch, per case 15's own
+`docs/hidden-buffer-wire-capture.md` context above -- this connection's own
+`load_hidden` would still report `created = true` for a buffer it did not
+create, and its `release_hidden` would delete a buffer someone else still
+has open. Matching `canon()` to `bufadd`'s own parent-realpath resolution
+closes this at the scan itself: the match is found directly, and the
+fallthrough `bufadd` branch (whose `created = true` is only ever correct
+because nothing already matched) is never reached for a path some earlier
+call, or a real window, already resolved under a different spelling.
