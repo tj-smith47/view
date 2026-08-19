@@ -6507,15 +6507,21 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
 
     let effects = update(&mut m, key("a"));
     match rpc_calls(&effects).as_slice() {
-        [RpcCall::BufSetText { undojoin, .. }] => assert!(
-            undojoin,
-            "the second hunk joins the first so one undo retracts the review"
-        ),
-        other => panic!("expected one BufSetText, got {other:?}"),
+        [RpcCall::BufSetText { undojoin, .. }, RpcCall::BufDetach { buf }] => {
+            assert!(
+                undojoin,
+                "the second hunk joins the first so one undo retracts the review"
+            );
+            assert_eq!(*buf, REVIEW_BUF);
+        }
+        other => {
+            panic!("expected the last write and the detach that ends the review, got {other:?}")
+        }
     }
     assert!(
-        !m.ai_panel().pending_diff.as_ref().unwrap().is_open(),
-        "both hunks are decided"
+        m.ai_panel().pending_diff.is_none(),
+        "a review with nothing left to decide ends itself rather than \
+         going on being told about every keystroke in the buffer"
     );
 }
 
@@ -6528,11 +6534,17 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
 
     let effects = update(&mut m, key("A"));
 
-    let rows: Vec<u32> = rpc_calls(&effects)
+    let calls = rpc_calls(&effects);
+    assert_eq!(
+        calls.last(),
+        Some(&RpcCall::BufDetach { buf: REVIEW_BUF }),
+        "accepting the last hunk ends the review: {calls:?}"
+    );
+    let rows: Vec<u32> = calls
         .iter()
-        .map(|call| match call {
-            RpcCall::BufSetText { edits, .. } => edits[0].start_row,
-            other => panic!("expected BufSetText, got {other:?}"),
+        .filter_map(|call| match call {
+            RpcCall::BufSetText { edits, .. } => Some(edits[0].start_row),
+            _ => None,
         })
         .collect();
     assert_eq!(rows.len(), 2);
@@ -6548,20 +6560,18 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
 fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
     let mut m = live_review_model();
 
-    for _ in 0..2 {
-        let effects = update(&mut m, key("x"));
-        assert!(
-            rpc_calls(&effects).is_empty(),
-            "a rejection is a decision not to write: {effects:?}"
-        );
-    }
-
-    let review = m.ai_panel().pending_diff.as_ref().unwrap();
-    assert!(!review.is_open());
-    assert!(review
-        .hunks
-        .iter()
-        .all(|h| h.status == crate::native::diff::HunkStatus::Rejected));
+    let effects = update(&mut m, key("x"));
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "a rejection is a decision not to write: {effects:?}"
+    );
+    let effects = update(&mut m, key("x"));
+    assert_eq!(
+        rpc_calls(&effects),
+        vec![RpcCall::BufDetach { buf: REVIEW_BUF }],
+        "rejecting the last hunk writes nothing and ends the review"
+    );
+    assert!(m.ai_panel().pending_diff.is_none());
 }
 
 /// Hunk-jump is the review's primary navigation and it skips what is

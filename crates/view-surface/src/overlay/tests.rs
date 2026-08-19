@@ -403,6 +403,49 @@ fn an_ai_panel_with_a_pending_permission_renders_its_question_and_options() {
     );
 }
 
+/// An open review has to reach the painted frame, not only
+/// `AiPanelView`'s own fields: its summary lands in the header, its hunk
+/// rows scroll below the rule, and the scroll window follows the
+/// hunk-jump cursor rather than starting from the top -- the review's
+/// primary navigation is only primary if the selected hunk is what the
+/// window shows.
+#[test]
+fn an_ai_panel_with_an_open_review_paints_its_hunks_and_follows_the_cursor() {
+    use view_core::native::views::AiPanelView;
+    let hunk_rows: Vec<Vec<Span>> = (0..30)
+        .map(|row| vec![Span::plain(format!("hunk row {row}"))])
+        .collect();
+    let kind = LayerKind::Ai(
+        AiPanelView::new("AI Agent")
+            .with_input("")
+            .with_rows(hunk_rows)
+            .with_review(
+                vec![vec![Span::plain(
+                    "Review src/main.rs -- hunk 3/4, 2 open".to_string(),
+                )]],
+                Some(20),
+            ),
+    );
+
+    let framed = rows(60, 10, &kind, BorderSet::ASCII);
+
+    let text: Vec<String> = framed.lines.iter().map(|line| line_text(line)).collect();
+    assert!(
+        text.iter().any(|line| line.contains("hunk 3/4, 2 open")),
+        "the review summary belongs in the header: {text:?}"
+    );
+    assert!(
+        text.iter().any(|line| line.contains("hunk row 20")),
+        "the window must show the hunk the cursor names, not the top of \
+         the review: {text:?}"
+    );
+    assert!(
+        !text.iter().any(|line| line.contains("hunk row 0")),
+        "the window scrolled to the cursor, so the first hunk is off it: \
+         {text:?}"
+    );
+}
+
 /// A request blocking the agent's own turn is unanswerable if the overlay
 /// is too short to show how to answer it: the option must survive, and the
 /// question and composer line -- context, not action -- are what a short

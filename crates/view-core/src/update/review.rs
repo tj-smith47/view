@@ -101,6 +101,7 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
         // review.
         _ => return Vec::new(),
     };
+    let mut effects = effects;
     // The cursor follows the work: once the hunk it names is decided,
     // there is nothing left to act on there and the next decision should
     // already be on screen.
@@ -111,6 +112,21 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             .is_some_and(|hunk| !hunk.status.is_open())
         {
             review.next_hunk();
+        }
+    }
+    // A review with nothing left to decide ends itself, subscription and
+    // all: every further edit in that buffer would otherwise be reported
+    // to a review that has no hunk left to rebase, one message per
+    // keystroke for no decision.
+    if model
+        .ai_panel()
+        .pending_diff
+        .as_ref()
+        .is_some_and(|review| !review.is_open())
+    {
+        let panel = model.ai_panel_mut();
+        if let Some(finished) = panel.pending_diff.take() {
+            effects.extend(finished.close_effect());
         }
     }
     match refusal {

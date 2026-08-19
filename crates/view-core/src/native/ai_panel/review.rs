@@ -338,10 +338,12 @@ impl DiffReviewState {
         rows
     }
 
-    /// The scrolling rows: every hunk's own header, then its removed and
-    /// added lines. Deliberately not the buffer around them -- the review's
-    /// scroll region is the hunks and their own context, never the whole
-    /// file.
+    /// The scrolling rows: every hunk's own header, the buffer row above
+    /// it, its removed and added lines, and the buffer row below it.
+    /// Deliberately nothing further -- the review's scroll region is the
+    /// hunks and their own context, never the whole file, so hunk-jump
+    /// stays the way to reach the next decision rather than scrolling
+    /// across buffer regions the proposal does not touch.
     #[must_use]
     pub fn hunk_rows(&self) -> Vec<Vec<Span>> {
         let mut rows = Vec::new();
@@ -352,12 +354,18 @@ impl DiffReviewState {
                 hunk.old_range.1,
                 status_label(hunk.status)
             ))]);
+            if hunk.has_leading_context() {
+                rows.push(context_row(hunk, hunk.old_range.0.saturating_sub(1)));
+            }
             for row in hunk.old_range.0..hunk.old_range.1 {
                 let text = hunk.anchor_row(row).map_or("", String::as_str);
                 rows.push(vec![Span::new(format!("-{text}"), StyleRole::DiffRemoved)]);
             }
             for line in &hunk.new_lines {
                 rows.push(vec![Span::new(format!("+{line}"), StyleRole::DiffAdded)]);
+            }
+            if hunk.has_trailing_context() {
+                rows.push(context_row(hunk, hunk.old_range.1));
             }
         }
         rows
@@ -375,12 +383,31 @@ impl DiffReviewState {
             if index == self.cursor {
                 return Some(row);
             }
-            row += 1
-                + usize::try_from(hunk.old_range.1.saturating_sub(hunk.old_range.0)).unwrap_or(0)
-                + hunk.new_lines.len();
+            row += rendered_rows(hunk);
         }
         None
     }
+}
+
+/// One unchanged buffer row shown beside a hunk, rendered in the diff's
+/// own gutter shape (a leading space) so the removed and added rows still
+/// line up with it.
+fn context_row(hunk: &Hunk, row: u32) -> Vec<Span> {
+    vec![Span::plain(format!(
+        " {}",
+        hunk.anchor_row(row).map_or("", String::as_str)
+    ))]
+}
+
+/// How many rows one hunk contributes to [`DiffReviewState::hunk_rows`].
+/// Shared with `cursor_row` rather than counted twice: a cursor row that
+/// disagreed with the rendered rows would scroll the window to the wrong
+/// hunk.
+fn rendered_rows(hunk: &Hunk) -> usize {
+    1 + usize::from(hunk.has_leading_context())
+        + usize::try_from(hunk.old_range.1.saturating_sub(hunk.old_range.0)).unwrap_or(0)
+        + hunk.new_lines.len()
+        + usize::from(hunk.has_trailing_context())
 }
 
 fn status_label(status: HunkStatus) -> &'static str {
@@ -668,14 +695,17 @@ mod tests {
         let state = review();
         let rows = state.hunk_rows();
         assert_eq!(rows[0], vec![Span::plain("@@ 1..2 @@ fresh")]);
-        assert_eq!(rows[1], vec![Span::new("-b", StyleRole::DiffRemoved)]);
-        assert_eq!(rows[2], vec![Span::new("+B", StyleRole::DiffAdded)]);
+        assert_eq!(rows[1], vec![Span::plain(" a")], "the row above the hunk");
+        assert_eq!(rows[2], vec![Span::new("-b", StyleRole::DiffRemoved)]);
+        assert_eq!(rows[3], vec![Span::new("+B", StyleRole::DiffAdded)]);
+        assert_eq!(rows[4], vec![Span::plain(" c")], "the row below it");
         assert_eq!(
             rows.len(),
-            6,
+            10,
             "two hunks of one removed and one added line each, plus their \
-             headers -- the rows between them are not part of the review's \
-             scroll region: {rows:?}"
+             headers and their own one row of context on each side -- the \
+             rows between the hunks are not part of the review's scroll \
+             region: {rows:?}"
         );
     }
 
@@ -684,6 +714,6 @@ mod tests {
         let mut state = review();
         assert_eq!(state.cursor_row(), Some(0));
         state.next_hunk();
-        assert_eq!(state.cursor_row(), Some(3));
+        assert_eq!(state.cursor_row(), Some(5));
     }
 }

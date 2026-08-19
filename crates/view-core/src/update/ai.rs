@@ -183,13 +183,11 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             // from under them, on the same terms
             // `AiPanelState::pending_diff`'s own doc states: the arriving
             // proposal is announced instead, and the user closes the one
-            // they are on when they are ready for it.
-            if model
-                .ai_panel()
-                .pending_diff
-                .as_ref()
-                .is_some_and(DiffReviewState::is_open)
-            {
+            // they are on when they are ready for it. Any review still on
+            // screen is one the user still owns -- a review whose every
+            // hunk is decided closes itself (see `update::review`), so
+            // there is no finished one left here to swap out.
+            if model.ai_panel().pending_diff.is_some() {
                 return model.engine.record_native_notice(
                     format!(
                         "AI agent proposed changes to {} while a review is open",
@@ -200,9 +198,6 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             }
             let mut effects = Vec::new();
             let panel = model.ai_panel_mut();
-            if let Some(finished) = panel.pending_diff.take() {
-                effects.extend(finished.close_effect());
-            }
             panel.review_generation += 1;
             let review = DiffReviewState::new(request_id, path, panel.review_generation, hunks);
             effects.push(review.bind_effect());
