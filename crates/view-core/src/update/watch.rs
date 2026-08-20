@@ -59,15 +59,31 @@ pub(super) fn on_checktime_reply(
             // the answer the user gave was destructive (discard the local
             // edits), so a reload that raised must say so rather than pass
             // for a completed discard. What it must NOT do is promise which
-            // side survived: `:edit!` raising after it has already read the
-            // file leaves the external content in the buffer, and raising
-            // before it leaves the local edits -- both answer `ok = false`
-            // and the wire cannot tell them apart
+            // side survived: `:edit!` clears the buffer before it reads, so
+            // every failure shape captured leaves either the external
+            // content or an empty buffer, never the local edit
             // (`docs/checktime-wire-capture.md` case 7a)
             CheckTimeOutcome::ReloadFailed => {
                 effects.extend(model.engine.record_native_notice(
                     format!(
                         "reloading {} did not finish -- check the buffer before saving over it",
+                        path.display()
+                    ),
+                    false,
+                ));
+                model.dirty = true;
+            }
+            // nothing was reloaded and nothing was lost: the chunk stats
+            // before it reloads precisely so this case never reaches
+            // `:edit!`, which would have succeeded against the missing path
+            // and emptied the buffer. Saying so matters because the user
+            // asked for a discard and did not get one -- and because the
+            // buffer is now the only copy left
+            CheckTimeOutcome::FileGone => {
+                effects.extend(model.engine.record_native_notice(
+                    format!(
+                        "{} is no longer on disk -- nothing was reloaded, \
+                         and your buffer still holds your edits",
                         path.display()
                     ),
                     false,
@@ -317,6 +333,24 @@ mod tests {
 
     /// A degraded watch says so. Through the notice path, so it survives
     /// the `SessionReady` that clears the AI panel's own crash banner.
+    /// The file is gone: nothing was reloaded, so the user is owed a notice
+    /// rather than `Reloaded`'s silence, and no prompt -- the question the
+    /// prompt would ask has no answer left to offer.
+    #[test]
+    fn a_forced_reload_of_a_vanished_file_is_reported() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let effects = update(
+            &mut model,
+            checktime_reply(2, &[("/proj/src/lib.rs", CheckTimeOutcome::FileGone)]),
+        );
+        assert!(
+            model.engine.messages.entries.len() > before,
+            "a vanished file must leave the user a notice, got effects {effects:?}"
+        );
+        assert_eq!(model.overlays().len(), 0);
+    }
+
     #[test]
     fn a_degraded_watch_is_reported() {
         let mut model = Model::new();

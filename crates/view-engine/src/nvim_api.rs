@@ -1257,11 +1257,17 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// is what makes every `force: false` call safe to issue from the
 /// watcher's own probe without risking that stall.
 ///
-/// The force branch answers `forced` and `ok` and never `fired`, which is
-/// what makes the user's own "reload, discard local edits" answer
-/// structurally distinguishable on the wire from the fresh conflict that
-/// prompted it -- and `ok` is `pcall`'s own result, so a reload that raised
-/// cannot read as a completed discard (capture doc, cases 7 and 7a).
+/// The force branch answers `forced` and never `fired`, which is what makes
+/// the user's own "reload, discard local edits" answer structurally
+/// distinguishable on the wire from the fresh conflict that prompted it --
+/// and `ok` is `pcall`'s own result, so a reload that raised cannot read as
+/// a completed discard (capture doc, cases 7 and 7a).
+///
+/// It stats before it reloads, and answers `gone` instead of reloading when
+/// the file is no longer there. `:edit!` on a missing path *succeeds* in
+/// nvim -- it opens a new, empty file -- so reloading anyway would answer
+/// `ok = true`, empty the buffer, and leave one `:w` between the user and a
+/// file recreated empty, with nothing said (capture doc, case 7e).
 const CHECKTIME_CHUNK: &str = "\
 local paths, force = ...
 local function canon(p)
@@ -1276,12 +1282,17 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
 end
 local results = {}
 for i, path in ipairs(paths) do
-  local bufnr = loaded[canon(path)]
+  local canonical = canon(path)
+  local bufnr = loaded[canonical]
   if bufnr == nil then
     results[i] = { found = false }
   elseif force then
-    local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    if vim.uv.fs_stat(canonical) == nil then
+      results[i] = { found = true, forced = true, gone = true }
+    else
+      local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    end
   else
     local fired = false
     local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
@@ -1327,6 +1338,9 @@ fn decode_checktime_entry(entry: &Value) -> CheckTimeOutcome {
         return CheckTimeOutcome::NoBuffer;
     }
     if flag("forced") {
+        if flag("gone") {
+            return CheckTimeOutcome::FileGone;
+        }
         return if flag("ok") {
             CheckTimeOutcome::Reloaded
         } else {
@@ -3169,6 +3183,10 @@ mod tests {
             (
                 vec![("found", true), ("forced", true), ("ok", false)],
                 CheckTimeOutcome::ReloadFailed,
+            ),
+            (
+                vec![("found", true), ("forced", true), ("gone", true)],
+                CheckTimeOutcome::FileGone,
             ),
         ];
         for (pairs, expected) in cases {

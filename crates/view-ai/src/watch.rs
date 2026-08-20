@@ -825,16 +825,21 @@ mod tests {
 
         let total = 200;
         let mut wanted: BTreeSet<PathBuf> = BTreeSet::new();
-        let writing = Instant::now();
         for i in 0..total {
             let path = root.join(format!("file{i}.rs"));
             std::fs::write(&path, b"x").unwrap();
             wanted.insert(path);
         }
-        let wrote_for = writing.elapsed();
 
         let mut batches = 0;
         let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+        // timed from the first batch, not from the write loop: how long the
+        // writer took says nothing about how long the backend took to
+        // deliver, and a loaded host can spread delivery over far more wall
+        // time than the writes themselves spanned. The pump's own windows
+        // are what the bound below is about, so the span the pump saw is
+        // what has to measure them.
+        let mut delivery: Option<Instant> = None;
         let deadline = Instant::now() + Duration::from_secs(20);
         while !wanted.is_subset(&seen) {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -846,6 +851,7 @@ mod tests {
             match rx.recv_timeout(remaining) {
                 Ok(Msg::ExternalWritesDetected { paths }) => {
                     batches += 1;
+                    delivery.get_or_insert_with(Instant::now);
                     seen.extend(paths);
                 }
                 Ok(other) => panic!("unexpected message {other:?}"),
@@ -855,10 +861,11 @@ mod tests {
         // the bound the design actually promises: one probe per coalescing
         // window, not merely "fewer than one per write". A regression to
         // near-per-event probing would still satisfy `batches < total`.
-        let windows = wrote_for.as_millis() / COALESCE_WINDOW.as_millis() + 2;
+        let spread = delivery.map(|first| first.elapsed()).unwrap_or_default();
+        let windows = spread.as_millis() / COALESCE_WINDOW.as_millis() + 2;
         assert!(
             u128::try_from(batches).unwrap_or(u128::MAX) <= windows,
-            "{total} writes spanning {wrote_for:?} cost {batches} probes of nvim's \
+            "{total} writes delivered over {spread:?} cost {batches} probes of nvim's \
              main loop, more than the {windows} windows they crossed"
         );
 

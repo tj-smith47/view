@@ -236,14 +236,60 @@ edits"), so a forced reload that raised must be reported rather than read as
 a completed discard. `ok` is what `CheckTimeOutcome::ReloadFailed` decodes
 from.
 
-`ok = false` does not say which content the buffer is left holding. In this
-very capture the `BufReadPost` autocmd raises *after* `:edit!` has already
-read the file, so the buffer holds the external content and the local edit
-is gone; a failure earlier in the re-read (the file removed, permissions
-refused) leaves the local edit in place instead. Both shapes answer
-`ok = false` and nothing on the wire separates them, which is why the notice
-`update/watch.rs` records tells the user to check the buffer rather than
-claiming either side survived.
+`ok = false` does not say which content the buffer is left holding, and no
+captured shape leaves the user's local edit. In this capture the
+`BufReadPost` autocmd raises *after* `:edit!` has already read the file, so
+the buffer holds the external content:
+
+```
+  lines after -> ["changed-externally"]
+```
+
+`:edit!` clears the buffer before it reads, so a raise earlier in the
+re-read leaves an empty buffer rather than the local edit. Every shape
+answers `ok = false` with `modified = false`, so nothing on the wire
+separates them -- which is why the notice `update/watch.rs` records tells
+the user to check the buffer rather than claiming any side survived.
+
+## 7e. `gone = true`: the file the reload would have read is not there
+
+`:edit!` against a missing path is a *success* in nvim -- it opens a new,
+empty file -- so a forced reload of a deleted file answers `ok = true` and
+leaves the buffer empty, with nothing on the wire to say anything went
+wrong. Captured against the branch as it stood before this case existed:
+
+```
+PREVIOUS CHUNK(paths={"force_deleted_old.txt"}, force=true)
+  -> { results = { { found = true, forced = true, ok = true, modified = false } } }
+  lines after -> [""]
+```
+
+That is silent data loss on the ordinary path: an agent removes a file the
+user has unsaved edits in, `FileChangedShell` raises the conflict prompt,
+the user answers "reload", and the buffer is emptied with no notice and one
+`:w` away from recreating the file empty.
+
+The force branch therefore stats before it reloads, and does not reload at
+all when the file is gone:
+
+```
+CHUNK(paths={"force_deleted.txt"}, force=false)  -- the prompt the user answers
+  -> { results = { { found = true, fired = true, modified = true } } }
+CHUNK(paths={"force_deleted.txt"}, force=true)
+  -> { results = { { found = true, forced = true, gone = true } } }
+  lines after    -> ["local-edit"]
+  modified after -> true
+  file recreated -> false
+```
+
+The buffer keeps the user's edits, the file is not recreated, and
+`gone = true` decodes to `CheckTimeOutcome::FileGone`, which owes the user a
+notice rather than `Reloaded`'s silence. The `gone` branch answers neither
+`ok` nor `modified`: nothing ran, so there is nothing to report about it.
+
+A file removed between the stat and the `:edit!` is not covered by the stat
+-- it is the same race as before this case existed, narrowed to that window,
+and nvim's own `:edit!` has no atomic alternative to offer.
 
 ## 8. One batched call over several paths at once
 
@@ -293,12 +339,17 @@ for _, b in ipairs(vim.api.nvim_list_bufs()) do
 end
 local results = {}
 for i, path in ipairs(paths) do
-  local bufnr = loaded[canon(path)]
+  local canonical = canon(path)
+  local bufnr = loaded[canonical]
   if bufnr == nil then
     results[i] = { found = false }
   elseif force then
-    local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    if vim.uv.fs_stat(canonical) == nil then
+      results[i] = { found = true, forced = true, gone = true }
+    else
+      local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    end
   else
     local fired = false
     local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
@@ -323,7 +374,7 @@ end
 return { results = results }
 ```
 
-Each `results` entry decodes into one `CheckTimeOutcome`, and the five
+Each `results` entry decodes into one `CheckTimeOutcome`, and the six
 outcomes are the whole vocabulary -- a reply that reports both a fresh
 conflict and a completed forced reload is unrepresentable rather than merely
 unexpected:
@@ -335,6 +386,7 @@ unexpected:
 | `found = true, fired = true` | `Conflict` | the conflict prompt (cases 3/8) |
 | `found = true, forced = true, ok = true` | `Reloaded` | nothing -- the answer the user already gave, carried out (case 7) |
 | `found = true, forced = true, ok = false` | `ReloadFailed` | a notice: the discard the user asked for did not happen (case 7a) |
+| `found = true, forced = true, gone = true` | `FileGone` | a notice: the file is gone, nothing was reloaded, the buffer is the only copy left (case 7e) |
 
 `force = true` is issued only in answer to the user's own "reload, discard
 local edits" choice on an already-open conflict prompt, never as part of the

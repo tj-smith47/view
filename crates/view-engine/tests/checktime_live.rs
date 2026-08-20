@@ -5,10 +5,11 @@
 //! modified buffer facing one raises the conflict signal (`found: true,
 //! fired: true`); and a self-write (nvim's own, indistinguishable on the
 //! wire from `AiFsWrite`'s own mechanism) is a no-op even with local edits
-//! layered on top of it afterward. Two final cases prove `force: true`
+//! layered on top of it afterward. Three final cases prove `force: true`
 //! drives the explicit reload behind the user's own "discard local edits"
-//! answer, and that a re-read which raises is reported as a reload that did
-//! not finish rather than as a completed discard.
+//! answer, that a re-read which raises is reported as a reload that did not
+//! finish rather than as a completed discard, and that a file no longer on
+//! disk is never "reloaded" over the user's own edits.
 //!
 //! [`EngineHandle::checktime`]: view_engine::nvim_api::EngineHandle::checktime
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -468,5 +469,65 @@ fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard()
     // content is what survives here, while a failure earlier in the re-read
     // would leave the local edit. The wire says only that the reload did
     // not finish, which is exactly what the recorded notice may claim.
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// The destructive answer against a file that is gone. `:edit!` on a missing
+/// path is a *success* in nvim -- it opens a new, empty file -- so reloading
+/// anyway answers `ok = true`, empties the buffer, and leaves one `:w`
+/// between the user and a file recreated empty, with nothing said. The whole
+/// sequence is the ordinary one this feature exists for: an agent removes a
+/// file the user has unsaved edits in, the conflict prompt opens, the user
+/// answers "reload". `docs/checktime-wire-capture.md` case 7e.
+#[test]
+fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
+    let root = scratch_root("force-deleted");
+    let path = root.join("case_force_deleted.txt");
+    std::fs::write(&path, "original\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let buf = resolve(&engine, &rx, &name);
+    set_lines(&engine, buf, &["local-edit"]);
+
+    settle_mtime();
+    std::fs::remove_file(&path).expect("remove the file out of band");
+
+    // the prompt the user answers: a removal raises `FileChangedShell` on a
+    // modified buffer exactly the way an external rewrite does
+    engine
+        .handle
+        .checktime(10, std::slice::from_ref(&name), false)
+        .expect("issue the probe");
+    assert_eq!(next_checktime_reply(&rx).only(), CheckTimeOutcome::Conflict);
+
+    engine
+        .handle
+        .checktime(11, std::slice::from_ref(&name), true)
+        .expect("issue the forced reload");
+    let forced = next_checktime_reply(&rx);
+    assert_eq!(forced.request_id, 11);
+    assert_eq!(
+        forced.only(),
+        CheckTimeOutcome::FileGone,
+        "a reload of a file that is gone must not read back as a completed one"
+    );
+    assert_eq!(
+        lines_of(&engine, buf),
+        vec!["local-edit".to_string()],
+        "the buffer is the only copy left -- it must not be emptied"
+    );
+    assert!(
+        is_modified(&engine, buf),
+        "the edits were never discarded, so the buffer must still read modified"
+    );
+    assert!(
+        !path.exists(),
+        "a forced reload must not recreate the file it could not read"
+    );
+
     engine.handle.release_hidden(&name).expect("release");
 }

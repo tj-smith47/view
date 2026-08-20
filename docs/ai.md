@@ -83,12 +83,20 @@ change?
 - **Keep local** leaves your edits exactly as they are and ignores the
   external change; the file on disk is not touched by this choice.
 
-If a reload cannot be carried out -- the file was removed between the
-prompt and your answer, or something refused the re-read -- view says so
-rather than letting it pass for a completed discard. It does not guess
-which version you are left looking at: a re-read that fails part way
-through can leave either one, so the notice tells you to check the buffer
-before you save over the file.
+If the file was removed between the prompt and your answer, nothing is
+reloaded at all -- your buffer keeps your edits, and view tells you the
+file is gone and that the buffer is now the only copy:
+
+```
+/home/you/project/src/lib.rs is no longer on disk -- nothing was reloaded,
+and your buffer still holds your edits
+```
+
+If the re-read is refused for some other reason, view says that too rather
+than letting it pass for a completed discard. It does not guess what you
+are left looking at, because a re-read that fails part way through can
+leave the new content or an empty buffer, so the notice tells you to check
+the buffer before you save over the file.
 
 Nothing about the *outcome* depends on which tool made the change: once
 view knows a file changed on disk, an agent's shell command, a `git`

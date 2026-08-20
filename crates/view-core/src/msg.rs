@@ -640,7 +640,7 @@ pub enum Msg {
 /// What nvim did about one path in a `RpcCall::Checktime`.
 ///
 /// A closed vocabulary rather than the wire's own `found`/`fired`/`forced`/
-/// `ok` flags, because the combinations that matter are exactly these five
+/// `ok` flags, because the combinations that matter are exactly these six
 /// and the ones that do not are unrepresentable here: in particular a
 /// forced reload -- the user's own answer to a conflict prompt -- can never
 /// decode to the same value a fresh conflict does, which is what would
@@ -673,6 +673,13 @@ pub enum CheckTimeOutcome {
     /// destructive, so a discard that did not happen is reported rather
     /// than left to look like one that did.
     ReloadFailed,
+    /// The file the user asked to reload from is no longer on disk, so
+    /// nothing was reloaded and the buffer still holds what it held
+    /// (case 7e). Distinct from [`Self::Reloaded`] because `:edit!` on a
+    /// missing path *succeeds* in nvim -- it opens a new, empty file --
+    /// so folding this as a completed reload would silently empty a buffer
+    /// the user still has unsaved edits in.
+    FileGone,
 }
 
 /// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
