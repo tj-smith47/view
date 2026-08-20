@@ -236,6 +236,15 @@ edits"), so a forced reload that raised must be reported rather than read as
 a completed discard. `ok` is what `CheckTimeOutcome::ReloadFailed` decodes
 from.
 
+`ok = false` does not say which content the buffer is left holding. In this
+very capture the `BufReadPost` autocmd raises *after* `:edit!` has already
+read the file, so the buffer holds the external content and the local edit
+is gone; a failure earlier in the re-read (the file removed, permissions
+refused) leaves the local edit in place instead. Both shapes answer
+`ok = false` and nothing on the wire separates them, which is why the notice
+`update/watch.rs` records tells the user to check the buffer rather than
+claiming either side survived.
+
 ## 8. One batched call over several paths at once
 
 The reason the chunk takes a list: each call resolves every loaded buffer's

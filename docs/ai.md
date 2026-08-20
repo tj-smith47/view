@@ -53,7 +53,8 @@ operating system's own limit on watched directories was reached
 ```
 out-of-band write detection is degraded: the platform's watch limit was
 reached while registering /home/you/project/crates (raise
-fs.inotify.max_user_watches); writes under it will not be noticed
+fs.inotify.max_user_watches); writes under it, and under everything not
+yet registered, will not be noticed
 ```
 
 It never goes quiet and leaves you believing detection is on.
@@ -83,9 +84,11 @@ change?
   external change; the file on disk is not touched by this choice.
 
 If a reload cannot be carried out -- the file was removed between the
-prompt and your answer, or something refused the re-read -- view says that
-too, and your local edits stay in the buffer rather than silently being
-treated as discarded.
+prompt and your answer, or something refused the re-read -- view says so
+rather than letting it pass for a completed discard. It does not guess
+which version you are left looking at: a re-read that fails part way
+through can leave either one, so the notice tells you to check the buffer
+before you save over the file.
 
 Nothing about the *outcome* depends on which tool made the change: once
 view knows a file changed on disk, an agent's shell command, a `git`

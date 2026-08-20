@@ -5,8 +5,10 @@
 //! modified buffer facing one raises the conflict signal (`found: true,
 //! fired: true`); and a self-write (nvim's own, indistinguishable on the
 //! wire from `AiFsWrite`'s own mechanism) is a no-op even with local edits
-//! layered on top of it afterward. A final case proves `force: true` drives
-//! the explicit reload behind the user's own "discard local edits" answer.
+//! layered on top of it afterward. Two final cases prove `force: true`
+//! drives the explicit reload behind the user's own "discard local edits"
+//! answer, and that a re-read which raises is reported as a reload that did
+//! not finish rather than as a completed discard.
 //!
 //! [`EngineHandle::checktime`]: view_engine::nvim_api::EngineHandle::checktime
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -410,5 +412,61 @@ fn force_true_discards_the_local_edit_and_takes_the_external_content() {
         "a freshly `:edit!`-reloaded buffer must not read as modified"
     );
 
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// The destructive answer that did not happen. A `BufReadPost` autocmd that
+/// raises makes the chunk's own `pcall` around `:edit!` fail, which is the
+/// live shape `docs/checktime-wire-capture.md` case 7a captured: `ok` comes
+/// back false, the local edit is still in the buffer, and the user is owed a
+/// notice rather than silence -- silence here reads as "your edits were
+/// discarded", the exact opposite of what happened.
+#[test]
+fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard() {
+    let root = scratch_root("force-fails");
+    let path = root.join("case_force_fails.txt");
+    std::fs::write(&path, "original\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let buf = resolve(&engine, &rx, &name);
+    set_lines(&engine, buf, &["local-edit"]);
+
+    settle_mtime();
+    std::fs::write(&path, "changed-externally\n").expect("external write");
+
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(
+                    "vim.api.nvim_create_autocmd('BufReadPost', \
+                     { buffer = ..., callback = function() error('reload refused') end })",
+                ),
+                rmpv::Value::Array(vec![rmpv::Value::from(buf)]),
+            ],
+        )
+        .expect("register the raising autocmd");
+
+    engine
+        .handle
+        .checktime(9, std::slice::from_ref(&name), true)
+        .expect("issue the forced reload");
+    let forced = next_checktime_reply(&rx);
+    assert_eq!(forced.request_id, 9);
+    assert_eq!(
+        forced.only(),
+        CheckTimeOutcome::ReloadFailed,
+        "a `:edit!` that raised must not read back as a completed discard"
+    );
+    // deliberately no assertion on the buffer's content: this autocmd
+    // raises after `:edit!` has already read the file, so the external
+    // content is what survives here, while a failure earlier in the re-read
+    // would leave the local edit. The wire says only that the reload did
+    // not finish, which is exactly what the recorded notice may claim.
     engine.handle.release_hidden(&name).expect("release");
 }

@@ -642,12 +642,16 @@ mod tests {
             picker,
             ai_context,
             // `cat`, not `inert_ai_worker`'s "claude-code" id: a real,
-            // provisioning-free child this test can spawn, that echoes the
-            // driver's own `initialize` request back at itself forever
-            // rather than ever answering it -- alive and `Ready` for as
-            // long as the test needs, and never crashing on its own, which
-            // is what gives the restart below a live child to prove
-            // survives it.
+            // provisioning-free child this test can spawn, whose process
+            // stays alive for as long as the test needs, which is what
+            // gives the restart below a live child to prove survives it.
+            // Its session, though, does not: echoing the driver's own
+            // `initialize` request back is a malformed reply, so the
+            // session reports `SessionCrashed` early and its watch is
+            // correctly torn down. The slot still reads `Ready` here
+            // because that demotion is lazy while watch teardown is eager
+            // -- so this fixture can attest the worker and the child, and
+            // never the watch.
             ai: crate::ai_worker::AiWorker::new(
                 view_ai::AgentSpec::Command(vec!["cat".to_string()]),
                 std::path::PathBuf::from("."),

@@ -973,14 +973,11 @@ mod tests {
     /// The out-of-band write watcher must never outlive its own session's
     /// crash: this is the falsifiable half of
     /// [`AiWorker::spawn_in_background`]'s own "## The watcher's own
-    /// lifetime" doc, which starts the watch strictly before
-    /// `AiSession::spawn` is even called rather than after `Ready` is
-    /// published. A regression that moved the start back to after
-    /// `Ok(session)` would race the crash-forwarding closure's own
-    /// `stop_watch` -- `true` exits fast enough that on the overwhelming
-    /// majority of runs, the closure's no-op `stop_watch` (nothing started
-    /// yet) would win the race, and the later `start_watch` would leave
-    /// this assertion observing a watch that outlived its own dead session.
+    /// lifetime" doc. `true` exits before its own watch can finish
+    /// starting, so the crash-forwarding closure's `stop_watch` runs while
+    /// nothing is published yet -- the interleaving the generation slot
+    /// exists for, and the one a plain "take the handle out" teardown would
+    /// let a later `start_watch` walk straight past.
     #[test]
     fn a_watch_never_outlives_its_own_crashed_session() {
         let dir = watch_tempdir("crashed");

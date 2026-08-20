@@ -57,13 +57,17 @@ pub(super) fn on_checktime_reply(
             | CheckTimeOutcome::Reloaded => {}
             CheckTimeOutcome::Conflict => open_conflict_prompt(model, path),
             // the answer the user gave was destructive (discard the local
-            // edits), so a reload that raised must say so: the edits are
-            // still in the buffer, which is the opposite of what the user
-            // was told would happen
+            // edits), so a reload that raised must say so rather than pass
+            // for a completed discard. What it must NOT do is promise which
+            // side survived: `:edit!` raising after it has already read the
+            // file leaves the external content in the buffer, and raising
+            // before it leaves the local edits -- both answer `ok = false`
+            // and the wire cannot tell them apart
+            // (`docs/checktime-wire-capture.md` case 7a)
             CheckTimeOutcome::ReloadFailed => {
                 effects.extend(model.engine.record_native_notice(
                     format!(
-                        "could not reload {} -- your local edits are still in the buffer",
+                        "reloading {} did not finish -- check the buffer before saving over it",
                         path.display()
                     ),
                     false,

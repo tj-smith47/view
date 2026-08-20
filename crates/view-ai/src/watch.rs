@@ -37,7 +37,7 @@ use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{Event, RecursiveMode, Watcher};
 use view_core::msg::Msg;
 
 /// Paths seen closer together than this leave as one batched
@@ -102,7 +102,15 @@ pub enum WatchError {
 /// The one real platform watcher, shared by every [`WatchHandle`] clone and
 /// by the watch's own thread (which keeps registering directories into it
 /// as they appear). `None` once [`WatchHandle::stop`] has taken it out.
-type WatcherSlot = Arc<Mutex<Option<RecommendedWatcher>>>;
+///
+/// Boxed behind `notify`'s own trait rather than held as the concrete
+/// `RecommendedWatcher`: a backend that refuses one directory and a backend
+/// that has hit the host's watch limit take [`register`] down two very
+/// different paths, and neither can be provoked from outside without
+/// either racing the walk or changing a global sysctl on the machine the
+/// test runs on. One indirection per directory, paid once at registration,
+/// buys both branches a real test.
+type WatcherSlot = Arc<Mutex<Option<Box<dyn Watcher + Send>>>>;
 
 /// Set once the initial registration walk has finished, so a caller that
 /// needs to know detection is actually live can wait for it instead of
@@ -116,8 +124,8 @@ type Ready = Arc<(Mutex<bool>, std::sync::Condvar)>;
 /// down the one real subscription for all of them -- the same
 /// shared-teardown shape `AiWorker`'s own clone already has for its
 /// session slot. No custom `Drop` impl: once the last clone's `Arc` goes
-/// away, the `Mutex<Option<RecommendedWatcher>>` it owns drops along with
-/// it, which drops the `RecommendedWatcher` inside on exactly the same
+/// away, the `Mutex<Option<_>>` it owns drops along with
+/// it, which drops the watcher inside on exactly the same
 /// terms `stop` unregisters it on -- the cascade already does the right
 /// thing without repeating that logic in a second place.
 #[derive(Clone)]
@@ -231,17 +239,19 @@ fn register(
         // `.gitignore` describing exactly the output no buffer will name
         .require_git(false)
         .filter_entry(move |entry| !is_excluded(entry.path(), &root_owned));
-    // a degradation is worth saying once per registration: a tree whose
-    // permissions refuse a whole subdirectory would otherwise repeat the
-    // same notice for every entry under it
-    let mut reported = false;
+    // each degradation class says its piece once per registration -- a tree
+    // whose permissions refuse a whole subdirectory would otherwise repeat
+    // the same notice for every entry under it -- and the two are counted
+    // apart so the quieter one can never silence the other
+    let mut walk_error_reported = false;
+    let mut watch_error_reported = false;
     let mut registered = 0;
     for entry in builder.build() {
         let entry = match entry {
             Ok(entry) => entry,
             Err(err) => {
-                if !reported {
-                    reported = true;
+                if !walk_error_reported {
+                    walk_error_reported = true;
                     emit(degraded(format!(
                         "part of {} could not be listed ({err}); \
                          writes under it will not be noticed",
@@ -267,22 +277,30 @@ fn register(
             continue;
         };
         drop(guard);
-        let reason = if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) {
-            format!(
+        // the limit is the host's, not this directory's, so every later
+        // registration would fail identically: stopping is the honest
+        // answer, and the notice has to name the whole remainder rather
+        // than the one path that happened to hit it first
+        if matches!(err.kind, notify::ErrorKind::MaxFilesWatch) {
+            emit(degraded(format!(
                 "the platform's watch limit was reached while registering {} \
-                 (raise fs.inotify.max_user_watches); writes under it will not be noticed",
+                 (raise fs.inotify.max_user_watches); writes under it, and under \
+                 everything not yet registered, will not be noticed",
                 entry.path().display()
-            )
-        } else {
-            format!(
+            )));
+            return registered;
+        }
+        // one directory refusing says nothing about the rest of the tree --
+        // a directory vanishing mid-walk is ordinary under a root an agent
+        // runs builds in, which is this whole feature's premise -- so the
+        // walk goes on and the coverage lost is that one directory
+        if !watch_error_reported {
+            watch_error_reported = true;
+            emit(degraded(format!(
                 "{} could not be watched ({err}); writes under it will not be noticed",
                 entry.path().display()
-            )
-        };
-        if !reported {
-            emit(degraded(reason));
+            )));
         }
-        return registered;
     }
     registered
 }
@@ -446,7 +464,7 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
     // against the realpath'd root or a symlinked project root would leave
     // every event looking like it fell outside the tree
     let root_owned = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let slot: WatcherSlot = Arc::new(Mutex::new(Some(watcher)));
+    let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
     let ready: Ready = Ready::default();
     let thread_slot = Arc::clone(&slot);
     let thread_ready = Arc::clone(&ready);
@@ -473,6 +491,151 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
 mod tests {
     use super::*;
     use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    /// A backend that answers by call index rather than by path, so
+    /// [`register`]'s two failure paths can be driven without racing a real
+    /// walk or lowering the host's own `max_user_watches`. Index-based on
+    /// purpose: directory order inside a walk is the filesystem's business,
+    /// so a test that named paths would be asserting on readdir order.
+    struct FakeWatcher {
+        calls: usize,
+        /// The call index that answers with an ordinary refusal (the shape a
+        /// directory vanishing mid-walk has). `usize::MAX` for none.
+        refuse_at: usize,
+        /// The first call index that answers with the host's watch limit.
+        limit_at: usize,
+        watched: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl notify::Watcher for FakeWatcher {
+        fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> {
+            Err(notify::Error::generic(
+                "this double is constructed directly",
+            ))
+        }
+
+        fn watch(&mut self, path: &Path, _: RecursiveMode) -> notify::Result<()> {
+            let call = self.calls;
+            self.calls += 1;
+            if call >= self.limit_at {
+                return Err(notify::Error::new(notify::ErrorKind::MaxFilesWatch));
+            }
+            if call == self.refuse_at {
+                return Err(notify::Error::generic("no such directory"));
+            }
+            self.watched
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(path.to_path_buf());
+            Ok(())
+        }
+
+        fn unwatch(&mut self, _: &Path) -> notify::Result<()> {
+            Ok(())
+        }
+
+        fn kind() -> notify::WatcherKind {
+            notify::WatcherKind::NullWatcher
+        }
+    }
+
+    /// Builds a root with `root`, `a`, `b`, `c` as its four directories and
+    /// a slot holding a [`FakeWatcher`] with the given answers.
+    fn fake_backend(
+        refuse_at: usize,
+        limit_at: usize,
+    ) -> (PathBuf, WatcherSlot, Arc<Mutex<Vec<PathBuf>>>) {
+        let root = tempdir();
+        for dir in ["a", "b", "c"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let watched = Arc::new(Mutex::new(Vec::new()));
+        let watcher = FakeWatcher {
+            calls: 0,
+            refuse_at,
+            limit_at,
+            watched: Arc::clone(&watched),
+        };
+        let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
+        (root, slot, watched)
+    }
+
+    /// One directory the backend refuses costs that directory's coverage and
+    /// nothing else. A directory vanishing part way through a walk is
+    /// ordinary under a root an agent runs builds in -- the case this whole
+    /// feature exists for -- so abandoning every directory the walk had not
+    /// yet reached would silently gut coverage of the tree while reporting
+    /// only the one path that failed.
+    #[test]
+    fn one_refused_directory_does_not_truncate_the_rest_of_the_walk() {
+        let (root, slot, watched) = fake_backend(1, usize::MAX);
+        let (msg_tx, msg_rx) = channel::<Msg>();
+        let emit = move |msg: Msg| {
+            let _ = msg_tx.send(msg);
+        };
+
+        let registered = register(&slot, &root, &root, &emit, None);
+
+        assert_eq!(registered, 3, "the walk stopped at the refusal");
+        assert_eq!(
+            watched.lock().unwrap().len(),
+            3,
+            "three of the four directories must still be watched"
+        );
+        match msg_rx.recv_timeout(Duration::from_millis(500)) {
+            Ok(Msg::ExternalWatchDegraded { reason }) => {
+                assert!(reason.contains("will not be noticed"), "got {reason:?}")
+            }
+            other => panic!("a refusal must report itself, got {other:?}"),
+        }
+        assert!(
+            matches!(
+                msg_rx.recv_timeout(Duration::from_millis(100)),
+                Err(RecvTimeoutError::Timeout)
+            ),
+            "one refusal must not become a storm of notices"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The host's watch limit is the one refusal that does stop the walk --
+    /// every later registration would fail identically -- so its notice has
+    /// to name the whole remainder rather than the one path that hit it
+    /// first, and it can never be suppressed by a degradation reported
+    /// earlier: the loudest failure must not be silenced by the quietest.
+    /// The string asserted here is the one `docs/ai.md` quotes to the user.
+    #[test]
+    fn the_watch_limit_stops_the_walk_and_still_says_so_after_another_refusal() {
+        let (root, slot, watched) = fake_backend(0, 1);
+        let (msg_tx, msg_rx) = channel::<Msg>();
+        let emit = move |msg: Msg| {
+            let _ = msg_tx.send(msg);
+        };
+
+        let registered = register(&slot, &root, &root, &emit, None);
+
+        assert_eq!(registered, 0);
+        assert!(watched.lock().unwrap().is_empty());
+        let mut reasons = Vec::new();
+        while let Ok(Msg::ExternalWatchDegraded { reason }) =
+            msg_rx.recv_timeout(Duration::from_millis(500))
+        {
+            reasons.push(reason);
+        }
+        assert_eq!(reasons.len(), 2, "got {reasons:?}");
+        let limit = &reasons[1];
+        assert!(
+            limit.contains("fs.inotify.max_user_watches"),
+            "the limit notice must name the knob that fixes it, got {limit:?}"
+        );
+        assert!(
+            limit.contains("everything not yet registered"),
+            "the limit notice must name the coverage it gave up, got {limit:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// A tempdir this crate's own `view-test-support` fixture would
     /// normally supply, but that crate is a dev-only leaf with no reach
@@ -519,7 +682,7 @@ mod tests {
             let _ = tx.send(result);
         })
         .expect("backend must be creatable");
-        let slot: WatcherSlot = Arc::new(Mutex::new(Some(watcher)));
+        let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
         let emit = |msg: Msg| panic!("a clean walk must report nothing, got {msg:?}");
 
         let registered = register(&slot, &root, &root, &emit, None);
@@ -662,11 +825,13 @@ mod tests {
 
         let total = 200;
         let mut wanted: BTreeSet<PathBuf> = BTreeSet::new();
+        let writing = Instant::now();
         for i in 0..total {
             let path = root.join(format!("file{i}.rs"));
             std::fs::write(&path, b"x").unwrap();
             wanted.insert(path);
         }
+        let wrote_for = writing.elapsed();
 
         let mut batches = 0;
         let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
@@ -687,9 +852,14 @@ mod tests {
                 Err(err) => panic!("channel closed with {} paths seen: {err}", seen.len()),
             }
         }
+        // the bound the design actually promises: one probe per coalescing
+        // window, not merely "fewer than one per write". A regression to
+        // near-per-event probing would still satisfy `batches < total`.
+        let windows = wrote_for.as_millis() / COALESCE_WINDOW.as_millis() + 2;
         assert!(
-            batches < total,
-            "{total} writes must not cost {batches} separate probes of nvim's main loop"
+            u128::try_from(batches).unwrap_or(u128::MAX) <= windows,
+            "{total} writes spanning {wrote_for:?} cost {batches} probes of nvim's \
+             main loop, more than the {windows} windows they crossed"
         );
 
         handle.stop();
@@ -864,7 +1034,7 @@ mod tests {
             let _ = tx.send(result);
         })
         .expect("backend must be creatable");
-        let slot: WatcherSlot = Arc::new(Mutex::new(Some(watcher)));
+        let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
         let (msg_tx, msg_rx) = channel::<Msg>();
 
         std::fs::create_dir_all(root.join("vanishing")).unwrap();
