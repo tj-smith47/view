@@ -454,21 +454,24 @@ impl Model {
     }
 
     /// Closes the open external-write conflict prompt for `path`, wherever
-    /// it sits in the stack, and reports whether one was found to close.
+    /// it sits in the stack, and does nothing if there is none.
     ///
     /// Keyed by path and not by focus: the prompt whose question has gone
     /// stale is rarely the one the user is looking at, and closing whatever
     /// happens to hold focus would dismiss a different file's conflict --
     /// or an unrelated overlay -- while leaving the stale one open.
-    pub fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) -> bool {
+    ///
+    /// Answers nothing, unlike the sibling closers: whether a prompt was
+    /// standing changes neither what the caller does next nor what the user
+    /// is told, and a `bool` nobody reads is a contract nobody can hold.
+    pub(crate) fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) {
         let Some(pos) = self.overlays.iter().position(|overlay| {
             matches!(&overlay.kind, OverlayKind::Prompt(p)
                 if p.external_write_conflict_path() == Some(path))
         }) else {
-            return false;
+            return;
         };
         self.take_overlay_at(pos);
-        true
     }
 
     /// The open tree's state, wherever it sits in the stack -- not only
@@ -929,6 +932,33 @@ impl EngineModel {
         replace_last: bool,
     ) -> Vec<crate::msg::Effect> {
         self.record_message("native".to_string(), vec![(0, text)], replace_last)
+    }
+
+    /// [`Self::record_native_notice`], except that the identical line
+    /// already standing is left alone rather than stacked on.
+    ///
+    /// For a notice raised by something that repeats on its own schedule: a
+    /// path that is still unreadable when the next detection window closes
+    /// answers the same way it did the last time, and a byte-identical copy
+    /// per window buries whatever stood above it and evicts real history
+    /// out of the bounded ring behind `:messages`. The standing line keeps
+    /// its own expiry rather than being reissued.
+    ///
+    /// Deliberately not what [`Self::record_native_notice`] does for
+    /// everyone: a repeat is sometimes the whole message -- a replacement
+    /// connection failing exactly the way the connection it replaced did is
+    /// news, and collapsing it would say the new one never failed.
+    pub fn record_native_notice_once(&mut self, text: String) -> Vec<crate::msg::Effect> {
+        let content = vec![(0, text)];
+        if self
+            .messages
+            .entries
+            .last()
+            .is_some_and(|last| last.is_native() && !last.condition && last.content == content)
+        {
+            return Vec::new();
+        }
+        self.record_message("native".to_string(), content, false)
     }
 }
 

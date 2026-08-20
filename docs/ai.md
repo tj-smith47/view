@@ -21,12 +21,13 @@ An agent can touch a file two ways, and view treats them differently:
   elsewhere in that buffer are never clobbered) and saves it. You see this
   the same way you see any other buffer change.
 - **Out-of-band** -- an agent's own shell tool (`sed`, `cat >`, a build
-  script, `git checkout`) writing a file directly. No ACP message describes
-  this; no client, view included, can see it as it happens. view catches it
-  a different way: while an agent session is running, a filesystem watcher
-  over the trusted project root notices the write and drives nvim's own
-  `:checktime` for it, the same mechanism that already runs when you switch
-  back to view after editing a file in another terminal.
+  script, `git checkout`) writing or removing a file directly. No ACP
+  message describes this; no client, view included, can see it as it
+  happens. view catches it a different way: while an agent session is
+  running, a filesystem watcher over the trusted project root notices the
+  write -- or the removal -- and drives nvim's own `:checktime` for it, the
+  same mechanism that already runs when you switch back to view after
+  editing a file in another terminal.
 
 ### When the watcher is running, and what it covers
 
@@ -40,6 +41,8 @@ the agent session:
 | a path outside the trusted project root | no |
 | `.git/`, `target/`, `node_modules/`, `.venv/`, or anything your `.gitignore` covers | no |
 
+A file being deleted counts as a change like any other: it is noticed on
+the same terms, and answered by the notice below rather than by a prompt.
 Editing a file in a second editor, or a `git` command in another terminal,
 is detected on exactly those terms -- during a session, inside the root,
 outside the skipped directories. With no session running, view notices the

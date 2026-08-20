@@ -1264,9 +1264,11 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// a completed discard (capture doc, cases 7 and 7a).
 ///
 /// One stat governs both branches, above the split rather than inside
-/// either: the question is not "does something exist here" but "can nvim
-/// read this as a file", and both `:checktime` and `:edit!` answer it
-/// catastrophically. On a missing path `:edit!` *succeeds* -- it opens a
+/// either -- and below the no-buffer arm, so a path nothing has loaded
+/// costs nvim's main loop no syscall at all, which is the ordinary shape
+/// of a batch an agent's build produced. The question is not "does
+/// something exist here" but "can nvim read this as a file", and both
+/// `:checktime` and `:edit!` answer it catastrophically. On a missing path `:edit!` *succeeds* -- it opens a
 /// new, empty file -- so it would answer `ok = true`, empty the buffer, and
 /// leave one `:w` between the user and a file recreated empty, with nothing
 /// said. On a pipe BOTH commands block on the open and never return,
@@ -1290,11 +1292,19 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// and the buffer's contents are exactly what that outcome's notice tells
 /// the user to check.
 ///
-/// The probe's own `pcall` is the honest catch-all for that same window on
-/// its side, and it is what lets the augroup cleanup on the next line run
-/// at all: an unprotected raise skipped it and left a one-shot
-/// `FileChangedShell` autocmd armed to set `fcs_choice = 'reload'` on some
-/// later, unrelated change.
+/// The probe's own `pcall` catches raises and only raises. It covers the
+/// one shape no stat can see -- a regular file the process may not open,
+/// which `:checktime` answers with `E321` (capture doc, case 10d) -- and
+/// the raising half of that same window; and it is what lets the augroup
+/// cleanup on the next line run at all, since an unprotected raise skipped
+/// it and left a one-shot `FileChangedShell` autocmd armed to set
+/// `fcs_choice = 'reload'` on some later, unrelated change. The blocking
+/// half of the window is not its to catch: a path that becomes a pipe
+/// between the stat and the command still wedges the main loop, and what
+/// notices that is
+/// [`HEARTBEAT_WEDGE_THRESHOLD`](crate::heartbeat::HEARTBEAT_WEDGE_THRESHOLD),
+/// whose `nvim_get_mode` probe stops being answered along with everything
+/// else on the connection.
 const CHECKTIME_CHUNK: &str = "\
 local paths, force = ...
 local function canon(p)
@@ -1311,35 +1321,37 @@ local results = {}
 for i, path in ipairs(paths) do
   local canonical = canon(path)
   local bufnr = loaded[canonical]
-  local st = vim.uv.fs_stat(canonical)
   if bufnr == nil then
     results[i] = { found = false }
-  elseif st == nil or st.type ~= 'file' then
-    results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
-  elseif force then
-    local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-    local after = vim.uv.fs_stat(canonical)
-    local ok = reloaded and after ~= nil and after.type == 'file'
-    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
   else
-    local fired = false
-    local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
-    vim.api.nvim_create_autocmd('FileChangedShell', {
-      group = group,
-      buffer = bufnr,
-      once = true,
-      callback = function()
-        fired = true
-        if vim.bo[bufnr].modified then
-          vim.v.fcs_choice = ''
-        else
-          vim.v.fcs_choice = 'reload'
-        end
-      end,
-    })
-    local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
-    pcall(vim.api.nvim_del_augroup_by_id, group)
-    results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+    local st = vim.uv.fs_stat(canonical)
+    if st == nil or st.type ~= 'file' then
+      results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
+    elseif force then
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local after = vim.uv.fs_stat(canonical)
+      local ok = reloaded and after ~= nil and after.type == 'file'
+      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    else
+      local fired = false
+      local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+      vim.api.nvim_create_autocmd('FileChangedShell', {
+        group = group,
+        buffer = bufnr,
+        once = true,
+        callback = function()
+          fired = true
+          if vim.bo[bufnr].modified then
+            vim.v.fcs_choice = ''
+          else
+            vim.v.fcs_choice = 'reload'
+          end
+        end,
+      })
+      local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
+      pcall(vim.api.nvim_del_augroup_by_id, group)
+      results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+    end
   end
 end
 return { results = results }";

@@ -96,6 +96,12 @@ rustix = { version = "1", default-features = false, features = ["fs"] }
 view-engine = { version = "0.0.1", path = "../view-engine", features = [
     "test-support",
 ] }
+# The same view-ai, with the barrier that lets a test observe a write the
+# filesystem watch was already covering rather than racing its registration
+# walk behind a sleep. Cargo enables it only for this package's test
+# targets, so the shipped binary is built from exactly the dependency
+# declared above.
+view-ai = { version = "0.0.1", path = "../view-ai", features = ["test-support"] }
 # The shared temp-dir fixture guard (see its own crate doc): used by both
 # this crate's own unit tests (src/native.rs) and its integration tests
 # (tests/cli_live.rs, tests/supersede_live.rs).

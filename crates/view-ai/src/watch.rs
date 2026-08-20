@@ -376,7 +376,17 @@ fn pump(
                 continue;
             }
         };
-        if !(event.kind.is_create() || event.kind.is_modify()) {
+        // a removal is nominated exactly like a write. An agent deleting a
+        // file the user has open is the most material shape this watch
+        // has, and it is the only one that raises neither a create nor a
+        // modify of its own -- filtering it left the user with a buffer
+        // whose file was gone and nothing said until something unrelated
+        // touched the path. Atomic-save tooling (temp file plus rename)
+        // emits a removal too, which is harmless because nomination is not
+        // a verdict: the checktime probe re-stats every path before
+        // answering, so a rename-based save that put the file back reads
+        // as the ordinary reload it is
+        if !(event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove()) {
             continue;
         }
         let is_create = event.kind.is_create();
@@ -774,6 +784,32 @@ mod tests {
 
         let target = root.join("touched.rs");
         std::fs::write(&target, b"hello").unwrap();
+
+        let paths = wait_for_path(&rx, &target);
+        assert!(paths.contains(&target), "got {paths:?}");
+
+        handle.stop();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Removing a file under the watched root raises a batch naming it,
+    /// exactly as a write does. The mutation this kills is the filter that
+    /// forwarded creates and modifies only: a bare `rm` is neither, so an
+    /// agent deleting a file the user had open was noticed by nothing at
+    /// all until some later, unrelated write touched the same path.
+    #[test]
+    fn a_removal_under_the_root_is_detected() {
+        let root = tempdir();
+        let target = root.join("removed.rs");
+        std::fs::write(&target, b"hello").unwrap();
+        let (tx, rx) = channel::<Msg>();
+        let handle = spawn(&root, move |msg| {
+            let _ = tx.send(msg);
+        })
+        .expect("watch must start against a real, writable tempdir");
+        assert!(handle.wait_until_watching(Duration::from_secs(5)));
+
+        std::fs::remove_file(&target).unwrap();
 
         let paths = wait_for_path(&rx, &target);
         assert!(paths.contains(&target), "got {paths:?}");

@@ -465,9 +465,10 @@ PREVIOUS CHUNK(paths={c_conflict.txt, c_socket.txt}, force=false)
 
 ### 10c. The stat hoisted above the split, and the probe's own `pcall`
 
-One predicate over both branches, plus a `pcall` around the probe's
-`:checktime` as the honest catch-all for the window between the stat and the
-command. The same batch, answered:
+One predicate over both branches -- taken inside the arm that found a
+buffer, so a path with nothing loaded for it still costs no syscall -- plus
+a `pcall` around the probe's `:checktime`, which catches raises and only
+raises (case 10d). The same batch, answered:
 
 ```
 CHUNK(paths={c_conflict.txt, c_socket.txt}, force=false)
@@ -545,6 +546,69 @@ CHUNK(paths={}, force=false)
   -> { results = {} }
 ```
 
+### 10d. The one unreadable shape no stat can see, and what the `pcall` is for
+
+`st.type == 'file'` asks what kind of path it is, and a regular file the
+process may not *open* answers "a file". `:checktime` on an unmodified
+buffer performs the re-read itself, the open is refused, and nvim raises
+`E321` out of the command -- past the stat, which had nothing wrong to
+report.
+
+Driven with the fixture made unreadable by mode bits, against a child
+dropped to an unprivileged uid (`setpriv --reuid=65534 --regid=65534
+--clear-groups nvim --clean --embed`), because mode bits are advisory to a
+privileged process and this host runs as root. Two paths in the call: the
+unreadable one, then one nothing touched.
+
+```
+$ timeout -s KILL 90 python3 t_perm.py
+uid seen by nvim:  65534
+stat type:         file
+nvim can open?     EACCES: permission denied: .../unreadable.txt
+CHUNK(paths={unreadable.txt, quiet.txt}, force=false)
+  -> { results = { { found = true, fired = false, modified = false },
+                   { found = true, fired = false, modified = false } } }
+  connection alive?  { mode = 'n', blocking = false }
+  augroup after   -> 0
+```
+
+The same fixture with the `pcall` alone removed -- the stat guard left
+exactly as it ships:
+
+```
+$ timeout -s KILL 90 python3 t_perm.py nopcall
+CHUNK err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../unreadable.txt"']
+     result=None
+  augroup after -> 1
+```
+
+Both losses of case 10b, reproduced from a path the stat cannot reject: the
+whole batch's answer, and the one-shot autocmd still armed. `HandledSilently`
+is the honest reading of the caught raise -- nothing was read, and nothing
+about the buffer changed for the user to be told about.
+
+### 10e. What the `pcall` does not catch
+
+The window between the stat and the command has a blocking half as well as a
+raising one, and `pcall` answers only the second. Driven deterministically
+with a `BufReadPre` autocmd that swaps a pipe in after the stat, while
+`:checktime` is already reading:
+
+```
+$ timeout -s KILL 120 python3 t_fiforace.py
+CHUNK err='TIMEOUT' res=None after 15.0s
+connection alive? nvim_get_mode -> 'TIMEOUT'
+$ pgrep -c nvim
+0
+```
+
+Reaching it means winning microseconds rather than replacing a file, and
+nothing on this side can close it -- nvim offers nothing atomic between the
+stat and the command. What notices it is the heartbeat: its own
+`nvim_get_mode` probe stops being answered exactly as the follow-up call
+above does, and `HEARTBEAT_WEDGE_THRESHOLD` (10s) turns that silence into a
+verdict, so a wedged engine surfaces rather than hanging quietly.
+
 ## Production chunk shape
 
 ```lua
@@ -563,35 +627,37 @@ local results = {}
 for i, path in ipairs(paths) do
   local canonical = canon(path)
   local bufnr = loaded[canonical]
-  local st = vim.uv.fs_stat(canonical)
   if bufnr == nil then
     results[i] = { found = false }
-  elseif st == nil or st.type ~= 'file' then
-    results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
-  elseif force then
-    local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-    local after = vim.uv.fs_stat(canonical)
-    local ok = reloaded and after ~= nil and after.type == 'file'
-    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
   else
-    local fired = false
-    local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
-    vim.api.nvim_create_autocmd('FileChangedShell', {
-      group = group,
-      buffer = bufnr,
-      once = true,
-      callback = function()
-        fired = true
-        if vim.bo[bufnr].modified then
-          vim.v.fcs_choice = ''
-        else
-          vim.v.fcs_choice = 'reload'
-        end
-      end,
-    })
-    local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
-    pcall(vim.api.nvim_del_augroup_by_id, group)
-    results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+    local st = vim.uv.fs_stat(canonical)
+    if st == nil or st.type ~= 'file' then
+      results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
+    elseif force then
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local after = vim.uv.fs_stat(canonical)
+      local ok = reloaded and after ~= nil and after.type == 'file'
+      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
+    else
+      local fired = false
+      local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
+      vim.api.nvim_create_autocmd('FileChangedShell', {
+        group = group,
+        buffer = bufnr,
+        once = true,
+        callback = function()
+          fired = true
+          if vim.bo[bufnr].modified then
+            vim.v.fcs_choice = ''
+          else
+            vim.v.fcs_choice = 'reload'
+          end
+        end,
+      })
+      local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
+      pcall(vim.api.nvim_del_augroup_by_id, group)
+      results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
+    end
   end
 end
 return { results = results }

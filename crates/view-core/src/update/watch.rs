@@ -92,21 +92,25 @@ pub(super) fn on_checktime_reply(
                 // the user their edits in exchange for nothing, so the
                 // question is withdrawn and the notice below stands in its
                 // place -- a prompt is worth keeping open only while one of
-                // its answers is still true
+                // its answers is still true.
+                //
+                // Withdrawing is involuntary, which every other overlay
+                // close is not: a key aimed at the prompt and pressed after
+                // the withdrawal lands finds no overlay focused and reaches
+                // nvim instead, where the prompt's own `r` is a normal-mode
+                // character replace. The window is one paint wide and the
+                // same one the cmdline-quiet dismissal already carries
                 model.close_external_write_conflict_prompt(&path);
                 let fate = if modified {
                     "and your buffer still holds your edits"
                 } else {
                     "and the buffer still holds the content it last read"
                 };
-                effects.extend(model.engine.record_native_notice(
-                    format!(
-                        "{} is no longer a readable file on disk -- nothing was \
-                         reloaded, {fate}",
-                        path.display()
-                    ),
-                    false,
-                ));
+                effects.extend(model.engine.record_native_notice_once(format!(
+                    "{} is no longer a readable file on disk -- nothing was \
+                     reloaded, {fate}",
+                    path.display()
+                )));
                 model.dirty = true;
             }
         }
@@ -406,6 +410,58 @@ mod tests {
             );
             assert_eq!(model.overlays().len(), 0);
         }
+    }
+
+    /// A path that keeps answering `FileGone` -- a pipe being written to
+    /// raises a detection per coalesce window, every one of them unreadable
+    /// -- says it once. The prompt this arm replaced was idempotent by
+    /// construction (`open_conflict_prompt` assigns in place), and a notice
+    /// that stacks a byte-identical copy per window would be a regression
+    /// against it: the pile buries whatever stood above it and evicts real
+    /// history out of the ring behind `:messages`.
+    ///
+    /// A *different* path's own notice still lands, which is what keeps
+    /// this from silencing a second file that vanished right after the
+    /// first.
+    #[test]
+    fn one_path_answering_gone_over_and_over_leaves_one_notice() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        for id in 1..=3 {
+            let _ = update(
+                &mut model,
+                checktime_reply(
+                    id,
+                    &[(
+                        "/proj/src/lib.rs",
+                        CheckTimeOutcome::FileGone { modified: false },
+                    )],
+                ),
+            );
+        }
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before + 1,
+            "three detections of one unreadable path are one thing to say: {:?}",
+            model.engine.messages.entries
+        );
+
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                4,
+                &[(
+                    "/proj/src/other.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before + 2,
+            "a second file that vanished is a second thing to say: {:?}",
+            model.engine.messages.entries
+        );
     }
 
     /// The watcher's own probe answers `FileGone` too, and it must land on

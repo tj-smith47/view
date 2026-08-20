@@ -24,6 +24,8 @@
 //! [`EngineHandle::checktime`]: view_engine::nvim_api::EngineHandle::checktime
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -537,12 +539,15 @@ fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard()
 /// The destructive answer against a file that is gone. `:edit!` on a missing
 /// path is a *success* in nvim -- it opens a new, empty file -- so reloading
 /// anyway answers `ok = true`, empties the buffer, and leaves one `:w`
-/// between the user and a file recreated empty, with nothing said. An agent
-/// removing a file the user has unsaved edits in is the ordinary way to
-/// arrive here. `docs/checktime-wire-capture.md` cases 7e and 10.
+/// between the user and a file recreated empty, with nothing said.
+/// `docs/checktime-wire-capture.md` cases 7e and 10.
 ///
-/// The forced call is still driven because it is still reachable: the path
-/// need only stop being a file between the prompt opening and the answer.
+/// An agent removing a file the user has unsaved edits in arrives at the
+/// *probe* row below: removals are nominated like writes, so the answer is
+/// the notice rather than a prompt whose only offer is a reload that cannot
+/// happen. The forced row is reached the one way left -- the path stops
+/// being a file between a prompt opening and the user answering it -- and
+/// is driven because that window is real.
 #[test]
 fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
     let row = forced_reload_after("force-deleted", |path| {
@@ -918,6 +923,173 @@ fn probe_augroup_count(engine: &Engine) -> i64 {
         .expect("count the probe augroup")
         .as_i64()
         .expect("the count is an integer")
+}
+
+/// The one unreadable shape `st.type == 'file'` cannot reject, and the only
+/// thing the probe's own `pcall` is left to catch: a regular file the
+/// editor may not *open*. `:checktime` on an unmodified buffer performs the
+/// re-read itself, the open is refused, and nvim raises `E321` out of the
+/// command -- past a stat that had nothing wrong to report
+/// (`docs/checktime-wire-capture.md` case 10d).
+///
+/// Unprotected, that raise ends the whole Lua chunk, and both losses of the
+/// batch test above come back from a path the guard cannot see: every entry
+/// degrades to `NoBuffer`, and the one-shot `FileChangedShell` autocmd
+/// stays armed to set `fcs_choice = 'reload'` on some later, unrelated
+/// change. The untouched path last in the call is what makes the leak
+/// observable, for the reason that test's own doc gives.
+///
+/// Mode bits are advisory to a privileged process, so the child is dropped
+/// to an unprivileged uid whenever the suite itself runs as root, and the
+/// refusal is read back through the child before the probe is issued: a
+/// fixture the editor could open would leave this passing while proving
+/// nothing.
+#[test]
+#[cfg(unix)]
+fn a_probe_of_a_file_the_editor_may_not_open_keeps_the_rest_of_its_batch() {
+    let root = scratch_root("probe-unreadable");
+    let unreadable = root.join("case_unreadable.txt");
+    let quiet = root.join("case_unreadable_quiet.txt");
+    for path in [&unreadable, &quiet] {
+        std::fs::write(path, "original\n").expect("write fixture");
+    }
+    let names: Vec<String> = [&unreadable, &quiet]
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    let mut engine = spawn_unprivileged(&root);
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let buf = resolve(&engine, &rx, &names[0]);
+    let _ = resolve(&engine, &rx, &names[1]);
+
+    settle_mtime();
+    std::fs::write(&unreadable, "changed-externally\n").expect("external write");
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+        .expect("deny reads on the fixture");
+
+    assert_eq!(
+        stat_type_seen_by(&engine, &names[0]),
+        "file",
+        "the whole point of this row is that the guard has nothing to reject"
+    );
+    assert!(
+        !can_be_opened_by(&engine, &names[0]),
+        "the editor must actually be refused, or nothing here is exercised"
+    );
+
+    engine
+        .handle
+        .checktime(15, &names, false)
+        .expect("issue the batched probe");
+    let probe = next_checktime_reply(&rx);
+    assert_eq!(probe.request_id, 15);
+    assert_eq!(
+        probe.results.len(),
+        2,
+        "an unprotected raise answers no array at all -- the whole call lost"
+    );
+    assert_eq!(
+        probe.results[0].1,
+        CheckTimeOutcome::HandledSilently,
+        "a refused re-read read nothing and changed nothing the user must be told about"
+    );
+    assert_eq!(
+        probe.results[1].1,
+        CheckTimeOutcome::HandledSilently,
+        "a path nothing touched must still be answered on its own terms"
+    );
+    assert_eq!(
+        probe_augroup_count(&engine),
+        0,
+        "the chunk's one-shot autocmd must never outlive the call that made it"
+    );
+    assert!(
+        !lines_of(&engine, buf).contains(&"changed-externally".to_string()),
+        "nothing was readable, so nothing may have been read into the buffer"
+    );
+
+    std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644))
+        .expect("restore the fixture's mode");
+    for name in &names {
+        engine.handle.release_hidden(name).expect("release");
+    }
+}
+
+/// [`spawn`], with the child dropped to the overflow uid when the suite runs
+/// as root. `nvim_bin` is a shell wrapper rather than an argument list
+/// because [`EngineConfig::extra_args`] lands *after* `--embed`, which is
+/// too late to name a program to run.
+#[cfg(unix)]
+fn spawn_unprivileged(root: &Scratch) -> Engine {
+    let mut config = EngineConfig::isolated();
+    if running_as_root() {
+        let wrapper = root.join("nvim-unprivileged");
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nexec setpriv --reuid=65534 --regid=65534 --clear-groups nvim \"$@\"\n",
+        )
+        .expect("write the privilege-dropping wrapper");
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
+            .expect("make the wrapper executable");
+        config = config.with_nvim_bin(&wrapper);
+    }
+    let engine = Engine::spawn(config).expect("spawn engine");
+    engine.handle.ui_attach(80, 24).expect("attach ui");
+    engine
+}
+
+#[cfg(unix)]
+fn running_as_root() -> bool {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .is_some_and(|uid| uid.trim() == "0")
+}
+
+/// What `vim.uv.fs_stat` answers for `path` inside the child -- the same
+/// call the chunk's own guard makes, asked from outside it.
+#[cfg(unix)]
+fn stat_type_seen_by(engine: &Engine, path: &str) -> String {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(
+                    "local p = ...\nlocal st = vim.uv.fs_stat(p)\nreturn st and st.type or 'none'",
+                ),
+                rmpv::Value::Array(vec![rmpv::Value::from(path)]),
+            ],
+        )
+        .expect("stat the fixture through the child")
+        .as_str()
+        .expect("the stat type is a string")
+        .to_owned()
+}
+
+/// Whether the child can open `path` for reading at all -- the question the
+/// stat cannot answer, and the one this row turns on.
+#[cfg(unix)]
+fn can_be_opened_by(engine: &Engine, path: &str) -> bool {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(
+                    "local p = ...\nlocal fd = vim.uv.fs_open(p, 'r', 420)\n                     if fd == nil then return false end\nvim.uv.fs_close(fd)\nreturn true",
+                ),
+                rmpv::Value::Array(vec![rmpv::Value::from(path)]),
+            ],
+        )
+        .expect("try the fixture open through the child")
+        .as_bool()
+        .expect("the open result is a bool")
 }
 
 /// The other side of the guard: an ordinary symlink to a real file must
