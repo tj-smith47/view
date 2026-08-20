@@ -673,12 +673,14 @@ pub enum CheckTimeOutcome {
     /// destructive, so a discard that did not happen is reported rather
     /// than left to look like one that did.
     ReloadFailed,
-    /// The file the user asked to reload from is no longer on disk, so
+    /// The path the user asked to reload from is no longer a readable file
+    /// -- deleted, dangling, or now holding a directory or a pipe -- so
     /// nothing was reloaded and the buffer still holds what it held
     /// (case 7e). Distinct from [`Self::Reloaded`] because `:edit!` on a
-    /// missing path *succeeds* in nvim -- it opens a new, empty file --
-    /// so folding this as a completed reload would silently empty a buffer
-    /// the user still has unsaved edits in.
+    /// missing path *succeeds* in nvim -- it opens a new, empty file -- so
+    /// folding this as a completed reload would silently empty a buffer the
+    /// user still has unsaved edits in, and on a pipe it never returns at
+    /// all.
     FileGone,
 }
 

@@ -83,13 +83,14 @@ change?
 - **Keep local** leaves your edits exactly as they are and ignores the
   external change; the file on disk is not touched by this choice.
 
-If the file was removed between the prompt and your answer, nothing is
-reloaded at all -- your buffer keeps your edits, and view tells you the
-file is gone and that the buffer is now the only copy:
+If the path is no longer a readable file when you answer -- removed, or now
+holding a directory, a symlink to nothing, or a pipe -- nothing is reloaded
+at all. Your buffer keeps your edits, and view tells you the buffer is now
+the only copy:
 
 ```
-/home/you/project/src/lib.rs is no longer on disk -- nothing was reloaded,
-and your buffer still holds your edits
+/home/you/project/src/lib.rs is no longer a readable file on disk -- nothing
+was reloaded, and your buffer still holds your edits
 ```
 
 If the re-read is refused for some other reason, view says that too rather

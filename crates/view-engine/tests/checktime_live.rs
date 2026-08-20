@@ -481,8 +481,56 @@ fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard()
 /// answers "reload". `docs/checktime-wire-capture.md` case 7e.
 #[test]
 fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
-    let root = scratch_root("force-deleted");
-    let path = root.join("case_force_deleted.txt");
+    let row = forced_reload_after("force-deleted", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+    });
+
+    assert_eq!(
+        row.probe,
+        CheckTimeOutcome::Conflict,
+        "a removal must open the prompt the way an external rewrite does, \
+         or the user never reaches the answer this case is about"
+    );
+    assert_eq!(
+        row.outcome,
+        CheckTimeOutcome::FileGone,
+        "a reload of a file that is gone must not read back as a completed one"
+    );
+    assert_eq!(
+        row.lines,
+        vec!["local-edit".to_string()],
+        "the buffer is the only copy left -- it must not be emptied"
+    );
+    assert!(
+        row.modified,
+        "the edits were never discarded, so the buffer must still read modified"
+    );
+    assert!(
+        !row.path.exists(),
+        "a forced reload must not recreate the file it could not read"
+    );
+}
+
+/// The window the guard cannot close from in front, driven deterministically
+/// by a `BufReadPre` autocmd that swaps a directory in after the chunk has
+/// stat'ed the path and while `:edit!` is already running -- the microseconds
+/// an agent's `rm -r && mkdir` would have to win by chance.
+///
+/// This shape is the one that gets through, and `pcall` is blind to it.
+/// A path that merely *vanishes* in that window is caught by nvim itself
+/// (`E200: *ReadPre autocommands made the file unreadable`), but a directory
+/// is something `:edit!` will happily open: it succeeds, hands the buffer a
+/// netrw listing in place of the user's unsaved edits, and clears `modified`.
+/// On `pcall` alone that reads back as `ok = true` -- a completed discard,
+/// reported to the user with silence.
+///
+/// The stat taken after the reload is the whole defence. It is deliberately
+/// not `FileGone`: by now `:edit!` has run, and `FileGone`'s notice promises
+/// the buffer still holds the user's edits, which here it no longer does.
+#[test]
+fn a_path_that_stops_being_a_file_mid_reload_is_not_reported_as_a_completed_one() {
+    let root = scratch_root("force-raced");
+    let path = root.join("case_force_raced.txt");
     std::fs::write(&path, "original\n").expect("write fixture");
     let name = path.to_string_lossy().into_owned();
 
@@ -494,15 +542,191 @@ fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
     set_lines(&engine, buf, &["local-edit"]);
 
     settle_mtime();
-    std::fs::remove_file(&path).expect("remove the file out of band");
+    std::fs::write(&path, "changed-externally\n").expect("external write");
 
-    // the prompt the user answers: a removal raises `FileChangedShell` on a
-    // modified buffer exactly the way an external rewrite does
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(
+                    "local b, p = ...\n\
+                     vim.api.nvim_create_autocmd('BufReadPre', { buffer = b, \
+                     callback = function() \
+                     vim.uv.fs_unlink(p) vim.uv.fs_mkdir(p, 493) end })",
+                ),
+                rmpv::Value::Array(vec![
+                    rmpv::Value::from(buf),
+                    rmpv::Value::from(name.clone()),
+                ]),
+            ],
+        )
+        .expect("register the swapping autocmd");
+
+    engine
+        .handle
+        .checktime(12, std::slice::from_ref(&name), true)
+        .expect("issue the forced reload");
+    let forced = next_checktime_reply(&rx);
+    assert_eq!(forced.request_id, 12);
+    assert_eq!(
+        forced.only(),
+        CheckTimeOutcome::ReloadFailed,
+        "a reload whose path stopped being a file under it must not read back \
+         as a completed discard, however well `:edit!` itself went"
+    );
+
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// A path that now holds a directory. Reachable only through the window
+/// between the guard's stat and the reload (a file-to-directory swap raises
+/// no `FileChangedShell` of its own, so it opens no prompt), but the outcome
+/// if it is reached is the same silent emptying a deleted file used to get.
+#[test]
+fn a_forced_reload_of_a_path_that_became_a_directory_reloads_nothing() {
+    let row = forced_reload_after("force-dir", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+        std::fs::create_dir(path).expect("put a directory in its place");
+    });
+
+    assert_eq!(
+        row.probe,
+        CheckTimeOutcome::HandledSilently,
+        "nvim raises no `FileChangedShell` for a directory in a file's place, \
+         which is what keeps this row off the prompt entirely"
+    );
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(
+        row.lines,
+        vec!["local-edit".to_string()],
+        "a directory has no content to reload, so the buffer must be left alone"
+    );
+}
+
+/// A symlink whose target is gone. `fs_stat` follows symlinks, so this
+/// answers exactly as a deleted file does -- which is the point: the guard
+/// asks what `:edit!` would be able to read, not what the path itself is.
+#[test]
+fn a_forced_reload_of_a_dangling_symlink_reloads_nothing() {
+    let row = forced_reload_after("force-dangling", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+        std::os::unix::fs::symlink(path.with_extension("nowhere"), path)
+            .expect("point the path at nothing");
+    });
+
+    assert_eq!(row.probe, CheckTimeOutcome::Conflict);
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(row.lines, vec!["local-edit".to_string()]);
+}
+
+/// The row the guard exists for. `:edit!` on a named pipe blocks reading it
+/// and never returns -- inside `nvim_exec_lua`, on nvim's single-threaded
+/// main loop, taking the RPC connection with it (capture doc case 7e, driven
+/// there under a bounded harness). `rm f && mkfifo f` is one shell command
+/// and raises `FileChangedShell` on the modified buffer, so the user reaches
+/// this by answering an ordinary conflict prompt.
+///
+/// Safe to run here: the guard means `:edit!` never executes, and a
+/// regression that let it through fails on `next_checktime_reply`'s own 5s
+/// deadline rather than hanging -- `Engine`'s `Drop` then `SIGKILL`s the
+/// wedged child, so a broken guard costs this test five seconds, not the
+/// suite.
+#[test]
+#[cfg(unix)]
+fn a_forced_reload_of_a_path_that_became_a_pipe_reloads_nothing() {
+    let row = forced_reload_after("force-fifo", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+        let made = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo refused to create the pipe");
+    });
+
+    assert_eq!(
+        row.probe,
+        CheckTimeOutcome::Conflict,
+        "`rm f && mkfifo f` opens the ordinary prompt, which is how a user \
+         reaches the answer that would otherwise wedge the editor"
+    );
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(
+        row.lines,
+        vec!["local-edit".to_string()],
+        "a pipe must never be read into the buffer, let alone block on"
+    );
+}
+
+/// The other side of the guard: an ordinary symlink to a real file must
+/// still reload, or "is this a file" would have cost every symlinked path in
+/// a project its forced reload. `fs_stat` follows the link, so it does.
+#[test]
+#[cfg(unix)]
+fn a_forced_reload_through_a_symlink_to_a_file_still_reloads() {
+    let row = forced_reload_after("force-symlink", |path| {
+        let target = path.with_extension("target");
+        std::fs::write(&target, "changed-externally\n").expect("write the link target");
+        std::fs::remove_file(path).expect("remove the file out of band");
+        std::os::unix::fs::symlink(&target, path).expect("point the path at the target");
+    });
+
+    assert_eq!(row.probe, CheckTimeOutcome::Conflict);
+    assert_eq!(
+        row.outcome,
+        CheckTimeOutcome::Reloaded,
+        "a symlink to a real file is a file to `:edit!`, and must still reload"
+    );
+    assert_eq!(row.lines, vec!["changed-externally".to_string()]);
+    assert!(
+        !row.modified,
+        "a completed reload leaves the buffer unmodified"
+    );
+}
+
+/// What one row of the capture doc's case-7e table reads back as: the
+/// unforced probe's answer, then the forced reload's, then what the buffer
+/// and the path were left holding.
+struct ForcedReload {
+    probe: CheckTimeOutcome,
+    outcome: CheckTimeOutcome,
+    lines: Vec<String>,
+    modified: bool,
+    path: std::path::PathBuf,
+}
+
+/// Loads a buffer on a fresh file, layers a local edit on it, lets `mutate`
+/// change what the path is out of band, then walks the sequence the user
+/// walks: the unforced probe that decides whether a prompt opens at all,
+/// followed by the forced reload behind their own "discard local edits"
+/// answer.
+///
+/// The probe leg is not scaffolding for the forced one. It is the half of
+/// the table that says which of these shapes a user can even reach, and
+/// whether reaching it costs them a prompt they never asked for.
+fn forced_reload_after(nonce: &str, mutate: impl FnOnce(&std::path::Path)) -> ForcedReload {
+    let root = scratch_root(nonce);
+    let path = root.join("case_forced.txt");
+    std::fs::write(&path, "original\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let buf = resolve(&engine, &rx, &name);
+    set_lines(&engine, buf, &["local-edit"]);
+
+    settle_mtime();
+    mutate(&path);
+
     engine
         .handle
         .checktime(10, std::slice::from_ref(&name), false)
         .expect("issue the probe");
-    assert_eq!(next_checktime_reply(&rx).only(), CheckTimeOutcome::Conflict);
+    let probed = next_checktime_reply(&rx);
+    assert_eq!(probed.request_id, 10);
+    let probe = probed.only();
 
     engine
         .handle
@@ -510,24 +734,15 @@ fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
         .expect("issue the forced reload");
     let forced = next_checktime_reply(&rx);
     assert_eq!(forced.request_id, 11);
-    assert_eq!(
-        forced.only(),
-        CheckTimeOutcome::FileGone,
-        "a reload of a file that is gone must not read back as a completed one"
-    );
-    assert_eq!(
-        lines_of(&engine, buf),
-        vec!["local-edit".to_string()],
-        "the buffer is the only copy left -- it must not be emptied"
-    );
-    assert!(
-        is_modified(&engine, buf),
-        "the edits were never discarded, so the buffer must still read modified"
-    );
-    assert!(
-        !path.exists(),
-        "a forced reload must not recreate the file it could not read"
-    );
-
+    let outcome = forced.only();
+    let lines = lines_of(&engine, buf);
+    let modified = is_modified(&engine, buf);
     engine.handle.release_hidden(&name).expect("release");
+    ForcedReload {
+        probe,
+        outcome,
+        lines,
+        modified,
+        path,
+    }
 }

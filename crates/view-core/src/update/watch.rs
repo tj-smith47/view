@@ -75,15 +75,16 @@ pub(super) fn on_checktime_reply(
             }
             // nothing was reloaded and nothing was lost: the chunk stats
             // before it reloads precisely so this case never reaches
-            // `:edit!`, which would have succeeded against the missing path
-            // and emptied the buffer. Saying so matters because the user
-            // asked for a discard and did not get one -- and because the
-            // buffer is now the only copy left
+            // `:edit!`, which against a missing path would have succeeded
+            // and emptied the buffer, and against a pipe would never have
+            // returned at all. Saying so matters because the user asked for
+            // a discard and did not get one -- and because the buffer is now
+            // the only copy left
             CheckTimeOutcome::FileGone => {
                 effects.extend(model.engine.record_native_notice(
                     format!(
-                        "{} is no longer on disk -- nothing was reloaded, \
-                         and your buffer still holds your edits",
+                        "{} is no longer a readable file on disk -- nothing was \
+                         reloaded, and your buffer still holds your edits",
                         path.display()
                     ),
                     false,
@@ -146,6 +147,13 @@ mod tests {
     use super::*;
     use crate::msg::Msg;
     use crate::update::update;
+
+    /// Collapses every run of whitespace to one space, so a sentence the
+    /// docs wrap across lines still compares equal to the one line of Rust
+    /// that produces it.
+    fn flatten(text: &str) -> String {
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
 
     fn external_writes(paths: &[&str]) -> Msg {
         Msg::ExternalWritesDetected {
@@ -333,9 +341,13 @@ mod tests {
 
     /// A degraded watch says so. Through the notice path, so it survives
     /// the `SessionReady` that clears the AI panel's own crash banner.
-    /// The file is gone: nothing was reloaded, so the user is owed a notice
-    /// rather than `Reloaded`'s silence, and no prompt -- the question the
-    /// prompt would ask has no answer left to offer.
+    /// The path is not a readable file: nothing was reloaded, so the user is
+    /// owed a notice rather than `Reloaded`'s silence, and no prompt -- the
+    /// question the prompt would ask has no answer left to offer. The
+    /// sentence itself is asserted against `docs/ai.md`, which quotes it
+    /// verbatim: a literal here alone would let an editor update both sides
+    /// together and leave the page promising something about the user's
+    /// unsaved edits that view no longer says.
     #[test]
     fn a_forced_reload_of_a_vanished_file_is_reported() {
         let mut model = Model::new();
@@ -347,6 +359,19 @@ mod tests {
         assert!(
             model.engine.messages.entries.len() > before,
             "a vanished file must leave the user a notice, got effects {effects:?}"
+        );
+        let entry = model.engine.messages.entries.last().expect("a notice");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            text,
+            "/proj/src/lib.rs is no longer a readable file on disk -- nothing was \
+             reloaded, and your buffer still holds your edits",
+            "the notice docs/ai.md quotes must say exactly this"
+        );
+        let quoted = text.replace("/proj/src/lib.rs", "/home/you/project/src/lib.rs");
+        assert!(
+            flatten(include_str!("../../../../docs/ai.md")).contains(&flatten(&quoted)),
+            "docs/ai.md quotes this notice verbatim, and no longer contains: {quoted}"
         );
         assert_eq!(model.overlays().len(), 0);
     }

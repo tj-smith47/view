@@ -251,7 +251,7 @@ answers `ok = false` with `modified = false`, so nothing on the wire
 separates them -- which is why the notice `update/watch.rs` records tells
 the user to check the buffer rather than claiming any side survived.
 
-## 7e. `gone = true`: the file the reload would have read is not there
+## 7e. `gone = true`: the path is not a readable file the reload could read
 
 `:edit!` against a missing path is a *success* in nvim -- it opens a new,
 empty file -- so a forced reload of a deleted file answers `ok = true` and
@@ -287,9 +287,79 @@ The buffer keeps the user's edits, the file is not recreated, and
 notice rather than `Reloaded`'s silence. The `gone` branch answers neither
 `ok` nor `modified`: nothing ran, so there is nothing to report about it.
 
-A file removed between the stat and the `:edit!` is not covered by the stat
--- it is the same race as before this case existed, narrowed to that window,
-and nvim's own `:edit!` has no atomic alternative to offer.
+### Existing is not the same as readable
+
+"Is anything here" is the wrong question. Every kind of path a file can be
+replaced by, driven through the chunk on a buffer holding a local edit:
+
+| the path becomes | probe | forced | buffer after |
+|---|---|---|---|
+| deleted | `fired = true` | `gone = true` | `["local-edit"]` |
+| a dangling symlink | `fired = true` | `gone = true` | `["local-edit"]` |
+| a directory | `fired = false` | `gone = true` | `["local-edit"]` |
+| a FIFO | `fired = true` | `gone = true` | `["local-edit"]` |
+| a symlink to a file | `fired = true` | `ok = true, modified = false` | `["changed-externally"]` |
+| rewritten in place | `fired = true` | `ok = true, modified = false` | `["changed-externally"]` |
+
+`fs_stat` follows symlinks, so `st.type == 'file'` keeps every ordinary
+reload -- direct or through a symlink -- on the reloading path, and takes
+every other shape off it with one predicate.
+
+The FIFO row is why the predicate is `type ~= 'file'` and not an existence
+check. `:edit!` on a named pipe blocks reading it and never returns, inside
+`nvim_exec_lua`, on nvim's single-threaded main loop -- the whole connection
+with it. Driven against the previous existence-only guard, under a bounded
+harness that SIGKILLs the child rather than letting it wedge anything:
+
+```
+PREVIOUS CHUNK(paths={"force_fifo_old.txt"}, force=true)
+  -> err='TIMEOUT' res=None after 15.0s
+  connection answering afterwards? ('TIMEOUT', None)
+```
+
+The follow-up `nvim_get_mode` timing out too is the point: it is not one
+slow call, it is the editor. This is case 0's hazard class -- an operation
+that blocks the connection -- reachable from a prompt the user is invited to
+answer, since `rm f && mkfifo f` raises `FileChangedShell` on the modified
+buffer (`fired = true`, above).
+
+An unreadable regular file (mode `000`) is not in the table: this host runs
+as root, where the mode bits do not apply. It stays on the reloading path by
+design -- it is a file, `:edit!` fails on it rather than blocking, and
+`ok = false` is the honest answer for a re-read that was refused.
+
+### The stat is taken twice
+
+A path that stops being a readable file between the first stat and the
+`:edit!` cannot be caught before the fact -- nvim offers nothing atomic
+here. What happens next depends on what the path became, and only one of the
+two shapes is nvim's problem. Driven by a `BufReadPre` autocmd, which runs
+inside exactly that window:
+
+```
+unlink(p) at BufReadPre
+  -> pcall_ok = false
+     err = 'Vim(edit):E200: *ReadPre autocommands made the file unreadable'
+
+unlink(p) + mkdir(p) at BufReadPre
+  -> pcall_ok  = true
+     err       = nil
+     modified  = false
+     lines     = { '" Netrw Directory Listing  (netrw v184)', ... }
+```
+
+A path that merely vanishes is caught by nvim itself. A path that becomes a
+directory is one `:edit!` is glad to open: it succeeds, replaces the user's
+unsaved buffer with a netrw listing, and clears `modified` -- so `pcall`
+alone answers `ok = true`, and the buffer the user is about to lose reads
+back as the discard they asked for, reported with silence.
+
+The second `fs_stat`, after the reload, is what closes that: `ok` is `false`
+unless the reload ran *and* the path is still a regular file, which turns the
+raced case into "the reload did not finish, check the buffer" -- true, and
+the only honest thing left to say. It is deliberately not folded into `gone`,
+whose own notice promises the buffer still holds the user's edits: by then
+`:edit!` has already run, and that promise would be the lie this case makes.
 
 ## 8. One batched call over several paths at once
 
@@ -344,10 +414,13 @@ for i, path in ipairs(paths) do
   if bufnr == nil then
     results[i] = { found = false }
   elseif force then
-    if vim.uv.fs_stat(canonical) == nil then
+    local st = vim.uv.fs_stat(canonical)
+    if st == nil or st.type ~= 'file' then
       results[i] = { found = true, forced = true, gone = true }
     else
-      local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local after = vim.uv.fs_stat(canonical)
+      local ok = reloaded and after ~= nil and after.type == 'file'
       results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
     end
   else
@@ -386,7 +459,7 @@ unexpected:
 | `found = true, fired = true` | `Conflict` | the conflict prompt (cases 3/8) |
 | `found = true, forced = true, ok = true` | `Reloaded` | nothing -- the answer the user already gave, carried out (case 7) |
 | `found = true, forced = true, ok = false` | `ReloadFailed` | a notice: the discard the user asked for did not happen (case 7a) |
-| `found = true, forced = true, gone = true` | `FileGone` | a notice: the file is gone, nothing was reloaded, the buffer is the only copy left (case 7e) |
+| `found = true, forced = true, gone = true` | `FileGone` | a notice: the path is not a readable file, nothing was reloaded, the buffer is the only copy left (case 7e) |
 
 `force = true` is issued only in answer to the user's own "reload, discard
 local edits" choice on an already-open conflict prompt, never as part of the

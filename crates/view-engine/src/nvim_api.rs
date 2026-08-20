@@ -1263,11 +1263,21 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// and `ok` is `pcall`'s own result, so a reload that raised cannot read as
 /// a completed discard (capture doc, cases 7 and 7a).
 ///
-/// It stats before it reloads, and answers `gone` instead of reloading when
-/// the file is no longer there. `:edit!` on a missing path *succeeds* in
-/// nvim -- it opens a new, empty file -- so reloading anyway would answer
+/// It stats before it reloads, and answers `gone` instead of reloading
+/// unless the path is a regular file. The question is not "does something
+/// exist here" but "can `:edit!` read this as a file": on a missing path
+/// `:edit!` *succeeds* -- it opens a new, empty file -- so it would answer
 /// `ok = true`, empty the buffer, and leave one `:w` between the user and a
-/// file recreated empty, with nothing said (capture doc, case 7e).
+/// file recreated empty, with nothing said; on a FIFO it blocks on the pipe
+/// and never returns, wedging nvim's main loop inside this very call with
+/// the RPC connection along with it. `fs_stat` follows symlinks, so an
+/// ordinary symlink to a file still reloads (capture doc, case 7e).
+///
+/// The second stat closes the window between the first one and the reload:
+/// a path that stopped being a readable file in between answers `ok = false`
+/// rather than a completed discard, since by then `:edit!` has already run
+/// and the buffer's contents are exactly what that outcome's notice tells
+/// the user to check.
 const CHECKTIME_CHUNK: &str = "\
 local paths, force = ...
 local function canon(p)
@@ -1287,10 +1297,13 @@ for i, path in ipairs(paths) do
   if bufnr == nil then
     results[i] = { found = false }
   elseif force then
-    if vim.uv.fs_stat(canonical) == nil then
+    local st = vim.uv.fs_stat(canonical)
+    if st == nil or st.type ~= 'file' then
       results[i] = { found = true, forced = true, gone = true }
     else
-      local ok = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+      local after = vim.uv.fs_stat(canonical)
+      local ok = reloaded and after ~= nil and after.type == 'file'
       results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
     end
   else
