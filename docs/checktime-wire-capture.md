@@ -292,7 +292,7 @@ notice rather than `Reloaded`'s silence. The `gone` branch answers neither
 "Is anything here" is the wrong question. Every kind of path a file can be
 replaced by, driven through the chunk on a buffer holding a local edit:
 
-| the path becomes | probe | forced | buffer after |
+| the path becomes | probe, before the hoist | forced | buffer after |
 |---|---|---|---|
 | deleted | `fired = true` | `gone = true` | `["local-edit"]` |
 | a dangling symlink | `fired = true` | `gone = true` | `["local-edit"]` |
@@ -300,6 +300,11 @@ replaced by, driven through the chunk on a buffer holding a local edit:
 | a FIFO | `fired = true` | `gone = true` | `["local-edit"]` |
 | a symlink to a file | `fired = true` | `ok = true, modified = false` | `["changed-externally"]` |
 | rewritten in place | `fired = true` | `ok = true, modified = false` | `["changed-externally"]` |
+
+The probe column is what the branch answered while the guard lived inside
+the force arm; case 10 is where it went and why. Every buffer here carries a
+local edit, which is the only reason the probe column reads back at all
+rather than blocking -- see case 10a.
 
 `fs_stat` follows symlinks, so `st.type == 'file'` keeps every ordinary
 reload -- direct or through a symlink -- on the reloading path, and takes
@@ -393,6 +398,153 @@ CHUNK(paths={}, force=false)
 
 Answers rather than errors, so a caller never has to special-case it.
 
+## 10. The probe reaches the same unreadable paths, with no user in the loop
+
+Case 7e's guard sat inside the force branch. The probe branch reaches every
+path in that table too -- the watcher issues it automatically on any
+create/modify event under a watched root -- and reaches the two worst rows
+on terms the forced call never does.
+
+### 10a. An unmodified buffer, path replaced by a pipe: `:checktime` itself blocks
+
+`:checktime` on an unmodified buffer does the re-read *itself*, without ever
+consulting `FileChangedShell`. Against a pipe it blocks on the open, inside
+`nvim_exec_lua`, on nvim's single-threaded main loop. Driven against the
+branch as it stood, under the same bounded harness case 7e's FIFO row used:
+
+```
+PREVIOUS CHUNK(paths={a_fifo.txt}, force=false)
+  -> err='TIMEOUT' result=None after 15.0s
+  connection answering afterwards? nvim_get_mode -> 'TIMEOUT'
+```
+
+The follow-up call timing out too is the point, exactly as in case 7e: it is
+not one slow call, it is the editor. The chunk's own `FileChangedShell`
+handler cannot save it -- control never reaches the callback, because
+`:checktime` blocks before raising the autocmd.
+
+A *modified* buffer is safe here: the handler sets `v:fcs_choice = ''`,
+which short-circuits nvim's read before it opens anything. That is why the
+forced-branch FIFO row -- which layers a local edit on the buffer first --
+answers `fired = true` rather than hanging, and why an unmodified buffer is
+the reachable shape. It is also the common one: a user is not editing every
+file that is open.
+
+### 10b. An unmodified buffer, path replaced by a socket or a device: `E321` aborts the whole chunk
+
+The same read, refused rather than blocked. `:checktime` raises, and an
+unprotected `vim.cmd` takes the entire Lua chunk down with it:
+
+```
+PREVIOUS CHUNK(paths={b_socket.txt}, force=false)
+  -> err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../b_socket.txt"']
+     result=None
+PREVIOUS CHUNK(paths={b_chardev.txt}, force=false)
+  -> err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../b_chardev.txt"']
+     result=None
+```
+
+Two things are lost with it. The augroup cleanup on the next line never
+runs, so the one-shot `FileChangedShell` autocmd stays armed on that buffer
+and will set `fcs_choice = 'reload'` on some later, unrelated change:
+
+```
+  augroup 'view_checktime_probe' after the raise -> 1 autocmd still registered
+```
+
+And because the chunk is batched (case 8), one odd path costs every sibling
+in the same call its answer -- including a genuine conflict, which the
+caller's own error handling degrades to `NoBuffer`, so the user never sees
+the prompt:
+
+```
+PREVIOUS CHUNK(paths={c_conflict.txt, c_socket.txt}, force=false)
+  -> err=[0, 'Lua: ... Vim(checktime):E321: Could not reload ".../c_socket.txt"']
+     result=None            # c_conflict.txt's own `fired = true` never arrives
+```
+
+### 10c. The stat hoisted above the split, and the probe's own `pcall`
+
+One predicate over both branches, plus a `pcall` around the probe's
+`:checktime` as the honest catch-all for the window between the stat and the
+command. The same batch, answered:
+
+```
+CHUNK(paths={c_conflict.txt, c_socket.txt}, force=false)
+  -> { results = { { found = true, fired = true, modified = true },
+                   { found = true, gone = true, modified = false } } }
+  augroup 'view_checktime_probe' after -> no such group
+```
+
+The augroup is answerable only from a path whose autocmd never fired: a
+one-shot that fired has already deleted itself, and reads back clean whether
+the cleanup ran or not. A batch ending on a path nothing touched is what
+makes the cleanup observable, since the group is re-created with
+`clear = true` per path and only the last one's autocmd can survive the
+loop:
+
+```
+CHUNK(paths={k_conflict.txt, k_socket.txt, k_device.txt, k_quiet.txt}, force=false)
+  -> { results = { { found = true, fired = true,  modified = true },
+                   { found = true, gone = true,   modified = false },
+                   { found = true, gone = true,   modified = false },
+                   { found = true, fired = false, modified = false } } }
+  augroup 'view_checktime_probe' after -> no such group
+```
+
+Every shape a file can be replaced by, probed with the buffer unmodified and
+again with a local edit on it. `lines after` is the buffer's own content
+once the probe returned:
+
+| the path becomes | probe, unmodified buffer | lines after | probe, modified buffer | lines after |
+|---|---|---|---|---|
+| rewritten in place | `fired = false, modified = false` | `["changed-externally"]` | `fired = true, modified = true` | `["originallocal-edit"]` |
+| a symlink to a file | `fired = false, modified = false` | `["changed-externally"]` | `fired = true, modified = true` | `["originallocal-edit"]` |
+| deleted | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a dangling symlink | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a directory | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a FIFO | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a char device | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a socket | `gone = true, modified = false` | `["original"]` | `gone = true, modified = true` | `["originallocal-edit"]` |
+
+The rows that used to answer `fired = true` -- deleted, dangling, FIFO --
+answered a conflict prompt whose only offer was a reload that could never
+happen. `gone` says so directly instead, and the directory row, which used
+to answer `fired = false` and say nothing at all, now says it too.
+
+The forced call over the identical shapes, unchanged by the hoist except
+that the entries no longer carry `forced`:
+
+| the path becomes | forced | lines after |
+|---|---|---|
+| rewritten in place | `forced = true, ok = true, modified = false` | `["changed-externally"]` |
+| a symlink to a file | `forced = true, ok = true, modified = false` | `["changed-externally"]` |
+| deleted | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a dangling symlink | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a directory | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a FIFO | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a char device | `gone = true, modified = true` | `["originallocal-edit"]` |
+| a socket | `gone = true, modified = true` | `["originallocal-edit"]` |
+
+`modified` is what the two `gone` shapes differ by, and it is the whole
+reason the entry carries it: a modified buffer is holding edits that exist
+nowhere else, an unmodified one is holding what it last read. Only one of
+those two sentences is ever true, and `update/watch.rs` picks by this flag.
+
+The ordinary rows are unmoved by the hoist -- the stat is taken, finds a
+regular file, and every branch runs exactly as cases 1, 2, 3 and 8 captured:
+
+```
+CHUNK(paths={g_nobuffer, g_unmodified, g_modified}, force=false)
+  -> { results = { { found = false },
+                   { found = true, fired = false, modified = false },
+                   { found = true, fired = true,  modified = true } } }
+  g_unmodified lines after -> ["changed-externally"]
+  g_modified   lines after -> ["originallocal-edit"]
+CHUNK(paths={}, force=false)
+  -> { results = {} }
+```
+
 ## Production chunk shape
 
 ```lua
@@ -411,18 +563,16 @@ local results = {}
 for i, path in ipairs(paths) do
   local canonical = canon(path)
   local bufnr = loaded[canonical]
+  local st = vim.uv.fs_stat(canonical)
   if bufnr == nil then
     results[i] = { found = false }
+  elseif st == nil or st.type ~= 'file' then
+    results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
   elseif force then
-    local st = vim.uv.fs_stat(canonical)
-    if st == nil or st.type ~= 'file' then
-      results[i] = { found = true, forced = true, gone = true }
-    else
-      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-      local after = vim.uv.fs_stat(canonical)
-      local ok = reloaded and after ~= nil and after.type == 'file'
-      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
-    end
+    local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+    local after = vim.uv.fs_stat(canonical)
+    local ok = reloaded and after ~= nil and after.type == 'file'
+    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
   else
     local fired = false
     local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
@@ -439,9 +589,9 @@ for i, path in ipairs(paths) do
         end
       end,
     })
-    vim.cmd('checktime ' .. bufnr)
+    local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
     pcall(vim.api.nvim_del_augroup_by_id, group)
-    results[i] = { found = true, fired = fired, modified = vim.bo[bufnr].modified }
+    results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
   end
 end
 return { results = results }
@@ -459,8 +609,14 @@ unexpected:
 | `found = true, fired = true` | `Conflict` | the conflict prompt (cases 3/8) |
 | `found = true, forced = true, ok = true` | `Reloaded` | nothing -- the answer the user already gave, carried out (case 7) |
 | `found = true, forced = true, ok = false` | `ReloadFailed` | a notice: the discard the user asked for did not happen (case 7a) |
-| `found = true, forced = true, gone = true` | `FileGone` | a notice: the path is not a readable file, nothing was reloaded, the buffer is the only copy left (case 7e) |
+| `found = true, gone = true, modified = <bool>` | `FileGone` | a notice: the path is not a readable file, so nothing was read; `modified` picks which of the two true sentences it gets (cases 7e, 10) |
+
+`gone` carries no `forced` of its own and is decoded ahead of it: the stat
+that answers it sits above the force split, so a probe and a forced call
+reach it on identical terms.
 
 `force = true` is issued only in answer to the user's own "reload, discard
 local edits" choice on an already-open conflict prompt, never as part of the
 watcher's own probe -- so a forced call always carries exactly one path.
+`gone` is the one outcome a probe and a forced call share, which is why the
+stat that decides it is taken once, above the split, rather than twice.

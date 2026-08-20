@@ -32,6 +32,12 @@ tasks:
       # code ships to the consumer who compiles the lib alone. This is that
       # consumer's build: no test targets, no dev-dependency features
       - cargo clippy --workspace --lib -- -D warnings
+      # `--lib` cannot reach `crates/view`, which has no lib target at all --
+      # and it is the crate holding runtime.rs, engine_ops.rs and
+      # clipboard.rs, with a dev-dependency turning `test-support` on. The
+      # same feature unification therefore hides the same dead code in the
+      # binary that ships
+      - cargo clippy --workspace --bins -- -D warnings
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)

@@ -1,15 +1,25 @@
-//! Live-nvim proof of [`EngineHandle::checktime`]'s three-way contract, the
-//! falsifiable check `docs/checktime-wire-capture.md` was captured to pin:
-//! an out-of-band write to a path with no loaded buffer raises nothing: an
-//! unmodified buffer facing a genuine external change reloads silently; a
-//! modified buffer facing one raises the conflict signal (`found: true,
-//! fired: true`); and a self-write (nvim's own, indistinguishable on the
-//! wire from `AiFsWrite`'s own mechanism) is a no-op even with local edits
-//! layered on top of it afterward. Three final cases prove `force: true`
-//! drives the explicit reload behind the user's own "discard local edits"
-//! answer, that a re-read which raises is reported as a reload that did not
-//! finish rather than as a completed discard, and that a file no longer on
-//! disk is never "reloaded" over the user's own edits.
+//! Live-nvim proof of [`EngineHandle::checktime`]'s contract, the
+//! falsifiable check `docs/checktime-wire-capture.md` was captured to pin.
+//!
+//! The ordinary rows first: an out-of-band write to a path with no loaded
+//! buffer raises nothing; an unmodified buffer facing a genuine external
+//! change reloads silently; a modified buffer facing one raises the
+//! conflict signal (`found: true, fired: true`); and a self-write (nvim's
+//! own, indistinguishable on the wire from `AiFsWrite`'s own mechanism) is
+//! a no-op even with local edits layered on top of it afterward.
+//!
+//! Then `force: true`, the explicit reload behind the user's own "discard
+//! local edits" answer: it takes the external content, a re-read that
+//! raises is reported as a reload that did not finish rather than as a
+//! completed discard, and a path that stops being a readable file -- gone,
+//! dangling, a directory, a pipe, a socket, a device, or swapped mid-reload
+//! -- is never "reloaded" over the user's own edits, while an ordinary
+//! symlink to a file still is.
+//!
+//! And last the watcher's own unforced probe over those same unreadable
+//! shapes, which reaches them with no user in the loop at all: it answers
+//! them rather than reading them, and one of them costs the rest of its
+//! batch nothing.
 //!
 //! [`EngineHandle::checktime`]: view_engine::nvim_api::EngineHandle::checktime
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -34,7 +44,28 @@ fn spawn() -> Engine {
     engine
 }
 
-fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
+/// A scratch directory that removes itself when the test that made it ends.
+///
+/// Cleanup is the type's job rather than each test's because the fixtures
+/// here are not all ordinary files: a named pipe or a socket left under
+/// `target/` blocks anything that later opens files for reading there --
+/// forever, and one more per run. A test that forgot the call would put one
+/// back.
+struct Scratch(std::path::PathBuf);
+
+impl Scratch {
+    fn join(&self, name: &str) -> std::path::PathBuf {
+        self.0.join(name)
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn scratch_root(nonce_suffix: &str) -> Scratch {
     let nonce = format!(
         "{}-{}-{}",
         std::process::id(),
@@ -48,23 +79,47 @@ fn scratch_root(nonce_suffix: &str) -> std::path::PathBuf {
         .join("../../target/tmp")
         .join(format!("checktime-{nonce}"));
     std::fs::create_dir_all(&root).expect("create test root");
-    std::fs::canonicalize(root).expect("canonicalize test root")
+    Scratch(std::fs::canonicalize(root).expect("canonicalize test root"))
+}
+
+/// The cleanup itself, which nothing else here would notice the loss of:
+/// every other test passes just as well with a pipe left behind, and the
+/// cost lands on whatever opens files under `target/` next -- once per run,
+/// forever.
+#[test]
+#[cfg(unix)]
+fn a_scratch_root_takes_its_blocking_fixtures_with_it() {
+    let pipe;
+    {
+        let root = scratch_root("scratch-drop");
+        pipe = root.join("case_scratch_pipe.txt");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&pipe)
+            .status()
+            .expect("run mkfifo");
+        assert!(made.success(), "mkfifo refused to create the pipe");
+        assert!(pipe.exists(), "the fixture must exist to be worth removing");
+    }
+    assert!(
+        !pipe.exists(),
+        "a named pipe left under target/ blocks every later reader of it"
+    );
 }
 
 fn next_hidden_buffer_loaded(rx: &mpsc::Receiver<Msg>) -> u64 {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            remaining > Duration::ZERO,
-            "no Msg::HiddenBufferLoaded arrived within 5s"
-        );
-        match rx.recv_timeout(remaining) {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::HiddenBufferLoaded { buf, .. }) => {
                 return buf.expect("the path resolves to a handle").0;
             }
             Ok(_other) => continue,
-            Err(err) => panic!("channel closed before a HiddenBufferLoaded arrived: {err}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("no Msg::HiddenBufferLoaded arrived within 5s")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the engine channel closed before a HiddenBufferLoaded arrived")
+            }
         }
     }
 }
@@ -82,15 +137,16 @@ impl CheckTimeReply {
     }
 }
 
+/// The deadline the pipe and socket rows lean on: a chunk that blocked
+/// nvim's main loop answers nothing, and this is what turns that into a
+/// five-second failure rather than a wedged suite. Timeout and disconnect
+/// are told apart deliberately -- a blocked engine and a dead one are
+/// different bugs, and one diagnostic covering both sends the next reader
+/// looking in the wrong place.
 fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        assert!(
-            remaining > Duration::ZERO,
-            "no Msg::CheckTimeReply arrived within 5s"
-        );
-        match rx.recv_timeout(remaining) {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
             Ok(Msg::CheckTimeReply {
                 request_id,
                 results,
@@ -101,7 +157,13 @@ fn next_checktime_reply(rx: &mpsc::Receiver<Msg>) -> CheckTimeReply {
                 };
             }
             Ok(_other) => continue,
-            Err(err) => panic!("channel closed before a CheckTimeReply arrived: {err}"),
+            Err(mpsc::RecvTimeoutError::Timeout) => panic!(
+                "no Msg::CheckTimeReply arrived within 5s -- nvim's main loop is \
+                 blocked inside the chunk"
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("the engine channel closed before a CheckTimeReply arrived")
+            }
         }
     }
 }
@@ -475,10 +537,12 @@ fn a_forced_reload_that_raises_reports_failure_rather_than_a_completed_discard()
 /// The destructive answer against a file that is gone. `:edit!` on a missing
 /// path is a *success* in nvim -- it opens a new, empty file -- so reloading
 /// anyway answers `ok = true`, empties the buffer, and leaves one `:w`
-/// between the user and a file recreated empty, with nothing said. The whole
-/// sequence is the ordinary one this feature exists for: an agent removes a
-/// file the user has unsaved edits in, the conflict prompt opens, the user
-/// answers "reload". `docs/checktime-wire-capture.md` case 7e.
+/// between the user and a file recreated empty, with nothing said. An agent
+/// removing a file the user has unsaved edits in is the ordinary way to
+/// arrive here. `docs/checktime-wire-capture.md` cases 7e and 10.
+///
+/// The forced call is still driven because it is still reachable: the path
+/// need only stop being a file between the prompt opening and the answer.
 #[test]
 fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
     let row = forced_reload_after("force-deleted", |path| {
@@ -487,13 +551,13 @@ fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
 
     assert_eq!(
         row.probe,
-        CheckTimeOutcome::Conflict,
-        "a removal must open the prompt the way an external rewrite does, \
-         or the user never reaches the answer this case is about"
+        CheckTimeOutcome::FileGone { modified: true },
+        "the probe answers the removal itself rather than opening a prompt \
+         whose only offer is a reload that cannot happen"
     );
     assert_eq!(
         row.outcome,
-        CheckTimeOutcome::FileGone,
+        CheckTimeOutcome::FileGone { modified: true },
         "a reload of a file that is gone must not read back as a completed one"
     );
     assert_eq!(
@@ -506,7 +570,7 @@ fn a_forced_reload_of_a_deleted_file_reloads_nothing_and_keeps_the_buffer() {
         "the edits were never discarded, so the buffer must still read modified"
     );
     assert!(
-        !row.path.exists(),
+        !row.path_existed,
         "a forced reload must not recreate the file it could not read"
     );
 }
@@ -579,10 +643,11 @@ fn a_path_that_stops_being_a_file_mid_reload_is_not_reported_as_a_completed_one(
     engine.handle.release_hidden(&name).expect("release");
 }
 
-/// A path that now holds a directory. Reachable only through the window
-/// between the guard's stat and the reload (a file-to-directory swap raises
-/// no `FileChangedShell` of its own, so it opens no prompt), but the outcome
-/// if it is reached is the same silent emptying a deleted file used to get.
+/// A path that now holds a directory -- the shape `:edit!` is *glad* to
+/// open, handing the buffer a netrw listing in place of the user's unsaved
+/// edits and calling it a completed discard. A file-to-directory swap
+/// raises no `FileChangedShell` of its own, so nothing about it announces
+/// itself; the stat is the only thing that notices.
 #[test]
 fn a_forced_reload_of_a_path_that_became_a_directory_reloads_nothing() {
     let row = forced_reload_after("force-dir", |path| {
@@ -592,11 +657,11 @@ fn a_forced_reload_of_a_path_that_became_a_directory_reloads_nothing() {
 
     assert_eq!(
         row.probe,
-        CheckTimeOutcome::HandledSilently,
+        CheckTimeOutcome::FileGone { modified: true },
         "nvim raises no `FileChangedShell` for a directory in a file's place, \
-         which is what keeps this row off the prompt entirely"
+         so before the stat governed the probe too this row said nothing at all"
     );
-    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
     assert_eq!(
         row.lines,
         vec!["local-edit".to_string()],
@@ -615,17 +680,16 @@ fn a_forced_reload_of_a_dangling_symlink_reloads_nothing() {
             .expect("point the path at nothing");
     });
 
-    assert_eq!(row.probe, CheckTimeOutcome::Conflict);
-    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(row.probe, CheckTimeOutcome::FileGone { modified: true });
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
     assert_eq!(row.lines, vec!["local-edit".to_string()]);
 }
 
 /// The row the guard exists for. `:edit!` on a named pipe blocks reading it
 /// and never returns -- inside `nvim_exec_lua`, on nvim's single-threaded
 /// main loop, taking the RPC connection with it (capture doc case 7e, driven
-/// there under a bounded harness). `rm f && mkfifo f` is one shell command
-/// and raises `FileChangedShell` on the modified buffer, so the user reaches
-/// this by answering an ordinary conflict prompt.
+/// there under a bounded harness). `rm f && mkfifo f` is one shell command,
+/// so nothing exotic is needed to reach it.
 ///
 /// Safe to run here: the guard means `:edit!` never executes, and a
 /// regression that let it through fails on `next_checktime_reply`'s own 5s
@@ -646,16 +710,214 @@ fn a_forced_reload_of_a_path_that_became_a_pipe_reloads_nothing() {
 
     assert_eq!(
         row.probe,
-        CheckTimeOutcome::Conflict,
-        "`rm f && mkfifo f` opens the ordinary prompt, which is how a user \
-         reaches the answer that would otherwise wedge the editor"
+        CheckTimeOutcome::FileGone { modified: true },
+        "`rm f && mkfifo f` is one shell command, and neither half of the \
+         round trip it starts may read the pipe"
     );
-    assert_eq!(row.outcome, CheckTimeOutcome::FileGone);
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
     assert_eq!(
         row.lines,
         vec!["local-edit".to_string()],
         "a pipe must never be read into the buffer, let alone block on"
     );
+}
+
+/// A path that now holds a unix socket, and one that now holds a character
+/// device. Neither is readable as a file, and both are creatable by an
+/// ordinary user -- a socket by binding one, a device by pointing a symlink
+/// at `/dev/null` -- so neither needs root to reach. The predicate rejects
+/// them for the same reason it rejects a pipe, and driving them is what
+/// closes the enumeration of what `fs_stat` can answer rather than leaving
+/// three of its types argued for and untested.
+#[test]
+#[cfg(unix)]
+fn a_forced_reload_of_a_path_that_became_a_socket_or_a_device_reloads_nothing() {
+    let row = forced_reload_after("force-socket", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+        let _listener =
+            std::os::unix::net::UnixListener::bind(path).expect("bind a socket in its place");
+    });
+    assert_eq!(row.probe, CheckTimeOutcome::FileGone { modified: true });
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
+    assert_eq!(row.lines, vec!["local-edit".to_string()]);
+
+    let row = forced_reload_after("force-chardev", |path| {
+        std::fs::remove_file(path).expect("remove the file out of band");
+        std::os::unix::fs::symlink("/dev/null", path).expect("point the path at a device");
+    });
+    assert_eq!(row.probe, CheckTimeOutcome::FileGone { modified: true });
+    assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
+    assert_eq!(row.lines, vec!["local-edit".to_string()]);
+}
+
+/// The reachable half of the pipe hazard, and the reason the stat sits above
+/// the force split rather than inside it. On an UNMODIFIED buffer
+/// `:checktime` performs the re-read itself, without consulting
+/// `FileChangedShell` at all, so it blocks on the pipe exactly as `:edit!`
+/// would -- and it gets there with no user in the loop: the watcher issues
+/// this call by itself for any write under a trusted root, and an unmodified
+/// buffer is the state most open files are in.
+///
+/// A modified buffer is what hid this: its handler sets `v:fcs_choice = ''`,
+/// which short-circuits nvim's read before anything is opened, which is why
+/// every forced row above answers rather than hanging
+/// (`docs/checktime-wire-capture.md` case 10a).
+///
+/// Bounded the same way the forced pipe row is: a regression fails on
+/// `next_checktime_reply`'s 5s deadline, and `Engine`'s `Drop` `SIGKILL`s
+/// the wedged child.
+#[test]
+#[cfg(unix)]
+fn an_unforced_probe_of_a_path_that_became_a_pipe_answers_without_reading_it() {
+    let root = scratch_root("probe-fifo");
+    let path = root.join("case_probe_fifo.txt");
+    std::fs::write(&path, "original\n").expect("write fixture");
+    let name = path.to_string_lossy().into_owned();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let buf = resolve(&engine, &rx, &name);
+
+    settle_mtime();
+    std::fs::remove_file(&path).expect("remove the file out of band");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo refused to create the pipe");
+
+    engine
+        .handle
+        .checktime(13, std::slice::from_ref(&name), false)
+        .expect("issue the probe");
+    let probe = next_checktime_reply(&rx);
+    assert_eq!(probe.request_id, 13);
+    assert_eq!(
+        probe.only(),
+        CheckTimeOutcome::FileGone { modified: false },
+        "the watcher's own probe must answer a pipe rather than read it"
+    );
+    assert_eq!(
+        lines_of(&engine, buf),
+        vec!["original".to_string()],
+        "nothing was read, so the buffer holds what it last read"
+    );
+
+    engine.handle.release_hidden(&name).expect("release");
+}
+
+/// One unreadable path must not cost its batch. `:checktime` against a
+/// socket or a device raises `E321` rather than blocking, and an unprotected
+/// `vim.cmd` takes the whole Lua chunk down with it -- which the caller
+/// degrades to `NoBuffer` for every path in the call, so a genuine conflict
+/// on a sibling is swallowed and the user never sees the prompt. The chunk
+/// is deliberately batched (`docs/checktime-wire-capture.md` case 8), so
+/// "one path in the call" is the ordinary shape, not a corner.
+///
+/// The raise also skipped the augroup cleanup on the line after it, leaving
+/// a one-shot `FileChangedShell` autocmd armed to set `fcs_choice =
+/// 'reload'` on some later, unrelated change. The quiet path last in the
+/// batch is what makes that visible: its autocmd never fires, so it is
+/// still armed when the call ends, and only the cleanup takes it down --
+/// a path whose autocmd fired has already deleted itself and would report
+/// a clean group either way (case 10b).
+#[test]
+#[cfg(unix)]
+fn an_unforced_probe_answers_every_path_in_a_batch_around_an_unreadable_one() {
+    let root = scratch_root("probe-batch");
+    let conflict = root.join("case_batch_conflict.txt");
+    let socket = root.join("case_batch_socket.txt");
+    let device = root.join("case_batch_device.txt");
+    let quiet = root.join("case_batch_quiet.txt");
+    for path in [&conflict, &socket, &device, &quiet] {
+        std::fs::write(path, "original\n").expect("write fixture");
+    }
+    let names: Vec<String> = [&conflict, &socket, &device, &quiet]
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+
+    let mut engine = spawn();
+    let (tx, rx) = mpsc::sync_channel(64);
+    let (_pump, _cutover) = engine.start_pump(tx);
+
+    let conflict_buf = resolve(&engine, &rx, &names[0]);
+    for name in &names[1..] {
+        let _ = resolve(&engine, &rx, name);
+    }
+    set_lines(&engine, conflict_buf, &["local-edit"]);
+
+    settle_mtime();
+    std::fs::write(&conflict, "changed-externally\n").expect("external write");
+    std::fs::remove_file(&socket).expect("remove the socket's fixture");
+    let _listener =
+        std::os::unix::net::UnixListener::bind(&socket).expect("bind a socket in its place");
+    std::fs::remove_file(&device).expect("remove the device's fixture");
+    std::os::unix::fs::symlink("/dev/null", &device).expect("point the path at a device");
+
+    engine
+        .handle
+        .checktime(14, &names, false)
+        .expect("issue the batched probe");
+    let probe = next_checktime_reply(&rx);
+    assert_eq!(probe.request_id, 14);
+    assert_eq!(
+        probe.results.len(),
+        4,
+        "the reply is positional -- a short array is the whole batch lost"
+    );
+    assert_eq!(
+        probe.results[0].1,
+        CheckTimeOutcome::Conflict,
+        "a genuine conflict must survive an unreadable path sharing its call"
+    );
+    assert_eq!(
+        probe.results[1].1,
+        CheckTimeOutcome::FileGone { modified: false }
+    );
+    assert_eq!(
+        probe.results[2].1,
+        CheckTimeOutcome::FileGone { modified: false }
+    );
+    assert_eq!(
+        probe.results[3].1,
+        CheckTimeOutcome::HandledSilently,
+        "a path nothing touched must still be answered on its own terms"
+    );
+    assert_eq!(
+        probe_augroup_count(&engine),
+        0,
+        "the chunk's one-shot autocmd must never outlive the call that made it"
+    );
+
+    for name in &names {
+        engine.handle.release_hidden(name).expect("release");
+    }
+}
+
+/// How many autocmds the chunk's own scoped augroup still holds. Zero unless
+/// the cleanup was skipped: the group is created and deleted inside a single
+/// call, so anything left in it fires on a change nobody asked about.
+fn probe_augroup_count(engine: &Engine) -> i64 {
+    engine
+        .handle
+        .request(
+            "nvim_exec_lua",
+            vec![
+                rmpv::Value::from(
+                    "local ok, found = pcall(vim.api.nvim_get_autocmds, \
+                     { group = 'view_checktime_probe' })\n\
+                     if not ok then return 0 end\n\
+                     return #found",
+                ),
+                rmpv::Value::Array(Vec::new()),
+            ],
+        )
+        .expect("count the probe augroup")
+        .as_i64()
+        .expect("the count is an integer")
 }
 
 /// The other side of the guard: an ordinary symlink to a real file must
@@ -692,7 +954,10 @@ struct ForcedReload {
     outcome: CheckTimeOutcome,
     lines: Vec<String>,
     modified: bool,
-    path: std::path::PathBuf,
+    /// Read before the scratch directory removes itself, so the "a reload
+    /// must not recreate what it could not read" assertion still has
+    /// something to fail on.
+    path_existed: bool,
 }
 
 /// Loads a buffer on a fresh file, layers a local edit on it, lets `mutate`
@@ -737,12 +1002,13 @@ fn forced_reload_after(nonce: &str, mutate: impl FnOnce(&std::path::Path)) -> Fo
     let outcome = forced.only();
     let lines = lines_of(&engine, buf);
     let modified = is_modified(&engine, buf);
+    let path_existed = path.symlink_metadata().is_ok();
     engine.handle.release_hidden(&name).expect("release");
     ForcedReload {
         probe,
         outcome,
         lines,
         modified,
-        path,
+        path_existed,
     }
 }

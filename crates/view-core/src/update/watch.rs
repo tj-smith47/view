@@ -73,18 +73,28 @@ pub(super) fn on_checktime_reply(
                 ));
                 model.dirty = true;
             }
-            // nothing was reloaded and nothing was lost: the chunk stats
-            // before it reloads precisely so this case never reaches
-            // `:edit!`, which against a missing path would have succeeded
-            // and emptied the buffer, and against a pipe would never have
-            // returned at all. Saying so matters because the user asked for
-            // a discard and did not get one -- and because the buffer is now
-            // the only copy left
-            CheckTimeOutcome::FileGone => {
+            // nothing was read and nothing was lost: the chunk stats before
+            // it reads precisely so this case reaches neither `:checktime`
+            // nor `:edit!`, either of which against a pipe would never have
+            // returned at all, and the latter of which against a missing
+            // path would have succeeded and emptied the buffer.
+            //
+            // Two sentences because only one of them is true at a time. A
+            // modified buffer is holding edits that now exist nowhere else,
+            // which is the thing worth saying; an unmodified one is holding
+            // what it last read off a path that no longer answers, and
+            // claiming otherwise would promise the user edits they never
+            // made
+            CheckTimeOutcome::FileGone { modified } => {
+                let fate = if modified {
+                    "and your buffer still holds your edits"
+                } else {
+                    "and the buffer still holds the content it last read"
+                };
                 effects.extend(model.engine.record_native_notice(
                     format!(
                         "{} is no longer a readable file on disk -- nothing was \
-                         reloaded, and your buffer still holds your edits",
+                         reloaded, {fate}",
                         path.display()
                     ),
                     false,
@@ -341,39 +351,81 @@ mod tests {
 
     /// A degraded watch says so. Through the notice path, so it survives
     /// the `SessionReady` that clears the AI panel's own crash banner.
-    /// The path is not a readable file: nothing was reloaded, so the user is
+    /// The path is not a readable file: nothing was read, so the user is
     /// owed a notice rather than `Reloaded`'s silence, and no prompt -- the
-    /// question the prompt would ask has no answer left to offer. The
-    /// sentence itself is asserted against `docs/ai.md`, which quotes it
-    /// verbatim: a literal here alone would let an editor update both sides
-    /// together and leave the page promising something about the user's
-    /// unsaved edits that view no longer says.
+    /// question the prompt would ask has no answer left to offer.
+    ///
+    /// Both sentences, because only one of them is ever true and picking the
+    /// wrong one is a lie about the user's own data: an unmodified buffer
+    /// holds no edits to still be holding. Each is asserted against
+    /// `docs/ai.md`, which quotes both verbatim -- a literal here alone
+    /// would let an editor update the two sides together and leave the page
+    /// promising something view no longer says.
     #[test]
-    fn a_forced_reload_of_a_vanished_file_is_reported() {
+    fn a_vanished_file_is_reported_by_what_the_buffer_is_holding() {
+        let ai_md = flatten(include_str!("../../../../docs/ai.md"));
+        for (modified, tail) in [
+            (true, "and your buffer still holds your edits"),
+            (false, "and the buffer still holds the content it last read"),
+        ] {
+            let mut model = Model::new();
+            let before = model.engine.messages.entries.len();
+            let effects = update(
+                &mut model,
+                checktime_reply(
+                    2,
+                    &[("/proj/src/lib.rs", CheckTimeOutcome::FileGone { modified })],
+                ),
+            );
+            assert!(
+                model.engine.messages.entries.len() > before,
+                "a vanished file must leave the user a notice, got effects {effects:?}"
+            );
+            let entry = model.engine.messages.entries.last().expect("a notice");
+            let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+            assert_eq!(
+                text,
+                format!(
+                    "/proj/src/lib.rs is no longer a readable file on disk -- \
+                     nothing was reloaded, {tail}"
+                ),
+                "the notice docs/ai.md quotes for modified={modified} must say exactly this"
+            );
+            let quoted = text.replace("/proj/src/lib.rs", "/home/you/project/src/lib.rs");
+            assert!(
+                ai_md.contains(&flatten(&quoted)),
+                "docs/ai.md quotes this notice verbatim, and no longer contains: {quoted}"
+            );
+            assert_eq!(model.overlays().len(), 0);
+        }
+    }
+
+    /// The watcher's own probe answers `FileGone` too, and it must land on
+    /// the notice rather than the prompt: a path nvim cannot read has no
+    /// reload to offer, so a prompt would ask a question with one answer.
+    #[test]
+    fn an_unforced_probe_of_a_vanished_file_notices_rather_than_prompts() {
         let mut model = Model::new();
         let before = model.engine.messages.entries.len();
-        let effects = update(
+        let _ = update(
             &mut model,
-            checktime_reply(2, &[("/proj/src/lib.rs", CheckTimeOutcome::FileGone)]),
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
         );
         assert!(
             model.engine.messages.entries.len() > before,
-            "a vanished file must leave the user a notice, got effects {effects:?}"
+            "a probe that found no readable file must not be silent"
         );
-        let entry = model.engine.messages.entries.last().expect("a notice");
-        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
         assert_eq!(
-            text,
-            "/proj/src/lib.rs is no longer a readable file on disk -- nothing was \
-             reloaded, and your buffer still holds your edits",
-            "the notice docs/ai.md quotes must say exactly this"
+            model.overlays().len(),
+            0,
+            "there is nothing to reload, so there is nothing to ask"
         );
-        let quoted = text.replace("/proj/src/lib.rs", "/home/you/project/src/lib.rs");
-        assert!(
-            flatten(include_str!("../../../../docs/ai.md")).contains(&flatten(&quoted)),
-            "docs/ai.md quotes this notice verbatim, and no longer contains: {quoted}"
-        );
-        assert_eq!(model.overlays().len(), 0);
     }
 
     #[test]

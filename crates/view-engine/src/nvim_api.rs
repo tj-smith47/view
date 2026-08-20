@@ -1263,21 +1263,38 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// and `ok` is `pcall`'s own result, so a reload that raised cannot read as
 /// a completed discard (capture doc, cases 7 and 7a).
 ///
-/// It stats before it reloads, and answers `gone` instead of reloading
-/// unless the path is a regular file. The question is not "does something
-/// exist here" but "can `:edit!` read this as a file": on a missing path
-/// `:edit!` *succeeds* -- it opens a new, empty file -- so it would answer
-/// `ok = true`, empty the buffer, and leave one `:w` between the user and a
-/// file recreated empty, with nothing said; on a FIFO it blocks on the pipe
-/// and never returns, wedging nvim's main loop inside this very call with
-/// the RPC connection along with it. `fs_stat` follows symlinks, so an
-/// ordinary symlink to a file still reloads (capture doc, case 7e).
+/// One stat governs both branches, above the split rather than inside
+/// either: the question is not "does something exist here" but "can nvim
+/// read this as a file", and both `:checktime` and `:edit!` answer it
+/// catastrophically. On a missing path `:edit!` *succeeds* -- it opens a
+/// new, empty file -- so it would answer `ok = true`, empty the buffer, and
+/// leave one `:w` between the user and a file recreated empty, with nothing
+/// said. On a pipe BOTH commands block on the open and never return,
+/// wedging nvim's main loop inside this very call with the RPC connection
+/// along with it -- `:checktime` reaches that read by itself whenever the
+/// buffer is unmodified, which needs no user in the loop at all. On a
+/// socket or a device `:checktime` raises `E321` instead, which without a
+/// `pcall` would abort the whole chunk and cost every other path in the
+/// same batch its answer. `fs_stat` follows symlinks, so an ordinary
+/// symlink to a file stays on the reading path (capture doc, cases 7e and
+/// 10).
+///
+/// `gone` therefore answers a probe as readily as a forced call, and
+/// carries `modified` so the notice can say which of the two true things it
+/// is -- a buffer holding edits that exist nowhere else, or one holding
+/// what it last read.
 ///
 /// The second stat closes the window between the first one and the reload:
 /// a path that stopped being a readable file in between answers `ok = false`
 /// rather than a completed discard, since by then `:edit!` has already run
 /// and the buffer's contents are exactly what that outcome's notice tells
 /// the user to check.
+///
+/// The probe's own `pcall` is the honest catch-all for that same window on
+/// its side, and it is what lets the augroup cleanup on the next line run
+/// at all: an unprotected raise skipped it and left a one-shot
+/// `FileChangedShell` autocmd armed to set `fcs_choice = 'reload'` on some
+/// later, unrelated change.
 const CHECKTIME_CHUNK: &str = "\
 local paths, force = ...
 local function canon(p)
@@ -1294,18 +1311,16 @@ local results = {}
 for i, path in ipairs(paths) do
   local canonical = canon(path)
   local bufnr = loaded[canonical]
+  local st = vim.uv.fs_stat(canonical)
   if bufnr == nil then
     results[i] = { found = false }
+  elseif st == nil or st.type ~= 'file' then
+    results[i] = { found = true, gone = true, modified = vim.bo[bufnr].modified }
   elseif force then
-    local st = vim.uv.fs_stat(canonical)
-    if st == nil or st.type ~= 'file' then
-      results[i] = { found = true, forced = true, gone = true }
-    else
-      local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
-      local after = vim.uv.fs_stat(canonical)
-      local ok = reloaded and after ~= nil and after.type == 'file'
-      results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
-    end
+    local reloaded = pcall(vim.api.nvim_buf_call, bufnr, function() vim.cmd('edit!') end)
+    local after = vim.uv.fs_stat(canonical)
+    local ok = reloaded and after ~= nil and after.type == 'file'
+    results[i] = { found = true, forced = true, ok = ok, modified = vim.bo[bufnr].modified }
   else
     local fired = false
     local group = vim.api.nvim_create_augroup('view_checktime_probe', { clear = true })
@@ -1322,9 +1337,9 @@ for i, path in ipairs(paths) do
         end
       end,
     })
-    vim.cmd('checktime ' .. bufnr)
+    local checked = pcall(vim.cmd, 'checktime ' .. bufnr)
     pcall(vim.api.nvim_del_augroup_by_id, group)
-    results[i] = { found = true, fired = fired, modified = vim.bo[bufnr].modified }
+    results[i] = { found = true, fired = checked and fired, modified = vim.bo[bufnr].modified }
   end
 end
 return { results = results }";
@@ -1343,6 +1358,10 @@ pub const CHECKTIME_PROBE_CHUNK: &str = CHECKTIME_CHUNK;
 /// asked for: the force branch is the only one that reports it, so a
 /// completed reload can never decode to the [`CheckTimeOutcome::Conflict`]
 /// that would re-raise the prompt the user just answered.
+///
+/// `gone` is read ahead of `forced` because the chunk answers it from above
+/// the force split, for the probe and the forced call alike -- a path that
+/// is not a readable file is the same answer whoever asked.
 fn decode_checktime_entry(entry: &Value) -> CheckTimeOutcome {
     let pairs = entry.as_map().map_or(&[][..], Vec::as_slice);
     let flag =
@@ -1350,10 +1369,12 @@ fn decode_checktime_entry(entry: &Value) -> CheckTimeOutcome {
     if !flag("found") {
         return CheckTimeOutcome::NoBuffer;
     }
+    if flag("gone") {
+        return CheckTimeOutcome::FileGone {
+            modified: flag("modified"),
+        };
+    }
     if flag("forced") {
-        if flag("gone") {
-            return CheckTimeOutcome::FileGone;
-        }
         return if flag("ok") {
             CheckTimeOutcome::Reloaded
         } else {
@@ -3168,7 +3189,10 @@ mod tests {
     /// entries `docs/checktime-wire-capture.md` captured. The forced pair is
     /// the load-bearing half: a force branch that reported `fired` instead
     /// of `forced` would decode to `Conflict` and re-raise the prompt the
-    /// user just answered.
+    /// user just answered. The `gone` pair carries no `forced` at all, since
+    /// the stat that answers it sits above the force split -- reading it
+    /// after `forced` would decode a probe's own `gone` as
+    /// `HandledSilently` and swallow the notice.
     #[test]
     fn each_captured_reply_entry_decodes_to_its_outcome() {
         let entry = |pairs: &[(&str, bool)]| {
@@ -3198,8 +3222,12 @@ mod tests {
                 CheckTimeOutcome::ReloadFailed,
             ),
             (
-                vec![("found", true), ("forced", true), ("gone", true)],
-                CheckTimeOutcome::FileGone,
+                vec![("found", true), ("gone", true), ("modified", true)],
+                CheckTimeOutcome::FileGone { modified: true },
+            ),
+            (
+                vec![("found", true), ("gone", true), ("modified", false)],
+                CheckTimeOutcome::FileGone { modified: false },
             ),
         ];
         for (pairs, expected) in cases {

@@ -673,15 +673,23 @@ pub enum CheckTimeOutcome {
     /// destructive, so a discard that did not happen is reported rather
     /// than left to look like one that did.
     ReloadFailed,
-    /// The path the user asked to reload from is no longer a readable file
-    /// -- deleted, dangling, or now holding a directory or a pipe -- so
-    /// nothing was reloaded and the buffer still holds what it held
-    /// (case 7e). Distinct from [`Self::Reloaded`] because `:edit!` on a
-    /// missing path *succeeds* in nvim -- it opens a new, empty file -- so
-    /// folding this as a completed reload would silently empty a buffer the
-    /// user still has unsaved edits in, and on a pipe it never returns at
-    /// all.
-    FileGone,
+    /// The path is no longer a readable file -- deleted, dangling, or now
+    /// holding a directory, a socket, a device, or a pipe -- so nothing was
+    /// read and the buffer still holds what it held (case 7e). Answered by
+    /// the watcher's own probe and by a forced reload alike: the question
+    /// "can nvim read this as a file" is the same one either way, and
+    /// asking it once is what keeps a pipe from wedging nvim's main loop on
+    /// whichever call reaches it first.
+    ///
+    /// Distinct from [`Self::Reloaded`] because `:edit!` on a missing path
+    /// *succeeds* in nvim -- it opens a new, empty file -- so folding this
+    /// as a completed reload would silently empty a buffer the user still
+    /// has unsaved edits in.
+    ///
+    /// `modified` is the buffer's own state, and it decides which notice
+    /// the user is owed: only a modified buffer is holding edits that exist
+    /// nowhere else.
+    FileGone { modified: bool },
 }
 
 /// The three outcomes [`Msg::TreeDeleteConfirmReply`] can carry, closed by
