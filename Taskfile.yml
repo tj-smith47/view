@@ -26,6 +26,12 @@ tasks:
       # arm's ship guard stays dormant here and needs no build environment
       # of its own
       - cargo clippy --workspace --all-targets --all-features -- -D warnings
+      # both lines above build every lib alongside its own test targets and
+      # dev-dependencies, whose features unify into the lib unit -- so a
+      # field only a `cfg(test)` reader touches looks live to them, and dead
+      # code ships to the consumer who compiles the lib alone. This is that
+      # consumer's build: no test targets, no dev-dependency features
+      - cargo clippy --workspace --lib -- -D warnings
 
   test:
     desc: Run the full test suite (requires nvim >= 0.11 on PATH)

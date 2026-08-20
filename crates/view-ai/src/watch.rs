@@ -115,6 +115,7 @@ type WatcherSlot = Arc<Mutex<Option<Box<dyn Watcher + Send>>>>;
 /// Set once the initial registration walk has finished, so a caller that
 /// needs to know detection is actually live can wait for it instead of
 /// guessing at a duration (see [`WatchHandle::wait_until_watching`]).
+#[cfg(any(test, feature = "test-support"))]
 type Ready = Arc<(Mutex<bool>, std::sync::Condvar)>;
 
 /// A running out-of-band write watch over one project root.
@@ -131,6 +132,7 @@ type Ready = Arc<(Mutex<bool>, std::sync::Condvar)>;
 #[derive(Clone)]
 pub struct WatchHandle {
     watcher: WatcherSlot,
+    #[cfg(any(test, feature = "test-support"))]
     ready: Ready,
 }
 
@@ -465,23 +467,29 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
     // every event looking like it fell outside the tree
     let root_owned = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
     let slot: WatcherSlot = Arc::new(Mutex::new(Some(Box::new(watcher))));
+    #[cfg(any(test, feature = "test-support"))]
     let ready: Ready = Ready::default();
     let thread_slot = Arc::clone(&slot);
+    #[cfg(any(test, feature = "test-support"))]
     let thread_ready = Arc::clone(&ready);
     std::thread::Builder::new()
         .name("view-ai-watch".to_string())
         .spawn(move || {
             let emit: &dyn Fn(Msg) = &emit;
             let _ = register(&thread_slot, &root_owned, &root_owned, emit, None);
-            let (lock, cv) = &*thread_ready;
-            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
-            cv.notify_all();
+            #[cfg(any(test, feature = "test-support"))]
+            {
+                let (lock, cv) = &*thread_ready;
+                *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+                cv.notify_all();
+            }
             pump(&rx, &thread_slot, &root_owned, emit);
         })
         .map_err(WatchError::ThreadSpawn)?;
 
     Ok(WatchHandle {
         watcher: slot,
+        #[cfg(any(test, feature = "test-support"))]
         ready,
     })
 }
