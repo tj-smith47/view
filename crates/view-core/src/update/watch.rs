@@ -52,9 +52,21 @@ pub(super) fn on_checktime_reply(
     let mut effects = Vec::new();
     for (path, outcome) in results {
         match outcome {
+            // an earlier detection may have said this path could no
+            // longer be read, and the answer just given proves otherwise:
+            // a save that unlinks before it rewrites can be nominated
+            // between its two halves, and a notice claiming a file is gone
+            // while it is back is worse than the silence it replaced
             CheckTimeOutcome::NoBuffer
             | CheckTimeOutcome::HandledSilently
-            | CheckTimeOutcome::Reloaded => {}
+            | CheckTimeOutcome::Reloaded => {
+                if model
+                    .engine
+                    .withdraw_native_notice(&file_gone_prefix(&path))
+                {
+                    model.dirty = true;
+                }
+            }
             CheckTimeOutcome::Conflict => open_conflict_prompt(model, path),
             // the answer the user gave was destructive (discard the local
             // edits), so a reload that raised must say so rather than pass
@@ -100,22 +112,38 @@ pub(super) fn on_checktime_reply(
                 // nvim instead, where the prompt's own `r` is a normal-mode
                 // character replace. The window is one paint wide and the
                 // same one the cmdline-quiet dismissal already carries
-                model.close_external_write_conflict_prompt(&path);
+                let withdrew = model.close_external_write_conflict_prompt(&path);
                 let fate = if modified {
                     "and your buffer still holds your edits"
                 } else {
                     "and the buffer still holds the content it last read"
                 };
-                effects.extend(model.engine.record_native_notice_once(format!(
-                    "{} is no longer a readable file on disk -- nothing was \
-                     reloaded, {fate}",
-                    path.display()
-                )));
-                model.dirty = true;
+                let raised = model.engine.record_native_notice_once(format!(
+                    "{} -- nothing was reloaded, {fate}",
+                    file_gone_prefix(&path)
+                ));
+                // a native notice always routes transient, so recording one
+                // always owes an expiry effect: an empty answer here is the
+                // dedupe declining to say the same thing twice, and a
+                // repaint for a screen nothing changed on would be spent
+                // once per detection window for as long as the path stays
+                // unreadable
+                let spoke = !raised.is_empty();
+                effects.extend(raised);
+                model.dirty |= withdrew || spoke;
             }
         }
     }
     effects
+}
+
+/// The opening of the notice an unreadable path raises, without the clause
+/// naming which of the two true things the buffer is holding: the spelling
+/// both the notice and its later withdrawal are keyed on, so a notice raised
+/// for a modified buffer is still retracted by an answer that finds the path
+/// readable again after the edits were saved elsewhere.
+fn file_gone_prefix(path: &std::path::Path) -> String {
+    format!("{} is no longer a readable file on disk", path.display())
 }
 
 /// Folds one `Msg::ExternalWatchDegraded` into a notice the user actually
@@ -461,6 +489,178 @@ mod tests {
             before + 2,
             "a second file that vanished is a second thing to say: {:?}",
             model.engine.messages.entries
+        );
+    }
+
+    /// Anything at all landing between two detections of the same
+    /// unreadable path must not restore the pile the collapse exists to
+    /// stop. An ordinary nvim message is the normal case, not the exotic
+    /// one: the user is typing and nvim is talking while a pipe is being
+    /// written to, so a collapse that only looked at the tail would hold
+    /// only for as long as nothing else spoke.
+    #[test]
+    fn a_message_arriving_between_two_detections_does_not_restack_the_notice() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let gone = || {
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            )
+        };
+        let _ = update(&mut model, gone());
+        let _ = update(
+            &mut model,
+            Msg::Redraw(vec![crate::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "written 1 line".into())],
+                replace_last: false,
+            }]),
+        );
+        let _ = update(&mut model, gone());
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before + 2,
+            "the notice and the message nvim showed, not a second copy of the notice: {:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    /// Two unreadable paths alternating (`A`, `B`, `A`) is the other
+    /// interleaving, and the answer is the same: `A` is still standing, so
+    /// it is not said again.
+    #[test]
+    fn a_second_path_between_two_detections_does_not_restack_the_first() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        for (id, path) in [
+            (1, "/proj/src/lib.rs"),
+            (2, "/proj/src/other.rs"),
+            (3, "/proj/src/lib.rs"),
+        ] {
+            let _ = update(
+                &mut model,
+                checktime_reply(
+                    id,
+                    &[(path, CheckTimeOutcome::FileGone { modified: false })],
+                ),
+            );
+        }
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before + 2,
+            "two unreadable paths are two things to say, however they interleave: {:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    /// A notice asserts the path cannot be read *now*, so an answer that
+    /// reads it takes the notice down rather than leaving it to age out:
+    /// a save that unlinks before it rewrites can be nominated between its
+    /// two halves, and the user must not be told a file is gone while it
+    /// is back.
+    #[test]
+    fn a_path_readable_again_takes_its_notice_down() {
+        for back in [
+            CheckTimeOutcome::HandledSilently,
+            CheckTimeOutcome::Reloaded,
+            CheckTimeOutcome::NoBuffer,
+        ] {
+            let mut model = Model::new();
+            let before = model.engine.messages.entries.len();
+            let _ = update(
+                &mut model,
+                checktime_reply(
+                    1,
+                    &[(
+                        "/proj/src/lib.rs",
+                        CheckTimeOutcome::FileGone { modified: true },
+                    )],
+                ),
+            );
+            assert_eq!(model.engine.messages.entries.len(), before + 1);
+            model.dirty = false;
+            let _ = update(
+                &mut model,
+                checktime_reply(2, &[("/proj/src/lib.rs", back)]),
+            );
+            assert_eq!(
+                model.engine.messages.entries.len(),
+                before,
+                "{back:?} proves the path readable, which retires the notice: {:?}",
+                model.engine.messages.entries
+            );
+            assert!(model.dirty, "taking a line off the screen needs a repaint");
+        }
+    }
+
+    /// A different path's notice is left alone by the one that came back:
+    /// the withdrawal is keyed on the path, never on "a notice of this
+    /// shape is standing".
+    #[test]
+    fn a_path_readable_again_leaves_another_paths_notice_standing() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/other.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[("/proj/src/lib.rs", CheckTimeOutcome::HandledSilently)],
+            ),
+        );
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before + 1,
+            "only the path that came back loses its notice: {:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    /// A suppressed notice changed nothing on screen, so it must not cost
+    /// a paint: with a pipe under the watch this arm runs once per coalesce
+    /// window for as long as the writing lasts, and paint cost is a
+    /// contract here.
+    #[test]
+    fn a_suppressed_notice_does_not_ask_for_a_repaint() {
+        let mut model = Model::new();
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        model.dirty = false;
+        let effects = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        assert!(effects.is_empty(), "nothing was said, so nothing is owed");
+        assert!(
+            !model.dirty,
+            "the screen already shows the only thing this had to say"
         );
     }
 

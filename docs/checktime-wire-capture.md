@@ -609,6 +609,59 @@ stat and the command. What notices it is the heartbeat: its own
 above does, and `HEARTBEAT_WEDGE_THRESHOLD` (10s) turns that silence into a
 verdict, so a wedged engine surfaces rather than hanging quietly.
 
+## 11. What each save shape raises at the kernel level
+
+Not a `nvim_exec_lua` capture: this one is the layer *below* the chunk, the
+filesystem events `view-ai`'s watch nominates from. It is here because the
+question "does forwarding removals make view cry wolf over an ordinary save"
+is answered by which events a save actually raises, and that had been
+answered from memory.
+
+Captured with `inotifywait -m -r --format '%e %f' .` over a scratch
+directory holding `watched.txt`, with a `MARK-*` file touched before each
+shape so the three are separable in one stream:
+
+```
+$ inotifywait -m -r --format '%e %f' . &
+$ printf 'changed\n' > watched.txt.tmp && mv watched.txt.tmp watched.txt
+CREATE watched.txt.tmp
+OPEN watched.txt.tmp
+MODIFY watched.txt.tmp
+CLOSE_WRITE,CLOSE watched.txt.tmp
+MOVED_FROM watched.txt.tmp
+MOVED_TO watched.txt
+
+$ rm watched.txt && printf 'changed-again\n' > watched.txt
+DELETE watched.txt
+CREATE watched.txt
+OPEN watched.txt
+MODIFY watched.txt
+CLOSE_WRITE,CLOSE watched.txt
+
+$ rm watched.txt
+DELETE watched.txt
+```
+
+| save shape | raises `DELETE`? | what the watch sees |
+| --- | --- | --- |
+| temp file + `rename` over the target (the atomic save) | no | `MOVED_TO`, which `notify` maps to `Modify(Name(To))` -- `is_modify()`, the arm that existed before removals were forwarded |
+| unlink, then write the target again | **yes**, followed by `CREATE`/`MODIFY` | `Remove(File)` on its own if the coalesce window closes between the two halves, otherwise coalesced with the create |
+| plain `rm` | yes, and nothing after it | `Remove(File)` -- the shape with no create or modify to ride along with |
+
+Two consequences the tests are built on:
+
+- An atomic save is nominated with or without removal forwarding, so
+  `an_atomic_save_over_a_watched_file_reloads_rather_than_reporting_it_gone`
+  cannot be the falsifiable half of "forwarding removals does not cry wolf".
+  `a_save_that_unlinks_before_rewriting_reloads_rather_than_reporting_it_gone`
+  is: it takes the nomination while the path is genuinely absent, which only
+  arrives when `is_remove()` is forwarded.
+- The unlink-then-rewrite is the one save shape whose nomination can reach
+  the probe while the path is still missing. The probe answers `gone` for it
+  correctly -- the file *was* gone -- so the notice that raises is retracted
+  by the next answer that finds the path readable again, rather than standing
+  for its full transient timeout over a file that came back.
+
 ## Production chunk shape
 
 ```lua

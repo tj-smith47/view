@@ -461,17 +461,20 @@ impl Model {
     /// happens to hold focus would dismiss a different file's conflict --
     /// or an unrelated overlay -- while leaving the stale one open.
     ///
-    /// Answers nothing, unlike the sibling closers: whether a prompt was
-    /// standing changes neither what the caller does next nor what the user
-    /// is told, and a `bool` nobody reads is a contract nobody can hold.
-    pub(crate) fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) {
+    /// Reports whether a prompt was standing, like the sibling closers: the
+    /// withdrawal takes a question off the screen, so it is one of the two
+    /// things that can make an unreadable path's reply worth a repaint --
+    /// the other being the notice that replaces it, which the caller learns
+    /// about from its own answer.
+    pub(crate) fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) -> bool {
         let Some(pos) = self.overlays.iter().position(|overlay| {
             matches!(&overlay.kind, OverlayKind::Prompt(p)
                 if p.external_write_conflict_path() == Some(path))
         }) else {
-            return;
+            return false;
         };
         self.take_overlay_at(pos);
+        true
     }
 
     /// The open tree's state, wherever it sits in the stack -- not only
@@ -950,15 +953,49 @@ impl EngineModel {
     /// news, and collapsing it would say the new one never failed.
     pub fn record_native_notice_once(&mut self, text: String) -> Vec<crate::msg::Effect> {
         let content = vec![(0, text)];
+        // every entry, not just the tail: anything at all landing between
+        // two detections -- one ordinary nvim message is enough -- takes
+        // the last slot, and a tail-only test would then stack the copy it
+        // exists to suppress. Scanning is exact rather than approximate,
+        // because `entries` holds only what is still standing: an expired
+        // transient is retain-removed from it, so a notice that has aged
+        // out is gone and the next detection speaks again
         if self
             .messages
             .entries
-            .last()
-            .is_some_and(|last| last.is_native() && !last.condition && last.content == content)
+            .iter()
+            .any(|e| e.is_native() && !e.condition && e.content == content)
         {
             return Vec::new();
         }
         self.record_message("native".to_string(), content, false)
+    }
+
+    /// Retracts every standing one-shot native notice whose line starts
+    /// with `prefix`, and reports whether one was showing.
+    ///
+    /// The counterpart to [`Self::record_native_notice_once`]: a notice
+    /// that asserts something is currently true -- a path that cannot be
+    /// read -- is worth keeping up only while it is still true, and the
+    /// thing that disproves it arrives long before the notice would have
+    /// aged out on its own. By prefix rather than by whole line so the one
+    /// call retracts whichever of a family's wordings is up (the same path
+    /// says one thing for a modified buffer and another for an unmodified
+    /// one).
+    ///
+    /// A raised condition is left alone: its lifetime belongs to
+    /// [`Messages::set_native_condition`], which retracts it by itself when
+    /// the condition ends.
+    pub fn withdraw_native_notice(&mut self, prefix: &str) -> bool {
+        let before = self.messages.entries.len();
+        self.messages.entries.retain(|e| {
+            !(e.is_native()
+                && !e.condition
+                && e.content
+                    .first()
+                    .is_some_and(|(_, line)| line.starts_with(prefix)))
+        });
+        self.messages.entries.len() != before
     }
 }
 

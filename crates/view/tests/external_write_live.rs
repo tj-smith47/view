@@ -7,14 +7,19 @@
 //! the seam.
 //!
 //! That question is whether nominating removals cries wolf. Atomic-save
-//! tooling writes a temp file and renames it over the target, which emits a
-//! removal; forwarding removals would be a bad trade if it made view
-//! announce a vanished file every time an agent saved one. It does not, and
-//! the reason is structural rather than lucky: the watch only nominates,
-//! and the probe re-stats every nominated path before answering. Both
-//! shapes are driven for real here rather than argued -- a `rename` over
-//! the target, and a `remove_file` -- and what the probe answers for each
-//! is asserted.
+//! tooling writes a temp file and renames it over the target, which raises
+//! no removal at all -- the rename arrives as a move-in, a shape the watch
+//! already nominated as a write. The save shape that does raise one is the
+//! unlink-then-rewrite (`rm f && cat > f`, a generator clearing its output
+//! before regenerating it), and forwarding removals would be a bad trade if
+//! a save caught between those two halves made view announce a vanished
+//! file. It does not, and the reason is structural rather than lucky: the
+//! watch only nominates, and the probe re-stats every nominated path before
+//! answering. All three shapes are driven for real here rather than argued
+//! -- a `rename` over the target, an unlink followed by a rewrite, and a
+//! plain `remove_file` -- and what the probe answers for each is asserted.
+//! `docs/checktime-wire-capture.md`'s inotify section records what each of
+//! the three raises at the kernel level.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 mod common;
@@ -26,7 +31,7 @@ use std::time::Duration;
 use view_ai::WatchHandle;
 use view_core::msg::{CheckTimeOutcome, Msg};
 use view_engine::process::{Engine, EngineConfig};
-use view_test_support::ScratchDir;
+use view_test_support::{settle_mtime, ScratchDir};
 
 /// How long a detection or a reply is waited for. Generous because a cold
 /// nvim spawn and the watch's own registration walk are the slow parts; a
@@ -84,10 +89,7 @@ fn watched(label: &str) -> Watched {
     .expect("watch must start against a real, writable scratch root");
     assert!(watch.wait_until_watching(ARRIVAL), "the walk must finish");
 
-    // coarse filesystem mtime resolution can otherwise leave the fixture's
-    // own write and the out-of-band one that follows inside the same clock
-    // tick, which nvim's own check cannot tell apart
-    std::thread::sleep(Duration::from_millis(1100));
+    settle_mtime();
 
     Watched {
         engine,
@@ -118,12 +120,20 @@ impl Watched {
         .collect()
     }
 
-    /// What the probe answers for [`Self::path`] in that batch.
+    /// What the probe answers for [`Self::path`] in the batch the watch
+    /// raised for it.
     fn probed(&self, request_id: u64) -> CheckTimeOutcome {
-        let names = self.nominated();
+        self.probe(request_id, &self.nominated())
+    }
+
+    /// [`Self::probed`], with the nomination taken separately -- for a case
+    /// that has to touch the file again between the detection and the probe,
+    /// which is the whole shape of a save whose two halves land in different
+    /// detection windows.
+    fn probe(&self, request_id: u64, names: &[String]) -> CheckTimeOutcome {
         self.engine
             .handle
-            .checktime(request_id, &names, false)
+            .checktime(request_id, names, false)
             .expect("issue the probe");
         let results = common::drain_until(&self.engine_rx, ARRIVAL, |msg| match msg {
             Msg::CheckTimeReply {
@@ -139,18 +149,38 @@ impl Watched {
             .map(|(_, outcome)| *outcome)
             .expect("the answer is positional to the batch the watch sent")
     }
+
+    /// What the buffer is holding, straight out of the live nvim: the only
+    /// thing that tells a silent reload apart from a check that found
+    /// nothing to do, since both answer
+    /// [`CheckTimeOutcome::HandledSilently`].
+    fn lines(&self) -> Vec<String> {
+        let name = self.path.to_string_lossy().into_owned();
+        self.engine
+            .handle
+            .preview_buffer(&name, 1)
+            .expect("issue the buffer read");
+        common::drain_until(&self.engine_rx, ARRIVAL, |msg| match msg {
+            Msg::PickerPreviewReply { loaded, lines, .. } => {
+                assert!(loaded, "the buffer this case loaded is still open");
+                Some(lines.clone())
+            }
+            _ => None,
+        })
+        .expect("the read must answer")
+    }
 }
 
 /// An atomic save, driven for real: a temp file written beside the target
 /// and renamed over it, which is how editors, formatters and most agent
-/// write tooling replace a file. The rename emits a removal, and the
-/// nomination that follows it is answered by re-stat'ing the path -- which
-/// finds an ordinary readable file, so nvim reloads the buffer itself and
-/// the user is told nothing, exactly as before removals were forwarded.
+/// write tooling replace a file. The rename raises no removal -- it arrives
+/// as a move-in, which the watch nominates as the write it is -- and the
+/// probe re-stats the path, finds an ordinary readable file, and leaves nvim
+/// to reload the buffer itself with nothing said to the user.
 ///
-/// The falsifiable half of "forwarding removals does not cry wolf": a
-/// `FileGone` here would be view announcing a vanished file every time an
-/// agent saved one.
+/// Removal forwarding is not what this row turns on, then. It is here
+/// because the commonest save shape there is must never reach `FileGone`,
+/// whichever arm of the watch's filter nominated it.
 #[test]
 fn an_atomic_save_over_a_watched_file_reloads_rather_than_reporting_it_gone() {
     let case = watched("extwrite-atomic");
@@ -162,6 +192,42 @@ fn an_atomic_save_over_a_watched_file_reloads_rather_than_reporting_it_gone() {
         case.probed(1),
         CheckTimeOutcome::HandledSilently,
         "a save that put the file back is a file the probe can still read"
+    );
+    assert_eq!(
+        case.lines(),
+        vec!["changed-externally".to_string()],
+        "silence is only right if the buffer actually took the new content"
+    );
+}
+
+/// The save shape that does raise a removal: the target is unlinked and then
+/// written again, which is what a generator clearing its output before
+/// regenerating it does. Driven with the two halves in different detection
+/// windows -- the nomination is taken while the path is genuinely absent,
+/// and the file is put back before the probe runs -- because that is the
+/// only ordering in which the removal reaches the probe as its own
+/// nomination rather than riding along with the create that follows it.
+///
+/// The falsifiable half of "forwarding removals does not cry wolf": this
+/// nomination names a path that really was gone when the watch saw it, and
+/// only the probe's own re-stat stands between that and view announcing a
+/// vanished file over an ordinary save.
+#[test]
+fn a_save_that_unlinks_before_rewriting_reloads_rather_than_reporting_it_gone() {
+    let case = watched("extwrite-unlink-rewrite");
+    std::fs::remove_file(&case.path).expect("unlink the target out of band");
+    let nominated = case.nominated();
+    std::fs::write(&case.path, "changed-externally\n").expect("write the target again");
+
+    assert_eq!(
+        case.probe(3, &nominated),
+        CheckTimeOutcome::HandledSilently,
+        "the path the watch nominated is readable again by the time it is probed"
+    );
+    assert_eq!(
+        case.lines(),
+        vec!["changed-externally".to_string()],
+        "silence is only right if the buffer actually took the new content"
     );
 }
 

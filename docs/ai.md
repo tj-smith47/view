@@ -42,7 +42,12 @@ the agent session:
 | `.git/`, `target/`, `node_modules/`, `.venv/`, or anything your `.gitignore` covers | no |
 
 A file being deleted counts as a change like any other: it is noticed on
-the same terms, and answered by the notice below rather than by a prompt.
+the same terms, and answered by the notice below rather than by a prompt. A
+tool that *replaces* a file is a save, not a deletion, and reads as one:
+whether it renames a temp file over the target or unlinks the target and
+writes it again, view re-checks the path before it says anything, so what
+you get is the ordinary reload.
+
 Editing a file in a second editor, or a `git` command in another terminal,
 is detected on exactly those terms -- during a session, inside the root,
 outside the skipped directories. With no session running, view notices the

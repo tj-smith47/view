@@ -72,6 +72,18 @@ impl ScratchDir {
     }
 }
 
+/// Sleeps long enough for the next write to land on a filesystem mtime
+/// distinguishable from the last one.
+///
+/// Coarse filesystem mtime resolution can otherwise leave a fixture's own
+/// write and the "external" write that follows it inside the same clock
+/// tick, which nvim's own file-changed check cannot tell apart -- the same
+/// reason `docs/checktime-wire-capture.md`'s capture method sleeps between
+/// the two writes of every case needing two distinct disk mtimes.
+pub fn settle_mtime() {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+}
+
 impl Deref for ScratchDir {
     type Target = Path;
 

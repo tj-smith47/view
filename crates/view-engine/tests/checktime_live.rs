@@ -31,6 +31,7 @@ use std::time::{Duration, Instant};
 
 use view_core::msg::{CheckTimeOutcome, Msg};
 use view_engine::process::{Engine, EngineConfig};
+use view_test_support::settle_mtime;
 
 /// Spawns an isolated engine with a UI attached -- load-bearing the same way
 /// `ai_fs_live.rs`'s own `spawn` documents, and doubly so here:
@@ -236,15 +237,6 @@ fn set_lines(engine: &Engine, buf: u64, lines: &[&str]) {
             ],
         )
         .expect("set buffer lines");
-}
-
-/// Coarse filesystem mtime resolution can leave two writes inside the same
-/// clock tick indistinguishable to nvim's own check -- the same reason
-/// `docs/checktime-wire-capture.md`'s own capture method sleeps between an
-/// initial write and the "external" one in every case that needs two
-/// distinct disk mtimes.
-fn settle_mtime() {
-    std::thread::sleep(Duration::from_millis(1100));
 }
 
 fn resolve(engine: &Engine, rx: &mpsc::Receiver<Msg>, path: &str) -> u64 {
@@ -1082,7 +1074,16 @@ fn can_be_opened_by(engine: &Engine, path: &str) -> bool {
             "nvim_exec_lua",
             vec![
                 rmpv::Value::from(
-                    "local p = ...\nlocal fd = vim.uv.fs_open(p, 'r', 420)\n                     if fd == nil then return false end\nvim.uv.fs_close(fd)\nreturn true",
+                    // the mode argument is `fs_open`'s create mode, which a
+                    // read-only open never reaches -- 0 rather than a file
+                    // mode that would read as the permissions this asks about
+                    concat!(
+                        "local p = ...\n",
+                        "local fd = vim.uv.fs_open(p, 'r', 0)\n",
+                        "if fd == nil then return false end\n",
+                        "vim.uv.fs_close(fd)\n",
+                        "return true",
+                    ),
                 ),
                 rmpv::Value::Array(vec![rmpv::Value::from(path)]),
             ],

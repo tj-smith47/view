@@ -1268,13 +1268,14 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// costs nvim's main loop no syscall at all, which is the ordinary shape
 /// of a batch an agent's build produced. The question is not "does
 /// something exist here" but "can nvim read this as a file", and both
-/// `:checktime` and `:edit!` answer it catastrophically. On a missing path `:edit!` *succeeds* -- it opens a
-/// new, empty file -- so it would answer `ok = true`, empty the buffer, and
-/// leave one `:w` between the user and a file recreated empty, with nothing
-/// said. On a pipe BOTH commands block on the open and never return,
-/// wedging nvim's main loop inside this very call with the RPC connection
-/// along with it -- `:checktime` reaches that read by itself whenever the
-/// buffer is unmodified, which needs no user in the loop at all. On a
+/// `:checktime` and `:edit!` answer it catastrophically. On a missing path
+/// `:edit!` *succeeds* -- it opens a new, empty file -- so it would answer
+/// `ok = true`, empty the buffer, and leave one `:w` between the user and a
+/// file recreated empty, with nothing said. On a pipe BOTH commands block on
+/// the open and never return, wedging nvim's main loop inside this very call
+/// with the RPC connection along with it -- `:checktime` reaches that read by
+/// itself whenever the buffer is unmodified, which needs no user in the loop
+/// at all. On a
 /// socket or a device `:checktime` raises `E321` instead, which without a
 /// `pcall` would abort the whole chunk and cost every other path in the
 /// same batch its answer. `fs_stat` follows symlinks, so an ordinary

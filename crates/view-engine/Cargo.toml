@@ -55,6 +55,7 @@ criterion = { version = "0.8.2", features = ["html_reports"] }
 # without a manual --features flag. No normal (non-test) build depends on
 # view-engine as its own dev-dependency, so test-support never leaks in.
 view-engine = { path = ".", features = ["test-support"] }
+view-test-support = { version = "0.0.1", path = "../view-test-support" }
 
 # The hang fixture tests/spawn.rs drives. Behind `test-support` so it is
 # built for this crate's own `cargo test` session (where the self

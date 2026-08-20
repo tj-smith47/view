@@ -382,10 +382,13 @@ fn pump(
         // modify of its own -- filtering it left the user with a buffer
         // whose file was gone and nothing said until something unrelated
         // touched the path. Atomic-save tooling (temp file plus rename)
-        // emits a removal too, which is harmless because nomination is not
-        // a verdict: the checktime probe re-stats every path before
-        // answering, so a rename-based save that put the file back reads
-        // as the ordinary reload it is
+        // raises no removal at all: a rename over the target arrives as a
+        // move-in, which the modify arm above already nominated. The save
+        // shape that does raise one is the unlink-then-rewrite a generator
+        // clearing its output performs, and it is harmless because
+        // nomination is not a verdict: the checktime probe re-stats every
+        // path before answering, so a path that is back by then reads as
+        // the ordinary reload it is
         if !(event.kind.is_create() || event.kind.is_modify() || event.kind.is_remove()) {
             continue;
         }
