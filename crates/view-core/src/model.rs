@@ -347,6 +347,23 @@ impl Model {
             .find(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))
     }
 
+    /// Removes the overlay at `pos` and hands it back, releasing the mouse
+    /// capture it held.
+    ///
+    /// The single removal point, so no closing path can forget the release:
+    /// a capture left pointing at a closed overlay's id routes drags to an
+    /// overlay that is no longer on screen, and every future one that
+    /// happens to be assigned the same id.
+    fn take_overlay_at(&mut self, pos: usize) -> Overlay {
+        let removed = self.overlays.remove(pos);
+        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
+            if removed.id == held {
+                self.mouse_capture = None;
+            }
+        }
+        removed
+    }
+
     /// Closes the overlay [`Model::focus`] names, wherever it sits in the
     /// stack, and returns it.
     ///
@@ -359,13 +376,7 @@ impl Model {
             .overlays
             .iter()
             .rposition(|overlay| Self::takes_focus_now(&overlay.kind, ai_entered))?;
-        let closed = self.overlays.remove(pos);
-        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
-            if closed.id == held {
-                self.mouse_capture = None;
-            }
-        }
-        Some(closed)
+        Some(self.take_overlay_at(pos))
     }
 
     /// The topmost overlay covering the terminal cell at `(row, col)`, or
@@ -442,6 +453,24 @@ impl Model {
             })
     }
 
+    /// Closes the open external-write conflict prompt for `path`, wherever
+    /// it sits in the stack, and reports whether one was found to close.
+    ///
+    /// Keyed by path and not by focus: the prompt whose question has gone
+    /// stale is rarely the one the user is looking at, and closing whatever
+    /// happens to hold focus would dismiss a different file's conflict --
+    /// or an unrelated overlay -- while leaving the stale one open.
+    pub fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) -> bool {
+        let Some(pos) = self.overlays.iter().position(|overlay| {
+            matches!(&overlay.kind, OverlayKind::Prompt(p)
+                if p.external_write_conflict_path() == Some(path))
+        }) else {
+            return false;
+        };
+        self.take_overlay_at(pos);
+        true
+    }
+
     /// The open tree's state, wherever it sits in the stack -- not only
     /// when it is topmost, for the same reason [`Model::picker_mut`] looks
     /// past the top: a scan or git-status reply must still be able to reach
@@ -470,12 +499,7 @@ impl Model {
         else {
             return false;
         };
-        let removed = self.overlays.remove(pos);
-        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
-            if removed.id == held {
-                self.mouse_capture = None;
-            }
-        }
+        self.take_overlay_at(pos);
         true
     }
 
@@ -526,12 +550,7 @@ impl Model {
         else {
             return false;
         };
-        let removed = self.overlays.remove(pos);
-        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
-            if removed.id == held {
-                self.mouse_capture = None;
-            }
-        }
+        self.take_overlay_at(pos);
         // the single authoritative closing point, so every caller that
         // closes the panel clears it the same way `mouse_capture` above
         // already is, rather than each having to remember to also clear
@@ -578,12 +597,7 @@ impl Model {
         else {
             return false;
         };
-        let removed = self.overlays.remove(pos);
-        if let Some(MouseCapture::Overlay(held)) = self.mouse_capture {
-            if removed.id == held {
-                self.mouse_capture = None;
-            }
-        }
+        self.take_overlay_at(pos);
         true
     }
 

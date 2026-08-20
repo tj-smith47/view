@@ -86,6 +86,14 @@ pub(super) fn on_checktime_reply(
             // claiming otherwise would promise the user edits they never
             // made
             CheckTimeOutcome::FileGone { modified } => {
+                // a conflict prompt opened by an earlier detection is still
+                // offering "Reload and discard the local edits" against a
+                // path that can no longer be read. Answering it would cost
+                // the user their edits in exchange for nothing, so the
+                // question is withdrawn and the notice below stands in its
+                // place -- a prompt is worth keeping open only while one of
+                // its answers is still true
+                model.close_external_write_conflict_prompt(&path);
                 let fate = if modified {
                     "and your buffer still holds your edits"
                 } else {
@@ -426,6 +434,73 @@ mod tests {
             0,
             "there is nothing to reload, so there is nothing to ask"
         );
+    }
+
+    /// The prompt is opened by one detection and outlived by the next. A
+    /// user reading "Reload and discard the local edits, or keep them?"
+    /// while an agent deletes the file underneath them must not be left
+    /// holding a question whose expensive answer now buys nothing -- and
+    /// must not have to answer it to find that out.
+    #[test]
+    fn a_conflict_prompt_is_withdrawn_when_its_path_stops_being_readable() {
+        let mut model = Model::new();
+        let _ = update(
+            &mut model,
+            checktime_reply(1, &[("/proj/src/lib.rs", CheckTimeOutcome::Conflict)]),
+        );
+        assert_eq!(model.overlays().len(), 1, "the conflict prompt opened");
+
+        let before = model.engine.messages.entries.len();
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: true },
+                )],
+            ),
+        );
+        assert_eq!(
+            model.overlays().len(),
+            0,
+            "the question has no true answer left, so it must be withdrawn"
+        );
+        assert!(
+            model.engine.messages.entries.len() > before,
+            "withdrawing the prompt must not also take away the explanation"
+        );
+    }
+
+    /// One reply must never close another file's still-open conflict. The
+    /// paths are separate questions and only one of them went stale.
+    #[test]
+    fn a_vanished_path_leaves_another_files_conflict_prompt_open() {
+        let mut model = Model::new();
+        let _ = update(
+            &mut model,
+            checktime_reply(1, &[("/proj/src/other.rs", CheckTimeOutcome::Conflict)]),
+        );
+        assert_eq!(model.overlays().len(), 1);
+
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: true },
+                )],
+            ),
+        );
+        assert_eq!(
+            model.overlays().len(),
+            1,
+            "another file's conflict is a different question, still answerable"
+        );
+        assert!(model
+            .external_write_conflict_prompt_mut(std::path::Path::new("/proj/src/other.rs"))
+            .is_some());
     }
 
     #[test]
