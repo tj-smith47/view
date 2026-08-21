@@ -2652,6 +2652,79 @@ fn ctrl_c_cancels_the_turn_a_pending_permission_is_holding_open() {
     );
 }
 
+/// The composer is not editable behind a question the user has not
+/// answered. `<BS>` and `<lt>` are composer edits spelled as named
+/// notations, and a gate that let every `<...>` through to look for
+/// `<C-c>` would take them along with it -- so the plain characters beside
+/// them would be swallowed while these two typed.
+#[test]
+fn the_composer_is_not_editable_behind_an_unanswered_permission() {
+    for notation in ["<BS>", "<lt>"] {
+        let mut m = pending_permission_model();
+        m.ai_panel_mut().input = "draft".to_string();
+        let effects = update(
+            &mut m,
+            Msg::Key(Key {
+                notation: notation.to_string(),
+            }),
+        );
+        assert!(
+            effects.is_empty(),
+            "{notation} must not forward past the prompt: {effects:?}"
+        );
+        assert_eq!(
+            m.ai_panel().input,
+            "draft",
+            "{notation} must leave the composer exactly as the prompt found it"
+        );
+    }
+}
+
+/// The same closed list, from the other state that owns the panel's keys.
+/// `q` already reaches the review here; `<BS>` must reach it the same way
+/// rather than editing a composer the review is standing in front of.
+#[test]
+fn the_composer_is_not_editable_behind_an_open_review() {
+    let mut m = live_review_model();
+    m.ai_panel_mut().input = "draft".to_string();
+    let _ = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<BS>".to_string(),
+        }),
+    );
+    assert_eq!(
+        m.ai_panel().input,
+        "draft",
+        "a review owns the keyboard, including the keys spelled with angle brackets"
+    );
+}
+
+/// One turn at a time: `<CR>` on a turn already in flight would put a
+/// second `session/prompt` on a wire that has no way to tell the two
+/// answers apart.
+#[test]
+fn a_second_prompt_cannot_be_submitted_into_a_turn_already_in_flight() {
+    let mut m = entered_ai_panel_model();
+    m.ai_panel_mut().turn_in_flight = true;
+    m.ai_panel_mut().input = "and another thing".to_string();
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<CR>".to_string(),
+        }),
+    );
+    assert!(
+        effects.is_empty(),
+        "a turn is already running; nothing may be submitted into it: {effects:?}"
+    );
+    assert_eq!(
+        m.ai_panel().input,
+        "and another thing",
+        "the refused prompt stays in the composer rather than being eaten"
+    );
+}
+
 /// Entering the panel makes `model.focus()` name it for real, the same way
 /// any other focus-taking overlay works (`Model::takes_focus_now` reads
 /// `AiPanelState::focused` directly) -- unlike `key_in_engine_focus_

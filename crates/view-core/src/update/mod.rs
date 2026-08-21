@@ -810,6 +810,23 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
     }
 }
 
+/// Whether `notation` is one of the AI panel's ways out -- un-entering it,
+/// interrupting a turn, dismissing a crash banner.
+///
+/// The one gate a review and an unanswered permission both use to decide
+/// what may reach past them, and a closed list rather than "any `<...>`
+/// notation" on purpose. The composer's own named keys are edits like any
+/// other keystroke: `<CR>` starts a turn, `<BS>` and `<lt>` (nvim's escape
+/// for a literal `<`, see `keys::encode_key`) type into the prompt. Letting
+/// those through because they are spelled with angle brackets would leave
+/// the composer editable behind a decision the user has not made yet --
+/// with `<CR>` able to start a second turn on top of the one whose
+/// permission request is still on screen -- while the plain characters
+/// beside them are swallowed.
+fn is_panel_exit_key(notation: &str) -> bool {
+    matches!(notation, "<Esc>" | "<C-c>" | "<C-d>")
+}
+
 /// Routes one keypress to whatever currently owns the keyboard, after
 /// [`note_supervision_choice`] has had its look at it.
 ///
@@ -1120,27 +1137,27 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                             },
                         })];
                     }
-                    // Named notations fall through to the panel's own keys
-                    // below, exactly as they do out of an open review. A
-                    // turn holding an unanswered permission is a turn in
-                    // flight, and it is the case the wire's cancellation
-                    // contract is written for ("the Client MUST respond to
-                    // all pending session/request_permission requests with
-                    // Cancelled"); swallowing `<C-c>` here would leave that
-                    // contract with no key that reaches it.
-                    if !notation.starts_with('<') {
+                    // Only the ways out fall through, exactly as they do out
+                    // of an open review. A turn holding an unanswered
+                    // permission is a turn in flight, and it is the case the
+                    // wire's cancellation contract is written for ("the
+                    // Client MUST respond to all pending
+                    // session/request_permission requests with Cancelled");
+                    // swallowing `<C-c>` here would leave that contract with
+                    // no key that reaches it.
+                    if !is_panel_exit_key(&notation) {
                         return Vec::new();
                     }
                 }
-                // A review owns the panel's printable keys while it is
-                // open. Deliberately total for printables rather than a
-                // few keys layered over the composer: `a` cannot mean
-                // both "accept this hunk" and "type an a", and a review
-                // is a decision the user opened the panel to make. Named
-                // notations (`<Esc>` to un-enter, `<C-c>`, `<C-d>`) fall
-                // through to the arm below, so every way out of the panel
-                // still works from inside a review.
-                if model.ai_panel().pending_diff.is_some() && !notation.starts_with('<') {
+                // A review owns the panel's keys while it is open.
+                // Deliberately total rather than a few keys layered over
+                // the composer: `a` cannot mean both "accept this hunk" and
+                // "type an a", and a review is a decision the user opened
+                // the panel to make. Only the ways out (`<Esc>` to
+                // un-enter, `<C-c>`, `<C-d>`) fall through to the arm
+                // below, so every way out of the panel still works from
+                // inside a review.
+                if model.ai_panel().pending_diff.is_some() && !is_panel_exit_key(&notation) {
                     return review_key(model, &notation);
                 }
                 // Nothing pending: the panel's own composer keys. Every key
@@ -1180,7 +1197,13 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                     }
                 } else if notation == "<CR>" {
                     let panel = model.ai_panel_mut();
-                    if !panel.input.trim().is_empty() {
+                    // One turn at a time. The wire has no correlation id on
+                    // `session/prompt`, so a second prompt sent into a live
+                    // turn gives the agent two questions and the panel one
+                    // stream to fold both answers into; `<C-c>` above is
+                    // the key that ends a turn, and this is the key that
+                    // starts one.
+                    if !panel.turn_in_flight && !panel.input.trim().is_empty() {
                         let text = std::mem::take(&mut panel.input);
                         panel.turn_in_flight = true;
                         model.dirty = true;
