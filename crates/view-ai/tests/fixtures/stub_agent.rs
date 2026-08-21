@@ -35,6 +35,16 @@
 //!   together and are indistinguishable from a turn rendered at its end.
 //! - `stream` -- emit one `session/update` of each chunk kind, then end the
 //!   turn.
+//! - `stream-forever` -- emit a numbered `agent_message_chunk` every
+//!   [`SUSTAINED_INTERVAL`] and never answer the prompt, so the turn stays
+//!   in flight for as long as the client keeps reading. Written for the
+//!   bench rows that measure view with a live agent session present: a
+//!   canned turn that ends is over long before a sampling run is, and a row
+//!   that sampled after it ended would measure the session-absent path
+//!   under a name that claims otherwise. The count of chunks written so far
+//!   is kept in [`SUSTAINED_PROGRESS_FILE`] beside the working directory,
+//!   which is how a driver checks the stream really did run for the whole
+//!   sampling window rather than stopping after the first frame.
 //! - `ask` -- send a `session/request_permission` request, then end the turn
 //!   once it is answered.
 //! - `ask-twice` -- send a second `session/request_permission` while the
@@ -283,6 +293,7 @@ fn main() {
                         stall();
                     }
                     "die" => std::process::exit(9),
+                    "stream-forever" => stream_sustained(&mut stdout),
                     "stream" => {
                         stream_chunks(&mut stdout);
                         reply(
@@ -482,6 +493,43 @@ fn stall() {
     }
 }
 
+/// Spacing between `stream-forever`'s chunks. Fixed rather than argued
+/// over the wire so two runs of a measurement that holds a session live
+/// face the same agent, and slow enough that the stream is a live session
+/// in the background rather than a flood the row would end up measuring.
+const SUSTAINED_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Ceiling on how long `stream-forever` keeps streaming. The loop's real
+/// end is the client going away, which the write below sees; this is what
+/// stops a fixture whose client died without closing the pipe from
+/// outliving the run that spawned it.
+const SUSTAINED_CEILING: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// Where `stream-forever` records how many chunks it has written, in the
+/// working directory the client spawned it in.
+const SUSTAINED_PROGRESS_FILE: &str = "view-ai-stub-stream-progress.txt";
+
+/// Streams numbered chunks until the client stops reading, recording the
+/// count as it goes. Never replies to the prompt: the turn it belongs to
+/// is meant to still be in flight when the caller stops watching.
+fn stream_sustained(stdout: &mut std::io::Stdout) {
+    let progress = named_inside_cwd(SUSTAINED_PROGRESS_FILE);
+    let start = std::time::Instant::now();
+    let mut written: u64 = 0;
+    while start.elapsed() < SUSTAINED_CEILING {
+        written += 1;
+        let frame = chunk_frame("agent_message_chunk", &format!("chunk {written} "));
+        if writeln!(stdout, "{frame}")
+            .and_then(|()| stdout.flush())
+            .is_err()
+        {
+            return;
+        }
+        let _ = std::fs::write(&progress, written.to_string());
+        std::thread::sleep(SUSTAINED_INTERVAL);
+    }
+}
+
 fn stream_chunks(stdout: &mut std::io::Stdout) {
     chunk(stdout, "user_message_chunk", "you asked");
     chunk(stdout, "agent_thought_chunk", "thinking");
@@ -670,21 +718,24 @@ fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
 }
 
 fn chunk(stdout: &mut std::io::Stdout, discriminant: &str, text: &str) {
-    send(
-        stdout,
-        &serde_json::json!({
-            "jsonrpc": "2.0",
-            "method": "session/update",
-            "params": {
-                "sessionId": "sess_stub",
-                "update": {
-                    "sessionUpdate": discriminant,
-                    "messageId": "msg_1",
-                    "content": { "type": "text", "text": text }
-                }
+    send(stdout, &chunk_frame(discriminant, text));
+}
+
+/// One chunk frame, built apart from writing it so the sustained stream can
+/// write it through a path that reports the broken pipe `send` swallows.
+fn chunk_frame(discriminant: &str, text: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": "sess_stub",
+            "update": {
+                "sessionUpdate": discriminant,
+                "messageId": "msg_1",
+                "content": { "type": "text", "text": text }
             }
-        }),
-    );
+        }
+    })
 }
 
 fn reply(stdout: &mut std::io::Stdout, id: serde_json::Value, result: serde_json::Value) {

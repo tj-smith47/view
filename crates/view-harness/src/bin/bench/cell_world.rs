@@ -118,6 +118,41 @@ impl CellWorld {
     }
 }
 
+impl SideSetup {
+    /// Turns the agent panel on for this side and points it at `agent`,
+    /// by appending an `[ai]` table to the fixture copy this side already
+    /// reads. The fixture itself is left alone: every other cell measures
+    /// an editor with no agent in it, and a fixture that carried one would
+    /// change what those rows measure.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the copied fixture has no `view.toml` to
+    /// extend -- an AI row against a fixture that never configured view is
+    /// a row measuring the default agent, which is the real one.
+    pub(crate) fn enable_ai_agent(&self, agent: &Path) -> Result<()> {
+        let config = self
+            .cwd
+            .join("xdg_config_home")
+            .join("view")
+            .join("view.toml");
+        ensure!(
+            config.exists(),
+            "{} has no view.toml for the AI rows to enable the agent in",
+            config.display()
+        );
+        let mut existing = std::fs::read_to_string(&config)
+            .with_context(|| format!("reading {}", config.display()))?;
+        existing.push_str(&format!(
+            "\n[ai]\nenabled = true\nagent = [{:?}]\n",
+            agent.to_string_lossy()
+        ));
+        std::fs::write(&config, existing)
+            .with_context(|| format!("writing {}", config.display()))?;
+        Ok(())
+    }
+}
+
 /// Settle bound before sampling starts: the heavy fixture's first-ever
 /// run may clone plugins into the shared cache, which dwarfs any paint
 /// settle; a warm cache settles in a couple of seconds.

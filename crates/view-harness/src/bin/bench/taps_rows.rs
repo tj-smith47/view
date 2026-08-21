@@ -73,7 +73,8 @@ pub(crate) fn run_taps_row(
     controlled: bool,
 ) -> Result<RowOutcome> {
     let (scenario, fixture) = (cell.scenario.as_str(), cell.fixture.as_str());
-    let (pipe, spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?)?;
+    let agent = ai_row(scenario).then(stub_agent_bin).transpose()?;
+    let (pipe, spec, cwd) = taps_side(fixture, world, bins.taps_bins()?, agent.as_deref())?;
     let deadline = settle_deadline(fixture);
     let (outcome, metric_key, unit) = match scenario {
         "input_path" => (
@@ -82,6 +83,20 @@ pub(crate) fn run_taps_row(
             "key_to_rpc_p99_us",
             "us",
         ),
+        "ai_session_active" => {
+            let (outcome, streamed) =
+                taps::run_ai_session_active(&spec, &pipe, protocol, deadline, &cwd)
+                    .with_context(|| format!("ai_session_active/{fixture} run failed"))?;
+            report_live_turn(streamed);
+            (outcome, "key_to_rpc_p99_us", "us")
+        }
+        "ai_streaming" => {
+            let (outcome, streamed) =
+                taps::run_ai_streaming(&spec, &pipe, protocol, deadline, &cwd)
+                    .with_context(|| format!("ai_streaming/{fixture} run failed"))?;
+            report_live_turn(streamed);
+            (outcome, "p99_ms", "ms")
+        }
         _ => (
             taps::run_output_path(&spec, &pipe, protocol, deadline)
                 .with_context(|| format!("output_path/{fixture} run failed"))?,
@@ -188,7 +203,7 @@ pub(crate) fn run_echo_speculated_row(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<RowOutcome> {
-    let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?)?;
+    let (pipe, view_spec, _cwd) = taps_side(fixture, world, bins.taps_bins()?, None)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = echo_speculated::run(
         ViewSpec(&view_spec),
@@ -246,12 +261,53 @@ pub(crate) fn run_echo_speculated_row(
 /// own decision (see [`Bins::echo_path_bins`]). Each accessor checks its
 /// own binary and names its own flag, so a missing arm is reported as the
 /// arm it is.
+/// Whether `scenario` measures its boundary with a live agent session in
+/// the editor. The one place that question is answered, because three
+/// things downstream turn on it: which binary the session spawns as its
+/// agent, whether the fixture copy gets an `[ai]` table, and which run
+/// function the row calls.
+pub(crate) fn ai_row(scenario: &str) -> bool {
+    matches!(scenario, "ai_session_active" | "ai_streaming")
+}
+
+/// The stub agent the AI rows measure against.
+///
+/// A fixture rather than the real pinned adapter: the rows price what an
+/// agent session costs *view*, so the agent has to stream on a cadence the
+/// row controls, on every host, with no network and no credentials. The
+/// real adapter's own conformance is `scripts/acceptance/ai-conformance.sh`.
+fn stub_agent_bin() -> Result<PathBuf> {
+    let path = workspace_root()
+        .join("target")
+        .join("release")
+        .join("view-ai-stub-agent");
+    ensure!(
+        path.exists(),
+        "the AI rows measure against the stub agent at {}, which is not built; `task bench` \
+         builds it, so a hand-run bench binary needs `cargo build --release -p view-ai \
+         --features test-support --bin view-ai-stub-agent` first",
+        path.display()
+    );
+    Ok(path)
+}
+
+/// Prints what the live turn produced across a row's sampling: the row's
+/// own evidence that it measured what its name says, alongside the number
+/// it reports.
+fn report_live_turn(streamed: u64) {
+    println!("      agent chunks streamed across the sampling run: {streamed}");
+}
+
 fn taps_side(
     fixture: &str,
     world: &CellWorld,
     editor: EditorBins<'_>,
+    agent: Option<&Path>,
 ) -> Result<(taps::TapPipe, SpawnSpec, PathBuf)> {
     let side = world.side(fixture, "view")?;
+    if let Some(agent) = agent {
+        side.enable_ai_agent(agent)?;
+    }
     let cwd = side.cwd.clone();
     let tap_path = cwd.join("tap.fifo");
     let pipe = taps::TapPipe::create(&tap_path)?;
@@ -354,7 +410,7 @@ pub(crate) fn run_echo_path_row(
     bins: &Bins,
     protocol: &Protocol,
 ) -> Result<CellMetrics> {
-    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.echo_path_bins()?)?;
+    let (pipe, view_spec, cwd) = taps_side(fixture, world, bins.echo_path_bins()?, None)?;
     let nvim_spec = nvim_spec_from(world.side(fixture, "nvim")?, &bins.nvim);
     let outcome = taps::run_echo_path(
         ViewSpec(&view_spec),

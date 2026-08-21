@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use crate::pairing::{paired_summary, NvimSamples, PairedSummary, ViewSamples};
 use crate::sampling::{interleave_schedule, median_of_trials, Distribution, Side};
+use crate::scenarios::ai_session;
 use crate::scenarios::clock::monotonic_nanos;
 use crate::scenarios::echo::{label, SideState, DEFAULT_STARTUP_QUIET};
 use crate::scenarios::Protocol;
@@ -445,6 +446,21 @@ pub fn run_input_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
+    sample_input_path(&mut session, pipe, protocol)
+}
+
+/// The input row's own sampling, over a session someone else prepared.
+///
+/// Split from [`run_input_path`] so a row that needs the same interval
+/// measured under a different session state -- the AI rows, whose session
+/// has a live agent turn in it -- runs this exact loop rather than a copy
+/// of it. Anything that changes here changes both rows, which is the point:
+/// the AI row's whole claim is that it is the same boundary.
+fn sample_input_path(
+    session: &mut BenchSession,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+) -> Result<TapsOutcome, BenchError> {
     let (overhead, overhead_pace) =
         characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
@@ -650,6 +666,16 @@ pub fn run_output_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
+    sample_output_path(&mut session, pipe, protocol)
+}
+
+/// The output row's own sampling, over a session someone else prepared --
+/// the same split, for the same reason, as [`sample_input_path`].
+fn sample_output_path(
+    session: &mut BenchSession,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+) -> Result<TapsOutcome, BenchError> {
     let (overhead, overhead_pace) =
         characterize_overhead_adaptive(pipe, OVERHEAD_ITERATIONS, OVERHEAD_PACE)?;
     let mut trial_distributions = Vec::with_capacity(protocol.trials);
@@ -754,6 +780,62 @@ pub fn run_output_path(
         overhead_pace,
         paints,
     })
+}
+
+/// The input row's boundary, measured with an agent turn streaming into an
+/// open panel: the "AI presence never degrades editor responsiveness"
+/// mandate held to the same number the session-absent row records, rather
+/// than asserted.
+///
+/// Everything but the session state is shared with [`run_input_path`] --
+/// the same preparation, the same [`sample_input_path`] -- so a difference
+/// between the two rows is a difference in what the session was doing,
+/// which is the only thing this row exists to price. The turn is confirmed
+/// live before the first sample and still streaming after the last, and
+/// the count of chunks it produced in between is returned as that
+/// evidence.
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] for everything [`run_input_path`] does,
+/// plus a turn that never started or stopped streaming partway.
+pub fn run_ai_session_active(
+    spec: &SpawnSpec,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+    settle_deadline: Duration,
+    cwd: &Path,
+) -> Result<(TapsOutcome, u64), BenchError> {
+    let mut session = prepare(spec, pipe, settle_deadline)?;
+    let turn = ai_session::start(&mut session, cwd)?;
+    // the panel's own opening frames are not this row's subject, and
+    // `prepare` drained on the same reasoning
+    let _ = pipe.drain();
+    let outcome = sample_input_path(&mut session, pipe, protocol)?;
+    let streamed = turn.ended_still_streaming()?;
+    Ok((outcome, streamed))
+}
+
+/// The output row's boundary under the same live turn, for the same
+/// reason and with the same evidence -- see [`run_ai_session_active`].
+///
+/// # Errors
+///
+/// Returns [`BenchError::Desync`] for everything [`run_output_path`] does,
+/// plus a turn that never started or stopped streaming partway.
+pub fn run_ai_streaming(
+    spec: &SpawnSpec,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+    settle_deadline: Duration,
+    cwd: &Path,
+) -> Result<(TapsOutcome, u64), BenchError> {
+    let mut session = prepare(spec, pipe, settle_deadline)?;
+    let turn = ai_session::start(&mut session, cwd)?;
+    let _ = pipe.drain();
+    let outcome = sample_output_path(&mut session, pipe, protocol)?;
+    let streamed = turn.ended_still_streaming()?;
+    Ok((outcome, streamed))
 }
 
 /// The tags one keystroke walks, in order, across view's whole echo round
@@ -1342,6 +1424,38 @@ fn characterize_once(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    /// The AI rows' entire claim is that they measure the session-absent
+    /// rows' boundary with a turn running underneath it, and that claim
+    /// lives in one shared sampling function per boundary. A copy-paste
+    /// that gave either pair its own loop would keep compiling and keep
+    /// producing numbers, comparable to nothing -- so the sharing is
+    /// asserted over this file's own text rather than left to review.
+    #[test]
+    fn the_ai_rows_sample_through_the_same_functions_the_session_absent_rows_do() {
+        let source = include_str!("taps.rs");
+        for (row, sampler) in [
+            ("run_input_path", "sample_input_path"),
+            ("run_ai_session_active", "sample_input_path"),
+            ("run_output_path", "sample_output_path"),
+            ("run_ai_streaming", "sample_output_path"),
+        ] {
+            let marker = format!("pub fn {row}(");
+            assert!(source.contains(&marker), "{row} is gone from this module");
+            let body = source
+                .split(&marker)
+                .nth(1)
+                .unwrap_or_default()
+                .split("\npub fn ")
+                .next()
+                .unwrap_or_default();
+            assert!(
+                body.contains(&format!("{sampler}(")),
+                "{row} no longer samples through {sampler}, so its number is no longer the \
+                 same boundary the row it is compared against measures"
+            );
+        }
+    }
 
     #[test]
     fn parse_record_round_trips_the_tap_line_shape() {

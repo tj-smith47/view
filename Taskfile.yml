@@ -170,6 +170,10 @@ tasks:
       # it runs that row's arm with the tap channel added; a fourth target
       # dir for the same reason as the third
       - cargo build --release -p view --features bench-taps,bench-no-speculate --target-dir target/taps-nospec
+      # the agent the AI rows measure a live turn against: a fixture that
+      # streams on a cadence the row controls, so the rows need no network,
+      # no credentials and no pinned adapter to put a turn in flight
+      - cargo build --release -p view-ai --features test-support --bin view-ai-stub-agent
       # the exit code is echoed as this target's own final log line, on
       # every path (pass, gate breach, refusal), so a tee'd gate log is
       # self-describing without a reader having to interpret the bench

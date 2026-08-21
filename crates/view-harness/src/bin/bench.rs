@@ -86,6 +86,28 @@ const MATRIX: &[(&str, &str)] = &[
     ("output_path", "minimal"),
     ("picker", "minimal"),
     ("supervision", "minimal"),
+    ("ai_session_active", "minimal"),
+    ("ai_streaming", "minimal"),
+];
+
+/// Cells measured only on the classes named here, and skipped elsewhere.
+///
+/// A cell is scoped when its bar is armed on some classes and not others:
+/// measuring it on a class whose baseline holds no cell for it fails the
+/// gate on coverage (a measured row with nothing to compare against),
+/// which would turn arming a bar on one class into a red gate on every
+/// other. Scoping is the narrow, declared version of that -- the cell is
+/// announced as skipped, lands in the same lane a platform block lands in,
+/// and the classes it does run on gate it exactly as before.
+///
+/// The AI rows are scoped to the controlled Linux class the spec section
+/// 3.1 budget rows they feed are scoped to (`classes =
+/// ["controlled-linux"]`). Widening them is a recording on the other
+/// class's own host, not an edit here alone: a class listed with no cell
+/// in its baseline file gates red, which is the point.
+const CLASS_SCOPED: &[(&str, &[&str])] = &[
+    ("ai_session_active", &["dev-linux"]),
+    ("ai_streaming", &["dev-linux"]),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
@@ -672,7 +694,12 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
     #[cfg(not(unix))]
     if matches!(
         scenario,
-        "input_path" | "output_path" | "echo_path" | "echo_speculated"
+        "input_path"
+            | "output_path"
+            | "echo_path"
+            | "echo_speculated"
+            | "ai_session_active"
+            | "ai_streaming"
     ) {
         return Some("the tap channel (FIFO + raw CLOCK_MONOTONIC) is a unix-only mechanism; the internal-boundary, echo_path and speculated-echo rows built on it are not measured off unix");
     }
@@ -684,6 +711,20 @@ fn platform_block(scenario: &str) -> Option<&'static str> {
         return Some("this row depends on a unix-only mechanism (echo_control's control socket, remote_memory's stub-ssh PATH symlink) with no validated equivalent off unix");
     }
     None
+}
+
+/// Why `scenario` is not measured on `class`, if it is not. See
+/// [`CLASS_SCOPED`]; a scenario absent from that table runs everywhere its
+/// platform allows.
+fn class_block(scenario: &str, class: &str) -> Option<String> {
+    let (_, classes) = CLASS_SCOPED.iter().find(|(name, _)| *name == scenario)?;
+    if classes.contains(&class) {
+        return None;
+    }
+    Some(format!(
+        "{scenario} is armed on {} and holds no bar on {class}",
+        classes.join(", ")
+    ))
 }
 
 /// Lines a full-matrix run prints for a platform-skipped cell. Under
@@ -891,8 +932,11 @@ fn main() -> Result<()> {
     let cells: Vec<CellId> = if cli.all {
         let mut selected = Vec::new();
         for &(scenario, fixture) in MATRIX {
-            if let Some(reason) = platform_block(scenario) {
-                for line in skip_announcements(scenario, fixture, reason, under_gha) {
+            let blocked = platform_block(scenario)
+                .map(ToOwned::to_owned)
+                .or_else(|| class_block(scenario, &cli.class));
+            if let Some(reason) = blocked {
+                for line in skip_announcements(scenario, fixture, &reason, under_gha) {
                     println!("{line}");
                 }
                 skipped.push(CellId::new(scenario, fixture));
@@ -935,6 +979,14 @@ fn main() -> Result<()> {
         }
         if let Some(reason) = platform_block(&scenario) {
             bail!("{scenario}/{fixture} cannot run on this platform: {reason}");
+        }
+        // named by hand rather than by --all, so this is a refusal rather
+        // than a skip: a run that asked for one cell and silently measured
+        // nothing reports success having done no work
+        if cli.record || cli.gate {
+            if let Some(reason) = class_block(&scenario, &cli.class) {
+                bail!("{scenario}/{fixture} cannot be recorded or gated on this class: {reason}");
+            }
         }
         vec![CellId { scenario, fixture }]
     };
@@ -2155,13 +2207,40 @@ mod tests {
         // the tap channel is a unix-only mechanism, so the internal-boundary
         // rows and the echo_path decomposition it drives run on unix and are
         // skipped on every other platform
-        for scenario in ["input_path", "output_path", "echo_path", "echo_speculated"] {
+        for scenario in [
+            "input_path",
+            "output_path",
+            "echo_path",
+            "echo_speculated",
+            "ai_session_active",
+            "ai_streaming",
+        ] {
             assert_eq!(
                 platform_block(scenario).is_some(),
                 cfg!(not(unix)),
                 "{scenario} must be measured on unix and skipped off it"
             );
         }
+    }
+
+    #[test]
+    fn a_scoped_cell_runs_on_the_classes_that_arm_it_and_is_skipped_elsewhere() {
+        for (scenario, classes) in CLASS_SCOPED {
+            for class in *classes {
+                assert!(
+                    class_block(scenario, class).is_none(),
+                    "{scenario} is armed on {class} and must not be skipped there"
+                );
+            }
+            let reason = class_block(scenario, "gh-macos").unwrap_or_default();
+            assert!(
+                reason.contains(scenario) && reason.contains("gh-macos"),
+                "a cell no class arms must be skipped, naming itself and the class: {reason:?}"
+            );
+        }
+        // an unscoped cell runs on every class its platform allows, which is
+        // every cell but the ones above
+        assert!(class_block("echo", "gh-macos").is_none());
     }
 
     #[test]

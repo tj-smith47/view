@@ -30,7 +30,7 @@ pub(super) fn run_cell(
     // either measures or fails, so measure_cell keeps the simpler contract
     let outcome = match scenario.as_str() {
         #[cfg(unix)]
-        "input_path" | "output_path" => {
+        "input_path" | "output_path" | "ai_session_active" | "ai_streaming" => {
             let world = CellWorld::create(fixture)?;
             taps_rows::run_taps_row(cell, &world, bins, protocol, controlled)?
         }

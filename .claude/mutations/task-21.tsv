@@ -9,3 +9,7 @@ crates/view-core/src/update/ai.rs	            let had_pending = panel.pending_pe
 crates/view/src/vlog.rs	const PAYLOAD_CAP: usize = 120;	const PAYLOAD_CAP: usize = 1_000_000;	-p view --bin view an_unbounded_ai_payload
 crates/view/src/ai_worker.rs	    let version = view_ai::pinned_version(id)?;	    let version = view_ai::pinned_version(id).unwrap_or("");	-p view --bin view nothing_that_starts_without_waiting
 crates/view-ai/tests/fixtures/stub_agent.rs	        .or_else(|| outcome["outcome"].as_str())	        .or_else(|| None)	-p view-ai --test session a_cancel_settles
+crates/view-bench/src/scenarios/ai_session.rs	        if added < SUSTAINED_MINIMUM {	        if false {	-p view-bench --lib a_turn_that_stopped_streaming
+crates/view-bench/src/scenarios/ai_session.rs	        .unwrap_or(0)	        .unwrap_or(1)	-p view-bench --lib a_missing_or_unreadable_progress_file
+crates/view-bench/src/scenarios/taps.rs	                body.contains(&format!("{sampler}(")),	                body.contains(&format!("{row}(")),	-p view-bench --lib the_ai_rows_sample_through_the_same_functions
+crates/view-harness/src/bin/bench.rs	    if classes.contains(&class) {	    if true {	-p view-harness --bin bench a_scoped_cell_runs

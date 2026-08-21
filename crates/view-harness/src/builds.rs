@@ -50,6 +50,9 @@ pub const MEASURED_BUILD: &[(&str, Option<&str>)] = &[
     ("echo_speculated", Some(TAPS_VIEW_BIN)),
     ("input_path", Some(TAPS_VIEW_BIN)),
     ("output_path", Some(TAPS_VIEW_BIN)),
+    // the same two boundaries, with an agent turn streaming underneath
+    ("ai_session_active", Some(TAPS_VIEW_BIN)),
+    ("ai_streaming", Some(TAPS_VIEW_BIN)),
     ("first_paint", Some(VIEW_BIN)),
     ("scroll", Some(VIEW_BIN)),
     ("memory", Some(VIEW_BIN)),
@@ -134,7 +137,13 @@ mod tests {
         assert_eq!(scenarios_reading(NOSPEC_VIEW_BIN), vec!["echo"]);
         assert_eq!(
             scenarios_reading(TAPS_VIEW_BIN),
-            vec!["echo_speculated", "input_path", "output_path"]
+            vec![
+                "echo_speculated",
+                "input_path",
+                "output_path",
+                "ai_session_active",
+                "ai_streaming"
+            ]
         );
         assert!(scenarios_reading(VIEW_BIN).contains(&"picker"));
     }
