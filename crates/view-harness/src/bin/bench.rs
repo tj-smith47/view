@@ -54,8 +54,8 @@ mod remote_rows;
 #[path = "bench/cell_world.rs"]
 mod cell_world;
 use cell_world::{nvim_spec_from, settle_deadline, view_spec_from, CellWorld};
-// named only by the two unix-gated row modules above, which reach it
-// through their own `use super::*`
+// named only by `remote_rows` above, which reaches it through its own
+// `use super::*`; `taps_rows` calls methods on it without naming the type
 #[cfg(unix)]
 use cell_world::SideSetup;
 

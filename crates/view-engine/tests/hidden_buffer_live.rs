@@ -1073,9 +1073,15 @@ fn a_buffer_this_connection_created_survives_release_once_the_user_adopts_it() {
 /// entry rather than racing each other's cleanup: both resolve to the same
 /// buffer, and the buffer survives until both spellings' holds have
 /// released.
-// Unix-only: the divergent spelling is built by joining a `.` component,
-// and windows drops it while pushing onto the verbatim prefix the
-// scratch root carries, leaving two identical strings and nothing to prove
+///
+/// Unix-only, from measurement rather than from principle: on windows the
+/// scratch root is a verbatim (`\\?\`) path, where a doubled separator is
+/// not a respelling of one file but a second path. `canonicalize` collapses
+/// it and nvim's own `canon()` does not, so the two spellings came back as
+/// two buffers (buf 2 and buf 3) on windows-msvc -- a divergence about that
+/// spelling, not about the refcount this asserts. The new-file variant
+/// below keeps the same property on both platforms, since its lexical
+/// fallback answers for both spellings.
 #[cfg(unix)]
 #[test]
 fn two_spellings_of_the_same_path_share_one_hold() {
@@ -1088,11 +1094,14 @@ fn two_spellings_of_the_same_path_share_one_hold() {
     let (_pump, _cutover) = engine.start_pump(tx);
 
     let canonical = path.to_string_lossy().into_owned();
-    let respelled = root
-        .join(".")
-        .join("shared-spelling.rs")
-        .to_string_lossy()
-        .into_owned();
+    // a doubled separator rather than a `.` component: windows normalizes
+    // the component away while pushing onto the verbatim prefix the scratch
+    // root carries, which would leave two identical strings to compare
+    let respelled = format!(
+        "{}{sep}{sep}shared-spelling.rs",
+        root.to_string_lossy(),
+        sep = std::path::MAIN_SEPARATOR
+    );
     assert_ne!(
         canonical, respelled,
         "the two spellings must actually differ as strings for this test to prove anything"
@@ -1141,15 +1150,11 @@ fn two_spellings_of_the_same_path_share_one_hold() {
 /// -- the new-file proposal's own case. `std::fs::canonicalize` fails for
 /// both spellings here (neither exists), so `canonical_hidden_key` falls
 /// back to a lexical normalization rather than a filesystem-backed one; if
-/// that fallback left `.`/`..` uncollapsed the two spellings would key two
-/// separate holds over the one buffer nvim itself resolves both onto (nvim's
-/// own `canon()` falls back to `fnamemodify(p, ':p')`, which does collapse
-/// them), and the first `release_hidden` would delete that buffer while the
-/// second spelling's hold still thinks it owns it.
-// Unix-only: the divergent spelling is built by joining a `.` component,
-// and windows drops it while pushing onto the verbatim prefix the
-// scratch root carries, leaving two identical strings and nothing to prove
-#[cfg(unix)]
+/// that fallback left the doubled separator uncollapsed the two spellings
+/// would key two separate holds over the one buffer nvim resolves both onto
+/// (nvim's own `canon()` falls back to `fnamemodify(p, ':p')`, which does
+/// collapse it), and the first `release_hidden` would delete that buffer
+/// while the second spelling's hold still thinks it owns it.
 #[test]
 fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
     let root = scratch_root("dual-spelling-new-file");
@@ -1160,11 +1165,11 @@ fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
     let (_pump, _cutover) = engine.start_pump(tx);
 
     let canonical = path.to_string_lossy().into_owned();
-    let respelled = root
-        .join(".")
-        .join("brand-new.rs")
-        .to_string_lossy()
-        .into_owned();
+    let respelled = format!(
+        "{}{sep}{sep}brand-new.rs",
+        root.to_string_lossy(),
+        sep = std::path::MAIN_SEPARATOR
+    );
     assert_ne!(
         canonical, respelled,
         "the two spellings must actually differ as strings for this test to prove anything"

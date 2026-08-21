@@ -3661,9 +3661,6 @@ mod tests {
     /// exercised live in `hidden_buffer_live.rs`, where an in-process check
     /// against a plain nonexistent directory cannot prove anything about
     /// `bufadd`'s own symlink handling.
-    // POSIX spellings are the subject: rooted paths with no drive letter,
-    // whose absoluteness and `..`-at-root behaviour are what this asserts
-    #[cfg(unix)]
     #[test]
     fn nvim_style_absolute_leaves_a_nonexistent_parent_completely_untouched() {
         let nonce = format!(
@@ -3686,7 +3683,13 @@ mod tests {
             "a '.' component under a nonexistent parent must be left exactly as given"
         );
 
+        // The `..` half is POSIX-only: windows normalizes the component
+        // away before the filesystem is asked, so the parent resolves (to
+        // the drive root) and there is nothing left untouched to assert --
+        // measured on windows-msvc, where this path came back as `C:\b`.
+        #[cfg(unix)]
         let dotdot = std::path::PathBuf::from(format!("/{nonce}/../b"));
+        #[cfg(unix)]
         assert_eq!(
             nvim_style_absolute(&dotdot),
             dotdot,
@@ -3694,8 +3697,8 @@ mod tests {
         );
     }
 
-    // POSIX spellings are the subject: rooted paths with no drive letter,
-    // whose absoluteness and `..`-at-root behaviour are what this asserts
+    // `/..` is POSIX root semantics: windows has no rooted path without a
+    // drive, so there is no spelling of this case to assert there
     #[cfg(unix)]
     #[test]
     fn nvim_style_absolute_resolves_dotdot_at_root_to_root_itself() {
@@ -3712,9 +3715,6 @@ mod tests {
     /// `canonical_hidden_key` would answer differently, and the ordinary
     /// ones that must still get through. A `load_hidden` these let past is
     /// a hold keyed on a path nvim resolved somewhere else.
-    // POSIX spellings are the subject: rooted paths with no drive letter,
-    // whose absoluteness and `..`-at-root behaviour are what this asserts
-    #[cfg(unix)]
     #[test]
     fn every_spelling_the_key_and_bufadd_disagree_on_is_refused() {
         for blank in ["", " ", "\t", "\n  "] {
@@ -3748,6 +3748,10 @@ mod tests {
              must too -- on Unix it is a readable file bufadd would bind, and a hold \
              taken on it comes back buf = 0 one round-trip later"
         );
+        // the refusals above are platform-independent (the blank and
+        // trailing-separator checks answer before absoluteness is asked at
+        // all); these spellings are absolute on unix alone
+        #[cfg(unix)]
         for usable in ["/tmp/a.rs", "/tmp/does/not/exist.rs", "/a", "/tmp/./a.rs"] {
             assert_eq!(
                 hidden_path_refusal(usable),
