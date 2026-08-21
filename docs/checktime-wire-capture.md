@@ -660,12 +660,24 @@ Two consequences the tests are built on:
   the probe while the path is still missing. The probe answers `gone` for it
   correctly -- the file *was* gone -- which is why that answer is not what
   reaches the user: the fold confirms it with a second probe one grace
-  period later (`view_ai::FILE_GONE_GRACE`, two coalesce windows), and an
-  ordinary save is readable again by then, so nothing is ever said. A path
-  still unreadable at the second probe is announced, and its notice is
-  retracted by any later answer that reads the path -- a file deleted for
+  period later (`view_ai::FILE_GONE_GRACE`, two coalesce windows), and a
+  save that finishes inside that grace is readable again by then, so nothing
+  is said. A path still unreadable at the second probe is announced --
+  including a build that clears its outputs and writes them seconds later,
+  where the file really is gone for the whole grace -- and its notice is
+  retracted by any later answer that reads the path, so a file deleted for
   real and restored minutes afterward loses its notice rather than standing
   for the full transient timeout.
+
+  Only the reply that second probe itself provokes may announce anything.
+  The probe is asked for by `Effect::ReprobeExternalWrite`, comes back as
+  `Msg::ConfirmExternalRemoval` once the grace has passed, and drives a
+  `checktime` of its own whose `request_id` the fold remembers; a `gone`
+  answer wearing any other id is a first look like any other. That is what
+  ends the episode at its answer rather than leaving a record behind: a
+  record that outlived its notice would let the next unlink-then-rewrite
+  save be announced on its first look, which is the flash this whole
+  sequence exists to prevent.
 
 ## Production chunk shape
 

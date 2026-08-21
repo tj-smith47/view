@@ -156,21 +156,29 @@ pub struct Model {
     /// that ownership legible rather than borrowing one whose doc explains a
     /// reason that does not apply here.
     checktime_generation: u64,
-    /// Every path whose most recent `Msg::CheckTimeReply` entry answered
-    /// [`crate::msg::CheckTimeOutcome::FileGone`], written through
-    /// [`Model::note_file_gone`] and [`Model::forget_file_gone`].
+    /// The confirming probes asked for by
+    /// [`crate::msg::Effect::ReprobeExternalWrite`] and not yet answered:
+    /// the `request_id` of the `RpcCall::Checktime` each one drove, beside
+    /// the path it was asked about. Written through
+    /// [`Model::expect_file_gone_confirmation`],
+    /// [`Model::take_file_gone_confirmation`] and
+    /// [`Model::forget_file_gone_confirmation`].
     ///
-    /// What it buys is the difference between a first such answer and a
-    /// repeated one: the first is not yet evidence -- a save that unlinks
+    /// What it buys is the difference between a first `FileGone` answer and
+    /// a confirmed one: the first is not yet evidence -- a save that unlinks
     /// its target before rewriting it can be probed between its two halves
-    /// -- so it schedules a re-probe instead of speaking, and only an
-    /// answer that outlived that probe is announced.
+    /// -- so it schedules a re-probe instead of speaking, and only the reply
+    /// that re-probe itself provoked is allowed to announce anything.
     ///
-    /// A `Vec` scanned linearly rather than a set: it holds one entry per
-    /// open buffer whose file is currently unreadable, which is a handful
-    /// at the very worst, and the notice dedupe beside it already scans its
-    /// own entries the same way.
-    paths_answering_file_gone: Vec<PathBuf>,
+    /// Keyed on the request rather than on the path alone so an entry can
+    /// never outlive the episode that made it: request ids are minted once
+    /// and never reused, so an entry whose reply never arrives (the engine
+    /// died holding it) can match nothing later, and a fresh episode for the
+    /// same path replaces it rather than inheriting it. That bounds the
+    /// `Vec` at one entry per path with a probe in flight -- at most one per
+    /// loaded buffer, since a `FileGone` answer requires one -- and the
+    /// bound is enforced on insert rather than asserted here.
+    pending_file_gone_probes: Vec<(u64, PathBuf)>,
 }
 
 impl Model {
@@ -213,7 +221,7 @@ impl Model {
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
             ai_fs: crate::native::ai_fs::AiFsState::default(),
             checktime_generation: 0,
-            paths_answering_file_gone: Vec::new(),
+            pending_file_gone_probes: Vec::new(),
         }
     }
 
@@ -226,27 +234,50 @@ impl Model {
         self.checktime_generation
     }
 
-    /// Records that `path` answered [`crate::msg::CheckTimeOutcome::FileGone`],
-    /// reporting whether its previous answer was one too.
+    /// Records that the `RpcCall::Checktime` numbered `request_id` is the
+    /// confirming second look at `path`, so its reply -- and no other -- may
+    /// announce that the path is gone.
     ///
-    /// `false` -- the first such answer since the path last answered
-    /// anything else -- is the caller's cue to confirm it with a re-probe
-    /// rather than announce it; `true` means the path was still unreadable
-    /// when something stat'd it again later.
-    #[must_use]
-    pub(crate) fn note_file_gone(&mut self, path: &std::path::Path) -> bool {
-        if self.paths_answering_file_gone.iter().any(|p| p == path) {
-            return true;
-        }
-        self.paths_answering_file_gone.push(path.to_path_buf());
-        false
+    /// Any earlier probe of the same path is dropped as it goes in: a second
+    /// nomination arriving while the first probe is still in flight starts
+    /// the episode over rather than stacking a duplicate, which is what
+    /// keeps one entry per path the true bound rather than a hopeful one.
+    pub(crate) fn expect_file_gone_confirmation(
+        &mut self,
+        request_id: u64,
+        path: &std::path::Path,
+    ) {
+        self.forget_file_gone_confirmation(path);
+        self.pending_file_gone_probes
+            .push((request_id, path.to_path_buf()));
     }
 
-    /// Forgets any `FileGone` answer standing for `path`, so the next one
-    /// it gives is confirmed from the start again rather than believed on
-    /// the strength of an answer the path has since contradicted.
-    pub(crate) fn forget_file_gone(&mut self, path: &std::path::Path) {
-        self.paths_answering_file_gone.retain(|p| p != path);
+    /// Whether the reply numbered `request_id` is the confirming probe of
+    /// `path`, consuming the record if it is.
+    ///
+    /// Consumed rather than left standing on purpose: the episode ends the
+    /// moment its confirmation is resolved, so a later `FileGone` answer for
+    /// the same path is a new episode that owes its own second look. A
+    /// record left behind is what lets the next episode announce on its
+    /// first answer -- the flash the confirmation exists to prevent.
+    #[must_use]
+    pub(crate) fn take_file_gone_confirmation(
+        &mut self,
+        request_id: u64,
+        path: &std::path::Path,
+    ) -> bool {
+        let before = self.pending_file_gone_probes.len();
+        self.pending_file_gone_probes
+            .retain(|(id, p)| !(*id == request_id && p == path));
+        self.pending_file_gone_probes.len() != before
+    }
+
+    /// Drops any confirming probe outstanding for `path`, so the next
+    /// `FileGone` answer it gives is confirmed from the start again rather
+    /// than believed on the strength of an answer the path has since
+    /// contradicted.
+    pub(crate) fn forget_file_gone_confirmation(&mut self, path: &std::path::Path) {
+        self.pending_file_gone_probes.retain(|(_, p)| p != path);
     }
 
     /// The next generation for a `RpcCall::LoadHidden` this crate issues,
@@ -1029,15 +1060,40 @@ impl EngineModel {
     #[must_use]
     pub fn withdraw_native_notice(&mut self, prefix: &str) -> bool {
         let before = self.messages.entries.len();
-        self.messages.entries.retain(|e| {
-            !(e.is_native()
-                && !e.condition
-                && e.content
-                    .first()
-                    .is_some_and(|(_, line)| line.starts_with(prefix)))
-        });
+        self.messages
+            .entries
+            .retain(|e| !is_standing_native_notice(e, prefix));
         self.messages.entries.len() != before
     }
+
+    /// Whether a one-shot native notice whose line starts with `prefix` is
+    /// standing right now, on exactly the terms
+    /// [`Self::withdraw_native_notice`] would take one down.
+    ///
+    /// The standing line is the only durable record of what the user has
+    /// already been told, and it retires itself: an expired transient is
+    /// retain-removed from `entries`, so this answers `false` again the
+    /// moment the notice leaves the screen.
+    #[must_use]
+    pub fn has_native_notice(&self, prefix: &str) -> bool {
+        self.messages
+            .entries
+            .iter()
+            .any(|e| is_standing_native_notice(e, prefix))
+    }
+}
+
+/// Whether `entry` is a standing one-shot native notice whose first line
+/// starts with `prefix`. A raised condition never counts: its lifetime
+/// belongs to [`Messages::set_native_condition`] rather than to whatever
+/// raised the notice beside it.
+fn is_standing_native_notice(entry: &MessageEntry, prefix: &str) -> bool {
+    entry.is_native()
+        && !entry.condition
+        && entry
+            .content
+            .first()
+            .is_some_and(|(_, line)| line.starts_with(prefix))
 }
 
 /// nvim mode state: the cursor/highlight property table from the last

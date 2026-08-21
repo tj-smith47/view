@@ -612,13 +612,29 @@ pub enum Msg {
     /// together (see `view_ai::watch`'s own doc, and the capture doc's
     /// case 8 for the reply shape that answers a batch).
     ///
-    /// The watcher is the usual source but not the only one:
-    /// [`Effect::ReprobeExternalWrite`] sends this too, naming the one path
-    /// whose last answer has to be confirmed before anything is said about
-    /// it. Deliberately the same message -- a confirmation is a second look
-    /// at a path, which is exactly what a detection already means here.
+    /// The watcher is the only source: a confirming second look at one path
+    /// arrives as [`Msg::ConfirmExternalRemoval`] instead, because the reply
+    /// it drives is the only one allowed to announce a removal and a fold
+    /// that could not tell the two apart could not tell their replies apart
+    /// either.
     ExternalWritesDetected {
         paths: Vec<std::path::PathBuf>,
+    },
+    /// The grace period [`Effect::ReprobeExternalWrite`] asked for has
+    /// elapsed: take the second look at `path` that decides whether the
+    /// `CheckTimeOutcome::FileGone` answer behind it is worth telling the
+    /// user about.
+    ///
+    /// Its own message rather than an [`Msg::ExternalWritesDetected`] of one
+    /// path, even though both drive the same `RpcCall::Checktime`: only the
+    /// reply this look provokes may confirm a removal, so the fold has to
+    /// know, at the moment it mints the request id, that this is the probe
+    /// whose answer counts. A confirmation the watcher's own detections
+    /// could also satisfy is one that a detection arriving long after the
+    /// episode ended can satisfy too -- and announcing on that first answer
+    /// is the flash the confirmation exists to prevent.
+    ConfirmExternalRemoval {
+        path: std::path::PathBuf,
     },
     /// The watch over the trusted project root is not covering everything
     /// it is documented to cover: the platform's watch limit was reached
@@ -629,6 +645,12 @@ pub enum Msg {
     /// session keeps running with out-of-band detection partly or wholly
     /// off, while `docs/ai.md` tells the user it is on. `reason` is written
     /// for that user, not for a log.
+    ///
+    /// The shell raises it for one more shape with the same consequence: a
+    /// confirming second look ([`Effect::ReprobeExternalWrite`]) it could
+    /// not schedule at all. A removal whose confirmation never runs is a
+    /// removal that is never announced, which is detection silently not
+    /// covering what it is documented to cover.
     ExternalWatchDegraded {
         reason: String,
     },
@@ -699,6 +721,16 @@ pub enum CheckTimeOutcome {
     /// two halves of a save that unlinks before it rewrites, so the fold
     /// asks again a grace period later (`Effect::ReprobeExternalWrite`)
     /// before it says anything.
+    ///
+    /// Everything this answer owes waits for that confirmation, not just
+    /// the notice: an open conflict prompt for the same path keeps offering
+    /// "reload and discard the local edits" until the second look comes
+    /// back, so the question stays answerable for a grace plus one round
+    /// trip after the path stopped being readable. Answering it in that
+    /// window issues the forced reload, whose own `FileGone` reply is
+    /// confirmed on exactly the same terms -- so a user who asks to reload a
+    /// path that has stopped being readable also waits a grace plus one
+    /// round trip to be told it could not happen.
     FileGone { modified: bool },
 }
 
@@ -983,10 +1015,12 @@ pub enum Effect {
     },
     /// Re-nominates `path` after a grace period, so an answer of
     /// [`CheckTimeOutcome::FileGone`] is confirmed before anything is said
-    /// about it. The executor sleeps and sends an ordinary
-    /// `Msg::ExternalWritesDetected` naming this one path, which takes the
-    /// same fold and the same probe a watcher's own batch does -- the point
-    /// is a second stat taken later, not a second code path.
+    /// about it. The executor sleeps and sends
+    /// [`Msg::ConfirmExternalRemoval`] naming this one path, which drives
+    /// the same `RpcCall::Checktime` a watcher's own batch does -- the point
+    /// is a second stat taken later, and a reply the fold can recognise as
+    /// the answer to this probe rather than to some other nomination of the
+    /// same path.
     ///
     /// The grace itself belongs to the shell, not to this crate: it is
     /// keyed to the filesystem watch's own coalesce window
@@ -997,11 +1031,13 @@ pub enum Effect {
     /// ordinary save and then retract it.
     ///
     /// One timer per path per gone episode, never one per detection: the
-    /// fold only emits this for the first `FileGone` answer a path gives,
+    /// fold emits this only for a `FileGone` answer that is neither a
+    /// confirmation nor a repeat of a notice already standing for the path,
     /// and a `FileGone` answer requires a loaded buffer for that path
     /// (`CHECKTIME_CHUNK` answers `found = false` above its own stat), so
     /// the count is bounded by open buffers rather than by whatever a build
-    /// just deleted.
+    /// just deleted -- and a path that stays unreadable under a watch that
+    /// keeps nominating it costs one timer per notice, not one per window.
     ReprobeExternalWrite {
         path: std::path::PathBuf,
     },

@@ -50,7 +50,11 @@ kind can be caught between its two halves -- the file really is missing for
 the moment between the unlink and the rewrite -- so view never speaks on the
 strength of one look: a path that reads as missing is checked once more, a
 fraction of a second later, and only a path that is still missing then is
-mentioned at all. Nothing flashes up and disappears again.
+mentioned at all. For a save that finishes promptly -- every shape above --
+nothing flashes up and disappears again. A file that stays missing for
+longer than that is genuinely missing as far as anything can tell, so it is
+mentioned, and its notice comes down as soon as any later check reads the
+path again.
 
 Editing a file in a second editor, or a `git` command in another terminal,
 is detected on exactly those terms -- during a session, inside the root,

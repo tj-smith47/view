@@ -26,6 +26,7 @@
 use crate::bridge::ThemeBridge;
 use crate::engine_ops::EngineOps;
 use crate::native::NativeSession;
+use crate::osc52::{drain_osc52, Osc52Job, Osc52Sink};
 use crate::recovery::{
     reconnects, restart_engine, step, EngineSession, LoopChannels, LoopState, ReconnectSchedule,
 };
@@ -34,9 +35,7 @@ use crate::speculate::{
 };
 use std::sync::mpsc;
 use view_core::model::Model;
-use view_core::msg::{
-    Effect, ExitInfo, Msg, RegisterType, ReplyValue, RpcCall, OSC52_MAX_PAYLOAD_BYTES,
-};
+use view_core::msg::{Effect, ExitInfo, Msg, RegisterType, ReplyValue, RpcCall};
 use view_core::native::supervision::{WedgeKind, READOUT_RESOLUTION};
 use view_core::update::update;
 use view_engine::handle::EngineHandle;
@@ -146,63 +145,6 @@ pub struct Executor<E: EngineOps> {
     ai_context: Option<mpsc::Sender<crate::ai_context_worker::AiContextJob>>,
 }
 
-/// One OSC52 clipboard-set escape to write, queued by [`Executor::run`] and
-/// drained by [`run`]'s loop into [`view_tui::terminal::Term::write_osc52`].
-pub struct Osc52Job {
-    pub register: char,
-    pub lines: Vec<String>,
-    pub regtype: RegisterType,
-}
-
-/// The one capability [`drain_osc52`] needs of the real terminal, factored
-/// out of [`Term`] the same way [`EngineOps`] is factored out of
-/// `EngineHandle`: a test drives the cap-before-encode and skip-and-log
-/// logic below against a recording fake, with no real terminal and no
-/// stdout write in the loop.
-trait Osc52Sink {
-    fn write_osc52(&mut self, register: char, text: &str) -> std::io::Result<()>;
-}
-
-impl Osc52Sink for Term {
-    fn write_osc52(&mut self, register: char, text: &str) -> std::io::Result<()> {
-        Term::write_osc52(self, register, text)
-    }
-}
-
-/// Drains every OSC52 job currently queued on `osc52_rx` into `sink`,
-/// applying the same cap-before-encode and skip-and-log policy
-/// `Effect::Osc52Copy`'s doc states: an over-cap payload is logged and
-/// never handed to `sink` at all (no truncated write), and a write error
-/// is logged rather than propagated, since nothing on the wire is blocked
-/// on this fire-and-forget escape (see [`Osc52Sink`]'s doc for the seam
-/// this drives against in tests).
-fn drain_osc52<S: Osc52Sink>(osc52_rx: &mpsc::Receiver<Osc52Job>, sink: &mut S) {
-    while let Ok(job) = osc52_rx.try_recv() {
-        let text = view_native::clipboard::lines_to_text(&job.lines, job.regtype);
-        // base64 expands 3 raw bytes to 4 encoded ones; this is the
-        // size the terminal actually receives and the bound
-        // `OSC52_MAX_PAYLOAD_BYTES` states in `Osc52Copy`'s own doc
-        let encoded_len = text.len().div_ceil(3) * 4;
-        if encoded_len > OSC52_MAX_PAYLOAD_BYTES {
-            crate::vlog::log_with("osc52", || {
-                format!(
-                    "skipped a {encoded_len}-byte payload over the \
-                     {OSC52_MAX_PAYLOAD_BYTES}-byte cap"
-                )
-            });
-            continue;
-        }
-        // fire-and-forget per `Effect::Osc52Copy`'s doc: nothing on the
-        // wire is blocked on this escape, so a transient stdout error
-        // here must not tear the session down the way a frame-paint
-        // failure does (`draw_surface`'s `?` in `run`, which the terminal's
-        // own real content depends on)
-        if let Err(err) = sink.write_osc52(job.register, &text) {
-            crate::vlog::log_with("osc52", || format!("write failed: {err}"));
-        }
-    }
-}
-
 /// One pass's handoffs: the work [`run`]'s loop owes other parties before
 /// it can paint or sleep, in one step so a pass cannot perform half of it.
 ///
@@ -245,6 +187,20 @@ where
             false
         }
     }
+}
+
+/// What the user is told when the confirming second look at `path`
+/// (`Effect::ReprobeExternalWrite`) could not be scheduled at all.
+///
+/// Written for that user rather than for a log, and routed through
+/// `Msg::ExternalWatchDegraded` because the consequence is that message's
+/// own subject: a removal whose confirmation never runs is never announced,
+/// so detection is quietly not covering what `docs/ai.md` says it covers.
+fn reprobe_unscheduled(path: &std::path::Path) -> String {
+    format!(
+        "{} could not be re-checked after it stopped being readable",
+        path.display()
+    )
 }
 
 impl<E: EngineOps> Executor<E> {
@@ -666,19 +622,30 @@ impl<E: EngineOps> Executor<E> {
             // the same one-shot thread `ScheduleToastExpiry` uses, and the
             // same reason for it: `update()` has no clock, and a reply that
             // said a path could not be read has to be re-asked later rather
-            // than believed at once. What goes back is an ordinary
-            // detection of that one path, so the confirming answer takes
-            // the identical fold and probe a watcher's own batch does.
+            // than believed at once. What goes back names the confirming
+            // probe as one, since the fold announces on the reply to this
+            // look and on no other.
             //
             // The delay is `view_ai`'s, taken from the crate that owns the
             // coalesce window it is keyed to rather than restated here.
+            //
+            // A spawn that fails says so through the same channel rather
+            // than swallowing the confirmation: the removal behind it would
+            // otherwise never be announced at all, which is detection
+            // quietly not covering what it is documented to cover. The
+            // unwired-`toast_timer` half of that degrade needs `update()`
+            // itself and lives in `dispatch`, beside `Effect::AiTrustSet`'s.
             Effect::ReprobeExternalWrite { path } => {
                 if let Some(tx) = &self.toast_timer {
-                    let tx = tx.clone();
-                    spawn_or_log("external-write-reprobe", move || {
+                    let timer = tx.clone();
+                    let reason = reprobe_unscheduled(&path);
+                    let spawned = spawn_or_log("external-write-reprobe", move || {
                         std::thread::sleep(view_ai::FILE_GONE_GRACE);
-                        let _ = tx.send(Msg::ExternalWritesDetected { paths: vec![path] });
+                        let _ = timer.send(Msg::ConfirmExternalRemoval { path });
                     });
+                    if !spawned {
+                        let _ = tx.try_send(Msg::ExternalWatchDegraded { reason });
+                    }
                 }
                 Flow::Continue
             }
@@ -1006,33 +973,35 @@ pub(crate) fn dispatch<E: EngineOps>(
             note_engine_call(model, call, follow_ups.speculate);
         }
         // `Executor::run` cannot self-announce an unwired `toast_timer`
-        // degrade the way its every other effect arm may: this is the one
-        // effect whose degrade means "tell `update()` its answer was
+        // degrade the way its every other effect arm may: these are the
+        // effects whose degrade means "tell `update()` its answer was
         // dropped," which needs a `Msg` folded back through `update()`
-        // itself, and `run` has no `&mut Model` of its own to do that with.
-        // `dispatch` does, so the fold happens here instead of inside
-        // `run`'s own match -- recursing into `dispatch` reuses its whole
-        // pipeline (follow-ups, speculation, vlog) for the synthesized
-        // `Msg` rather than hand-rolling a second copy of it. Never reached
-        // outside a bare test `Executor`: every real executor wires
-        // `toast_timer` (see `run`'s own comment on that, a few effects up).
-        if let Effect::AiTrustSet { verb, .. } = &eff {
-            if executor.toast_timer.is_none() {
-                let sub_flow = dispatch(
-                    model,
-                    executor,
-                    follow_ups,
-                    Msg::AiTrustResolved {
-                        trusted: false,
-                        verb: verb.clone(),
-                    },
-                );
-                if sub_flow != Flow::Continue {
-                    flow = sub_flow;
-                    break;
-                }
-                continue;
+        // itself, and `run` has no `&mut Model` of its own to do that with
+        // -- nor, with no channel wired, anything to send one on. `dispatch`
+        // does, so the fold happens here instead of inside `run`'s own match
+        // -- recursing into `dispatch` reuses its whole pipeline (follow-ups,
+        // speculation, vlog) for the synthesized `Msg` rather than
+        // hand-rolling a second copy of it. Never reached outside a bare test
+        // `Executor`: every real executor wires `toast_timer` (see `run`'s own
+        // comment on that), which is also why the spawn-failure half of the
+        // same degrade lives in `run`, where the channel exists to carry it.
+        let dropped = executor.toast_timer.is_none().then(|| match &eff {
+            Effect::AiTrustSet { verb, .. } => Some(Msg::AiTrustResolved {
+                trusted: false,
+                verb: verb.clone(),
+            }),
+            Effect::ReprobeExternalWrite { path } => Some(Msg::ExternalWatchDegraded {
+                reason: reprobe_unscheduled(path),
+            }),
+            _ => None,
+        });
+        if let Some(Some(answer)) = dropped {
+            let sub_flow = dispatch(model, executor, follow_ups, answer);
+            if sub_flow != Flow::Continue {
+                flow = sub_flow;
+                break;
             }
+            continue;
         }
         match executor.run(eff) {
             Flow::Continue => {}
@@ -1520,9 +1489,10 @@ pub struct MsgChannel {
 /// this pass, the overwhelming majority of passes) is one non-blocking
 /// `try_recv()` returning empty, no syscall and no allocation. The rare
 /// case (a yank just happened) costs exactly one bounded write+flush --
-/// [`OSC52_MAX_PAYLOAD_BYTES`] caps the base64-encoded payload at 100 KiB
-/// before it ever reaches the sink, so the worst case this pass can add is
-/// one syscall pair on a fixed-size buffer, not an unbounded one. A
+/// [`view_core::msg::OSC52_MAX_PAYLOAD_BYTES`] caps the base64-encoded
+/// payload at 100 KiB before it ever reaches the sink, so the worst case
+/// this pass can add is one syscall pair on a fixed-size buffer, not an
+/// unbounded one. A
 /// transient write error or an over-cap payload is logged and skipped
 /// rather than retried or escalated, so this never turns into a stall the
 /// way an engine-bound write can (see `OutboxStallWatch`).
@@ -1889,6 +1859,7 @@ mod tests {
     )]
     use super::*;
     use crate::engine_ops::{FakeOps, SlowOps};
+    use crate::osc52::FakeOsc52Sink;
     use view_core::msg::{BufferHandle, OptionValue, ReplyToken, TextEdit};
 
     /// Serializes every test here that mutates `XDG_STATE_HOME`, the same
@@ -3782,87 +3753,6 @@ mod tests {
         assert_eq!(job.regtype, RegisterType::Linewise);
     }
 
-    /// A recording [`Osc52Sink`] fake, the same shape as `FakeOps` above:
-    /// `drain_osc52`'s cap/skip/write logic is driven against this instead
-    /// of a real terminal, so the 100 KiB cap and the skip-and-log path are
-    /// provable with no stdout write and no sleep.
-    #[derive(Default)]
-    struct FakeOsc52Sink {
-        writes: Vec<(char, String)>,
-    }
-
-    impl Osc52Sink for FakeOsc52Sink {
-        fn write_osc52(&mut self, register: char, text: &str) -> std::io::Result<()> {
-            self.writes.push((register, text.to_owned()));
-            Ok(())
-        }
-    }
-
-    /// One raw byte short of the base64-expanded cap
-    /// (`div_ceil(3) * 4 == OSC52_MAX_PAYLOAD_BYTES` exactly at this
-    /// length): the boundary case `encoded_len > OSC52_MAX_PAYLOAD_BYTES`
-    /// must not reject, since `>` (not `>=`) is the cap's own contract.
-    fn at_cap_text() -> String {
-        // OSC52_MAX_PAYLOAD_BYTES is a multiple of 4, so 3/4 of it is a
-        // whole number of raw bytes whose base64 expansion lands exactly
-        // on the cap with no remainder to round up
-        "a".repeat(OSC52_MAX_PAYLOAD_BYTES / 4 * 3)
-    }
-
-    #[test]
-    fn an_at_cap_payload_is_written_whole() {
-        let (tx, rx) = mpsc::channel();
-        let text = at_cap_text();
-        let encoded_len = text.len().div_ceil(3) * 4;
-        assert_eq!(
-            encoded_len, OSC52_MAX_PAYLOAD_BYTES,
-            "fixture must sit exactly at the cap, not merely under it"
-        );
-        tx.send(Osc52Job {
-            register: '+',
-            lines: vec![text.clone()],
-            regtype: RegisterType::Charwise,
-        })
-        .unwrap();
-
-        let mut sink = FakeOsc52Sink::default();
-        drain_osc52(&rx, &mut sink);
-
-        assert_eq!(sink.writes.len(), 1, "an at-cap payload must be written");
-        assert_eq!(sink.writes[0].0, '+');
-        assert_eq!(
-            sink.writes[0].1, text,
-            "the written text must be whole, not truncated"
-        );
-    }
-
-    #[test]
-    fn an_over_cap_payload_is_skipped_with_no_write_attempted() {
-        let (tx, rx) = mpsc::channel();
-        // one raw byte past `at_cap_text`'s length pushes the base64
-        // expansion strictly over the cap
-        let text = "a".repeat(OSC52_MAX_PAYLOAD_BYTES / 4 * 3 + 1);
-        let encoded_len = text.len().div_ceil(3) * 4;
-        assert!(
-            encoded_len > OSC52_MAX_PAYLOAD_BYTES,
-            "fixture must sit strictly over the cap"
-        );
-        tx.send(Osc52Job {
-            register: '+',
-            lines: vec![text],
-            regtype: RegisterType::Charwise,
-        })
-        .unwrap();
-
-        let mut sink = FakeOsc52Sink::default();
-        drain_osc52(&rx, &mut sink);
-
-        assert!(
-            sink.writes.is_empty(),
-            "an over-cap payload must never reach the sink, truncated or otherwise"
-        );
-    }
-
     #[test]
     fn dispatch_a_key_forwards_input_and_returns_continue() {
         let ops = FakeOps::default();
@@ -3917,13 +3807,58 @@ mod tests {
         model.dirty.then(|| view_surface::render(model))
     }
 
-    /// The confirming re-probe has to actually be carried out. The fold
+    /// The shell's own half of the confirmation, driven without waiting out
+    /// the real grace: the second look is asked for, and the reply that look
+    /// -- and no other -- is allowed to announce is handed back. Its
+    /// `request_id` is read off the engine call the fold actually made,
+    /// since that is what the fold recorded as the one answer it will
+    /// believe.
+    fn second_look(
+        model: &mut Model,
+        executor: &Executor<&FakeOps>,
+        follow_ups: &mut FollowUps<'_>,
+        ops: &FakeOps,
+        path: &str,
+    ) -> Msg {
+        let _ = dispatch(
+            model,
+            executor,
+            follow_ups,
+            Msg::ConfirmExternalRemoval {
+                path: std::path::PathBuf::from(path),
+            },
+        );
+        let call = ops
+            .calls
+            .borrow()
+            .last()
+            .cloned()
+            .expect("the second look has to reach the engine");
+        let id = call
+            .strip_prefix("checktime(")
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|id| id.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("expected a checktime call, got {call}"));
+        gone(id, path)
+    }
+
+    /// The confirming re-probe has to actually be carried out, and not
+    /// before the save it exists to wait out could have finished. The fold
     /// stays silent on a first `gone` answer, so an effect that reaches no
     /// arm here (they degrade to no-ops by design, see `run`'s tail) turns
     /// a file an agent deleted into permanent silence rather than a notice
-    /// a fraction of a second late.
+    /// a fraction of a second late -- and one carried out at once answers
+    /// from inside an ordinary unlink-then-rewrite save, which is the flash
+    /// the whole confirmation exists to remove.
+    ///
+    /// The floor is an absolute duration, deliberately not a fraction of
+    /// the constant under test: an assertion written against
+    /// `FILE_GONE_GRACE` itself holds for every value that constant can
+    /// take, zero included, and zero is exactly the regression. 60ms is one
+    /// coalesce window and change -- above the window a save's two halves
+    /// can straddle, below the real grace.
     #[test]
-    fn the_re_probe_effect_comes_back_as_a_detection_of_the_same_path() {
+    fn the_re_probe_waits_out_the_save_before_looking_again() {
         let ops = FakeOps::default();
         let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel(8);
         let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
@@ -3934,20 +3869,60 @@ mod tests {
 
         assert!(matches!(flow, Flow::Continue));
         assert!(
-            msg_rx.recv_timeout(view_ai::FILE_GONE_GRACE / 2).is_err(),
-            "re-asking at once would answer from inside the save it is waiting out"
+            msg_rx
+                .recv_timeout(std::time::Duration::from_millis(60))
+                .is_err(),
+            "re-asking this soon answers from inside the save it is waiting out"
         );
         match msg_rx
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("the grace has to end in a second look, not in silence")
         {
-            Msg::ExternalWritesDetected { paths } => assert_eq!(
-                paths,
-                vec![std::path::PathBuf::from("/proj/src/lib.rs")],
-                "the path re-nominated is the one that answered gone"
+            Msg::ConfirmExternalRemoval { path } => assert_eq!(
+                path,
+                std::path::PathBuf::from("/proj/src/lib.rs"),
+                "the path looked at again is the one that answered gone"
             ),
-            other => panic!("expected the path to be nominated again, got {other:?}"),
+            other => panic!("expected the path to be looked at again, got {other:?}"),
         }
+    }
+
+    /// A second look that could not be scheduled is a removal that is never
+    /// announced, so it says so rather than going quiet -- the same degrade
+    /// `Effect::AiTrustSet` takes for the same unwired channel, through the
+    /// notice `Msg::ExternalWatchDegraded` already exists to raise.
+    #[test]
+    fn a_second_look_that_cannot_be_scheduled_is_reported_rather_than_swallowed() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+
+        let flow = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            gone(1, "/proj/src/lib.rs"),
+        );
+        assert!(matches!(flow, Flow::Continue));
+        let entry = model
+            .engine
+            .messages
+            .entries
+            .last()
+            .expect("an unwired executor must not drop the confirmation in silence");
+        let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+        assert_eq!(
+            text,
+            "out-of-band write detection is degraded: /proj/src/lib.rs could not \
+             be re-checked after it stopped being readable"
+        );
     }
 
     /// A file an agent removed under an open buffer has to reach the
@@ -3957,7 +3932,8 @@ mod tests {
     #[test]
     fn a_confirmed_vanished_file_reaches_the_frame_that_shows_it() {
         let ops = FakeOps::default();
-        let executor = Executor::new(&ops);
+        let (msg_tx, _msg_rx) = std::sync::mpsc::sync_channel(8);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
         let mut model = Model::with_term_size(80, 24);
         model.engine.apply_grid(view_core::grid::GridOp::Resize {
             width: 80,
@@ -3982,13 +3958,15 @@ mod tests {
             .is_none(),
             "the first answer is still being confirmed, so nothing is owed a frame"
         );
-        let frame = painted(
+        let confirming = second_look(
             &mut model,
             &executor,
             &mut follow_ups,
-            gone(2, "/proj/src/lib.rs"),
-        )
-        .expect("a notice nobody was told to paint never reaches the terminal");
+            &ops,
+            "/proj/src/lib.rs",
+        );
+        let frame = painted(&mut model, &executor, &mut follow_ups, confirming)
+            .expect("a notice nobody was told to paint never reaches the terminal");
         assert_ne!(
             frame, before,
             "and the frame it asked for is the one carrying it"
@@ -3996,13 +3974,15 @@ mod tests {
     }
 
     /// The other screen change the same reply can owe: the conflict prompt
-    /// being withdrawn. Driven with the notice already standing, so it
-    /// dedupes and the question leaving the screen is the only thing left
-    /// to repaint for.
+    /// being withdrawn. A user reading "reload and discard the local edits?"
+    /// against a path that has stopped being readable has to see the
+    /// question go, and the reply that takes it away arrives off the RPC
+    /// pump with no keystroke behind it.
     #[test]
     fn a_withdrawn_conflict_prompt_reaches_the_frame_without_it() {
         let ops = FakeOps::default();
-        let executor = Executor::new(&ops);
+        let (msg_tx, _msg_rx) = std::sync::mpsc::sync_channel(8);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
         let mut model = Model::with_term_size(80, 24);
         model.engine.apply_grid(view_core::grid::GridOp::Resize {
             width: 80,
@@ -4016,20 +3996,12 @@ mod tests {
             speculate: crate::speculate::SpeculationClock::default(),
         };
 
-        for id in 1..=2 {
-            let _ = dispatch(
-                &mut model,
-                &executor,
-                &mut follow_ups,
-                gone(id, "/proj/src/lib.rs"),
-            );
-        }
         let _ = dispatch(
             &mut model,
             &executor,
             &mut follow_ups,
             Msg::CheckTimeReply {
-                request_id: 3,
+                request_id: 1,
                 results: vec![(
                     std::path::PathBuf::from("/proj/src/lib.rs"),
                     view_core::msg::CheckTimeOutcome::Conflict,
@@ -4039,19 +4011,26 @@ mod tests {
         assert_eq!(model.overlays().len(), 1, "the prompt is standing");
         let asking = view_surface::render(&model);
 
-        let _ = dispatch(
-            &mut model,
-            &executor,
-            &mut follow_ups,
-            gone(4, "/proj/src/lib.rs"),
+        assert!(
+            painted(
+                &mut model,
+                &executor,
+                &mut follow_ups,
+                gone(2, "/proj/src/lib.rs")
+            )
+            .is_none(),
+            "an unconfirmed answer must not tear down a live question"
         );
-        let frame = painted(
+        assert_eq!(model.overlays().len(), 1, "the question is still standing");
+        let confirming = second_look(
             &mut model,
             &executor,
             &mut follow_ups,
-            gone(5, "/proj/src/lib.rs"),
-        )
-        .expect("a question leaving the screen has to take the screen with it");
+            &ops,
+            "/proj/src/lib.rs",
+        );
+        let frame = painted(&mut model, &executor, &mut follow_ups, confirming)
+            .expect("a question leaving the screen has to take the screen with it");
         assert_eq!(model.overlays().len(), 0, "the prompt was withdrawn");
         assert_ne!(
             frame, asking,

@@ -55,12 +55,19 @@ use view_core::msg::Msg;
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
 /// How long a path that answered `gone` is given to come back before that
-/// answer is believed. Two [`COALESCE_WINDOW`]s rather than a number of its
-/// own: an unlink-then-rewrite save whose halves fall in different windows
-/// is nominated by its unlink first, so the batch that carries the rewrite
-/// -- the one proving the path is back -- cannot form until the window
-/// after that one has closed, and a grace shorter than two of them would
-/// re-probe before the evidence it is waiting for exists.
+/// answer is believed. What has to be outlasted is the file's own absence
+/// from the filesystem, not any message about it: the confirming probe
+/// stats the path itself rather than waiting for the batch that would carry
+/// the rewrite.
+///
+/// Two [`COALESCE_WINDOW`]s rather than a number of its own, because the
+/// window is what sets how long that absence can last while still being one
+/// ordinary save: the unlink is nominated by the window it falls in, and
+/// the rewrite is a save that has not finished until the window after that
+/// one -- a grace shorter than the two of them re-probes a path whose save
+/// is still legitimately in progress, which is the flash the grace exists
+/// to prevent. `the_grace_outlasts_the_absence_a_save_can_leave` is what
+/// holds the two constants in that relation.
 pub const FILE_GONE_GRACE: Duration = Duration::from_millis(2 * COALESCE_WINDOW.as_millis() as u64);
 
 /// The most paths one batch carries. Whatever a window collects beyond this
@@ -521,6 +528,27 @@ pub fn spawn(root: &Path, emit: impl Fn(Msg) + Send + 'static) -> Result<WatchHa
 mod tests {
     use super::*;
     use std::sync::mpsc::{channel, RecvTimeoutError};
+
+    /// The grace's magnitude is the feature, not its existence: a grace
+    /// shorter than the absence an ordinary save can leave re-probes while
+    /// that save is still running, which announces a vanished file over a
+    /// write and takes it back a moment later. Two coalesce windows is the
+    /// floor because a save whose unlink and rewrite fall in different
+    /// windows is not finished until the second window has closed, and the
+    /// unlink was nominated out of the first.
+    ///
+    /// Asserted against `COALESCE_WINDOW` rather than against a number so
+    /// the two constants can only move together, and asserted at all
+    /// because every other test of this delay is satisfied by any value the
+    /// constant can take, zero included.
+    #[test]
+    fn the_grace_outlasts_the_absence_a_save_can_leave() {
+        assert!(
+            FILE_GONE_GRACE >= 2 * COALESCE_WINDOW,
+            "a grace of {FILE_GONE_GRACE:?} re-probes inside a save whose \
+             halves straddle two {COALESCE_WINDOW:?} windows"
+        );
+    }
 
     /// A backend that answers by call index rather than by path, so
     /// [`register`]'s two failure paths can be driven without racing a real

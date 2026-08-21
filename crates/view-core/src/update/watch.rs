@@ -11,11 +11,20 @@
 //! One outcome takes a third hop. A path answering
 //! `CheckTimeOutcome::FileGone` for the first time says nothing at all and
 //! schedules `Effect::ReprobeExternalWrite` instead, which comes back as
-//! another detection of that one path a grace period later; only a path
-//! that is still unreadable then is announced. That is what keeps a save
-//! that unlinks its target before rewriting it -- nominated, legitimately,
-//! while the path is absent -- from flashing a vanished file at the user
-//! over an ordinary write.
+//! `Msg::ConfirmExternalRemoval` for that one path a grace period later;
+//! only the reply that second probe provokes may announce anything. That is
+//! what keeps a save that unlinks its target before rewriting it --
+//! nominated, legitimately, while the path is absent -- from flashing a
+//! vanished file at the user over an ordinary write.
+//!
+//! A gone episode therefore has exactly three ends, and the state carrying
+//! it is gone after any of them: the confirming reply arrives (announced or
+//! not), some other answer for the path contradicts it, or a fresh
+//! nomination of the same path starts the episode over. Nothing outlives
+//! the episode that could let a later first answer pass for a confirmed
+//! one -- what stops a path already announced from being probed again and
+//! again is the notice standing on screen for it, which retires itself when
+//! it expires or is withdrawn.
 
 use std::path::PathBuf;
 
@@ -45,6 +54,24 @@ pub(super) fn on_external_writes_detected(model: &mut Model, paths: Vec<PathBuf>
     })]
 }
 
+/// Starts the confirming second look at one path, a grace period after its
+/// first `CheckTimeOutcome::FileGone` answer (see
+/// `Effect::ReprobeExternalWrite`). Mints the `request_id` and records that
+/// this probe's reply -- and no other -- may announce the removal.
+///
+/// One path, not a batch: this is the answer to a specific question about a
+/// specific file, and a probe that carried other paths along would let one
+/// of them be confirmed by a reply nobody asked for on its behalf.
+pub(super) fn on_confirm_external_removal(model: &mut Model, path: PathBuf) -> Vec<Effect> {
+    let request_id = model.next_checktime_request_id();
+    model.expect_file_gone_confirmation(request_id, &path);
+    vec![Effect::Rpc(RpcCall::Checktime {
+        request_id,
+        paths: vec![super::path_to_wire(&path)],
+        force: false,
+    })]
+}
+
 /// Folds one `Msg::CheckTimeReply`: every entry is dispositioned on its own,
 /// since one call answers many paths and each can have landed differently.
 ///
@@ -56,39 +83,38 @@ pub(super) fn on_external_writes_detected(model: &mut Model, paths: Vec<PathBuf>
 /// with "Reload".
 pub(super) fn on_checktime_reply(
     model: &mut Model,
+    request_id: u64,
     results: Vec<(PathBuf, CheckTimeOutcome)>,
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
     for (path, outcome) in results {
         // any answer other than `FileGone` ends whatever gone episode the
-        // path was in: `Conflict`, `HandledSilently`, `Reloaded` and
-        // `ReloadFailed` are all answered below the chunk's own stat, so
-        // each of them read the path as a file, and `NoBuffer` is answered
-        // above it for a path nvim no longer holds at all. Left standing,
-        // the record would let some later, genuine removal skip the
-        // confirmation every first answer owes
+        // path was in, both halves of it. `Conflict`, `HandledSilently`,
+        // `Reloaded` and `ReloadFailed` are all answered below the chunk's
+        // own stat, so each of them read the path as a file; `NoBuffer`
+        // proves nothing about the file -- the chunk answers it above the
+        // stat -- but it retires the notice all the same, whose second
+        // clause describes a buffer that no longer exists to hold anything.
+        //
+        // So a notice asserting the path cannot be read has nothing true
+        // left to say, and a confirming probe still in flight is asking a
+        // question that has been answered: neither may survive into the
+        // next episode, where the notice would suppress the second look the
+        // next first answer owes and the probe's late reply would pass for
+        // that second look itself
         if !matches!(outcome, CheckTimeOutcome::FileGone { .. }) {
-            model.forget_file_gone(&path);
+            model.forget_file_gone_confirmation(&path);
+            if model
+                .engine
+                .withdraw_native_notice(&file_gone_prefix(&path))
+            {
+                model.dirty = true;
+            }
         }
         match outcome {
-            // an earlier detection may have said this path could no longer
-            // be read, and two of these three answers disprove it: a
-            // `checktime` that reloaded silently and a forced reload that
-            // completed were both answered below the chunk's stat, so each
-            // one read the path as a file. `NoBuffer` proves nothing about
-            // the file -- the chunk answers it above the stat -- but it
-            // does retire the notice, whose second clause describes a
-            // buffer that no longer exists to hold anything
             CheckTimeOutcome::NoBuffer
             | CheckTimeOutcome::HandledSilently
-            | CheckTimeOutcome::Reloaded => {
-                if model
-                    .engine
-                    .withdraw_native_notice(&file_gone_prefix(&path))
-                {
-                    model.dirty = true;
-                }
-            }
+            | CheckTimeOutcome::Reloaded => {}
             CheckTimeOutcome::Conflict => open_conflict_prompt(model, path),
             // the answer the user gave was destructive (discard the local
             // edits), so a reload that raised must say so rather than pass
@@ -126,11 +152,19 @@ pub(super) fn on_checktime_reply(
                 // so announcing the first answer would flash a vanished
                 // file over an ordinary save and retract it a moment
                 // later -- and a notice that is wrong for 50ms is still a
-                // notice the user's eye caught. The re-probe settles it
-                // (`Effect::ReprobeExternalWrite`), and everything below
-                // runs only for a path that was still unreadable when it
-                // came back around
-                if !model.note_file_gone(&path) {
+                // notice the user's eye caught. Only the reply the
+                // confirming probe itself provoked settles it
+                // (`Effect::ReprobeExternalWrite`), so a stray answer for a
+                // path nobody is currently confirming cannot pass for one.
+                //
+                // A notice already standing for the path counts as settled
+                // too, and has to: the episode it belongs to said its piece
+                // already, so a watch that keeps nominating an absent path
+                // once per window would otherwise buy a fresh probe, and a
+                // fresh sleeping thread, for every window it stays gone
+                let confirmed = model.take_file_gone_confirmation(request_id, &path)
+                    || model.engine.has_native_notice(&file_gone_prefix(&path));
+                if !confirmed {
                     effects.push(Effect::ReprobeExternalWrite { path });
                     continue;
                 }
@@ -147,7 +181,14 @@ pub(super) fn on_checktime_reply(
                 // the withdrawal lands finds no overlay focused and reaches
                 // nvim instead, where the prompt's own `r` is a normal-mode
                 // character replace. The window is one paint wide and the
-                // same one the cmdline-quiet dismissal already carries
+                // same one the cmdline-quiet dismissal already carries.
+                //
+                // The withdrawal waits for the confirmation the notice
+                // waits for, so the stale question stays answerable for a
+                // grace plus one round trip: the alternative is withdrawing
+                // it on an answer taken mid-save, which would take a live
+                // conflict off the screen for a file that never went
+                // anywhere
                 let withdrew = model.close_external_write_conflict_prompt(&path);
                 let fate = if modified {
                     "and your buffer still holds your edits"
@@ -163,7 +204,12 @@ pub(super) fn on_checktime_reply(
                 // dedupe declining to say the same thing twice, and a
                 // repaint for a screen nothing changed on would be spent
                 // once per detection window for as long as the path stays
-                // unreadable
+                // unreadable.
+                //
+                // Both, not either: a question leaving the screen and a line
+                // arriving on it are each a change the user has to be shown,
+                // and the paint each one owes belongs to it rather than to
+                // the other happening to be there beside it
                 let spoke = !raised.is_empty();
                 effects.extend(raised);
                 model.dirty |= withdrew || spoke;
@@ -257,10 +303,15 @@ mod tests {
         }
     }
 
-    /// The pair of answers announcing an unreadable path takes: the first
-    /// only asks for the confirming re-probe, and the second -- the one a
-    /// path that is genuinely gone survives to give -- is what speaks.
-    /// Hands back the second reply's own effects.
+    /// The whole announcing sequence for an unreadable path, shell hop
+    /// included: a first answer that only asks for the confirming re-probe,
+    /// the grace's own re-nomination, and the reply to the probe that
+    /// re-nomination drove -- the one answer allowed to speak. Hands back
+    /// that last reply's own effects.
+    ///
+    /// `id` is the first answer's; the confirming probe mints its own, which
+    /// is exactly why it can be told apart from any other answer for the
+    /// same path.
     fn confirm_gone(model: &mut Model, id: u64, path: &str, modified: bool) -> Vec<Effect> {
         let gone = CheckTimeOutcome::FileGone { modified };
         let asked = update(model, checktime_reply(id, &[(path, gone)]));
@@ -268,7 +319,32 @@ mod tests {
             matches!(asked.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
             "the first answer confirms rather than speaks, got {asked:?}"
         );
-        update(model, checktime_reply(id + 1, &[(path, gone)]))
+        let confirming = reprobe(model, path);
+        update(model, checktime_reply(confirming, &[(path, gone)]))
+    }
+
+    /// Performs the shell's half of the confirmation -- the grace elapsing
+    /// and the second look being asked for -- and hands back the
+    /// `request_id` of the probe it drove, since only the reply wearing that
+    /// id may confirm anything.
+    fn reprobe(model: &mut Model, path: &str) -> u64 {
+        let effects = update(
+            model,
+            Msg::ConfirmExternalRemoval {
+                path: PathBuf::from(path),
+            },
+        );
+        match effects.as_slice() {
+            [Effect::Rpc(RpcCall::Checktime {
+                request_id,
+                paths,
+                force: false,
+            })] => {
+                assert_eq!(paths, &vec![path.to_string()], "the probe names its path");
+                *request_id
+            }
+            other => panic!("expected one unforced probe of the path, got {other:?}"),
+        }
     }
 
     /// The watcher's own detection always drives one `RpcCall::Checktime`
@@ -572,12 +648,12 @@ mod tests {
     fn a_second_path_between_two_detections_does_not_restack_the_first() {
         let mut model = Model::new();
         let before = model.engine.messages.entries.len();
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
+        let _ = confirm_gone(&mut model, 2, "/proj/src/other.rs", false);
         for (id, path) in [
-            (1, "/proj/src/lib.rs"),
-            (2, "/proj/src/other.rs"),
-            (3, "/proj/src/lib.rs"),
-            (4, "/proj/src/other.rs"),
             (5, "/proj/src/lib.rs"),
+            (6, "/proj/src/other.rs"),
+            (7, "/proj/src/lib.rs"),
         ] {
             let _ = update(
                 &mut model,
@@ -709,6 +785,158 @@ mod tests {
                 model.engine.messages.entries
             );
         }
+    }
+
+    /// The episode ends when it has spoken, and the next one starts from
+    /// nothing. A notice is transient: it leaves the screen on its own, and
+    /// the file can come back with nothing watching it (the watch runs only
+    /// while an agent session does). If anything survived that, the next
+    /// unlink-then-rewrite save would be announced on its first answer and
+    /// retracted a moment later -- the flash the confirmation exists to
+    /// prevent, back through the side door.
+    #[test]
+    fn a_finished_episode_leaves_nothing_that_could_announce_the_next_one() {
+        let mut model = Model::new();
+        let raised = confirm_gone(&mut model, 1, "/proj/src/gen.rs", false);
+        let expiry = raised
+            .iter()
+            .find_map(|e| match e {
+                Effect::ScheduleToastExpiry { id, .. } => Some(*id),
+                _ => None,
+            })
+            .expect("the notice the episode raised owes an expiry");
+        assert_eq!(model.engine.messages.entries.len(), 1, "it spoke once");
+
+        // the notice ages out, and the file comes back unobserved: nothing
+        // ever answers for the path again until the next save unlinks it
+        let _ = update(&mut model, Msg::ToastExpired { id: expiry });
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "the notice left the screen: {:?}",
+            model.engine.messages.entries
+        );
+
+        let effects = update(
+            &mut model,
+            checktime_reply(
+                9,
+                &[(
+                    "/proj/src/gen.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
+            "the next episode owes its own second look, got {effects:?}"
+        );
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "and says nothing until that look answers: {:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    /// Only the answer the confirming probe itself provoked may confirm.
+    /// Any other reply naming the path -- a watcher batch that happened to
+    /// nominate it while the probe was in flight -- is a first answer like
+    /// any other, because it was taken at a moment nobody chose.
+    #[test]
+    fn an_answer_the_confirming_probe_did_not_provoke_confirms_nothing() {
+        let mut model = Model::new();
+        let gone = CheckTimeOutcome::FileGone { modified: false };
+        let _ = update(
+            &mut model,
+            checktime_reply(1, &[("/proj/src/lib.rs", gone)]),
+        );
+        let confirming = reprobe(&mut model, "/proj/src/lib.rs");
+
+        let effects = update(
+            &mut model,
+            checktime_reply(confirming + 7, &[("/proj/src/lib.rs", gone)]),
+        );
+        assert!(
+            matches!(effects.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
+            "a reply nobody asked for is a first answer, got {effects:?}"
+        );
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "and says nothing: {:?}",
+            model.engine.messages.entries
+        );
+
+        let effects = update(
+            &mut model,
+            checktime_reply(confirming, &[("/proj/src/lib.rs", gone)]),
+        );
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, Effect::ScheduleToastExpiry { .. })));
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            1,
+            "the probe's own answer is what speaks: {:?}",
+            model.engine.messages.entries
+        );
+    }
+
+    /// One probe in flight per path, and the last nomination owns it: a
+    /// second look asked for while an earlier one is still out replaces it
+    /// rather than joining it. That is what makes "one entry per path" the
+    /// record's real bound rather than a hopeful one, and it keeps the
+    /// superseded probe's late reply from announcing on behalf of an
+    /// episode that has already moved on.
+    #[test]
+    fn a_second_look_asked_for_twice_leaves_only_the_later_probe_able_to_confirm() {
+        let mut model = Model::new();
+        let gone = CheckTimeOutcome::FileGone { modified: false };
+        let _ = update(
+            &mut model,
+            checktime_reply(1, &[("/proj/src/lib.rs", gone)]),
+        );
+        let superseded = reprobe(&mut model, "/proj/src/lib.rs");
+        let current = reprobe(&mut model, "/proj/src/lib.rs");
+
+        let _ = update(
+            &mut model,
+            checktime_reply(superseded, &[("/proj/src/lib.rs", gone)]),
+        );
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "the replaced probe's answer speaks for nobody: {:?}",
+            model.engine.messages.entries
+        );
+        let _ = update(
+            &mut model,
+            checktime_reply(current, &[("/proj/src/lib.rs", gone)]),
+        );
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            1,
+            "the probe that is still outstanding is the one that answers"
+        );
+    }
+
+    /// A conflict reads the path as a file (it is answered below the
+    /// chunk's own stat), so a notice saying the path cannot be read is
+    /// false the moment the conflict arrives -- and left standing it would
+    /// also silence the second look the next genuine removal owes.
+    #[test]
+    fn a_conflict_takes_down_the_notice_it_contradicts() {
+        let mut model = Model::new();
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", true);
+        assert_eq!(model.engine.messages.entries.len(), 1);
+
+        let _ = update(
+            &mut model,
+            checktime_reply(4, &[("/proj/src/lib.rs", CheckTimeOutcome::Conflict)]),
+        );
+        assert!(
+            model.engine.messages.entries.is_empty(),
+            "the file is there to conflict over: {:?}",
+            model.engine.messages.entries
+        );
+        assert_eq!(model.overlays().len(), 1, "and the question is open");
     }
 
     /// A notice asserts the path cannot be read *now*, so an answer that

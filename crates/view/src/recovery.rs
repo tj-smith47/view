@@ -19,7 +19,8 @@ use view_engine::handle::EngineHandle;
 use view_engine::process::Engine;
 
 use crate::engine_ops::EngineOps;
-use crate::runtime::{dispatch, Executor, Flow, FollowUps, Osc52Job};
+use crate::osc52::Osc52Job;
+use crate::runtime::{dispatch, Executor, Flow, FollowUps};
 
 /// What the loop has resolved about its engine, carried between passes and
 /// between the three sites that dispatch into it.
