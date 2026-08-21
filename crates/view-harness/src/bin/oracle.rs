@@ -663,7 +663,8 @@ fn run_review_entry(
             | ReviewStep::AcceptAll
             | ReviewStep::Reject(_)
             | ReviewStep::ReDiff(_)
-            | ReviewStep::FoldRow(_)) => {
+            | ReviewStep::FoldRow(_)
+            | ReviewStep::AgentWrite(_)) => {
                 if driver.apply(&mut engine, step)? {
                     engine_settled &= engine.quiesce(silence, deadline)?;
                 }

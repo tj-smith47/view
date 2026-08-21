@@ -1,5 +1,7 @@
-//! The diff-review leg of a differential run: the one path where view
-//! writes a buffer through `nvim_buf_set_text` instead of typing keys.
+//! The agent-write legs of a differential run: the two paths where view
+//! writes a buffer through the API instead of typing keys -- a review's
+//! accepted hunks through `nvim_buf_set_text`, and an agent's
+//! `fs/write_text_file` through a whole-buffer replace.
 //!
 //! Every other corpus entry drives both sides with the same script, because
 //! both sides are supposed to reach the same state by the same route. This
@@ -45,6 +47,11 @@ const GENERATION: u64 = 1;
 /// `RpcCall::LoadHidden`, so nothing here reads the path back out.
 const REVIEW_PATH: &str = "/oracle/diff-review";
 
+/// The correlation id an agent write is issued under. One session, one
+/// write in flight, and the reply is routed to a sink this driver never
+/// reads, so the value only has to be a value.
+const AGENT_WRITE_REQUEST_ID: u64 = 1;
+
 /// The keys both sides run after a case's decisions, before the comparison.
 ///
 /// `o<Esc>dd` is one identical edit performed by both sides from identical
@@ -81,15 +88,20 @@ pub enum DiffReviewCase {
     /// A hunk staled by the user's own edit inside its anchor, re-diffed
     /// against what they left, then accepted.
     StaleReDiffThenAccept,
+    /// No review at all: an agent replacing the file's whole text through
+    /// `fs/write_text_file`, which is the other route by which text reaches
+    /// a buffer without anyone typing it.
+    AgentFsWrite,
 }
 
 impl DiffReviewCase {
     /// Every case, in the order a corpus-coverage check reports them.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::SingleHunkAccept,
         Self::MultiHunkAcceptAll,
         Self::RejectThenRepropose,
         Self::StaleReDiffThenAccept,
+        Self::AgentFsWrite,
     ];
 
     /// How a corpus entry's `diff_review` field spells this case.
@@ -100,6 +112,7 @@ impl DiffReviewCase {
             Self::MultiHunkAcceptAll => "multi-hunk-accept-all",
             Self::RejectThenRepropose => "reject-then-repropose",
             Self::StaleReDiffThenAccept => "stale-re-diff-then-accept",
+            Self::AgentFsWrite => "agent-fs-write",
         }
     }
 
@@ -161,6 +174,27 @@ impl DiffReviewCase {
                 ReviewStep::Accept(0),
                 ReviewStep::Reference("GccFÎVE<Esc>"),
             ],
+            // Both ends of the buffer change, because the call under test
+            // replaces every line rather than splicing a range: a
+            // whole-buffer write that dropped or duplicated an edge row
+            // reproduces the middle perfectly and still diverges here. The
+            // buffer is named first so the chunk's own save runs -- an
+            // unnamed buffer takes the replacement and then fails the write
+            // silently, which is the half of this route a text comparison
+            // alone would never reach. Both sides take the same name, from
+            // the temp root the two sessions share rather than from either
+            // session's own directory: the name is on screen in the
+            // statusline, so two spellings of it are a divergence about
+            // where nvim puts its scratch files. Only view's side ever
+            // writes the file; the reference side needs the name, not the
+            // save.
+            Self::AgentFsWrite => &[
+                ReviewStep::Shared(
+                    "<Cmd>execute 'file' fnamemodify(tempname(), ':h:h') .. '/agent-fs-write'<CR>",
+                ),
+                ReviewStep::AgentWrite("ÜNÏCODE\ntwo\nthree\nfôur\nFÎVE"),
+                ReviewStep::Reference("ggccÜNÏCODE<Esc>GccFÎVE<Esc>"),
+            ],
         }
     }
 }
@@ -189,6 +223,9 @@ pub enum ReviewStep {
     /// Fold the current text of this 0-indexed buffer row into the review,
     /// the way the loop folds one `Msg::BufTextChanged`.
     FoldRow(u32),
+    /// An agent replaces the buffer's whole text with this, through the
+    /// same call `fs/write_text_file` reaches nvim by.
+    AgentWrite(&'static str),
 }
 
 /// Drives one case's review steps against an [`EngineSession`]'s own
@@ -271,6 +308,10 @@ impl ReviewDriver {
                 self.fold_row(session, row)?;
                 Ok(false)
             }
+            ReviewStep::AgentWrite(text) => {
+                self.agent_write(session, text)?;
+                Ok(true)
+            }
         }
     }
 
@@ -320,6 +361,42 @@ impl ReviewDriver {
             changedtick,
             desynced: false,
         });
+        Ok(())
+    }
+
+    /// Replaces the session buffer's whole text through the engine call an
+    /// agent's `fs/write_text_file` is carried out by, then reads the
+    /// buffer back to confirm it took.
+    ///
+    /// The read is the barrier and the check at once. The write is issued
+    /// asynchronously -- its own reply is routed to a message sink this
+    /// driver does not read -- and nvim answers requests in the order they
+    /// arrive, so a blocking probe behind it cannot observe the buffer
+    /// before the write. Without the check a refused write would surface
+    /// only as a text divergence at the end of the run, reported as a
+    /// disagreement between the two editors rather than as the write this
+    /// case could not perform.
+    fn agent_write(
+        &mut self,
+        session: &mut EngineSession,
+        text: &'static str,
+    ) -> Result<(), OracleError> {
+        let buf = probe_u64(session, "bufnr('%')")?;
+        let changedtick = probe_u64(session, "b:changedtick")?;
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        session.engine.handle.ai_fs_write(
+            AGENT_WRITE_REQUEST_ID,
+            BufferHandle(buf),
+            &lines,
+            true,
+            changedtick,
+        )?;
+        let now = session.eval_str(BUFFER_TEXT_EXPR)?;
+        if now != text {
+            return Err(OracleError::Review(format!(
+                "the agent's write left the buffer holding {now:?}, not the {text:?} it wrote"
+            )));
+        }
         Ok(())
     }
 
@@ -440,7 +517,7 @@ mod tests {
     /// longer exercises what its name promises.
     #[test]
     fn every_case_scripts_the_steps_that_name_it() {
-        let required: [(DiffReviewCase, &[ReviewStep]); 4] = [
+        let required: [(DiffReviewCase, &[ReviewStep]); 5] = [
             (DiffReviewCase::SingleHunkAccept, &[ReviewStep::Accept(0)]),
             (
                 DiffReviewCase::MultiHunkAcceptAll,
@@ -461,6 +538,10 @@ mod tests {
                     ReviewStep::ReDiff(0),
                     ReviewStep::Accept(0),
                 ],
+            ),
+            (
+                DiffReviewCase::AgentFsWrite,
+                &[ReviewStep::AgentWrite("ÜNÏCODE\ntwo\nthree\nfôur\nFÎVE")],
             ),
         ];
         for case in DiffReviewCase::ALL {

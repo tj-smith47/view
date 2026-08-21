@@ -1,0 +1,17 @@
+# The one entry whose write reaches nvim as an agent's own
+# `fs/write_text_file` rather than as a review's accepted hunk: view's side
+# replaces the buffer's whole text through that call, the reference side
+# types the same change. The case named here supplies the written text and
+# the reference-side keys (`view_oracle::review`); this file supplies the
+# buffer both sides start from.
+#
+# The fixture is spelled with multi-byte characters on the rows the write
+# changes, at both ends of the buffer: a whole-buffer replace that mishandled
+# an edge row or a byte-vs-character count reproduces the middle of the file
+# perfectly and diverges only here.
+schema = 1
+name = "agent-fs-write"
+input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"
+diff_review = "agent-fs-write"
