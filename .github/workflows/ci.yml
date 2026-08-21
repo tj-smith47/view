@@ -356,8 +356,20 @@ jobs:
           ENGINE_PIN=$(cat .engine-pin)
           nvim --version | head -1 | grep -F "${ENGINE_PIN#v}"
 
-      # Shared-runner noise cannot silently pass this gate: the null-pair
-      # calibration bracket refuses a host too noisy to measure, and tail
-      # (p99) metrics never gate on shared classes
-      - name: Gate bench matrix against baseline (${{ matrix.class }})
-        run: task bench -- --all --class ${{ matrix.class }} --gate
+      # The committed gh baselines' input_path/output_path cells predate
+      # the sample-anchoring correction (samples now close on the
+      # keystroke's own handoff), so honest numbers would read as
+      # regressions against them. Those cells are deleted in the commit
+      # that flips this leg to --record — the baseline ratchet refuses
+      # seating a worse number, so a stale cell would silently keep its
+      # old bar — and the leg flips back to --gate in the commit that
+      # lands the reviewed refreshed TOMLs, upload step removed with it
+      - name: Record bench matrix baseline (${{ matrix.class }})
+        run: task bench -- --all --class ${{ matrix.class }} --record
+
+      - name: Upload recorded baseline
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-baseline-${{ matrix.class }}
+          path: crates/view-bench/baselines/${{ matrix.class }}.toml
+          if-no-files-found: error
