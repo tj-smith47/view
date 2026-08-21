@@ -521,7 +521,10 @@ fn ensure_extracted(
             });
         }
     };
-    if let Err(err) = std::fs::write(tmp_dir.join(ENTRY_STAMP_NAME), sha256_hex(&entry_bytes)) {
+    if let Err(err) = std::fs::write(
+        tmp_dir.join(ENTRY_STAMP_NAME),
+        entry_stamp(pin, &entry_bytes),
+    ) {
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(ProvisionError::Write {
             path: tmp_dir.join(ENTRY_STAMP_NAME),
@@ -737,17 +740,34 @@ fn publish_extraction(
     Ok(entry_path.to_path_buf())
 }
 
-/// The extracted entry stamp's file name: a hex SHA-256 of the entry
-/// file's own bytes at extraction time, written alongside it so a later
-/// call can detect the entry having been modified on disk since --
-/// deliberately scoped to the one file that is ever read as this
-/// adapter's launchable script, not a hash of the whole extracted tree.
+/// The extracted entry stamp's file name, holding what [`entry_stamp`]
+/// records at extraction time so a later call can detect the entry having
+/// been modified on disk since -- deliberately scoped to the one file that
+/// is ever read as this adapter's launchable script plus the lockfile its
+/// dependencies came from, not a hash of the whole extracted tree.
 const ENTRY_STAMP_NAME: &str = ".entry-sha256";
+
+/// What [`ENTRY_STAMP_NAME`] records for `pin`: the entry's own hash, and
+/// for a row that pins a lockfile the hash of that lockfile too.
+///
+/// The lockfile half is what makes an already-installed tree answer the
+/// question the tarball checksum cannot: which dependencies are sitting
+/// beside the entry. A tree installed from a different lockfile -- or by
+/// an earlier build that resolved dependencies freshly, with nothing
+/// verifying what it fetched -- stamps differently and so reads as
+/// invalid, which re-extracts and re-installs it from the pin.
+fn entry_stamp(pin: &AdapterPin, entry_bytes: &[u8]) -> String {
+    let entry = sha256_hex(entry_bytes);
+    match pin.lockfile {
+        Some(lockfile) => format!("{entry}-{}", sha256_hex(lockfile.as_bytes())),
+        None => entry,
+    }
+}
 
 /// Whether `entry_path` (under `extract_dir`) still matches the stamp left
 /// at extraction time -- `false` for a missing extraction, a missing
-/// entry, a missing or unreadable stamp, or an entry whose bytes no longer
-/// hash to what the stamp recorded.
+/// entry, a missing or unreadable stamp, or an entry whose bytes -- or
+/// whose pinned lockfile -- no longer hash to what the stamp recorded.
 ///
 /// A package that declares dependencies is additionally only valid with a
 /// `node_modules` beside it. The stamp covers the entry file alone, so an
@@ -767,7 +787,7 @@ fn extraction_is_valid(pin: &AdapterPin, entry_path: &Path, extract_dir: &Path) 
     let Ok(stamp) = std::fs::read_to_string(extract_dir.join(ENTRY_STAMP_NAME)) else {
         return false;
     };
-    if stamp.trim() != sha256_hex(&entry_bytes) {
+    if stamp.trim() != entry_stamp(pin, &entry_bytes) {
         return false;
     }
     match package_root(pin, extract_dir) {
@@ -1566,6 +1586,44 @@ mod tests {
         assert!(
             ready_in(&pin, &root),
             "a complete extraction needs no download or install"
+        );
+    }
+
+    #[test]
+    fn a_tree_installed_under_another_lockfile_is_provisioned_again() {
+        let content = b"the genuine entry script";
+        let tarball = build_test_tarball(content);
+        let sha256 = sha256_hex(&tarball);
+        let server = StubServer::start(tarball);
+        let mut pin = test_pin(server.url(), Box::leak(sha256.into_boxed_str()));
+        pin.lockfile = Some("{\"version\":\"0.0.0-test\"}");
+        let cache_root = scratch_cache_root("stamp-lockfile");
+
+        let entry = resolve_in(&pin, &cache_root).expect("first resolve succeeds");
+        let extract_dir = extract_dir(&pin_dir(&pin, &cache_root));
+
+        // exactly what a machine provisioned before this row pinned a
+        // lockfile carries: the entry's own hash and nothing about what
+        // was installed beside it
+        std::fs::write(extract_dir.join(ENTRY_STAMP_NAME), sha256_hex(content))
+            .expect("write the pre-lockfile stamp");
+        assert!(
+            !extraction_is_valid(&pin, &entry, &extract_dir),
+            "an extraction stamped without the pinned lockfile must not be reused -- its \
+             dependencies came from somewhere the pin never covered"
+        );
+
+        resolve_in(&pin, &cache_root).expect("second resolve re-provisions");
+        assert_eq!(
+            std::fs::read_to_string(extract_dir.join(ENTRY_STAMP_NAME))
+                .expect("read the re-provisioned stamp"),
+            entry_stamp(&pin, content),
+            "re-provisioning must leave a stamp that covers the pinned lockfile"
+        );
+        assert_eq!(
+            server.request_count(),
+            1,
+            "the cached tarball was still valid -- re-provisioning must reuse it"
         );
     }
 
