@@ -1545,37 +1545,6 @@ pub enum RpcCall {
         generation: u64,
         path: String,
     },
-    /// Reads the current buffer's path and nvim-authoritative text --
-    /// unlike `PreviewBuffer`, keyed off no path argument and no picker
-    /// state, since a prompt submission has neither: it reads whatever
-    /// buffer nvim considers current at the moment of the call.
-    /// `generation` tags the read for whichever reply-routing scheme its
-    /// consumer adopts; this crate declares no reply variant or
-    /// consumption behavior for it yet.
-    ReadCurrentBufferText {
-        generation: u64,
-    },
-    /// Reads the buffer-space cursor position and, when one is active, the
-    /// visual selection's text and line range -- nvim's own position, never
-    /// the painted grid's viewport-relative cursor. `generation` tags the
-    /// read on the same terms as `ReadCurrentBufferText`.
-    ReadCursorContext {
-        generation: u64,
-    },
-    /// Reads every current entry from `vim.diagnostic.get(0)`, tagged
-    /// `generation` on the same terms as `ReadCurrentBufferText`. Distinct
-    /// from the bridge's `DiagnosticChanged` autocmd, which reports only
-    /// the error/warning totals a statusline segment needs -- context
-    /// assembly needs each diagnostic's own line, column, severity, and
-    /// message.
-    ReadDiagnosticEntries {
-        generation: u64,
-    },
-    /// Reads every current entry from `getqflist()`, tagged `generation` on
-    /// the same terms as `ReadCurrentBufferText`.
-    ReadQuickfixEntries {
-        generation: u64,
-    },
     /// Applies a batched set of line/column-range replacements to one buffer
     /// via `nvim_buf_set_text`, the only path that ever writes agent-proposed
     /// text (hard rule: nvim owns all buffer text). `undojoin` links this
@@ -1584,11 +1553,12 @@ pub enum RpcCall {
     /// right after an undo), the executor falls back to applying `edits`
     /// unjoined rather than dropping them, since a hunk the user just
     /// accepted must never silently vanish. Diff review issues exactly one
-    /// hunk's edits per call, with `undojoin: true` for every hunk after the
-    /// first in an "accept all" batch and `false` for the first, which is
-    /// what makes `u` step backward one accepted hunk at a time -- never a
-    /// whole multi-hunk accept collapsed into one undo entry, and never one
-    /// entry per line-range within a single hunk.
+    /// hunk's edits per call, with `undojoin: true` for every accept after
+    /// the first in a review and `false` for the first, which puts one undo
+    /// entry behind a whole review rather than one per line-range within a
+    /// hunk. Per-hunk stepping is not what `undojoin` can express: it
+    /// merges into the previous entry by construction, so a chain of joined
+    /// calls is one entry and a single `u` retracts the review.
     ///
     /// `edits` must be non-overlapping (see [`TextEdit`]'s own doc); the
     /// executor applies them in descending `(start_row, start_col)` order

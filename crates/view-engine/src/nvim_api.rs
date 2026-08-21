@@ -2910,7 +2910,7 @@ impl EngineHandle {
     }
 
     /// Reads the current buffer's path and nvim-authoritative text via
-    /// [`CURRENT_BUFFER_TEXT_CHUNK`], for `RpcCall::ReadCurrentBufferText`.
+    /// [`CURRENT_BUFFER_TEXT_CHUNK`], for the context an agent prompt carries.
     ///
     /// # Errors
     ///
@@ -2929,7 +2929,7 @@ impl EngineHandle {
     }
 
     /// Reads the buffer-space cursor and, when one is active, the visual
-    /// selection via [`CURSOR_CONTEXT_CHUNK`], for `RpcCall::ReadCursorContext`.
+    /// selection via [`CURSOR_CONTEXT_CHUNK`], on the same terms.
     ///
     /// # Errors
     ///
@@ -2944,7 +2944,7 @@ impl EngineHandle {
     }
 
     /// Reads every current entry from `vim.diagnostic.get(0)` via
-    /// [`DIAGNOSTIC_ENTRIES_CHUNK`], for `RpcCall::ReadDiagnosticEntries`.
+    /// [`DIAGNOSTIC_ENTRIES_CHUNK`], on the same terms.
     ///
     /// # Errors
     ///
@@ -2959,7 +2959,7 @@ impl EngineHandle {
     }
 
     /// Reads every current entry from `getqflist()` via
-    /// [`QUICKFIX_ENTRIES_CHUNK`], for `RpcCall::ReadQuickfixEntries`.
+    /// [`QUICKFIX_ENTRIES_CHUNK`], on the same terms.
     ///
     /// # Errors
     ///

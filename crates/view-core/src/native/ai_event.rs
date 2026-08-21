@@ -331,15 +331,9 @@ pub enum PermissionOutcome {
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContextBlock {
-    /// Literal text, e.g. a selected region the user pulled in.
-    Text { text: String },
-    /// A pointer to a resource the agent may fetch for itself, e.g. a
-    /// mentioned file. A link rather than inlined content: a mention costs
-    /// the turn nothing until the agent decides it needs the bytes.
-    ResourceLink { uri: String, name: String },
     /// The current buffer's path and nvim-authoritative text, inlined
-    /// rather than a [`Self::ResourceLink`]: the point of attaching it is
-    /// that the agent reads it as part of the turn, not on a later fetch.
+    /// rather than linked: the point of attaching it is that the agent
+    /// reads it as part of the turn, not on a later fetch.
     CurrentBuffer { path: PathBuf, text: String },
     /// The active visual selection's text and its `(start_line, end_line)`
     /// range.
@@ -505,15 +499,7 @@ mod tests {
         let commands = [
             AiCommand::Prompt {
                 text: "explain this".to_string(),
-                context: vec![
-                    ContextBlock::Text {
-                        text: "fn main() {}".to_string(),
-                    },
-                    ContextBlock::ResourceLink {
-                        uri: "file:///tmp/a.rs".to_string(),
-                        name: "a.rs".to_string(),
-                    },
-                ],
+                context: vec![ContextBlock::Cursor { line: 1, col: 0 }],
             },
             AiCommand::AnswerPermission {
                 request_id: 5,

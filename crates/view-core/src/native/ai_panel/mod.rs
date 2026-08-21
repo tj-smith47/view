@@ -53,18 +53,6 @@ impl UsageStats {
     }
 }
 
-/// One diff hunk the agent has proposed and the user has not yet acted on.
-/// The plainest shape that can prove a countable, resolved/unresolved
-/// distinction -- diff review (`native::ai_panel::review`, not yet built)
-/// grows this into the real hunk content in place; nothing here anticipates
-/// that shape ahead of the task that owns it.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PendingEdit {
-    pub id: String,
-    pub resolved: bool,
-}
-
 /// The agent panel's state: which session it belongs to, its transcript so
 /// far, its own composer line, and whatever it is currently blocked on.
 #[must_use]
@@ -76,10 +64,6 @@ pub struct AiPanelState {
     pub transcript: Transcript,
     /// The panel's own prompt-composition line.
     pub input: String,
-    /// Diff hunks the agent has proposed, oldest first.
-    /// `AiStatus::derive` (`native::ai_registry`) counts the unresolved
-    /// ones for its doctor-facing `pending_edit_count`.
-    pub pending_edits: Vec<PendingEdit>,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
     /// at once, and a second arriving request is a protocol violation
@@ -186,7 +170,6 @@ impl AiPanelState {
             session_id: None,
             transcript: Transcript::new(),
             input: String::new(),
-            pending_edits: Vec::new(),
             pending_permission: None,
             focused: false,
             turn_in_flight: false,
@@ -319,7 +302,6 @@ mod tests {
         assert_eq!(state.session_id, None);
         assert!(state.transcript.is_empty());
         assert_eq!(state.input, "");
-        assert!(state.pending_edits.is_empty());
         assert_eq!(state.pending_permission, None);
         assert!(!state.focused);
         assert!(!state.turn_in_flight);

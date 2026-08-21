@@ -1217,17 +1217,13 @@ fn cost_from_wire(raw: &Value) -> Option<Cost> {
 /// attachment is left out of the turn rather than sent as empty text the
 /// agent would read as a blank message.
 ///
-/// The engine-read blocks (`CurrentBuffer` through `QuickfixList`) all
-/// lower to `"text"`: the ACP schema's own `resource`/`image`/`audio`
+/// Every block lowers to `"text"`: the ACP schema's own
+/// `resource`/`resource_link`/`image`/`audio`
 /// content kinds are not pinned anywhere in this crate's wire capture, and
 /// guessing their field shapes would risk a payload the agent's decoder
 /// rejects outright, which is worse than the plainer text rendering below.
 fn context_block(block: &ContextBlock) -> Option<Value> {
     match block {
-        ContextBlock::Text { text } => Some(json!({ "type": "text", "text": text })),
-        ContextBlock::ResourceLink { uri, name } => {
-            Some(json!({ "type": "resource_link", "uri": uri, "name": name }))
-        }
         ContextBlock::CurrentBuffer { path, text } => Some(json!({
             "type": "text",
             "text": format!("Current buffer: {}\n\n{text}", path.display()),

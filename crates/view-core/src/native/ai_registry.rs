@@ -64,9 +64,12 @@ impl AiStatus {
     /// It only ever surfaces on `AiStatus::enabled` for the doctor to
     /// render next to the state, never folded into deriving it.
     ///
-    /// `pending_edit_count` counts `panel.pending_edits` entries with
-    /// `resolved: false`; a resolved edit already left diff review's own
-    /// queue and does not haunt the doctor row after the user acted on it.
+    /// `pending_edit_count` counts the hunks still awaiting a decision, in
+    /// the open review and in the one queued behind it. Derived from the
+    /// reviews themselves rather than a parallel list kept beside them: a
+    /// second record of what the user has and has not acted on is a second
+    /// thing to keep true, and the one that is never read is the one that
+    /// silently stops being true.
     ///
     /// `last_activity` is always `None`: nothing in `AiPanelState` carries
     /// a timestamp yet, so there is nothing honest to derive it from until
@@ -81,7 +84,17 @@ impl AiStatus {
         } else {
             SessionState::NotStarted
         };
-        let pending_edit_count = panel.pending_edits.iter().filter(|e| !e.resolved).count();
+        let pending_edit_count = [&panel.pending_diff, &panel.pending_diff_next]
+            .into_iter()
+            .flatten()
+            .map(|review| {
+                review
+                    .hunks
+                    .iter()
+                    .filter(|hunk| hunk.status.is_open())
+                    .count()
+            })
+            .sum();
         Self {
             enabled,
             agent_id: agent_id.to_string(),
@@ -96,24 +109,46 @@ impl AiStatus {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-    use super::super::ai_panel::{AiPanelState, PendingEdit};
+    use super::super::ai_panel::{AiPanelState, DiffReviewState};
     use super::*;
 
-    fn edit(id: &str, resolved: bool) -> PendingEdit {
-        PendingEdit {
-            id: id.to_string(),
-            resolved,
+    /// One review of `open` undecided hunks, plus `decided` the user has
+    /// already answered.
+    fn review(open: usize, decided: usize) -> DiffReviewState {
+        let hunk = || {
+            crate::native::diff::hunk::Hunk::new(
+                (0, 1),
+                vec!["new".to_string()],
+                0,
+                vec!["old".to_string()],
+            )
+        };
+        let mut hunks: Vec<_> = std::iter::repeat_with(hunk).take(open + decided).collect();
+        for hunk in hunks.iter_mut().take(decided) {
+            hunk.status = crate::native::diff::hunk::HunkStatus::Rejected;
         }
+        DiffReviewState::new(1, std::path::PathBuf::from("/p/a.rs"), 1, hunks)
     }
 
     #[test]
-    fn pending_edit_count_counts_only_unresolved_hunks() {
+    fn pending_edit_count_counts_every_hunk_still_owed_a_decision() {
         let mut panel = AiPanelState::new();
-        panel.pending_edits = vec![edit("1", false), edit("2", false), edit("3", true)];
+        panel.pending_diff = Some(review(2, 1));
+        panel.pending_diff_next = Some(review(3, 0));
+
         let status = AiStatus::derive(&panel, true, "claude-code", false);
-        assert_eq!(status.pending_edit_count, 2);
+        assert_eq!(
+            status.pending_edit_count, 5,
+            "the queued review's hunks are owed a decision too"
+        );
         assert!(status.enabled);
         assert_eq!(status.agent_id, "claude-code");
+    }
+
+    #[test]
+    fn a_session_with_no_review_owes_no_decisions() {
+        let status = AiStatus::derive(&AiPanelState::new(), true, "claude-code", false);
+        assert_eq!(status.pending_edit_count, 0);
     }
 
     #[test]

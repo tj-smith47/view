@@ -1,6 +1,6 @@
-//! Live-nvim proof of the engine-side executors for the four context reads
-//! `RpcCall` declared (`ReadCurrentBufferText`, `ReadCursorContext`,
-//! `ReadDiagnosticEntries`, `ReadQuickfixEntries`): each
+//! Live-nvim proof of the four context reads a prompt's context is
+//! assembled from -- the current buffer's text, the cursor and any visual
+//! selection, the buffer's diagnostics, and the quickfix list. Each
 //! `EngineHandle::read_*` method issues its own `nvim_exec_lua` chunk and
 //! decodes the reply into the `view_core::native::ai_context` type
 //! `EngineReadSnapshot`'s builders take. See
