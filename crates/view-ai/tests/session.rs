@@ -501,13 +501,15 @@ fn a_cancel_settles_every_permission_request_the_agent_is_holding() {
 
     session.send(AiCommand::Cancel);
 
-    // the stub reports which option it was told about; a cancelled outcome
-    // names none, which is what the transport is required to answer with
+    // the stub reports the outcome it was actually handed, which for this
+    // path is the wire's bare `"cancelled"` and no option id at all -- a
+    // reply the agent could not read at all would name its error code here
+    // instead, so the two are never confused for one another
     assert_eq!(
         next_event(&rx, "the agent's reading of the cancelled outcome"),
         AiEvent::MessageChunk {
             message_id: Some("msg_1".to_string()),
-            text: "chose none".to_string(),
+            text: "chose cancelled".to_string(),
             from_agent: true,
         }
     );

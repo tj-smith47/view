@@ -27,10 +27,28 @@
 //!   first argument exists. Proves the client's own send path never waits on
 //!   the agent, since a stalled reader fills the pipe.
 //! - `die` -- exit immediately, mid-turn, with the request unanswered.
+//! - `tool-call` -- emit half a message, announce one tool call as
+//!   non-terminal, hold both there until the resume file named by the
+//!   fixture's first argument appears, then emit the rest of the message
+//!   and complete the call. The pause is the whole point: it is what makes
+//!   a partly-rendered turn observable, rather than frames that arrive
+//!   together and are indistinguishable from a turn rendered at its end.
 //! - `stream` -- emit one `session/update` of each chunk kind, then end the
 //!   turn.
 //! - `ask` -- send a `session/request_permission` request, then end the turn
 //!   once it is answered.
+//! - `ask-twice` -- send a second `session/request_permission` while the
+//!   first is still unanswered, and report what came back for it as a
+//!   message chunk. The overlap degrade is a client-side policy with no
+//!   wire mandate behind it (`docs/acp-v1-wire-capture.md`), so what
+//!   matters is that a real turn survives it: the first request stays open
+//!   and the turn still ends on its answer.
+//! - `propose` -- announce a tool call and complete it with a
+//!   `ToolCallContent` `"diff"` item over `view-ai-stub-diff.txt` in this
+//!   process's own working directory. Any suffix after the word (`propose2`)
+//!   picks a different edit and a different tool call id, so a second
+//!   proposal in the same session is a genuinely new one rather than a
+//!   duplicate the driver deduplicates away.
 //! - `read` -- send an `fs/read_text_file` request for a file inside this
 //!   process's own working directory (which is the session's, and so the
 //!   only directory the client answers for) and report what came back as a
@@ -58,11 +76,56 @@ const AUTH_REQUIRED: i64 = -32000;
 /// the session directory, and the session directory is exactly the one it
 /// spawned this fixture in.
 fn inside_cwd() -> String {
+    named_inside_cwd("view-ai-stub-fs.txt")
+}
+
+/// The absolute path of `name` inside this process's working directory,
+/// which is the session directory the client answers for.
+fn named_inside_cwd(name: &str) -> String {
     std::env::current_dir()
         .unwrap_or_default()
-        .join("view-ai-stub-fs.txt")
+        .join(name)
         .to_string_lossy()
         .into_owned()
+}
+
+/// The file the `propose` leg offers edits to.
+const DIFF_FILE: &str = "view-ai-stub-diff.txt";
+
+/// What each `propose` suffix claims the file holds, and what it offers to
+/// make of it: the bare word touches the middle line of the seeded file,
+/// any suffix touches the last line of what accepting the first one leaves
+/// behind. The client diffs `old` against `new` to derive the hunks it
+/// offers and anchors them in the buffer, so a proposal whose `old` is not
+/// what the buffer actually holds gets a review of stale hunks -- which is
+/// why the second one states the first one's result rather than the seed.
+fn diff_texts(suffix: &str) -> (&'static str, &'static str) {
+    if suffix.is_empty() {
+        ("alpha\nbeta\ngamma\n", "alpha\nBETA\ngamma\n")
+    } else {
+        ("alpha\nBETA\ngamma\n", "alpha\nBETA\nGAMMA\n")
+    }
+}
+
+/// What a `session/request_permission` answer actually said, in one word:
+/// the chosen `optionId` for the wire's `"selected"` variant, the bare
+/// outcome string for `"cancelled"`, and the error code for a reply that
+/// was no outcome at all.
+///
+/// Reported this precisely because a client's reply body is not otherwise
+/// observable from outside the two processes -- this fixture is the only
+/// witness to what it received, and "none" for every shape it could not
+/// read would make a malformed reply indistinguishable from a correct
+/// cancellation.
+fn outcome_label(frame: &serde_json::Value) -> String {
+    let outcome = &frame["result"]["outcome"];
+    outcome["optionId"]
+        .as_str()
+        .or_else(|| outcome["outcome"].as_str())
+        .map_or_else(
+            || format!("error {}", frame["error"]["code"]),
+            str::to_string,
+        )
 }
 
 fn main() {
@@ -106,17 +169,23 @@ fn main() {
             // string id it chose
             match id.as_ref().and_then(serde_json::Value::as_str) {
                 Some("perm-1") => {
-                    let chosen = frame["result"]["outcome"]["optionId"]
-                        .as_str()
-                        .unwrap_or("none")
-                        .to_string();
                     chunk(
                         &mut stdout,
                         "agent_message_chunk",
-                        &format!("chose {chosen}"),
+                        &format!("chose {}", outcome_label(&frame)),
                     );
                     end_prompt(&mut stdout, &mut pending_prompt, stop_reason_for(cancelled));
                     cancelled = false;
+                }
+                Some("perm-2") => {
+                    // reported rather than ended on: the first request is
+                    // still open, and a turn that ended here would hide
+                    // whether the overlap disturbed it
+                    chunk(
+                        &mut stdout,
+                        "agent_message_chunk",
+                        &format!("overlap {}", outcome_label(&frame)),
+                    );
                 }
                 Some("fs-read-1") => {
                     let content = if let Some(error) = frame.get("error") {
@@ -222,21 +291,36 @@ fn main() {
                             serde_json::json!({ "stopReason": "end_turn" }),
                         );
                     }
+                    "tool-call" => {
+                        // The two halves are separated by the resume file
+                        // rather than sent together, so the non-terminal
+                        // status is on screen long enough to be read: a
+                        // transcript keeps one row per call, and a terminal
+                        // update written in the same breath overwrites the
+                        // status nobody got to see.
+                        chunk(&mut stdout, "agent_message_chunk", "streaming");
+                        tool_call_status(&mut stdout, "in_progress", None);
+                        stall();
+                        chunk(&mut stdout, "agent_message_chunk", " and done");
+                        tool_call_status(&mut stdout, "completed", Some("read 3 lines"));
+                        reply(
+                            &mut stdout,
+                            id,
+                            serde_json::json!({ "stopReason": "end_turn" }),
+                        );
+                    }
                     "ask" => {
                         pending_prompt = Some(id);
-                        request(
-                            &mut stdout,
-                            serde_json::json!("perm-1"),
-                            "session/request_permission",
-                            serde_json::json!({
-                                "sessionId": "sess_stub",
-                                "toolCall": { "toolCallId": "call_001" },
-                                "options": [
-                                    { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
-                                    { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
-                                ]
-                            }),
-                        );
+                        ask_permission(&mut stdout, "perm-1", "call_001");
+                    }
+                    "ask-twice" => {
+                        pending_prompt = Some(id);
+                        ask_permission(&mut stdout, "perm-1", "call_001");
+                        // no wait in between: the overlap under test is a
+                        // second request arriving while the first is still
+                        // unanswered, which only happens if this one is
+                        // written before any answer could have come back
+                        ask_permission(&mut stdout, "perm-2", "call_002");
                     }
                     "read" => {
                         pending_prompt = Some(id);
@@ -277,6 +361,14 @@ fn main() {
                     }
                     "refuse" => {
                         error_reply(&mut stdout, id, -32603, "the agent refused the turn");
+                    }
+                    proposal if proposal.starts_with("propose") => {
+                        propose_diff(&mut stdout, &proposal["propose".len()..]);
+                        reply(
+                            &mut stdout,
+                            id,
+                            serde_json::json!({ "stopReason": "end_turn" }),
+                        );
                     }
                     _ => reply(
                         &mut stdout,
@@ -480,6 +572,101 @@ fn stream_chunks(stdout: &mut std::io::Stdout) {
             }),
         );
     }
+}
+
+/// One tool call at `status`, announced under a title the first frame
+/// establishes and every later one inherits (`docs/acp-v1-wire-capture.md`:
+/// `ToolCallUpdate` requires only `toolCallId`).
+fn tool_call_status(stdout: &mut std::io::Stdout, status: &str, result: Option<&str>) {
+    let discriminant = if result.is_none() {
+        "tool_call"
+    } else {
+        "tool_call_update"
+    };
+    let mut update = serde_json::json!({
+        "sessionUpdate": discriminant,
+        "toolCallId": "call_probe",
+        "status": status
+    });
+    if let Some(result) = result {
+        update["content"] = serde_json::json!([
+            { "type": "content", "content": { "type": "text", "text": result } }
+        ]);
+    } else {
+        update["title"] = serde_json::json!("Probe the file");
+    }
+    send(
+        stdout,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": { "sessionId": "sess_stub", "update": update }
+        }),
+    );
+}
+
+/// One `session/request_permission` with the two options every permission
+/// leg here offers, under the request id the answer is matched back on.
+fn ask_permission(stdout: &mut std::io::Stdout, request_id: &str, tool_call_id: &str) {
+    request(
+        stdout,
+        serde_json::json!(request_id),
+        "session/request_permission",
+        serde_json::json!({
+            "sessionId": "sess_stub",
+            "toolCall": { "toolCallId": tool_call_id },
+            "options": [
+                { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" }
+            ]
+        }),
+    );
+}
+
+/// A tool call announced and then completed carrying one `"diff"` content
+/// item, which is how an edit is offered for review: the announcement is a
+/// separate frame so the non-terminal status is on screen before the
+/// terminal one replaces it, rather than the call appearing already
+/// finished.
+fn propose_diff(stdout: &mut std::io::Stdout, suffix: &str) {
+    let tool_call_id = format!("edit_{}", if suffix.is_empty() { "1" } else { suffix });
+    send(
+        stdout,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess_stub",
+                "update": {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": tool_call_id,
+                    "title": "Edit view-ai-stub-diff.txt",
+                    "status": "in_progress"
+                }
+            }
+        }),
+    );
+    send(
+        stdout,
+        &serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "sess_stub",
+                "update": {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": tool_call_id,
+                    "status": "completed",
+                    "content": [{
+                        "type": "diff",
+                        "path": named_inside_cwd(DIFF_FILE),
+                        "oldText": diff_texts(suffix).0,
+                        "newText": diff_texts(suffix).1
+                    }]
+                }
+            }
+        }),
+    );
 }
 
 fn chunk(stdout: &mut std::io::Stdout, discriminant: &str, text: &str) {

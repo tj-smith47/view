@@ -1,0 +1,4 @@
+crates/view-ai/src/provision.rs	Some(root) => !declares_dependencies(&root) || root.join("node_modules").is_dir(),	Some(root) => root.exists(),	-p view-ai --lib provision
+crates/view-ai/src/provision.rs	.is_some_and(|deps| !deps.is_empty())	.is_some()	-p view-ai --lib provision
+crates/view-core/src/update/mod.rs	                    if !notation.starts_with('<') {	                    if true {	-p view-core ctrl_c_cancels
+crates/view-ai/tests/fixtures/stub_agent.rs	        .or_else(|| outcome["outcome"].as_str())	        .or_else(|| None)	-p view-ai --test session a_cancel_settles

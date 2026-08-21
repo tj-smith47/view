@@ -128,7 +128,7 @@ tasks:
     cmd: cargo test -p view-harness --test supersede_heavy -- --ignored --test-threads=1
 
   acceptance:
-    desc: Engine-supervision and remote-reconnect conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~3 min; needs tmux)
+    desc: Engine-supervision, remote-reconnect and ACP-agent conformance against a real terminal session, then the RTT-injection proof that speculative echo hides transport latency (~6 min; needs tmux, and node for the agent leg)
     # its own target rather than a step of `task ci`, on the same terms as
     # oracle, compat and bench: it drives a real pty through tmux and most
     # of its runtime is spent waiting out the very thresholds it measures,
@@ -141,6 +141,11 @@ tasks:
       - bash scripts/acceptance/supervision.sh
       - bash scripts/acceptance/remote-reconnect.sh
       - bash scripts/acceptance/remote-rtt.sh
+      # the one leg of this target that reaches the network: its first leg
+      # provisions the pinned ACP adapter the way a first-run user does,
+      # which is the only way to speak to a real agent rather than this
+      # repo's reading of one
+      - bash scripts/acceptance/ai-conformance.sh
 
   bench:
     desc: The scenario x fixture measurement matrix (task bench -- --scenario echo --fixture minimal --class dev-linux; --all --record / --gate)

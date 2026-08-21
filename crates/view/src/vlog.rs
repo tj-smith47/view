@@ -131,6 +131,13 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::FeatureInvoke { feature, verb } => {
             log_with("native", || format!("invoke feature={feature} verb={verb}"));
         }
+        // The whole event, not a kind label: an AI triage question is
+        // almost always about a payload (which path a proposal named, which
+        // stop reason ended a turn), and a log that recorded only which arm
+        // arrived would answer none of them.
+        Msg::Ai(event) => {
+            log_with("ai", || format!("{event:?}"));
+        }
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
                 let keys: Vec<String> = claimed
