@@ -1025,7 +1025,7 @@ mod tests {
             "the pipe delivered a different number of bytes than were sent"
         );
         let mut next = vec![0_u64; usize::from(CONTENDING_CALLERS) + 1];
-        for (frame, bytes) in seen.chunks_exact(MESSAGE_LEN).enumerate() {
+        for (frame, bytes) in seen.as_chunks::<MESSAGE_LEN>().0.iter().enumerate() {
             let caller = usize::from(bytes[0]);
             assert!(caller < next.len(), "frame {frame} names no sender");
             let seq = u64::from_le_bytes(bytes[1..9].try_into().unwrap_or([0; 8]));

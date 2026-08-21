@@ -170,9 +170,7 @@ impl Grid {
             GridDamage { full: false, rows }
         };
         self.dirty_full = false;
-        for row in &mut self.dirty_rows {
-            *row = false;
-        }
+        self.dirty_rows.fill(false);
         damage
     }
 
