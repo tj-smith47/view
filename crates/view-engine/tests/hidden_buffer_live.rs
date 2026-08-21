@@ -1619,7 +1619,7 @@ fn a_trailing_backslash_is_refused_here_exactly_as_the_chunk_refuses_it() {
 /// is built from symlinked directories, and the `/`-joined spelling the two
 /// sides agree on here is a POSIX one. What matters on every platform --
 /// two spellings nvim resolves onto one buffer share one hold -- is pinned
-/// by the reuse tests above, which are not gated.
+/// by the not-yet-existing-path reuse test above, which is not gated.
 #[test]
 #[cfg(unix)]
 fn the_hold_key_answers_exactly_what_the_load_chunks_own_canon_answers() {
