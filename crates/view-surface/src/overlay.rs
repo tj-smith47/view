@@ -687,17 +687,20 @@ fn palette_body(view: &PaletteView) -> Body {
 fn ai_body(view: &AiPanelView) -> Body {
     // Header order is truncation order, because `header_keep_tail` keeps
     // the tail: the first row here is the first sacrificed and the last is
-    // the last standing. Composer line first (context -- what the user is
-    // typing survives in the state whether or not it is painted), then the
+    // the last standing. Session accounting first (it answers a question
+    // nobody is currently blocked on), then the composer line (context --
+    // what the user is typing survives in the state whether or not it is
+    // painted), then the
     // review's own summary, then a pending permission's question and
     // options, and the crash banner last of all. A dead session is the one
     // thing that explains why nothing else on this panel will ever answer,
     // so it outranks a review the user can still scroll to and a request
     // whose agent is already gone.
-    let mut header = vec![Line::Text(plain_spans(format!(
+    let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
+    header.push(Line::Text(plain_spans(format!(
         "{PROMPT_MARK} {}",
         view.input
-    )))];
+    ))));
     header.extend(view.review.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     header.extend(view.local_error.iter().cloned().map(Line::Text));

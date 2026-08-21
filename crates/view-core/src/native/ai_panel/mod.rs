@@ -36,6 +36,23 @@ pub struct UsageStats {
     pub cost: Option<crate::native::ai_event::Cost>,
 }
 
+impl UsageStats {
+    /// This snapshot as the panel's one accounting row.
+    ///
+    /// The currency is printed as the code the agent sent rather than
+    /// mapped to a symbol: the wire places no constraint on it at all, and
+    /// a table of guesses would render an unknown code as somebody else's
+    /// money.
+    #[must_use]
+    pub fn render(&self) -> String {
+        let mut row = format!("context {}/{}", self.used, self.size);
+        if let Some(cost) = &self.cost {
+            row.push_str(&format!(", cost {:.2} {}", cost.amount, cost.currency));
+        }
+        row
+    }
+}
+
 /// One diff hunk the agent has proposed and the user has not yet acted on.
 /// The plainest shape that can prove a countable, resolved/unresolved
 /// distinction -- diff review (`native::ai_panel::review`, not yet built)
@@ -213,6 +230,9 @@ impl AiPanelState {
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
             .with_rows(rows);
+        if let Some(usage) = &self.usage {
+            view = view.with_usage(vec![Span::plain(usage.render())]);
+        }
         if let Some(review) = &self.pending_diff {
             let mut rows = review.summary_rows();
             if let Some(queued) = &self.pending_diff_next {
@@ -464,6 +484,29 @@ mod tests {
                 .all(|row| row != &vec![Span::plain(ENTER_HINT)]),
             "a focused panel already answers keys; the hint would be stale: {:?}",
             view.pending_permission
+        );
+    }
+
+    #[test]
+    fn what_the_session_has_spent_is_on_the_panel_once_the_agent_reports_it() {
+        let mut state = AiPanelState::new();
+        assert!(
+            state.view().usage.is_empty(),
+            "nothing is claimed about a session that has reported nothing"
+        );
+
+        state.usage = Some(UsageStats {
+            used: 100,
+            size: 1000,
+            cost: Some(crate::native::ai_event::Cost {
+                amount: 0.05,
+                currency: "USD".to_string(),
+            }),
+        });
+
+        assert_eq!(
+            state.view().usage,
+            vec![vec![Span::plain("context 100/1000, cost 0.05 USD")]]
         );
     }
 

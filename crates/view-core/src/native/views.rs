@@ -601,6 +601,14 @@ pub struct AiPanelView {
     /// The transcript, oldest first, each entry already formatted as one
     /// row of spans.
     pub rows: Vec<Vec<Span>>,
+    /// What the session has spent so far, as the agent last reported it:
+    /// context window used against its size, and the running cost when the
+    /// agent priced the turn. Empty until the first `usage_update` arrives,
+    /// on the same "empty means nothing extra to draw" terms the rows below
+    /// use. Deliberately the header's first row and so the first sacrificed
+    /// under truncation: it is ambient accounting, and it must never cost
+    /// the panel the crash banner or the question an agent is blocked on.
+    pub usage: Vec<Vec<Span>>,
     /// The pending permission prompt's own rows -- the question first, then
     /// one row per option the agent offered, each naming its kind. Empty
     /// when nothing is pending, which is what tells `view-surface`'s own
@@ -664,6 +672,15 @@ impl AiPanelView {
     pub fn with_local_error(self, rows: Vec<Vec<Span>>) -> Self {
         Self {
             local_error: rows,
+            ..self
+        }
+    }
+
+    /// The same panel showing `row` as its session accounting.
+    #[must_use]
+    pub fn with_usage(self, row: Vec<Span>) -> Self {
+        Self {
+            usage: vec![row],
             ..self
         }
     }
