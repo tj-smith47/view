@@ -1252,11 +1252,19 @@ mod tests {
             matches!(&result, Err(ProvisionError::Extract { .. })),
             "expected the symlink write-through to be refused, got {result:?}"
         );
-        let message = result.unwrap_err().to_string();
-        assert!(
-            message.contains("outside of destination path"),
-            "expected an outside-destination refusal, got: {message}"
-        );
+        // The refusal's wording is pinned on unix only: windows refuses
+        // the symlink member itself (creating one needs a privilege the
+        // extracting process does not hold), so the error names that
+        // instead. What both platforms must show is the refusal above and
+        // the untouched target below.
+        #[cfg(unix)]
+        {
+            let message = result.unwrap_err().to_string();
+            assert!(
+                message.contains("outside of destination path"),
+                "expected an outside-destination refusal, got: {message}"
+            );
+        }
         assert!(
             !outside.join("planted.txt").exists(),
             "the symlink write-through must never reach the real target it points at"

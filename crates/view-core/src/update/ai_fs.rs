@@ -237,6 +237,18 @@ mod tests {
     use crate::native::ai_fs::MAX_IN_FLIGHT;
     use crate::update::update;
 
+    /// Two absolute paths in this platform's own shape. The requests these
+    /// tests drive are refused unless the path is absolute, and a
+    /// POSIX-rooted literal is not absolute on windows.
+    #[cfg(unix)]
+    const FILE_A: &str = "/p/a.rs";
+    #[cfg(unix)]
+    const FILE_B: &str = "/p/b.rs";
+    #[cfg(not(unix))]
+    const FILE_A: &str = r"C:\p\a.rs";
+    #[cfg(not(unix))]
+    const FILE_B: &str = r"C:\p\b.rs";
+
     fn trusted() -> Model {
         let mut model = Model::new();
         model.ai_trusted = true;
@@ -307,12 +319,12 @@ mod tests {
     fn a_read_resolves_onto_a_buffer_reads_it_and_releases_its_hold() {
         let mut model = trusted();
 
-        let started = update(&mut model, read_request(7, "/p/a.rs"));
+        let started = update(&mut model, read_request(7, FILE_A));
         let generation = generation_of(&started);
         assert_eq!(
             rpcs(&started),
             vec![RpcCall::LoadHidden {
-                path: "/p/a.rs".to_owned(),
+                path: FILE_A.to_owned(),
                 generation,
             }]
         );
@@ -338,7 +350,7 @@ mod tests {
         assert_eq!(
             rpcs(&answered),
             vec![RpcCall::ReleaseHidden {
-                path: "/p/a.rs".to_owned()
+                path: FILE_A.to_owned()
             }]
         );
         assert_eq!(
@@ -363,7 +375,7 @@ mod tests {
             &mut model,
             Msg::Ai(AiEvent::FsReadRequested {
                 request_id: 1,
-                path: PathBuf::from("/p/a.rs"),
+                path: PathBuf::from(FILE_A),
                 line: Some(10),
                 limit: Some(5),
             }),
@@ -389,7 +401,7 @@ mod tests {
     fn a_write_carries_the_split_content_the_eol_flag_and_the_observed_tick() {
         let mut model = trusted();
 
-        let started = update(&mut model, write_request(3, "/p/a.rs", "one\ntwo\n"));
+        let started = update(&mut model, write_request(3, FILE_A, "one\ntwo\n"));
         let resolved = update(&mut model, loaded(generation_of(&started), 9, 42));
 
         assert_eq!(
@@ -413,7 +425,7 @@ mod tests {
         assert_eq!(
             rpcs(&answered),
             vec![RpcCall::ReleaseHidden {
-                path: "/p/a.rs".to_owned()
+                path: FILE_A.to_owned()
             }]
         );
         assert_eq!(
@@ -433,8 +445,8 @@ mod tests {
     fn an_untrusted_project_refuses_both_legs_without_resolving_anything() {
         let mut model = Model::new();
 
-        let read = update(&mut model, read_request(1, "/p/a.rs"));
-        let write = update(&mut model, write_request(2, "/p/a.rs", "x\n"));
+        let read = update(&mut model, read_request(1, FILE_A));
+        let write = update(&mut model, write_request(2, FILE_A, "x\n"));
 
         assert_eq!(
             commands(&read),
@@ -498,7 +510,7 @@ mod tests {
     fn a_resolve_that_named_no_buffer_refuses_and_still_releases() {
         let mut model = trusted();
 
-        let started = update(&mut model, read_request(5, "/p/a.rs"));
+        let started = update(&mut model, read_request(5, FILE_A));
         let generation = generation_of(&started);
         let resolved = update(
             &mut model,
@@ -513,7 +525,7 @@ mod tests {
         assert_eq!(
             rpcs(&resolved),
             vec![RpcCall::ReleaseHidden {
-                path: "/p/a.rs".to_owned()
+                path: FILE_A.to_owned()
             }]
         );
         assert_eq!(
@@ -535,15 +547,15 @@ mod tests {
     fn two_overlapping_requests_for_one_path_take_and_give_back_two_holds() {
         let mut model = trusted();
 
-        let first = generation_of(&update(&mut model, read_request(1, "/p/a.rs")));
-        let second = generation_of(&update(&mut model, read_request(2, "/p/a.rs")));
+        let first = generation_of(&update(&mut model, read_request(1, FILE_A)));
+        let second = generation_of(&update(&mut model, read_request(2, FILE_A)));
         assert_ne!(first, second, "each request resolves under its own tag");
 
         let _ = update(&mut model, loaded(first, 8, 0));
         let _ = update(&mut model, loaded(second, 8, 0));
 
         let release = RpcCall::ReleaseHidden {
-            path: "/p/a.rs".to_owned(),
+            path: FILE_A.to_owned(),
         };
         for request_id in [2, 1] {
             let answered = update(
@@ -564,7 +576,7 @@ mod tests {
     #[test]
     fn a_resolve_for_a_generation_no_request_holds_falls_through() {
         let mut model = trusted();
-        let started = update(&mut model, read_request(1, "/p/a.rs"));
+        let started = update(&mut model, read_request(1, FILE_A));
         let generation = generation_of(&started);
 
         let stranger =
@@ -582,8 +594,8 @@ mod tests {
     #[test]
     fn a_session_ending_releases_every_outstanding_hold_and_answers_none() {
         let mut model = trusted();
-        let _ = update(&mut model, read_request(1, "/p/a.rs"));
-        let _ = update(&mut model, write_request(2, "/p/b.rs", "x\n"));
+        let _ = update(&mut model, read_request(1, FILE_A));
+        let _ = update(&mut model, write_request(2, FILE_B, "x\n"));
 
         let effects = on_session_ended(&mut model);
 
@@ -591,10 +603,10 @@ mod tests {
             rpcs(&effects),
             vec![
                 RpcCall::ReleaseHidden {
-                    path: "/p/a.rs".to_owned()
+                    path: FILE_A.to_owned()
                 },
                 RpcCall::ReleaseHidden {
-                    path: "/p/b.rs".to_owned()
+                    path: FILE_B.to_owned()
                 },
             ]
         );
@@ -613,8 +625,8 @@ mod tests {
     #[test]
     fn a_session_crash_releases_every_hold_its_requests_were_riding() {
         let mut model = trusted();
-        let _ = update(&mut model, read_request(1, "/p/a.rs"));
-        let _ = update(&mut model, write_request(2, "/p/b.rs", "x\n"));
+        let _ = update(&mut model, read_request(1, FILE_A));
+        let _ = update(&mut model, write_request(2, FILE_B, "x\n"));
 
         let effects = update(
             &mut model,
@@ -648,11 +660,11 @@ mod tests {
     fn a_request_past_the_in_flight_cap_is_answered_and_resolves_nothing() {
         let mut model = trusted();
         for request_id in 0..u64::try_from(MAX_IN_FLIGHT).unwrap_or(u64::MAX) {
-            let started = update(&mut model, read_request(request_id, "/p/a.rs"));
+            let started = update(&mut model, read_request(request_id, FILE_A));
             assert_eq!(rpcs(&started).len(), 1, "request {request_id} must resolve");
         }
 
-        let refused = update(&mut model, read_request(9999, "/p/a.rs"));
+        let refused = update(&mut model, read_request(9999, FILE_A));
 
         assert!(
             rpcs(&refused).is_empty(),

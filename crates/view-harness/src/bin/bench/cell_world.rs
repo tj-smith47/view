@@ -118,6 +118,11 @@ impl CellWorld {
     }
 }
 
+// The AI rows are unix-only (they sample through the tap channel), and so
+// is the session driver this arming shares its progress path with, so a
+// windows build compiles the bench binary with the arming absent rather
+// than with a reference it cannot resolve.
+#[cfg(unix)]
 impl SideSetup {
     /// Turns the agent panel on for this side and points it at `agent`,
     /// by appending an `[ai]` table to the fixture copy this side already
@@ -211,7 +216,7 @@ pub(crate) fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;

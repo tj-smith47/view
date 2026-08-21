@@ -53,7 +53,11 @@ mod remote_rows;
 // it is unconditional like `rows` below.
 #[path = "bench/cell_world.rs"]
 mod cell_world;
-use cell_world::{nvim_spec_from, settle_deadline, view_spec_from, CellWorld, SideSetup};
+use cell_world::{nvim_spec_from, settle_deadline, view_spec_from, CellWorld};
+// named only by the two unix-gated row modules above, which reach it
+// through their own `use super::*`
+#[cfg(unix)]
+use cell_world::SideSetup;
 
 #[path = "bench/rows.rs"]
 mod rows;

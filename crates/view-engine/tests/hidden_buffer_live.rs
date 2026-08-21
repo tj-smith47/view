@@ -17,9 +17,10 @@ use std::time::{Duration, Instant};
 
 use view_core::msg::{BufferHandle, Msg, TextEdit};
 use view_engine::handle::EngineError;
-use view_engine::nvim_api::{
-    hidden_buffer_key, hidden_path_refusal, BufWriteOutcome, HiddenPathRefusal,
-};
+use view_engine::nvim_api::{BufWriteOutcome, HiddenPathRefusal};
+// named only by the symlink-built canon-drift pin below, which is unix-only
+#[cfg(unix)]
+use view_engine::nvim_api::{hidden_buffer_key, hidden_path_refusal};
 use view_engine::process::{Engine, EngineConfig};
 
 /// Spawns an isolated engine with a UI attached, the same load-bearing
@@ -211,6 +212,7 @@ fn load_chunk_answer(engine: &Engine, path: &str) -> u64 {
 
 /// What `LOAD_HIDDEN_CHUNK`'s own `canon()` resolves `path` to, inside
 /// nvim, from the identical literal the chunk itself embeds.
+#[cfg(unix)]
 fn canon_in_nvim(engine: &Engine, path: &str) -> String {
     engine
         .handle
@@ -1071,6 +1073,10 @@ fn a_buffer_this_connection_created_survives_release_once_the_user_adopts_it() {
 /// entry rather than racing each other's cleanup: both resolve to the same
 /// buffer, and the buffer survives until both spellings' holds have
 /// released.
+// Unix-only: the divergent spelling is built by joining a `.` component,
+// and windows drops it while pushing onto the verbatim prefix the
+// scratch root carries, leaving two identical strings and nothing to prove
+#[cfg(unix)]
 #[test]
 fn two_spellings_of_the_same_path_share_one_hold() {
     let root = scratch_root("dual-spelling");
@@ -1140,6 +1146,10 @@ fn two_spellings_of_the_same_path_share_one_hold() {
 /// own `canon()` falls back to `fnamemodify(p, ':p')`, which does collapse
 /// them), and the first `release_hidden` would delete that buffer while the
 /// second spelling's hold still thinks it owns it.
+// Unix-only: the divergent spelling is built by joining a `.` component,
+// and windows drops it while pushing onto the verbatim prefix the
+// scratch root carries, leaving two identical strings and nothing to prove
+#[cfg(unix)]
 #[test]
 fn two_spellings_of_a_not_yet_existing_path_share_one_hold() {
     let root = scratch_root("dual-spelling-new-file");

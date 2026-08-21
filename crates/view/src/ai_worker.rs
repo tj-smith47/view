@@ -879,6 +879,9 @@ mod tests {
     /// handshake bytes back as a malformed reply), and does not exit for
     /// the whole assertion window -- unlike every other fixture in this
     /// module, which is deliberately chosen to fail fast.
+    // `sleep` is the fixture, and there is no windows program with its
+    // shape (start, hold stdin open, say nothing, outlive the window)
+    #[cfg(unix)]
     #[test]
     fn a_ready_session_keeps_its_watch_running() {
         let dir = watch_tempdir("ready");
@@ -915,6 +918,7 @@ mod tests {
     /// that a clone observes the same live watch -- a worker rebuilt from
     /// scratch instead would leave the surviving agent's own shell writes
     /// unnoticed for the rest of the run, with nothing anywhere saying so.
+    #[cfg(unix)]
     #[test]
     fn a_clone_of_a_running_worker_shares_its_live_watch() {
         let dir = watch_tempdir("restart");

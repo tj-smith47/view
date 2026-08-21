@@ -670,6 +670,7 @@ fn a_forced_reload_of_a_path_that_became_a_directory_reloads_nothing() {
 /// answers exactly as a deleted file does -- which is the point: the guard
 /// asks what `:edit!` would be able to read, not what the path itself is.
 #[test]
+#[cfg(unix)]
 fn a_forced_reload_of_a_dangling_symlink_reloads_nothing() {
     let row = forced_reload_after("force-dangling", |path| {
         std::fs::remove_file(path).expect("remove the file out of band");
@@ -897,6 +898,9 @@ fn an_unforced_probe_answers_every_path_in_a_batch_around_an_unreadable_one() {
 /// How many autocmds the chunk's own scoped augroup still holds. Zero unless
 /// the cleanup was skipped: the group is created and deleted inside a single
 /// call, so anything left in it fires on a change nobody asked about.
+///
+/// Asked only by the two unix-gated batch probes around it.
+#[cfg(unix)]
 fn probe_augroup_count(engine: &Engine) -> i64 {
     engine
         .handle

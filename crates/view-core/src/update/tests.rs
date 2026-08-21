@@ -6500,6 +6500,14 @@ const REVIEW_BUF: BufferHandle = BufferHandle(7);
 /// The `b:changedtick` nvim reports for `REVIEW_BUF` when it resolves.
 const REVIEW_TICK: u64 = 4;
 
+/// The reviewed file's path, in this platform's own shape: an agent read of
+/// it is refused unless the path is absolute, and a POSIX-rooted literal is
+/// not absolute on windows.
+#[cfg(unix)]
+const REVIEW_FILE: &str = "/tmp/review.rs";
+#[cfg(not(unix))]
+const REVIEW_FILE: &str = r"C:\tmp\review.rs";
+
 const REVIEW_OLD: &str = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\n";
 const REVIEW_NEW: &str = "alpha\nBETA\ngamma\ndelta\nepsilon\nzeta\nETA\ntheta\n";
 
@@ -6512,14 +6520,14 @@ fn live_review_model() -> Model {
         &mut m,
         Msg::Ai(crate::native::ai_event::AiEvent::DiffProposed {
             request_id: 1,
-            path: std::path::PathBuf::from("/tmp/review.rs"),
+            path: std::path::PathBuf::from(REVIEW_FILE),
             old_text: Some(REVIEW_OLD.to_string()),
             new_text: REVIEW_NEW.to_string(),
         }),
     );
     let generation = match rpc_calls(&effects).as_slice() {
         [RpcCall::LoadHidden { path, generation }] => {
-            assert_eq!(path, "/tmp/review.rs");
+            assert_eq!(path, REVIEW_FILE);
             *generation
         }
         other => panic!("expected one LoadHidden, got {other:?}"),
@@ -6622,7 +6630,7 @@ fn accepting_through_the_key_path_writes_the_hunk_and_joins_the_next() {
                 "the second hunk joins the first so one undo retracts the review"
             );
             assert_eq!(*buf, REVIEW_BUF);
-            assert_eq!(path, "/tmp/review.rs");
+            assert_eq!(path, REVIEW_FILE);
         }
         other => {
             panic!(
@@ -6653,7 +6661,7 @@ fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
         &mut m,
         Msg::Ai(crate::native::ai_event::AiEvent::FsReadRequested {
             request_id: 44,
-            path: std::path::PathBuf::from("/tmp/review.rs"),
+            path: std::path::PathBuf::from(REVIEW_FILE),
             line: None,
             limit: None,
         }),
@@ -6662,7 +6670,7 @@ fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
     let [RpcCall::LoadHidden { path, generation }] = calls.as_slice() else {
         panic!("expected the read's own resolve, got {started:?}")
     };
-    assert_eq!(path, "/tmp/review.rs");
+    assert_eq!(path, REVIEW_FILE);
     assert_ne!(
         *generation, review,
         "a second holder of one path must resolve under its own tag"
@@ -6701,7 +6709,7 @@ fn an_agent_read_of_a_reviewed_path_neither_folds_nor_ends_the_review() {
     assert_eq!(
         rpc_calls(&answered),
         vec![RpcCall::ReleaseHidden {
-            path: "/tmp/review.rs".to_string()
+            path: REVIEW_FILE.to_string()
         }],
         "one hold taken, one hold given back"
     );
@@ -6729,7 +6737,7 @@ fn accept_all_through_the_key_path_writes_bottom_of_buffer_first() {
     assert_eq!(
         calls.last(),
         Some(&RpcCall::ReleaseHidden {
-            path: "/tmp/review.rs".to_string()
+            path: REVIEW_FILE.to_string()
         }),
         "accepting the last hunk ends the review: {calls:?}"
     );
@@ -6765,7 +6773,7 @@ fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
         vec![
             RpcCall::BufDetach { buf: REVIEW_BUF },
             RpcCall::ReleaseHidden {
-                path: "/tmp/review.rs".to_string()
+                path: REVIEW_FILE.to_string()
             }
         ],
         "rejecting the last hunk writes nothing and ends the review"
@@ -6976,7 +6984,7 @@ fn closing_the_review_detaches_the_buffer_it_attached() {
         vec![
             RpcCall::BufDetach { buf: REVIEW_BUF },
             RpcCall::ReleaseHidden {
-                path: "/tmp/review.rs".to_string(),
+                path: REVIEW_FILE.to_string(),
             },
         ]
     );

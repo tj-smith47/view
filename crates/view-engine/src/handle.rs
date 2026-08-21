@@ -2146,6 +2146,17 @@ mod tests {
     use crate::rpc::RpcMessage;
     use rmpv::Value;
 
+    /// An absolute fixture path in this platform's own shape: a hold is
+    /// refused unless its path is absolute, and a POSIX-rooted literal is
+    /// not absolute on windows.
+    fn abs(name: &str) -> String {
+        if cfg!(unix) {
+            format!("/tmp/{name}")
+        } else {
+            format!(r"C:\tmp\{name}")
+        }
+    }
+
     fn fake_peer(
         mut respond: impl FnMut(u32, &str) -> RpcMessage + Send + 'static,
     ) -> (EngineHandle, std::sync::mpsc::Receiver<EngineNotification>) {
@@ -2824,7 +2835,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(64);
         let _dpump = pump.attach_sink(tx);
 
-        h.load_hidden("/tmp/one.rs", 3).unwrap();
+        h.load_hidden(&abs("one.rs"), 3).unwrap();
         let mut r = std::io::BufReader::new(peer_read);
         let v = rmpv::decode::read_value(&mut r).unwrap();
         let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
@@ -2858,12 +2869,12 @@ mod tests {
         assert_eq!(changedtick, 2);
 
         assert_eq!(
-            h.note_hidden_release("/tmp/one.rs"),
+            h.note_hidden_release(&abs("one.rs")),
             Some(view_core::msg::BufferHandle(2)),
             "the one hold this reply recorded must delete on its one release"
         );
         assert_eq!(
-            h.note_hidden_release("/tmp/one.rs"),
+            h.note_hidden_release(&abs("one.rs")),
             None,
             "a path with no recorded hold left must not report a buffer to delete"
         );
@@ -2887,12 +2898,12 @@ mod tests {
         let _dpump = pump.attach_sink(tx);
         let mut r = std::io::BufReader::new(peer_read);
 
-        h.load_hidden("/tmp/race.rs", 30).unwrap();
+        h.load_hidden(&abs("race.rs"), 30).unwrap();
         // released before the load's own request has even been read off the
         // wire below -- the exact overtaking ordering the hold's issue-time
         // acquire exists to survive
         assert!(
-            h.release_hidden("/tmp/race.rs").is_ok(),
+            h.release_hidden(&abs("race.rs")).is_ok(),
             "a release with no buffer known yet must not touch the wire at all"
         );
 
@@ -2957,7 +2968,7 @@ mod tests {
         let mut r = std::io::BufReader::new(peer_read);
 
         for generation in [10u64, 11u64] {
-            h.load_hidden("/tmp/two.rs", generation).unwrap();
+            h.load_hidden(&abs("two.rs"), generation).unwrap();
             let v = rmpv::decode::read_value(&mut r).unwrap();
             let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
                 unreachable!("expected a Request");
@@ -2981,12 +2992,12 @@ mod tests {
         }
 
         assert_eq!(
-            h.note_hidden_release("/tmp/two.rs"),
+            h.note_hidden_release(&abs("two.rs")),
             None,
             "the first release of two holders must not delete -- one holder remains"
         );
         assert_eq!(
-            h.note_hidden_release("/tmp/two.rs"),
+            h.note_hidden_release(&abs("two.rs")),
             Some(view_core::msg::BufferHandle(4)),
             "the second release, decrementing to zero, must report the buffer to delete"
         );
@@ -3009,7 +3020,7 @@ mod tests {
         let _dpump = pump.attach_sink(tx);
         let mut r = std::io::BufReader::new(peer_read);
 
-        h.load_hidden("/tmp/refused.rs", 40).unwrap();
+        h.load_hidden(&abs("refused.rs"), 40).unwrap();
         let v = rmpv::decode::read_value(&mut r).unwrap();
         let RpcMessage::Request { msgid, .. } = RpcMessage::from_value(v).unwrap() else {
             unreachable!("expected a Request");
@@ -3029,7 +3040,7 @@ mod tests {
         );
 
         assert_eq!(
-            h.note_hidden_release("/tmp/refused.rs"),
+            h.note_hidden_release(&abs("refused.rs")),
             None,
             "a refused load has no buffer to delete"
         );
@@ -3037,7 +3048,7 @@ mod tests {
             !h.hidden_bufs
                 .lock()
                 .unwrap()
-                .contains_key("/tmp/refused.rs"),
+                .contains_key(&abs("refused.rs")),
             "the entry must be removed once its one release lands, not left \
              behind for the rest of the connection's life"
         );
@@ -3057,7 +3068,7 @@ mod tests {
     #[test]
     fn a_second_loads_send_failure_does_not_orphan_the_first_loads_still_pending_reply() {
         let (h, _pump, peer_read, peer_write) = pumped_peer();
-        let path = "/tmp/orphan-guard-r3.rs";
+        let path = &abs("orphan-guard-r3.rs");
 
         h.load_hidden(path, 50).unwrap();
         // brings the first load's hold to a zero count with no reply landed

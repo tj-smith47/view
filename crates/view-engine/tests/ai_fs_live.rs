@@ -338,9 +338,12 @@ fn a_write_to_a_path_with_neither_file_nor_directory_creates_both() {
 
     let (_, result) = next_write_reply(&rx);
     result.expect("a write to a path with no file behind it must create it");
+    // a buffer with no file behind it is written in nvim's default
+    // fileformat for the platform, which is dos on windows
+    let eol = if cfg!(windows) { "\r\n" } else { "\n" };
     assert_eq!(
         std::fs::read_to_string(&path).expect("the file now exists"),
-        "created\nby the agent\n"
+        format!("created{eol}by the agent{eol}")
     );
 
     engine.handle.release_hidden(&name).expect("release");

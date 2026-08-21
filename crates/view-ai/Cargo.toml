@@ -29,7 +29,10 @@ serde = { version = "1", features = ["derive"] }
 # `serde` above is.
 serde_json = "1"
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["rt-multi-thread", "process", "io-util", "sync", "macros"] }
+# `net` is what carries `Builder::enable_io` on every platform: on unix the
+# `process` feature above enables the io driver as a side effect, on windows
+# it does not, so a build without it compiles here and fails there
+tokio = { version = "1", features = ["rt-multi-thread", "process", "net", "io-util", "sync", "macros"] }
 # The [ai] table's own parser (crates/view-ai/src/config.rs), this crate's
 # first use of it. Confined the same way `serde` above is.
 toml = "0.8"

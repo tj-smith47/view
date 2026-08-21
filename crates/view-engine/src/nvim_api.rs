@@ -3661,6 +3661,9 @@ mod tests {
     /// exercised live in `hidden_buffer_live.rs`, where an in-process check
     /// against a plain nonexistent directory cannot prove anything about
     /// `bufadd`'s own symlink handling.
+    // POSIX spellings are the subject: rooted paths with no drive letter,
+    // whose absoluteness and `..`-at-root behaviour are what this asserts
+    #[cfg(unix)]
     #[test]
     fn nvim_style_absolute_leaves_a_nonexistent_parent_completely_untouched() {
         let nonce = format!(
@@ -3691,6 +3694,9 @@ mod tests {
         );
     }
 
+    // POSIX spellings are the subject: rooted paths with no drive letter,
+    // whose absoluteness and `..`-at-root behaviour are what this asserts
+    #[cfg(unix)]
     #[test]
     fn nvim_style_absolute_resolves_dotdot_at_root_to_root_itself() {
         let path = std::path::PathBuf::from("/../a");
@@ -3706,6 +3712,9 @@ mod tests {
     /// `canonical_hidden_key` would answer differently, and the ordinary
     /// ones that must still get through. A `load_hidden` these let past is
     /// a hold keyed on a path nvim resolved somewhere else.
+    // POSIX spellings are the subject: rooted paths with no drive letter,
+    // whose absoluteness and `..`-at-root behaviour are what this asserts
+    #[cfg(unix)]
     #[test]
     fn every_spelling_the_key_and_bufadd_disagree_on_is_refused() {
         for blank in ["", " ", "\t", "\n  "] {
