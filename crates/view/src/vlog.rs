@@ -103,8 +103,9 @@ fn write_line(file: &Mutex<std::fs::File>, topic: &str, payload: &str) {
 /// Logs the loggable slice of one `Msg` crossing the runtime loop's
 /// dispatch seam: theme events nested in a `Redraw` batch (`view-core` is
 /// pure and cannot log these itself -- see the module docs), the async
-/// `nvim_get_hl` default-colors probe's reply, and an engine-down
-/// transition. Every other `Msg` variant (`Key`, `Paste`, `Mouse`,
+/// `nvim_get_hl` default-colors probe's reply, an engine-down transition,
+/// a native feature invocation, the mappings the engine claimed, and every
+/// AI event. Every other `Msg` variant (`Key`, `Paste`, `Mouse`,
 /// `Resized`, loop plumbing) carries nothing this log's contract asks for
 /// and is a deliberate no-op here.
 pub fn log_msg(msg: &view_core::msg::Msg) {
@@ -131,12 +132,12 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
         Msg::FeatureInvoke { feature, verb } => {
             log_with("native", || format!("invoke feature={feature} verb={verb}"));
         }
-        // The whole event, not a kind label: an AI triage question is
-        // almost always about a payload (which path a proposal named, which
-        // stop reason ended a turn), and a log that recorded only which arm
-        // arrived would answer none of them.
+        // The payload, not a kind label: an AI triage question is almost
+        // always about one (which path a proposal named, which stop reason
+        // ended a turn), and a log that recorded only which arm arrived
+        // would answer none of them.
         Msg::Ai(event) => {
-            log_with("ai", || format!("{event:?}"));
+            log_with("ai", || ai_payload(event));
         }
         Msg::MappingsClaimed { claimed } => {
             log_with("native", || {
@@ -148,6 +149,95 @@ pub fn log_msg(msg: &view_core::msg::Msg) {
             });
         }
         _ => {}
+    }
+}
+
+/// How much of a free-text field reaches the log.
+///
+/// Latency consequence: `log_msg` runs on the loop's dispatch thread under
+/// the process-wide logger mutex (see [`write_line`]), so an unbounded
+/// `Debug` of an `AiEvent` would put a whole proposed file -- or a whole
+/// agent write -- through `format!` and `writeln!` there, turning one agent
+/// edit to a large file into a megabyte-scale write between two frames.
+/// Every payload-bearing arm below is capped at this, which holds the cost
+/// of an AI dispatch with `VIEW_LOG` set to the same small constant every
+/// other arm already pays. With `VIEW_LOG` unset nothing is formatted at
+/// all: the closure `log_with` takes never runs.
+///
+/// It is also what keeps the log handable: the module doc describes this
+/// file as the thing a user is asked to attach to a bug report, and a full
+/// `Debug` would put the whole conversation, the model's reasoning and the
+/// contents of every file it touched into it.
+const PAYLOAD_CAP: usize = 120;
+
+/// `text` capped at [`PAYLOAD_CAP`], with what was dropped counted rather
+/// than silently lost -- a truncation that did not say so reads as a short
+/// message, which is a different bug report.
+fn capped(text: &str) -> String {
+    let kept: String = text.chars().take(PAYLOAD_CAP).collect();
+    if kept.len() == text.len() {
+        return format!("{kept:?}");
+    }
+    format!("{kept:?}+{}B", text.len() - kept.len())
+}
+
+/// One `AiEvent` rendered for the log: ids, paths, statuses and stop
+/// reasons in full, free text capped. Shaped like the `Debug` it replaces,
+/// field for field, so a reader of an older log is not learning a second
+/// format.
+fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
+    use view_core::native::ai_event::AiEvent;
+    match event {
+        AiEvent::MessageChunk {
+            message_id,
+            text,
+            from_agent,
+        } => format!(
+            "MessageChunk {{ message_id: {message_id:?}, from_agent: {from_agent}, \
+             text: {} }}",
+            capped(text)
+        ),
+        AiEvent::ThoughtChunk { message_id, text } => format!(
+            "ThoughtChunk {{ message_id: {message_id:?}, text: {} }}",
+            capped(text)
+        ),
+        AiEvent::ToolCallUpdate {
+            tool_call_id,
+            title,
+            status,
+            content,
+        } => format!(
+            "ToolCallUpdate {{ tool_call_id: {tool_call_id:?}, title: {}, status: {status:?}, \
+             content: {} }}",
+            capped(title),
+            content.as_ref().map_or_else(
+                || "None".to_string(),
+                |items| format!("{} item(s)", items.len())
+            )
+        ),
+        AiEvent::DiffProposed {
+            request_id,
+            path,
+            old_text,
+            new_text,
+        } => format!(
+            "DiffProposed {{ request_id: {request_id}, path: {path:?}, old_bytes: {}, \
+             new_bytes: {} }}",
+            old_text.as_ref().map_or(0, String::len),
+            new_text.len()
+        ),
+        AiEvent::FsWriteRequested {
+            request_id,
+            path,
+            content,
+        } => format!(
+            "FsWriteRequested {{ request_id: {request_id}, path: {path:?}, bytes: {} }}",
+            content.len()
+        ),
+        // Everything else is bounded by its own shape -- a session id, a
+        // stop reason, a request id and a path, a plan, an exit message --
+        // and reads better as the `Debug` the wire's own vocabulary spells.
+        bounded => format!("{bounded:?}"),
     }
 }
 
@@ -209,6 +299,56 @@ mod tests {
                 sp: None,
             },
         ]));
+    }
+
+    /// The payloads that have no bound of their own never reach the log at
+    /// full size, and say how much they dropped. `log_msg` runs on the
+    /// dispatch thread under a process-wide mutex, so a proposal carrying a
+    /// large file would otherwise be a megabyte-scale write between two
+    /// frames -- and a log written to be handed over would carry the file's
+    /// whole contents with it.
+    #[test]
+    fn an_unbounded_ai_payload_never_reaches_the_log_at_full_size() {
+        use view_core::native::ai_event::AiEvent;
+
+        let huge = "x".repeat(200_000);
+        let proposal = ai_payload(&AiEvent::DiffProposed {
+            request_id: 1,
+            path: std::path::PathBuf::from("/tmp/big.rs"),
+            old_text: None,
+            new_text: huge.clone(),
+        });
+        assert!(
+            proposal.len() < PAYLOAD_CAP * 4 && proposal.contains("new_bytes: 200000"),
+            "a proposal must log its size, not its text: {proposal}"
+        );
+
+        let write = ai_payload(&AiEvent::FsWriteRequested {
+            request_id: 2,
+            path: std::path::PathBuf::from("/tmp/big.rs"),
+            content: huge.clone(),
+        });
+        assert!(
+            write.len() < PAYLOAD_CAP * 4 && write.contains("bytes: 200000"),
+            "an agent write must log its size, not its content: {write}"
+        );
+
+        let chunk = ai_payload(&AiEvent::MessageChunk {
+            message_id: Some("m1".to_string()),
+            text: huge,
+            from_agent: true,
+        });
+        assert!(
+            chunk.len() < PAYLOAD_CAP * 4 && chunk.contains("+199880B"),
+            "a chunk must be capped and count what it dropped: {chunk}"
+        );
+
+        // ... and a payload that is already bounded is logged whole, or the
+        // cap would be answering a triage question with a truncation.
+        let ended = ai_payload(&AiEvent::TurnEnded {
+            stop_reason: view_core::native::ai_event::StopReason::Cancelled,
+        });
+        assert_eq!(ended, "TurnEnded { stop_reason: Cancelled }");
     }
 
     #[test]
