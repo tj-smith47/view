@@ -338,11 +338,14 @@ leg_session_lifecycle() {
     # something. The question names a file that is not the open buffer, so
     # it cannot be answered out of the context view assembles and sends
     # along with every prompt (`view_ai::context::assemble`) -- answering it
-    # takes a real tool call -- and it asks for prose rather than a word, so
-    # the answer is long enough to arrive in more than one chunk.
+    # takes a real tool call -- and it asks for a long answer rather than a
+    # short one: the adapter forwards whatever its stream has buffered when
+    # it flushes, so a reply the model finishes inside one flush arrives
+    # whole (observed: a two-sentence answer once arrived in a single
+    # chunk), while one that takes seconds to generate cannot.
     printf 'The mailbox key lives in the blue tin on the third shelf.\n' \
         >"$ROOT/notes.txt"
-    submit 'Read notes.txt in this directory and tell me, in two full sentences, where the mailbox key is and what it is kept in.'
+    submit 'Read notes.txt in this directory, then write me a detailed answer of at least eight full sentences that says where the mailbox key is, what container it is kept in, which shelf that container sits on, and how someone unfamiliar with the house would go about finding it.'
     # Before anything else: the wait itself is announced. A first run that
     # downloads and installs an agent while the panel sits silent is
     # indistinguishable from a feature that does not work.
