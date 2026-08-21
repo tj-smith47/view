@@ -113,7 +113,10 @@ fn engine_session_ignores_an_intrusive_user_config() {
     drop(leaky);
 
     let mut session = EngineSession::spawn(40, 6).expect("EngineSession::spawn against real nvim");
-    while session.pump_until_flush(Duration::from_millis(500)) {}
+    while session
+        .pump_until_flush(Duration::from_millis(500))
+        .expect("draining startup flushes")
+    {}
 
     let buffers = session.eval_str(BUFFER_PROBE).unwrap();
     assert!(

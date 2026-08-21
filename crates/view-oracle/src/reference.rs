@@ -697,10 +697,11 @@ impl Settling for ReferenceSession {
         self.pump.take_damage()
     }
 
-    fn apply_batch(&mut self, events: Vec<UiEvent>) {
+    fn apply_batch(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError> {
         for ev in events {
             self.apply(ev);
         }
+        Ok(())
     }
 
     fn markers(&mut self) -> &mut QuiesceMarkers {

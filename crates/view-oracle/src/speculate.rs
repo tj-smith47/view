@@ -396,7 +396,12 @@ impl SpecSession {
     /// against the batch, apply it, route its effects back -- including the
     /// follow-up messages a buffer write answers with, which carry a
     /// refusal the model has to see -- then check the age bound.
-    fn apply(&mut self, events: Vec<UiEvent>) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::PumpUnsettled`] if that routing left the
+    /// effect loop still producing follow-ups.
+    fn apply(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError> {
         self.note(&events);
         fold_redraw(&mut self.model, &events);
         let effects = update(&mut self.model, Msg::Redraw(events));
@@ -412,8 +417,9 @@ impl SpecSession {
                     }
                 }
             },
-        );
+        )?;
         fold_expiry(&mut self.model, now);
+        Ok(())
     }
 
     /// Records which redraw kinds a batch carried.
@@ -629,13 +635,18 @@ impl SpecSession {
     }
 
     /// Drains and applies whatever has arrived without waiting for anything.
-    fn drain(&mut self) {
+    ///
+    /// # Errors
+    ///
+    /// As [`apply`](Self::apply).
+    fn drain(&mut self) -> Result<(), OracleError> {
         let events = self.pump.take_damage();
         if events.is_empty() {
             let now = self.now();
             fold_expiry(&mut self.model, now);
+            Ok(())
         } else {
-            self.apply(events);
+            self.apply(events)
         }
     }
 }
@@ -649,8 +660,8 @@ impl settle::Settling for SpecSession {
         self.pump.take_damage()
     }
 
-    fn apply_batch(&mut self, events: Vec<UiEvent>) {
-        self.apply(events);
+    fn apply_batch(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError> {
+        self.apply(events)
     }
 
     fn markers(&mut self) -> &mut settle::QuiesceMarkers {
@@ -732,15 +743,22 @@ impl Outcome {
 /// The loop is the runtime's own per-pass shape: drain whatever arrived,
 /// check the bound, and go round again. What it must never do is settle,
 /// which would make the retirement a redraw's doing rather than the clock's.
-fn wait_out_the_bound(session: &mut SpecSession, predicted_at: Instant) -> Option<Duration> {
+///
+/// # Errors
+///
+/// As [`SpecSession::drain`].
+fn wait_out_the_bound(
+    session: &mut SpecSession,
+    predicted_at: Instant,
+) -> Result<Option<Duration>, OracleError> {
     while predicted_at.elapsed() <= age_deadline() {
-        session.drain();
+        session.drain()?;
         if session.model.speculate.pending().is_empty() {
-            return Some(predicted_at.elapsed());
+            return Ok(Some(predicted_at.elapsed()));
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    None
+    Ok(None)
 }
 
 /// Enters insert mode on an empty buffer and waits for the mode change to
@@ -948,7 +966,7 @@ fn age_bound(session: &mut SpecSession) -> Result<Outcome, OracleError> {
     let predicted_at = Instant::now();
     session.predict_only("k");
     let painted = session.painted();
-    let retired_after = wait_out_the_bound(session, predicted_at);
+    let retired_after = wait_out_the_bound(session, predicted_at)?;
     Ok(Outcome {
         painted,
         fired: retired_after.is_some(),

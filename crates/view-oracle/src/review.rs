@@ -491,8 +491,9 @@ mod tests {
         let err = refuse_if_moved(Some("one\ntwo"), "one\nWRÖNG")
             .expect_err("a moved buffer must refuse the next proposal");
         assert!(
-            matches!(err, OracleError::Review(ref why) if why.contains("WRÖNG")),
-            "expected the refusal to name what moved, got {err:?}"
+            matches!(err, OracleError::Review(ref why)
+                if why.contains("WRÖNG") && why.contains("no step in this case declared")),
+            "expected the refusal to name what moved and stop there, got {err:?}"
         );
         refuse_if_moved(Some("one\ntwo"), "one\ntwo")
             .expect("an unmoved buffer must allow the next proposal");

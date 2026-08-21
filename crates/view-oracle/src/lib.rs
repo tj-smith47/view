@@ -167,28 +167,73 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> 
     follow_ups
 }
 
+/// How many rounds of follow-up routing [`pump_rpc`] will run before it
+/// reports the loop as non-settling.
+///
+/// Sized for the shape that exists: a buffer write answers with one message,
+/// whose fold issues no further call, so one extra round is all a settling
+/// loop has ever needed. The margin above that is for a future fold that
+/// answers a refusal with a retry -- a legitimate two-or-three-round
+/// exchange -- while still stopping a fold that answers its own answer.
+const MAX_FOLLOW_UP_ROUNDS: usize = 8;
+
 /// Drives `effects` out to `handle` and settles the loop the production
 /// runtime settles: every follow-up [`Msg`] the dispatch routes back goes
 /// through [`update`] against `model`, and whatever effects that produces
 /// go out in turn, until nothing is left to route. `each_effect` sees every
 /// effect batch, including the follow-ups', so a caller that folds calls
 /// into its own bookkeeping folds the follow-ups too.
+///
+/// # Errors
+///
+/// Returns [`OracleError::PumpUnsettled`] if the exchange is still producing
+/// follow-ups after [`MAX_FOLLOW_UP_ROUNDS`]. Production's own loop is
+/// blocked on a channel between rounds, so a cycle there stays responsive
+/// and shows up as traffic; here the rounds run back-to-back inside one
+/// call, where the same cycle is a silent spin no deadline reaches.
 fn pump_rpc(
     handle: &view_engine::handle::EngineHandle,
     model: &mut Model,
     effects: Vec<Effect>,
     mut each_effect: impl FnMut(&mut Model, &[Effect]),
-) {
-    let mut effects = effects;
-    let mut pending = std::collections::VecDeque::new();
-    loop {
-        each_effect(model, &effects);
-        pending.extend(apply_rpc(handle, &effects));
-        let Some(msg) = pending.pop_front() else {
-            return;
+) -> Result<(), OracleError> {
+    let mut first = Some(effects);
+    pump_bounded(|msg| {
+        let batch = match msg {
+            Some(msg) => update(model, msg),
+            None => first.take().unwrap_or_default(),
         };
-        effects = update(model, msg);
+        each_effect(model, &batch);
+        apply_rpc(handle, &batch)
+    })
+}
+
+/// Runs `round` -- carry out a batch, hand back whatever follow-ups it
+/// answered with -- until a round answers with nothing, feeding each
+/// follow-up back in turn. The first round is called with `None`, meaning
+/// the caller's own batch.
+///
+/// Separate from [`pump_rpc`] so the bound can be exercised against a
+/// generator that actually cycles: nothing in the tree produces one today,
+/// and a bound proven only by the absence of a cycle is not proven.
+///
+/// # Errors
+///
+/// Returns [`OracleError::PumpUnsettled`] once [`MAX_FOLLOW_UP_ROUNDS`]
+/// rounds have run and follow-ups are still arriving.
+fn pump_bounded<M>(mut round: impl FnMut(Option<M>) -> Vec<M>) -> Result<(), OracleError> {
+    let mut pending = std::collections::VecDeque::new();
+    let mut next = None;
+    for _ in 0..=MAX_FOLLOW_UP_ROUNDS {
+        pending.extend(round(next));
+        let Some(msg) = pending.pop_front() else {
+            return Ok(());
+        };
+        next = Some(msg);
     }
+    Err(OracleError::PumpUnsettled {
+        rounds: MAX_FOLLOW_UP_ROUNDS,
+    })
 }
 
 /// Errors surfaced by the headless drivers.
@@ -260,6 +305,16 @@ pub enum OracleError {
     /// would be reporting a comparison that never happened.
     #[error("diff-review step failed: {0}")]
     Review(String),
+    /// An effect batch and the follow-up messages it answered with kept
+    /// producing each other past the round bound. Surfaced rather than
+    /// broken out of quietly: a driver that stopped pumping mid-exchange
+    /// would compare a model holding a message it never routed, which is a
+    /// divergence report about the driver rather than about view.
+    #[error("the effect loop was still producing follow-ups after {rounds} rounds")]
+    PumpUnsettled {
+        /// The bound that was reached ([`MAX_FOLLOW_UP_ROUNDS`]).
+        rounds: usize,
+    },
 }
 
 /// Msg-level headless driver: pure, no engine, no terminal. The fast oracle
@@ -509,21 +564,25 @@ impl EngineSession {
     /// the chrome-reservation boundary produces) when nothing was ever
     /// sent, leaving the model's own idea of the engine's grid size
     /// disagree with the real nvim process underneath it.
-    #[must_use]
-    pub fn pump_until_flush(&mut self, deadline: Duration) -> bool {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::PumpUnsettled`] if one of those forwards left
+    /// the effect loop still producing follow-ups (see [`pump_rpc`]).
+    pub fn pump_until_flush(&mut self, deadline: Duration) -> Result<bool, OracleError> {
         let start = Instant::now();
         loop {
             let events = self.pump.take_damage();
             let saw_flush = events.iter().any(|e| matches!(e, UiEvent::Flush));
             if !events.is_empty() {
                 let effects = update(&mut self.model, Msg::Redraw(events));
-                self.apply_effects(effects);
+                self.apply_effects(effects)?;
             }
             if saw_flush {
-                return true;
+                return Ok(true);
             }
             if start.elapsed() >= deadline {
-                return false;
+                return Ok(false);
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -536,13 +595,26 @@ impl EngineSession {
     /// loop to reply to a blocked request) can ever actually produce from
     /// [`update`], and routes the follow-up [`Msg`]s that dispatch answers
     /// with back through [`update`] until the loop goes quiet -- so a
-    /// refused buffer write reaches the model here exactly as it does in
-    /// production. A transport failure is dropped rather than surfaced:
-    /// this driver has no `Flow::EngineLost`/`Msg::EngineDown` recovery
-    /// path to hand it to, and the caller's own `deadline` bound already
-    /// covers a wedged connection.
-    fn apply_effects(&mut self, effects: Vec<Effect>) {
-        pump_rpc(&self.engine.handle, &mut self.model, effects, |_, _| {});
+    /// refused buffer write is mapped and routed here the way production
+    /// maps and routes it. Delivery differs and cannot be made to match:
+    /// production queues the outcome behind whatever loop traffic is
+    /// already ahead of it, so an edit event folded first can retire the
+    /// write the refusal would otherwise put back, while here the follow-up
+    /// is folded immediately with nothing able to interleave. This driver
+    /// has no message sink for such traffic to arrive on, so the difference
+    /// is one it cannot produce and cannot observe.
+    ///
+    /// A transport failure is dropped rather than surfaced: this driver has
+    /// no `Flow::EngineLost`/`Msg::EngineDown` recovery path to hand it to,
+    /// and the caller's own `deadline` bound already covers a wedged
+    /// connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`OracleError::PumpUnsettled`] if the effect loop is still
+    /// producing follow-ups after [`MAX_FOLLOW_UP_ROUNDS`] rounds.
+    fn apply_effects(&mut self, effects: Vec<Effect>) -> Result<(), OracleError> {
+        pump_rpc(&self.engine.handle, &mut self.model, effects, |_, _| {})
     }
 
     /// Captures the current [`Surface`] (leg (b): deterministic capture, at
@@ -627,9 +699,9 @@ impl settle::Settling for EngineSession {
         self.pump.take_damage()
     }
 
-    fn apply_batch(&mut self, events: Vec<UiEvent>) {
+    fn apply_batch(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError> {
         let effects = update(&mut self.model, Msg::Redraw(events));
-        self.apply_effects(effects);
+        self.apply_effects(effects)
     }
 
     fn markers(&mut self) -> &mut settle::QuiesceMarkers {
@@ -641,8 +713,12 @@ impl settle::Settling for EngineSession {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use std::path::PathBuf;
     use view_core::events::GridCell;
     use view_core::msg::{BufferHandle, Key, TextEdit};
+    use view_core::native::ai_panel::DiffReviewState;
+    use view_core::native::diff::hunk;
+    use view_core::native::diff::HunkStatus;
 
     #[test]
     fn session_fed_a_scripted_redraw_and_flush_yields_the_known_screen_text() {
@@ -729,5 +805,67 @@ mod tests {
             ),
             "a write nvim refused answered {refused:?}"
         );
+    }
+
+    /// Producing the follow-up is half the job; delivering it is the other
+    /// half. An open review is what makes the delivery observable: a
+    /// refusal that reaches `update` puts the hunks the write claimed back
+    /// to stale, and a driver that produced the message without routing it
+    /// would leave them accepted over a buffer nvim never wrote.
+    #[test]
+    fn a_refused_write_routed_through_the_pump_puts_its_hunks_back() {
+        let mut session = testenv::spawning(|| EngineSession::spawn(40, 6))
+            .expect("EngineSession::spawn against real nvim");
+        let buf = session.eval_str("bufnr('%')").unwrap();
+        let buf: u64 = buf.trim().parse().unwrap();
+        let tick = session.eval_str("b:changedtick").unwrap();
+        let tick: u64 = tick.trim().parse().unwrap();
+
+        let hunks = hunk::diff(Some("one\ntwo"), "one\nTWÖ");
+        let mut review = DiffReviewState::new(1, PathBuf::from("proposal.txt"), 3, hunks);
+        // a tick this buffer has never held, so the write the accept below
+        // issues is one nvim refuses outright
+        let _ = review.bind(3, Some(BufferHandle(buf)), tick.saturating_add(1000));
+        let effects = review.accept(0).expect("accepting the review's first hunk");
+        session.model.ai_panel_mut().pending_diff = Some(review);
+
+        session
+            .apply_effects(effects)
+            .expect("routing the write's outcome back");
+
+        let review = session
+            .model
+            .ai_panel()
+            .pending_diff
+            .as_ref()
+            .expect("the review is still open");
+        assert_eq!(
+            review.hunks[0].status,
+            HunkStatus::Stale,
+            "the refusal never reached the fold: the hunk still reads as written"
+        );
+    }
+
+    /// The round bound, against a generator that actually cycles -- nothing
+    /// in the tree produces one today, and a bound proven only by the
+    /// absence of a cycle is not proven.
+    #[test]
+    fn a_follow_up_cycle_trips_the_round_bound_instead_of_spinning() {
+        let mut rounds = 0_usize;
+        let err = pump_bounded(|_: Option<()>| {
+            rounds += 1;
+            vec![()]
+        })
+        .expect_err("a generator that always answers must not settle");
+        assert!(
+            matches!(err, OracleError::PumpUnsettled { rounds } if rounds == MAX_FOLLOW_UP_ROUNDS),
+            "the cycle surfaced as {err:?}"
+        );
+        assert_eq!(
+            rounds,
+            MAX_FOLLOW_UP_ROUNDS + 1,
+            "the bound stopped somewhere other than its own round count"
+        );
+        pump_bounded(|_: Option<()>| Vec::new()).expect("a generator that answers nothing settles");
     }
 }

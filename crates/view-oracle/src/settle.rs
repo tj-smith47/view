@@ -194,7 +194,12 @@ pub(crate) trait Settling {
     /// protocol's own marker echo (see [`take_marker_echo`]): a settle
     /// protocol must never cost the caller redraw content the script
     /// produced.
-    fn apply_batch(&mut self, events: Vec<UiEvent>);
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever the driver's own effect routing could not settle;
+    /// the protocol stops rather than settling a model that is mid-exchange.
+    fn apply_batch(&mut self, events: Vec<UiEvent>) -> Result<(), OracleError>;
 
     /// This driver's marker bookkeeping.
     fn markers(&mut self) -> &mut QuiesceMarkers;
@@ -448,7 +453,7 @@ pub(crate) fn settle<S: Settling>(
                     fired_mode = take_marker_echo(&mut events, prefix);
                 }
             }
-            session.apply_batch(events);
+            session.apply_batch(events)?;
             quiet_since = Instant::now();
         }
 

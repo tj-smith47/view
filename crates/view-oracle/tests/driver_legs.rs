@@ -74,7 +74,9 @@ fn engine_session_input_and_pump_until_flush_agree_with_eval_str_probe() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut flushed = false;
     while Instant::now() < deadline && !session.screen_text().contains("hello") {
-        flushed |= session.pump_until_flush(Duration::from_millis(250));
+        flushed |= session
+            .pump_until_flush(Duration::from_millis(250))
+            .expect("pumping a live engine");
     }
     assert!(
         flushed,
@@ -108,9 +110,14 @@ fn pump_until_flush_returns_false_at_the_deadline_when_no_flush_arrives() {
 
     // drain every startup flush first so the timed pump below observes a
     // genuinely quiescent engine, not attach-time redraw traffic
-    while session.pump_until_flush(Duration::from_millis(500)) {}
+    while session
+        .pump_until_flush(Duration::from_millis(500))
+        .expect("draining startup flushes")
+    {}
 
-    let flushed = session.pump_until_flush(Duration::from_millis(300));
+    let flushed = session
+        .pump_until_flush(Duration::from_millis(300))
+        .expect("pumping a quiescent engine");
     assert!(
         !flushed,
         "pump_until_flush reported a Flush from a quiescent engine with no input queued"
