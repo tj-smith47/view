@@ -1210,13 +1210,23 @@ fn plan_entry(raw: &Value) -> PlanEntry {
     }
 }
 
+/// A real currency code is three to eight characters; this is headroom,
+/// not a format assumption.
+const CURRENCY_CAP: usize = 16;
+
 /// A `UsageUpdate`'s `cost` member, already filtered non-null by the
 /// caller. `None` when `amount` or `currency` is missing -- an unreadable
 /// cost is left out of the stats rather than shown as free.
+///
+/// `currency` is capped here, at decode, rather than at either place it is
+/// later read: `UsageStats::render` runs once per painted frame while the
+/// panel is open, and the vlog catch-all logs it verbatim. Capping once at
+/// the wire boundary bounds both.
 fn cost_from_wire(raw: &Value) -> Option<Cost> {
+    let currency = raw.get("currency").and_then(Value::as_str)?;
     Some(Cost {
         amount: raw.get("amount").and_then(Value::as_f64)?,
-        currency: raw.get("currency").and_then(Value::as_str)?.to_string(),
+        currency: currency.chars().take(CURRENCY_CAP).collect(),
     })
 }
 
@@ -2790,5 +2800,17 @@ mod tests {
             driver.open_permissions.is_empty(),
             "the correlation map is drained, not just replied to"
         );
+    }
+
+    /// A currency code is the agent's to choose, and both readers of
+    /// `Cost.currency` -- the vlog catch-all and `UsageStats::render`,
+    /// which runs once per painted frame -- take it on faith that it is
+    /// short. Capped at decode, an oversized wire value never reaches
+    /// either.
+    #[test]
+    fn an_oversized_currency_is_capped_at_decode() {
+        let huge = "x".repeat(200_000);
+        let cost = cost_from_wire(&json!({ "amount": 1.5, "currency": huge })).unwrap();
+        assert_eq!(cost.currency.chars().count(), CURRENCY_CAP);
     }
 }
