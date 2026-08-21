@@ -654,8 +654,17 @@ fn run_review_entry(
                 reference.arm_and_input(keys)?;
                 reference_settled &= reference.quiesce(silence, deadline)?;
             }
-            other => {
-                if driver.apply(&mut engine, other)? {
+            // Spelled out rather than caught by a wildcard: a step kind
+            // added later that delivers keys must fail to compile here
+            // instead of routing to a driver that has no session to type
+            // into
+            step @ (ReviewStep::Propose(_)
+            | ReviewStep::Accept(_)
+            | ReviewStep::AcceptAll
+            | ReviewStep::Reject(_)
+            | ReviewStep::ReDiff(_)
+            | ReviewStep::FoldRow(_)) => {
+                if driver.apply(&mut engine, step)? {
                     engine_settled &= engine.quiesce(silence, deadline)?;
                 }
             }

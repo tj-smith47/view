@@ -122,6 +122,21 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) {
                 col,
             } => handle.input_mouse(button, action, modifier, *row, *col),
             RpcCall::GetDefaultHl { generation } => handle.probe_default_hl(*generation),
+            // Named rather than left to the fallback below, which would
+            // drop an agent's accepted text on the floor and leave the run
+            // comparing a buffer the write never reached. The outcome is
+            // dropped on the same terms as every other call here; the
+            // driver that needs it (see `review`) carries its own writes
+            // out instead of routing them through this dispatch.
+            RpcCall::BufSetText {
+                buf,
+                edits,
+                undojoin,
+                expected_changedtick,
+                ..
+            } => handle
+                .set_buf_text(*buf, edits, *undojoin, *expected_changedtick)
+                .map(|_| ()),
             // RpcCall is #[non_exhaustive]: a future call kind degrades to a
             // no-op here rather than fail to compile, matching
             // Executor::run's own fallback arm.

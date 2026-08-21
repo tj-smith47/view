@@ -54,6 +54,15 @@ const REVIEW_PATH: &str = "/oracle/diff-review";
 /// same row. Without it every diff-review entry would report a cursor and
 /// mark divergence that says nothing about the write under test, since the
 /// reference side got where it is by typing and view's side by an API call.
+///
+/// Resetting the registers is collateral, not a goal: it means no
+/// diff-review entry holds register parity, so nothing here would catch a
+/// write that clobbered one. Nothing can, from these two routes -- typing
+/// `cc` writes the changed text to the unnamed register and an API write
+/// writes nothing, so the two sides disagree on registers before the write
+/// under test is even reached. Register parity is what the other twenty-six
+/// corpus entries hold (they drive both sides with the same keys), and
+/// `nvim_buf_set_text` is the only call this path issues.
 pub const NORMALIZE_KEYS: &str = "<Esc>ggo<Esc>ddgg0";
 
 /// One shape of hunk decision a corpus entry can name. The corpus file
@@ -117,11 +126,12 @@ impl DiffReviewCase {
                 ReviewStep::Accept(0),
                 ReviewStep::Reference("GccFÎVE<Esc>"),
             ],
-            // The two undos are the assertion. One retracts the whole
-            // review, the second retracts the typing that seeded the
-            // buffer, so both sides end empty -- and a review that had
-            // written two undo entries instead of one would still be
-            // holding its seeded text after the same two keys.
+            // The single undo is the assertion, and it discriminates in
+            // both directions: one `u` must leave exactly the text the
+            // review found. A review that wrote two entries instead of one
+            // retracts only its second hunk and keeps the first, while one
+            // that joined its first write backwards onto the user's own
+            // typing retracts that typing too and empties the buffer.
             // `undojoin` is how the reference side reaches one entry by
             // typing, which is the same claim stated in nvim's own terms.
             Self::MultiHunkAcceptAll => &[
@@ -129,7 +139,7 @@ impl DiffReviewCase {
                 ReviewStep::Accept(0),
                 ReviewStep::AcceptAll,
                 ReviewStep::Reference("2GccTWÖ<Esc><Cmd>undojoin | normal! GccFÎVE<CR>"),
-                ReviewStep::Shared("uu"),
+                ReviewStep::Shared("u"),
             ],
             Self::RejectThenRepropose => &[
                 ReviewStep::Propose("ünïcode\ntwo\nthree\nfôur\nWRÖNG"),
@@ -158,7 +168,6 @@ impl DiffReviewCase {
 /// One step of a case's script. Key steps are the runner's to deliver (it
 /// owns both sessions); every other step is the review driver's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum ReviewStep {
     /// Keys both sides receive: the user's own editing, or an undo, which
     /// happens to both sessions identically.
@@ -189,6 +198,11 @@ pub enum ReviewStep {
 #[derive(Debug, Default)]
 pub struct ReviewDriver {
     review: Option<DiffReviewState>,
+    /// The buffer text the last proposal was diffed against, which the next
+    /// proposal must still find. See [`refuse_if_moved`] for what a
+    /// disagreement means and why re-reading without this check is what
+    /// makes a reject case unable to fail.
+    proposed_against: Option<String>,
 }
 
 impl ReviewDriver {
@@ -211,7 +225,9 @@ impl ReviewDriver {
         step: ReviewStep,
     ) -> Result<bool, OracleError> {
         match step {
-            ReviewStep::Shared(_) | ReviewStep::Reference(_) => Ok(false),
+            ReviewStep::Shared(keys) | ReviewStep::Reference(keys) => Err(OracleError::Review(
+                format!("the keys {keys:?} are the runner's to deliver, not this driver's"),
+            )),
             ReviewStep::Propose(text) => {
                 self.propose(session, text)?;
                 Ok(false)
@@ -270,6 +286,8 @@ impl ReviewDriver {
         let buf = probe_u64(session, "bufnr('%')")?;
         let changedtick = probe_u64(session, "b:changedtick")?;
         let old = session.eval_str(BUFFER_TEXT_EXPR)?;
+        refuse_if_moved(self.proposed_against.as_deref(), &old)?;
+        self.proposed_against = Some(old.clone());
         let hunks = hunk::diff(Some(&old), proposal);
         if hunks.is_empty() {
             return Err(OracleError::Review(format!(
@@ -357,6 +375,32 @@ impl ReviewDriver {
     }
 }
 
+/// Refuses a follow-up proposal whose buffer no longer holds the text the
+/// previous proposal was diffed against.
+///
+/// Without this, a case that decides a hunk without writing it cannot fail:
+/// each proposal re-reads the live buffer, so a decision that wrote when it
+/// owed no write is laundered into the next proposal's `old` text, which
+/// then diffs the corruption away and converges on the reference side's own
+/// typing. The reject case is exactly that shape, and its whole claim is
+/// that nothing was written.
+///
+/// The rule is deliberately absolute -- a write or a scripted edit between
+/// two proposals refuses too, not only an unexpected one. A case that
+/// legitimately re-proposes over changed text has to say so with a step of
+/// its own rather than by having this guard look the other way, since a
+/// guard that guesses which movement was intended is the guard that
+/// launders the one that was not.
+fn refuse_if_moved(previous: Option<&str>, now: &str) -> Result<(), OracleError> {
+    match previous {
+        Some(expected) if expected != now => Err(OracleError::Review(format!(
+            "the buffer moved between proposals, from {expected:?} to {now:?}: a decision that \
+             owed no write produced one"
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Reads one `nvim_eval` probe that must answer a number.
 fn probe_u64(session: &mut EngineSession, expr: &str) -> Result<u64, OracleError> {
     let raw = session.eval_str(expr)?;
@@ -385,6 +429,74 @@ mod tests {
     #[test]
     fn an_unknown_case_name_resolves_to_nothing() {
         assert_eq!(DiffReviewCase::from_name("accept-everything"), None);
+    }
+
+    /// A case name binds a corpus entry to a script, and the corpus check
+    /// only holds the name end of that. This holds the other end: the steps
+    /// that make a case the thing it is named after must still be in it, so
+    /// gutting a case's body (dropping the staleness steps, the reject, the
+    /// undo) fails here instead of quietly leaving an entry that still
+    /// loads, still runs, and still reports PARITY over a script that no
+    /// longer exercises what its name promises.
+    #[test]
+    fn every_case_scripts_the_steps_that_name_it() {
+        let required: [(DiffReviewCase, &[ReviewStep]); 4] = [
+            (DiffReviewCase::SingleHunkAccept, &[ReviewStep::Accept(0)]),
+            (
+                DiffReviewCase::MultiHunkAcceptAll,
+                &[
+                    ReviewStep::Accept(0),
+                    ReviewStep::AcceptAll,
+                    ReviewStep::Shared("u"),
+                ],
+            ),
+            (
+                DiffReviewCase::RejectThenRepropose,
+                &[ReviewStep::Reject(0), ReviewStep::Accept(0)],
+            ),
+            (
+                DiffReviewCase::StaleReDiffThenAccept,
+                &[
+                    ReviewStep::FoldRow(3),
+                    ReviewStep::ReDiff(0),
+                    ReviewStep::Accept(0),
+                ],
+            ),
+        ];
+        for case in DiffReviewCase::ALL {
+            let row = required.iter().find(|(named, _)| *named == case);
+            assert!(
+                row.is_some(),
+                "{} has no required-step row here, so nothing holds its script",
+                case.name()
+            );
+            if let Some((_, steps)) = row {
+                for step in *steps {
+                    assert!(
+                        case.steps().contains(step),
+                        "{} no longer scripts {step:?}",
+                        case.name()
+                    );
+                }
+            }
+        }
+    }
+
+    /// The reject case's own premise: a proposal that follows a decision
+    /// owing no write must find the buffer untouched. A driver that let the
+    /// second proposal re-read a moved buffer would diff the corruption
+    /// away and report parity over it.
+    #[test]
+    fn a_proposal_over_a_moved_buffer_is_refused() {
+        let err = refuse_if_moved(Some("one\ntwo"), "one\nWRÖNG")
+            .expect_err("a moved buffer must refuse the next proposal");
+        assert!(
+            matches!(err, OracleError::Review(ref why) if why.contains("owed no write")),
+            "expected the refusal to name what moved, got {err:?}"
+        );
+        refuse_if_moved(Some("one\ntwo"), "one\ntwo")
+            .expect("an unmoved buffer must allow the next proposal");
+        refuse_if_moved(None, "one\ntwo").expect("the first proposal has nothing to compare");
     }
 
     /// Every case must end with the reference side having been given its own

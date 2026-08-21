@@ -4,6 +4,11 @@
 # changes that row's byte length and its character length by different
 # amounts, so an accept measuring it in characters writes into the middle of
 # the row the user just left behind.
+#
+# The re-anchoring arithmetic is what this holds. The event plumbing that
+# feeds it in production -- nvim's own lines event through `Msg` and
+# `update()` -- is not: the driver reads the changed row back and folds the
+# event shape itself, and that leg stays on the change-streaming tests.
 schema = 1
 name = "diff-review-stale"
 input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"

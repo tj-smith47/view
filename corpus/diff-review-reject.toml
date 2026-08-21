@@ -1,7 +1,11 @@
 # A declined hunk must write nothing, and the proposal that replaces it must
-# write as if the first had never been offered: the two proposals differ in
-# the text they put on the last row, so a rejected hunk that wrote anyway
-# leaves that row disagreeing with the reference side's own typing.
+# write as if the first had never been offered. What holds the first half is
+# the driver's own refusal, not this text: a second proposal is diffed
+# against the text the first one saw and refuses outright if the buffer
+# moved, so a reject that wrote anyway ends the run with an error instead of
+# being laundered into the follow-up proposal's diff. The second half is
+# this entry's own comparison -- the replacement's last row against the
+# reference side's typing of it.
 schema = 1
 name = "diff-review-reject"
 input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"

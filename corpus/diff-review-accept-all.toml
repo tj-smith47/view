@@ -1,8 +1,13 @@
-# Accept-all over two hunks, then two undos. One undo must retract the whole
-# review and the second the typing that seeded the buffer, leaving both
-# sides empty -- a review that had written two undo entries instead of one
-# would still be holding its seeded text after the same two keys. The
-# reference side reaches one entry the way nvim's own `:undojoin` does.
+# Accept-all over two hunks, then one undo, which must leave exactly the
+# text the review found. It discriminates in both directions: a review that
+# wrote two undo entries instead of one keeps its first hunk after that key,
+# and one that joined its first write backwards onto the user's own typing
+# retracts that typing too and empties the buffer. The reference side
+# reaches its one entry the way nvim's own `:undojoin` does.
+#
+# The undo is what this entry holds, so it is the one diff-review entry the
+# byte-versus-character column arithmetic cannot fail: the write is retracted
+# before the comparison. The other three carry that.
 schema = 1
 name = "diff-review-accept-all"
 input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
