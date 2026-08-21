@@ -368,7 +368,8 @@ leg_session_lifecycle() {
     wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null
     # Rendered incrementally means more than one chunk crossed the loop and
     # was folded into the transcript, each one repainting -- a turn
-    # delivered whole at its end logs exactly one.
+    # delivered whole at its end logs exactly one. The line shape this reads
+    # is checked against `vlog.rs`'s own template at startup.
     chunks=$(grep -cE 'ai MessageChunk .*from_agent: true' "$ROOT/view.log" || true)
     if [ "${chunks:-0}" -lt 2 ]; then
         fail "the real agent's reply arrived in $chunks chunk(s); a streamed turn is more than one"
@@ -384,31 +385,37 @@ leg_session_lifecycle() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
-# The status sequence one real tool call was seen in. Read from the log
+# The status sequence one real tool call was seen in -- the first call the
+# agent reported, followed by its own `tool_call_id` so this asserts one
+# call transitioning rather than two calls coinciding. Read from the log
 # rather than the screen because it is the order that is being asserted, and
 # the log's own line order is arrival order -- a screen poll could only ever
 # say which statuses were reachable, never which came first. The vocabulary
 # is the wire's (`docs/acp-v1-wire-capture.md` pins
-# `pending`/`in_progress`/`completed`/`failed`); which call it belongs to and
-# what it was called are the agent's business, not this leg's.
+# `pending`/`in_progress`/`completed`/`failed`); what the call was called is
+# the agent's business, not this leg's.
 assert_tool_call_went_non_terminal_then_terminal() {
-    local statuses first_terminal first_non_terminal
-    statuses=$(grep -oE 'ai ToolCallUpdate .*status: [A-Za-z]+' "$ROOT/view.log" |
-        grep -oE '[A-Za-z]+$' || true)
-    if [ -z "$statuses" ]; then
+    local id statuses first_terminal first_non_terminal
+    id=$(grep -oE 'ai ToolCallUpdate \{ tool_call_id: "[^"]+"' "$ROOT/view.log" |
+        head -1 | sed -E 's/.*"(.*)"/\1/')
+    if [ -z "$id" ]; then
         fail 'the real agent made no tool call at all'
         return 1
     fi
-    first_non_terminal=$(printf '%s\n' "$statuses" | grep -nE '^(Pending|InProgress)$' |
+    # the greedy `.*` takes the last `status: ` on a line, so a title that
+    # happens to carry the word cannot stand in for the real field
+    statuses=$(grep -F "ai ToolCallUpdate { tool_call_id: \"$id\"" "$ROOT/view.log" |
+        grep -oE '.*status: [A-Za-z]+' | grep -oE '[A-Za-z]+$' || true)
+    first_non_terminal=$(printf '%s\n' "$statuses" | grep -nE "^($NON_TERMINAL_STATUSES)$" |
         head -1 | cut -d: -f1)
-    first_terminal=$(printf '%s\n' "$statuses" | grep -nE '^(Completed|Failed)$' |
+    first_terminal=$(printf '%s\n' "$statuses" | grep -nE "^($TERMINAL_STATUSES)$" |
         head -1 | cut -d: -f1)
     if [ -z "$first_non_terminal" ] || [ -z "$first_terminal" ]; then
-        fail "a real tool call was never seen both non-terminal and terminal (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
+        fail "tool call $id was never seen both non-terminal and terminal (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
         return 1
     fi
     if [ "$first_non_terminal" -ge "$first_terminal" ]; then
-        fail "the tool call reached a terminal status before a non-terminal one (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
+        fail "tool call $id reached a terminal status before a non-terminal one (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
         return 1
     fi
 }
@@ -648,6 +655,25 @@ TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai
 }
 # How the first-run provisioning wait announces itself.
 PROVISION_NOTICE=$(const_str "$REPO_ROOT/crates/view/src/ai_worker.rs" PROVISION_NOTICE_PREFIX)
+
+# The shapes leg 1 reads its own log lines by. `vlog.rs` renders every AI
+# event from a template of its own rather than a derive, so the field order
+# is that file's to change; reading the templates from there is what turns a
+# rename into a loud failure here rather than a grep that quietly matches
+# nothing. The four status words are `ToolCallStatus` variant names as
+# `{status:?}` spells them, each proved still to exist by the label the
+# panel renders it as.
+VLOG_RS="$REPO_ROOT/crates/view/src/vlog.rs"
+require_template "$VLOG_RS" 'log_with("ai"' || exit 1
+require_template "$VLOG_RS" \
+    'MessageChunk {{ message_id: {message_id:?}, from_agent: {from_agent}' || exit 1
+require_template "$VLOG_RS" \
+    'ToolCallUpdate {{ tool_call_id: {tool_call_id:?}, title: {}, status: {status:?}' || exit 1
+NON_TERMINAL_STATUSES='Pending|InProgress'
+TERMINAL_STATUSES='Completed|Failed'
+for status in ${NON_TERMINAL_STATUSES//|/ } ${TERMINAL_STATUSES//|/ }; do
+    status_label "$status" >/dev/null || exit 1
+done
 
 # The stub agent's first argument is the file whose appearance releases a
 # held turn; one path serves every leg because no two sessions overlap.
