@@ -1390,13 +1390,19 @@ mod tests {
     /// `extract_dir` -- the entry file plus its stamp -- without going
     /// through `ensure_extracted`, so a test can pre-populate a "someone
     /// else already published a valid extraction" state deterministically.
-    fn write_valid_extraction(extract_dir: &Path, entry: &str, content: &[u8]) {
+    fn write_valid_extraction(pin: &AdapterPin, extract_dir: &Path, entry: &str, content: &[u8]) {
         let entry_path = extract_dir.join(entry);
         std::fs::create_dir_all(entry_path.parent().expect("entry has a parent"))
             .expect("create extracted entry's parent dir");
         std::fs::write(&entry_path, content).expect("write extracted entry");
-        std::fs::write(extract_dir.join(ENTRY_STAMP_NAME), sha256_hex(content))
-            .expect("write entry stamp");
+        // The stamp comes from the one production function so a
+        // lockfile-bearing pin stamps here exactly as `ensure_extracted`
+        // would, instead of silently writing the bare form.
+        std::fs::write(
+            extract_dir.join(ENTRY_STAMP_NAME),
+            entry_stamp(pin, content),
+        )
+        .expect("write entry stamp");
     }
 
     #[test]
@@ -1409,6 +1415,7 @@ mod tests {
         // "someone else" (a concurrent process winning the same race)
         // already published a valid extraction at extract_dir
         write_valid_extraction(
+            &pin,
             &extract_dir,
             "package/dist/index.js",
             b"the winner's content",
@@ -1420,7 +1427,12 @@ mod tests {
         // of privilege, so this deterministically forces the collision
         // `ensure_extracted` can hit under real concurrency
         let tmp_dir = root.join(".extracted.loser.tmp");
-        write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
+        write_valid_extraction(
+            &pin,
+            &tmp_dir,
+            "package/dist/index.js",
+            b"the loser's content",
+        );
 
         let result = publish_extraction(&pin, &tmp_dir, &extract_dir, &entry_path);
 
@@ -1459,7 +1471,12 @@ mod tests {
         .expect("write unrelated occupant file");
 
         let tmp_dir = root.join(".extracted.loser.tmp");
-        write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
+        write_valid_extraction(
+            &pin,
+            &tmp_dir,
+            "package/dist/index.js",
+            b"the loser's content",
+        );
 
         let result = publish_extraction(&pin, &tmp_dir, &extract_dir, &entry_path);
 
@@ -1485,7 +1502,7 @@ mod tests {
         let root = scratch_cache_root("deps-missing");
         let extract_dir = root.join("extracted");
         let entry_path = extract_dir.join(pin.entry);
-        write_valid_extraction(&extract_dir, pin.entry, b"import 'dep';");
+        write_valid_extraction(&pin, &extract_dir, pin.entry, b"import 'dep';");
         write_manifest(&extract_dir, "{\"dep\":\"^1\"}");
 
         assert!(
@@ -1507,7 +1524,7 @@ mod tests {
         let root = scratch_cache_root("deps-none");
         let extract_dir = root.join("extracted");
         let entry_path = extract_dir.join(pin.entry);
-        write_valid_extraction(&extract_dir, pin.entry, b"console.log(1);");
+        write_valid_extraction(&pin, &extract_dir, pin.entry, b"console.log(1);");
 
         // no manifest at all, then an empty `dependencies`: neither may
         // reach npm, which is what keeps every other test in this module
@@ -1528,7 +1545,7 @@ mod tests {
         let pin = test_pin(String::new(), "");
         let root = scratch_cache_root("deps-unpinned");
         let extract_dir = root.join("extracted");
-        write_valid_extraction(&extract_dir, pin.entry, b"import 'dep';");
+        write_valid_extraction(&pin, &extract_dir, pin.entry, b"import 'dep';");
         write_manifest(&extract_dir, "{\"dep\":\"^1\"}");
 
         let err = ensure_dependencies(&pin, &extract_dir)
@@ -1582,7 +1599,7 @@ mod tests {
         );
 
         let extract_dir = extract_dir(&pin_dir(&pin, &root));
-        write_valid_extraction(&extract_dir, pin.entry, b"console.log(1);");
+        write_valid_extraction(&pin, &extract_dir, pin.entry, b"console.log(1);");
         assert!(
             ready_in(&pin, &root),
             "a complete extraction needs no download or install"

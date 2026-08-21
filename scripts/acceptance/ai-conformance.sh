@@ -32,10 +32,12 @@
 #
 # Almost every string asserted below is read out of the source that owns it,
 # so a reworded row fails here loudly rather than leaving an assertion
-# quietly matching nothing. The exceptions are the handful built from the
-# wire's own pinned vocabulary (`docs/acp-v1-wire-capture.md`) rather than
-# from a `&str` constant, each guarded by a check that the template it slots
-# into still exists.
+# quietly matching nothing. Two kinds of exception remain: strings built
+# from the wire's own pinned vocabulary (`docs/acp-v1-wire-capture.md`),
+# each guarded by a check that the template it slots into still exists;
+# and the `ai TurnEnded` log lines, which render through vlog's derive
+# catch-all and so have no template to guard -- a rename there fails these
+# waits loudly at their own timeout, which is the check they get.
 #
 # Needs `tmux`, `node` and `npm` for the agent leg, a network for the one
 # cold provision, and credentials the pinned adapter can authenticate with

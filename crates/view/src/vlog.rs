@@ -224,11 +224,25 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
             options,
         } => format!(
             "PermissionRequested {{ request_id: {request_id}, tool_call_id: {tool_call_id:?}, \
-             title: {}, options: {options:?} }}",
+             title: {}, options: [{}] }}",
             title.as_ref().map_or_else(
                 || "None".to_string(),
                 |title| format!("Some({})", capped(title))
-            )
+            ),
+            // The count is bounded too: option_id and name arrive from the
+            // agent, and so does how many options there are.
+            options
+                .iter()
+                .take(8)
+                .map(|o| format!(
+                    "{{ option_id: {}, name: {}, kind: {:?} }}",
+                    capped(&o.option_id),
+                    capped(&o.name),
+                    o.kind
+                ))
+                .chain((options.len() > 8).then(|| format!("+{} more", options.len() - 8)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AiEvent::PlanUpdated { entries } => {
             format!("PlanUpdated {{ entries: {} item(s) }}", entries.len())
@@ -371,6 +385,27 @@ mod tests {
         assert!(
             permission.len() < PAYLOAD_CAP * 4 && permission.contains("+199880B"),
             "a permission title must be capped like every other title: {permission}"
+        );
+
+        // Every dimension of the options list is the agent's to choose:
+        // the id, the name, and how many there are.
+        let overloaded = ai_payload(&AiEvent::PermissionRequested {
+            request_id: 4,
+            tool_call_id: "call_2".to_string(),
+            title: None,
+            options: vec![
+                view_core::native::ai_event::PermissionOption {
+                    option_id: huge.clone(),
+                    name: huge.clone(),
+                    kind: view_core::native::ai_event::PermissionOptionKind::AllowOnce,
+                };
+                40
+            ],
+        });
+        assert!(
+            overloaded.len() < PAYLOAD_CAP * 40 && overloaded.contains("+32 more"),
+            "options must be capped in id, name, and count: {} bytes",
+            overloaded.len()
         );
 
         // The wire replaces the whole plan on every update, so its size is
