@@ -1108,6 +1108,14 @@ struct DiffProposal {
 /// normalized into something plausible: a proposal names a file the user is
 /// about to accept edits into, and guessing which file an off-contract
 /// spelling meant is exactly the guess that must not be made.
+///
+/// Deliberately not [`crate::trust::path_is_contained`], which every `fs/*`
+/// request must pass: a proposal edits nothing on its own. It opens a review
+/// naming the file on screen, and no byte reaches any buffer until the user
+/// accepts a hunk, so containment is enforced by a person reading the path
+/// rather than by the workspace root. An `fs/*` call has no such reader --
+/// it is the agent acting directly -- which is why that path takes the
+/// stricter test and this one does not.
 fn usable_path(path: &&str) -> bool {
     !path.ends_with(['/', '\\']) && std::path::Path::new(path).is_absolute()
 }
