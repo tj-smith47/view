@@ -80,11 +80,15 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             text,
             from_agent,
         } => {
-            model.ai_panel_mut().transcript.append_or_extend(
-                message_id.as_deref(),
-                &text,
-                from_agent,
-            );
+            let role = if from_agent {
+                crate::native::ai_panel::TranscriptRole::Agent
+            } else {
+                crate::native::ai_panel::TranscriptRole::User
+            };
+            model
+                .ai_panel_mut()
+                .transcript
+                .append_or_extend(message_id.as_deref(), &text, role);
             model.dirty = true;
         }
         AiEvent::ToolCallUpdate {
@@ -275,7 +279,14 @@ pub(super) fn on_ai_event(model: &mut Model, event: AiEvent) -> Vec<Effect> {
             path,
             content,
         } => return super::ai_fs::on_write_requested(model, request_id, path, &content),
-        AiEvent::ThoughtChunk { .. } => {}
+        AiEvent::ThoughtChunk { message_id, text } => {
+            model.ai_panel_mut().transcript.append_or_extend(
+                message_id.as_deref(),
+                &text,
+                crate::native::ai_panel::TranscriptRole::Thought,
+            );
+            model.dirty = true;
+        }
     }
     Vec::new()
 }
@@ -354,6 +365,30 @@ mod tests {
         );
         assert_eq!(model.ai_panel_mut().transcript.len(), 1);
         assert!(model.dirty);
+    }
+
+    /// Reasoning was dropped on the floor here for the life of the panel,
+    /// which showed as dead air on any agent that thinks before it answers
+    /// -- and it is the panel's rendered row that has to prove otherwise,
+    /// since a fold into the transcript under the wrong voice is exactly
+    /// the failure a length check would call a pass.
+    #[test]
+    fn a_thought_chunk_reaches_the_panel_in_its_own_voice() {
+        let mut model = model_with_open_panel();
+        on_ai_event(
+            &mut model,
+            AiEvent::ThoughtChunk {
+                message_id: Some("m1".to_string()),
+                text: "weighing it".to_string(),
+            },
+        );
+        assert!(model.dirty);
+        assert_eq!(
+            model.ai_panel().view().rows,
+            vec![vec![crate::native::views::Span::plain(
+                "Thinking: weighing it"
+            )]]
+        );
     }
 
     #[test]

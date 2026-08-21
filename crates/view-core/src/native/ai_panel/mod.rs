@@ -470,8 +470,12 @@ mod tests {
     #[test]
     fn a_transcript_entry_renders_with_its_speaker_prefix() {
         let mut state = AiPanelState::new();
-        state.transcript.append_or_extend(Some("1"), "hi", false);
-        state.transcript.append_or_extend(Some("2"), "hello", true);
+        state
+            .transcript
+            .append_or_extend(Some("1"), "hi", TranscriptRole::User);
+        state
+            .transcript
+            .append_or_extend(Some("2"), "hello", TranscriptRole::Agent);
         let view = state.view();
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0], vec![Span::plain("You: hi")]);

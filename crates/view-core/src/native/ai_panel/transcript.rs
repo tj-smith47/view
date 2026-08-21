@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use crate::native::ai_event::{PlanEntry, PlanEntryPriority, PlanEntryStatus, ToolCallStatus};
 use crate::native::views::Span;
 
-/// Who spoke one transcript entry. Closed rather than a free-form string:
-/// every renderer that ever styles a row by speaker (the composer's own
-/// "you" vs "agent" convention every chat-shaped UI uses) switches on this
-/// instead of matching text an adapter could spell differently release to
-/// release.
+/// Who spoke one transcript entry, and in which voice. Closed rather than
+/// a free-form string: every renderer that ever styles a row by speaker
+/// (the composer's own "you" vs "agent" convention every chat-shaped UI
+/// uses) switches on this instead of matching text an adapter could spell
+/// differently release to release.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriptRole {
@@ -21,6 +21,13 @@ pub enum TranscriptRole {
     User,
     /// The agent's reply.
     Agent,
+    /// The agent's reasoning, which is the agent speaking but is not its
+    /// answer. Its own role rather than a second [`Self::Agent`] entry:
+    /// the wire carries reasoning apart from the reply precisely so that a
+    /// client cannot present one as the other, and a reader who cannot
+    /// tell them apart is being shown the agent asserting things it was
+    /// only considering.
+    Thought,
 }
 
 /// What one transcript entry represents: a streamed message, a tool call's
@@ -196,19 +203,23 @@ impl Transcript {
     /// update) interleaved -- an agent streaming its answer around a tool
     /// call it dispatches mid-reply still owns one message, so that chunk
     /// must resume the original entry rather than starting a second one.
-    pub fn append_or_extend(&mut self, message_id: Option<&str>, text: &str, from_agent: bool) {
+    pub fn append_or_extend(&mut self, message_id: Option<&str>, text: &str, role: TranscriptRole) {
         if let Some(id) = message_id {
+            // Same id, same voice, or it is a different entry. An agent is
+            // free to stream its reasoning and its answer under one id, and
+            // folding those together would append the thought into the
+            // reply as though the agent had said it.
             if let Some(&i) = self.message_index.get(id) {
-                self.entries[i].text.push_str(text);
-                self.row_cache.get_mut()[i] = None;
-                return;
+                if matches!(
+                    &self.entries[i].kind,
+                    TranscriptEntryKind::Message { role: held, .. } if *held == role
+                ) {
+                    self.entries[i].text.push_str(text);
+                    self.row_cache.get_mut()[i] = None;
+                    return;
+                }
             }
         }
-        let role = if from_agent {
-            TranscriptRole::Agent
-        } else {
-            TranscriptRole::User
-        };
         self.entries.push(TranscriptEntry {
             kind: TranscriptEntryKind::Message {
                 message_id: message_id.map(ToString::to_string),
@@ -322,6 +333,7 @@ fn render_entry(entry: &TranscriptEntry) -> Vec<Vec<Span>> {
             let prefix = match role {
                 TranscriptRole::User => "You",
                 TranscriptRole::Agent => "Agent",
+                TranscriptRole::Thought => "Thinking",
             };
             vec![vec![Span::plain(format!("{prefix}: {}", entry.text))]]
         }
@@ -369,10 +381,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reasoning_renders_apart_from_the_reply_it_shares_an_id_with() {
+        let mut transcript = Transcript::new();
+        transcript.append_or_extend(Some("m1"), "weighing it", TranscriptRole::Thought);
+        transcript.append_or_extend(Some("m1"), "the answer", TranscriptRole::Agent);
+
+        assert_eq!(
+            transcript.rendered_rows(),
+            vec![
+                vec![Span::plain("Thinking: weighing it")],
+                vec![Span::plain("Agent: the answer")],
+            ],
+            "reasoning must be readable as reasoning, not as what the agent said"
+        );
+    }
+
+    #[test]
     fn two_chunks_sharing_a_message_id_fold_into_one_entry() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(Some("m1"), "hel", true);
-        transcript.append_or_extend(Some("m1"), "lo", true);
+        transcript.append_or_extend(Some("m1"), "hel", TranscriptRole::Agent);
+        transcript.append_or_extend(Some("m1"), "lo", TranscriptRole::Agent);
 
         assert_eq!(transcript.len(), 1);
         let entry = transcript.iter().next().expect("one entry");
@@ -389,8 +417,8 @@ mod tests {
     #[test]
     fn chunks_with_no_message_id_never_fold_together() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(None, "one", true);
-        transcript.append_or_extend(None, "two", true);
+        transcript.append_or_extend(None, "one", TranscriptRole::Agent);
+        transcript.append_or_extend(None, "two", TranscriptRole::Agent);
 
         assert_eq!(transcript.len(), 2);
     }
@@ -398,8 +426,8 @@ mod tests {
     #[test]
     fn a_new_message_id_starts_a_new_entry_rather_than_extending_the_old_one() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(Some("m1"), "first message", true);
-        transcript.append_or_extend(Some("m2"), "second message", true);
+        transcript.append_or_extend(Some("m1"), "first message", TranscriptRole::Agent);
+        transcript.append_or_extend(Some("m2"), "second message", TranscriptRole::Agent);
 
         assert_eq!(transcript.len(), 2);
         let mut entries = transcript.iter();
@@ -410,14 +438,14 @@ mod tests {
     #[test]
     fn a_message_id_resumes_its_entry_across_an_intervening_tool_call() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(Some("m1"), "chunk A", true);
+        transcript.append_or_extend(Some("m1"), "chunk A", TranscriptRole::Agent);
         transcript.upsert_tool_call(
             "call_1".to_string(),
             "Read file".to_string(),
             ToolCallStatus::Pending,
             None,
         );
-        transcript.append_or_extend(Some("m1"), ", chunk A'", true);
+        transcript.append_or_extend(Some("m1"), ", chunk A'", TranscriptRole::Agent);
 
         assert_eq!(
             transcript.len(),
@@ -484,7 +512,7 @@ mod tests {
             ToolCallStatus::Pending,
             None,
         );
-        transcript.append_or_extend(Some("m1"), "meanwhile, agent text", true);
+        transcript.append_or_extend(Some("m1"), "meanwhile, agent text", TranscriptRole::Agent);
         transcript.upsert_tool_call(
             "call_1".to_string(),
             "Read file".to_string(),
@@ -604,13 +632,13 @@ mod tests {
     #[test]
     fn a_plan_between_message_chunks_does_not_disturb_them() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(Some("m1"), "before", true);
+        transcript.append_or_extend(Some("m1"), "before", TranscriptRole::Agent);
         transcript.upsert_plan(vec![PlanEntry {
             content: "task".to_string(),
             priority: PlanEntryPriority::Low,
             status: PlanEntryStatus::Pending,
         }]);
-        transcript.append_or_extend(Some("m1"), " after", true);
+        transcript.append_or_extend(Some("m1"), " after", TranscriptRole::Agent);
 
         assert_eq!(transcript.len(), 2);
         assert_eq!(transcript.iter().next().unwrap().text, "before after");
@@ -633,8 +661,8 @@ mod tests {
     #[test]
     fn rendered_rows_only_recomputes_the_entry_that_changed() {
         let mut transcript = Transcript::new();
-        transcript.append_or_extend(Some("m1"), "one", true);
-        transcript.append_or_extend(Some("m2"), "two", true);
+        transcript.append_or_extend(Some("m1"), "one", TranscriptRole::Agent);
+        transcript.append_or_extend(Some("m2"), "two", TranscriptRole::Agent);
 
         reset_render_entry_calls();
         let first_pass = transcript.rendered_rows();
@@ -655,7 +683,7 @@ mod tests {
              neither entry again, where a bypassed cache would render both"
         );
 
-        transcript.append_or_extend(Some("m2"), " more", true);
+        transcript.append_or_extend(Some("m2"), " more", TranscriptRole::Agent);
         reset_render_entry_calls();
         let second_pass = transcript.rendered_rows();
         assert_eq!(

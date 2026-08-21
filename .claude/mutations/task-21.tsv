@@ -26,3 +26,4 @@ crates/view-harness/src/bin/bench/cell_world.rs	            "\n[ai]\nenabled = t
 crates/view-core/src/update/review.rs	            stray = true;	            stray = false;	-p view-core --lib update::tests
 crates/view-core/src/update/review.rs	or close it (q) before typing";	or close it before typing";	-p view-core --lib update::tests
 crates/view/src/runtime.rs	                    RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),	                    RpcCall::ReleaseHidden { path } => self.ops.load_hidden(&path, 0),	-p view --lib runtime::tests
+crates/view-core/src/update/ai.rs	                crate::native::ai_panel::TranscriptRole::Thought,	                crate::native::ai_panel::TranscriptRole::Agent,	-p view-core --lib update::ai

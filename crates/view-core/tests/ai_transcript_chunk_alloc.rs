@@ -18,7 +18,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use view_core::native::ai_panel::Transcript;
+use view_core::native::ai_panel::{Transcript, TranscriptRole};
 use view_test_support::CountingAllocator;
 
 #[global_allocator]
@@ -38,7 +38,7 @@ fn five_hundred_same_id_chunks_fold_via_far_fewer_than_five_hundred_allocations(
 
     let before = ALLOCATOR.count();
     for _ in 0..500 {
-        transcript.append_or_extend(Some("m1"), "x", true);
+        transcript.append_or_extend(Some("m1"), "x", TranscriptRole::Agent);
     }
     let allocations = ALLOCATOR.count() - before;
 

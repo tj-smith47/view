@@ -463,13 +463,15 @@ leg_streaming_and_tool_status() {
     wait_for "$DONE_LABEL: Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
     wait_for "$TERMINAL_CONTENT" "$WAIT_SECS" "the streamed terminal content" >/dev/null
     wait_for "$PLAN_PREFIX" "$WAIT_SECS" "the streamed plan" >/dev/null
-    # Reasoning has no surface of its own, so it is read where the loop
-    # recorded it -- and the refute beside it is the actual contract: the
-    # wire carries reasoning apart from the answer precisely so that no
-    # consumer renders one as the other, and a fold that collapsed the two
-    # would leave the agent apparently claiming its own deliberation.
+    # Reasoning reaches the loop, reaches the screen, and reaches it in its
+    # own voice. The refute is the actual contract: the wire carries
+    # reasoning apart from the answer precisely so that no consumer renders
+    # one as the other, and a fold that collapsed the two would leave the
+    # agent apparently claiming what it was only considering.
     wait_for_log "ai ThoughtChunk .* text: \"$STREAM_THOUGHT\"" "$WAIT_SECS" \
         "the streamed reasoning" >/dev/null
+    wait_for "${THOUGHT_PREFIX}${STREAM_THOUGHT}" "$WAIT_SECS" \
+        "the streamed reasoning in its own voice" >/dev/null
     refute "${AGENT_PREFIX}${STREAM_THOUGHT}" "reasoning was rendered as the agent's own answer"
     # Usage is asserted on its decoded numbers, not on its arrival: `used`
     # and `size` are what any context-window readout is built from, and an
@@ -725,6 +727,17 @@ AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => "[A-Za-z]+"' "$TRANSCRIPT_RS" 
 }
 require_template "$TRANSCRIPT_RS" '"{prefix}: {}"' || exit 1
 AGENT_PREFIX="$AGENT_PREFIX: "
+# The label reasoning wears instead, from the same match. Read separately
+# rather than derived, since the whole assertion is that the two are not
+# the same word.
+THOUGHT_PREFIX=$(grep -oE 'TranscriptRole::Thought => "[A-Za-z]+"' "$TRANSCRIPT_RS" |
+    sed -E 's/.*"(.*)"/\1/')
+[ -n "$THOUGHT_PREFIX" ] || {
+    printf 'FAIL: TranscriptRole::Thought has no rendered label in %s any more\n' \
+        "$TRANSCRIPT_RS" >&2
+    exit 1
+}
+THOUGHT_PREFIX="$THOUGHT_PREFIX: "
 # A plan row's own opening, and a placeholder for a content kind the panel
 # shows a label for rather than the content itself. Both are built from the
 # wire's pinned vocabulary (`docs/acp-v1-wire-capture.md`'s `Plan` and
