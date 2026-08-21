@@ -16,7 +16,7 @@
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 
 /// The only `jsonrpc` value the protocol defines.
 pub const JSONRPC_VERSION: &str = "2.0";
@@ -39,7 +39,24 @@ pub enum WireError {
         "agent sent a JSON-RPC frame that is neither a request, a notification, nor a response"
     )]
     UnknownFrame,
+    /// A line ran past [`MAX_FRAME_BYTES`] with no terminator in sight.
+    #[error(
+        "agent sent a frame larger than the {MAX_FRAME_BYTES} byte limit without terminating it"
+    )]
+    FrameTooLarge,
 }
+
+/// The largest single frame this client will accumulate before giving up on
+/// the stream.
+///
+/// The framing is newline-delimited and the reader is a child process's
+/// stdout, so an agent that never writes a newline -- wedged mid-write,
+/// streaming something that is not this protocol at all, or hostile --
+/// otherwise grows one buffer without bound on the machine the editor is
+/// running on. Far above any real frame: a whole-file `fs/write_text_file`
+/// is the largest thing the protocol legitimately carries, and this leaves
+/// room for one far bigger than any file a person edits.
+pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 
 /// A JSON-RPC request id, spanning the whole domain the schema defines for
 /// it: `null`, a signed 64-bit integer, or a string.
@@ -260,7 +277,7 @@ pub enum Incoming {
 /// The read half: one frame per line.
 #[derive(Debug)]
 pub struct JsonRpcReader<R> {
-    lines: Lines<BufReader<R>>,
+    inner: BufReader<R>,
 }
 
 impl<R: AsyncRead + Unpin> JsonRpcReader<R> {
@@ -269,12 +286,33 @@ impl<R: AsyncRead + Unpin> JsonRpcReader<R> {
     /// # Errors
     ///
     /// [`WireError::Io`] if the stream fails, [`WireError::Decode`] if a
-    /// line is not a JSON object.
+    /// line is not a JSON object, [`WireError::FrameTooLarge`] if a line
+    /// runs past [`MAX_FRAME_BYTES`] without ending.
     pub async fn next_message(&mut self) -> Result<Option<JsonRpcMessage>, WireError> {
+        let mut raw = Vec::new();
         loop {
-            let Some(line) = self.lines.next_line().await? else {
+            raw.clear();
+            // Read through a `take` rather than to the next newline
+            // outright: the limit is what stops an agent that writes no
+            // terminator from being answered with an allocation the size of
+            // whatever it sends.
+            let read = (&mut self.inner)
+                .take(MAX_FRAME_BYTES as u64)
+                .read_until(b'\n', &mut raw)
+                .await?;
+            if read == 0 {
                 return Ok(None);
-            };
+            }
+            if raw.last() != Some(&b'\n') {
+                // Either the limit was reached mid-frame, or the stream
+                // ended without one. The first is the case this refuses;
+                // the second is a truncated frame, which decodes as badly
+                // and is worth the same answer.
+                if read >= MAX_FRAME_BYTES {
+                    return Err(WireError::FrameTooLarge);
+                }
+            }
+            let line = String::from_utf8_lossy(&raw);
             // a blank line is skipped rather than reported: it carries no
             // frame, so surfacing it as a decode failure would turn a
             // trailing newline -- which costs nothing to ignore -- into a
@@ -330,7 +368,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> JsonRpcCodec<R, W> {
     pub fn new(stdout: R, stdin: W) -> Self {
         Self {
             reader: JsonRpcReader {
-                lines: BufReader::new(stdout).lines(),
+                inner: BufReader::new(stdout),
             },
             writer: JsonRpcWriter { inner: stdin },
         }
@@ -428,7 +466,7 @@ mod tests {
         }
 
         let mut reader = JsonRpcReader {
-            lines: BufReader::new(written.as_slice()).lines(),
+            inner: BufReader::new(written.as_slice()),
         };
         let mut round_tripped = Vec::new();
         while let Some(frame) = reader.next_message().await.unwrap() {
@@ -473,7 +511,7 @@ mod tests {
         assert!(text.ends_with('\n'));
 
         let mut reader = JsonRpcReader {
-            lines: BufReader::new(text.as_bytes()).lines(),
+            inner: BufReader::new(text.as_bytes()),
         };
         let first = reader.next_message().await.unwrap().unwrap();
         let Incoming::Notification { method, params } = first.classify().unwrap() else {
@@ -488,6 +526,35 @@ mod tests {
                 id: RequestId::Num(7),
                 ..
             }
+        ));
+        assert!(reader.next_message().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_frame_that_never_ends_is_refused_instead_of_held() {
+        let endless = vec![b'x'; MAX_FRAME_BYTES + 1];
+        let mut reader = JsonRpcReader {
+            inner: BufReader::new(endless.as_slice()),
+        };
+        let err = reader.next_message().await.unwrap_err();
+        assert!(matches!(err, WireError::FrameTooLarge), "{err:?}");
+        assert!(
+            err.to_string().contains(&MAX_FRAME_BYTES.to_string()),
+            "the failure names the limit it hit: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_last_frame_with_no_newline_behind_it_is_still_read() {
+        let mut reader = JsonRpcReader {
+            inner: BufReader::new(
+                br#"{"jsonrpc":"2.0","method":"session/update","params":{}}"#.as_slice(),
+            ),
+        };
+        let last = reader.next_message().await.unwrap().unwrap();
+        assert!(matches!(
+            last.classify().unwrap(),
+            Incoming::Notification { .. }
         ));
         assert!(reader.next_message().await.unwrap().is_none());
     }
@@ -573,7 +640,7 @@ mod tests {
     async fn a_blank_line_is_skipped_and_a_broken_line_is_reported() {
         let stream = "\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\nnot json\n";
         let mut reader = JsonRpcReader {
-            lines: BufReader::new(stream.as_bytes()).lines(),
+            inner: BufReader::new(stream.as_bytes()),
         };
         assert!(matches!(
             reader
