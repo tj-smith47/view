@@ -125,6 +125,11 @@ impl SideSetup {
     /// an editor with no agent in it, and a fixture that carried one would
     /// change what those rows measure.
     ///
+    /// The trailing argument is the stub fixture's progress path, resolved
+    /// by the same function the row's driver reads it back through
+    /// (`ai_session::progress_path`); the empty arguments before it are the
+    /// fixture's other argument slots, which this row wants none of.
+    ///
     /// # Errors
     ///
     /// Returns an error when the copied fixture has no `view.toml` to
@@ -143,9 +148,11 @@ impl SideSetup {
         );
         let mut existing = std::fs::read_to_string(&config)
             .with_context(|| format!("reading {}", config.display()))?;
+        let progress = view_bench::scenarios::ai_session::progress_path(&self.cwd);
         existing.push_str(&format!(
-            "\n[ai]\nenabled = true\nagent = [{:?}]\n",
-            agent.to_string_lossy()
+            "\n[ai]\nenabled = true\nagent = [{:?}, \"\", \"\", \"\", \"\", {:?}]\n",
+            agent.to_string_lossy(),
+            progress.to_string_lossy()
         ));
         std::fs::write(&config, existing)
             .with_context(|| format!("writing {}", config.display()))?;
@@ -201,5 +208,44 @@ pub(crate) fn nvim_spec_from(side: SideSetup, nvim_bin: &Path) -> SpawnSpec {
         args: vec![side.scratch_file.into_os_string()],
         env: side.env,
         cwd: Some(side.cwd),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    /// The agent writes its progress file and the row's driver reads it:
+    /// two processes agreeing on one path only because both resolve it
+    /// through `ai_session::progress_path`. A spawn that named a different
+    /// one -- or none, leaving the fixture to pick the watched root -- is
+    /// what this catches.
+    #[test]
+    fn the_armed_agent_is_told_the_progress_path_the_driver_reads() {
+        let dir = view_test_support::ScratchDir::new("bench-arm-agent").unwrap();
+        let cwd = dir.path().join("view");
+        std::fs::create_dir_all(cwd.join("xdg_config_home").join("view")).unwrap();
+        let config = cwd.join("xdg_config_home").join("view").join("view.toml");
+        std::fs::write(&config, "[ui]\n").unwrap();
+        let side = SideSetup {
+            env: Vec::new(),
+            cwd: cwd.clone(),
+            scratch_file: cwd.join("scratch.txt"),
+        };
+
+        side.enable_ai_agent(Path::new("/nowhere/view-ai-stub-agent"))
+            .unwrap();
+
+        let written = std::fs::read_to_string(&config).unwrap();
+        let table: toml::Value = written.parse().unwrap();
+        let agent = table["ai"]["agent"].as_array().unwrap();
+        let progress = view_bench::scenarios::ai_session::progress_path(&cwd);
+        assert_eq!(
+            agent.last().and_then(toml::Value::as_str),
+            Some(progress.to_string_lossy().as_ref()),
+            "the fifth argument is the driver's progress path: {written}"
+        );
+        assert_eq!(agent.len(), 6, "the path lands in the fixture's fifth slot");
     }
 }

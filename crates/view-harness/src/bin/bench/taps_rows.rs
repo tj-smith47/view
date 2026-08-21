@@ -141,9 +141,9 @@ pub(crate) fn run_taps_row(
     }
     if outcome.paints.agent > 0 {
         println!(
-            "      paints the agent panel explains: {} of {keystrokes} keystrokes (a frame \
-             painting the panel with no grid damage in it, which is the streamed turn painting \
-             itself); outside this row's boundary and explained -- no bar",
+            "      paints the agent panel explains: {} of {keystrokes} keystrokes (a frame whose \
+             whole damage is the panel's rows, which is the streamed turn painting itself); \
+             outside this row's boundary and explained -- no bar",
             outcome.paints.agent
         );
     }

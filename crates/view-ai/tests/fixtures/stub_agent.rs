@@ -42,7 +42,8 @@
 //!   canned turn that ends is over long before a sampling run is, and a row
 //!   that sampled after it ended would measure the session-absent path
 //!   under a name that claims otherwise. The count of chunks written so far
-//!   is kept in [`SUSTAINED_PROGRESS_FILE`] beside the working directory
+//!   is kept in the file [`sustained_progress`] resolves -- the fifth
+//!   argument, or [`SUSTAINED_PROGRESS_FILE`] beside the working directory
 //!   (replaced by [`SUSTAINED_CEILING_SENTINEL`] if the loop ever reaches
 //!   its own ceiling),
 //!   which is how a driver checks the stream really did run for the whole
@@ -507,9 +508,25 @@ const SUSTAINED_INTERVAL: std::time::Duration = std::time::Duration::from_millis
 /// outliving the run that spawned it.
 const SUSTAINED_CEILING: std::time::Duration = std::time::Duration::from_secs(900);
 
-/// Where `stream-forever` records how many chunks it has written, in the
-/// working directory the client spawned it in.
+/// Where `stream-forever` records how many chunks it has written, when the
+/// client did not name a path with the fifth argument.
 const SUSTAINED_PROGRESS_FILE: &str = "view-ai-stub-stream-progress.txt";
+
+/// The path `stream-forever` records its count in: the fifth argument when
+/// the client named one, and [`SUSTAINED_PROGRESS_FILE`] in this process's
+/// working directory otherwise.
+///
+/// The argument exists because the working directory is also the session
+/// directory a client may be watching for external writes, and a count
+/// rewritten every [`SUSTAINED_INTERVAL`] inside it is a write the client
+/// answers -- traffic a measurement holding this stream live would be
+/// reading as its own subject.
+fn sustained_progress() -> String {
+    std::env::args()
+        .nth(5)
+        .filter(|arg| !arg.is_empty())
+        .unwrap_or_else(|| named_inside_cwd(SUSTAINED_PROGRESS_FILE))
+}
 
 /// What `stream-forever` leaves in that file when it stops on the ceiling
 /// rather than because the client went away, so a reader watching the
@@ -521,7 +538,7 @@ const SUSTAINED_CEILING_SENTINEL: &str = "ceiling";
 /// count as it goes. Never replies to the prompt: the turn it belongs to
 /// is meant to still be in flight when the caller stops watching.
 fn stream_sustained(stdout: &mut std::io::Stdout) {
-    let progress = named_inside_cwd(SUSTAINED_PROGRESS_FILE);
+    let progress = sustained_progress();
     let start = std::time::Instant::now();
     let mut written: u64 = 0;
     while start.elapsed() < SUSTAINED_CEILING {

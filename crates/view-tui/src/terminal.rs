@@ -429,10 +429,6 @@ impl Term {
         if surface.carries_speculation() {
             crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
         }
-        #[cfg(all(unix, feature = "bench-taps"))]
-        if !grid_damage.full && grid_damage.rows.is_empty() && surface.carries_agent_panel() {
-            crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
-        }
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_reporting != Some(model.engine.mouse_on) {
             if model.engine.mouse_on {
@@ -479,6 +475,19 @@ impl Term {
             &cur_overlay,
             force_full,
         );
+        // the streamed turn repainting its own panel and nothing else: the
+        // one repaint between a keystroke and its redraw that a bench row
+        // holding an agent session live can attribute to the session rather
+        // than to the editor answering the key. A frame that also carries
+        // grid damage, or damage past the panel's rows, is left unexplained
+        #[cfg(all(unix, feature = "bench-taps"))]
+        let agent_repaint = !grid_damage.full
+            && grid_damage.rows.is_empty()
+            && damage.is_exactly(&crate::paint::agent_panel_rows(surface));
+        #[cfg(all(unix, feature = "bench-taps"))]
+        if agent_repaint {
+            crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
+        }
         // paint only the damaged rows into the persistent shadow, then emit
         // the cells that actually changed against what the terminal already
         // shows; no full-buffer copy runs, because the shadow's buffers swap

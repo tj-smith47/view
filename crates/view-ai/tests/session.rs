@@ -217,6 +217,43 @@ fn killing_the_agent_mid_turn_reports_the_crash_within_a_tight_bound() {
     );
 }
 
+/// The bench rows that hold a stream live count its chunks through this
+/// file, and they name a path outside the directory view watches so the
+/// count's own rewrites are not detected as project writes. A fixture that
+/// ignored the name would put the file back inside that directory, which
+/// is the regression this catches.
+#[test]
+fn a_sustained_stream_records_its_count_where_the_client_named_it() {
+    let progress = std::env::temp_dir().join(format!(
+        "view-ai-stub-named-progress-{}.txt",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&progress);
+    let (session, rx) = session_with(&["", "", "", "", &progress.to_string_lossy()]);
+    ready(&rx);
+    session.send(AiCommand::Prompt {
+        text: "stream-forever".to_string(),
+        context: Vec::new(),
+    });
+
+    let deadline = Instant::now() + WAIT;
+    let count = loop {
+        if let Ok(text) = std::fs::read_to_string(&progress) {
+            if let Ok(count) = text.trim().parse::<u64>() {
+                break count;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the stream never wrote its count to the named path {}",
+            progress.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(count > 0, "the named file holds the chunk count: {count}");
+    let _ = std::fs::remove_file(&progress);
+}
+
 #[test]
 fn every_streamed_chunk_kind_reaches_its_own_arm() {
     let (session, rx) = session();

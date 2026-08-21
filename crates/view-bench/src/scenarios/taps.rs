@@ -408,9 +408,6 @@ fn delta_us(from: i64, to: i64) -> f64 {
     (to - from) as f64 / 1000.0
 }
 
-/// The input-path row's tap chain, opening at the key's arrival in view
-/// (the gated boundary's start) and closing one tag before the `W` the
-/// caller already holds.
 /// The first `closing` tap at or after `t0` that has a resolvable `tags`
 /// chain behind it, with that chain.
 ///
@@ -447,6 +444,9 @@ fn wait_for_chained(
     }
 }
 
+/// The input-path row's tap chain, opening at the key's arrival in view
+/// (the gated boundary's start) and closing one tag before the `W` the
+/// caller already holds.
 const INPUT_CHAIN: &[u8] = b"KUS";
 
 /// The taps a keystroke walks up to the point its RPC is handed to the
@@ -621,8 +621,8 @@ pub struct PaintSplit {
     /// predicted paint, which speculation produces between the keypress and
     /// its authoritative redraw by design.
     pub speculated: usize,
-    /// Writes the painter announced as an agent-panel repaint with no grid
-    /// damage in the frame: the streamed turn painting itself, which under
+    /// Writes the painter announced as a frame whose whole damage is the
+    /// agent panel: the streamed turn painting itself, which under
     /// the AI rows happens on the agent's own cadence and lands inside a
     /// sample window whenever the two coincide.
     pub agent: usize,
@@ -637,9 +637,9 @@ pub struct PaintSplit {
 /// explains and the ones nothing does.
 ///
 /// An announcement precedes the write it explains: the painter taps
-/// `D` at the head of a frame carrying a predicted cell and `A` at the
-/// head of a frame that paints the agent panel with no grid damage behind
-/// it, and each is consumed by the next write.
+/// `D` at the head of a frame carrying a predicted cell and `A` inside a
+/// frame whose whole damage is the agent panel's rows, and each is
+/// consumed by the next write.
 ///
 /// A speculated paint announces itself before it happens: the painter taps
 /// `D` at the head of a frame carrying a predicted cell, and that frame's

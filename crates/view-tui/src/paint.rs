@@ -91,6 +91,22 @@ impl Damage {
         self.full || self.rows.contains(&row)
     }
 
+    /// Whether this damage covers `rows` and nothing besides, `rows` being
+    /// non-empty.
+    ///
+    /// Set equality rather than containment, because the bench taps use it
+    /// to attribute a repaint to what it covers: a frame that also repaints
+    /// a row outside the region asked about was driven by something else as
+    /// well, and attributing it whole to that region would explain away a
+    /// paint nothing accounts for.
+    #[must_use]
+    pub fn is_exactly(&self, rows: &[u16]) -> bool {
+        !self.full
+            && !rows.is_empty()
+            && rows.iter().all(|row| self.rows.contains(row))
+            && self.rows.iter().all(|row| rows.contains(row))
+    }
+
     /// The damage covering every row either input covers.
     #[must_use]
     pub fn union(&self, other: &Self) -> Self {
@@ -448,6 +464,28 @@ pub fn overlay_rows(surface: &Surface) -> Vec<u16> {
     let mut rows = Vec::new();
     for layer in &surface.layers {
         if matches!(layer.kind, LayerKind::EngineGrid) {
+            continue;
+        }
+        let first = layer.rect.row;
+        let last = first.saturating_add(layer.rect.height);
+        rows.extend(first..last);
+    }
+    rows
+}
+
+/// The terminal-space rows the agent panel covers, empty when this frame
+/// paints no panel.
+///
+/// Only the bench taps ask: a frame whose whole damage is these rows is a
+/// repaint the streamed turn explains, and one that reaches past them is
+/// not (see [`Damage::is_exactly`]). The answer itself is unconditional so
+/// the shipped test run keeps proving it, rather than only the builds that
+/// carry the taps.
+#[must_use]
+pub fn agent_panel_rows(surface: &Surface) -> Vec<u16> {
+    let mut rows = Vec::new();
+    for layer in &surface.layers {
+        if !matches!(layer.kind, LayerKind::Ai(_)) {
             continue;
         }
         let first = layer.rect.row;
@@ -2102,6 +2140,55 @@ mod tests {
         terminal.draw(|f| composite(&model, &surface, f)).unwrap();
         let buf = terminal.backend().buffer().clone();
         assert_eq!(&buf[(0, 0)].symbol(), &"z");
+    }
+
+    /// What the agent-paint tap is allowed to explain. The panel repainting
+    /// itself under a streamed turn is the frame a bench row attributes to
+    /// the agent; the same panel on screen while a toast expires is a frame
+    /// something else drove, and reading it as the agent's would explain
+    /// away a paint the row exists to count.
+    #[test]
+    fn only_a_frame_whose_whole_damage_is_the_panel_reads_as_the_agents() {
+        let mut model = Model::with_term_size(40, 12);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 40,
+            height: 12,
+        });
+        model.push_overlay(
+            view_core::native::geometry::OverlayBox::new(40, 60),
+            view_core::model::OverlayKind::Ai,
+        );
+        apply(
+            &mut model,
+            view_core::events::UiEvent::MsgShow {
+                kind: "echomsg".into(),
+                content: vec![(0, "a toast".into())],
+                replace_last: false,
+            },
+        );
+        let surface = view_surface::render(&model);
+        let panel = agent_panel_rows(&surface);
+        assert!(!panel.is_empty(), "the panel is on screen");
+
+        let quiet = GridDamage::default();
+        assert!(
+            Damage::from_frame(&quiet, 0, &panel, &panel, false).is_exactly(&panel),
+            "a frame repainting the panel and nothing else"
+        );
+
+        let overlay = overlay_rows(&surface);
+        assert!(
+            !Damage::from_frame(&quiet, 0, &overlay, &panel, false).is_exactly(&panel),
+            "the toast's rows repaint beside the panel's"
+        );
+        assert!(
+            !Damage::full().is_exactly(&panel),
+            "a whole-frame repaint is not the panel's doing"
+        );
+        assert!(
+            !Damage::from_frame(&quiet, 0, &[], &[], false).is_exactly(&panel),
+            "a frame with no damage at all explains nothing"
+        );
     }
 
     #[test]

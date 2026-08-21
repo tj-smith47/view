@@ -33,9 +33,26 @@ const TRUST_YES: &[u8] = b"y";
 const SUSTAINED_PROMPT: &[u8] = b"stream-forever\r";
 const STREAM_MARKER: &str = "chunk";
 
-/// Where that fixture records how many chunks it has written, inside the
-/// working directory view spawned it in.
+/// Where that fixture records how many chunks it has written.
 const PROGRESS_FILE: &str = "view-ai-stub-stream-progress.txt";
+
+/// The progress path an AI row spawns its agent with, given the project
+/// root view runs in: beside that root rather than inside it.
+///
+/// Inside is what the fixture would pick on its own, and it is the one
+/// place the file cannot go: the root is also the directory view watches
+/// for external writes, so a count rewritten every 20ms becomes a
+/// steady stream of detection round trips to the engine -- traffic that
+/// exists only in the rows holding a stream live, which is precisely what
+/// those rows compare against rows that have none.
+///
+/// A root at the filesystem root has no beside, and keeps the fixture's
+/// own convention rather than failing a row over a path that cannot occur
+/// in a scratch world.
+#[must_use]
+pub fn progress_path(cwd: &Path) -> PathBuf {
+    cwd.parent().unwrap_or(cwd).join(PROGRESS_FILE)
+}
 
 /// How long the preamble waits for the panel, the agent and the first
 /// rendered chunk. Generous: it covers a cold agent spawn on a loaded
@@ -63,6 +80,12 @@ const SUSTAINED_MINIMUM: u64 = 5;
 /// half that can, which is why it is read while the session is still up.
 /// Two seconds is a hundred of the fixture's 20ms cadences, so it is a
 /// liveness question rather than a load threshold.
+///
+/// The window it cannot cover is its own length: a stream that died
+/// within the last two seconds of sampling still reads as live, so the
+/// samples taken in that window are attested by the count alone. What the
+/// pair rules out is a turn that ended early and left the rest of the run
+/// measuring the session-absent path under this name.
 const STREAM_STALE: Duration = Duration::from_secs(2);
 
 /// What the fixture writes into its progress file when it stops on its own
@@ -91,7 +114,7 @@ pub struct LiveTurn {
 /// step before it (the panel, the trust answer, the agent spawn, the
 /// prompt) can only fail by leaving that chunk unrendered.
 pub fn start(session: &mut BenchSession, cwd: &Path) -> Result<LiveTurn, BenchError> {
-    let progress = cwd.join(PROGRESS_FILE);
+    let progress = progress_path(cwd);
     let _ = std::fs::remove_file(&progress);
 
     // out of the insert mode `prepare` left the session in: the panel is
@@ -210,6 +233,25 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
+
+    /// The count is rewritten every 20ms for the whole sampling run. Inside
+    /// the root, each rewrite is an external write view detects and answers
+    /// -- engine traffic the AI rows would carry and the rows they are
+    /// compared against would not.
+    #[test]
+    fn the_progress_file_lands_beside_the_root_view_watches_rather_than_in_it() {
+        let dir = view_test_support::ScratchDir::new("ai-session-outside").unwrap();
+        let root = dir.path().join("view");
+        std::fs::create_dir_all(&root).unwrap();
+        let progress = progress_path(&root);
+        assert!(
+            !progress.starts_with(&root),
+            "{} is inside the watched root {}",
+            progress.display(),
+            root.display()
+        );
+        assert_eq!(progress.parent(), Some(dir.path()));
+    }
 
     #[test]
     fn a_missing_or_unreadable_progress_file_is_no_evidence_of_a_stream() {

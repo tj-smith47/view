@@ -17,5 +17,9 @@ crates/view-bench/src/scenarios/taps.rs	        if let Some(chain) = tag_chain(&
 crates/view-bench/src/scenarios/taps.rs	            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos) else {	            let Some((parsed, paint)) = measured_frame(&all_records, t0) else {	-p view-bench --lib the_output_row_anchors_its_redraw
 crates/view-bench/src/scenarios/taps.rs	    let streamed = turn.still_streaming();	    let streamed: Result<u64, BenchError> = Ok(0);	-p view-bench --lib the_ai_rows_sample_through_the_same_functions
 crates/view-bench/src/scenarios/taps.rs	                Some(_) => split.agent += 1,	                Some(_) => split.unexplained += 1,	-p view-bench --lib an_announced_agent_repaint_is_explained
-crates/view-surface/src/lib.rs	            .any(|layer| matches!(&layer.kind, LayerKind::Ai(_)))	            .any(|layer| matches!(&layer.kind, LayerKind::EngineGrid))	-p view-surface --lib carries_the_agent
 crates/view-bench/src/scenarios/taps.rs	        .filter(|r| r.tag == b'T' && r.nanos < t0)	        .filter(|r| r.tag == b'T' && r.nanos < 0)	-p view-bench --lib an_announcement_from_the_frame_in_flight
+crates/view-tui/src/paint.rs	        if !matches!(layer.kind, LayerKind::Ai(_)) {	        if matches!(layer.kind, LayerKind::EngineGrid) {	-p view-tui --lib only_a_frame_whose_whole_damage
+crates/view-tui/src/paint.rs	            && self.rows.iter().all(|row| rows.contains(row))		-p view-tui --lib only_a_frame_whose_whole_damage
+crates/view-bench/src/scenarios/ai_session.rs	    cwd.parent().unwrap_or(cwd).join(PROGRESS_FILE)	    cwd.join(PROGRESS_FILE)	-p view-bench --lib the_progress_file_lands_beside
+crates/view-ai/tests/fixtures/stub_agent.rs	        .nth(5)	        .nth(4)	-p view-ai --test session a_sustained_stream
+crates/view-harness/src/bin/bench/cell_world.rs	            "\n[ai]\nenabled = true\nagent = [{:?}, \"\", \"\", \"\", \"\", {:?}]\n",	            "\n[ai]\nenabled = true\nagent = [{:?}, {:?}]\n",	-p view-harness --bin bench the_armed_agent
