@@ -57,6 +57,43 @@ scenario = "output_path"
 metric = "p99_ms"
 max = 1.0
 
+# Both AI rows inherit their session-absent counterpart's bar rather than
+# carrying one computed from the recording that seeded them.
+# ai_session_active measures the same key_to_rpc_p99_us interval input_path
+# does and ai_streaming the same p99_ms interval output_path does, so the
+# claim these rows exist to hold -- an agent session on screen never
+# degrades editor responsiveness -- is exactly the statement that the same
+# bar still binds with a turn in flight. Deriving a max from the first
+# recording instead is the defect that withdrew the input-path row's 232 us,
+# the first-paint row's cold_ms bar and the remote row's 6.0: a bound taken
+# from the measurement it bounds cannot fail.
+#
+# First recorded on controlled-linux 2026-08-21 in a quiet window:
+# ai_session_active 70.865 us against the 100 us bar, ai_streaming 0.4306 ms
+# against the 1 ms bar. The ratchet is the tighter instrument on both today
+# (the x1.5 absolute default over those values, this class having published
+# no measured spread yet), which is the relationship the first-paint row
+# calls intended rather than redundant: the budget states where the number
+# must be, the ratchet that it may not get worse than where it is.
+#
+# classes mirrors the cells' own arming rather than either counterpart's
+# scoping. Both cells are matrix-scoped to the linux classes that record
+# them (bin/bench.rs's CLASS_SCOPED), so a row naming another controlled
+# class would bound a cell that class never measures.
+[[budget]]
+spec_row = "view input path, AI session active: key event read from the terminal -> RPC bytes written"
+scenario = "ai_session_active"
+metric = "key_to_rpc_p99_us"
+max = 100.0
+classes = ["controlled-linux"]
+
+[[budget]]
+spec_row = "view output path, agent response streaming: redraw event parsed -> terminal write"
+scenario = "ai_streaming"
+metric = "p99_ms"
+max = 1.0
+classes = ["controlled-linux"]
+
 [[budget]]
 spec_row = "Keypress -> cell change end-to-end, steady typing"
 scenario = "echo"
