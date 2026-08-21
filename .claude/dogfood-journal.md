@@ -117,3 +117,48 @@ sleep/wake, real fingers) is the missing dogfood. The stub proves the
 machinery; it cannot surface feel (echo latency perception, banner timing
 under real jitter). That session should happen before the first release
 tag, and its warts belong here.
+
+## 2026-08-21 — P5 AI exit
+
+What was actually driven: the shipped binary under tmux with the AI panel
+open against the real pinned adapter — `claude-code 0.69.0`, provisioned
+through the first-run path a new user gets, no `[ai]` table in the config
+at all. The work given to it was this phase's own: `git show 4e732df --
+crates/view-tui/src/paint.rs`, the paint-attribution slice of the
+liveness-file fix, handed over as a file with "review this". Two hunks
+were accepted through the review overlay with `a`, and the buffer took
+them byte-exactly; every file touched was a scratch copy, never the tree.
+
+What felt right: the agent's review was good, and it caught something
+unprompted — that the artifact was only the `paint.rs` slice of the
+commit its message describes. It is. Being told that by the panel, about
+our own commit, is the first time this feature has been the thing doing
+the work rather than the thing being tested.
+
+What felt wrong, and both of these are the reason for dogfooding rather
+than asserting:
+
+The adapter writes files with its own tool instead of deferring to the
+client, so every proposal arrived already applied to disk. view sees the
+external write, reloads the buffer, and the queued hunk's base stops
+matching — it is then correctly labelled stale rather than force-applied,
+which is the conflict machinery working. But the user's accept is racing
+the agent it serves, and the review answers a question the disk settled a
+second ago. Not a code change this phase; the capability-negotiation side
+is P6 plan input.
+
+Typing a prompt while a review sits unanswered did nothing at all. The
+review owns the panel's keys totally and by design (`a` cannot mean both
+"accept this hunk" and "type an a"), but an unmapped key was swallowed in
+silence, so a whole sentence went nowhere and read as a dead panel. Fixed
+this round: an unmapped key now raises one notice naming the open review
+and the way out of it.
+
+Evidence: `.claude/HANDOFF.md`'s dated dogfood section, with the pane
+captures, accepted files and full session log under
+`.superpowers/sdd/2026-08-09-p5-ai/dogfood/`.
+
+Still owed: nobody has lived in the panel for a working day. Two accepts
+prove the path; they do not surface what a long session's transcript,
+context assembly or repeated turns feel like, and that session's warts
+belong here before the first release tag.
