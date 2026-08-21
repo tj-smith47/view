@@ -195,10 +195,11 @@ pub(super) fn on_checktime_reply(
                 } else {
                     "and the buffer still holds the content it last read"
                 };
-                let raised = model.engine.record_native_notice_once(format!(
-                    "{} -- nothing was reloaded, {fate}",
-                    file_gone_prefix(&path)
-                ));
+                let prefix = file_gone_prefix(&path);
+                let raised = model.engine.record_native_notice_once(
+                    &prefix,
+                    format!("{prefix} -- nothing was reloaded, {fate}"),
+                );
                 // a native notice always routes transient, so recording one
                 // always owes an expiry effect: an empty answer here is the
                 // dedupe declining to say the same thing twice, and a
@@ -834,6 +835,41 @@ mod tests {
             model.engine.messages.entries.is_empty(),
             "and says nothing until that look answers: {:?}",
             model.engine.messages.entries
+        );
+    }
+
+    /// One path, one fact, two wordings. A `modified` flip between two
+    /// confirmed answers -- the user typed while the path stayed absent --
+    /// rewords the standing notice instead of stacking a second line
+    /// beside it, because the older wording is not merely redundant: after
+    /// the keystroke, "still holds the content it last read" is false, and
+    /// a stale line contradicting the true one is worse than a repeat.
+    #[test]
+    fn a_modified_flip_rewords_the_standing_notice_instead_of_stacking_it() {
+        let mut model = Model::new();
+        let _ = confirm_gone(&mut model, 1, "/proj/src/gen.rs", false);
+        assert_eq!(model.engine.messages.entries.len(), 1, "it spoke once");
+
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[(
+                    "/proj/src/gen.rs",
+                    CheckTimeOutcome::FileGone { modified: true },
+                )],
+            ),
+        );
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            1,
+            "one line, not a stack: {:?}",
+            model.engine.messages.entries
+        );
+        let line = &model.engine.messages.entries[0].content[0].1;
+        assert!(
+            line.ends_with("your buffer still holds your edits"),
+            "the line wears the current wording: {line}"
         );
     }
 

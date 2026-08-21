@@ -175,9 +175,10 @@ pub struct Model {
     /// and never reused, so an entry whose reply never arrives (the engine
     /// died holding it) can match nothing later, and a fresh episode for the
     /// same path replaces it rather than inheriting it. That bounds the
-    /// `Vec` at one entry per path with a probe in flight -- at most one per
-    /// loaded buffer, since a `FileGone` answer requires one -- and the
-    /// bound is enforced on insert rather than asserted here.
+    /// `Vec` at one entry per path that has had a second look asked for and
+    /// not yet resolved -- an entry whose reply can never arrive stays,
+    /// inert, until a fresh episode for its path replaces it -- and the
+    /// bound is enforced by replace-on-insert rather than asserted here.
     pending_file_gone_probes: Vec<(u64, PathBuf)>,
 }
 
@@ -255,11 +256,12 @@ impl Model {
     /// Whether the reply numbered `request_id` is the confirming probe of
     /// `path`, consuming the record if it is.
     ///
-    /// Consumed rather than left standing on purpose: the episode ends the
-    /// moment its confirmation is resolved, so a later `FileGone` answer for
-    /// the same path is a new episode that owes its own second look. A
-    /// record left behind is what lets the next episode announce on its
-    /// first answer -- the flash the confirmation exists to prevent.
+    /// Consumed for the bound rather than for correctness: replies wear
+    /// ids minted after any record already written, so a resolved record
+    /// left in place could never confirm a later episode -- but it would
+    /// sit in the `Vec` until the same path was probed again, and the
+    /// bound the field's doc gives counts entries still awaiting
+    /// resolution, not everything ever asked.
     #[must_use]
     pub(crate) fn take_file_gone_confirmation(
         &mut self,
@@ -1009,7 +1011,9 @@ impl EngineModel {
     }
 
     /// [`Self::record_native_notice`], except that the identical line
-    /// already standing is left alone rather than stacked on.
+    /// already standing is left alone rather than stacked on, and a
+    /// standing line from the same `family` with different wording is
+    /// withdrawn before the new one lands.
     ///
     /// For a notice raised by something that repeats on its own schedule: a
     /// path that is still unreadable when the next detection window closes
@@ -1018,11 +1022,23 @@ impl EngineModel {
     /// out of the bounded ring behind `:messages`. The standing line keeps
     /// its own expiry rather than being reissued.
     ///
+    /// The family withdrawal is for the wording, not the repeat: one fact
+    /// can be told two ways (a path's notice names what the buffer holds,
+    /// which changes when the user types), and the older wording is not
+    /// merely redundant beside the newer one -- it is false the moment the
+    /// clause it names stops being true. Keyed on `family`, the opening
+    /// both wordings share, on exactly the terms
+    /// [`Self::withdraw_native_notice`] uses.
+    ///
     /// Deliberately not what [`Self::record_native_notice`] does for
     /// everyone: a repeat is sometimes the whole message -- a replacement
     /// connection failing exactly the way the connection it replaced did is
     /// news, and collapsing it would say the new one never failed.
-    pub fn record_native_notice_once(&mut self, text: String) -> Vec<crate::msg::Effect> {
+    pub fn record_native_notice_once(
+        &mut self,
+        family: &str,
+        text: String,
+    ) -> Vec<crate::msg::Effect> {
         let content = vec![(0, text)];
         // every entry, not just the tail: anything at all landing between
         // two detections -- one ordinary nvim message is enough -- takes
@@ -1039,6 +1055,9 @@ impl EngineModel {
         {
             return Vec::new();
         }
+        self.messages
+            .entries
+            .retain(|e| !is_standing_native_notice(e, family));
         self.record_message("native".to_string(), content, false)
     }
 
