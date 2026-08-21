@@ -182,9 +182,11 @@ fn capped(text: &str) -> String {
 }
 
 /// One `AiEvent` rendered for the log: ids, paths, statuses and stop
-/// reasons in full, free text capped. Shaped like the `Debug` it replaces,
-/// field for field, so a reader of an older log is not learning a second
-/// format.
+/// reasons in full, free text capped. Shaped like the `Debug` it replaces
+/// -- same field names, and `MessageChunk` alone reordered so that a
+/// capped `text` never sits between the two fields a reader (or a grep)
+/// identifies a chunk by -- so a reader of an older log is not learning a
+/// second format.
 fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
     use view_core::native::ai_event::AiEvent;
     match event {
@@ -215,6 +217,22 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
                 |items| format!("{} item(s)", items.len())
             )
         ),
+        AiEvent::PermissionRequested {
+            request_id,
+            tool_call_id,
+            title,
+            options,
+        } => format!(
+            "PermissionRequested {{ request_id: {request_id}, tool_call_id: {tool_call_id:?}, \
+             title: {}, options: {options:?} }}",
+            title.as_ref().map_or_else(
+                || "None".to_string(),
+                |title| format!("Some({})", capped(title))
+            )
+        ),
+        AiEvent::PlanUpdated { entries } => {
+            format!("PlanUpdated {{ entries: {} item(s) }}", entries.len())
+        }
         AiEvent::DiffProposed {
             request_id,
             path,
@@ -235,8 +253,9 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
             content.len()
         ),
         // Everything else is bounded by its own shape -- a session id, a
-        // stop reason, a request id and a path, a plan, an exit message --
-        // and reads better as the `Debug` the wire's own vocabulary spells.
+        // stop reason, a request id and a path, an exit message, a usage
+        // count -- and reads better as the `Debug` the wire's own
+        // vocabulary spells.
         bounded => format!("{bounded:?}"),
     }
 }
@@ -335,13 +354,38 @@ mod tests {
 
         let chunk = ai_payload(&AiEvent::MessageChunk {
             message_id: Some("m1".to_string()),
-            text: huge,
+            text: huge.clone(),
             from_agent: true,
         });
         assert!(
             chunk.len() < PAYLOAD_CAP * 4 && chunk.contains("+199880B"),
             "a chunk must be capped and count what it dropped: {chunk}"
         );
+
+        let permission = ai_payload(&AiEvent::PermissionRequested {
+            request_id: 3,
+            tool_call_id: "call_1".to_string(),
+            title: Some(huge.clone()),
+            options: Vec::new(),
+        });
+        assert!(
+            permission.len() < PAYLOAD_CAP * 4 && permission.contains("+199880B"),
+            "a permission title must be capped like every other title: {permission}"
+        );
+
+        // The wire replaces the whole plan on every update, so its size is
+        // the model's to choose, not the shape's.
+        let plan = ai_payload(&AiEvent::PlanUpdated {
+            entries: vec![
+                view_core::native::ai_event::PlanEntry {
+                    content: huge,
+                    priority: view_core::native::ai_event::PlanEntryPriority::High,
+                    status: view_core::native::ai_event::PlanEntryStatus::Pending,
+                };
+                4
+            ],
+        });
+        assert_eq!(plan, "PlanUpdated { entries: 4 item(s) }");
 
         // ... and a payload that is already bounded is logged whole, or the
         // cap would be answering a triage question with a truncation.
