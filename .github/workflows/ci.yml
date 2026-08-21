@@ -8,6 +8,12 @@ on:
 permissions:
   contents: read
 
+# A newer push supersedes the runs before it — measurement legs included,
+# since a baseline recorded on a stale tip is never the one to harvest
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
     strategy:
