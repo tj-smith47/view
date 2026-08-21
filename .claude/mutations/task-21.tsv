@@ -28,3 +28,4 @@ crates/view-core/src/update/review.rs	or close it (q) before typing";	or close i
 crates/view/src/runtime.rs	                    RpcCall::ReleaseHidden { path } => self.ops.release_hidden(&path),	                    RpcCall::ReleaseHidden { path } => self.ops.load_hidden(&path, 0),	-p view --lib runtime::tests
 crates/view-core/src/update/ai.rs	                crate::native::ai_panel::TranscriptRole::Thought,	                crate::native::ai_panel::TranscriptRole::Agent,	-p view-core --lib update::ai
 crates/view-core/src/native/ai_panel/mod.rs	            view = view.with_usage(vec![Span::plain(usage.render())]);	            let _ = usage;	-p view-core --lib native::ai_panel
+crates/view/src/vlog.rs	            format!("SessionCrashed {{ message: {} }}", capped(message))	            format!("SessionCrashed {{ message: {message:?} }}")	-p view --lib vlog

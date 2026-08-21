@@ -203,6 +203,15 @@ fn ai_payload(event: &view_core::native::ai_event::AiEvent) -> String {
             "ThoughtChunk {{ message_id: {message_id:?}, text: {} }}",
             capped(text)
         ),
+        // Both carry a string the agent chose: a crash message is whatever
+        // its `error.message` said, and a session id is opaque to this
+        // process. Neither is bounded by anything on this side of the wire.
+        AiEvent::SessionReady { session_id } => {
+            format!("SessionReady {{ session_id: {} }}", capped(session_id))
+        }
+        AiEvent::SessionCrashed { message } => {
+            format!("SessionCrashed {{ message: {} }}", capped(message))
+        }
         AiEvent::ToolCallUpdate {
             tool_call_id,
             title,
@@ -374,6 +383,24 @@ mod tests {
         assert!(
             chunk.len() < PAYLOAD_CAP * 4 && chunk.contains("+199880B"),
             "a chunk must be capped and count what it dropped: {chunk}"
+        );
+
+        let crashed = ai_payload(&AiEvent::SessionCrashed {
+            message: huge.clone(),
+        });
+        assert!(
+            crashed.len() < PAYLOAD_CAP * 4 && crashed.contains("+199880B"),
+            "a crash message is the agent's own error text and is capped \
+             like the rest of it: {crashed}"
+        );
+
+        let ready = ai_payload(&AiEvent::SessionReady {
+            session_id: huge.clone(),
+        });
+        assert!(
+            ready.len() < PAYLOAD_CAP * 4 && ready.contains("+199880B"),
+            "a session id is opaque to this process and bounded by nothing \
+             on this side of the wire: {ready}"
         );
 
         let permission = ai_payload(&AiEvent::PermissionRequested {
