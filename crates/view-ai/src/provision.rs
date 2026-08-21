@@ -35,6 +35,15 @@
 //! registry's `bin` field, `dist/index.js`, prefixed with the npm tarball's
 //! own `package/` root), which [`crate::ClaudeCodeAdapter::provisioned`]
 //! then runs under a `node` resolved from `PATH`.
+//!
+//! An npm tarball carries a package's own files and none of the packages it
+//! imports, so extraction alone produces an entry script `node` refuses to
+//! load (`ERR_MODULE_NOT_FOUND` on the first bare import). The declared
+//! runtime dependencies are therefore installed into the extraction before
+//! it is published, under `--ignore-scripts`: the checksum pin covers the
+//! adapter's own bytes, and letting a hundred transitive packages run
+//! install hooks on this machine would hand a far wider surface than the
+//! one pin that was verified.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -133,6 +142,28 @@ pub enum ProvisionError {
          Node.js (https://nodejs.org) and ensure `node` is on PATH, then retry"
     )]
     NodeNotFound,
+    /// The extracted package declares runtime dependencies and `npm` was not
+    /// on `PATH` to install them. Its own variant rather than a reuse of
+    /// [`ProvisionError::NodeNotFound`]: a host can carry a `node` from a
+    /// tarball or a version manager shim with no `npm` beside it, and
+    /// telling that host to install Node.js again is a remedy that does
+    /// nothing.
+    #[error(
+        "npm was not found on PATH; the claude-code adapter's own dependencies are installed \
+         with it -- ensure the `npm` that ships with Node.js is on PATH, then retry"
+    )]
+    NpmNotFound,
+    /// `npm install` ran and refused. Carries what npm itself said, because
+    /// the causes (an offline host, a registry that requires a proxy, a
+    /// dependency yanked out from under the pin) are distinguishable only
+    /// from its own output.
+    #[error("could not install adapter `{id}`'s dependencies: {detail}")]
+    DependencyInstall {
+        /// The adapter id being provisioned.
+        id: String,
+        /// npm's own report, trimmed to its tail.
+        detail: String,
+    },
 }
 
 /// One entry in the pinned-adapter manifest -- a compile-time table on
@@ -266,13 +297,25 @@ pub fn ensure_adapter(id: &str) -> Result<PathBuf, ProvisionError> {
 /// an interpreter" utility this module means to expose.
 pub(crate) fn resolve_node() -> Result<PathBuf, ProvisionError> {
     let exe_name = if cfg!(windows) { "node.exe" } else { "node" };
+    on_path(exe_name).ok_or(ProvisionError::NodeNotFound)
+}
+
+/// `npm`/`npm.cmd` resolved from `PATH`. On Windows npm is a batch shim
+/// rather than an executable, which is why the name it is looked up under
+/// differs from the plain `.exe` `resolve_node` wants.
+fn resolve_npm() -> Result<PathBuf, ProvisionError> {
+    let exe_name = if cfg!(windows) { "npm.cmd" } else { "npm" };
+    on_path(exe_name).ok_or(ProvisionError::NpmNotFound)
+}
+
+/// The first `exe_name` on `PATH`, if any.
+fn on_path(exe_name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).collect::<Vec<_>>())
         .unwrap_or_default()
         .into_iter()
         .map(|dir| dir.join(exe_name))
         .find(|candidate| candidate.is_file())
-        .ok_or(ProvisionError::NodeNotFound)
 }
 
 /// `ensure_adapter`'s production entry point into the mechanism: resolves
@@ -354,7 +397,7 @@ fn ensure_extracted(
     extract_dir: &Path,
 ) -> Result<PathBuf, ProvisionError> {
     let entry_path = extract_dir.join(pin.entry);
-    if extraction_is_valid(&entry_path, extract_dir) {
+    if extraction_is_valid(pin, &entry_path, extract_dir) {
         return Ok(entry_path);
     }
 
@@ -386,6 +429,13 @@ fn ensure_extracted(
         return Err(err);
     }
 
+    // Before the stamp, so a failed install never publishes: the stamp is
+    // what a later call reads as "this extraction is finished".
+    if let Err(err) = ensure_dependencies(pin, &tmp_dir) {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return Err(err);
+    }
+
     let tmp_entry = tmp_dir.join(pin.entry);
     let entry_bytes = match std::fs::read(&tmp_entry) {
         Ok(bytes) => bytes,
@@ -411,7 +461,92 @@ fn ensure_extracted(
     // crash -- or another process -- between the two calls; `publish_extraction`
     // is what absorbs that gap.
     let _ = std::fs::remove_dir_all(extract_dir);
-    publish_extraction(&tmp_dir, extract_dir, &entry_path)
+    publish_extraction(pin, &tmp_dir, extract_dir, &entry_path)
+}
+
+/// The extracted package's own root: the first component of the pin's
+/// declared entry, which for an npm tarball is the archive's `package/`
+/// prefix -- the directory holding the `package.json` whose `dependencies`
+/// the entry script's bare imports resolve against.
+fn package_root(pin: &AdapterPin, extract_dir: &Path) -> Option<PathBuf> {
+    let first = Path::new(pin.entry).components().next()?;
+    Some(extract_dir.join(first.as_os_str()))
+}
+
+/// Whether `package_root`'s manifest declares at least one runtime
+/// dependency. A package with none (every test pin in this module, and any
+/// future row that ships a self-contained bundle) needs no install step at
+/// all, so nothing is spawned for it.
+fn declares_dependencies(package_root: &Path) -> bool {
+    let Ok(manifest) = std::fs::read_to_string(package_root.join("package.json")) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&manifest) else {
+        return false;
+    };
+    value
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|deps| !deps.is_empty())
+}
+
+/// Installs the extracted package's declared runtime dependencies in place,
+/// so the entry script `node` is handed can actually resolve its imports.
+///
+/// `--omit=dev` keeps a test and build toolchain the adapter never runs off
+/// the machine; `--ignore-scripts` keeps the transitive tree from executing
+/// install hooks, which is the difference between trusting the one artifact
+/// whose checksum was verified and trusting everything it depends on.
+fn ensure_dependencies(pin: &AdapterPin, extract_dir: &Path) -> Result<(), ProvisionError> {
+    let Some(root) = package_root(pin, extract_dir) else {
+        return Ok(());
+    };
+    if !declares_dependencies(&root) {
+        return Ok(());
+    }
+    let npm = resolve_npm()?;
+    let output = std::process::Command::new(npm)
+        .args([
+            "install",
+            "--omit=dev",
+            "--ignore-scripts",
+            "--no-audit",
+            "--no-fund",
+        ])
+        .current_dir(&root)
+        .output()
+        .map_err(|source| ProvisionError::DependencyInstall {
+            id: pin.id.to_string(),
+            detail: source.to_string(),
+        })?;
+    if !output.status.success() {
+        return Err(ProvisionError::DependencyInstall {
+            id: pin.id.to_string(),
+            detail: install_detail(&output),
+        });
+    }
+    Ok(())
+}
+
+/// npm's own failure report, tail-trimmed: the whole log of a failed
+/// install is thousands of lines of tree output, and the cause is at the
+/// end of it.
+fn install_detail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let tail: String = stderr
+        .lines()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("; ");
+    if tail.trim().is_empty() {
+        format!("npm install exited with {}", output.status)
+    } else {
+        tail
+    }
 }
 
 /// Publishes a completed extraction at `tmp_dir` into `extract_dir` via
@@ -426,13 +561,14 @@ fn ensure_extracted(
 /// otherwise the loser discards its own (unused) temp dir and defers to
 /// the winner.
 fn publish_extraction(
+    pin: &AdapterPin,
     tmp_dir: &Path,
     extract_dir: &Path,
     entry_path: &Path,
 ) -> Result<PathBuf, ProvisionError> {
     if let Err(source) = std::fs::rename(tmp_dir, extract_dir) {
         let _ = std::fs::remove_dir_all(tmp_dir);
-        if extraction_is_valid(entry_path, extract_dir) {
+        if extraction_is_valid(pin, entry_path, extract_dir) {
             return Ok(entry_path.to_path_buf());
         }
         return Err(ProvisionError::Write {
@@ -455,14 +591,26 @@ const ENTRY_STAMP_NAME: &str = ".entry-sha256";
 /// at extraction time -- `false` for a missing extraction, a missing
 /// entry, a missing or unreadable stamp, or an entry whose bytes no longer
 /// hash to what the stamp recorded.
-fn extraction_is_valid(entry_path: &Path, extract_dir: &Path) -> bool {
+///
+/// A package that declares dependencies is additionally only valid with
+/// them installed. The stamp covers the entry file alone, so an extraction
+/// left behind by a build that did not install them -- or one whose
+/// `node_modules` was cleaned out from under it -- hashes as intact while
+/// being a script `node` cannot load; re-extracting is what fixes it.
+fn extraction_is_valid(pin: &AdapterPin, entry_path: &Path, extract_dir: &Path) -> bool {
     let Ok(entry_bytes) = std::fs::read(entry_path) else {
         return false;
     };
     let Ok(stamp) = std::fs::read_to_string(extract_dir.join(ENTRY_STAMP_NAME)) else {
         return false;
     };
-    stamp.trim() == sha256_hex(&entry_bytes)
+    if stamp.trim() != sha256_hex(&entry_bytes) {
+        return false;
+    }
+    match package_root(pin, extract_dir) {
+        Some(root) => !declares_dependencies(&root) || root.join("node_modules").is_dir(),
+        None => true,
+    }
 }
 
 /// Unpacks a gzip'd tar archive's bytes into `dest`, which must already
@@ -1069,6 +1217,7 @@ mod tests {
 
     #[test]
     fn publish_extraction_defers_to_a_concurrently_published_valid_destination() {
+        let pin = test_pin(String::new(), "");
         let root = scratch_cache_root("publish-race");
         let extract_dir = root.join("extracted");
         let entry_path = extract_dir.join("package/dist/index.js");
@@ -1089,7 +1238,7 @@ mod tests {
         let tmp_dir = root.join(".extracted.loser.tmp");
         write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
 
-        let result = publish_extraction(&tmp_dir, &extract_dir, &entry_path);
+        let result = publish_extraction(&pin, &tmp_dir, &extract_dir, &entry_path);
 
         assert_eq!(
             result.expect("a rename onto an already-valid destination must be treated as benign"),
@@ -1109,6 +1258,7 @@ mod tests {
 
     #[test]
     fn publish_extraction_still_fails_when_the_destination_is_populated_but_invalid() {
+        let pin = test_pin(String::new(), "");
         let root = scratch_cache_root("publish-race-invalid");
         let extract_dir = root.join("extracted");
         let entry_path = extract_dir.join("package/dist/index.js");
@@ -1127,12 +1277,62 @@ mod tests {
         let tmp_dir = root.join(".extracted.loser.tmp");
         write_valid_extraction(&tmp_dir, "package/dist/index.js", b"the loser's content");
 
-        let result = publish_extraction(&tmp_dir, &extract_dir, &entry_path);
+        let result = publish_extraction(&pin, &tmp_dir, &extract_dir, &entry_path);
 
         assert!(
             matches!(result, Err(ProvisionError::Write { .. })),
             "an occupied-but-invalid destination must still be a hard error, got {result:?}"
         );
+    }
+
+    /// Writes a `package.json` beside an already-written extraction, so a
+    /// test can say what the extracted package declares.
+    fn write_manifest(extract_dir: &Path, dependencies: &str) {
+        std::fs::write(
+            extract_dir.join("package/package.json"),
+            format!("{{\"name\":\"stub\",\"dependencies\":{dependencies}}}"),
+        )
+        .expect("write package manifest");
+    }
+
+    #[test]
+    fn an_extraction_missing_the_dependencies_it_declares_is_not_valid() {
+        let pin = test_pin(String::new(), "");
+        let root = scratch_cache_root("deps-missing");
+        let extract_dir = root.join("extracted");
+        let entry_path = extract_dir.join(pin.entry);
+        write_valid_extraction(&extract_dir, pin.entry, b"import 'dep';");
+        write_manifest(&extract_dir, "{\"dep\":\"^1\"}");
+
+        assert!(
+            !extraction_is_valid(&pin, &entry_path, &extract_dir),
+            "an intact entry whose imports cannot resolve is not a usable extraction"
+        );
+
+        std::fs::create_dir_all(extract_dir.join("package/node_modules"))
+            .expect("create node_modules");
+        assert!(
+            extraction_is_valid(&pin, &entry_path, &extract_dir),
+            "the same extraction with its dependencies present is valid"
+        );
+    }
+
+    #[test]
+    fn a_package_declaring_no_dependencies_installs_nothing() {
+        let pin = test_pin(String::new(), "");
+        let root = scratch_cache_root("deps-none");
+        let extract_dir = root.join("extracted");
+        let entry_path = extract_dir.join(pin.entry);
+        write_valid_extraction(&extract_dir, pin.entry, b"console.log(1);");
+
+        // no manifest at all, then an empty `dependencies`: neither may
+        // reach npm, which is what keeps every other test in this module
+        // (and any future self-contained adapter row) off the network
+        assert!(extraction_is_valid(&pin, &entry_path, &extract_dir));
+        ensure_dependencies(&pin, &extract_dir).expect("a manifest-less package installs nothing");
+        write_manifest(&extract_dir, "{}");
+        assert!(extraction_is_valid(&pin, &entry_path, &extract_dir));
+        ensure_dependencies(&pin, &extract_dir).expect("an empty dependency set installs nothing");
     }
 
     #[test]
