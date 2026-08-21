@@ -394,8 +394,8 @@ impl ReviewDriver {
 fn refuse_if_moved(previous: Option<&str>, now: &str) -> Result<(), OracleError> {
     match previous {
         Some(expected) if expected != now => Err(OracleError::Review(format!(
-            "the buffer moved between proposals, from {expected:?} to {now:?}: a decision that \
-             owed no write produced one"
+            "the buffer moved between proposals, from {expected:?} to {now:?}, and no step in \
+             this case declared the movement"
         ))),
         _ => Ok(()),
     }
@@ -491,7 +491,7 @@ mod tests {
         let err = refuse_if_moved(Some("one\ntwo"), "one\nWRÖNG")
             .expect_err("a moved buffer must refuse the next proposal");
         assert!(
-            matches!(err, OracleError::Review(ref why) if why.contains("owed no write")),
+            matches!(err, OracleError::Review(ref why) if why.contains("WRÖNG")),
             "expected the refusal to name what moved, got {err:?}"
         );
         refuse_if_moved(Some("one\ntwo"), "one\ntwo")

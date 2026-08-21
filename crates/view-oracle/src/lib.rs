@@ -77,6 +77,7 @@ use view_core::model::Model;
 use view_core::msg::{Effect, Msg, RpcCall};
 use view_core::update::update;
 use view_engine::handle::EngineError;
+use view_engine::nvim_api::BufWriteOutcome;
 use view_engine::process::{Engine, EngineConfig};
 use view_engine::DamagePump;
 use view_surface::Surface;
@@ -95,17 +96,25 @@ pub use reference::ReferenceSession;
 /// Forwards every [`Effect::Rpc`] in `effects` to `handle`, mirroring the
 /// production runtime's `Executor::run` dispatch
 /// (`crates/view/src/runtime.rs`) for the subset of [`RpcCall`] variants a
-/// headless driver can produce from [`update`].
+/// headless driver can produce from [`update`], and returns the follow-up
+/// [`Msg`]s that dispatch routes back into the loop. Callers owe those to
+/// [`update`] before they read the model.
 ///
-/// A write failure is dropped rather than surfaced: a driver here has no
-/// `Flow::EngineLost`/`Msg::EngineDown` recovery path to hand it to, and
-/// every caller's own deadline already bounds a wedged connection.
+/// A transport failure is dropped rather than surfaced: a driver here has
+/// no `Flow::EngineLost`/`Msg::EngineDown` recovery path to hand it to, and
+/// every caller's own deadline already bounds a wedged connection. A write
+/// *refusal* is not such a failure -- it is an `Ok` outcome meaning nothing
+/// was written -- so it comes back as a `Msg` instead.
 ///
 /// Shared by every driver in this crate rather than reimplemented per
 /// session type: a second dispatch that mapped one call differently would
 /// leave two drivers closing the effect loop in two ways, which is exactly
-/// the disagreement a differential runner cannot see.
-fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) {
+/// the disagreement a differential runner cannot see. The same argument
+/// binds this dispatch to the production loop's routing: a shim that
+/// answered a call differently than `Executor::run` does compares a model
+/// production never puts in front of a user.
+fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) -> Vec<Msg> {
+    let mut follow_ups = Vec::new();
     for effect in effects {
         let Effect::Rpc(call) = effect else {
             continue;
@@ -122,26 +131,63 @@ fn apply_rpc(handle: &view_engine::handle::EngineHandle, effects: &[Effect]) {
                 col,
             } => handle.input_mouse(button, action, modifier, *row, *col),
             RpcCall::GetDefaultHl { generation } => handle.probe_default_hl(*generation),
-            // Named rather than left to the fallback below, which would
-            // drop an agent's accepted text on the floor and leave the run
-            // comparing a buffer the write never reached. The outcome is
-            // dropped on the same terms as every other call here; the
-            // driver that needs it (see `review`) carries its own writes
-            // out instead of routing them through this dispatch.
+            // The one call whose outcome is not just ok-or-lost: a buffer
+            // that moved past the tick the review named refuses the write,
+            // and a driver that read that as success would compare a
+            // buffer the write never reached while the model believed the
+            // hunks had landed. Routed back the way `Executor::run` routes
+            // it so both outcomes reach the review that asked.
             RpcCall::BufSetText {
                 buf,
                 edits,
                 undojoin,
                 expected_changedtick,
-                ..
+                generation,
             } => handle
                 .set_buf_text(*buf, edits, *undojoin, *expected_changedtick)
-                .map(|_| ()),
+                .map(|outcome| {
+                    follow_ups.push(match outcome {
+                        BufWriteOutcome::Applied { changedtick } => Msg::BufWriteApplied {
+                            buf: *buf,
+                            generation: *generation,
+                            changedtick,
+                        },
+                        BufWriteOutcome::BufferAdvanced => Msg::BufWriteRefused {
+                            buf: *buf,
+                            generation: *generation,
+                        },
+                    });
+                }),
             // RpcCall is #[non_exhaustive]: a future call kind degrades to a
             // no-op here rather than fail to compile, matching
             // Executor::run's own fallback arm.
             _ => Ok(()),
         };
+    }
+    follow_ups
+}
+
+/// Drives `effects` out to `handle` and settles the loop the production
+/// runtime settles: every follow-up [`Msg`] the dispatch routes back goes
+/// through [`update`] against `model`, and whatever effects that produces
+/// go out in turn, until nothing is left to route. `each_effect` sees every
+/// effect batch, including the follow-ups', so a caller that folds calls
+/// into its own bookkeeping folds the follow-ups too.
+fn pump_rpc(
+    handle: &view_engine::handle::EngineHandle,
+    model: &mut Model,
+    effects: Vec<Effect>,
+    mut each_effect: impl FnMut(&mut Model, &[Effect]),
+) {
+    let mut effects = effects;
+    let mut pending = std::collections::VecDeque::new();
+    loop {
+        each_effect(model, &effects);
+        pending.extend(apply_rpc(handle, &effects));
+        let Some(msg) = pending.pop_front() else {
+            return;
+        };
+        effects = update(model, msg);
     }
 }
 
@@ -488,12 +534,15 @@ impl EngineSession {
     /// (`crates/view/src/runtime.rs`) for the subset of [`RpcCall`]
     /// variants a redraw-only driver (no key input, no mouse, no paint
     /// loop to reply to a blocked request) can ever actually produce from
-    /// [`update`]. A write failure is dropped rather than surfaced: this
-    /// driver has no `Flow::EngineLost`/`Msg::EngineDown` recovery path to
-    /// hand it to, and the caller's own `deadline` bound already covers a
-    /// wedged connection.
+    /// [`update`], and routes the follow-up [`Msg`]s that dispatch answers
+    /// with back through [`update`] until the loop goes quiet -- so a
+    /// refused buffer write reaches the model here exactly as it does in
+    /// production. A transport failure is dropped rather than surfaced:
+    /// this driver has no `Flow::EngineLost`/`Msg::EngineDown` recovery
+    /// path to hand it to, and the caller's own `deadline` bound already
+    /// covers a wedged connection.
     fn apply_effects(&mut self, effects: Vec<Effect>) {
-        apply_rpc(&self.engine.handle, &effects);
+        pump_rpc(&self.engine.handle, &mut self.model, effects, |_, _| {});
     }
 
     /// Captures the current [`Surface`] (leg (b): deterministic capture, at
@@ -593,7 +642,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use view_core::events::GridCell;
-    use view_core::msg::Key;
+    use view_core::msg::{BufferHandle, Key, TextEdit};
 
     #[test]
     fn session_fed_a_scripted_redraw_and_flush_yields_the_known_screen_text() {
@@ -631,5 +680,54 @@ mod tests {
             notation: "x".to_string(),
         }));
         assert_eq!(session.screen_text(), "");
+    }
+
+    /// A buffer write answers with an outcome, not merely ok-or-lost, and a
+    /// refusal is an `Ok` meaning nothing was written. A dispatch that
+    /// dropped it would leave a review believing its hunks landed while the
+    /// buffer still holds the user's own text -- the exact disagreement
+    /// production routes `Msg::BufWriteRefused` to prevent.
+    #[test]
+    fn a_buffer_write_routes_its_outcome_back_the_way_production_does() {
+        let mut session = testenv::spawning(|| EngineSession::spawn(40, 6))
+            .expect("EngineSession::spawn against real nvim");
+        let buf = session.eval_str("bufnr('%')").unwrap();
+        let buf: u64 = buf.trim().parse().unwrap();
+        let tick = session.eval_str("b:changedtick").unwrap();
+        let tick: u64 = tick.trim().parse().unwrap();
+        let write = |expected_changedtick| {
+            Effect::Rpc(RpcCall::BufSetText {
+                buf: BufferHandle(buf),
+                edits: vec![TextEdit {
+                    start_row: 0,
+                    start_col: 0,
+                    end_row: 0,
+                    end_col: 0,
+                    lines: vec!["wrïtten".to_string()],
+                }],
+                undojoin: false,
+                expected_changedtick: Some(expected_changedtick),
+                generation: 7,
+            })
+        };
+
+        let applied = apply_rpc(&session.engine.handle, &[write(tick)]);
+        assert!(
+            matches!(
+                applied.as_slice(),
+                [Msg::BufWriteApplied { generation: 7, .. }]
+            ),
+            "a write nvim applied answered {applied:?}"
+        );
+        // the same tick again: the write above moved the buffer past it, so
+        // nvim refuses this one outright
+        let refused = apply_rpc(&session.engine.handle, &[write(tick)]);
+        assert!(
+            matches!(
+                refused.as_slice(),
+                [Msg::BufWriteRefused { generation: 7, .. }]
+            ),
+            "a write nvim refused answered {refused:?}"
+        );
     }
 }

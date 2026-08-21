@@ -66,7 +66,7 @@ use view_engine::DamagePump;
 use view_surface::{LayerKind, Surface, SurfaceCache};
 
 use crate::parity::{diff_rows, ReferenceRows, ViewRows, RECORD_SEP};
-use crate::{apply_rpc, masked_rows, raster, settle, Divergence, OracleError};
+use crate::{masked_rows, pump_rpc, raster, settle, Divergence, OracleError};
 
 #[cfg(test)]
 mod tests;
@@ -393,19 +393,26 @@ impl SpecSession {
     }
 
     /// Applies one drained batch the way the runtime's pass does: reconcile
-    /// against the batch, apply it, route its effects back, then check the
-    /// age bound.
+    /// against the batch, apply it, route its effects back -- including the
+    /// follow-up messages a buffer write answers with, which carry a
+    /// refusal the model has to see -- then check the age bound.
     fn apply(&mut self, events: Vec<UiEvent>) {
         self.note(&events);
         fold_redraw(&mut self.model, &events);
         let effects = update(&mut self.model, Msg::Redraw(events));
         let now = self.now();
-        for effect in &effects {
-            if let Effect::Rpc(call) = effect {
-                fold_engine_call(&mut self.model, call, now);
-            }
-        }
-        apply_rpc(&self.engine.handle, &effects);
+        pump_rpc(
+            &self.engine.handle,
+            &mut self.model,
+            effects,
+            |model, effects| {
+                for effect in effects {
+                    if let Effect::Rpc(call) = effect {
+                        fold_engine_call(model, call, now);
+                    }
+                }
+            },
+        );
         fold_expiry(&mut self.model, now);
     }
 
