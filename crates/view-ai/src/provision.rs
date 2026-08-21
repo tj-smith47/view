@@ -40,10 +40,26 @@
 //! imports, so extraction alone produces an entry script `node` refuses to
 //! load (`ERR_MODULE_NOT_FOUND` on the first bare import). The declared
 //! runtime dependencies are therefore installed into the extraction before
-//! it is published, under `--ignore-scripts`: the checksum pin covers the
-//! adapter's own bytes, and letting a hundred transitive packages run
-//! install hooks on this machine would hand a far wider surface than the
-//! one pin that was verified.
+//! it is published -- from a lockfile pinned beside the row, never resolved
+//! fresh. That is the same guarantee the tarball checksum gives, extended
+//! to everything `node` will actually execute: a resolved-at-provision-time
+//! tree is a hundred packages whose bytes nothing verified, running as the
+//! user in the user's own project on every session, under a pin that
+//! covered only the wrapper around them. `npm ci` installs exactly the
+//! lockfile's tree and verifies every package against the `integrity` hash
+//! recorded in it, so a tampered or moved dependency fails the install
+//! instead of being launched. `--ignore-scripts` keeps that tree from
+//! executing install hooks on the way in, and `--omit=dev` leaves a test
+//! and build toolchain the adapter never runs off the machine entirely.
+//!
+//! The pinned lockfile is captured once, at pin time, from the pinned
+//! tarball itself:
+//!
+//! ```text
+//! tar xzf claude-agent-acp-0.69.0.tgz
+//! cd package && npm install --package-lock-only --omit=dev --ignore-scripts
+//! # -> crates/view-ai/adapters/claude-code-0.69.0-package-lock.json
+//! ```
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -153,9 +169,26 @@ pub enum ProvisionError {
          with it -- ensure the `npm` that ships with Node.js is on PATH, then retry"
     )]
     NpmNotFound,
-    /// `npm install` ran and refused. Carries what npm itself said, because
-    /// the causes (an offline host, a registry that requires a proxy, a
-    /// dependency yanked out from under the pin) are distinguishable only
+    /// The pinned lockfile and the pin itself disagree -- a row whose
+    /// package declares dependencies with no lockfile beside it, or a
+    /// lockfile locking a different release than the row names. Refused
+    /// rather than installed from: a lockfile that does not belong to the
+    /// pinned tarball pins nothing about what this build will run.
+    #[error(
+        "adapter `{id}`'s pinned lockfile does not match its pin: {detail} -- re-capture the \
+         lockfile from the pinned tarball (see this module's own header), since installing \
+         from a disagreeing lockfile would run packages the pin never covered"
+    )]
+    LockfileMismatch {
+        /// The adapter id being provisioned.
+        id: String,
+        /// How the two disagree.
+        detail: String,
+    },
+    /// The dependency install ran and refused, or outlived its own bound.
+    /// Carries what npm itself said, because the causes (an offline host, a
+    /// registry that requires a proxy, a package whose bytes no longer hash
+    /// to the lockfile's recorded `integrity`) are distinguishable only
     /// from its own output.
     #[error("could not install adapter `{id}`'s dependencies: {detail}")]
     DependencyInstall {
@@ -198,6 +231,14 @@ pub struct AdapterPin {
     /// [`ensure_adapter`] resolves this against the extraction directory
     /// and returns that path.
     pub entry: &'static str,
+    /// The `package-lock.json` captured against this exact release, embedded
+    /// at compile time and written into the extraction before the install
+    /// runs. `None` only for a row whose package declares no runtime
+    /// dependencies at all -- a row that declares them and carries no
+    /// lockfile is [`ProvisionError::LockfileMismatch`], never a fresh
+    /// resolve, since the whole point of the row's checksum is that nothing
+    /// unverified runs.
+    pub lockfile: Option<&'static str>,
 }
 
 // This build knows how to provision exactly one adapter, matching
@@ -210,6 +251,9 @@ static ADAPTERS: [AdapterPin; 1] = [AdapterPin {
     url_template: "https://registry.npmjs.org/@agentclientprotocol/claude-agent-acp/-/claude-agent-acp-0.69.0.tgz",
     sha256: "73334255e17f5f48f08030fa4e0c54c118e820f9aaaf29f4629aa230e48c65c2",
     entry: "package/dist/index.js",
+    lockfile: Some(include_str!(
+        "../adapters/claude-code-0.69.0-package-lock.json"
+    )),
 }];
 
 /// `url` starts with `https://`, evaluated at compile time so the check
@@ -288,6 +332,36 @@ pub fn pinned_version(id: &str) -> Option<&'static str> {
 pub fn ensure_adapter(id: &str) -> Result<PathBuf, ProvisionError> {
     let pin = lookup(id).ok_or_else(|| ProvisionError::UnknownAdapter { id: id.to_string() })?;
     resolve(pin)
+}
+
+/// Whether `id` is already provisioned on this machine: a complete,
+/// self-consistent extraction with its dependencies beside it, so
+/// [`ensure_adapter`] would return without downloading or installing
+/// anything.
+///
+/// For a caller that owes the user a word before a wait, not a
+/// precondition for calling [`ensure_adapter`] -- which re-checks
+/// everything this reads and does the work when the answer is `false`.
+/// Answering `false` for an unknown id or an unresolvable cache directory
+/// is deliberate: both are cases where a session is about to fail or stall,
+/// and neither is a case where staying silent helps.
+#[must_use]
+pub fn adapter_is_ready(id: &str) -> bool {
+    let Some(pin) = lookup(id) else {
+        return false;
+    };
+    let Ok(root) = cache_root() else {
+        return false;
+    };
+    ready_in(pin, &root)
+}
+
+/// [`adapter_is_ready`]'s mechanism, parameterized on `cache_root` for the
+/// same reason [`resolve_in`] is: one implementation, exercised by the
+/// tests against a scratch directory rather than process-global state.
+fn ready_in(pin: &AdapterPin, cache_root: &Path) -> bool {
+    let extract_dir = extract_dir(&pin_dir(pin, cache_root));
+    extraction_is_valid(pin, &extract_dir.join(pin.entry), &extract_dir)
 }
 
 /// `node`/`node.exe` resolved from `PATH`, or
@@ -490,13 +564,28 @@ fn declares_dependencies(package_root: &Path) -> bool {
         .is_some_and(|deps| !deps.is_empty())
 }
 
+/// The lockfile name npm itself reads, written into the extraction from
+/// [`AdapterPin::lockfile`] so `npm ci` has the tree it must reproduce.
+const LOCKFILE_NAME: &str = "package-lock.json";
+
+/// How long a dependency install is given before it is stopped. Generous
+/// against a slow link and a cold npm cache, and finite against the case
+/// the bound exists for: a registry (or a proxy in front of one) that
+/// accepts the connection and then never answers, which `Command::output`
+/// would wait on for the rest of the process's life with the panel sitting
+/// on a turn that never starts.
+const INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How often the install is checked for having finished. Small next to
+/// [`INSTALL_TIMEOUT`] and charged only to a provisioning run, never to a
+/// session that starts from a complete cache.
+const INSTALL_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Installs the extracted package's declared runtime dependencies in place,
 /// so the entry script `node` is handed can actually resolve its imports.
 ///
-/// `--omit=dev` keeps a test and build toolchain the adapter never runs off
-/// the machine; `--ignore-scripts` keeps the transitive tree from executing
-/// install hooks, which is the difference between trusting the one artifact
-/// whose checksum was verified and trusting everything it depends on.
+/// From the pin's own lockfile, via `npm ci` -- see this module's header for
+/// why a fresh resolve is not an option here.
 fn ensure_dependencies(pin: &AdapterPin, extract_dir: &Path) -> Result<(), ProvisionError> {
     let Some(root) = package_root(pin, extract_dir) else {
         return Ok(());
@@ -504,48 +593,116 @@ fn ensure_dependencies(pin: &AdapterPin, extract_dir: &Path) -> Result<(), Provi
     if !declares_dependencies(&root) {
         return Ok(());
     }
+    let lockfile = pinned_lockfile(pin)?;
+    let lock_path = root.join(LOCKFILE_NAME);
+    std::fs::write(&lock_path, lockfile).map_err(|source| ProvisionError::Write {
+        path: lock_path,
+        source,
+    })?;
     let npm = resolve_npm()?;
-    let output = std::process::Command::new(npm)
+    run_install(&npm, &root).map_err(|detail| ProvisionError::DependencyInstall {
+        id: pin.id.to_string(),
+        detail,
+    })
+}
+
+/// The pin's own lockfile, refused unless it locks the release the pin
+/// names. `npm ci` catches the deeper disagreement on its own (a lockfile
+/// out of sync with the `package.json` beside it is a hard error there,
+/// never a re-resolve); this catches the shallower one a lockfile copied
+/// from the wrong release would present, where both files parse and agree
+/// with each other while describing something the checksum never covered.
+fn pinned_lockfile(pin: &AdapterPin) -> Result<&'static str, ProvisionError> {
+    let mismatch = |detail: String| ProvisionError::LockfileMismatch {
+        id: pin.id.to_string(),
+        detail,
+    };
+    let Some(lockfile) = pin.lockfile else {
+        return Err(mismatch(
+            "the package declares runtime dependencies and the row carries no lockfile".to_string(),
+        ));
+    };
+    let locked = serde_json::from_str::<serde_json::Value>(lockfile)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    match locked {
+        Some(version) if version == pin.version => Ok(lockfile),
+        Some(version) => Err(mismatch(format!(
+            "it locks version {version}, the row pins {}",
+            pin.version
+        ))),
+        None => Err(mismatch(
+            "it parses as no lockfile with a root version in it".to_string(),
+        )),
+    }
+}
+
+/// Runs the lockfile's install in `root`, bounded by [`INSTALL_TIMEOUT`].
+/// `Err` carries npm's own report, tail-trimmed: the whole log of a failed
+/// install is thousands of lines of tree output, and the cause is at the
+/// end of it.
+fn run_install(npm: &Path, root: &Path) -> Result<(), String> {
+    let mut child = std::process::Command::new(npm)
         .args([
-            "install",
+            "ci",
             "--omit=dev",
             "--ignore-scripts",
             "--no-audit",
             "--no-fund",
         ])
-        .current_dir(&root)
-        .output()
-        .map_err(|source| ProvisionError::DependencyInstall {
-            id: pin.id.to_string(),
-            detail: source.to_string(),
-        })?;
-    if !output.status.success() {
-        return Err(ProvisionError::DependencyInstall {
-            id: pin.id.to_string(),
-            detail: install_detail(&output),
-        });
+        .current_dir(root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|err| err.to_string())?;
+    // Drained on its own thread rather than after the wait: a failing
+    // install writes far more than a pipe buffer holds, and a parent that
+    // only watched for exit would block the child on a full pipe until the
+    // deadline stopped a job that had already done its work.
+    let mut pipe = child.stderr.take();
+    let drain = std::thread::Builder::new()
+        .name("adapter-install".to_string())
+        .spawn(move || {
+            let mut text = String::new();
+            if let Some(pipe) = pipe.as_mut() {
+                let _ = std::io::Read::read_to_string(pipe, &mut text);
+            }
+            text
+        })
+        .map_err(|err| err.to_string())?;
+    let deadline = std::time::Instant::now() + INSTALL_TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Err(err) => return Err(err.to_string()),
+            Ok(Some(status)) => break status,
+            Ok(None) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "npm ci was still running after {}s and was stopped",
+                INSTALL_TIMEOUT.as_secs()
+            ));
+        }
+        std::thread::sleep(INSTALL_POLL);
+    };
+    let reported = drain.join().unwrap_or_default();
+    if status.success() {
+        return Ok(());
     }
-    Ok(())
-}
-
-/// npm's own failure report, tail-trimmed: the whole log of a failed
-/// install is thousands of lines of tree output, and the cause is at the
-/// end of it.
-fn install_detail(output: &std::process::Output) -> String {
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let tail: String = stderr
-        .lines()
-        .rev()
-        .take(8)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<Vec<_>>()
-        .join("; ");
-    if tail.trim().is_empty() {
-        format!("npm install exited with {}", output.status)
+    let tail: Vec<&str> = reported.lines().rev().take(8).collect();
+    let detail = tail.into_iter().rev().collect::<Vec<_>>().join("; ");
+    if detail.trim().is_empty() {
+        Err(format!("npm ci exited with {status}"))
     } else {
-        tail
+        Err(detail)
     }
 }
 
@@ -592,11 +749,17 @@ const ENTRY_STAMP_NAME: &str = ".entry-sha256";
 /// entry, a missing or unreadable stamp, or an entry whose bytes no longer
 /// hash to what the stamp recorded.
 ///
-/// A package that declares dependencies is additionally only valid with
-/// them installed. The stamp covers the entry file alone, so an extraction
-/// left behind by a build that did not install them -- or one whose
-/// `node_modules` was cleaned out from under it -- hashes as intact while
-/// being a script `node` cannot load; re-extracting is what fixes it.
+/// A package that declares dependencies is additionally only valid with a
+/// `node_modules` beside it. The stamp covers the entry file alone, so an
+/// extraction left behind by a build that did not install them -- or one
+/// whose `node_modules` was removed from under it -- hashes as intact while
+/// being a script `node` cannot load; re-extracting is what fixes it. The
+/// check is presence, not contents: this module's own writes publish a
+/// complete tree or none at all (`ensure_extracted` installs into the temp
+/// dir before the stamp, and `publish_extraction` renames), so the only way
+/// to a half-emptied `node_modules` is an external hand, and the loud
+/// failure that hand earns is `node`'s own module-resolution error rather
+/// than a full tree walk on every session start.
 fn extraction_is_valid(pin: &AdapterPin, entry_path: &Path, extract_dir: &Path) -> bool {
     let Ok(entry_bytes) = std::fs::read(entry_path) else {
         return false;
@@ -909,6 +1072,7 @@ mod tests {
             url_template: Box::leak(url.into_boxed_str()),
             sha256,
             entry: "package/dist/index.js",
+            lockfile: None,
         }
     }
 
@@ -1333,6 +1497,76 @@ mod tests {
         write_manifest(&extract_dir, "{}");
         assert!(extraction_is_valid(&pin, &entry_path, &extract_dir));
         ensure_dependencies(&pin, &extract_dir).expect("an empty dependency set installs nothing");
+    }
+
+    /// The install is never reached for a package whose dependencies the
+    /// row cannot pin: the whole point of the checksum is that nothing
+    /// unverified runs, and a fresh resolve is exactly the unverified tree
+    /// it exists to refuse.
+    #[test]
+    fn a_package_whose_dependencies_the_row_cannot_pin_is_never_installed() {
+        let pin = test_pin(String::new(), "");
+        let root = scratch_cache_root("deps-unpinned");
+        let extract_dir = root.join("extracted");
+        write_valid_extraction(&extract_dir, pin.entry, b"import 'dep';");
+        write_manifest(&extract_dir, "{\"dep\":\"^1\"}");
+
+        let err = ensure_dependencies(&pin, &extract_dir)
+            .expect_err("a lockfile-less row must refuse rather than resolve");
+        assert!(
+            matches!(err, ProvisionError::LockfileMismatch { .. }),
+            "expected a lockfile mismatch, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn a_lockfile_locking_another_release_is_refused() {
+        let mut pin = test_pin(String::new(), "");
+        pin.lockfile = Some("{\"name\":\"stub\",\"version\":\"9.9.9\",\"lockfileVersion\":3}");
+
+        let err = pinned_lockfile(&pin).expect_err("a lockfile for another release must refuse");
+        assert!(
+            matches!(err, ProvisionError::LockfileMismatch { .. }),
+            "expected a lockfile mismatch, got {err:?}"
+        );
+        let said = format!("{err}");
+        assert!(
+            said.contains("9.9.9") && said.contains(pin.version),
+            "the refusal must name both versions, said {said:?}"
+        );
+    }
+
+    /// The shipped row's own lockfile, checked here rather than only on a
+    /// machine that provisions: a lockfile re-captured against a bumped
+    /// version without the row moving with it would otherwise fail for the
+    /// first user to run a cold provision, not for the commit that did it.
+    #[test]
+    fn the_shipped_row_carries_a_lockfile_for_the_version_it_pins() {
+        for pin in &ADAPTERS {
+            let checked = pinned_lockfile(pin);
+            assert!(
+                checked.is_ok(),
+                "`{}`'s lockfile must match its pin: {checked:?}",
+                pin.id
+            );
+        }
+    }
+
+    #[test]
+    fn an_adapter_is_ready_only_once_its_extraction_is_complete() {
+        let pin = test_pin(String::new(), "");
+        let root = scratch_cache_root("ready");
+        assert!(
+            !ready_in(&pin, &root),
+            "nothing is provisioned in an empty cache"
+        );
+
+        let extract_dir = extract_dir(&pin_dir(&pin, &root));
+        write_valid_extraction(&extract_dir, pin.entry, b"console.log(1);");
+        assert!(
+            ready_in(&pin, &root),
+            "a complete extraction needs no download or install"
+        );
     }
 
     #[test]

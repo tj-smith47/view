@@ -654,6 +654,17 @@ pub enum Msg {
     ExternalWatchDegraded {
         reason: String,
     },
+    /// The AI agent this session needs is not on the machine yet, and the
+    /// download and install that fetch it are starting. Raised only for the
+    /// first-run case that actually waits -- a session starting from a
+    /// complete cache pays nothing and says nothing -- because minutes of a
+    /// panel holding a turn with no output is indistinguishable from a
+    /// feature that does not work. `detail` is written for that user, not
+    /// for a log, on the same terms [`Msg::ExternalWatchDegraded`]'s
+    /// `reason` is.
+    AiProvisioning {
+        detail: String,
+    },
     /// The decoded answer to one `RpcCall::Checktime`, correlated on
     /// `request_id`. One entry per path the call carried, in the order it
     /// carried them; each path echoes the call back, since the reply itself

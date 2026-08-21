@@ -410,6 +410,15 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
         Msg::ExternalWritesDetected { paths } => on_external_writes_detected(model, paths),
         Msg::ConfirmExternalRemoval { path } => on_confirm_external_removal(model, path),
         Msg::ExternalWatchDegraded { reason } => on_external_watch_degraded(model, reason),
+        // Through the same notice channel `on_external_watch_degraded`
+        // uses, and for the same reason it does rather than the panel's own
+        // banner: the panel may not even be open when a session starts, and
+        // this is the one thing the user needs told before a wait nothing
+        // else on screen explains.
+        Msg::AiProvisioning { detail } => {
+            model.dirty = true;
+            model.engine.record_native_notice(detail, false)
+        }
         // `request_id` reaches the fold because one probe is not like the
         // others: the confirming second look at a vanished path
         // (`Msg::ConfirmExternalRemoval`) records the id it minted, and only

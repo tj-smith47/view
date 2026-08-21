@@ -631,6 +631,26 @@ mod tests {
         assert!(model.dirty);
     }
 
+    /// The wait a first run pays is announced where a user sees it with the
+    /// panel closed -- a notice, not the panel's own banner, which is why
+    /// this asserts against the message log rather than `local_error`.
+    #[test]
+    fn a_first_run_provisioning_wait_is_announced() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let _ = crate::update::update(
+            &mut model,
+            Msg::AiProvisioning {
+                detail: "provisioning the AI agent claude-code 0.69.0".to_string(),
+            },
+        );
+        assert!(
+            model.engine.messages.entries.len() > before,
+            "a multi-minute first-run wait must not be silent"
+        );
+        assert!(model.dirty);
+    }
+
     /// The falsifiable half of the crash-surfacing contract: `local_error`
     /// must actually hold the agent's own message, not just clear the
     /// permission slot -- a doctor row or a panel render reading `None`

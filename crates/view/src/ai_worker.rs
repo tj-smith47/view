@@ -113,6 +113,38 @@ fn resolve_launch(spec: &AgentSpec, cwd: &Path) -> Result<AgentLaunch, SpawnFail
     }
 }
 
+/// How the first-run provisioning notice opens. Its own constant so the
+/// acceptance leg that proves the notice reaches the screen reads the words
+/// it greps for out of this file rather than restating them.
+const PROVISION_NOTICE_PREFIX: &str = "provisioning the AI agent";
+
+/// What to tell the user before `resolver` runs, or `None` when there is
+/// nothing to tell. Only the case that genuinely waits says anything, so
+/// the notice stays a first-run event rather than a line on every session
+/// start: a configured `agent = [...]` command spawns straight away, an id
+/// this build has no pin for fails straight away, and a pinned adapter
+/// already sitting complete in the cache is launched straight away. What is
+/// left is the download and dependency install, minutes of it on a cold
+/// cache, which is indistinguishable from a broken feature if nothing says
+/// it is happening.
+///
+/// Called from the background thread, never the loop thread: reading the
+/// cache to answer is filesystem work, and this crate's own rule about what
+/// may run on the paint path does not except a cheap-looking check.
+fn provisioning_notice(spec: &AgentSpec) -> Option<String> {
+    let AgentSpec::Id(id) = spec else {
+        return None;
+    };
+    let version = view_ai::pinned_version(id)?;
+    if view_ai::adapter_is_ready(id) {
+        return None;
+    }
+    Some(format!(
+        "{PROVISION_NOTICE_PREFIX} {id} {version} -- first run downloads and installs it, \
+         which can take a few minutes"
+    ))
+}
+
 /// The one slot an [`AiWorker`] and every clone of it share for whichever
 /// out-of-band write watch is currently running.
 ///
@@ -443,6 +475,9 @@ impl AiWorker {
             let watch_for_start = Arc::clone(&watch);
             let msg_for_start = msg.clone();
             let cwd_for_start = cwd.clone();
+            if let Some(detail) = provisioning_notice(&agent_spec) {
+                let _ = msg.send(Msg::AiProvisioning { detail });
+            }
             let result = resolver(&agent_spec, &cwd).and_then(|launch| {
                 let emit_tx = msg.clone();
                 start_watch(
@@ -522,6 +557,21 @@ mod tests {
         AgentSpec::Command(vec![
             "view-ai-worker-test-nonexistent-program-xyz".to_string()
         ])
+    }
+
+    /// The notice is for a wait, so every spec that has no wait in it is
+    /// silent. The one spec that does -- the pinned adapter against a cold
+    /// cache -- is proven where the wait actually happens, in
+    /// `scripts/acceptance/ai-conformance.sh`'s first leg, which provisions
+    /// into a fresh cache directory by construction; asserting it here
+    /// would only assert whatever this machine's own cache happens to hold.
+    #[test]
+    fn nothing_that_starts_without_waiting_announces_provisioning() {
+        assert_eq!(provisioning_notice(&missing_program_spec()), None);
+        assert_eq!(
+            provisioning_notice(&AgentSpec::Id("no-such-adapter".to_string())),
+            None
+        );
     }
 
     fn worker_with(spec: AgentSpec) -> (AiWorker, mpsc::Receiver<Msg>) {
