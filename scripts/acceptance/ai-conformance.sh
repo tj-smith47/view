@@ -23,8 +23,9 @@
 #     the thing happened and in what order, never what the model said.
 #   * the stub agent drives everything a real agent cannot be asked to do
 #     on demand: stream a named sequence, hold a tool call non-terminal,
-#     propose a specific diff, overlap two permission requests, die
-#     mid-turn. It is a real subprocess speaking real JSON-RPC over real
+#     propose a specific diff, overlap two permission requests, ask for a
+#     file it may not have, die mid-turn. It is a real subprocess speaking
+#     real JSON-RPC over real
 #     pipes -- what it is not is a language model, and a scenario that
 #     needs an agent to do one exact thing at one exact moment cannot be
 #     obtained from one. That is what buys the exact assertions: the two
@@ -35,9 +36,10 @@
 # quietly matching nothing. Two kinds of exception remain: strings built
 # from the wire's own pinned vocabulary (`docs/acp-v1-wire-capture.md`),
 # each guarded by a check that the template it slots into still exists;
-# and the `ai TurnEnded` log lines, which render through vlog's derive
-# catch-all and so have no template to guard -- a rename there fails these
-# waits loudly at their own timeout, which is the check they get.
+# and the `ai TurnEnded` and `ai UsageUpdated` log lines, which render
+# through vlog's derive catch-all and so have no template to guard -- a
+# rename there fails these waits loudly at their own timeout, which is the
+# check they get.
 #
 # Needs `tmux`, `node` and `npm` for the agent leg, a network for the one
 # cold provision, and credentials the pinned adapter can authenticate with
@@ -57,6 +59,7 @@ PANEL_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/mod.rs
 REVIEW_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/review.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 TRANSCRIPT_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/transcript.rs
+STUB_RS=$REPO_ROOT/crates/view-ai/tests/fixtures/stub_agent.rs
 
 # The panel is a fixed-width column beside the buffer, so widening the
 # terminal does not widen it: these are chosen for the buffer and for having
@@ -460,6 +463,20 @@ leg_streaming_and_tool_status() {
     wait_for "$DONE_LABEL: Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
     wait_for "$TERMINAL_CONTENT" "$WAIT_SECS" "the streamed terminal content" >/dev/null
     wait_for "$PLAN_PREFIX" "$WAIT_SECS" "the streamed plan" >/dev/null
+    # Reasoning has no surface of its own, so it is read where the loop
+    # recorded it -- and the refute beside it is the actual contract: the
+    # wire carries reasoning apart from the answer precisely so that no
+    # consumer renders one as the other, and a fold that collapsed the two
+    # would leave the agent apparently claiming its own deliberation.
+    wait_for_log "ai ThoughtChunk .* text: \"$STREAM_THOUGHT\"" "$WAIT_SECS" \
+        "the streamed reasoning" >/dev/null
+    refute "${AGENT_PREFIX}${STREAM_THOUGHT}" "reasoning was rendered as the agent's own answer"
+    # Usage is asserted on its decoded numbers, not on its arrival: `used`
+    # and `size` are what any context-window readout is built from, and an
+    # update that arrived with them swapped, defaulted or dropped would
+    # satisfy every check that only looked for the event's name.
+    wait_for_log "ai UsageUpdated \{ used: $STREAM_USED, size: $STREAM_SIZE" "$WAIT_SECS" \
+        "the streamed usage accounting" >/dev/null
     pass 'every streamed update kind reached the panel'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -469,9 +486,24 @@ leg_diff_accept_and_reject() {
     start_session diff "$STUB_ARGV" "$(mktemp -d)"
     open_panel "$WAIT_SECS"
 
+    # Abandoned first, and restated afterwards. The session deduplicates a
+    # diff it has already raised, so the second review below can only open
+    # if closing the first one told the agent side to forget it -- which is
+    # the whole of what abandoning means: the user dismissed the proposal
+    # unread, and an agent restating it must reach them again rather than be
+    # deduplicated against a review nobody looked at.
+    submit 'propose'
+    wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the abandoned review's keys" >/dev/null
+    send_text 'q'
+    until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing unanswered" >/dev/null
+    assert_file_is 'alpha
+beta
+gamma' 'an abandoned review changed the buffer'
+
     submit 'propose'
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the diff review's keys" >/dev/null
     wait_for '+BETA' "$WAIT_SECS" "the proposed hunk" >/dev/null
+    pass 'a proposal abandoned unread was raised again when the agent restated it'
     send_text 'a'
     # The review closing on its last open hunk, not the `+BETA` row the line
     # above already proved is on screen -- that string is what the proposal
@@ -595,6 +627,64 @@ leg_permission_overlap() {
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
+leg_filesystem_round_trip() {
+    CURRENT_LEG=7-filesystem-round-trip
+    local settled
+    start_session fs "$STUB_ARGV" "$(mktemp -d)"
+    # Two lines and a final newline, because all three are things the answer
+    # can get wrong: nvim's line list carries no record of a terminator at
+    # all, so the join and the trailing newline are reconstructed on the way
+    # back out and a one-line file would exercise neither.
+    printf 'first line\nsecond line\n' >"$ROOT/$STUB_FS_FILE"
+    open_panel "$WAIT_SECS"
+
+    # Read from the log rather than the screen: what is being asserted is
+    # the exact bytes handed back to the agent, and the panel is a column
+    # too narrow to hold them -- a screen assertion here could only ever
+    # check a prefix of the answer it exists to pin.
+    submit 'read'
+    wait_for_log "ai MessageChunk .* text: \"read first line\\\\nsecond line\\\\n\"" \
+        "$WAIT_SECS" "the file's exact content, back at the agent" >/dev/null
+    pass 'a read crossed to nvim and came back byte for byte'
+
+    # The path is absolute, well-formed and nowhere near the session
+    # directory. The code it is refused with is the assertion: an
+    # unresolvable path inside the boundary and a resolvable one outside it
+    # answer identically, so that an agent cannot learn what exists out
+    # there by watching the code change.
+    submit 'read-outside'
+    wait_for_log "ai MessageChunk .* text: \"read refused $INVALID_PARAMS\"" \
+        "$WAIT_SECS" "the refusal of a path outside the session directory" >/dev/null
+    if grep -qE "ai MessageChunk .* text: \"read refused $RESOURCE_NOT_FOUND\"" \
+        "$ROOT/view.log"; then
+        fail 'a path outside the session directory was refused with a code that reports whether it exists'
+        return 1
+    fi
+    pass 'a read outside the session directory was refused without reporting what is there'
+
+    # The write's own content ends without a newline, which nvim adds back
+    # on save unless it is told not to -- so comparing bytes rather than
+    # lines is the only comparison that can fail when it should.
+    printf '%s' "$STUB_FS_WRITE_CONTENT" >"$ROOT/expected-fs-write"
+    submit 'write'
+    wait_for_log 'ai MessageChunk .* text: "wrote"' "$WAIT_SECS" \
+        "the write's acceptance, back at the agent" >/dev/null
+    # The reply crosses back the moment nvim reports the save, and the
+    # comparison below reads the file the save produced; re-read until it
+    # settles for the reason `assert_file_is` does, and fail at the budget
+    # with the bytes actually found.
+    settled=$(now)
+    while ! cmp -s "$ROOT/expected-fs-write" "$ROOT/$STUB_FS_FILE"; do
+        if ! under "$(elapsed "$settled" "$(now)")" "$WAIT_SECS"; then
+            fail "the agent's write did not land byte for byte -- the file holds $(printf '%q' "$(cat "$ROOT/$STUB_FS_FILE")")"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+    pass "an agent's write reached disk through nvim's buffer, byte for byte"
+    tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
 command -v tmux >/dev/null || {
     printf 'FAIL: tmux is required (this drives a real terminal session)\n' >&2
     exit 1
@@ -674,6 +764,7 @@ require_template "$VLOG_RS" \
     'MessageChunk {{ message_id: {message_id:?}, from_agent: {from_agent}' || exit 1
 require_template "$VLOG_RS" \
     'ToolCallUpdate {{ tool_call_id: {tool_call_id:?}, title: {}, status: {status:?}' || exit 1
+require_template "$VLOG_RS" 'ThoughtChunk {{ message_id: {message_id:?}, text: {} }}' || exit 1
 NON_TERMINAL_STATUSES='Pending|InProgress'
 TERMINAL_STATUSES='Completed|Failed'
 for status in ${NON_TERMINAL_STATUSES//|/ } ${TERMINAL_STATUSES//|/ }; do
@@ -686,6 +777,45 @@ PINNED_VERSION=$(grep -A 2 'id: "claude-code"' "$REPO_ROOT/crates/view-ai/src/pr
     grep -oE 'version: "[^"]+"' | sed -E 's/.*"(.*)"/\1/')
 [ -n "$PINNED_VERSION" ] || {
     printf 'FAIL: the claude-code row has no pinned version in provision.rs any more\n' >&2
+    exit 1
+}
+
+# What the stub streams as reasoning, and the accounting it reports beside
+# it -- read from the fixture that sends them so a reworded chunk or a
+# changed count fails the waits that name them rather than passing on a
+# pattern that now matches nothing.
+STREAM_THOUGHT=$(grep -oE 'chunk\(stdout, "agent_thought_chunk", "[^"]+"\)' "$STUB_RS" |
+    sed -E 's/.*"(.*)"\)/\1/')
+[ -n "$STREAM_THOUGHT" ] || {
+    printf 'FAIL: the stub agent no longer streams a thought chunk in %s\n' "$STUB_RS" >&2
+    exit 1
+}
+STREAM_USED=$(grep -oE '"used": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$')
+STREAM_SIZE=$(grep -oE '"size": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$')
+[ -n "$STREAM_USED" ] && [ -n "$STREAM_SIZE" ] || {
+    printf 'FAIL: the stub agent no longer streams a usage update in %s\n' "$STUB_RS" >&2
+    exit 1
+}
+# The file the filesystem legs name, and the content the write leg sends,
+# both read from the same fixture for the same reason.
+STUB_FS_FILE=$(grep -oE 'named_inside_cwd\("[^"]+"\)' "$STUB_RS" | head -1 |
+    sed -E 's/.*"(.*)".*/\1/')
+[ -n "$STUB_FS_FILE" ] || {
+    printf 'FAIL: the stub agent names no file inside its own cwd in %s any more\n' "$STUB_RS" >&2
+    exit 1
+}
+STUB_FS_WRITE_CONTENT='fn main() {}'
+require_template "$STUB_RS" "\"content\": \"$STUB_FS_WRITE_CONTENT\"" || exit 1
+# The two refusal codes leg 7 tells apart. Read from the crate that pins
+# them against the wire's own table, since the whole assertion is which of
+# the two an out-of-boundary path gets.
+WIRE_RS=$REPO_ROOT/crates/view-ai/src/acp/wire.rs
+INVALID_PARAMS=$(grep -oE 'pub const INVALID_PARAMS: i64 = -?[0-9]+' "$WIRE_RS" |
+    grep -oE '\-?[0-9]+$')
+RESOURCE_NOT_FOUND=$(grep -oE 'pub const RESOURCE_NOT_FOUND: i64 = -?[0-9]+' "$WIRE_RS" |
+    grep -oE '\-?[0-9]+$')
+[ -n "$INVALID_PARAMS" ] && [ -n "$RESOURCE_NOT_FOUND" ] || {
+    printf 'FAIL: the filesystem refusal codes are not constants in %s any more\n' "$WIRE_RS" >&2
     exit 1
 }
 
@@ -702,7 +832,7 @@ ROOTS+=("$ADAPTER_CACHE")
 # what makes reverting one task and re-running the one leg that covers it a
 # practical way to check that the leg is really the thing being asserted.
 LEGS=(leg_session_lifecycle leg_streaming_and_tool_status leg_diff_accept_and_reject
-    leg_cancel_mid_turn leg_agent_crash leg_permission_overlap)
+    leg_cancel_mid_turn leg_agent_crash leg_permission_overlap leg_filesystem_round_trip)
 if [ "$#" -eq 0 ]; then
     selected=("${LEGS[@]}")
 else

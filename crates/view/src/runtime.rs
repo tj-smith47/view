@@ -2036,6 +2036,86 @@ mod tests {
         );
     }
 
+    /// And the hold that load took has to come back. The engine matches
+    /// the two by count and deletes the buffer only when the last one is
+    /// given back (`view-engine`'s own `hidden_buffer_live` suite proves
+    /// that half against real nvim), so the release is asserted where both
+    /// halves are observable at once: a whole agent read driven through
+    /// `dispatch`, with the calls that reached the engine read back in
+    /// order. An arm wired to anything but `release_hidden` leaks one
+    /// buffer per read the agent makes, and leaves every effect-level
+    /// assertion in this suite green while it does.
+    #[test]
+    fn an_agent_read_gives_back_the_hold_it_took_on_the_buffer_it_read() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.ai_trusted = true;
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+        let path = if cfg!(windows) {
+            "C:\\work\\main.rs"
+        } else {
+            "/work/main.rs"
+        };
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::Ai(view_core::native::ai_event::AiEvent::FsReadRequested {
+                request_id: 3,
+                path: std::path::PathBuf::from(path),
+                line: None,
+                limit: None,
+            }),
+        );
+        // Read back rather than assumed: the generation is minted by the
+        // fold, and a release that carried a different one would be a hold
+        // given back for a request nobody made.
+        let load = ops.calls.borrow().first().cloned().unwrap_or_default();
+        let generation = load
+            .strip_prefix(&format!("load_hidden({path},"))
+            .and_then(|rest| rest.strip_suffix(')'))
+            .and_then(|id| id.parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("expected the read to resolve a path, got {load}"));
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::HiddenBufferLoaded {
+                generation,
+                buf: Some(BufferHandle(7)),
+                created: true,
+                changedtick: 1,
+            },
+        );
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::AiFsReadReply {
+                request_id: 3,
+                result: Ok("fn main() {}\n".to_string()),
+            },
+        );
+
+        assert_eq!(
+            ops.calls.borrow().as_slice(),
+            [
+                format!("load_hidden({path},{generation})"),
+                "ai_fs_read(3,7,None,None)".to_string(),
+                format!("release_hidden({path})"),
+            ]
+        );
+    }
+
     /// The stand-in above must cover the refused path and nothing else. A
     /// connection that died during a review's bind is a lost engine, and
     /// answering it with a fabricated buffer-less resolve instead would
