@@ -50,7 +50,7 @@ pub fn parse_record(line: &str) -> Option<TapRecord> {
 /// Every tap tag, grouped by the crate whose sequence counter numbers it.
 /// A tag missing from this table is a tag whose loss no drop check can
 /// see, so the chain walkers below assert their own tags against it.
-const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGCD")];
+const TAG_ORIGINS: [(&str, &[u8]); 2] = [("view-engine", b"WRS"), ("view-tui", b"TKUBFPGCDA")];
 
 /// Verifies each crate's tap sequence stream is contiguous. The engine's
 /// two tags share one counter and the tui's tags share their own, so the
@@ -449,6 +449,16 @@ fn wait_for_chained(
 
 const INPUT_CHAIN: &[u8] = b"KUS";
 
+/// The taps a keystroke walks up to the point its RPC is handed to the
+/// writer, which is the earliest instant the engine's answer to it can
+/// exist. The output row anchors on the handoff rather than on the write
+/// tap that follows it: that tap is stamped after the write syscall
+/// returns and after its lock is dropped, so a redraw parsed while the
+/// writing thread was descheduled is stamped *before* the write it
+/// answers (measured on dev-linux under a live agent turn: R at 2990us,
+/// W at 3008us for the same keystroke).
+const HANDOFF_CHAIN: &[u8] = b"KU";
+
 /// One label per interval the chain resolves, including the leading
 /// harness-timestamp-to-first-tag one, so there is one more label than
 /// chain tag. Only the first is outside the gated boundary.
@@ -611,14 +621,25 @@ pub struct PaintSplit {
     /// predicted paint, which speculation produces between the keypress and
     /// its authoritative redraw by design.
     pub speculated: usize,
-    /// Writes with neither a redraw nor a live prediction behind them --
-    /// view answering the keystroke from its own chrome, the regression the
-    /// output-path row's floor-1 refusal exists to catch.
+    /// Writes the painter announced as an agent-panel repaint with no grid
+    /// damage in the frame: the streamed turn painting itself, which under
+    /// the AI rows happens on the agent's own cadence and lands inside a
+    /// sample window whenever the two coincide.
+    pub agent: usize,
+    /// Writes with neither a redraw nor a live prediction nor an agent
+    /// repaint behind them -- view answering the keystroke from its own
+    /// chrome, the regression the output-path row's floor-1 refusal exists
+    /// to catch.
     pub unexplained: usize,
 }
 
 /// Splits the writes in `[t0, parsed)` into the ones a live prediction
 /// explains and the ones nothing does.
+///
+/// An announcement precedes the write it explains: the painter taps
+/// `D` at the head of a frame carrying a predicted cell and `A` at the
+/// head of a frame that paints the agent panel with no grid damage behind
+/// it, and each is consumed by the next write.
 ///
 /// A speculated paint announces itself before it happens: the painter taps
 /// `D` at the head of a frame carrying a predicted cell, and that frame's
@@ -633,21 +654,42 @@ pub struct PaintSplit {
 /// `T` are stamped on the paint thread but reach the harness through a pipe
 /// the engine's threads write to as well.
 pub fn classify_paints_before_redraw(records: &[TapRecord], t0: i64, parsed: i64) -> PaintSplit {
+    // An announcement is stamped at the head of the frame whose write it
+    // explains, so a frame already in flight when the key was pressed
+    // announces before `t0` and writes after it. Announcements are
+    // therefore collected from the last write before the keypress -- the
+    // boundary of that in-flight frame, everything before it already
+    // consumed -- while the writes counted stay the ones inside the
+    // window. Cutting announcements at `t0` instead reports the frames
+    // that straddle it as explained by nothing, which under a streaming
+    // agent turn is most of them.
+    let frame_start = records
+        .iter()
+        .filter(|r| r.tag == b'T' && r.nanos < t0)
+        .map(|r| r.nanos)
+        .max()
+        .unwrap_or(t0);
     let mut window: Vec<&TapRecord> = records
         .iter()
-        .filter(|r| matches!(r.tag, b'T' | b'D') && r.nanos >= t0 && r.nanos < parsed)
+        .filter(|r| match r.tag {
+            b'T' => r.nanos >= t0 && r.nanos < parsed,
+            b'D' | b'A' => r.nanos >= frame_start && r.nanos < parsed,
+            _ => false,
+        })
         .collect();
     window.sort_by_key(|r| (r.nanos, r.seq));
     let mut split = PaintSplit::default();
-    let mut announced = false;
+    let mut announced = None;
     for record in window {
-        if record.tag == b'D' {
-            announced = true;
-        } else if announced {
-            split.speculated += 1;
-            announced = false;
-        } else {
-            split.unexplained += 1;
+        match record.tag {
+            b'T' => match announced.take() {
+                Some(b'D') => split.speculated += 1,
+                Some(_) => split.agent += 1,
+                None => split.unexplained += 1,
+            },
+            // a frame announcing both is a predicted paint first: the
+            // prediction is the reason it is on screen ahead of the redraw
+            tag => announced = announced.filter(|held| *held == b'D').or(Some(tag)),
         }
     }
     split
@@ -728,22 +770,24 @@ fn sample_output_path(
             all_records.extend(pipe.drain());
             let t0 = monotonic_nanos();
             session.send(b"x")?;
-            // Wait out this keystroke's own RPC write first, then the
+            // Wait out this keystroke's own RPC handoff first, then the
             // redraw at or after it, then the paint that carries it. Each
             // wait has its own sample timeout because each fails for a
-            // different reason: no chain-bearing write is the key never
+            // different reason: no chain-bearing handoff is the key never
             // reaching the engine, no redraw after it is the engine never
             // answering, and a redraw with no paint behind it is the paint
-            // loop stalling. Anchoring the redraw on the write rather than
-            // on the keystroke is what makes the interval this keystroke's
-            // echo: the engine also redraws for everything else it is
-            // doing, which under a streaming agent turn is continuous.
-            let Some((_, written)) =
-                wait_for_chained(pipe, protocol.sample_timeout, t0, INPUT_CHAIN, b'W')
+            // loop stalling. Anchoring the redraw on the handoff rather
+            // than on the keystroke is what makes the interval this
+            // keystroke's echo: the engine also redraws for everything
+            // else it is doing, and view repaints for everything its own
+            // surfaces do -- which under a streaming agent turn is
+            // continuous.
+            let Some((_, handoff)) =
+                wait_for_chained(pipe, protocol.sample_timeout, t0, HANDOFF_CHAIN, b'S')
             else {
                 return Err(BenchError::Desync {
                     context: format!(
-                        "no RPC write with a resolvable K/U/S chain behind it within {:?} of a \
+                        "no RPC handoff with a resolvable K/U chain behind it within {:?} of a \
                          keypress, so no redraw can be attributed to it; screen:\n{}",
                         protocol.sample_timeout,
                         session.screen_text()
@@ -751,7 +795,7 @@ fn sample_output_path(
                 });
             };
             let Some(seen_parsed) = pipe.wait_for(protocol.sample_timeout, |r| {
-                r.tag == b'R' && r.nanos >= written.nanos
+                r.tag == b'R' && r.nanos >= handoff.nanos
             }) else {
                 return Err(BenchError::Desync {
                     context: format!(
@@ -780,7 +824,7 @@ fn sample_output_path(
             // set: an `R` stamped earlier than `seen_parsed` may still have
             // been crossing the pipe while the wait above returned
             all_records.extend(pipe.drain());
-            let Some((parsed, paint)) = measured_frame(&all_records, written.nanos) else {
+            let Some((parsed, paint)) = measured_frame(&all_records, handoff.nanos) else {
                 return Err(BenchError::Desync {
                     context: "the redraw and paint that ended the sample waits were not in \
                               the drained record set"
@@ -789,6 +833,7 @@ fn sample_output_path(
             };
             let split = classify_paints_before_redraw(&all_records, t0, parsed.nanos);
             paints.speculated += split.speculated;
+            paints.agent += split.agent;
             paints.unexplained += split.unexplained;
             #[allow(clippy::cast_precision_loss)]
             deltas_ms.push((paint.nanos - parsed.nanos) as f64 / 1_000_000.0);
@@ -1546,19 +1591,20 @@ mod tests {
     }
 
     /// The output row's interval is the keystroke's own echo: both halves
-    /// anchor on the write that keystroke's chain produced. Anchoring
+    /// anchor on the handoff that keystroke's chain produced. Anchoring
     /// either back on the keypress timestamp readmits any redraw the
-    /// engine happened to be doing -- which under a streaming agent turn
-    /// is continuous, and would price the agent's cadence as view's echo.
+    /// engine happened to be doing, and anchoring on the write tap instead
+    /// skips the keystroke's own redraw whenever the writing thread was
+    /// descheduled between the syscall and its tap.
     #[test]
-    fn the_output_row_anchors_its_redraw_on_the_keystrokes_own_write() {
+    fn the_output_row_anchors_its_redraw_on_the_keystrokes_own_handoff() {
         let body = body_of("sample_output_path");
         assert!(
-            body.contains("r.tag == b'R' && r.nanos >= written.nanos"),
+            body.contains("r.tag == b'R' && r.nanos >= handoff.nanos"),
             "the redraw wait no longer anchors on this keystroke's own RPC write"
         );
         assert!(
-            body.contains("measured_frame(&all_records, written.nanos)"),
+            body.contains("measured_frame(&all_records, handoff.nanos)"),
             "the measured frame no longer anchors on this keystroke's own RPC write"
         );
     }
@@ -1606,6 +1652,72 @@ mod tests {
     }
 
     #[test]
+    fn an_announced_agent_repaint_is_explained_rather_than_counted_against_the_bar() {
+        // t=110 the agent's own frame, t=130 a paint nothing announced
+        let records = [
+            tap(b'A', 1, 105),
+            tap(b'T', 2, 110),
+            tap(b'T', 3, 130),
+            tap(b'D', 4, 140),
+            tap(b'T', 5, 150),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 200),
+            PaintSplit {
+                speculated: 1,
+                agent: 1,
+                unexplained: 1,
+            }
+        );
+    }
+
+    /// The shape the AI rows produce constantly: the panel's frame starts
+    /// before the keypress and its write lands after it, ~250us later.
+    #[test]
+    fn an_announcement_from_the_frame_in_flight_still_explains_its_write() {
+        let records = [
+            tap(b'T', 1, 50),
+            tap(b'A', 2, 90),
+            tap(b'T', 3, 110),
+            tap(b'R', 4, 200),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 200),
+            PaintSplit {
+                speculated: 0,
+                agent: 1,
+                unexplained: 0,
+            }
+        );
+        // an announcement the previous write already consumed explains
+        // nothing: it is older than the frame in flight
+        let consumed = [
+            tap(b'A', 1, 40),
+            tap(b'T', 2, 50),
+            tap(b'T', 3, 110),
+            tap(b'R', 4, 200),
+        ];
+        assert_eq!(
+            classify_paints_before_redraw(&consumed, 100, 200).unexplained,
+            1
+        );
+    }
+
+    #[test]
+    fn a_frame_that_is_both_a_prediction_and_an_agent_repaint_counts_as_the_prediction() {
+        let records = [tap(b'A', 1, 105), tap(b'D', 2, 106), tap(b'T', 3, 110)];
+        assert_eq!(
+            classify_paints_before_redraw(&records, 100, 200).speculated,
+            1
+        );
+        let other_order = [tap(b'D', 1, 105), tap(b'A', 2, 106), tap(b'T', 3, 110)];
+        assert_eq!(
+            classify_paints_before_redraw(&other_order, 100, 200).speculated,
+            1
+        );
+    }
+
+    #[test]
     fn parse_record_round_trips_the_tap_line_shape() {
         assert_eq!(
             parse_record("W 42 123456789"),
@@ -1649,6 +1761,7 @@ mod tests {
             classify_paints_before_redraw(&records, 100, 180),
             PaintSplit {
                 speculated: 0,
+                agent: 0,
                 unexplained: 1
             }
         );
@@ -1694,6 +1807,7 @@ mod tests {
             classify_paints_before_redraw(&records, 100, 180),
             PaintSplit {
                 speculated: 0,
+                agent: 0,
                 unexplained: 2
             }
         );
@@ -1716,6 +1830,7 @@ mod tests {
             classify_paints_before_redraw(&records, 100, 180),
             PaintSplit {
                 speculated: 1,
+                agent: 0,
                 unexplained: 1
             },
             "one announcement explains one write; the second write has nothing behind it"
@@ -1733,6 +1848,7 @@ mod tests {
             classify_paints_before_redraw(&records, 100, 180),
             PaintSplit {
                 speculated: 0,
+                agent: 0,
                 unexplained: 1
             }
         );
@@ -1749,6 +1865,7 @@ mod tests {
             classify_paints_before_redraw(&doubled, 100, 180),
             PaintSplit {
                 speculated: 1,
+                agent: 0,
                 unexplained: 1
             }
         );
@@ -1825,6 +1942,7 @@ mod tests {
             classify_paints_before_redraw(&records, 100, 180),
             PaintSplit {
                 speculated: 1,
+                agent: 0,
                 unexplained: 0
             }
         );

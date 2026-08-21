@@ -429,6 +429,10 @@ impl Term {
         if surface.carries_speculation() {
             crate::tap::tap(crate::tap::TAG_SPECULATED_PAINT);
         }
+        #[cfg(all(unix, feature = "bench-taps"))]
+        if !grid_damage.full && grid_damage.rows.is_empty() && surface.carries_agent_panel() {
+            crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
+        }
         let mut sink = FrameBuf(Rc::clone(&self.frame_buf));
         if self.last_mouse_reporting != Some(model.engine.mouse_on) {
             if model.engine.mouse_on {

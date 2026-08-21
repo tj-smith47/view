@@ -308,6 +308,19 @@ impl Surface {
     /// without this layer being present: `speculated_col` advances only for a
     /// pending cell that is on-grid, and every on-grid pending cell is in
     /// this layer (see `a_caret_advance_cannot_happen_without_the_layer`).
+    /// Whether this frame paints the agent panel.
+    ///
+    /// The panel is an overlay layer, so this answers "the panel is on
+    /// screen in this frame", not "the panel changed": what separates an
+    /// agent-driven repaint from a keystroke's is the grid damage beside
+    /// it, which the painter has and this layer does not.
+    #[must_use]
+    pub fn carries_agent_panel(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(&layer.kind, LayerKind::Ai(_)))
+    }
+
     #[must_use]
     pub fn carries_speculation(&self) -> bool {
         self.layers
@@ -2369,6 +2382,16 @@ mod tests {
         predict(&mut model, 'a', (7, 0), 0);
 
         assert!(speculated_cells(&render(&model)).is_none());
+    }
+
+    /// The panel's own frames are what a bench row attributes an otherwise
+    /// unexplained paint to, so the answer has to follow the panel.
+    #[test]
+    fn only_a_frame_that_paints_the_panel_carries_the_agent_panel() {
+        let mut model = model_with_grid(20, 6);
+        assert!(!render(&model).carries_agent_panel());
+        model.push_overlay(OverlayBox::new(40, 60), OverlayKind::Ai);
+        assert!(render(&model).carries_agent_panel());
     }
 
     /// The resting frame carries nothing to attribute, and the burst frame

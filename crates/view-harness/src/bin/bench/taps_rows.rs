@@ -139,6 +139,14 @@ pub(crate) fn run_taps_row(
             outcome.paints.speculated
         );
     }
+    if outcome.paints.agent > 0 {
+        println!(
+            "      paints the agent panel explains: {} of {keystrokes} keystrokes (a frame \
+             painting the panel with no grid damage in it, which is the streamed turn painting \
+             itself); outside this row's boundary and explained -- no bar",
+            outcome.paints.agent
+        );
+    }
     if outcome.paints.unexplained > 0 {
         println!(
             "      paints with no redraw behind them: {} of {keystrokes} keystrokes (view \

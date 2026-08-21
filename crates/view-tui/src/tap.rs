@@ -83,6 +83,16 @@ pub const TAG_AREA_RESOLVED: u8 = b'G';
 /// cost, which a tap landing inside it would inflate. A reader pairs it
 /// with the next terminal write, which is this frame's.
 pub const TAG_SPECULATED_PAINT: u8 = b'D';
+/// The frame now being drawn paints the agent panel and carries no engine
+/// grid damage at all, so the write closing it is view's own surfaces
+/// repainting -- a streamed agent chunk, most of all -- rather than
+/// anything the keystroke did.
+///
+/// Paired with the next terminal write exactly as [`TAG_SPECULATED_PAINT`]
+/// is, and deliberately silent on any frame that also carries grid damage:
+/// such a frame is at least partly the engine's answer, and announcing it
+/// would explain away a paint the engine is entitled to be blamed for.
+pub const TAG_AGENT_PAINT: u8 = b'A';
 /// This frame's damaged rows are composited into the shadow. With
 /// [`TAG_AREA_RESOLVED`] this brackets damage resolution and compositing,
 /// and with [`TAG_FLUSH_START`] the backend diff and escape encode, so
