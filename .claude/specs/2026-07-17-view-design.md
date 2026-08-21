@@ -669,8 +669,17 @@ exists to kill. view treats the agent as a peer subsystem with native UI.
   screen.
 - **Edits flow in** as reviewable native diff overlays: hunk-by-hunk
   accept/reject rendered by view, applied through batched
-  `Effect::Rpc(nvim_buf_set_text …)` calls, one undo step per accept
-  (undojoin policy). Hunks rebase live against concurrent user edits
+  `Effect::Rpc(nvim_buf_set_text …)` calls, **one undo entry per review,
+  not per accept**: the first accept of a review opens the entry and every
+  later accept joins it, so a single `u` retracts the whole review. Never
+  one entry per line-range within a hunk, and never an accept chain joined
+  onto the user's own preceding edit. **Amended 2026-08-21.** This line
+  promised "one undo step per accept (undojoin policy)" until the plan's
+  `ea41a92` found that promise unsatisfiable: `:undojoin` merges into the
+  previous entry by construction, so per-hunk undo stepping is not
+  representable with it at all, and the two halves of the old wording
+  contradicted each other. The spec follows the mechanism rather than
+  asking the mechanism to follow it. Hunks rebase live against concurrent user edits
   (`nvim_buf_attach` change events adjust offsets); a hunk whose context no
   longer matches is marked stale and re-diffed — never force-applied. Edits
   to files with no loaded buffer are reviewed in an RPC-loaded hidden buffer
