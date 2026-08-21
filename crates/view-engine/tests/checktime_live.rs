@@ -68,6 +68,28 @@ impl Drop for Scratch {
     }
 }
 
+/// A listener bound at a short path under the system temp dir, with the
+/// asked-for path symlinked to it. `sun_path` caps a bindable socket path
+/// near 104 bytes and the scratch root's nonce alone puts a path under it
+/// at that edge on CI runners, so the bind never happens at the scratch
+/// path itself. The probe stats through the link, so the path reads as a
+/// socket either way -- the same reach the device case gets from its
+/// `/dev/null` symlink. The socket file outlives the listener on purpose:
+/// the path must keep reading as a socket after the binder returns, and a
+/// tiny `view-ct-*.sock` left in the system temp dir is the OS's to sweep,
+/// unlike anything under `target/`.
+#[cfg(unix)]
+fn socket_at(path: &std::path::Path) -> std::os::unix::net::UnixListener {
+    static NONCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let short = std::env::temp_dir().join(format!("view-ct-{}-{n}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&short);
+    let listener =
+        std::os::unix::net::UnixListener::bind(&short).expect("bind a socket at a short path");
+    std::os::unix::fs::symlink(&short, path).expect("point the path at the socket");
+    listener
+}
+
 fn scratch_root(nonce_suffix: &str) -> Scratch {
     let nonce = format!(
         "{}-{}-{}",
@@ -732,8 +754,7 @@ fn a_forced_reload_of_a_path_that_became_a_pipe_reloads_nothing() {
 fn a_forced_reload_of_a_path_that_became_a_socket_or_a_device_reloads_nothing() {
     let row = forced_reload_after("force-socket", |path| {
         std::fs::remove_file(path).expect("remove the file out of band");
-        let _listener =
-            std::os::unix::net::UnixListener::bind(path).expect("bind a socket in its place");
+        let _socket = socket_at(path);
     });
     assert_eq!(row.probe, CheckTimeOutcome::FileGone { modified: true });
     assert_eq!(row.outcome, CheckTimeOutcome::FileGone { modified: true });
@@ -850,8 +871,7 @@ fn an_unforced_probe_answers_every_path_in_a_batch_around_an_unreadable_one() {
     settle_mtime();
     std::fs::write(&conflict, "changed-externally\n").expect("external write");
     std::fs::remove_file(&socket).expect("remove the socket's fixture");
-    let _listener =
-        std::os::unix::net::UnixListener::bind(&socket).expect("bind a socket in its place");
+    let _listener = socket_at(&socket);
     std::fs::remove_file(&device).expect("remove the device's fixture");
     std::os::unix::fs::symlink("/dev/null", &device).expect("point the path at a device");
 

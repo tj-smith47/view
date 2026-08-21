@@ -1,0 +1,8 @@
+# Byte-sensitive tests compare repo files (wire-capture docs, oracle
+# corpora) against compiled-in constants, so every checkout must produce
+# the same bytes: LF everywhere, no autocrlf rewrites on Windows runners.
+* text=auto eol=lf
+
+# Windows batch fixtures are CRLF by the format's own requirement; stored
+# and checked out byte-for-byte.
+*.cmd -text
