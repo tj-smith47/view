@@ -479,6 +479,7 @@ leg_streaming_and_tool_status() {
     # satisfy every check that only looked for the event's name.
     wait_for_log "ai UsageUpdated \{ used: $STREAM_USED, size: $STREAM_SIZE" "$WAIT_SECS" \
         "the streamed usage accounting" >/dev/null
+    wait_for "$USAGE_ROW" "$WAIT_SECS" "the accounting on the panel itself" >/dev/null
     pass 'every streamed update kind reached the panel'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -809,6 +810,10 @@ STREAM_SIZE=$(grep -oE '"size": [0-9]+' "$STUB_RS" | grep -oE '[0-9]+$')
     printf 'FAIL: the stub agent no longer streams a usage update in %s\n' "$STUB_RS" >&2
     exit 1
 }
+# How the panel spells that accounting once it holds it, from the format
+# that builds the row.
+require_template "$PANEL_RS" '"context {}/{}"' || exit 1
+USAGE_ROW="context $STREAM_USED/$STREAM_SIZE"
 # The file the filesystem legs name, and the content the write leg sends,
 # both read from the same fixture for the same reason.
 STUB_FS_FILE=$(grep -oE 'named_inside_cwd\("[^"]+"\)' "$STUB_RS" | head -1 |
