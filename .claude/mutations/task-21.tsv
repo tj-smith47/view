@@ -1,4 +1,10 @@
 crates/view-ai/src/provision.rs	Some(root) => !declares_dependencies(&root) || root.join("node_modules").is_dir(),	Some(root) => root.exists(),	-p view-ai --lib provision
 crates/view-ai/src/provision.rs	.is_some_and(|deps| !deps.is_empty())	.is_some()	-p view-ai --lib provision
-crates/view-core/src/update/mod.rs	                    if !notation.starts_with('<') {	                    if true {	-p view-core ctrl_c_cancels
+crates/view-ai/src/provision.rs	        Some(version) if version == pin.version => Ok(lockfile),	        Some(version) if version != pin.version => Ok(lockfile),	-p view-ai --lib provision
+crates/view-core/src/update/mod.rs	                    if !is_panel_exit_key(&notation) {	                    if true {	-p view-core ctrl_c_cancels
+crates/view-core/src/update/mod.rs	    matches!(notation, "<Esc>" | "<C-c>" | "<C-d>")	    notation.starts_with('<')	-p view-core the_composer_is_not_editable
+crates/view-core/src/update/mod.rs	                    if !panel.turn_in_flight && !panel.input.trim().is_empty() {	                    if !panel.input.trim().is_empty() {	-p view-core a_second_prompt_cannot_be_submitted
+crates/view-core/src/update/ai.rs	            let had_pending = panel.pending_permission.take().is_some();	            let had_pending = panel.pending_permission.is_some();	-p view-core a_turn_ending_clears
+crates/view/src/vlog.rs	const PAYLOAD_CAP: usize = 120;	const PAYLOAD_CAP: usize = 1_000_000;	-p view --bin view an_unbounded_ai_payload
+crates/view/src/ai_worker.rs	    let version = view_ai::pinned_version(id)?;	    let version = view_ai::pinned_version(id).unwrap_or("");	-p view --bin view nothing_that_starts_without_waiting
 crates/view-ai/tests/fixtures/stub_agent.rs	        .or_else(|| outcome["outcome"].as_str())	        .or_else(|| None)	-p view-ai --test session a_cancel_settles

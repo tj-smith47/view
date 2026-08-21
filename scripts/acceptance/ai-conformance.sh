@@ -17,19 +17,31 @@
 #
 #   * the pinned adapter itself (the `[ai] agent` default, provisioned by
 #     the same code path a first-run user gets) drives the session
-#     lifecycle. It is the only agent that can prove the handshake against
-#     a real ACP implementation rather than this repo's reading of one.
+#     lifecycle, a real streamed turn and a real tool call. It is the only
+#     agent that can prove any of that against a real ACP implementation
+#     rather than this repo's reading of one -- so what it asserts is that
+#     the thing happened and in what order, never what the model said.
 #   * the stub agent drives everything a real agent cannot be asked to do
 #     on demand: stream a named sequence, hold a tool call non-terminal,
 #     propose a specific diff, overlap two permission requests, die
 #     mid-turn. It is a real subprocess speaking real JSON-RPC over real
 #     pipes -- what it is not is a language model, and a scenario that
 #     needs an agent to do one exact thing at one exact moment cannot be
-#     obtained from one.
+#     obtained from one. That is what buys the exact assertions: the two
+#     layers together are "it really happens" plus "it happens exactly so".
 #
-# Every string asserted below is read out of the source that owns it, so a
-# reworded row fails here loudly rather than leaving an assertion quietly
-# matching nothing.
+# Almost every string asserted below is read out of the source that owns it,
+# so a reworded row fails here loudly rather than leaving an assertion
+# quietly matching nothing. The exceptions are the handful built from the
+# wire's own pinned vocabulary (`docs/acp-v1-wire-capture.md`) rather than
+# from a `&str` constant, each guarded by a check that the template it slots
+# into still exists.
+#
+# Needs `tmux`, `node` and `npm` for the agent leg, a network for the one
+# cold provision, and credentials the pinned adapter can authenticate with
+# for the real turn it drives. All three fail loudly rather than skipping:
+# an acceptance leg that quietly opts out of the thing it exists to prove is
+# worse than one that is not there.
 set -euo pipefail
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
@@ -44,9 +56,11 @@ REVIEW_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/review.rs
 PERMISSION_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/permission.rs
 TRANSCRIPT_RS=$REPO_ROOT/crates/view-core/src/native/ai_panel/transcript.rs
 
-# Wide enough that no panel row is truncated before the text an assertion
-# greps for, tall enough that a review, a transcript and a banner are on
-# screen together.
+# The panel is a fixed-width column beside the buffer, so widening the
+# terminal does not widen it: these are chosen for the buffer and for having
+# a review, a transcript and a banner on screen together, and the rows that
+# still truncate are asserted on a leading prefix or read out of the log
+# instead (each such assertion says so where it stands).
 COLS=140
 ROWS=44
 # How often the screen is read. Charged in full to every measurement, so it
@@ -59,16 +73,20 @@ WAIT_SECS=30
 # What provisioning is given, which is a download and a dependency install
 # on a cold cache.
 PROVISION_SECS=180
-# The window a frame must render within after the agent process dies. The
-# paint loop owes the same responsiveness with a dead agent as with a live
-# one; this is the bound that says so rather than an assertion that it
-# "does not stall".
+# The window a frame must render within after the agent process dies. A
+# liveness bound, not a paint budget: it says the loop is not blocked on a
+# dead agent's pipe, which is what this leg is about, and it is orders of
+# magnitude looser than anything in the spec's own §3.1 table -- those are
+# measured by `view-bench` against a quiet host, never through tmux.
 FRAME_BUDGET_SECS=2.5
 
 SESSIONS=()
 ROOTS=()
 SESSION=""
 ROOT=""
+# Assigned once the artifact checks below have passed; declared here so the
+# exit trap can clear it even for a run that never got that far.
+RESUME_FILE=""
 CURRENT_LEG=startup
 DUMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/view-ai-conformance-XXXXXX")
 
@@ -78,6 +96,15 @@ cleanup() {
     for session in ${SESSIONS[@]+"${SESSIONS[@]}"}; do
         tmux kill-session -t "$session" 2>/dev/null || true
     done
+    # `tmux kill-session` returns before the pane's own process is gone, and
+    # a removal that overtakes a still-live `view` walks past directories it
+    # then re-creates -- which is how a "cleaned up" root survives the run
+    # holding an empty state directory.
+    for _ in 1 2 3 4 5 6 7 8 9 10; do
+        pgrep -f "$VIEW_BIN" >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+    rm -f "$RESUME_FILE"
     for root in ${ROOTS[@]+"${ROOTS[@]}"}; do
         [ -n "$root" ] && rm -rf "$root"
     done
@@ -136,6 +163,17 @@ status_label() {
     printf '%s' "$value"
 }
 
+# The literal `text` in `file`, as a check that a string this script builds
+# from the wire's own vocabulary still has a template in the source to slot
+# into. Prints nothing; fails loudly when the template is gone.
+require_template() {
+    local file="$1" text="$2"
+    if ! grep -qF -- "$text" "$file"; then
+        printf 'FAIL: %s no longer builds its rows from the template %s\n' "$file" "$text" >&2
+        return 1
+    fi
+}
+
 # Waits for `text` to appear on screen, and reports how long it took.
 wait_for() {
     local text="$1" budget="$2" what="$3" start el
@@ -174,6 +212,26 @@ wait_for_log() {
     done
 }
 
+# The mirror of `wait_for`: waits for `text` to stop being on screen. What
+# synchronises a keystroke against the state change it asks for, when the
+# thing that proves the change is a row leaving rather than arriving.
+until_gone() {
+    local text="$1" budget="$2" what="$3" start el
+    start=$(now)
+    while :; do
+        if ! pane | grep -qF -- "$text"; then
+            elapsed "$start" "$(now)"
+            return 0
+        fi
+        el=$(elapsed "$start" "$(now)")
+        if ! under "$el" "$budget"; then
+            fail "$what did not happen within ${budget}s ('$text' is still on screen)"
+            return 1
+        fi
+        sleep "$POLL"
+    done
+}
+
 refute() {
     local text="$1" what="$2"
     if pane | grep -qF -- "$text"; then
@@ -197,6 +255,7 @@ start_session() {
     SESSION="view-ai-conf-$$-$tag"
     ROOT=$(mktemp -d "${TMPDIR:-/tmp}/view-ai-conf-$tag-XXXXXX")
     ROOTS+=("$ROOT")
+    ROOTS+=("$cache")
     cp -R "$FIXTURE" "$ROOT/xdg_config_home"
     mkdir -p "$ROOT/xdg_data_home" "$ROOT/xdg_state_home" "$cache"
     if [ "$agent" != "default" ]; then
@@ -230,7 +289,7 @@ open_panel() {
     local budget="$1"
     send_text ':View ai open'
     send_key Enter
-    wait_for 'Trust ' "$WAIT_SECS" "the project trust prompt" >/dev/null
+    wait_for "$TRUST_PROMPT" "$WAIT_SECS" "the project trust prompt" >/dev/null
     send_text 'y'
     wait_for "$FOCUSED_TITLE" "$budget" "the entered agent panel" >/dev/null
 }
@@ -243,17 +302,27 @@ submit() {
 # Leaves the panel, writes the buffer, and compares the file byte for byte
 # with what was expected -- the diff review's contract is a byte-exact
 # buffer mutation, and a screen that looks right is not that claim.
+#
+# Written and re-read until it settles rather than once: an accept reaches
+# the buffer over RPC, and a `:w` dispatched in the same breath as the
+# keystroke can win that race on a loaded host and write the file the accept
+# had not landed in yet. A wrong answer that never settles still fails, at
+# the budget, with the bytes it actually found.
 assert_file_is() {
-    local expected="$1" what="$2" actual
+    local expected="$1" what="$2" actual start
     send_key Escape
-    send_text ':w'
-    send_key Enter
-    sleep "$POLL"
-    actual=$(cat "$ROOT/view-ai-stub-diff.txt")
-    if [ "$actual" != "$expected" ]; then
-        fail "$what -- the file holds $(printf '%q' "$actual"), expected $(printf '%q' "$expected")"
-        return 1
-    fi
+    start=$(now)
+    while :; do
+        send_text ':w'
+        send_key Enter
+        sleep "$POLL"
+        actual=$(cat "$ROOT/view-ai-stub-diff.txt")
+        [ "$actual" = "$expected" ] && break
+        if ! under "$(elapsed "$start" "$(now)")" "$WAIT_SECS"; then
+            fail "$what -- the file holds $(printf '%q' "$actual"), expected $(printf '%q' "$expected")"
+            return 1
+        fi
+    done
     send_text ':View ai focus'
     send_key Enter
     wait_for "$FOCUSED_TITLE" "$WAIT_SECS" "the panel re-entered after the write" >/dev/null
@@ -261,16 +330,25 @@ assert_file_is() {
 
 leg_session_lifecycle() {
     CURRENT_LEG=1-session-lifecycle
-    local took
+    local took chunks
     start_session lifecycle default "$ADAPTER_CACHE"
     open_panel "$WAIT_SECS"
     # A session starts on the first command, never on the panel opening, so
     # the lifecycle is driven the way a user drives it: by asking the agent
-    # something. What the agent then makes of the question is not this
-    # leg's subject -- reaching a bound session is.
-    submit 'hello'
-    # Provisioning (download, verify, extract, dependency install) happens
-    # on the way to the handshake, so this budget carries it.
+    # something. The question names a file that is not the open buffer, so
+    # it cannot be answered out of the context view assembles and sends
+    # along with every prompt (`view_ai::context::assemble`) -- answering it
+    # takes a real tool call -- and it asks for prose rather than a word, so
+    # the answer is long enough to arrive in more than one chunk.
+    printf 'The mailbox key lives in the blue tin on the third shelf.\n' \
+        >"$ROOT/notes.txt"
+    submit 'Read notes.txt in this directory and tell me, in two full sentences, where the mailbox key is and what it is kept in.'
+    # Before anything else: the wait itself is announced. A first run that
+    # downloads and installs an agent while the panel sits silent is
+    # indistinguishable from a feature that does not work.
+    wait_for "$PROVISION_NOTICE" "$WAIT_SECS" "the first-run provisioning notice" >/dev/null
+    # Provisioning (download, verify, install from the pinned lockfile)
+    # happens on the way to the handshake, so this budget carries it.
     took=$(wait_for_log 'ai SessionReady' "$PROVISION_SECS" \
         "the pinned adapter's session")
     if ! find "$ADAPTER_CACHE" -maxdepth 8 -type d -name node_modules | grep -q .; then
@@ -282,13 +360,62 @@ leg_session_lifecycle() {
         return 1
     fi
     pass "the pinned adapter $PINNED_VERSION reached session/new in ${took}s"
+
+    # Everything below asserts occurrences and their order, never content: a
+    # model's words are its own, and a leg that pinned them would be a test
+    # of the model. The exact rendering of each of these is leg 2's subject,
+    # against an agent that can be told what to send.
+    wait_for_log 'ai TurnEnded' "$PROVISION_SECS" "the real agent's turn ending" >/dev/null
+    # Rendered incrementally means more than one chunk crossed the loop and
+    # was folded into the transcript, each one repainting -- a turn
+    # delivered whole at its end logs exactly one.
+    chunks=$(grep -cE 'ai MessageChunk .*from_agent: true' "$ROOT/view.log" || true)
+    if [ "${chunks:-0}" -lt 2 ]; then
+        fail "the real agent's reply arrived in $chunks chunk(s); a streamed turn is more than one"
+        return 1
+    fi
+    if ! wait_for "$AGENT_PREFIX" "$WAIT_SECS" "the real agent's reply in the panel" >/dev/null; then
+        return 1
+    fi
+    pass "a real streamed reply reached the panel in $chunks chunks"
+
+    assert_tool_call_went_non_terminal_then_terminal || return 1
+    pass 'a real tool call was observed non-terminal, then terminal'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
+}
+
+# The status sequence one real tool call was seen in. Read from the log
+# rather than the screen because it is the order that is being asserted, and
+# the log's own line order is arrival order -- a screen poll could only ever
+# say which statuses were reachable, never which came first. The vocabulary
+# is the wire's (`docs/acp-v1-wire-capture.md` pins
+# `pending`/`in_progress`/`completed`/`failed`); which call it belongs to and
+# what it was called are the agent's business, not this leg's.
+assert_tool_call_went_non_terminal_then_terminal() {
+    local statuses first_terminal first_non_terminal
+    statuses=$(grep -oE 'ai ToolCallUpdate .*status: [A-Za-z]+' "$ROOT/view.log" |
+        grep -oE '[A-Za-z]+$' || true)
+    if [ -z "$statuses" ]; then
+        fail 'the real agent made no tool call at all'
+        return 1
+    fi
+    first_non_terminal=$(printf '%s\n' "$statuses" | grep -nE '^(Pending|InProgress)$' |
+        head -1 | cut -d: -f1)
+    first_terminal=$(printf '%s\n' "$statuses" | grep -nE '^(Completed|Failed)$' |
+        head -1 | cut -d: -f1)
+    if [ -z "$first_non_terminal" ] || [ -z "$first_terminal" ]; then
+        fail "a real tool call was never seen both non-terminal and terminal (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
+        return 1
+    fi
+    if [ "$first_non_terminal" -ge "$first_terminal" ]; then
+        fail "the tool call reached a terminal status before a non-terminal one (saw: $(printf '%s' "$statuses" | tr '\n' ' '))"
+        return 1
+    fi
 }
 
 leg_streaming_and_tool_status() {
     CURRENT_LEG=2-streaming-and-tool-status
     local resume
-    ROOT=""
     start_session stream "$STUB_ARGV" "$(mktemp -d)"
     resume=$RESUME_FILE
     rm -f "$resume"
@@ -298,13 +425,15 @@ leg_streaming_and_tool_status() {
     # Mid-turn: the message is half written and the call is not finished.
     # Both are rendered before anything ends, which is what "streams" means
     # for a panel -- a turn rendered only at its end shows neither.
-    wait_for 'Agent: streaming' "$WAIT_SECS" "the first half of the streamed message" >/dev/null
+    wait_for "${AGENT_PREFIX}streaming" "$WAIT_SECS" \
+        "the first half of the streamed message" >/dev/null
     wait_for "$RUNNING_LABEL: Probe the file" "$WAIT_SECS" \
         "the tool call's non-terminal status" >/dev/null
-    refute 'Agent: streaming and done' "the turn's second half rendered before it was sent"
+    refute "${AGENT_PREFIX}streaming and done" \
+        "the turn's second half rendered before it was sent"
 
     touch "$resume"
-    wait_for 'Agent: streaming and done' "$WAIT_SECS" \
+    wait_for "${AGENT_PREFIX}streaming and done" "$WAIT_SECS" \
         "the streamed message growing in place" >/dev/null
     wait_for "$DONE_LABEL: Probe the file" "$WAIT_SECS" \
         "the tool call's terminal status" >/dev/null
@@ -317,8 +446,8 @@ leg_streaming_and_tool_status() {
     # later ones are inside a row the panel's width has already truncated.
     submit 'stream'
     wait_for "$DONE_LABEL: Read a.rs" "$WAIT_SECS" "the streamed tool call" >/dev/null
-    wait_for '[terminal content]' "$WAIT_SECS" "the streamed terminal content" >/dev/null
-    wait_for 'plan [' "$WAIT_SECS" "the streamed plan" >/dev/null
+    wait_for "$TERMINAL_CONTENT" "$WAIT_SECS" "the streamed terminal content" >/dev/null
+    wait_for "$PLAN_PREFIX" "$WAIT_SECS" "the streamed plan" >/dev/null
     pass 'every streamed update kind reached the panel'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -332,7 +461,12 @@ leg_diff_accept_and_reject() {
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the diff review's keys" >/dev/null
     wait_for '+BETA' "$WAIT_SECS" "the proposed hunk" >/dev/null
     send_text 'a'
-    wait_for 'BETA' "$WAIT_SECS" "the accepted hunk in the buffer" >/dev/null
+    # The review closing on its last open hunk, not the `+BETA` row the line
+    # above already proved is on screen -- that string is what the proposal
+    # renders as either way, so waiting on it would return on its first poll
+    # whether or not the accept did anything, and would leave the write
+    # below racing the RPC that carries the accept into the buffer.
+    until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the accept" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'the accepted hunk was not written byte for byte'
@@ -342,6 +476,7 @@ gamma' 'the accepted hunk was not written byte for byte'
     wait_for "$REVIEW_KEY_HINT" "$WAIT_SECS" "the second diff review's keys" >/dev/null
     wait_for '+GAMMA' "$WAIT_SECS" "the second proposed hunk" >/dev/null
     send_text 'x'
+    until_gone "$REVIEW_KEY_HINT" "$WAIT_SECS" "the review closing on the reject" >/dev/null
     assert_file_is 'alpha
 BETA
 gamma' 'a rejected hunk changed the buffer'
@@ -360,12 +495,17 @@ leg_cancel_mid_turn() {
     send_key C-c
     # Half one, read back from the agent itself: what it was handed for the
     # request it was holding. The wire's own word, not an option it offered.
-    wait_for 'Agent: chose cancelled' "$WAIT_SECS" \
+    wait_for "${AGENT_PREFIX}chose cancelled" "$WAIT_SECS" \
         "the pending permission settled as cancelled" >/dev/null
     # Half two: the original prompt's own promise. Nothing on screen carries
     # a stop reason, so this is read where the loop recorded it.
     wait_for_log 'ai TurnEnded \{ stop_reason: Cancelled \}' "$WAIT_SECS" \
         "the cancelled turn" >/dev/null
+    # ... and the user-visible consequence of both: the question the agent
+    # is no longer waiting on an answer to is off the screen. A regression
+    # that settled the wire correctly and left a dead prompt pinned there
+    # forever would satisfy every assertion above this one.
+    refute "$PERMISSION_PROMPT" 'the cancelled permission prompt stayed on screen'
     pass 'both halves of the cancellation contract, driven from the keyboard'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
@@ -381,8 +521,7 @@ leg_agent_crash() {
     # session belongs to, not a modal over the buffer and not a toast that
     # ages out of a long-running session unseen.
     wait_for_log 'ai SessionCrashed' "$WAIT_SECS" "the agent's death" >/dev/null
-    wait_for 'Error: ' "$WAIT_SECS" "the panel-local crash notice" >/dev/null
-    refute 'Trust ' 'the crash was raised as a modal rather than in the panel'
+    wait_for "$CRASH_PREFIX" "$WAIT_SECS" "the panel-local crash notice" >/dev/null
 
     # Immediately after the crash, with no dismissal and no recovery in
     # between: a keystroke reaches the buffer and its frame renders. A loop
@@ -398,6 +537,18 @@ leg_agent_crash() {
         return 1
     fi
     pass "a frame rendered ${took}s after the crash, banner still up"
+
+    # Which surface the notice is on, checked by acting on it rather than by
+    # noting the absence of some other overlay: the panel's own banner is
+    # what `<C-d>` inside the panel clears, and nothing modal answers that
+    # key at all.
+    send_text ':View ai focus'
+    send_key Enter
+    wait_for "$FOCUSED_TITLE" "$WAIT_SECS" "the panel re-entered over the banner" >/dev/null
+    send_key C-d
+    sleep "$POLL"
+    refute "$CRASH_PREFIX" 'the crash notice did not answer the panel-local dismiss key'
+    pass 'the crash notice was the panel-local banner, dismissed from inside the panel'
     tmux kill-session -t "$SESSION" 2>/dev/null || true
 }
 
@@ -412,7 +563,7 @@ leg_permission_overlap() {
     # The second request is answered rather than left hanging, and answered
     # with an outcome rather than an error -- the agent reports the word it
     # was handed, so a reply shape it could not read would name a code here.
-    wait_for 'Agent: overlap cancelled' "$WAIT_SECS" \
+    wait_for "${AGENT_PREFIX}overlap cancelled" "$WAIT_SECS" \
         "the overlapping request's reply" >/dev/null
     # ... and the first request is still the one on screen, unanswered.
     wait_for "$PERMISSION_PROMPT call_001" "$WAIT_SECS" \
@@ -460,6 +611,43 @@ PERMISSION_PROMPT=$(grep -oE 'format!\("Permission requested for' "$PERMISSION_R
         "$PERMISSION_RS" >&2
     exit 1
 }
+# How the transcript labels the agent's own side of the conversation, and
+# the separator it joins to -- one row's whole prefix, from the two places
+# that own its halves.
+AGENT_PREFIX=$(grep -oE 'TranscriptRole::Agent => "[A-Za-z]+"' "$TRANSCRIPT_RS" |
+    sed -E 's/.*"(.*)"/\1/')
+[ -n "$AGENT_PREFIX" ] || {
+    printf 'FAIL: TranscriptRole::Agent has no rendered label in %s any more\n' \
+        "$TRANSCRIPT_RS" >&2
+    exit 1
+}
+require_template "$TRANSCRIPT_RS" '"{prefix}: {}"' || exit 1
+AGENT_PREFIX="$AGENT_PREFIX: "
+# A plan row's own opening, and a placeholder for a content kind the panel
+# shows a label for rather than the content itself. Both are built from the
+# wire's pinned vocabulary (`docs/acp-v1-wire-capture.md`'s `Plan` and
+# `Terminal` pins) slotted into a template that lives in the source, so the
+# template is what is checked and the wire word is what is substituted.
+require_template "$TRANSCRIPT_RS" '"plan [{status}, {priority}]: {}"' || exit 1
+PLAN_PREFIX='plan ['
+require_template "$REPO_ROOT/crates/view-ai/src/acp/driver.rs" '"[{kind} content]"' || exit 1
+TERMINAL_CONTENT='[terminal content]'
+# The crash banner's own opening, and the trust prompt's -- both `format!`
+# literals rather than `&str` constants, so both are read to their first
+# substitution.
+CRASH_PREFIX=$(grep -oE '"Error: \{message\}' "$PANEL_RS" | sed -E 's/"(.*)\{message\}/\1/')
+[ -n "$CRASH_PREFIX" ] || {
+    printf 'FAIL: the crash banner is not built from a literal in %s any more\n' "$PANEL_RS" >&2
+    exit 1
+}
+TRUST_PROMPT=$(grep -oE '"Trust \{\}' "$REPO_ROOT/crates/view-core/src/update/ai.rs" |
+    sed -E 's/"(.*)\{\}/\1/')
+[ -n "$TRUST_PROMPT" ] || {
+    printf 'FAIL: the AI trust prompt is not built from a literal any more\n' >&2
+    exit 1
+}
+# How the first-run provisioning wait announces itself.
+PROVISION_NOTICE=$(const_str "$REPO_ROOT/crates/view/src/ai_worker.rs" PROVISION_NOTICE_PREFIX)
 
 # The stub agent's first argument is the file whose appearance releases a
 # held turn; one path serves every leg because no two sessions overlap.
