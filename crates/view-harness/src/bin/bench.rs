@@ -100,14 +100,16 @@ const MATRIX: &[(&str, &str)] = &[
 /// announced as skipped, lands in the same lane a platform block lands in,
 /// and the classes it does run on gate it exactly as before.
 ///
-/// The AI rows are scoped to the controlled Linux class the spec section
-/// 3.1 budget rows they feed are scoped to (`classes =
-/// ["controlled-linux"]`). Widening them is a recording on the other
-/// class's own host, not an edit here alone: a class listed with no cell
-/// in its baseline file gates red, which is the point.
+/// The AI rows are scoped to the Linux classes that record them: the
+/// controlled one their spec section 3.1 budget rows name (`classes =
+/// ["controlled-linux"]`, which is where those budgets are evaluated at
+/// all), and the dev class the same host records under shared policy.
+/// Widening them further is a recording on the other class's own host,
+/// not an edit here alone: a class listed with no cell in its baseline
+/// file gates red, which is the point.
 const CLASS_SCOPED: &[(&str, &[&str])] = &[
-    ("ai_session_active", &["dev-linux"]),
-    ("ai_streaming", &["dev-linux"]),
+    ("ai_session_active", &["dev-linux", "controlled-linux"]),
+    ("ai_streaming", &["dev-linux", "controlled-linux"]),
 ];
 
 /// Cells that decompose a gated row instead of being one. They are
