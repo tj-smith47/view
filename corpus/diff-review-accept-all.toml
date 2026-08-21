@@ -1,0 +1,11 @@
+# Accept-all over two hunks, then two undos. One undo must retract the whole
+# review and the second the typing that seeded the buffer, leaving both
+# sides empty -- a review that had written two undo entries instead of one
+# would still be holding its seeded text after the same two keys. The
+# reference side reaches one entry the way nvim's own `:undojoin` does.
+schema = 1
+name = "diff-review-accept-all"
+input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"
+diff_review = "multi-hunk-accept-all"

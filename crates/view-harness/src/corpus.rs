@@ -1,6 +1,7 @@
 //! The corpus TOML schema and loader: each entry is a durable, reviewable
 //! artifact (name, input key-notation, the engine pin it was authored
-//! against, an ext-option set name) instead of a hardcoded Rust test, per
+//! against, an ext-option set name, and optionally the hunk-decision case
+//! it drives) instead of a hardcoded Rust test, per
 //! the design spec's manifest rule (engine pin + ext set travel WITH
 //! the entry, not encoded into a path -- a path-encoded scheme cannot carry
 //! per-entry quiesce overrides and re-keys every entry on a pin bump,
@@ -17,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+use view_oracle::review::DiffReviewCase;
 
 /// The only `schema` value this loader accepts today.
 const SUPPORTED_SCHEMA: u32 = 1;
@@ -60,6 +62,7 @@ struct RawEntry {
     ext_set: String,
     quiesce_silence_ms: Option<u64>,
     quiesce_deadline_ms: Option<u64>,
+    diff_review: Option<String>,
 }
 
 /// One validated, defaults-applied corpus entry, ready for the runner to
@@ -74,6 +77,9 @@ pub struct CorpusEntry {
     pub ext_set: String,
     pub quiesce_silence_ms: u64,
     pub quiesce_deadline_ms: u64,
+    /// The hunk-decision case this entry drives, for the entries that drive
+    /// one. `None` is the ordinary entry: one key script, both sides.
+    pub diff_review: Option<DiffReviewCase>,
 }
 
 /// Errors loading or validating a corpus entry.
@@ -97,6 +103,12 @@ pub enum CorpusError {
     /// `ext_set` named a set this loader does not recognize.
     #[error("unknown ext_set {0:?} (only \"default\" is recognized)")]
     UnknownExtSet(String),
+    /// `diff_review` named a case no [`DiffReviewCase`] answers to. A hard
+    /// load error rather than a skipped entry: an entry naming a case that
+    /// does not exist drives nothing, and a corpus run that quietly dropped
+    /// it would report the same PARITY count as one that ran it.
+    #[error("unknown diff_review case {0:?}")]
+    UnknownDiffReviewCase(String),
 }
 
 /// Parses and validates one corpus entry from its raw TOML text.
@@ -107,8 +119,10 @@ pub enum CorpusError {
 /// field (missing `ext_set` included: it is a required `RawEntry` field,
 /// so `toml`'s own missing-field error covers it without a second check
 /// here), [`CorpusError::UnsupportedSchema`] if `schema` is not
-/// [`SUPPORTED_SCHEMA`], or [`CorpusError::UnknownExtSet`] if `ext_set`
-/// does not name a recognized set.
+/// [`SUPPORTED_SCHEMA`], [`CorpusError::UnknownExtSet`] if `ext_set`
+/// does not name a recognized set, or
+/// [`CorpusError::UnknownDiffReviewCase`] if `diff_review` names a case
+/// that does not exist.
 pub fn parse(raw_toml: &str) -> Result<CorpusEntry, CorpusError> {
     let raw: RawEntry = toml::from_str(raw_toml)?;
     if raw.schema != SUPPORTED_SCHEMA {
@@ -117,6 +131,12 @@ pub fn parse(raw_toml: &str) -> Result<CorpusEntry, CorpusError> {
     if raw.ext_set != DEFAULT_EXT_SET {
         return Err(CorpusError::UnknownExtSet(raw.ext_set));
     }
+    let diff_review = match raw.diff_review {
+        None => None,
+        Some(name) => {
+            Some(DiffReviewCase::from_name(&name).ok_or(CorpusError::UnknownDiffReviewCase(name))?)
+        }
+    };
     Ok(CorpusEntry {
         name: raw.name,
         input: raw.input,
@@ -126,6 +146,7 @@ pub fn parse(raw_toml: &str) -> Result<CorpusEntry, CorpusError> {
         quiesce_deadline_ms: raw
             .quiesce_deadline_ms
             .unwrap_or(DEFAULT_QUIESCE_DEADLINE_MS),
+        diff_review,
     })
 }
 
@@ -176,6 +197,13 @@ struct WritableEntry<'a> {
 /// Rust's `Debug` escaping for `str`, so only the crate that also parses
 /// this format can be trusted to always produce a document it can read
 /// back.
+///
+/// No `diff_review` field is written, and neither caller has one to write:
+/// the minimizer refuses a diff-review entry outright (its ddmin predicate
+/// reduces a key script, which is not what such an entry's failure is made
+/// of) and the fuzz generator only ever produces key scripts. That refusal
+/// is what keeps this omission from silently stripping a case name off an
+/// entry it rewrites.
 ///
 /// Quiesce overrides are omitted when they equal the loader's own
 /// defaults ([`DEFAULT_QUIESCE_SILENCE_MS`], [`DEFAULT_QUIESCE_DEADLINE_MS`]):
@@ -246,6 +274,7 @@ ext_set = "default"
         // defaults applied when the TOML omits the quiesce overrides
         assert_eq!(entry.quiesce_silence_ms, DEFAULT_QUIESCE_SILENCE_MS);
         assert_eq!(entry.quiesce_deadline_ms, DEFAULT_QUIESCE_DEADLINE_MS);
+        assert_eq!(entry.diff_review, None, "an entry names no case by default");
     }
 
     #[test]
@@ -292,6 +321,27 @@ engine_pin = "v0.12.4"
     }
 
     #[test]
+    fn a_diff_review_case_name_resolves_to_its_case() {
+        let toml = format!("{VALID}\ndiff_review = \"single-hunk-accept\"\n");
+        let entry = parse(&toml).expect("a known diff_review case must parse");
+        assert_eq!(
+            entry.diff_review,
+            Some(DiffReviewCase::SingleHunkAccept),
+            "the entry must carry the case it named"
+        );
+    }
+
+    #[test]
+    fn an_unknown_diff_review_case_is_rejected() {
+        let toml = format!("{VALID}\ndiff_review = \"accept-everything\"\n");
+        let err = parse(&toml).expect_err("an unrecognized diff_review case must be a hard error");
+        assert!(
+            matches!(err, CorpusError::UnknownDiffReviewCase(ref s) if s == "accept-everything"),
+            "expected UnknownDiffReviewCase(\"accept-everything\"), got {err:?}"
+        );
+    }
+
+    #[test]
     fn unknown_ext_set_is_rejected() {
         let toml = VALID.replace(r#"ext_set = "default""#, r#"ext_set = "minimal""#);
         let err = parse(&toml).expect_err("an unrecognized ext_set must be a hard error");
@@ -329,6 +379,7 @@ engine_pin = "v0.12.4"
         assert_eq!(entry.ext_set, "default");
         assert_eq!(entry.quiesce_silence_ms, DEFAULT_QUIESCE_SILENCE_MS);
         assert_eq!(entry.quiesce_deadline_ms, DEFAULT_QUIESCE_DEADLINE_MS);
+        assert_eq!(entry.diff_review, None);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

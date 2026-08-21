@@ -36,6 +36,12 @@
 //!   nothing else is supposed to, so what it holds is a stand-in client
 //!   faithful enough to break a caller a real one would break, and the
 //!   cases that hold the remote path against the local one.
+//! - [`review`]: the diff-review leg. Also not a fidelity level: the one
+//!   script shape where the two sides reach the same text by different
+//!   routes on purpose -- view's through an agent proposal's own
+//!   `nvim_buf_set_text` write, the reference's by typing -- so that the
+//!   write's row/column arithmetic is held against what a person's own
+//!   edit would have produced.
 //! - [`parity`]: the comparison layer a corpus runner drives -- state
 //!   probes ([`StateSnapshot`]/[`snapshot`]) plus a masked row-by-row grid
 //!   diff ([`compare`]/[`masked_rows`]) between any two [`Probe`] sources,
@@ -57,6 +63,7 @@ pub mod pty;
 pub mod raster;
 mod reference;
 pub mod remote;
+pub mod review;
 mod settle;
 pub mod speculate;
 #[cfg(test)]
@@ -184,6 +191,14 @@ pub enum OracleError {
     /// reporting a broken probe.
     #[error("state probe parse error: {0}")]
     Parse(String),
+    /// A diff-review case's own step could not be carried out: a proposal
+    /// that yields nothing to review, a decision the review refuses, a
+    /// write nvim refuses. Surfaced rather than absorbed, and kept distinct
+    /// from a divergence: the script stopped describing what the code does,
+    /// so there is no post-accept state left to compare and reporting one
+    /// would be reporting a comparison that never happened.
+    #[error("diff-review step failed: {0}")]
+    Review(String),
 }
 
 /// Msg-level headless driver: pure, no engine, no terminal. The fast oracle

@@ -1,0 +1,12 @@
+# The user edits the row the open hunk anchors to, which stales it, and the
+# accept that follows the re-diff must address its columns against what they
+# typed rather than against the row the proposal was computed on. The edit
+# changes that row's byte length and its character length by different
+# amounts, so an accept measuring it in characters writes into the middle of
+# the row the user just left behind.
+schema = 1
+name = "diff-review-stale"
+input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"
+diff_review = "stale-re-diff-then-accept"

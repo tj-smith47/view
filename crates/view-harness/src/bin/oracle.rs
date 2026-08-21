@@ -43,6 +43,7 @@ use view_harness::fixture::{current_engine_pin, verify_nvim_matches_pin, workspa
 use view_harness::fuzz;
 use view_harness::page;
 use view_harness::results::load_results;
+use view_oracle::review::{DiffReviewCase, ReviewDriver, ReviewStep, NORMALIZE_KEYS};
 use view_oracle::{
     compare, ddmin, join_tokens, masked_rows, snapshot, tokenize, Divergence, EngineSession,
     ReferenceSession, ReferenceSide, ViewSide,
@@ -482,27 +483,7 @@ fn run_tokens(
     route: EngineRoute,
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
     let start = Instant::now();
-    let mut engine = match route {
-        EngineRoute::Local => EngineSession::spawn(cols, rows)?,
-        EngineRoute::StubRemote => view_oracle::remote::spawn_stub_session(cols, rows)?,
-    };
-    let mut reference = ReferenceSession::spawn(cols, rows)?;
-
-    // startup quiescence is drained, not gated on: a slow-starting nvim's
-    // own splash/plugin traffic settling late here is not itself a
-    // divergence, only the post-input settle below decides pass/fail. A
-    // probe error, unlike a slow settle, still propagates: it means the
-    // session is broken, not merely late
-    let _ = engine.quiesce(silence, deadline)?;
-    let _ = reference.quiesce(silence, deadline)?;
-
-    // warm the session's cached renderer before the script runs: the
-    // post-settle captures below then decide reuse-versus-rebuild against a
-    // frame that predates the entry's edits, so every entry exercises the
-    // production frame-to-frame render path (and, in debug builds, its
-    // equivalence guard) across a real model change instead of only
-    // capturing from a cold cache
-    let _ = engine.surface();
+    let (mut engine, mut reference) = spawn_pair(cols, rows, silence, deadline, route)?;
 
     let (engine_keys, reference_keys) =
         match tokens.iter().position(|t| t == INJECT_DIVERGENCE_TOKEN) {
@@ -525,13 +506,66 @@ fn run_tokens(
     let engine_settled = engine.quiesce(silence, deadline)?;
     let reference_settled = reference.quiesce(silence, deadline)?;
 
+    compare_pair(
+        &mut engine,
+        &mut reference,
+        EngineSettled(engine_settled),
+        ReferenceSettled(reference_settled),
+        start,
+    )
+}
+
+/// Spawns one side-by-side pair at `cols`x`rows`, drains their startup
+/// traffic and warms the engine side's renderer cache -- everything every
+/// run does before its script's first key, whichever script shape it is.
+///
+/// Startup quiescence is drained, not gated on: a slow-starting nvim's own
+/// splash/plugin traffic settling late here is not itself a divergence,
+/// only a post-input settle decides pass/fail. A probe error, unlike a slow
+/// settle, still propagates: it means the session is broken, not merely
+/// late.
+///
+/// Warming the cached renderer is what makes every run's later captures
+/// decide reuse-versus-rebuild against a frame that predates the script's
+/// edits, so each one exercises the production frame-to-frame render path
+/// (and, in debug builds, its equivalence guard) across a real model change
+/// instead of only capturing from a cold cache.
+fn spawn_pair(
+    cols: u16,
+    rows: u16,
+    silence: Duration,
+    deadline: Duration,
+    route: EngineRoute,
+) -> Result<(EngineSession, ReferenceSession), view_oracle::OracleError> {
+    let mut engine = match route {
+        EngineRoute::Local => EngineSession::spawn(cols, rows)?,
+        EngineRoute::StubRemote => view_oracle::remote::spawn_stub_session(cols, rows)?,
+    };
+    let mut reference = ReferenceSession::spawn(cols, rows)?;
+    let _ = engine.quiesce(silence, deadline)?;
+    let _ = reference.quiesce(silence, deadline)?;
+    let _ = engine.surface();
+    Ok((engine, reference))
+}
+
+/// Probes both sides and diffs them: the comparison tail every run shape
+/// shares, so a plain corpus entry and a diff-review one are scored by the
+/// same state probes, the same masked grid diff, and the same rule about an
+/// unsettled side.
+fn compare_pair(
+    engine: &mut EngineSession,
+    reference: &mut ReferenceSession,
+    engine_settled: EngineSettled,
+    reference_settled: ReferenceSettled,
+    start: Instant,
+) -> Result<EntryOutcome, view_oracle::OracleError> {
     let surface = engine.surface();
     let view_screen = engine.screen();
     let mask = masked_rows(&surface);
     let ref_screen = reference.screen();
 
-    let view_state = snapshot(&mut engine)?;
-    let ref_state = snapshot(&mut reference)?;
+    let view_state = snapshot(engine)?;
+    let ref_state = snapshot(reference)?;
 
     let divergences = compare(
         ViewSide {
@@ -545,6 +579,8 @@ fn run_tokens(
         &mask,
     );
 
+    let EngineSettled(engine_settled) = engine_settled;
+    let ReferenceSettled(reference_settled) = reference_settled;
     Ok(EntryOutcome {
         engine_settled,
         reference_settled,
@@ -553,20 +589,90 @@ fn run_tokens(
     })
 }
 
-/// Tokenizes `entry.input` and drives it through [`run_tokens`] at
-/// `entry`'s own quiesce overrides -- the plain corpus-run path `Command`'s
-/// `None` (bare `oracle [PATH]`) arm uses.
+/// Drives one corpus entry at its own quiesce overrides -- the plain
+/// corpus-run path `Command`'s `None` (bare `oracle [PATH]`) arm uses.
+///
+/// An entry naming a diff-review case runs the two sides on deliberately
+/// different scripts (see [`run_review_entry`]); every other entry drives
+/// both sides with its own tokenized input.
 fn run_entry(
     entry: &CorpusEntry,
     route: EngineRoute,
 ) -> Result<EntryOutcome, view_oracle::OracleError> {
-    run_tokens(
-        &tokenize(&entry.input),
-        COLS,
-        ROWS,
-        Duration::from_millis(entry.quiesce_silence_ms),
-        Duration::from_millis(entry.quiesce_deadline_ms),
-        route,
+    let silence = Duration::from_millis(entry.quiesce_silence_ms);
+    let deadline = Duration::from_millis(entry.quiesce_deadline_ms);
+    match entry.diff_review {
+        Some(case) => run_review_entry(entry, case, silence, deadline, route),
+        None => run_tokens(
+            &tokenize(&entry.input),
+            COLS,
+            ROWS,
+            silence,
+            deadline,
+            route,
+        ),
+    }
+}
+
+/// Drives one diff-review entry: `entry.input` seeds both sides with the
+/// same text, then `case`'s own steps take the two sides apart on purpose
+/// -- view's side applies an agent's proposal through the review's
+/// `nvim_buf_set_text` write, the reference side types the same change --
+/// and [`NORMALIZE_KEYS`] brings the incidental editing residue back
+/// together so the comparison is about the text the write produced.
+///
+/// Every keys step settles the side it typed into before the next one, and
+/// a write step settles the engine side before anything types into it
+/// again: `arm_and_input`'s marker protocol owes an already-settled
+/// session, and a review's write leaves redraw traffic in flight that a
+/// marker armed on top of would fire inside.
+fn run_review_entry(
+    entry: &CorpusEntry,
+    case: DiffReviewCase,
+    silence: Duration,
+    deadline: Duration,
+    route: EngineRoute,
+) -> Result<EntryOutcome, view_oracle::OracleError> {
+    let start = Instant::now();
+    let (mut engine, mut reference) = spawn_pair(COLS, ROWS, silence, deadline, route)?;
+
+    engine.arm_and_input(&entry.input)?;
+    reference.arm_and_input(&entry.input)?;
+    let mut engine_settled = engine.quiesce(silence, deadline)?;
+    let mut reference_settled = reference.quiesce(silence, deadline)?;
+
+    let mut driver = ReviewDriver::default();
+    for step in case.steps() {
+        match *step {
+            ReviewStep::Shared(keys) => {
+                engine.arm_and_input(keys)?;
+                reference.arm_and_input(keys)?;
+                engine_settled &= engine.quiesce(silence, deadline)?;
+                reference_settled &= reference.quiesce(silence, deadline)?;
+            }
+            ReviewStep::Reference(keys) => {
+                reference.arm_and_input(keys)?;
+                reference_settled &= reference.quiesce(silence, deadline)?;
+            }
+            other => {
+                if driver.apply(&mut engine, other)? {
+                    engine_settled &= engine.quiesce(silence, deadline)?;
+                }
+            }
+        }
+    }
+
+    engine.arm_and_input(NORMALIZE_KEYS)?;
+    reference.arm_and_input(NORMALIZE_KEYS)?;
+    engine_settled &= engine.quiesce(silence, deadline)?;
+    reference_settled &= reference.quiesce(silence, deadline)?;
+
+    compare_pair(
+        &mut engine,
+        &mut reference,
+        EngineSettled(engine_settled),
+        ReferenceSettled(reference_settled),
+        start,
     )
 }
 
@@ -768,6 +874,18 @@ fn build_tokens(entry: &CorpusEntry, inject_at: Option<usize>) -> Vec<String> {
 fn minimize_command(path: &Path, inject_divergence_at: Option<usize>) -> Result<()> {
     let entry = corpus::load_file(path)
         .with_context(|| format!("loading corpus entry {}", path.display()))?;
+    if let Some(case) = entry.diff_review {
+        // ddmin reduces a key script toward a failure signature, and a
+        // diff-review entry's failure is made of its case's own decisions
+        // rather than of the keys that seed the buffer; a rewrite here
+        // would also drop the case name the entry carries, since the
+        // writer has no field for it
+        bail!(
+            "{} drives the diff-review case {}, which the minimizer cannot reduce",
+            entry.name,
+            case.name()
+        );
+    }
     // same gate as every other session-spawning mode: the minimized entry
     // is rewritten still stamped with an engine pin, and a reduction
     // performed by an off-pin nvim would re-author the entry against a
@@ -1382,6 +1500,54 @@ mod tests {
         );
     }
 
+    /// The corpus must claim every diff-review case, exactly once. Deleting
+    /// one of those entries is the way this coverage silently disappears:
+    /// the runner would report the same PARITY-for-every-entry line it
+    /// always does, one case lighter, and the buffer-write path would stop
+    /// being exercised without a single failure to say so. This is the
+    /// assertion that turns that deletion into a red test.
+    #[test]
+    fn every_diff_review_case_is_claimed_by_exactly_one_corpus_entry() {
+        let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        dir.pop(); // crates/
+        dir.pop(); // workspace root
+        dir.push("corpus");
+        let mut claimed: Vec<(DiffReviewCase, String)> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("failed to read corpus/") {
+            let path = entry.expect("failed to read corpus/ entry").path();
+            if path.extension().is_none_or(|ext| ext != "toml") {
+                continue;
+            }
+            let corpus_entry = corpus::load_file(&path)
+                .map_err(|err| format!("failed to load {}: {err}", path.display()))
+                .expect("every corpus/*.toml entry must load");
+            if let Some(case) = corpus_entry.diff_review {
+                claimed.push((case, corpus_entry.name));
+            }
+        }
+        for case in DiffReviewCase::ALL {
+            let entries: Vec<&str> = claimed
+                .iter()
+                .filter(|(claimed_case, _)| *claimed_case == case)
+                .map(|(_, name)| name.as_str())
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "the diff-review case {} must be driven by exactly one corpus entry, but {} \
+                 claim it: {entries:?}",
+                case.name(),
+                entries.len()
+            );
+        }
+        assert_eq!(
+            claimed.len(),
+            DiffReviewCase::ALL.len(),
+            "every diff-review entry must name a case that exists, and every case must be \
+             named once: {claimed:?}"
+        );
+    }
+
     /// The falsifiable check this whole feature exists for: a script whose
     /// only source of divergence is [`INJECT_DIVERGENCE_TOKEN`], planted at
     /// the midpoint of a filler run via the hidden `--inject-divergence-at`
@@ -1438,6 +1604,45 @@ mod tests {
             current_engine_pin().expect("reading .engine-pin"),
             "the rewritten entry must be stamped with the pin the run was verified \
              against, not the scratch entry's authored-against value"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A diff-review entry must be refused by the minimizer before it
+    /// spawns anything. The writer has no `diff_review` field, so a
+    /// reduction that ran would rewrite the entry without its case name and
+    /// leave a file that still loads, still reports PARITY, and no longer
+    /// drives the write path at all.
+    #[test]
+    fn minimizing_a_diff_review_entry_is_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "view-harness-oracle-review-minimize-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
+        let path = dir.join("review.toml");
+        std::fs::write(
+            &path,
+            format!(
+                "schema = 1\nname = \"scratch-review\"\ninput = \"x\"\nengine_pin = \
+                 \"test-pin\"\next_set = \"default\"\ndiff_review = \"{}\"\n",
+                DiffReviewCase::SingleHunkAccept.name()
+            ),
+        )
+        .expect("failed to write scratch entry");
+
+        let err = minimize_command(&path, None).expect_err("a diff-review entry must be refused");
+
+        assert!(
+            err.to_string().contains("the minimizer cannot reduce"),
+            "expected the refusal to name the minimizer's own limit, got {err}"
+        );
+        assert!(
+            std::fs::read_to_string(&path)
+                .expect("the scratch entry must still be readable")
+                .contains("diff_review"),
+            "the refused entry must be left exactly as it was"
         );
 
         let _ = std::fs::remove_dir_all(&dir);

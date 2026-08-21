@@ -1,0 +1,10 @@
+# A declined hunk must write nothing, and the proposal that replaces it must
+# write as if the first had never been offered: the two proposals differ in
+# the text they put on the last row, so a rejected hunk that wrote anyway
+# leaves that row disagreeing with the reference side's own typing.
+schema = 1
+name = "diff-review-reject"
+input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"
+diff_review = "reject-then-repropose"

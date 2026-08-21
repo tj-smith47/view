@@ -1,0 +1,19 @@
+# The diff-review entries are the only ones whose two sides run different
+# scripts: view's side applies an agent's proposal through the review's own
+# `nvim_buf_set_text` write, the reference side types the same change. The
+# case named here supplies the proposal, the reference-side keys and the
+# decisions (`view_oracle::review`); this file supplies the buffer both
+# sides start from.
+#
+# The fixture is spelled with multi-byte characters on the last row and the
+# row above it deliberately: an accepted hunk that runs to the buffer's last
+# row is addressed by BYTE column from the end of the row above, so this is
+# the shape where a character-column reading of those offsets splices the
+# replacement at the wrong place instead of agreeing with what a person
+# typing the same change would have produced.
+schema = 1
+name = "diff-review-accept"
+input = "iünïcode<CR>two<CR>three<CR>fôur<CR>fïvé<Esc>"
+engine_pin = "v0.12.4"
+ext_set = "default"
+diff_review = "single-hunk-accept"

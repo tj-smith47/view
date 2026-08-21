@@ -71,6 +71,13 @@ pub(crate) const RECORD_SEP: &str = "\u{1e}";
 /// host clipboard/session state a hermetic probe must never depend on.
 const REGISTER_NAMES: [char; 4] = ['"', '0', '1', 'a'];
 
+/// The `nvim_eval` expression that reads a session's whole buffer as one
+/// newline-joined string. Shared with [`crate::review`] rather than spelled
+/// twice: a review case reads the text it diffs a proposal against from the
+/// same expression the comparison later reads both sides' text from, so the
+/// two can never disagree about what "the buffer's text" means.
+pub(crate) const BUFFER_TEXT_EXPR: &str = "join(getline(1,'$'), \"\\n\")";
+
 /// Bound on [`snapshot`]'s wait for a blocked session to leave its
 /// key-wait after the `<Esc>` dismissal (see [`snapshot`]'s own doc
 /// comment): generous relative to processing a single already-queued
@@ -278,7 +285,7 @@ fn snapshot_with_deadline(
     }
 
     let buffer_lines = probe
-        .eval_str("join(getline(1,'$'), \"\\n\")")?
+        .eval_str(BUFFER_TEXT_EXPR)?
         .split('\n')
         .map(str::to_string)
         .collect();
