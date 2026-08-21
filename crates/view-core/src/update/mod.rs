@@ -1095,23 +1095,33 @@ fn route_key(model: &mut Model, notation: String) -> Vec<Effect> {
                             outcome: PermissionOutcome::Cancelled,
                         })];
                     }
-                    // An unmapped key is swallowed rather than forwarded,
-                    // the same way an unmatched key on a confirm-class
-                    // `PromptState` leaves the prompt open instead of
-                    // falling through.
+                    // An unmapped printable is swallowed rather than
+                    // forwarded, the same way an unmatched key on a
+                    // confirm-class `PromptState` leaves the prompt open
+                    // instead of falling through.
                     let mut chars = notation.chars();
                     let key = chars.next().filter(|_| chars.next().is_none());
-                    let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() else {
+                    if let Some(option) = key.and_then(|c| prompt.option_for_key(c)).cloned() {
+                        model.ai_panel_mut().pending_permission = None;
+                        model.dirty = true;
+                        return vec![Effect::Ai(AiCommand::AnswerPermission {
+                            request_id: prompt.request_id,
+                            outcome: PermissionOutcome::Selected {
+                                option_id: option.option_id,
+                            },
+                        })];
+                    }
+                    // Named notations fall through to the panel's own keys
+                    // below, exactly as they do out of an open review. A
+                    // turn holding an unanswered permission is a turn in
+                    // flight, and it is the case the wire's cancellation
+                    // contract is written for ("the Client MUST respond to
+                    // all pending session/request_permission requests with
+                    // Cancelled"); swallowing `<C-c>` here would leave that
+                    // contract with no key that reaches it.
+                    if !notation.starts_with('<') {
                         return Vec::new();
-                    };
-                    model.ai_panel_mut().pending_permission = None;
-                    model.dirty = true;
-                    return vec![Effect::Ai(AiCommand::AnswerPermission {
-                        request_id: prompt.request_id,
-                        outcome: PermissionOutcome::Selected {
-                            option_id: option.option_id,
-                        },
-                    })];
+                    }
                 }
                 // A review owns the panel's printable keys while it is
                 // open. Deliberately total for printables rather than a

@@ -2630,6 +2630,28 @@ fn an_unmapped_key_is_swallowed_while_a_permission_is_pending_and_focused() {
     );
 }
 
+#[test]
+fn ctrl_c_cancels_the_turn_a_pending_permission_is_holding_open() {
+    let mut m = pending_permission_model();
+    m.ai_panel_mut().turn_in_flight = true;
+    let effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "<C-c>".to_string(),
+        }),
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::Ai(AiCommand::Cancel)]),
+        "an unanswered permission is exactly the turn the wire's cancellation \
+         contract is written for, so the interrupt must reach it: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_permission.is_some(),
+        "the prompt is settled by the wire's own cancelled outcome arriving \
+         back, not by the key that asked for the cancel"
+    );
+}
+
 /// Entering the panel makes `model.focus()` name it for real, the same way
 /// any other focus-taking overlay works (`Model::takes_focus_now` reads
 /// `AiPanelState::focused` directly) -- unlike `key_in_engine_focus_
