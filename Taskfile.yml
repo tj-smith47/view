@@ -246,3 +246,17 @@ tasks:
       - task: ci
       - git add -A
       - git commit {{.CLI_ARGS}}
+  mutate:
+    desc: "Prove a battery of guards load-bearing: each row is deleted, its tests run, the file restored (task mutate -- .claude/mutations/task-19.tsv)"
+    cmd: scripts/mutate.sh {{.CLI_ARGS}}
+
+  clean-cache:
+    desc: "Reclaim build-cache bloat: incremental output, foreign-target trees, then sweep target/ down to the size ceiling (task clean-cache MAXSIZE=8)"
+    vars:
+      MAXSIZE: '{{.MAXSIZE | default "10"}}'
+    cmds:
+      - df -h . | tail -1
+      - rm -rf target/debug/incremental target/release/incremental
+      - find target -maxdepth 1 -type d \( -name 'x86_64-*' -o -name 'aarch64-*' \) -exec rm -rf {} +
+      - cargo sweep --maxsize {{.MAXSIZE}} || true
+      - df -h . | tail -1
