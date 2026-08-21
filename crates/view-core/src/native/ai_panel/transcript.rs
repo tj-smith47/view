@@ -165,20 +165,35 @@ impl Transcript {
         self.entries.iter()
     }
 
-    /// Every entry's rendered rows, oldest first, flattened across entries
-    /// (an entry may render more than one row -- see
+    /// The first `budget` rendered rows, oldest first, flattened across
+    /// entries (an entry may render more than one row -- see
     /// [`TranscriptEntryKind::ToolCall`]'s `result` and
     /// [`TranscriptEntryKind::Plan`]). Recomputes only the entries whose
     /// cache slot a fold cleared since the last call; every other entry's
     /// rows are cloned from the cache as-is.
+    ///
+    /// Bounded rather than whole because this runs on the paint path and a
+    /// transcript is the one piece of panel content that grows without
+    /// limit: a session hours long renders and clones every row it has ever
+    /// held, on every frame, to hand the overlay rows it will cut back to
+    /// the panel's height anyway. `budget` is the overlay's own window, so
+    /// the per-frame cost is the panel's height rather than the session's
+    /// length. Rows are taken from the oldest end because that is the end
+    /// the panel's window keeps (see `overlay::lay_out`); an entry whose
+    /// rows straddle the budget renders once and is cut mid-entry, exactly
+    /// where the overlay would have cut it.
     #[must_use]
-    pub fn rendered_rows(&self) -> Vec<Vec<Span>> {
+    pub fn rendered_rows(&self, budget: usize) -> Vec<Vec<Span>> {
         let mut cache = self.row_cache.borrow_mut();
         let mut rows = Vec::new();
         for (i, entry) in self.entries.iter().enumerate() {
+            if rows.len() >= budget {
+                break;
+            }
             let entry_rows = cache[i].get_or_insert_with(|| render_entry(entry));
             rows.extend(entry_rows.iter().cloned());
         }
+        rows.truncate(budget);
         rows
     }
 
@@ -380,6 +395,10 @@ mod tests {
 
     use super::*;
 
+    /// A row budget larger than any transcript a test builds, for the tests
+    /// whose subject is what renders rather than how much of it does.
+    const ROOM: usize = 1_000;
+
     #[test]
     fn reasoning_renders_apart_from_the_reply_it_shares_an_id_with() {
         let mut transcript = Transcript::new();
@@ -387,7 +406,7 @@ mod tests {
         transcript.append_or_extend(Some("m1"), "the answer", TranscriptRole::Agent);
 
         assert_eq!(
-            transcript.rendered_rows(),
+            transcript.rendered_rows(ROOM),
             vec![
                 vec![Span::plain("Thinking: weighing it")],
                 vec![Span::plain("Agent: the answer")],
@@ -590,7 +609,7 @@ mod tests {
             "the result row must survive a contentless update, not empty out"
         );
         assert_eq!(
-            transcript.rendered_rows().len(),
+            transcript.rendered_rows(ROOM).len(),
             2,
             "the title/status row plus the one result row must both still \
              render"
@@ -665,7 +684,7 @@ mod tests {
         transcript.append_or_extend(Some("m2"), "two", TranscriptRole::Agent);
 
         reset_render_entry_calls();
-        let first_pass = transcript.rendered_rows();
+        let first_pass = transcript.rendered_rows(ROOM);
         assert_eq!(first_pass.len(), 2);
         assert_eq!(
             render_entry_calls(),
@@ -674,7 +693,7 @@ mod tests {
         );
 
         reset_render_entry_calls();
-        let repeat_pass = transcript.rendered_rows();
+        let repeat_pass = transcript.rendered_rows(ROOM);
         assert_eq!(repeat_pass, first_pass);
         assert_eq!(
             render_entry_calls(),
@@ -685,7 +704,7 @@ mod tests {
 
         transcript.append_or_extend(Some("m2"), " more", TranscriptRole::Agent);
         reset_render_entry_calls();
-        let second_pass = transcript.rendered_rows();
+        let second_pass = transcript.rendered_rows(ROOM);
         assert_eq!(
             second_pass[0], first_pass[0],
             "the untouched entry's cached row must be reused byte for byte"
@@ -700,6 +719,38 @@ mod tests {
             1,
             "only the entry the fold touched should re-render -- a bypassed \
              cache would render both entries again here"
+        );
+    }
+
+    /// Pins the paint path's cost to the window rather than the session:
+    /// asserting only the rows returned would pass with the whole transcript
+    /// rendered and then thrown away, so this asserts the rendering too.
+    #[test]
+    fn a_long_session_costs_a_frame_no_more_than_a_short_one() {
+        let mut transcript = Transcript::new();
+        for i in 0..2_000 {
+            transcript.append_or_extend(Some(&format!("m{i}")), "hello", TranscriptRole::Agent);
+        }
+
+        reset_render_entry_calls();
+        let window = 20;
+        let rows = transcript.rendered_rows(window);
+
+        assert_eq!(
+            rows.len(),
+            window,
+            "a frame paints its window, not a history"
+        );
+        assert_eq!(
+            rows[0],
+            vec![Span::plain("Agent: hello")],
+            "the window starts where the panel's own window starts"
+        );
+        assert!(
+            render_entry_calls() <= window,
+            "a frame must not render entries no window can show: {} entries \
+             rendered for a {window}-row window",
+            render_entry_calls()
         );
     }
 }

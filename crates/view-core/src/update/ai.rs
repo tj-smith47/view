@@ -384,7 +384,7 @@ mod tests {
         );
         assert!(model.dirty);
         assert_eq!(
-            model.ai_panel().view().rows,
+            model.ai_panel().view(64).rows,
             vec![vec![crate::native::views::Span::plain(
                 "Thinking: weighing it"
             )]]

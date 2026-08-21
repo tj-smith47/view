@@ -777,7 +777,12 @@ fn layer_kind(model: &Model, kind: &OverlayKind) -> Option<LayerKind> {
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not
         OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
-        OverlayKind::Ai => Some(LayerKind::Ai(model.ai_panel().view())),
+        // The terminal's height is an upper bound on the panel's: no row
+        // past it can be painted whatever geometry the panel is given, and
+        // the transcript is unbounded without one.
+        OverlayKind::Ai => Some(LayerKind::Ai(
+            model.ai_panel().view(usize::from(model.term_height)),
+        )),
         _ => None,
     }
 }

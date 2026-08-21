@@ -198,8 +198,16 @@ impl AiPanelState {
     /// every key but `<Esc>`, and unlike the modal, centered overlays that
     /// state is not self-evident from geometry alone, so the border is the
     /// one always-visible place to say how to get back out.
+    ///
+    /// `visible_rows` bounds how much of the transcript is rendered and
+    /// cloned for this frame: it grows without limit over a session, and
+    /// rows past what the panel can paint are cut by the overlay anyway
+    /// (see [`Transcript::rendered_rows`]). An open review is not bounded
+    /// the same way -- its rows are a fixed set of hunks the user scrolls
+    /// through by cursor, so the window it needs is wherever that cursor
+    /// is, not the first screenful.
     #[must_use]
-    pub fn view(&self) -> AiPanelView {
+    pub fn view(&self, visible_rows: usize) -> AiPanelView {
         // An open review takes over the scrolling rows rather than
         // appending to them: its scroll region is its own hunks and their
         // context, never the whole transcript with a diff somewhere in it
@@ -208,7 +216,7 @@ impl AiPanelState {
         // review closes.
         let rows = match &self.pending_diff {
             Some(review) => review.hunk_rows(),
-            None => self.transcript.rendered_rows(),
+            None => self.transcript.rendered_rows(visible_rows),
         };
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
             .with_input(self.input.clone())
@@ -296,6 +304,11 @@ mod tests {
     use super::super::views::Span;
     use super::*;
 
+    /// A row budget larger than any transcript these tests build; what the
+    /// budget itself does is pinned in [`Transcript::rendered_rows`]'s own
+    /// tests.
+    const ROOM: usize = 1_000;
+
     #[test]
     fn a_new_panel_is_empty() {
         let state = AiPanelState::new();
@@ -313,7 +326,7 @@ mod tests {
     fn an_empty_panel_views_as_an_empty_transcript_with_the_typed_input() {
         let mut state = AiPanelState::new();
         state.input = "hello".to_string();
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(view.title, TITLE);
         assert_eq!(view.input, "hello");
         assert!(view.rows.is_empty());
@@ -335,7 +348,7 @@ mod tests {
     fn a_local_error_renders_as_the_panels_own_banner_row() {
         let mut state = AiPanelState::new();
         state.local_error = Some("the agent exited (signal: 9)".to_string());
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(
             view.local_error,
             vec![vec![Span::plain(format!(
@@ -354,14 +367,14 @@ mod tests {
         state.local_error = Some("gone".to_string());
         state.focused = true;
         assert_eq!(
-            state.view().local_error,
+            state.view(ROOM).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone -- {DISMISS_KEY_HINT}"
             ))]]
         );
         state.focused = false;
         assert_eq!(
-            state.view().local_error,
+            state.view(ROOM).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone -- {DISMISS_VERB_HINT}"
             ))]]
@@ -375,9 +388,9 @@ mod tests {
     #[test]
     fn an_entered_panel_announces_itself_in_its_title_even_while_idle() {
         let mut state = AiPanelState::new();
-        assert_eq!(state.view().title, TITLE);
+        assert_eq!(state.view(ROOM).title, TITLE);
         state.focused = true;
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(view.title, FOCUSED_TITLE);
         assert!(
             view.title.contains("Esc"),
@@ -405,7 +418,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(
             view.pending_permission,
             vec![
@@ -433,7 +446,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(
             view.pending_permission.last(),
             Some(&vec![Span::plain(ENTER_HINT)]),
@@ -459,7 +472,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view();
+        let view = state.view(ROOM);
         assert!(
             view.pending_permission
                 .iter()
@@ -473,7 +486,7 @@ mod tests {
     fn what_the_session_has_spent_is_on_the_panel_once_the_agent_reports_it() {
         let mut state = AiPanelState::new();
         assert!(
-            state.view().usage.is_empty(),
+            state.view(ROOM).usage.is_empty(),
             "nothing is claimed about a session that has reported nothing"
         );
 
@@ -487,7 +500,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.view().usage,
+            state.view(ROOM).usage,
             vec![vec![Span::plain("context 100/1000, cost 0.05 USD")]]
         );
     }
@@ -501,7 +514,7 @@ mod tests {
         state
             .transcript
             .append_or_extend(Some("2"), "hello", TranscriptRole::Agent);
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0], vec![Span::plain("You: hi")]);
         assert_eq!(view.rows[1], vec![Span::plain("Agent: hello")]);
@@ -516,7 +529,7 @@ mod tests {
             ToolCallStatus::InProgress,
             None,
         );
-        let view = state.view();
+        let view = state.view(ROOM);
         assert_eq!(view.rows, vec![vec![Span::plain("running: Read file")]]);
     }
 }

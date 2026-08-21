@@ -30,3 +30,4 @@ crates/view-core/src/update/ai.rs	                crate::native::ai_panel::Trans
 crates/view-core/src/native/ai_panel/mod.rs	            view = view.with_usage(vec![Span::plain(usage.render())]);	            let _ = usage;	-p view-core --lib native::ai_panel
 crates/view/src/vlog.rs	            format!("SessionCrashed {{ message: {} }}", capped(message))	            format!("SessionCrashed {{ message: {message:?} }}")	-p view --lib vlog
 crates/view-ai/src/acp/wire.rs	                    return Err(WireError::FrameTooLarge);	                    ()	-p view-ai --lib acp::wire
+crates/view-core/src/native/ai_panel/transcript.rs	            if rows.len() >= budget {	            if rows.len() >= usize::MAX {	-p view-core --lib native::ai_panel
