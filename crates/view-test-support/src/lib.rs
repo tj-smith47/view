@@ -1,5 +1,7 @@
-//! `ScratchDir`: a panic-safe temp-directory fixture, shared across every
-//! crate whose tests write one.
+//! Fixtures shared across every crate whose tests need them: `ScratchDir`,
+//! a panic-safe temp directory; `settle_mtime`, the sleep a second write
+//! needs to land on an mtime the first one is distinguishable from; and
+//! `CountingAllocator`, for an allocation-count budget.
 //!
 //! Before this crate existed, `view-native::config`, `view::native`, and
 //! the `cli_live`/`supersede_live` integration tests each hand-rolled the
@@ -72,18 +74,6 @@ impl ScratchDir {
     }
 }
 
-/// Sleeps long enough for the next write to land on a filesystem mtime
-/// distinguishable from the last one.
-///
-/// Coarse filesystem mtime resolution can otherwise leave a fixture's own
-/// write and the "external" write that follows it inside the same clock
-/// tick, which nvim's own file-changed check cannot tell apart -- the same
-/// reason `docs/checktime-wire-capture.md`'s capture method sleeps between
-/// the two writes of every case needing two distinct disk mtimes.
-pub fn settle_mtime() {
-    std::thread::sleep(std::time::Duration::from_millis(1100));
-}
-
 impl Deref for ScratchDir {
     type Target = Path;
 
@@ -102,6 +92,18 @@ impl Drop for ScratchDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.path);
     }
+}
+
+/// Sleeps long enough for the next write to land on a filesystem mtime
+/// distinguishable from the last one.
+///
+/// Coarse filesystem mtime resolution can otherwise leave a fixture's own
+/// write and the "external" write that follows it inside the same clock
+/// tick, which nvim's own file-changed check cannot tell apart -- the same
+/// reason `docs/checktime-wire-capture.md`'s capture method sleeps between
+/// the two writes of every case needing two distinct disk mtimes.
+pub fn settle_mtime() {
+    std::thread::sleep(std::time::Duration::from_millis(1100));
 }
 
 /// A [`GlobalAlloc`] that forwards every call unchanged to [`System`] while

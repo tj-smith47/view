@@ -54,6 +54,15 @@ use view_core::msg::Msg;
 /// dropped for looking like the first one.
 const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
+/// How long a path that answered `gone` is given to come back before that
+/// answer is believed. Two [`COALESCE_WINDOW`]s rather than a number of its
+/// own: an unlink-then-rewrite save whose halves fall in different windows
+/// is nominated by its unlink first, so the batch that carries the rewrite
+/// -- the one proving the path is back -- cannot form until the window
+/// after that one has closed, and a grace shorter than two of them would
+/// re-probe before the evidence it is waiting for exists.
+pub const FILE_GONE_GRACE: Duration = Duration::from_millis(2 * COALESCE_WINDOW.as_millis() as u64);
+
 /// The most paths one batch carries. Whatever a window collects beyond this
 /// stays pending for the next one, so a single chunk execution on nvim's
 /// main loop is bounded no matter how many files a `git checkout` or a

@@ -20,7 +20,7 @@ pub use config::{AgentSpec, AiConfig, AiConfigError};
 pub use context::assemble;
 pub use provision::{ensure_adapter, pinned_version, AdapterPin, ProvisionError};
 pub use trust::{path_is_contained, TrustError, TrustStore};
-pub use watch::{spawn as spawn_watch, WatchError, WatchHandle};
+pub use watch::{spawn as spawn_watch, WatchError, WatchHandle, FILE_GONE_GRACE};
 
 /// Where the agent comes from and where it runs.
 #[non_exhaustive]

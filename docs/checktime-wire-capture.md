@@ -658,9 +658,14 @@ Two consequences the tests are built on:
   arrives when `is_remove()` is forwarded.
 - The unlink-then-rewrite is the one save shape whose nomination can reach
   the probe while the path is still missing. The probe answers `gone` for it
-  correctly -- the file *was* gone -- so the notice that raises is retracted
-  by the next answer that finds the path readable again, rather than standing
-  for its full transient timeout over a file that came back.
+  correctly -- the file *was* gone -- which is why that answer is not what
+  reaches the user: the fold confirms it with a second probe one grace
+  period later (`view_ai::FILE_GONE_GRACE`, two coalesce windows), and an
+  ordinary save is readable again by then, so nothing is ever said. A path
+  still unreadable at the second probe is announced, and its notice is
+  retracted by any later answer that reads the path -- a file deleted for
+  real and restored minutes afterward loses its notice rather than standing
+  for the full transient timeout.
 
 ## Production chunk shape
 

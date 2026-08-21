@@ -7,6 +7,15 @@
 //! see `docs/checktime-wire-capture.md` for the outcomes this reads and
 //! `CheckTimeOutcome` for why they are a closed vocabulary rather than
 //! flags.
+//!
+//! One outcome takes a third hop. A path answering
+//! `CheckTimeOutcome::FileGone` for the first time says nothing at all and
+//! schedules `Effect::ReprobeExternalWrite` instead, which comes back as
+//! another detection of that one path a grace period later; only a path
+//! that is still unreadable then is announced. That is what keeps a save
+//! that unlinks its target before rewriting it -- nominated, legitimately,
+//! while the path is absent -- from flashing a vanished file at the user
+//! over an ordinary write.
 
 use std::path::PathBuf;
 
@@ -51,12 +60,25 @@ pub(super) fn on_checktime_reply(
 ) -> Vec<Effect> {
     let mut effects = Vec::new();
     for (path, outcome) in results {
+        // any answer other than `FileGone` ends whatever gone episode the
+        // path was in: `Conflict`, `HandledSilently`, `Reloaded` and
+        // `ReloadFailed` are all answered below the chunk's own stat, so
+        // each of them read the path as a file, and `NoBuffer` is answered
+        // above it for a path nvim no longer holds at all. Left standing,
+        // the record would let some later, genuine removal skip the
+        // confirmation every first answer owes
+        if !matches!(outcome, CheckTimeOutcome::FileGone { .. }) {
+            model.forget_file_gone(&path);
+        }
         match outcome {
-            // an earlier detection may have said this path could no
-            // longer be read, and the answer just given proves otherwise:
-            // a save that unlinks before it rewrites can be nominated
-            // between its two halves, and a notice claiming a file is gone
-            // while it is back is worse than the silence it replaced
+            // an earlier detection may have said this path could no longer
+            // be read, and two of these three answers disprove it: a
+            // `checktime` that reloaded silently and a forced reload that
+            // completed were both answered below the chunk's stat, so each
+            // one read the path as a file. `NoBuffer` proves nothing about
+            // the file -- the chunk answers it above the stat -- but it
+            // does retire the notice, whose second clause describes a
+            // buffer that no longer exists to hold anything
             CheckTimeOutcome::NoBuffer
             | CheckTimeOutcome::HandledSilently
             | CheckTimeOutcome::Reloaded => {
@@ -98,6 +120,20 @@ pub(super) fn on_checktime_reply(
             // claiming otherwise would promise the user edits they never
             // made
             CheckTimeOutcome::FileGone { modified } => {
+                // one answer is not evidence yet. An unlink-then-rewrite
+                // save (a generator clearing its output before writing it
+                // again) is nominated while the path is genuinely absent,
+                // so announcing the first answer would flash a vanished
+                // file over an ordinary save and retract it a moment
+                // later -- and a notice that is wrong for 50ms is still a
+                // notice the user's eye caught. The re-probe settles it
+                // (`Effect::ReprobeExternalWrite`), and everything below
+                // runs only for a path that was still unreadable when it
+                // came back around
+                if !model.note_file_gone(&path) {
+                    effects.push(Effect::ReprobeExternalWrite { path });
+                    continue;
+                }
                 // a conflict prompt opened by an earlier detection is still
                 // offering "Reload and discard the local edits" against a
                 // path that can no longer be read. Answering it would cost
@@ -219,6 +255,20 @@ mod tests {
                 .map(|(p, o)| (PathBuf::from(*p), *o))
                 .collect(),
         }
+    }
+
+    /// The pair of answers announcing an unreadable path takes: the first
+    /// only asks for the confirming re-probe, and the second -- the one a
+    /// path that is genuinely gone survives to give -- is what speaks.
+    /// Hands back the second reply's own effects.
+    fn confirm_gone(model: &mut Model, id: u64, path: &str, modified: bool) -> Vec<Effect> {
+        let gone = CheckTimeOutcome::FileGone { modified };
+        let asked = update(model, checktime_reply(id, &[(path, gone)]));
+        assert!(
+            matches!(asked.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
+            "the first answer confirms rather than speaks, got {asked:?}"
+        );
+        update(model, checktime_reply(id + 1, &[(path, gone)]))
     }
 
     /// The watcher's own detection always drives one `RpcCall::Checktime`
@@ -410,13 +460,7 @@ mod tests {
         ] {
             let mut model = Model::new();
             let before = model.engine.messages.entries.len();
-            let effects = update(
-                &mut model,
-                checktime_reply(
-                    2,
-                    &[("/proj/src/lib.rs", CheckTimeOutcome::FileGone { modified })],
-                ),
-            );
+            let effects = confirm_gone(&mut model, 2, "/proj/src/lib.rs", modified);
             assert!(
                 model.engine.messages.entries.len() > before,
                 "a vanished file must leave the user a notice, got effects {effects:?}"
@@ -455,7 +499,8 @@ mod tests {
     fn one_path_answering_gone_over_and_over_leaves_one_notice() {
         let mut model = Model::new();
         let before = model.engine.messages.entries.len();
-        for id in 1..=3 {
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
+        for id in 3..=4 {
             let _ = update(
                 &mut model,
                 checktime_reply(
@@ -470,20 +515,11 @@ mod tests {
         assert_eq!(
             model.engine.messages.entries.len(),
             before + 1,
-            "three detections of one unreadable path are one thing to say: {:?}",
+            "four detections of one unreadable path are one thing to say: {:?}",
             model.engine.messages.entries
         );
 
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                4,
-                &[(
-                    "/proj/src/other.rs",
-                    CheckTimeOutcome::FileGone { modified: false },
-                )],
-            ),
-        );
+        let _ = confirm_gone(&mut model, 5, "/proj/src/other.rs", false);
         assert_eq!(
             model.engine.messages.entries.len(),
             before + 2,
@@ -511,7 +547,7 @@ mod tests {
                 )],
             )
         };
-        let _ = update(&mut model, gone());
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
         let _ = update(
             &mut model,
             Msg::Redraw(vec![crate::events::UiEvent::MsgShow {
@@ -540,6 +576,8 @@ mod tests {
             (1, "/proj/src/lib.rs"),
             (2, "/proj/src/other.rs"),
             (3, "/proj/src/lib.rs"),
+            (4, "/proj/src/other.rs"),
+            (5, "/proj/src/lib.rs"),
         ] {
             let _ = update(
                 &mut model,
@@ -557,6 +595,122 @@ mod tests {
         );
     }
 
+    /// The first answer of `FileGone` for a path says nothing and asks for
+    /// a second stat instead. An unlink-then-rewrite save is nominated
+    /// while the path is genuinely absent, so this answer is as true and as
+    /// meaningless as the same answer during a `rm`; what tells the two
+    /// apart is whether the path is still unreadable a moment later.
+    #[test]
+    fn a_first_answer_of_gone_asks_for_a_re_probe_instead_of_speaking() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let effects = update(
+            &mut model,
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: true },
+                )],
+            ),
+        );
+        match effects.as_slice() {
+            [Effect::ReprobeExternalWrite { path }] => {
+                assert_eq!(path, std::path::Path::new("/proj/src/lib.rs"));
+            }
+            other => panic!("expected one re-probe of the path, got {other:?}"),
+        }
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before,
+            "nothing is said until the re-probe answers: {:?}",
+            model.engine.messages.entries
+        );
+        assert!(
+            !model.dirty,
+            "an answer that changed nothing on screen must not cost a paint"
+        );
+    }
+
+    /// The save this whole confirmation exists for: the path is back by the
+    /// time the re-probe stats it, and the user is never told anything at
+    /// all -- not a notice, and not a notice retracted a moment later,
+    /// which is still a notice their eye caught.
+    #[test]
+    fn a_path_readable_by_the_re_probe_is_never_announced_at_all() {
+        let mut model = Model::new();
+        let before = model.engine.messages.entries.len();
+        let _ = update(
+            &mut model,
+            checktime_reply(
+                1,
+                &[(
+                    "/proj/src/lib.rs",
+                    CheckTimeOutcome::FileGone { modified: false },
+                )],
+            ),
+        );
+        let effects = update(
+            &mut model,
+            checktime_reply(
+                2,
+                &[("/proj/src/lib.rs", CheckTimeOutcome::HandledSilently)],
+            ),
+        );
+        assert!(effects.is_empty(), "an ordinary save owes nothing");
+        assert_eq!(
+            model.engine.messages.entries.len(),
+            before,
+            "a save that put the file back said nothing to retract: {:?}",
+            model.engine.messages.entries
+        );
+        assert!(!model.dirty, "nothing reached the screen to be repainted");
+    }
+
+    /// A path that answers something else has its gone record dropped, so
+    /// the next unreadable answer it gives is confirmed from the start
+    /// again. Every answer other than `FileGone` counts, whichever arm
+    /// below handles it: each one either read the path as a file or found
+    /// no buffer left for the notice to describe.
+    #[test]
+    fn an_answer_that_is_not_gone_makes_the_next_one_start_over() {
+        for answered in [
+            CheckTimeOutcome::HandledSilently,
+            CheckTimeOutcome::Reloaded,
+            CheckTimeOutcome::NoBuffer,
+            CheckTimeOutcome::Conflict,
+            CheckTimeOutcome::ReloadFailed,
+        ] {
+            let mut model = Model::new();
+            let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
+            let _ = update(
+                &mut model,
+                checktime_reply(3, &[("/proj/src/lib.rs", answered)]),
+            );
+            let before = model.engine.messages.entries.len();
+            let effects = update(
+                &mut model,
+                checktime_reply(
+                    4,
+                    &[(
+                        "/proj/src/lib.rs",
+                        CheckTimeOutcome::FileGone { modified: false },
+                    )],
+                ),
+            );
+            assert!(
+                matches!(effects.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
+                "{answered:?} ended the gone episode, so the next one is unconfirmed again, got {effects:?}"
+            );
+            assert_eq!(
+                model.engine.messages.entries.len(),
+                before,
+                "and an unconfirmed answer says nothing: {:?}",
+                model.engine.messages.entries
+            );
+        }
+    }
+
     /// A notice asserts the path cannot be read *now*, so an answer that
     /// reads it takes the notice down rather than leaving it to age out:
     /// a save that unlinks before it rewrites can be nominated between its
@@ -571,26 +725,17 @@ mod tests {
         ] {
             let mut model = Model::new();
             let before = model.engine.messages.entries.len();
-            let _ = update(
-                &mut model,
-                checktime_reply(
-                    1,
-                    &[(
-                        "/proj/src/lib.rs",
-                        CheckTimeOutcome::FileGone { modified: true },
-                    )],
-                ),
-            );
+            let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", true);
             assert_eq!(model.engine.messages.entries.len(), before + 1);
             model.dirty = false;
             let _ = update(
                 &mut model,
-                checktime_reply(2, &[("/proj/src/lib.rs", back)]),
+                checktime_reply(3, &[("/proj/src/lib.rs", back)]),
             );
             assert_eq!(
                 model.engine.messages.entries.len(),
                 before,
-                "{back:?} proves the path readable, which retires the notice: {:?}",
+                "{back:?} leaves the notice nothing true left to assert: {:?}",
                 model.engine.messages.entries
             );
             assert!(model.dirty, "taking a line off the screen needs a repaint");
@@ -604,20 +749,11 @@ mod tests {
     fn a_path_readable_again_leaves_another_paths_notice_standing() {
         let mut model = Model::new();
         let before = model.engine.messages.entries.len();
+        let _ = confirm_gone(&mut model, 1, "/proj/src/other.rs", false);
         let _ = update(
             &mut model,
             checktime_reply(
-                1,
-                &[(
-                    "/proj/src/other.rs",
-                    CheckTimeOutcome::FileGone { modified: false },
-                )],
-            ),
-        );
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                2,
+                3,
                 &[("/proj/src/lib.rs", CheckTimeOutcome::HandledSilently)],
             ),
         );
@@ -636,21 +772,12 @@ mod tests {
     #[test]
     fn a_suppressed_notice_does_not_ask_for_a_repaint() {
         let mut model = Model::new();
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                1,
-                &[(
-                    "/proj/src/lib.rs",
-                    CheckTimeOutcome::FileGone { modified: false },
-                )],
-            ),
-        );
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
         model.dirty = false;
         let effects = update(
             &mut model,
             checktime_reply(
-                2,
+                3,
                 &[(
                     "/proj/src/lib.rs",
                     CheckTimeOutcome::FileGone { modified: false },
@@ -671,16 +798,7 @@ mod tests {
     fn an_unforced_probe_of_a_vanished_file_notices_rather_than_prompts() {
         let mut model = Model::new();
         let before = model.engine.messages.entries.len();
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                1,
-                &[(
-                    "/proj/src/lib.rs",
-                    CheckTimeOutcome::FileGone { modified: false },
-                )],
-            ),
-        );
+        let _ = confirm_gone(&mut model, 1, "/proj/src/lib.rs", false);
         assert!(
             model.engine.messages.entries.len() > before,
             "a probe that found no readable file must not be silent"
@@ -707,16 +825,7 @@ mod tests {
         assert_eq!(model.overlays().len(), 1, "the conflict prompt opened");
 
         let before = model.engine.messages.entries.len();
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                2,
-                &[(
-                    "/proj/src/lib.rs",
-                    CheckTimeOutcome::FileGone { modified: true },
-                )],
-            ),
-        );
+        let _ = confirm_gone(&mut model, 2, "/proj/src/lib.rs", true);
         assert_eq!(
             model.overlays().len(),
             0,
@@ -739,16 +848,7 @@ mod tests {
         );
         assert_eq!(model.overlays().len(), 1);
 
-        let _ = update(
-            &mut model,
-            checktime_reply(
-                2,
-                &[(
-                    "/proj/src/lib.rs",
-                    CheckTimeOutcome::FileGone { modified: true },
-                )],
-            ),
-        );
+        let _ = confirm_gone(&mut model, 2, "/proj/src/lib.rs", true);
         assert_eq!(
             model.overlays().len(),
             1,

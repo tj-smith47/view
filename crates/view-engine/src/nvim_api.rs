@@ -1271,16 +1271,15 @@ fn remote_failure(error: &Value) -> Option<FsError> {
 /// `:checktime` and `:edit!` answer it catastrophically. On a missing path
 /// `:edit!` *succeeds* -- it opens a new, empty file -- so it would answer
 /// `ok = true`, empty the buffer, and leave one `:w` between the user and a
-/// file recreated empty, with nothing said. On a pipe BOTH commands block on
-/// the open and never return, wedging nvim's main loop inside this very call
-/// with the RPC connection along with it -- `:checktime` reaches that read by
-/// itself whenever the buffer is unmodified, which needs no user in the loop
-/// at all. On a
-/// socket or a device `:checktime` raises `E321` instead, which without a
-/// `pcall` would abort the whole chunk and cost every other path in the
-/// same batch its answer. `fs_stat` follows symlinks, so an ordinary
-/// symlink to a file stays on the reading path (capture doc, cases 7e and
-/// 10).
+/// file recreated empty, with nothing said. On a pipe BOTH commands block
+/// on the open and never return, wedging nvim's main loop inside this very
+/// call with the RPC connection along with it -- `:checktime` reaches that
+/// read by itself whenever the buffer is unmodified, which needs no user in
+/// the loop at all. On a socket or a device `:checktime` raises `E321`
+/// instead, which without a `pcall` would abort the whole chunk and cost
+/// every other path in the same batch its answer. `fs_stat` follows
+/// symlinks, so an ordinary symlink to a file stays on the reading path
+/// (capture doc, cases 7e and 10).
 ///
 /// `gone` therefore answers a probe as readily as a forced call, and
 /// carries `modified` so the notice can say which of the two true things it

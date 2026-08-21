@@ -11,13 +11,17 @@
 //! no removal at all -- the rename arrives as a move-in, a shape the watch
 //! already nominated as a write. The save shape that does raise one is the
 //! unlink-then-rewrite (`rm f && cat > f`, a generator clearing its output
-//! before regenerating it), and forwarding removals would be a bad trade if
-//! a save caught between those two halves made view announce a vanished
-//! file. It does not, and the reason is structural rather than lucky: the
-//! watch only nominates, and the probe re-stats every nominated path before
-//! answering. All three shapes are driven for real here rather than argued
-//! -- a `rename` over the target, an unlink followed by a rewrite, and a
-//! plain `remove_file` -- and what the probe answers for each is asserted.
+//! before regenerating it), and its nomination really can reach the probe
+//! while the path is still absent: the probe then answers `gone`, truly and
+//! uselessly, about a file that is on its way back.
+//!
+//! What keeps that from reaching the user is the fold, not luck. A first
+//! `gone` answer is not announced; it schedules a re-probe one grace period
+//! later (`view_ai::FILE_GONE_GRACE`), and only a path still unreadable
+//! then is spoken about. Both halves are driven here for real -- the three
+//! save shapes against a live nvim (`rename` over the target, an unlink
+//! followed by a rewrite, a plain `remove_file`) and, through `update()`
+//! itself, what the user is told for the two that matter.
 //! `docs/checktime-wire-capture.md`'s inotify section records what each of
 //! the three raises at the kernel level.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -29,7 +33,9 @@ use std::sync::mpsc::{channel, Receiver};
 use std::time::Duration;
 
 use view_ai::WatchHandle;
-use view_core::msg::{CheckTimeOutcome, Msg};
+use view_core::model::Model;
+use view_core::msg::{CheckTimeOutcome, Effect, Msg};
+use view_core::update::update;
 use view_engine::process::{Engine, EngineConfig};
 use view_test_support::{settle_mtime, ScratchDir};
 
@@ -131,23 +137,29 @@ impl Watched {
     /// which is the whole shape of a save whose two halves land in different
     /// detection windows.
     fn probe(&self, request_id: u64, names: &[String]) -> CheckTimeOutcome {
+        match self.reply(request_id, names) {
+            Msg::CheckTimeReply { results, .. } => results
+                .iter()
+                .find(|(path, _)| path == &self.path)
+                .map(|(_, outcome)| *outcome)
+                .expect("the answer is positional to the batch the watch sent"),
+            other => panic!("expected a checktime reply, got {other:?}"),
+        }
+    }
+
+    /// The probe's whole reply, for a case that folds it through `update()`
+    /// rather than reading one outcome out of it -- what the user is told
+    /// is a property of the fold, not of any single outcome.
+    fn reply(&self, request_id: u64, names: &[String]) -> Msg {
         self.engine
             .handle
             .checktime(request_id, names, false)
             .expect("issue the probe");
-        let results = common::drain_until(&self.engine_rx, ARRIVAL, |msg| match msg {
-            Msg::CheckTimeReply {
-                request_id: id,
-                results,
-            } if *id == request_id => Some(results.clone()),
+        common::drain_until(&self.engine_rx, ARRIVAL, |msg| match msg {
+            Msg::CheckTimeReply { request_id: id, .. } if *id == request_id => Some(msg.clone()),
             _ => None,
         })
-        .expect("the probe must answer");
-        results
-            .iter()
-            .find(|(path, _)| path == &self.path)
-            .map(|(_, outcome)| *outcome)
-            .expect("the answer is positional to the batch the watch sent")
+        .expect("the probe must answer")
     }
 
     /// What the buffer is holding, straight out of the live nvim: the only
@@ -208,10 +220,13 @@ fn an_atomic_save_over_a_watched_file_reloads_rather_than_reporting_it_gone() {
 /// only ordering in which the removal reaches the probe as its own
 /// nomination rather than riding along with the create that follows it.
 ///
-/// The falsifiable half of "forwarding removals does not cry wolf": this
-/// nomination names a path that really was gone when the watch saw it, and
-/// only the probe's own re-stat stands between that and view announcing a
-/// vanished file over an ordinary save.
+/// The favourable ordering of the two, and the reason removals can be
+/// forwarded at all: a nomination naming a path that really was gone when
+/// the watch saw it still answers `HandledSilently`, because the probe
+/// re-stats every path it is handed. The ordering where the probe wins the
+/// race instead -- answering `gone` about a file on its way back -- is what
+/// `a_save_that_unlinks_before_rewriting_never_says_anything` drives, and
+/// there the fold's own confirmation is what keeps it off the screen.
 #[test]
 fn a_save_that_unlinks_before_rewriting_reloads_rather_than_reporting_it_gone() {
     let case = watched("extwrite-unlink-rewrite");
@@ -244,5 +259,96 @@ fn a_removed_watched_file_reaches_the_probe_and_answers_gone() {
         case.probed(2),
         CheckTimeOutcome::FileGone { modified: false },
         "the buffer is holding what it last read off a path that no longer answers"
+    );
+}
+
+/// The whole point of confirming a `gone` answer, driven end to end: an
+/// ordinary save whose unlink is nominated on its own, whose rewrite lands
+/// inside the grace period, and which therefore says nothing to the user at
+/// all -- not a notice, and not a notice retracted a moment later, which is
+/// still a notice their eye caught.
+#[test]
+fn a_save_that_unlinks_before_rewriting_never_says_anything() {
+    let case = watched("extwrite-grace-save");
+    let mut model = Model::new();
+    std::fs::remove_file(&case.path).expect("unlink the target out of band");
+    let nominated = case.nominated();
+
+    let effects = update(&mut model, case.reply(4, &nominated));
+    assert!(
+        matches!(effects.as_slice(), [Effect::ReprobeExternalWrite { .. }]),
+        "the answer taken while the path is absent asks for a second stat, got {effects:?}"
+    );
+    assert!(
+        model.engine.messages.entries.is_empty(),
+        "and says nothing meanwhile: {:?}",
+        model.engine.messages.entries
+    );
+
+    // the save finishes inside the window the shell spends sleeping, which
+    // is what the grace is sized for
+    std::fs::write(&case.path, "changed-externally\n").expect("write the target again");
+    std::thread::sleep(view_ai::FILE_GONE_GRACE);
+    let _ = update(&mut model, case.reply(5, &nominated));
+
+    assert!(
+        model.engine.messages.entries.is_empty(),
+        "an ordinary save must never reach the user at all: {:?}",
+        model.engine.messages.entries
+    );
+    assert_eq!(
+        case.lines(),
+        vec!["changed-externally".to_string()],
+        "silence is only right if the buffer actually took the new content"
+    );
+}
+
+/// The other side of the same grace: a file an agent really removed is
+/// still unreadable when the re-probe stats it, and that is what the user
+/// is told. Confirming delays the notice; it must not lose it.
+///
+/// The notice's own end is driven here too, off the same live pair: a
+/// removal the agent undoes minutes later leaves a notice asserting
+/// something that has stopped being true, and the answer that reads the
+/// path again is what takes it down.
+#[test]
+fn a_removed_watched_file_is_announced_once_the_grace_confirms_it() {
+    let case = watched("extwrite-grace-removed");
+    let mut model = Model::new();
+    std::fs::remove_file(&case.path).expect("remove the file out of band");
+    let nominated = case.nominated();
+
+    let _ = update(&mut model, case.reply(6, &nominated));
+    assert!(
+        model.engine.messages.entries.is_empty(),
+        "nothing is said on the strength of one answer: {:?}",
+        model.engine.messages.entries
+    );
+
+    std::thread::sleep(view_ai::FILE_GONE_GRACE);
+    let _ = update(&mut model, case.reply(7, &nominated));
+
+    let entry = model
+        .engine
+        .messages
+        .entries
+        .last()
+        .expect("a file that stayed gone must leave the user a notice");
+    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    assert_eq!(
+        text,
+        format!(
+            "{} is no longer a readable file on disk -- nothing was reloaded, \
+             and the buffer still holds the content it last read",
+            case.path.display()
+        )
+    );
+
+    std::fs::write(&case.path, "restored\n").expect("put the file back");
+    let _ = update(&mut model, case.reply(8, &nominated));
+    assert!(
+        model.engine.messages.entries.is_empty(),
+        "an answer that read the path takes the notice down: {:?}",
+        model.engine.messages.entries
     );
 }

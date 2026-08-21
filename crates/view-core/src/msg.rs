@@ -611,6 +611,12 @@ pub enum Msg {
     /// watcher collects whatever a short window brings and hands them over
     /// together (see `view_ai::watch`'s own doc, and the capture doc's
     /// case 8 for the reply shape that answers a batch).
+    ///
+    /// The watcher is the usual source but not the only one:
+    /// [`Effect::ReprobeExternalWrite`] sends this too, naming the one path
+    /// whose last answer has to be confirmed before anything is said about
+    /// it. Deliberately the same message -- a confirmation is a second look
+    /// at a path, which is exactly what a detection already means here.
     ExternalWritesDetected {
         paths: Vec<std::path::PathBuf>,
     },
@@ -688,7 +694,11 @@ pub enum CheckTimeOutcome {
     ///
     /// `modified` is the buffer's own state, and it decides which notice
     /// the user is owed: only a modified buffer is holding edits that exist
-    /// nowhere else.
+    /// nowhere else. Owed once the answer is confirmed, never on the first
+    /// one -- a path is legitimately unreadable for the moment between the
+    /// two halves of a save that unlinks before it rewrites, so the fold
+    /// asks again a grace period later (`Effect::ReprobeExternalWrite`)
+    /// before it says anything.
     FileGone { modified: bool },
 }
 
@@ -970,6 +980,30 @@ pub enum Effect {
     ScheduleToastExpiry {
         id: MessageId,
         after: Duration,
+    },
+    /// Re-nominates `path` after a grace period, so an answer of
+    /// [`CheckTimeOutcome::FileGone`] is confirmed before anything is said
+    /// about it. The executor sleeps and sends an ordinary
+    /// `Msg::ExternalWritesDetected` naming this one path, which takes the
+    /// same fold and the same probe a watcher's own batch does -- the point
+    /// is a second stat taken later, not a second code path.
+    ///
+    /// The grace itself belongs to the shell, not to this crate: it is
+    /// keyed to the filesystem watch's own coalesce window
+    /// (`view_ai::FILE_GONE_GRACE`), which `view-core` cannot see and must
+    /// not restate. A save that unlinks its target before rewriting it is
+    /// nominated while the path is genuinely absent, and announcing that
+    /// first answer would flash "no longer a readable file on disk" over an
+    /// ordinary save and then retract it.
+    ///
+    /// One timer per path per gone episode, never one per detection: the
+    /// fold only emits this for the first `FileGone` answer a path gives,
+    /// and a `FileGone` answer requires a loaded buffer for that path
+    /// (`CHECKTIME_CHUNK` answers `found = false` above its own stat), so
+    /// the count is bounded by open buffers rather than by whatever a build
+    /// just deleted.
+    ReprobeExternalWrite {
+        path: std::path::PathBuf,
     },
     /// Hands a picker query to the matcher worker off the loop thread; the
     /// worker, not this arm, owns streaming back `Msg::PickerResults`.

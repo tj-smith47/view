@@ -45,8 +45,12 @@ A file being deleted counts as a change like any other: it is noticed on
 the same terms, and answered by the notice below rather than by a prompt. A
 tool that *replaces* a file is a save, not a deletion, and reads as one:
 whether it renames a temp file over the target or unlinks the target and
-writes it again, view re-checks the path before it says anything, so what
-you get is the ordinary reload.
+writes it again, what you get is the ordinary reload. A save of the second
+kind can be caught between its two halves -- the file really is missing for
+the moment between the unlink and the rewrite -- so view never speaks on the
+strength of one look: a path that reads as missing is checked once more, a
+fraction of a second later, and only a path that is still missing then is
+mentioned at all. Nothing flashes up and disappears again.
 
 Editing a file in a second editor, or a `git` command in another terminal,
 is detected on exactly those terms -- during a session, inside the root,
@@ -94,8 +98,9 @@ change?
 If the path is no longer a readable file -- removed, or now holding a
 directory, a symlink to nothing, a socket, a device, or a pipe -- nothing is
 read from it at all, whether view noticed the write by itself or you asked
-for the reload. Nothing is reloaded and nothing is lost; view says so rather
-than leaving you to find out at your next `:w`.
+for the reload. Nothing is reloaded and nothing is lost; view says so, once
+the second look above confirms it, rather than leaving you to find out at
+your next `:w`.
 
 With unsaved edits in the buffer, those edits are now the only copy:
 

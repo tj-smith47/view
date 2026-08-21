@@ -156,6 +156,21 @@ pub struct Model {
     /// that ownership legible rather than borrowing one whose doc explains a
     /// reason that does not apply here.
     checktime_generation: u64,
+    /// Every path whose most recent `Msg::CheckTimeReply` entry answered
+    /// [`crate::msg::CheckTimeOutcome::FileGone`], written through
+    /// [`Model::note_file_gone`] and [`Model::forget_file_gone`].
+    ///
+    /// What it buys is the difference between a first such answer and a
+    /// repeated one: the first is not yet evidence -- a save that unlinks
+    /// its target before rewriting it can be probed between its two halves
+    /// -- so it schedules a re-probe instead of speaking, and only an
+    /// answer that outlived that probe is announced.
+    ///
+    /// A `Vec` scanned linearly rather than a set: it holds one entry per
+    /// open buffer whose file is currently unreadable, which is a handful
+    /// at the very worst, and the notice dedupe beside it already scans its
+    /// own entries the same way.
+    paths_answering_file_gone: Vec<PathBuf>,
 }
 
 impl Model {
@@ -198,6 +213,7 @@ impl Model {
             ai_panel: crate::native::ai_panel::AiPanelState::new(),
             ai_fs: crate::native::ai_fs::AiFsState::default(),
             checktime_generation: 0,
+            paths_answering_file_gone: Vec::new(),
         }
     }
 
@@ -208,6 +224,29 @@ impl Model {
     pub fn next_checktime_request_id(&mut self) -> u64 {
         self.checktime_generation += 1;
         self.checktime_generation
+    }
+
+    /// Records that `path` answered [`crate::msg::CheckTimeOutcome::FileGone`],
+    /// reporting whether its previous answer was one too.
+    ///
+    /// `false` -- the first such answer since the path last answered
+    /// anything else -- is the caller's cue to confirm it with a re-probe
+    /// rather than announce it; `true` means the path was still unreadable
+    /// when something stat'd it again later.
+    #[must_use]
+    pub(crate) fn note_file_gone(&mut self, path: &std::path::Path) -> bool {
+        if self.paths_answering_file_gone.iter().any(|p| p == path) {
+            return true;
+        }
+        self.paths_answering_file_gone.push(path.to_path_buf());
+        false
+    }
+
+    /// Forgets any `FileGone` answer standing for `path`, so the next one
+    /// it gives is confirmed from the start again rather than believed on
+    /// the strength of an answer the path has since contradicted.
+    pub(crate) fn forget_file_gone(&mut self, path: &std::path::Path) {
+        self.paths_answering_file_gone.retain(|p| p != path);
     }
 
     /// The next generation for a `RpcCall::LoadHidden` this crate issues,
@@ -466,6 +505,7 @@ impl Model {
     /// things that can make an unreadable path's reply worth a repaint --
     /// the other being the notice that replaces it, which the caller learns
     /// about from its own answer.
+    #[must_use]
     pub(crate) fn close_external_write_conflict_prompt(&mut self, path: &std::path::Path) -> bool {
         let Some(pos) = self.overlays.iter().position(|overlay| {
             matches!(&overlay.kind, OverlayKind::Prompt(p)
@@ -986,6 +1026,7 @@ impl EngineModel {
     /// A raised condition is left alone: its lifetime belongs to
     /// [`Messages::set_native_condition`], which retracts it by itself when
     /// the condition ends.
+    #[must_use]
     pub fn withdraw_native_notice(&mut self, prefix: &str) -> bool {
         let before = self.messages.entries.len();
         self.messages.entries.retain(|e| {

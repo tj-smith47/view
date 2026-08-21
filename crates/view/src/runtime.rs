@@ -663,6 +663,25 @@ impl<E: EngineOps> Executor<E> {
                 }
                 Flow::Continue
             }
+            // the same one-shot thread `ScheduleToastExpiry` uses, and the
+            // same reason for it: `update()` has no clock, and a reply that
+            // said a path could not be read has to be re-asked later rather
+            // than believed at once. What goes back is an ordinary
+            // detection of that one path, so the confirming answer takes
+            // the identical fold and probe a watcher's own batch does.
+            //
+            // The delay is `view_ai`'s, taken from the crate that owns the
+            // coalesce window it is keyed to rather than restated here.
+            Effect::ReprobeExternalWrite { path } => {
+                if let Some(tx) = &self.toast_timer {
+                    let tx = tx.clone();
+                    spawn_or_log("external-write-reprobe", move || {
+                        std::thread::sleep(view_ai::FILE_GONE_GRACE);
+                        let _ = tx.send(Msg::ExternalWritesDetected { paths: vec![path] });
+                    });
+                }
+                Flow::Continue
+            }
             // carries no ReplyToken (see the effect's own doc): forwarded
             // to the matcher worker when one is wired, silently dropped
             // otherwise -- the worker, not this arm, owns streaming back
@@ -3866,6 +3885,178 @@ mod tests {
         );
         assert!(matches!(flow, Flow::Continue));
         assert_eq!(ops.calls.borrow()[0], "input(x)");
+    }
+
+    /// One `Msg::CheckTimeReply` naming `path` as unreadable.
+    fn gone(request_id: u64, path: &str) -> Msg {
+        Msg::CheckTimeReply {
+            request_id,
+            results: vec![(
+                std::path::PathBuf::from(path),
+                view_core::msg::CheckTimeOutcome::FileGone { modified: false },
+            )],
+        }
+    }
+
+    /// The frame `run` would put on the terminal for `msg`, or `None` when
+    /// nothing asked for one.
+    ///
+    /// The gate is the loop's own (`run`'s `if model.dirty`), and the
+    /// distinction it draws is the whole point: a reply off the RPC pump
+    /// has no keystroke behind it, so a change the fold made without asking
+    /// for a repaint sits in the model, unseen, until unrelated input
+    /// happens along.
+    fn painted(
+        model: &mut Model,
+        executor: &Executor<&FakeOps>,
+        follow_ups: &mut FollowUps<'_>,
+        msg: Msg,
+    ) -> Option<view_surface::Surface> {
+        model.dirty = false;
+        let _ = dispatch(model, executor, follow_ups, msg);
+        model.dirty.then(|| view_surface::render(model))
+    }
+
+    /// The confirming re-probe has to actually be carried out. The fold
+    /// stays silent on a first `gone` answer, so an effect that reaches no
+    /// arm here (they degrade to no-ops by design, see `run`'s tail) turns
+    /// a file an agent deleted into permanent silence rather than a notice
+    /// a fraction of a second late.
+    #[test]
+    fn the_re_probe_effect_comes_back_as_a_detection_of_the_same_path() {
+        let ops = FakeOps::default();
+        let (msg_tx, msg_rx) = std::sync::mpsc::sync_channel(8);
+        let executor = Executor::new(&ops).with_toast_timer(crate::wake::LoopSender::new(msg_tx));
+
+        let flow = executor.run(Effect::ReprobeExternalWrite {
+            path: std::path::PathBuf::from("/proj/src/lib.rs"),
+        });
+
+        assert!(matches!(flow, Flow::Continue));
+        assert!(
+            msg_rx.recv_timeout(view_ai::FILE_GONE_GRACE / 2).is_err(),
+            "re-asking at once would answer from inside the save it is waiting out"
+        );
+        match msg_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the grace has to end in a second look, not in silence")
+        {
+            Msg::ExternalWritesDetected { paths } => assert_eq!(
+                paths,
+                vec![std::path::PathBuf::from("/proj/src/lib.rs")],
+                "the path re-nominated is the one that answered gone"
+            ),
+            other => panic!("expected the path to be nominated again, got {other:?}"),
+        }
+    }
+
+    /// A file an agent removed under an open buffer has to reach the
+    /// screen by itself. Nothing else will bring it there: the reply that
+    /// raises it arrives off the RPC pump, and the frame that would show it
+    /// is painted only for a fold that said something changed.
+    #[test]
+    fn a_confirmed_vanished_file_reaches_the_frame_that_shows_it() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+
+        let before = view_surface::render(&model);
+        assert!(
+            painted(
+                &mut model,
+                &executor,
+                &mut follow_ups,
+                gone(1, "/proj/src/lib.rs")
+            )
+            .is_none(),
+            "the first answer is still being confirmed, so nothing is owed a frame"
+        );
+        let frame = painted(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            gone(2, "/proj/src/lib.rs"),
+        )
+        .expect("a notice nobody was told to paint never reaches the terminal");
+        assert_ne!(
+            frame, before,
+            "and the frame it asked for is the one carrying it"
+        );
+    }
+
+    /// The other screen change the same reply can owe: the conflict prompt
+    /// being withdrawn. Driven with the notice already standing, so it
+    /// dedupes and the question leaving the screen is the only thing left
+    /// to repaint for.
+    #[test]
+    fn a_withdrawn_conflict_prompt_reaches_the_frame_without_it() {
+        let ops = FakeOps::default();
+        let executor = Executor::new(&ops);
+        let mut model = Model::with_term_size(80, 24);
+        model.engine.apply_grid(view_core::grid::GridOp::Resize {
+            width: 80,
+            height: 24,
+        });
+        let mut native = NativeSession::inert();
+        let mut bridge = ThemeBridge::new(None);
+        let mut follow_ups = FollowUps {
+            native: &mut native,
+            theme: &mut bridge,
+            speculate: crate::speculate::SpeculationClock::default(),
+        };
+
+        for id in 1..=2 {
+            let _ = dispatch(
+                &mut model,
+                &executor,
+                &mut follow_ups,
+                gone(id, "/proj/src/lib.rs"),
+            );
+        }
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            Msg::CheckTimeReply {
+                request_id: 3,
+                results: vec![(
+                    std::path::PathBuf::from("/proj/src/lib.rs"),
+                    view_core::msg::CheckTimeOutcome::Conflict,
+                )],
+            },
+        );
+        assert_eq!(model.overlays().len(), 1, "the prompt is standing");
+        let asking = view_surface::render(&model);
+
+        let _ = dispatch(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            gone(4, "/proj/src/lib.rs"),
+        );
+        let frame = painted(
+            &mut model,
+            &executor,
+            &mut follow_ups,
+            gone(5, "/proj/src/lib.rs"),
+        )
+        .expect("a question leaving the screen has to take the screen with it");
+        assert_eq!(model.overlays().len(), 0, "the prompt was withdrawn");
+        assert_ne!(
+            frame, asking,
+            "and the frame painted for it no longer asks the question"
+        );
     }
 
     /// The keystroke path that makes speculation reach the screen at all: a
