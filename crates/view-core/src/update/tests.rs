@@ -6781,6 +6781,53 @@ fn rejecting_through_the_key_path_writes_nothing_and_closes_the_review() {
     assert!(m.ai_panel().pending_diff.is_none());
 }
 
+/// A prompt typed at an unanswered review reaches neither the composer nor
+/// the engine, because the review owns the panel's keys while it is open.
+/// The user is owed the reason: silence is indistinguishable from a panel
+/// that has stopped working.
+#[test]
+fn typing_at_an_open_review_is_answered_rather_than_swallowed() {
+    let mut m = live_review_model();
+
+    let effects = update(&mut m, key("z"));
+
+    assert!(
+        rpc_calls(&effects).is_empty(),
+        "a stray key must still not reach the engine: {effects:?}"
+    );
+    assert!(
+        m.ai_panel().pending_diff.is_some(),
+        "a stray key decides nothing"
+    );
+    let texts = visible_texts(&m);
+    assert!(
+        texts.iter().any(|line| line.contains("A review is open")),
+        "the stray key is answered: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|line| line.contains("(q)")),
+        "the answer names the way out: {texts:?}"
+    );
+}
+
+/// The notice above is raised once per standing line, not once per key: a
+/// sentence typed at a review is one mistake, and a line per character
+/// would evict the answer out of the bounded `:messages` ring.
+#[test]
+fn a_sentence_typed_at_a_review_raises_one_notice_not_one_per_letter() {
+    let mut m = live_review_model();
+
+    for notation in ["z", "y", "w", "z"] {
+        let _ = update(&mut m, key(notation));
+    }
+
+    let standing = visible_texts(&m)
+        .into_iter()
+        .filter(|line| line.contains("A review is open"))
+        .count();
+    assert_eq!(standing, 1, "one standing notice for four stray keys");
+}
+
 /// Hunk-jump is the review's primary navigation and it skips what is
 /// already decided -- there is nothing left to do on a rejected hunk.
 #[test]
@@ -7037,7 +7084,7 @@ fn a_review_owns_printables_but_not_the_named_ways_out() {
     let mut m = live_review_model();
 
     let effects = update(&mut m, key("z"));
-    assert!(effects.is_empty(), "{effects:?}");
+    assert!(rpc_calls(&effects).is_empty(), "{effects:?}");
     assert_eq!(m.ai_panel().input, "", "the composer took no review key");
 
     let _ = update(&mut m, key("<Esc>"));

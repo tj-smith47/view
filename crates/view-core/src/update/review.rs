@@ -100,6 +100,9 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
     };
     let index = review.cursor;
     let mut refusal = None;
+    // Set by the arm that owns no review state and surfaced after the
+    // borrow above ends, the same way `refusal` is.
+    let mut stray = false;
     let effects = match notation {
         "a" => match review.accept(index) {
             Ok(effects) => effects,
@@ -141,11 +144,20 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
             effects.extend(promote_queued(model));
             return effects;
         }
-        // Every other printable is swallowed, the same way an unmatched key
-        // on a pending permission prompt is: a review is a decision, and
-        // leaking its stray keys to nvim would edit the very buffer under
-        // review.
-        _ => return Vec::new(),
+        // Every other printable stays out of nvim, the same way an
+        // unmatched key on a pending permission prompt does: a review is a
+        // decision, and leaking its stray keys to the engine would edit the
+        // very buffer under review. Swallowing it in silence is the part
+        // that misleads -- a prompt typed at an unanswered review produces
+        // no echo, no refusal and no agent turn, which reads as a dead
+        // panel rather than as keys that belong to a decision. Delivering
+        // it to the composer instead is not available: these keys are the
+        // review's own vocabulary, and `a` cannot both accept a hunk and
+        // type an `a`.
+        _ => {
+            stray = true;
+            Vec::new()
+        }
     };
     let mut effects = effects;
     // The cursor follows the work: once the hunk it names is decided,
@@ -187,8 +199,29 @@ pub(super) fn review_key(model: &mut Model, notation: &str) -> Vec<Effect> {
                 .record_native_notice(refusal_notice(why), false),
         );
     }
+    // Once per standing notice rather than once per key: a sentence typed
+    // at an open review is one mistake, and a line per character would
+    // bury the answer in the ring behind `:messages`.
+    if stray {
+        effects.extend(
+            model
+                .engine
+                .record_native_notice_once(STRAY_KEY_FAMILY, STRAY_KEY_NOTICE.to_string()),
+        );
+    }
     effects
 }
+
+/// The opening [`STRAY_KEY_NOTICE`] is deduplicated on.
+const STRAY_KEY_FAMILY: &str = "A review is open";
+
+/// What an unmapped key inside a review answers with: the state the panel
+/// is in, and both ways out of it. Names the keys rather than pointing at
+/// the hint row, since the reader has just demonstrated they were not
+/// reading it.
+const STRAY_KEY_NOTICE: &str =
+    "A review is open and owns these keys -- decide it (a accept, x reject, R re-diff) \
+     or close it (q) before typing";
 
 /// Opens the proposal that was waiting behind the review that just ended,
 /// if there is one. A queued proposal binds here rather than when it

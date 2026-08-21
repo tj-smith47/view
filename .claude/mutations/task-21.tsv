@@ -23,3 +23,5 @@ crates/view-tui/src/paint.rs	            && self.rows.iter().all(|row| rows.cont
 crates/view-bench/src/scenarios/ai_session.rs	    cwd.parent().unwrap_or(cwd).join(PROGRESS_FILE)	    cwd.join(PROGRESS_FILE)	-p view-bench --lib the_progress_file_lands_beside
 crates/view-ai/tests/fixtures/stub_agent.rs	        .nth(5)	        .nth(4)	-p view-ai --test session a_sustained_stream
 crates/view-harness/src/bin/bench/cell_world.rs	            "\n[ai]\nenabled = true\nagent = [{:?}, \"\", \"\", \"\", \"\", {:?}]\n",	            "\n[ai]\nenabled = true\nagent = [{:?}, {:?}]\n",	-p view-harness --bin bench the_armed_agent
+crates/view-core/src/update/review.rs	            stray = true;	            stray = false;	-p view-core --lib update::tests
+crates/view-core/src/update/review.rs	or close it (q) before typing";	or close it before typing";	-p view-core --lib update::tests
