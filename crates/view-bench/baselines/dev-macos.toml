@@ -44,13 +44,13 @@ cadence_p99_ratio = 1.0364998638846823
 pace_ratio = 1.0030877047265554
 
 [input_path.minimal]
-key_to_rpc_p99_us = 74.0
+key_to_rpc_p99_us = 157.0
 
 [memory.minimal]
 phys_footprint_mb = 3.56329345703125
 
 [output_path.minimal]
-p99_ms = 0.055
+p99_ms = 0.208
 
 [picker.minimal]
 first_page_p50_ms = 1.4233749999999998
