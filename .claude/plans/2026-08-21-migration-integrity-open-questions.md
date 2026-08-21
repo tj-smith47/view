@@ -31,15 +31,12 @@ is the user's namespace, not the assistant's: `<leader>fp` is a concrete
 claim on their muscle memory and a different letter costs nothing to pick
 now and a deprecation later.
 
-**Recommendation:** ship `<leader>fp`. Overrule with a preferred key if
-`<leader>f` is already crowded in the user's own config.
-
-**Not a blocker.** This is an FYI with a recommendation, not a fork that
-holds execution: the repo's own conventions decide it (view already claims
-four `<leader>f` keys — `ff`, `fb`, `fg`, `fm`, the last for this very
-surface — `fp` is unclaimed, and §5.3's displacement reporting is the
-designed mitigation for a crowded prefix). Task 17 proceeds on the
-recommendation unless the user says otherwise.
+**RULED 2026-08-21: ship `<leader>fp`.** The user confirmed the key at P5
+exit ("sure, `<leader>fp` sounds fine"). The repo's own conventions carried
+the recommendation (view already claims four `<leader>f` keys — `ff`, `fb`,
+`fg`, `fm`, the last for this very surface — `fp` is unclaimed, and §5.3's
+displacement reporting is the designed mitigation for a crowded prefix).
+Task 17 proceeds on `<leader>fp` as planned.
 
 ---
 
