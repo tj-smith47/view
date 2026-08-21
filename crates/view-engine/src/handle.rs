@@ -2148,10 +2148,16 @@ mod tests {
 
     /// An absolute fixture path in this platform's own shape: a hold is
     /// refused unless its path is absolute, and a POSIX-rooted literal is
-    /// not absolute on windows.
+    /// not absolute on windows. The base is canonicalized because hold keys
+    /// pass through `canonical_hidden_key`, which resolves the parent even
+    /// for a file that never exists -- on macOS `/tmp` is a symlink to
+    /// `/private/tmp`, so a literal `/tmp/x` spelling would store under one
+    /// key and let key-level assertions look up another.
     fn abs(name: &str) -> String {
         if cfg!(unix) {
-            format!("/tmp/{name}")
+            let base =
+                std::fs::canonicalize("/tmp").unwrap_or_else(|_| std::path::PathBuf::from("/tmp"));
+            format!("{}/{name}", base.display())
         } else {
             format!(r"C:\tmp\{name}")
         }
