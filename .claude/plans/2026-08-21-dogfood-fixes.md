@@ -1,0 +1,123 @@
+# 2026-08-21 dogfood fixes — first personal AI-session findings
+
+Four defects from the user's first personal dogfood of the AI panel
+(Termius/SSH, real config, 263x88). All reproduced live in tmux against
+the release binary at ebc2812; captures under the session scratchpad.
+Spec of record: `.claude/specs/2026-07-17-view-design.md`. These are
+fixes to shipped P5/P4 surface, not new phase work.
+
+## Global constraints
+
+- nvim owns buffer text; paint loop never awaits RPC; core ← surface ←
+  {native, ai}; no unwrap/expect in lib code.
+- T2/T3 touch paint: the commit message states the latency consequence,
+  and `task bench` budgets must hold.
+- Commit only via `task commit -- -m`. One commit per task.
+
+## T1 — Bare `:View <feature>` resolves to the feature's canonical verb
+
+Reproduced: `:View ai` sends `FeatureInvoke { feature: "ai", verb: "" }`;
+no arm matches an empty verb, so the user gets the trust prompt, answers
+it, and the re-dispatched empty verb lands in the "`:View` needs a
+feature and a verb" notice. The panel never opens. This is the exact
+flow behind "ai doesn't work at all".
+
+Fix in `crates/view-core/src/update/mod.rs`'s `FeatureInvoke` arm: when
+`verb` is empty and `feature` is not, resolve the verb to the feature's
+canonical entry point before any gate runs (so the trust prompt's
+pending re-dispatch carries the resolved verb too). Canonical verb = the
+first `default_maps()` spec whose `feature` matches: ai→toggle,
+picker→files, tree→toggle, notifications→history. Unknown features keep
+the existing notice. The discoverability notice text stays; it now only
+fires for genuinely unknown pairs.
+
+Tests: bare `ai` on a trusted model toggles the panel; bare `ai` on an
+untrusted model opens the trust prompt and, once trusted, the re-dispatch
+opens the panel (this is the regression that shipped); bare `picker`
+opens the files picker; an unknown feature still gets the notice.
+
+## T2 — Overlay chrome takes the theme; Confirm prompt sized to content
+
+Reproduced (escape captures, dracula active and cached). Four distinct
+paint defects, and the primary user complaint is the NOTIFICATION
+surface, not the prompt:
+
+1. Overlay interiors and borders emit `ESC[49m` (terminal default
+   background) instead of the theme's float background — every box
+   (toast, message history, Confirm prompt) renders as an unthemed
+   black slab over the themed buffer.
+2. The buffer's cursorline highlight (`48;2;68;71;90`, full window
+   width) runs beneath the default-bg toast box, so the user sees a
+   selection-colored bar extending all the way across with an alien box
+   sitting in it. The overlay must fully own its cells (opaque themed
+   bg) so underlying row highlights read as behind it, not through it.
+3. Confirmed attr bleed-through: inside the message-history overlay one
+   character mid-row carried the underlying layer's background
+   (`48;2;33;34;44`) while its neighbors ran default — overlay cell
+   attrs are not consistently overriding what is beneath.
+4. The Confirm prompt's selected row is `ESC[7m` reverse video padded
+   to the full interior width (~180 columns on the user's terminal);
+   toasts stack as adjacent boxes of differing widths that read as one
+   ragged lump.
+
+Fix: overlay chrome (interior fill, borders, title, selection row)
+draws with theme colors — the same probed/derived palette the statusline
+already uses (investigate the `theme` flow: `default_colors_set`, probe
+replies, the theme cache). Every overlay cell is opaque: themed bg
+written explicitly, never `[49m`, never inherited from the layer
+beneath. Selection = themed highlight bg, never bare reverse video. The
+Confirm prompt's box width follows its content (question + options +
+padding) capped at the current 70%. The toast stack gets one coherent
+treatment: consistent width or a single themed container, not ragged
+adjacent borders.
+
+Tests: paint-level assertions that every overlay-interior cell carries
+the themed bg (non-default) when a theme is active; a regression test
+for the bleed-through (underlying non-default bg never survives into an
+overlay row); Confirm prompt width tracks content. Latency: chrome
+painting is per-frame; state the consequence in the commit.
+
+## T3 — AI transcript follows the tail; scrollable
+
+Reproduced by the user ("I can't even see everything"): the transcript
+region is head-keep — a session taller than the panel shows only its
+OLDEST screenful. `.claude/plans/2026-08-09-p5-ai.md` records this as
+known deferred surface; the user hit it in their first real session, so
+it lands now.
+
+Fix in the AI panel state/paint: default to follow-tail (newest
+transcript lines visible, like a terminal). Explicit scroll keys while
+the panel is focused — keys that cannot collide with prompt text entry
+(PageUp/PageDown plus Ctrl-u/Ctrl-d half-pages; implementer reads
+`route_key`'s Ai arm and keeps every existing binding working). Scrolling
+up holds the viewport (stops following); scrolling to the bottom or
+PageDown past the end resumes follow. A one-line indicator (e.g. more
+below marker) when scrolled away from the tail. Keys documented in
+`docs/ai.md`'s panel section.
+
+Tests: update-level tests for follow-then-hold-then-resume across
+appended transcript lines; a paint/rows test that the newest line is in
+the derived window by default.
+
+## T4 — Panel width is configurable and resizable
+
+The AI panel and tree sidebar are hardcoded `OverlayBox::new(30, 100)`.
+The user asked how to resize; there is no way.
+
+Fix: `[ai] panel_width` and `[native] tree_width` in view.toml (percent,
+optional, default 30 — derivable default per the config rule), read
+where the other `[ai]`/`[native]` keys already are. Runtime resize while
+the panel/tree is focused: `<` and `>` (or the closest non-colliding
+pair the existing key routing allows) step the width by 5% within
+[15, 70], session-scoped (not persisted). `docs/ai.md` + config docs
+updated.
+
+Tests: config round-trip for both keys including out-of-range clamping;
+update-level test that resize keys change the overlay geometry and mark
+the model dirty.
+
+## Exit
+
+- All four fixed, `task ci` green, budgets hold, docs current.
+- Dogfood journal appended with the findings + fix commits.
+- Verified live in the same tmux repro flow that reproduced each defect.

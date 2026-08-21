@@ -213,6 +213,20 @@ pub fn update(model: &mut Model, msg: Msg) -> Vec<Effect> {
             observed_for,
         } => note_engine_liveness(model, wedge, observed_for),
         Msg::FeatureInvoke { feature, verb } => {
+            // A bare `:View <feature>` (no verb) means "just open it":
+            // resolved to the feature's own first `default_maps()` entry
+            // ahead of every gate below, so a trust prompt this triggers
+            // (`open_ai_trust_prompt`) carries the resolved verb into its
+            // pending re-dispatch instead of the empty one that used to
+            // land back here as "needs a feature and a verb".
+            let verb = if verb.is_empty() && !feature.is_empty() {
+                crate::native::mappings::default_maps()
+                    .iter()
+                    .find(|spec| spec.feature == feature)
+                    .map_or(verb, |spec| spec.verb.to_string())
+            } else {
+                verb
+            };
             // `ai_enabled` gates ahead of `ai_trusted`: a feature that is
             // off has nothing to trust it for, so prompting first would ask
             // a question whose every answer is thrown away the moment the

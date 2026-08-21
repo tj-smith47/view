@@ -2199,6 +2199,140 @@ fn a_feature_invoke_while_a_blocked_prompt_is_topmost_does_not_steal_focus() {
 }
 
 #[test]
+fn bare_ai_on_a_trusted_model_toggles_the_panel() {
+    let mut m = model();
+    m.ai_trusted = true;
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "a bare `ai` invoke on a trusted project must resolve to the \
+             feature's canonical `toggle` verb and open the panel: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn bare_ai_on_an_untrusted_model_opens_the_trust_prompt_and_the_redispatch_opens_the_panel_once_trusted(
+) {
+    let mut m = model();
+    assert!(!m.ai_trusted);
+    let _ = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Prompt(_))
+        ),
+        "a bare `ai` invoke on an untrusted project must still gate on \
+             trust: {:?}",
+        m.overlays()
+    );
+    let key_effects = update(
+        &mut m,
+        Msg::Key(Key {
+            notation: "y".to_string(),
+        }),
+    );
+    let verb = match key_effects.as_slice() {
+        [Effect::AiTrustSet {
+            trusted: true,
+            verb,
+            ..
+        }] => verb.clone(),
+        other => panic!("expected one AiTrustSet{{trusted: true}}, got {other:?}"),
+    };
+    assert_eq!(
+        verb, "toggle",
+        "the trust prompt's pending re-dispatch must carry the resolved \
+             `toggle` verb, not the empty one that reached the \"needs a \
+             feature and a verb\" notice in the shipped regression"
+    );
+    let _ = update(
+        &mut m,
+        Msg::AiTrustResolved {
+            trusted: true,
+            verb,
+        },
+    );
+    assert!(
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "the trusted re-dispatch must open the panel, not fall back to the \
+             discoverability notice: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn bare_picker_opens_the_files_picker() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "picker".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::PickerQuery { .. }]),
+        "a bare `picker` invoke must resolve to its canonical `files` verb \
+             and issue the picker's first query: {effects:?}"
+    );
+    assert!(
+        matches!(
+            m.overlays().last().map(|o| &o.kind),
+            Some(OverlayKind::Picker(_))
+        ),
+        "a bare `picker` invoke must open the files picker: {:?}",
+        m.overlays()
+    );
+}
+
+#[test]
+fn an_unknown_feature_with_no_verb_still_gets_the_notice() {
+    let mut m = model();
+    let effects = update(
+        &mut m,
+        Msg::FeatureInvoke {
+            feature: "wat".to_string(),
+            verb: String::new(),
+        },
+    );
+    assert!(
+        matches!(effects.as_slice(), [Effect::ScheduleToastExpiry { .. }]),
+        "an unknown feature with no verb must still only schedule the \
+             notice's expiry, never open anything: {effects:?}"
+    );
+    assert!(
+        m.overlays().is_empty(),
+        "no overlay exists for an unrecognized feature: {:?}",
+        m.overlays()
+    );
+    let entry = m
+        .engine
+        .messages
+        .entries
+        .last()
+        .expect("the invoke must reach the user through the message surface");
+    let text: String = entry.content.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(
+        text.starts_with(":View "),
+        "an unresolvable feature must still fall to the usage line, not \
+             the bare-`:View` discoverability reopen: {text:?}"
+    );
+}
+
+#[test]
 fn an_untrusted_ai_invoke_opens_the_trust_prompt_instead_of_going_further() {
     let mut m = model();
     assert!(!m.ai_trusted);
@@ -3267,15 +3401,22 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
     );
     // the executor's own round trip is out of this crate's reach; the bin
     // feeds this back once TrustStore::set_trusted succeeds (see
-    // crates/view/src/runtime.rs)
+    // crates/view/src/runtime.rs) -- "toggle" is what the bare invoke
+    // above already resolved before opening the trust prompt
     let _ = update(
         &mut m,
         Msg::AiTrustResolved {
             trusted: true,
-            verb: String::new(),
+            verb: "toggle".to_string(),
         },
     );
     assert!(m.ai_trusted);
+    assert!(
+        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
+        "the resolved re-dispatch must complete the interrupted invoke and \
+             open the panel in the same flow: {:?}",
+        m.overlays()
+    );
 
     let effects = update(
         &mut m,
@@ -3292,13 +3433,8 @@ fn a_trusted_project_never_reprompts_within_the_same_session() {
         m.overlays()
     );
     assert!(
-        matches!(m.overlays().last().map(|o| &o.kind), Some(OverlayKind::Ai)),
-        "falls through to the real panel toggle: {:?}",
-        m.overlays()
-    );
-    assert!(
         effects.is_empty(),
-        "opening the agent panel issues no effect of its own: {effects:?}"
+        "toggling the agent panel issues no effect of its own: {effects:?}"
     );
 }
 
