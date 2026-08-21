@@ -32,8 +32,10 @@ existing config, plugins, LSP servers, and treesitter setup work on day one:
 the same Neovim you already run is running them. Around that engine, view draws its
 own UI in native Rust: one design system for the editor chrome instead of a
 patchwork of plugins, a process that paints before your config has finished
-loading, and (coming in a later phase) AI agents as a first-class part of
-the editor rather than a bolt-on.
+loading, and AI agents as a first-class part of the editor rather than a
+bolt-on: an agent panel (`<leader>ai`) speaks [ACP](https://agentclientprotocol.com)
+to real agents, with in-editor review of every proposed change. See
+[docs/ai.md](docs/ai.md).
 
 ## Features
 
@@ -119,7 +121,7 @@ keystroke, and how budgets are enforced in CI, lives in
       notifications, theming
 - [x] Clipboard provider and full CLI passthrough (`+42`, `-R`, `-O`,
       `ls | view -`)
-- [ ] **AI**: agent panel, ACP client, context providers, in-editor diff
+- [x] **AI**: agent panel, ACP client, context providers, in-editor diff
       review
 - [ ] Multigrid, `view doctor`, Windows as a supported tier, v0.1
 

@@ -12,6 +12,35 @@ Trust is per-project and durable -- answer once, and every later session in
 the same root skips the prompt. An agent's file reads and writes are
 confined to that root for as long as the session runs.
 
+## The panel
+
+The panel is a transcript. Your prompts, the agent's replies, and the
+agent's reasoning each speak in their own voice -- reasoning renders under
+a `Thinking:` prefix, never folded into the reply around it -- and the
+header's first row keeps the session's accounting as the agent reports it:
+
+```
+context 8153/200000, cost 0.14 USD
+```
+
+Tool calls appear as they start and update in place as they finish. When
+the panel is open but not focused, it says so and names the way in
+(`:View ai focus`).
+
+## Reviewing an agent's edits
+
+An edit the agent proposes through ACP does not touch your buffer until
+you accept it. The proposal opens as a hunk-by-hunk review:
+
+```
+a accept  A accept all  x reject  R re-diff  ] next  [ prev  q close
+```
+
+While a review is open it owns the keys; anything unmapped answers with a
+notice naming the open review and both ways out, rather than doing
+nothing. An accepted review is one undo entry -- a single `u` retracts the
+whole thing, never joined onto your own preceding edit.
+
 ## How an agent's writes reach your buffers
 
 An agent can touch a file two ways, and view treats them differently:

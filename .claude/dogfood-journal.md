@@ -161,4 +161,8 @@ captures, accepted files and full session log under
 Still owed: nobody has lived in the panel for a working day. Two accepts
 prove the path; they do not surface what a long session's transcript,
 context assembly or repeated turns feel like, and that session's warts
-belong here before the first release tag.
+belong here before the first release tag. One wart is already known
+before that session runs: the transcript window is head-keep with no
+scroll or follow-tail, so a session longer than one panel height shows
+only its oldest screenful -- the long-session dogfood will hit this
+first, and it lands as planned work, not a surprise.
