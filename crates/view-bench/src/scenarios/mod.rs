@@ -4,6 +4,11 @@
 //! resolved [`crate::session::SpawnSpec`]s; which fixture/environment
 //! those represent is the caller's concern.
 
+// The AI rows' preamble drives view's own agent panel through the pty and
+// watches a stub agent stream into it; both rows it serves are taps rows,
+// so it goes where the tap channel does.
+#[cfg(unix)]
+pub mod ai_session;
 pub mod clock;
 pub mod echo;
 // The control arm reaches its headless server over a unix socket path; the
@@ -33,11 +38,6 @@ pub mod picker;
 pub mod remote_memory;
 pub mod scroll;
 pub mod supervision;
-// The AI rows' preamble drives view's own agent panel through the pty and
-// watches a stub agent stream into it; both rows it serves are taps rows,
-// so it goes where the tap channel does.
-#[cfg(unix)]
-pub mod ai_session;
 // The tap channel is FIFO + raw-CLOCK_MONOTONIC based (see taps.rs); neither
 // exists on Windows, so the module and the rows built on it are unix-only and
 // the driver loud-skips them off-unix, the same way the memory row skips where

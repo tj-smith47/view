@@ -54,6 +54,23 @@ const KEY_QUIET: Duration = Duration::from_millis(500);
 /// throughout clears this by orders of magnitude.
 const SUSTAINED_MINIMUM: u64 = 5;
 
+/// How long ago the fixture may last have written its count when the
+/// window's liveness is read, before the turn reads as over.
+///
+/// A count alone cannot see the end of the window: a turn killed halfway
+/// through still added thousands of chunks, and every one of them was
+/// added before the samples that followed it. The last write's age is the
+/// half that can, which is why it is read while the session is still up.
+/// Two seconds is a hundred of the fixture's 20ms cadences, so it is a
+/// liveness question rather than a load threshold.
+const STREAM_STALE: Duration = Duration::from_secs(2);
+
+/// What the fixture writes into its progress file when it stops on its own
+/// ceiling rather than because view went away (see that fixture's header;
+/// the word is duplicated here for the same reason the file name is -- two
+/// crates, one convention, no shared dependency between them).
+const CEILING_SENTINEL: &str = "ceiling";
+
 /// A turn confirmed in flight, holding what the stream had produced when
 /// sampling was allowed to start.
 #[derive(Debug)]
@@ -117,27 +134,58 @@ pub fn start(session: &mut BenchSession, cwd: &Path) -> Result<LiveTurn, BenchEr
 }
 
 impl LiveTurn {
-    /// Confirms the stream kept running across the sampling it bracketed.
+    /// Confirms the stream is still running at the end of the sampling it
+    /// bracketed, and returns what it added.
+    ///
+    /// Read while the session is still up, deliberately: after teardown
+    /// every one of these signals reads the same whether the turn ran to
+    /// the last sample or died at the first, and the row would stand
+    /// behind a number nothing supports.
     ///
     /// # Errors
     ///
-    /// Returns [`BenchError::Desync`] when fewer than [`SUSTAINED_MINIMUM`]
-    /// chunks were added, which is a turn that ended (or an agent that
-    /// died) partway through a run whose whole subject is what a live turn
+    /// Returns [`BenchError::Desync`] when the fixture stopped on its own
+    /// ceiling, when fewer than [`SUSTAINED_MINIMUM`] chunks were added, or
+    /// when the last chunk is older than [`STREAM_STALE`] -- a turn that
+    /// ended partway through a run whose whole subject is what a live turn
     /// costs.
-    pub fn ended_still_streaming(&self) -> Result<u64, BenchError> {
+    pub fn still_streaming(&self) -> Result<u64, BenchError> {
+        let refuse = |why: String| {
+            Err(BenchError::Desync {
+                context: format!("{why}, so the samples were not all taken under a live turn"),
+            })
+        };
+        if std::fs::read_to_string(&self.progress).is_ok_and(|text| text.trim() == CEILING_SENTINEL)
+        {
+            return refuse("the agent stopped on its own streaming ceiling".to_string());
+        }
         let added = chunks_written(&self.progress).saturating_sub(self.at_start);
         if added < SUSTAINED_MINIMUM {
-            return Err(BenchError::Desync {
-                context: format!(
-                    "the agent added {added} chunk(s) across the sampling run, under the \
-                     {SUSTAINED_MINIMUM} a live turn produces, so the samples were not all taken \
-                     under one"
-                ),
-            });
+            return refuse(format!(
+                "the agent added {added} chunk(s) across the sampling run, under the \
+                 {SUSTAINED_MINIMUM} a live turn produces"
+            ));
         }
-        Ok(added)
+        match last_write_age(&self.progress) {
+            Some(idle) if idle <= STREAM_STALE => Ok(added),
+            Some(idle) => refuse(format!(
+                "the agent's last chunk is {idle:?} old, past the {STREAM_STALE:?} a \
+                 stream at the fixture's cadence stays inside"
+            )),
+            None => refuse("the agent's progress file cannot be read at all".to_string()),
+        }
     }
+}
+
+/// How long ago the fixture last wrote its count, or `None` when that
+/// cannot be established -- an unreadable file, or a clock that moved
+/// backwards under it.
+fn last_write_age(progress: &Path) -> Option<Duration> {
+    std::fs::metadata(progress)
+        .and_then(|meta| meta.modified())
+        .ok()?
+        .elapsed()
+        .ok()
 }
 
 /// How many chunks the fixture has recorded, or zero for a file that is
@@ -174,6 +222,8 @@ mod tests {
         assert_eq!(chunks_written(&progress), 42, "a count, whitespace and all");
     }
 
+    /// A turn is live when the count moved AND the last chunk is recent:
+    /// one without the other is exactly the state a dead agent leaves.
     #[test]
     fn a_turn_that_stopped_streaming_is_refused_rather_than_recorded() {
         let dir = view_test_support::ScratchDir::new("ai-session-sustained").unwrap();
@@ -184,7 +234,7 @@ mod tests {
             at_start: 10,
         };
         let err = turn
-            .ended_still_streaming()
+            .still_streaming()
             .expect_err("a stream that added nothing must refuse the row");
         assert!(
             format!("{err}").contains("0 chunk(s) across the sampling run"),
@@ -193,9 +243,54 @@ mod tests {
 
         std::fs::write(&progress, (10 + SUSTAINED_MINIMUM).to_string()).unwrap();
         assert_eq!(
-            turn.ended_still_streaming()
-                .expect("a stream at the minimum must stand"),
+            turn.still_streaming()
+                .expect("a stream at the minimum, written just now, must stand"),
             SUSTAINED_MINIMUM
+        );
+    }
+
+    #[test]
+    fn a_stream_that_added_plenty_and_then_died_is_refused_on_its_last_write() {
+        let dir = view_test_support::ScratchDir::new("ai-session-stale").unwrap();
+        let progress = dir.path().join(PROGRESS_FILE);
+        std::fs::write(&progress, "5000").unwrap();
+        let aged = std::fs::File::options()
+            .write(true)
+            .open(&progress)
+            .unwrap();
+        aged.set_times(
+            std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - Duration::from_secs(30)),
+        )
+        .unwrap();
+        let turn = LiveTurn {
+            progress,
+            at_start: 0,
+        };
+        let err = turn
+            .still_streaming()
+            .expect_err("a turn that died mid-window must refuse, however much it added");
+        assert!(
+            format!("{err}").contains("old, past the"),
+            "the refusal must name the age of the last chunk: {err}"
+        );
+    }
+
+    #[test]
+    fn a_fixture_that_stopped_on_its_own_ceiling_is_refused() {
+        let dir = view_test_support::ScratchDir::new("ai-session-ceiling").unwrap();
+        let progress = dir.path().join(PROGRESS_FILE);
+        std::fs::write(&progress, CEILING_SENTINEL).unwrap();
+        let turn = LiveTurn {
+            progress,
+            at_start: 0,
+        };
+        let err = turn
+            .still_streaming()
+            .expect_err("a fixture at its ceiling is not a live turn");
+        assert!(
+            format!("{err}").contains("own streaming ceiling"),
+            "the refusal must name the ceiling: {err}"
         );
     }
 }

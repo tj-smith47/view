@@ -411,6 +411,42 @@ fn delta_us(from: i64, to: i64) -> f64 {
 /// The input-path row's tap chain, opening at the key's arrival in view
 /// (the gated boundary's start) and closing one tag before the `W` the
 /// caller already holds.
+/// The first `closing` tap at or after `t0` that has a resolvable `tags`
+/// chain behind it, with that chain.
+///
+/// Not the first `closing` tap, which is what a sample's boundary looks
+/// like it should close on. `W` is written from two places (the inline
+/// path in view-engine's outbox and its writer thread), so a previous
+/// keystroke's handed-off write can land after this keystroke's `t0`; `R`
+/// answers anything the engine redraws for, which under a streaming agent
+/// turn is continuous. Closing on such a record measures an interval this
+/// keystroke never produced -- loudly when nothing chains back to it (the
+/// row aborts), silently when the stray lands after the chain instead of
+/// before it. Walking forward to the first closing tap the chain reaches
+/// keeps the boundary this keystroke's own in both cases.
+fn wait_for_chained(
+    pipe: &TapPipe,
+    timeout: Duration,
+    t0: i64,
+    tags: &[u8],
+    closing: u8,
+) -> Option<(Vec<TapRecord>, TapRecord)> {
+    let deadline = Instant::now() + timeout;
+    let mut after = t0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let record = pipe.wait_for(remaining, |r| r.tag == closing && r.nanos >= after)?;
+        let window = pipe.records_between(t0, record.nanos);
+        if let Some(chain) = tag_chain(&window, tags, t0) {
+            return Some((chain, record));
+        }
+        after = record.nanos + 1;
+        if Instant::now() >= deadline {
+            return None;
+        }
+    }
+}
+
 const INPUT_CHAIN: &[u8] = b"KUS";
 
 /// One label per interval the chain resolves, including the leading
@@ -446,7 +482,9 @@ pub fn run_input_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
-    sample_input_path(&mut session, pipe, protocol)
+    let outcome = sample_input_path(&mut session, pipe, protocol);
+    session.shutdown();
+    outcome
 }
 
 /// The input row's own sampling, over a session someone else prepared.
@@ -479,23 +517,14 @@ fn sample_input_path(
             all_records.extend(pipe.drain());
             let t0 = monotonic_nanos();
             session.send(b"x")?;
-            let Some(record) =
-                pipe.wait_for(protocol.sample_timeout, |r| r.tag == b'W' && r.nanos >= t0)
+            let Some((chain, record)) =
+                wait_for_chained(pipe, protocol.sample_timeout, t0, INPUT_CHAIN, b'W')
             else {
                 return Err(BenchError::Desync {
                     context: format!(
-                        "no RPC-written tap within {:?} of a keypress; screen:\n{}",
+                        "no RPC write with a resolvable K/U/S chain behind it within {:?} of a \
+                         keypress, so the gated boundary has no opening timestamp; screen:\n{}",
                         protocol.sample_timeout,
-                        session.screen_text()
-                    ),
-                });
-            };
-            let window = pipe.records_between(t0, record.nanos);
-            let Some(chain) = tag_chain(&window, INPUT_CHAIN, t0) else {
-                return Err(BenchError::Desync {
-                    context: format!(
-                        "keypress reached the RPC write with no resolvable K/U/S chain behind \
-                         it, so the gated boundary has no opening timestamp; screen:\n{}",
                         session.screen_text()
                     ),
                 });
@@ -521,7 +550,6 @@ fn sample_input_path(
         trial_distributions.push(Distribution::from_samples(&deltas_us, protocol.warmup)?);
     }
     all_records.extend(pipe.drain());
-    session.shutdown();
     verify_no_drops(&all_records)?;
 
     let p99s: Vec<f64> = trial_distributions.iter().map(Distribution::p99).collect();
@@ -666,7 +694,9 @@ pub fn run_output_path(
     settle_deadline: Duration,
 ) -> Result<TapsOutcome, BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
-    sample_output_path(&mut session, pipe, protocol)
+    let outcome = sample_output_path(&mut session, pipe, protocol);
+    session.shutdown();
+    outcome
 }
 
 /// The output row's own sampling, over a session someone else prepared --
@@ -698,14 +728,31 @@ fn sample_output_path(
             all_records.extend(pipe.drain());
             let t0 = monotonic_nanos();
             session.send(b"x")?;
-            // Wait on the redraw first, then on the paint that carries it.
-            // Both waits are separate sample timeouts because they fail
-            // for different reasons: no redraw at all after a keypress is
-            // the engine (or the key) never answering, while a redraw with
-            // no paint behind it is the paint loop stalling.
-            let Some(seen_parsed) =
-                pipe.wait_for(protocol.sample_timeout, |r| r.tag == b'R' && r.nanos >= t0)
+            // Wait out this keystroke's own RPC write first, then the
+            // redraw at or after it, then the paint that carries it. Each
+            // wait has its own sample timeout because each fails for a
+            // different reason: no chain-bearing write is the key never
+            // reaching the engine, no redraw after it is the engine never
+            // answering, and a redraw with no paint behind it is the paint
+            // loop stalling. Anchoring the redraw on the write rather than
+            // on the keystroke is what makes the interval this keystroke's
+            // echo: the engine also redraws for everything else it is
+            // doing, which under a streaming agent turn is continuous.
+            let Some((_, written)) =
+                wait_for_chained(pipe, protocol.sample_timeout, t0, INPUT_CHAIN, b'W')
             else {
+                return Err(BenchError::Desync {
+                    context: format!(
+                        "no RPC write with a resolvable K/U/S chain behind it within {:?} of a \
+                         keypress, so no redraw can be attributed to it; screen:\n{}",
+                        protocol.sample_timeout,
+                        session.screen_text()
+                    ),
+                });
+            };
+            let Some(seen_parsed) = pipe.wait_for(protocol.sample_timeout, |r| {
+                r.tag == b'R' && r.nanos >= written.nanos
+            }) else {
                 return Err(BenchError::Desync {
                     context: format!(
                         "no parsed-redraw tap within {:?} of a keypress; screen:\n{}",
@@ -733,7 +780,7 @@ fn sample_output_path(
             // set: an `R` stamped earlier than `seen_parsed` may still have
             // been crossing the pipe while the wait above returned
             all_records.extend(pipe.drain());
-            let Some((parsed, paint)) = measured_frame(&all_records, t0) else {
+            let Some((parsed, paint)) = measured_frame(&all_records, written.nanos) else {
                 return Err(BenchError::Desync {
                     context: "the redraw and paint that ended the sample waits were not in \
                               the drained record set"
@@ -768,7 +815,6 @@ fn sample_output_path(
         trial_distributions.push(Distribution::from_samples(&deltas_ms, protocol.warmup)?);
     }
     all_records.extend(pipe.drain());
-    session.shutdown();
     verify_no_drops(&all_records)?;
 
     let p99s: Vec<f64> = trial_distributions.iter().map(Distribution::p99).collect();
@@ -782,6 +828,10 @@ fn sample_output_path(
     })
 }
 
+/// The sampling one AI row drives, so both rows reach it through one
+/// function pointer rather than one copy each.
+type Sampler = fn(&mut BenchSession, &TapPipe, &Protocol) -> Result<TapsOutcome, BenchError>;
+
 /// The input row's boundary, measured with an agent turn streaming into an
 /// open panel: the "AI presence never degrades editor responsiveness"
 /// mandate held to the same number the session-absent row records, rather
@@ -790,10 +840,7 @@ fn sample_output_path(
 /// Everything but the session state is shared with [`run_input_path`] --
 /// the same preparation, the same [`sample_input_path`] -- so a difference
 /// between the two rows is a difference in what the session was doing,
-/// which is the only thing this row exists to price. The turn is confirmed
-/// live before the first sample and still streaming after the last, and
-/// the count of chunks it produced in between is returned as that
-/// evidence.
+/// which is the only thing this row exists to price.
 ///
 /// # Errors
 ///
@@ -806,18 +853,18 @@ pub fn run_ai_session_active(
     settle_deadline: Duration,
     cwd: &Path,
 ) -> Result<(TapsOutcome, u64), BenchError> {
-    let mut session = prepare(spec, pipe, settle_deadline)?;
-    let turn = ai_session::start(&mut session, cwd)?;
-    // the panel's own opening frames are not this row's subject, and
-    // `prepare` drained on the same reasoning
-    let _ = pipe.drain();
-    let outcome = sample_input_path(&mut session, pipe, protocol)?;
-    let streamed = turn.ended_still_streaming()?;
-    Ok((outcome, streamed))
+    ai_row(
+        spec,
+        pipe,
+        protocol,
+        settle_deadline,
+        cwd,
+        sample_input_path,
+    )
 }
 
-/// The output row's boundary under the same live turn, for the same
-/// reason and with the same evidence -- see [`run_ai_session_active`].
+/// The output row's boundary under the same live turn, for the same reason
+/// and with the same evidence -- see [`run_ai_session_active`].
 ///
 /// # Errors
 ///
@@ -830,12 +877,41 @@ pub fn run_ai_streaming(
     settle_deadline: Duration,
     cwd: &Path,
 ) -> Result<(TapsOutcome, u64), BenchError> {
+    ai_row(
+        spec,
+        pipe,
+        protocol,
+        settle_deadline,
+        cwd,
+        sample_output_path,
+    )
+}
+
+/// One AI row: prepare the session, put a turn in flight, sample the
+/// boundary `sample` measures, and confirm the turn is still streaming
+/// while the session is still up.
+///
+/// The liveness check sits here, between the last sample and the teardown,
+/// because after teardown every signal a dead agent leaves reads exactly
+/// like a live one's. Both rows run this one body, so neither can drift
+/// into checking less than the other.
+fn ai_row(
+    spec: &SpawnSpec,
+    pipe: &TapPipe,
+    protocol: &Protocol,
+    settle_deadline: Duration,
+    cwd: &Path,
+    sample: Sampler,
+) -> Result<(TapsOutcome, u64), BenchError> {
     let mut session = prepare(spec, pipe, settle_deadline)?;
     let turn = ai_session::start(&mut session, cwd)?;
+    // the panel's own opening frames are not this row's subject, and
+    // `prepare` drained on the same reasoning
     let _ = pipe.drain();
-    let outcome = sample_output_path(&mut session, pipe, protocol)?;
-    let streamed = turn.ended_still_streaming()?;
-    Ok((outcome, streamed))
+    let outcome = sample(&mut session, pipe, protocol);
+    let streamed = turn.still_streaming();
+    session.shutdown();
+    Ok((outcome?, streamed?))
 }
 
 /// The tags one keystroke walks, in order, across view's whole echo round
@@ -1423,38 +1499,110 @@ fn characterize_once(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::io::Write;
+
     use super::*;
 
+    /// One function's own body text, from its signature to its own close,
+    /// so a structural claim about a caller cannot be satisfied by the
+    /// definition of the very function it is supposed to reach.
+    fn body_of(name: &str) -> &'static str {
+        let source = include_str!("taps.rs");
+        let marker = format!("fn {name}(");
+        assert!(source.contains(&marker), "{name} is gone from this module");
+        source
+            .split(&marker)
+            .nth(1)
+            .unwrap_or_default()
+            .split("\n}\n")
+            .next()
+            .unwrap_or_default()
+    }
+
     /// The AI rows' entire claim is that they measure the session-absent
-    /// rows' boundary with a turn running underneath it, and that claim
-    /// lives in one shared sampling function per boundary. A copy-paste
-    /// that gave either pair its own loop would keep compiling and keep
-    /// producing numbers, comparable to nothing -- so the sharing is
-    /// asserted over this file's own text rather than left to review.
+    /// rows' boundary with a turn running underneath it, and that the turn
+    /// is proven live while the session is still up. Both live in shared
+    /// functions: one sampler per boundary, one row body for the liveness
+    /// check. A copy-paste that gave either its own would keep compiling
+    /// and keep producing numbers, comparable to nothing -- so the sharing
+    /// is asserted over this file's own text rather than left to review.
     #[test]
     fn the_ai_rows_sample_through_the_same_functions_the_session_absent_rows_do() {
-        let source = include_str!("taps.rs");
-        for (row, sampler) in [
+        for (row, called) in [
             ("run_input_path", "sample_input_path"),
-            ("run_ai_session_active", "sample_input_path"),
             ("run_output_path", "sample_output_path"),
+            ("run_ai_session_active", "sample_input_path"),
             ("run_ai_streaming", "sample_output_path"),
+            ("run_ai_session_active", "ai_row"),
+            ("run_ai_streaming", "ai_row"),
+            ("ai_row", "still_streaming"),
         ] {
-            let marker = format!("pub fn {row}(");
-            assert!(source.contains(&marker), "{row} is gone from this module");
-            let body = source
-                .split(&marker)
-                .nth(1)
-                .unwrap_or_default()
-                .split("\npub fn ")
-                .next()
-                .unwrap_or_default();
             assert!(
-                body.contains(&format!("{sampler}(")),
-                "{row} no longer samples through {sampler}, so its number is no longer the \
-                 same boundary the row it is compared against measures"
+                body_of(row).contains(called),
+                "{row} no longer reaches {called}, so it no longer measures (or proves) what \
+                 the row it is compared against does"
             );
         }
+    }
+
+    /// The output row's interval is the keystroke's own echo: both halves
+    /// anchor on the write that keystroke's chain produced. Anchoring
+    /// either back on the keypress timestamp readmits any redraw the
+    /// engine happened to be doing -- which under a streaming agent turn
+    /// is continuous, and would price the agent's cadence as view's echo.
+    #[test]
+    fn the_output_row_anchors_its_redraw_on_the_keystrokes_own_write() {
+        let body = body_of("sample_output_path");
+        assert!(
+            body.contains("r.tag == b'R' && r.nanos >= written.nanos"),
+            "the redraw wait no longer anchors on this keystroke's own RPC write"
+        );
+        assert!(
+            body.contains("measured_frame(&all_records, written.nanos)"),
+            "the measured frame no longer anchors on this keystroke's own RPC write"
+        );
+    }
+
+    #[test]
+    fn a_stray_closing_tap_is_walked_past_rather_than_closing_the_sample() {
+        let dir = view_test_support::ScratchDir::new("taps-chained").unwrap();
+        let pipe = TapPipe::create(&dir.path().join("tap.fifo")).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(pipe.path())
+            .unwrap();
+        // the shape the outbox's writer thread produces: a previous
+        // keystroke's handed-off write landing after this keystroke's t0,
+        // ahead of anything this keystroke did
+        for line in ["W 1 1001", "K 2 1002", "U 3 1003", "S 4 1004", "W 5 1005"] {
+            writeln!(writer, "{line}").unwrap();
+        }
+        writer.flush().unwrap();
+        let (chain, closing) =
+            wait_for_chained(&pipe, Duration::from_secs(5), 1000, INPUT_CHAIN, b'W')
+                .expect("the chain-bearing write is there to be found");
+        assert_eq!(closing.nanos, 1005, "closed on the stray write");
+        assert_eq!(
+            chain.first().map(|r| r.nanos),
+            Some(1002),
+            "the interval must open at this keystroke's own key-read tap"
+        );
+    }
+
+    #[test]
+    fn a_closing_tap_that_never_gets_a_chain_times_out_rather_than_standing() {
+        let dir = view_test_support::ScratchDir::new("taps-chainless").unwrap();
+        let pipe = TapPipe::create(&dir.path().join("tap.fifo")).unwrap();
+        let mut writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(pipe.path())
+            .unwrap();
+        writeln!(writer, "W 1 1001").unwrap();
+        writer.flush().unwrap();
+        assert!(
+            wait_for_chained(&pipe, Duration::from_millis(200), 1000, INPUT_CHAIN, b'W').is_none(),
+            "a write with nothing chaining back to the keypress is not this sample's close"
+        );
     }
 
     #[test]

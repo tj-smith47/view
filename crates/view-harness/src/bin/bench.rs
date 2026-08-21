@@ -835,6 +835,13 @@ fn require_named_bins_reach_their_rows(cli: &Cli, cells: &[CellId]) -> Result<()
             scenarios_reading(flag).join(", ")
         );
     }
+    // the AI rows spawn the stub agent only once their turn starts, which
+    // on a full matrix is half an hour in; checked here, an unbuilt stub
+    // fails the run before the first cell rather than after the twelfth
+    #[cfg(unix)]
+    if cells.iter().any(|cell| taps_rows::ai_row(&cell.scenario)) {
+        taps_rows::stub_agent_bin()?;
+    }
     Ok(())
 }
 
@@ -2243,6 +2250,20 @@ mod tests {
         // an unscoped cell runs on every class its platform allows, which is
         // every cell but the ones above
         assert!(class_block("echo", "gh-macos").is_none());
+        // pinned by name rather than read back out of the table: the loop
+        // above passes on an empty table, and on a table that armed the AI
+        // rows on some other class than the one their spec 3.1 budgets are
+        // scoped to
+        for scenario in ["ai_session_active", "ai_streaming"] {
+            assert!(
+                class_block(scenario, "controlled-linux").is_none(),
+                "{scenario} must be measured on the class its budget rows name"
+            );
+            assert!(
+                class_block(scenario, "gh-macos").is_some(),
+                "{scenario} has no bar on gh-macos and must be skipped there"
+            );
+        }
     }
 
     #[test]

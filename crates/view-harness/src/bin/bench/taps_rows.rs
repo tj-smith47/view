@@ -276,16 +276,18 @@ pub(crate) fn ai_row(scenario: &str) -> bool {
 /// agent session costs *view*, so the agent has to stream on a cadence the
 /// row controls, on every host, with no network and no credentials. The
 /// real adapter's own conformance is `scripts/acceptance/ai-conformance.sh`.
-fn stub_agent_bin() -> Result<PathBuf> {
+pub(crate) fn stub_agent_bin() -> Result<PathBuf> {
     let path = workspace_root()
         .join("target")
+        .join("stub-agent")
         .join("release")
         .join("view-ai-stub-agent");
     ensure!(
         path.exists(),
         "the AI rows measure against the stub agent at {}, which is not built; `task bench` \
          builds it, so a hand-run bench binary needs `cargo build --release -p view-ai \
-         --features test-support --bin view-ai-stub-agent` first",
+         --features test-support --bin view-ai-stub-agent --target-dir target/stub-agent` \
+         first",
         path.display()
     );
     Ok(path)

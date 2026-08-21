@@ -42,7 +42,9 @@
 //!   canned turn that ends is over long before a sampling run is, and a row
 //!   that sampled after it ended would measure the session-absent path
 //!   under a name that claims otherwise. The count of chunks written so far
-//!   is kept in [`SUSTAINED_PROGRESS_FILE`] beside the working directory,
+//!   is kept in [`SUSTAINED_PROGRESS_FILE`] beside the working directory
+//!   (replaced by [`SUSTAINED_CEILING_SENTINEL`] if the loop ever reaches
+//!   its own ceiling),
 //!   which is how a driver checks the stream really did run for the whole
 //!   sampling window rather than stopping after the first frame.
 //! - `ask` -- send a `session/request_permission` request, then end the turn
@@ -509,6 +511,12 @@ const SUSTAINED_CEILING: std::time::Duration = std::time::Duration::from_secs(90
 /// working directory the client spawned it in.
 const SUSTAINED_PROGRESS_FILE: &str = "view-ai-stub-stream-progress.txt";
 
+/// What `stream-forever` leaves in that file when it stops on the ceiling
+/// rather than because the client went away, so a reader watching the
+/// count can tell "the stream ended by itself" from "the stream is still
+/// going" instead of reading a stalled number as either.
+const SUSTAINED_CEILING_SENTINEL: &str = "ceiling";
+
 /// Streams numbered chunks until the client stops reading, recording the
 /// count as it goes. Never replies to the prompt: the turn it belongs to
 /// is meant to still be in flight when the caller stops watching.
@@ -528,6 +536,7 @@ fn stream_sustained(stdout: &mut std::io::Stdout) {
         let _ = std::fs::write(&progress, written.to_string());
         std::thread::sleep(SUSTAINED_INTERVAL);
     }
+    let _ = std::fs::write(&progress, SUSTAINED_CEILING_SENTINEL);
 }
 
 fn stream_chunks(stdout: &mut std::io::Stdout) {
