@@ -4,14 +4,14 @@
 //! against a populated 120x40 grid.
 //!
 //! **These numbers are relative instruments, not absolute per-keystroke
-//! costs.** Every function below except the last runs its frames back to
-//! back, which keeps the whole paint path's working set resident; steady
+//! costs.** Every function below except the cold ones runs its frames back
+//! to back, which keeps the whole paint path's working set resident; steady
 //! typing leaves the core idle between frames and pays cold. The same frame
 //! measures 2.94us hot and 21.27us cold, so a hot number understates what a
 //! keystroke actually costs by roughly 7x. Use them to tell whether a change
 //! made the code worse, never to answer how long a keystroke takes.
 //!
-//! Five functions bracket the damage-clipping lever:
+//! Seven functions bracket the damage-clipping lever:
 //!
 //! - `paint_frame_full_recomposite` recomposites every cell and diffs the
 //!   whole grid each frame (the pre-clipping behavior), the "before" number.
@@ -27,6 +27,10 @@
 //! - `paint_frame_cold/steady_state_crossterm_cold` is that same frame with
 //!   a keystroke interval of idle before each one, which is the state the
 //!   editor actually meets.
+//! - `paint_frame_agent_composer` (and its cold twin) is one character
+//!   typed into the agent panel's composer while the panel is open and
+//!   full height: the frame whose damage must be the composer's row rather
+//!   than every row the panel covers.
 //! - `paint_frame_prompt_overlay_open` is the modal prompt overlay's own
 //!   first frame: the `MsgShow`+`CmdlineShow` pair `update()` turns into a
 //!   pushed `OverlayKind::Prompt`, composited and diffed against an already
@@ -35,7 +39,7 @@
 //!   iteration, `KEYSTROKE_GAP`-paced): a prompt opening is a rare, one-shot
 //!   event, never a steady per-frame path, so there is no hot variant.
 //!
-//! All six absorb terminal write syscalls into their backend.
+//! All seven absorb terminal write syscalls into their backend.
 
 #![allow(clippy::expect_used)]
 
@@ -50,7 +54,7 @@ use view_core::grid::GridOp;
 use view_core::model::Model;
 use view_core::msg::Msg;
 use view_core::update::update;
-use view_tui::paint::{overlay_rows, Damage, Shadow};
+use view_tui::paint::{Damage, Shadow};
 
 /// Idle between frames in the cold variant. The `echo` bench row paces its
 /// keystrokes at this interval and a human types slower still, so this is
@@ -145,14 +149,14 @@ fn emit_frame<B: Backend>(
 /// A shadow sized for the bench grid with one full frame already painted, so
 /// every measured iteration starts from a populated terminal rather than a
 /// blank one.
-fn primed_shadow<B: Backend>(backend: &mut B, model: &mut Model) -> (Shadow, Vec<u16>) {
+fn primed_shadow<B: Backend>(backend: &mut B, model: &mut Model) -> Shadow {
     let mut shadow = Shadow::new();
     shadow.resize(Rect::new(0, 0, WIDTH, HEIGHT));
     let _ = model.take_paint_damage();
     let surface = view_surface::render(model);
-    let overlay = overlay_rows(&surface);
+    let _ = shadow.overlay_damage(&surface);
     emit_frame(backend, &mut shadow, model, &surface, &Damage::full());
-    (shadow, overlay)
+    shadow
 }
 
 /// The "before" reference: recomposite and diff every cell each frame, the
@@ -160,7 +164,7 @@ fn primed_shadow<B: Backend>(backend: &mut B, model: &mut Model) -> (Shadow, Vec
 fn bench_paint_frame_full(c: &mut Criterion) {
     let mut model = populated_model();
     let mut backend = TestBackend::new(WIDTH, HEIGHT);
-    let (mut shadow, _) = primed_shadow(&mut backend, &mut model);
+    let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
     c.bench_function("paint_frame_full_recomposite", |b| {
@@ -190,7 +194,7 @@ fn bench_paint_frame_full(c: &mut Criterion) {
 fn bench_paint_frame_full_wide(c: &mut Criterion) {
     let mut model = wide_model();
     let mut backend = TestBackend::new(WIDTH, HEIGHT);
-    let (mut shadow, _) = primed_shadow(&mut backend, &mut model);
+    let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
     c.bench_function("paint_frame_full_recomposite_wide", |b| {
@@ -222,7 +226,7 @@ fn bench_paint_frame_full_wide(c: &mut Criterion) {
 fn bench_paint_frame(c: &mut Criterion) {
     let mut model = populated_model();
     let mut backend = TestBackend::new(WIDTH, HEIGHT);
-    let (mut shadow, mut prev_overlay) = primed_shadow(&mut backend, &mut model);
+    let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
     c.bench_function("paint_frame_steady_state", |b| {
@@ -237,15 +241,9 @@ fn bench_paint_frame(c: &mut Criterion) {
             });
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
-            let cur_overlay = overlay_rows(&surface);
-            let damage = Damage::from_frame(
-                &grid_damage,
-                model.chrome_rows(),
-                &prev_overlay,
-                &cur_overlay,
-                false,
-            );
-            prev_overlay = cur_overlay;
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
             emit_frame(
                 black_box(&mut backend),
                 black_box(&mut shadow),
@@ -265,7 +263,7 @@ fn bench_paint_frame(c: &mut Criterion) {
 fn bench_paint_frame_crossterm(c: &mut Criterion) {
     let mut model = populated_model();
     let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
-    let (mut shadow, mut prev_overlay) = primed_shadow(&mut backend, &mut model);
+    let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
     c.bench_function("paint_frame_steady_state_crossterm", |b| {
@@ -278,15 +276,9 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
             });
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
-            let cur_overlay = overlay_rows(&surface);
-            let damage = Damage::from_frame(
-                &grid_damage,
-                model.chrome_rows(),
-                &prev_overlay,
-                &cur_overlay,
-                false,
-            );
-            prev_overlay = cur_overlay;
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
             emit_frame(
                 black_box(&mut backend),
                 black_box(&mut shadow),
@@ -313,7 +305,7 @@ fn bench_paint_frame_crossterm(c: &mut Criterion) {
 fn bench_paint_frame_cold(c: &mut Criterion) {
     let mut model = populated_model();
     let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
-    let (mut shadow, mut prev_overlay) = primed_shadow(&mut backend, &mut model);
+    let mut shadow = primed_shadow(&mut backend, &mut model);
 
     let mut flip = false;
     let mut group = c.benchmark_group("paint_frame_cold");
@@ -335,14 +327,9 @@ fn bench_paint_frame_cold(c: &mut Criterion) {
                 let started = Instant::now();
                 let grid_damage = model.take_paint_damage();
                 let surface = view_surface::render(&model);
-                let cur_overlay = overlay_rows(&surface);
-                let damage = Damage::from_frame(
-                    &grid_damage,
-                    model.chrome_rows(),
-                    &prev_overlay,
-                    &cur_overlay,
-                    false,
-                );
+                let overlay_damage = shadow.overlay_damage(&surface);
+                let damage =
+                    Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
                 emit_frame(
                     black_box(&mut backend),
                     black_box(&mut shadow),
@@ -351,7 +338,110 @@ fn bench_paint_frame_cold(c: &mut Criterion) {
                     &damage,
                 );
                 elapsed += started.elapsed();
-                prev_overlay = cur_overlay;
+            }
+            elapsed
+        });
+    });
+    group.finish();
+}
+
+/// A model with the agent panel open, focused, and holding a transcript
+/// long enough that a naive repaint would scale with it.
+fn agent_panel_model() -> Model {
+    let mut model = populated_model();
+    model.term_width = WIDTH;
+    model.term_height = HEIGHT;
+    model.ai_trusted = true;
+    let _ = update(
+        &mut model,
+        Msg::FeatureInvoke {
+            feature: "ai".to_string(),
+            verb: "open".to_string(),
+        },
+    );
+    let panel = model.ai_panel_mut();
+    for i in 0..200 {
+        panel.transcript.append_or_extend(
+            Some(&format!("m{i}")),
+            "a transcript line with enough prose in it that wrapping and \
+             styling both have real work to do",
+            view_core::native::ai_panel::TranscriptRole::Agent,
+        );
+    }
+    assert!(model.ai_panel().focused, "the composer holds focus");
+    let surface = view_surface::render(&model);
+    let rows = view_tui::paint::agent_panel_rows(&surface);
+    assert!(
+        rows.len() > 8,
+        "the panel is on screen and full height: {rows:?}"
+    );
+    model
+}
+
+/// One character typed into the agent panel's composer.
+///
+/// The panel is full height, so this is the frame that proves a composer
+/// keystroke costs the row it changed rather than the screen the panel
+/// covers: the pre-clipping shape measured 539us against 88us at 263x88,
+/// and it grew with the terminal instead of with the typing. Hot and cold
+/// both, for the same reason `paint_frame_cold` exists -- typing is a cold
+/// path, and the panel's own layout is the largest thing in it.
+fn bench_paint_frame_agent_composer(c: &mut Criterion) {
+    let mut model = agent_panel_model();
+    let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
+    let mut shadow = primed_shadow(&mut backend, &mut model);
+
+    let mut typed = 0_u32;
+    let composer_frame =
+        |model: &mut Model, shadow: &mut Shadow, backend: &mut _, typed: &mut u32| {
+            // the composer does not wrap, so the input is cleared before it
+            // reaches the panel's width rather than changing the shape of
+            // the frame being measured
+            *typed += 1;
+            if (*typed).is_multiple_of(20) {
+                model.ai_panel_mut().input.clear();
+            }
+            let _ = update(
+                model,
+                Msg::Key(view_core::msg::Key {
+                    notation: "x".to_string(),
+                }),
+            );
+            let started = Instant::now();
+            let grid_damage = model.take_paint_damage();
+            let surface = view_surface::render(model);
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
+            emit_frame(
+                black_box(backend),
+                black_box(shadow),
+                model,
+                &surface,
+                &damage,
+            );
+            started.elapsed()
+        };
+
+    c.bench_function("paint_frame_agent_composer", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                elapsed += composer_frame(&mut model, &mut shadow, &mut backend, &mut typed);
+            }
+            elapsed
+        });
+    });
+
+    let mut group = c.benchmark_group("paint_frame_agent_composer_cold");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(12));
+    group.bench_function("agent_composer_cold", |b| {
+        b.iter_custom(|iters| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iters {
+                std::thread::sleep(KEYSTROKE_GAP);
+                elapsed += composer_frame(&mut model, &mut shadow, &mut backend, &mut typed);
             }
             elapsed
         });
@@ -400,20 +490,15 @@ fn bench_paint_frame_prompt_overlay_open(c: &mut Criterion) {
                 std::thread::sleep(KEYSTROKE_GAP);
                 let mut model = populated_model();
                 let mut backend = ratatui::backend::CrosstermBackend::new(Vec::<u8>::new());
-                let (mut shadow, prev_overlay) = primed_shadow(&mut backend, &mut model);
+                let mut shadow = primed_shadow(&mut backend, &mut model);
                 open_prompt_overlay(&mut model);
 
                 let started = Instant::now();
                 let grid_damage = model.take_paint_damage();
                 let surface = view_surface::render(&model);
-                let cur_overlay = overlay_rows(&surface);
-                let damage = Damage::from_frame(
-                    &grid_damage,
-                    model.chrome_rows(),
-                    &prev_overlay,
-                    &cur_overlay,
-                    false,
-                );
+                let overlay_damage = shadow.overlay_damage(&surface);
+                let damage =
+                    Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, false);
                 emit_frame(
                     black_box(&mut backend),
                     black_box(&mut shadow),
@@ -436,6 +521,7 @@ criterion_group!(
     bench_paint_frame,
     bench_paint_frame_crossterm,
     bench_paint_frame_cold,
+    bench_paint_frame_agent_composer,
     bench_paint_frame_prompt_overlay_open
 );
 criterion_main!(benches);

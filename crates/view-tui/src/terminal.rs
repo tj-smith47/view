@@ -4,7 +4,7 @@
 //! `view -> crossterm` and `view -> ratatui`: only `view-tui` may touch the
 //! terminal).
 
-use crate::paint::{overlay_rows, Damage, Shadow};
+use crate::paint::{Damage, Shadow};
 use crate::tiers;
 use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use ratatui::backend::Backend;
@@ -290,11 +290,6 @@ pub struct Term {
     /// ~4800 cells every keystroke. Starts zero-sized so the first paint
     /// (and any later size change) rebuilds it and repaints in full.
     shadow: Shadow,
-    /// The terminal-space rows every overlay layer covered last frame, so a
-    /// vanished, moved, or shrunk overlay's vacated cells are marked dirty
-    /// this frame and the grid (or the new overlay position) repaints under
-    /// them; see [`crate::paint::Damage::from_frame`].
-    last_overlay_rows: Vec<u16>,
     /// The reserved chrome-row offset last frame. A change (a tabline
     /// appearing or vanishing) shifts every grid row, so the next paint
     /// must be full rather than damage-clipped.
@@ -341,7 +336,6 @@ impl Term {
             last_cursor_shape: None,
             last_mouse_reporting: None,
             shadow: Shadow::new(),
-            last_overlay_rows: Vec::new(),
             last_offset: None,
             caps,
             residue,
@@ -441,13 +435,14 @@ impl Term {
         if model.caps.sync {
             sink.write_all(b"\x1b[?2026h")?;
         }
-        // Translate this frame's grid damage into terminal-space rows, unioned
-        // with the overlay rows of this frame and the last so a vanished or
-        // moved overlay repaints the grid it uncovered. A chrome-offset change
-        // (a tabline appearing), a first paint, or a resize forces a
+        // Translate this frame's grid damage into terminal-space rows,
+        // unioned with the rows this frame's overlay stack draws
+        // differently than the one on screen -- which covers the grid a
+        // vanished or moved overlay uncovered. A chrome-offset change (a
+        // tabline appearing), a first paint, or a resize forces a
         // whole-frame repaint instead.
         let offset = model.chrome_rows();
-        let cur_overlay = overlay_rows(surface);
+        let overlay_damage = self.shadow.overlay_damage(surface);
         #[cfg(all(unix, feature = "bench-taps"))]
         crate::tap::tap(crate::tap::TAG_FRAME_PREPARED);
         // the terminal size comes from the model (fed by Msg::Resized and
@@ -468,13 +463,7 @@ impl Term {
                 crossterm::terminal::Clear(crossterm::terminal::ClearType::All)
             )?;
         }
-        let damage = Damage::from_frame(
-            grid_damage,
-            offset,
-            &self.last_overlay_rows,
-            &cur_overlay,
-            force_full,
-        );
+        let damage = Damage::from_frame(grid_damage, offset, &overlay_damage, force_full);
         // the streamed turn repainting its own panel and nothing else: the
         // one repaint between a keystroke and its redraw that a bench row
         // holding an agent session live can attribute to the session rather
@@ -483,7 +472,7 @@ impl Term {
         #[cfg(all(unix, feature = "bench-taps"))]
         let agent_repaint = !grid_damage.full
             && grid_damage.rows.is_empty()
-            && damage.is_exactly(&crate::paint::agent_panel_rows(surface));
+            && damage.covers_only(&crate::paint::agent_panel_rows(surface));
         #[cfg(all(unix, feature = "bench-taps"))]
         if agent_repaint {
             crate::tap::tap(crate::tap::TAG_AGENT_PAINT);
@@ -498,7 +487,6 @@ impl Term {
         // backend encodes them into the shared frame buffer
         self.shadow.emit_updates(&mut self.inner)?;
         self.shadow.commit();
-        self.last_overlay_rows = cur_overlay;
         self.last_offset = Some(offset);
         match surface.cursor {
             Some(spec) => {

@@ -21,12 +21,14 @@ use view_surface::{Layer, LayerKind, Rect, Surface};
 /// Rows are in terminal (post-chrome-offset) space, the same space
 /// [`ratatui::buffer::Buffer`] indexes, so [`composite_into`] can test a
 /// grid row's painted position directly. `full` supersedes `rows`: a
-/// first paint, resize, or chrome-offset change repaints everything. The
-/// grid layer is the only one clipped; transient overlays (cmdline,
-/// messages, popupmenu, tabline, shell) are small and always painted whole
-/// when present, and their rows are always included in a non-full
-/// `Damage` (see [`Damage::from_frame`]) so the grid underneath a vacated
-/// overlay repaints.
+/// first paint, resize, or chrome-offset change repaints everything.
+/// Every layer is clipped to these rows: a layer covering none of them
+/// paints nothing at all, and a framed overlay paints only the rows of its
+/// own frame that fall inside them. Which rows an overlay contributes is
+/// [`OverlayShadow::advance`]'s answer -- the rows it draws differently
+/// from the frame on screen -- so a full-height panel answering a
+/// composer keystroke costs the row that changed rather than the screen it
+/// covers.
 #[derive(Debug, Clone)]
 pub struct Damage {
     full: bool,
@@ -55,33 +57,26 @@ impl Damage {
     }
 
     /// Builds a frame's damage from the grid's own changed rows plus the
-    /// overlay rows of this frame and the last, offsetting grid-space rows
-    /// by the reserved chrome rows to reach terminal space.
+    /// rows the overlay stack draws differently than the frame on screen,
+    /// offsetting grid-space rows by the reserved chrome rows to reach
+    /// terminal space.
     ///
-    /// The union with both frames' overlay rows is what makes an overlay
-    /// transition correct by construction: a toast that appears, moves,
-    /// shrinks, or vanishes has every cell it now covers *and* every cell it
-    /// covered last frame marked dirty, so the grid (or the new overlay
+    /// `overlay` is [`OverlayShadow::advance`]'s answer, which already
+    /// carries every row an overlay transition uncovers: one that appears,
+    /// moves, shrinks or vanishes contributes the rows it now covers *and*
+    /// the rows it covered last frame, so the grid (or the new overlay
     /// position) repaints underneath the vacated cells. `force_full` (a
     /// chrome-offset change that shifts the whole grid) and a full
     /// [`GridDamage`] (a resize or clear) both collapse to a whole-frame
     /// repaint.
     #[must_use]
-    pub fn from_frame(
-        grid: &GridDamage,
-        offset: u16,
-        prev_overlay_rows: &[u16],
-        cur_overlay_rows: &[u16],
-        force_full: bool,
-    ) -> Self {
+    pub fn from_frame(grid: &GridDamage, offset: u16, overlay: &[u16], force_full: bool) -> Self {
         if force_full || grid.full {
             return Self::full();
         }
-        let mut rows =
-            Vec::with_capacity(grid.rows.len() + prev_overlay_rows.len() + cur_overlay_rows.len());
+        let mut rows = Vec::with_capacity(grid.rows.len() + overlay.len());
         rows.extend(grid.rows.iter().map(|&r| r.saturating_add(offset)));
-        rows.extend_from_slice(prev_overlay_rows);
-        rows.extend_from_slice(cur_overlay_rows);
+        rows.extend_from_slice(overlay);
         Self { full: false, rows }
     }
 
@@ -91,19 +86,29 @@ impl Damage {
         self.full || self.rows.contains(&row)
     }
 
-    /// Whether this damage covers `rows` and nothing besides, `rows` being
-    /// non-empty.
+    /// Whether any row of `area` must repaint.
+    #[must_use]
+    pub fn covers_any(&self, area: ratatui::layout::Rect) -> bool {
+        self.full
+            || (area.y..area.y.saturating_add(area.height)).any(|row| self.rows.contains(&row))
+    }
+
+    /// Whether this damage repaints something, and nothing outside `rows`.
     ///
-    /// Set equality rather than containment, because the bench taps use it
+    /// Containment rather than set equality, because the bench taps use it
     /// to attribute a repaint to what it covers: a frame that also repaints
     /// a row outside the region asked about was driven by something else as
     /// well, and attributing it whole to that region would explain away a
-    /// paint nothing accounts for.
+    /// paint nothing accounts for. The other direction is not the same
+    /// question and must not be asserted -- a panel repaints the rows its
+    /// content changed on, which is one row for a composer keystroke and
+    /// the whole transcript window for a streamed chunk, and both are
+    /// repaints the panel explains.
     #[must_use]
-    pub fn is_exactly(&self, rows: &[u16]) -> bool {
+    pub fn covers_only(&self, rows: &[u16]) -> bool {
         !self.full
+            && !self.rows.is_empty()
             && !rows.is_empty()
-            && rows.iter().all(|row| self.rows.contains(row))
             && self.rows.iter().all(|row| rows.contains(row))
     }
 
@@ -216,6 +221,9 @@ pub struct Shadow {
     runs: Vec<(u16, u16)>,
     /// Scratch sub-buffers, one per run, likewise kept across frames.
     staged: Vec<StagedRun>,
+    /// The overlay stack as the terminal shows it, which answers both which
+    /// overlay rows a frame damages and how the damaged ones lay out.
+    overlays: OverlayShadow,
     /// Frames composed, so the debug-build equivalence guard can name the
     /// frame a divergence appeared on.
     #[cfg(debug_assertions)]
@@ -323,12 +331,28 @@ impl Shadow {
         true
     }
 
+    /// Folds `surface`'s overlay stack in, returning the terminal-space rows
+    /// its overlays draw differently than the frame on screen -- the overlay
+    /// half of the next [`Damage::from_frame`].
+    ///
+    /// Call it once per frame, before [`Shadow::compose`]: it is what leaves
+    /// the layouts behind for that compose to paint from.
+    pub fn overlay_damage(&mut self, surface: &Surface) -> Vec<u16> {
+        self.overlays.advance(surface)
+    }
+
     /// Composites one frame into the back buffer, repainting `damage`'s rows
     /// plus the rows the previous frame repainted (see the type docs for why
     /// the previous frame's rows are needed).
     pub fn compose(&mut self, model: &Model, surface: &Surface, damage: &Damage) {
         let repaint = damage.union(&self.carried);
-        composite_into(&mut self.back, model, surface, &repaint);
+        composite_layers(
+            &mut self.back,
+            model,
+            surface,
+            &repaint,
+            Some(&self.overlays),
+        );
         self.carried = damage.clone();
         self.painted = repaint;
         #[cfg(debug_assertions)]
@@ -455,22 +479,173 @@ impl Shadow {
     }
 }
 
-/// The terminal-space rows every non-[`LayerKind::EngineGrid`] layer covers.
-/// [`Term`](crate::terminal::Term) feeds this frame's set and remembers it as
-/// the next frame's "previous overlay rows" so [`Damage::from_frame`] can
-/// dirty the cells a vanished or moved overlay leaves behind.
-#[must_use]
-pub fn overlay_rows(surface: &Surface) -> Vec<u16> {
-    let mut rows = Vec::new();
-    for layer in &surface.layers {
-        if matches!(layer.kind, LayerKind::EngineGrid) {
+/// One overlay layer as the frame on screen painted it: the layer itself,
+/// and the rows it was laid out into.
+#[derive(Debug, Clone)]
+struct PaintedOverlay {
+    layer: Layer,
+    laid: view_surface::overlay::Rows,
+}
+
+/// The overlay stack as the terminal currently shows it, kept so the next
+/// frame can ask which of its rows actually change.
+///
+/// Exists because "this layer is present" and "this layer draws something
+/// new" are different questions, and only the second one is damage. The
+/// agent panel is the case that makes the difference structural: it is
+/// full height, so answering a composer keystroke by dirtying every row it
+/// covers re-resolved the whole screen -- every grid cell beside the panel
+/// included -- for one changed cell, and that cost grows with the
+/// terminal rather than with what the user typed.
+///
+/// The comparison is two-stage, cheapest first. A layer equal to the one
+/// on screen draws identical cells by construction (the layout is a pure
+/// function of rect, kind and border set), so an unchanged panel costs one
+/// `==` and no layout at all -- which is what a buffer keystroke typed
+/// beside an open panel now pays. Only a layer that differs is laid out,
+/// and then row by row against the layout on screen, so the damage is the
+/// rows whose spans (or selection) moved.
+#[derive(Debug, Default)]
+pub struct OverlayShadow {
+    painted: Vec<PaintedOverlay>,
+}
+
+impl OverlayShadow {
+    /// Folds `surface` in as what the terminal will show, returning the
+    /// terminal-space rows its overlay layers draw differently than the
+    /// frame they replace.
+    ///
+    /// Layers are paired by stack position: a stack that grew, shrank or
+    /// reordered pairs a layer against a different one and falls back to
+    /// both rects whole, which is conservative in the direction that
+    /// repaints too much rather than too little.
+    pub fn advance(&mut self, surface: &Surface) -> Vec<u16> {
+        let mut rows = Vec::new();
+        for gone in self.painted.iter().skip(surface.layers.len()) {
+            push_rect_rows(&gone.layer, &mut rows);
+        }
+        self.painted.truncate(surface.layers.len());
+        for (i, layer) in surface.layers.iter().enumerate() {
+            // the whole point of the pairing: an unchanged layer draws what
+            // is already on screen, so it is neither laid out nor damaged
+            if self.painted.get(i).is_some_and(|was| was.layer == *layer) {
+                continue;
+            }
+            // the grid layer stays in the stack so positions keep pairing,
+            // but contributes no rows: its own damage already names the
+            // rows its cells changed on, and a rect change under it is a
+            // resize or a chrome-offset shift, both of which repaint whole
+            let contributes = !matches!(layer.kind, LayerKind::EngineGrid);
+            let laid = lay_out(layer);
+            match self.painted.get_mut(i) {
+                Some(was) => {
+                    if contributes {
+                        push_changed_rows(was, layer, &laid, &mut rows);
+                    }
+                    *was = PaintedOverlay {
+                        layer: layer.clone(),
+                        laid,
+                    };
+                }
+                None => {
+                    if contributes {
+                        push_rect_rows(layer, &mut rows);
+                    }
+                    self.painted.push(PaintedOverlay {
+                        layer: layer.clone(),
+                        laid,
+                    });
+                }
+            }
+        }
+        rows
+    }
+
+    /// The layout this shadow holds for the layer at stack position `index`,
+    /// when it is the layout of exactly `layer`.
+    ///
+    /// Lets the painter spend [`OverlayShadow::advance`]'s layout instead of
+    /// repeating it: laying a full-height panel out measured 67 us against
+    /// 0.7 us for the row compare that decided it was needed, so a frame
+    /// that laid the panel out twice spent most of itself there.
+    fn laid_for(&self, index: usize, layer: &Layer) -> Option<&view_surface::overlay::Rows> {
+        self.painted
+            .get(index)
+            .filter(|painted| painted.layer == *layer)
+            .map(|painted| &painted.laid)
+    }
+}
+
+/// This layer's rows as the painter will lay them out, empty for a kind
+/// that carries no framed rows of its own (the transient overlays, the
+/// speculated cells, the engine grid).
+fn lay_out(layer: &Layer) -> view_surface::overlay::Rows {
+    layer.borders.map_or_else(Default::default, |borders| {
+        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders)
+    })
+}
+
+/// Appends every terminal row `layer` covers.
+fn push_rect_rows(layer: &Layer, out: &mut Vec<u16>) {
+    let first = layer.rect.row;
+    let last = first.saturating_add(layer.rect.height);
+    for row in first..last {
+        if !out.contains(&row) {
+            out.push(row);
+        }
+    }
+}
+
+/// Appends the rows on which `now` (already laid out as `laid`) draws
+/// something other than what `was` put on screen.
+///
+/// Falls back to both rects whole where a row-by-row answer would not be
+/// sound: a layer that moved or resized vacates cells outside its own new
+/// rows, and a kind with no framed layout (a toast, the cmdline, the
+/// speculated cells) has no rows to compare -- its content lives in the
+/// layer, which already compared unequal to get here.
+fn push_changed_rows(
+    was: &PaintedOverlay,
+    now: &Layer,
+    laid: &view_surface::overlay::Rows,
+    out: &mut Vec<u16>,
+) {
+    if was.layer.rect != now.rect
+        || was.laid.framed != laid.framed
+        || laid.lines.is_empty()
+        || was.laid.lines.is_empty()
+    {
+        push_rect_rows(&was.layer, out);
+        push_rect_rows(now, out);
+        return;
+    }
+    let base = now.rect.row;
+    // the selection is a whole-row style the spans themselves do not
+    // carry, so a selection that moved between two identical rows still
+    // repaints both of them
+    let moved = if was.laid.selected == laid.selected {
+        [None, None]
+    } else {
+        [was.laid.selected, laid.selected]
+    };
+    for row in moved.into_iter().flatten() {
+        let row = base.saturating_add(row);
+        if !out.contains(&row) {
+            out.push(row);
+        }
+    }
+    for i in 0..was.laid.lines.len().max(laid.lines.len()) {
+        if was.laid.lines.get(i) == laid.lines.get(i) {
             continue;
         }
-        let first = layer.rect.row;
-        let last = first.saturating_add(layer.rect.height);
-        rows.extend(first..last);
+        let Ok(row) = u16::try_from(i) else {
+            break;
+        };
+        let row = base.saturating_add(row);
+        if !out.contains(&row) {
+            out.push(row);
+        }
     }
-    rows
 }
 
 /// The terminal-space rows the agent panel covers, empty when this frame
@@ -478,7 +653,7 @@ pub fn overlay_rows(surface: &Surface) -> Vec<u16> {
 ///
 /// Only the bench taps ask: a frame whose whole damage is these rows is a
 /// repaint the streamed turn explains, and one that reaches past them is
-/// not (see [`Damage::is_exactly`]). The answer itself is unconditional so
+/// not (see [`Damage::covers_only`]). The answer itself is unconditional so
 /// the shipped test run keeps proving it, rather than only the builds that
 /// carry the taps.
 #[must_use]
@@ -522,6 +697,22 @@ pub fn agent_panel_rows(surface: &Surface) -> Vec<u16> {
 /// so the unconditional `EngineGrid` paint below is what restores the
 /// resting text underneath).
 pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage: &Damage) {
+    composite_layers(buf, model, surface, damage, None);
+}
+
+/// [`composite_into`], optionally spending overlay layouts a caller already
+/// computed rather than laying the same layers out a second time.
+///
+/// `layouts` is only ever an optimisation: a layer it has no matching entry
+/// for is laid out here, which is what keeps the equality guard's
+/// from-scratch recomposite an independent answer.
+fn composite_layers(
+    buf: &mut Buffer,
+    model: &Model,
+    surface: &Surface,
+    damage: &Damage,
+    layouts: Option<&OverlayShadow>,
+) {
     let frame_area = buf.area;
     // Clear the rows this frame repaints before any layer paints, so each
     // layer writes over blank cells exactly as a full recomposite writes
@@ -536,9 +727,16 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
     // lookup over already-decoded fields, not an RPC round trip, so
     // re-deriving on every paint costs nothing beyond this struct copy
     let theme = Theme::from_hl(model.engine.hl());
-    for layer in &surface.layers {
+    for (index, layer) in surface.layers.iter().enumerate() {
         let area = clip_to_frame(layer.rect, frame_area);
         if area.width == 0 || area.height == 0 {
+            continue;
+        }
+        // a layer with no damaged row under it draws what the buffer
+        // already holds there, so it is skipped before it is laid out --
+        // the grid painter clips itself, row by row, and is the one layer
+        // whose rows are named by something other than this test
+        if !matches!(layer.kind, LayerKind::EngineGrid) && !damage.covers_any(area) {
             continue;
         }
         match &layer.kind {
@@ -566,7 +764,8 @@ pub fn composite_into(buf: &mut Buffer, model: &Model, surface: &Surface, damage
             | LayerKind::Prompt(_)
             | LayerKind::Palette(_)
             | LayerKind::Ai(_) => {
-                paint_native_overlay(layer, &theme, area, buf);
+                let laid = layouts.and_then(|shadow| shadow.laid_for(index, layer));
+                paint_native_overlay(layer, laid, &theme, area, damage, buf);
             }
             // LayerKind is #[non_exhaustive]: a future variant degrades to
             // painting nothing rather than failing to compile here
@@ -1125,15 +1324,23 @@ fn paint_popupmenu(
 /// away from readable.
 fn paint_native_overlay(
     layer: &Layer,
+    laid: Option<&view_surface::overlay::Rows>,
     theme: &Theme,
     area: ratatui::layout::Rect,
+    damage: &Damage,
     buf: &mut Buffer,
 ) {
-    let Some(borders) = layer.borders else {
+    if layer.borders.is_none() {
         return;
+    }
+    let computed;
+    let laid = match laid {
+        Some(laid) => laid,
+        None => {
+            computed = lay_out(layer);
+            &computed
+        }
     };
-    let laid =
-        view_surface::overlay::rows(layer.rect.width, layer.rect.height, &layer.kind, borders);
     // every overlay reads its colors from the floating-window group except
     // the statusline, which is its own chrome group (a status line is not a
     // float and a colorscheme that restyles one must not restyle the other)
@@ -1180,6 +1387,13 @@ fn paint_native_overlay(
         };
         if row >= area.height {
             break;
+        }
+        // the row-level half of the clip the loop above applies to the
+        // whole layer: a framed overlay is one layer but many independent
+        // rows, and a keystroke in a panel's composer changes exactly one
+        // of them
+        if !damage.covers(area.y.saturating_add(row)) {
+            continue;
         }
         let edge_row = laid.framed && (i == 0 || i == last);
         if edge_row {
@@ -1850,6 +2064,28 @@ mod tests {
         let _ = view_core::update::update(model, view_core::msg::Msg::Redraw(vec![ev]));
     }
 
+    /// Drives the agent panel's `:View ai <verb>` entry point.
+    fn ai_verb(model: &mut Model, verb: &str) {
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::FeatureInvoke {
+                feature: "ai".to_string(),
+                verb: verb.to_string(),
+            },
+        );
+    }
+
+    /// Sends one key through `update()`, which routes it to whatever holds
+    /// focus -- the agent panel's composer, when the panel is open.
+    fn type_key(model: &mut Model, notation: &str) {
+        let _ = view_core::update::update(
+            model,
+            view_core::msg::Msg::Key(view_core::msg::Key {
+                notation: notation.to_string(),
+            }),
+        );
+    }
+
     /// Supersedes an earlier EngineGrid-only regression test: the cmdline is
     /// a transient overlay, so it is correct UX for it to paint over the
     /// grid's bottom row while it is open (matching the cmdheight=0
@@ -2179,6 +2415,58 @@ mod tests {
         assert_eq!(&buf[(0, 0)].symbol(), &"z");
     }
 
+    /// The agent panel is full height, so answering a composer keystroke by
+    /// dirtying every row it covers costs a whole-screen recomposite -- the
+    /// grid cells beside the panel included -- for one changed cell, and
+    /// that cost grows with the terminal rather than with what was typed.
+    /// Over a link with any latency it is what makes typing into the panel
+    /// feel slower than typing into the buffer, which is backwards: the
+    /// composer is native state and the buffer round-trips nvim.
+    #[test]
+    fn a_composer_keystroke_damages_only_the_composer_row() {
+        let mut model = Model::with_term_size(120, 40);
+        model.engine.apply_grid(GridOp::Resize {
+            width: 120,
+            height: 40,
+        });
+        model.ai_trusted = true;
+        ai_verb(&mut model, "open");
+        assert!(model.ai_panel().focused, "the composer holds focus");
+
+        let mut shadow = Shadow::new();
+        assert!(shadow.resize(ratatui::layout::Rect::new(0, 0, 120, 40)));
+        let surface = view_surface::render(&model);
+        let opened = shadow.overlay_damage(&surface);
+        let panel = agent_panel_rows(&surface);
+        assert!(
+            panel.len() > 8,
+            "the panel spans the terminal's height: {panel:?}"
+        );
+        assert_eq!(
+            opened.len(),
+            panel.len(),
+            "the panel's own first frame draws every row it covers"
+        );
+
+        let _ = model.take_paint_damage();
+        type_key(&mut model, "x");
+        let surface = view_surface::render(&model);
+        let typed = shadow.overlay_damage(&surface);
+        assert_eq!(
+            typed.len(),
+            1,
+            "one composer row changed, but these rows were damaged: {typed:?}"
+        );
+        assert!(
+            panel.contains(&typed[0]),
+            "the damaged row is inside the panel"
+        );
+        assert!(
+            model.take_paint_damage().rows.is_empty(),
+            "a composer keystroke never reaches the engine grid"
+        );
+    }
+
     /// What the agent-paint tap is allowed to explain. The panel repainting
     /// itself under a streamed turn is the frame a bench row attributes to
     /// the agent; the same panel on screen while a toast expires is a frame
@@ -2209,21 +2497,26 @@ mod tests {
 
         let quiet = GridDamage::default();
         assert!(
-            Damage::from_frame(&quiet, 0, &panel, &panel, false).is_exactly(&panel),
+            Damage::from_frame(&quiet, 0, &panel, false).covers_only(&panel),
             "a frame repainting the panel and nothing else"
         );
-
-        let overlay = overlay_rows(&surface);
         assert!(
-            !Damage::from_frame(&quiet, 0, &overlay, &panel, false).is_exactly(&panel),
+            Damage::from_frame(&quiet, 0, &panel[..1], false).covers_only(&panel),
+            "one changed panel row is still the panel and nothing else"
+        );
+
+        let mut beside = panel.clone();
+        beside.push(panel.iter().max().copied().unwrap_or(0).saturating_add(1));
+        assert!(
+            !Damage::from_frame(&quiet, 0, &beside, false).covers_only(&panel),
             "the toast's rows repaint beside the panel's"
         );
         assert!(
-            !Damage::full().is_exactly(&panel),
+            !Damage::full().covers_only(&panel),
             "a whole-frame repaint is not the panel's doing"
         );
         assert!(
-            !Damage::from_frame(&quiet, 0, &[], &[], false).is_exactly(&panel),
+            !Damage::from_frame(&quiet, 0, &[], false).covers_only(&panel),
             "a frame with no damage at all explains nothing"
         );
     }
@@ -2896,7 +3189,8 @@ mod tests {
         let mut model = Model::new();
         setup_a(&mut model);
         let surf_a = view_surface::render(&model);
-        let prev_overlay = overlay_rows(&surf_a);
+        let mut overlay = OverlayShadow::default();
+        let _ = overlay.advance(&surf_a);
         let offset_a = model.chrome_rows();
         // clear the damage state A's construction accumulated: the shadow is
         // about to hold A in full, so only B's later damage matters
@@ -2907,7 +3201,7 @@ mod tests {
         mutate_b(&mut model);
         let grid_damage = model.take_paint_damage();
         let surf_b = view_surface::render(&model);
-        let cur_overlay = overlay_rows(&surf_b);
+        let overlay_damage = overlay.advance(&surf_b);
         let offset_b = model.chrome_rows();
         // a chrome-offset change or a paint-area change forces a full repaint,
         // matching Term's own force_full; otherwise clip to B's damage
@@ -2918,7 +3212,7 @@ mod tests {
         let damage = if force_full {
             Damage::full()
         } else {
-            Damage::from_frame(&grid_damage, offset_b, &prev_overlay, &cur_overlay, false)
+            Damage::from_frame(&grid_damage, offset_b, &overlay_damage, false)
         };
         composite_into(&mut shadow, &model, &surf_b, &damage);
 
@@ -3012,24 +3306,53 @@ mod tests {
                     });
                 }),
             ),
+            // the agent panel is the layer whose damage is row-wise rather
+            // than whole-rect, so every one of its transitions has to land
+            // in the sequence this checks: appearing, one row of it
+            // changing, the grid changing under it while it holds still,
+            // and vanishing
+            (
+                "agent panel opens",
+                Box::new(|m: &mut Model| {
+                    m.ai_trusted = true;
+                    ai_verb(m, "open");
+                }),
+            ),
+            (
+                "composer keystroke",
+                Box::new(|m: &mut Model| type_key(m, "q")),
+            ),
+            (
+                "second composer keystroke",
+                Box::new(|m: &mut Model| type_key(m, "w")),
+            ),
+            (
+                "grid edit beside the open panel",
+                Box::new(|m: &mut Model| {
+                    m.engine.apply_grid(GridOp::PutLine {
+                        row: 4,
+                        col_start: 1,
+                        cells: vec![("Y".into(), 2, 1)],
+                    });
+                }),
+            ),
+            (
+                "agent panel closes",
+                Box::new(|m: &mut Model| {
+                    ai_verb(m, "close");
+                }),
+            ),
         ];
 
-        let mut prev_overlay: Vec<u16> = Vec::new();
         let mut first = true;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
-            let cur_overlay = overlay_rows(&surface);
-            let damage = Damage::from_frame(
-                &grid_damage,
-                model.chrome_rows(),
-                &prev_overlay,
-                &cur_overlay,
-                first,
-            );
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
-            prev_overlay = cur_overlay;
             shadow.compose(&model, &surface, &damage);
             shadow.commit();
             assert_eq!(
@@ -3291,22 +3614,15 @@ mod tests {
             ),
         ];
 
-        let mut prev_overlay: Vec<u16> = Vec::new();
         let mut first = true;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
-            let cur_overlay = overlay_rows(&surface);
-            let damage = Damage::from_frame(
-                &grid_damage,
-                model.chrome_rows(),
-                &prev_overlay,
-                &cur_overlay,
-                first,
-            );
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
-            prev_overlay = cur_overlay;
             shadow.compose(&model, &surface, &damage);
             assert_clipped_emission_matches_unclipped(&mut shadow, label);
             shadow.commit();
@@ -3882,22 +4198,15 @@ mod tests {
             ),
         ];
 
-        let mut prev_overlay: Vec<u16> = Vec::new();
         let mut first = true;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
             let surface = view_surface::render(&model);
-            let cur_overlay = overlay_rows(&surface);
-            let damage = Damage::from_frame(
-                &grid_damage,
-                model.chrome_rows(),
-                &prev_overlay,
-                &cur_overlay,
-                first,
-            );
+            let overlay_damage = shadow.overlay_damage(&surface);
+            let damage =
+                Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
-            prev_overlay = cur_overlay;
             shadow.compose(&model, &surface, &damage);
             shadow.commit();
             assert_eq!(
@@ -4484,8 +4793,10 @@ mod tests {
         let mut buf = Buffer::empty(ratatui::layout::Rect::new(0, 0, 30, 10));
         paint_native_overlay(
             &layer,
+            None,
             &theme,
             ratatui::layout::Rect::new(2, 1, 24, 7),
+            &Damage::full(),
             &mut buf,
         );
         for row in 0..10_u16 {
