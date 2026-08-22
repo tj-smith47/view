@@ -4,7 +4,6 @@ machine_class = "gh-macos"
 
 [echo.heavy]
 paired_delta_p99_ms = 4.27
-ratio_p50 = 0.9315969481715337
 ratio_p99 = 1.0146224631287029
 view_p99_ms = 8.049
 

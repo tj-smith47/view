@@ -3,28 +3,32 @@ engine_pin = "v0.12.4"
 machine_class = "gh-linux"
 
 [echo.heavy]
-paired_delta_p99_ms = 0.978245
-ratio_p50 = 1.139405693248307
-ratio_p99 = 1.0882649125183297
+paired_delta_p99_ms = 0.564674
+ratio_p50 = 1.0631182283384175
+ratio_p99 = 1.054358503259563
 view_p99_ms = 1.672663
 
 [echo.minimal]
 paired_delta_p99_ms = 0.27052499999999996
-ratio_p50 = 1.208872714970104
-ratio_p99 = 1.1947349214948375
+ratio_p50 = 1.1613990855166902
+ratio_p99 = 1.1779065070047432
 view_p99_ms = 0.753246
 
 [echo_control.heavy]
 control_delta_p99_ms = 0.7250650000000001
 control_p99_ms = 1.469202
-control_ratio_p50 = 1.009346790816689
+control_ratio_p50 = 1.0083938668742227
 control_ratio_p99 = 1.007715339120072
 
 [echo_control.minimal]
 control_delta_p99_ms = 0.18762
 control_p99_ms = 0.721107
-control_ratio_p50 = 1.0385668880868222
-control_ratio_p99 = 1.0786170417869194
+control_ratio_p50 = 0.9857445467564057
+control_ratio_p99 = 0.976705714890261
+
+[echo_speculated.minimal]
+speculated_paint_p99_ms = 0.512257
+speculated_ratio_p50 = 0.36717997563500987
 
 [first_paint.heavy]
 marker_cold_ms = 87.80524100000001
@@ -39,19 +43,40 @@ marker_ratio_p99 = 0.20177850569483782
 shell_visible_cold_ms = 3.94175
 
 [flood.minimal]
-cadence_p99_ms = 23.517096000000002
-cadence_p99_ratio = 1.0665704699648504
+cadence_p99_ms = 21.871975
+cadence_p99_ratio = 0.9105279856120709
 pace_ratio = 0.9881605234695989
+
+[input_path.minimal]
+key_to_rpc_p99_us = 35.757
 
 [memory.minimal]
 pss_mb = 3.3857421875
 
+[output_path.minimal]
+p99_ms = 0.091666
+
+[picker.minimal]
+first_page_p50_ms = 11.072344
+first_page_p99_ms = 26.319372
+match_paint_p50_ms = 3.296945
+match_paint_p99_ms = 4.170838
+
+[remote_memory.minimal]
+local_pss_mb = 6.27978515625
+pss_mb = 6.3662109375
+remote_local_ratio = 1.0066246835460066
+
 [scroll.heavy]
-ratio_p50 = 2.4288741643823273
-ratio_p99 = 2.337079483688592
-staleness_p99_ms = 1.759887
+ratio_p50 = 2.0943067839001626
+ratio_p99 = 1.9449275397570551
+staleness_p99_ms = 1.6172179999999998
 
 [scroll.minimal]
-ratio_p50 = 2.29456046705588
-ratio_p99 = 2.265844308712498
-staleness_p99_ms = 1.649691
+ratio_p50 = 1.9668940310173837
+ratio_p99 = 1.98635842635655
+staleness_p99_ms = 1.5666250000000002
+
+[supervision.minimal]
+restart_rehydrate_p99_ms = 36.796227
+wedge_detect_p99_ms = 11582.656874
