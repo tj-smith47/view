@@ -7,6 +7,32 @@
 //! routing a click and painting a frame both resolve through it, so the
 //! rect a click is tested against is always the rect on screen.
 
+/// The cells a framed overlay `width` terminal columns wide leaves for its
+/// own text, once its border and the one-column pad inside each edge have
+/// had theirs. A rect too narrow to hold a frame at all keeps every column
+/// for content, matching what the framing itself does at that size.
+///
+/// Lives here rather than in `view-surface`'s framing because two crates
+/// need the same answer and a second copy of the arithmetic would disagree
+/// at the pad threshold: the framing paints to this column, and the AI
+/// panel's composer breaks its lines at it. A wrap a cell out from the
+/// paint is exactly how a character goes missing.
+///
+/// ```
+/// use view_core::native::geometry::interior_text_width;
+/// assert_eq!(interior_text_width(60), 56);
+/// assert_eq!(interior_text_width(5), 3);
+/// assert_eq!(interior_text_width(1), 1);
+/// ```
+#[must_use]
+pub const fn interior_text_width(width: u16) -> u16 {
+    if width < 2 {
+        return width;
+    }
+    let pad = if width >= 6 { 2 } else { 0 };
+    width - 2 - pad
+}
+
 /// Which terminal edge an overlay is pinned to when it is smaller than the
 /// terminal. The axis an anchor says nothing about stays centered, so a
 /// left-anchored sidebar is flush left and vertically centered.

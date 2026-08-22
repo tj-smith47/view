@@ -928,20 +928,26 @@ fn scroll_ai_transcript(model: &mut Model, notation: &str) -> bool {
     let Some(scroll) = ai_scroll_for(notation) else {
         return false;
     };
-    let height = ai_panel_height(model);
-    model.ai_panel_mut().scroll_transcript(scroll, height)
+    let (height, width) = ai_panel_size(model);
+    model
+        .ai_panel_mut()
+        .scroll_transcript(scroll, height, width)
 }
 
-/// The open AI panel's own resolved height in terminal rows -- the same
-/// number `view-surface` paints it at, so a page moves the window by
-/// exactly what the panel last drew.
-fn ai_panel_height(model: &Model) -> usize {
+/// The open AI panel's own resolved size in terminal cells, rows first --
+/// the same numbers `view-surface` paints it at, so a page moves the window
+/// by exactly what the panel last drew, over the rows a wrapped composer
+/// left it.
+fn ai_panel_size(model: &Model) -> (usize, usize) {
     model
         .overlays()
         .iter()
         .rev()
         .find(|overlay| matches!(overlay.kind, OverlayKind::Ai))
-        .map_or(0, |overlay| usize::from(model.overlay_rect(overlay).height))
+        .map_or((0, 0), |overlay| {
+            let rect = model.overlay_rect(overlay);
+            (usize::from(rect.height), usize::from(rect.width))
+        })
 }
 
 /// Routes one keypress to whatever currently owns the keyboard, after

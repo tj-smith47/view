@@ -71,10 +71,10 @@ fn sample_ai_composer(
     for _ in 0..protocol.trials {
         let mut deltas_ms = Vec::with_capacity(protocol.warmup + protocol.samples);
         for index in 0..(protocol.warmup + protocol.samples) {
-            // the composer does not wrap, so every second sample deletes
-            // the character the one before it typed: the input length
-            // oscillates between zero and one instead of growing past the
-            // panel's width, and both keys are the same one-row edit
+            // every second sample deletes the character the one before it
+            // typed: the input length oscillates between zero and one
+            // instead of growing past the panel's width into a wrap, so
+            // both keys are the same one-row edit
             let key: &[u8] = if index % 2 == 0 { b"x" } else { b"\x7f" };
             all_records.extend(pipe.drain());
             let t0 = monotonic_nanos();

@@ -2952,7 +2952,7 @@ fn scrollable_ai_panel_model(lines: usize) -> Model {
 /// panel's own resolved height.
 fn panel_transcript_texts(m: &Model) -> Vec<String> {
     m.ai_panel()
-        .view(24)
+        .view(24, 60)
         .rows
         .into_iter()
         .map(|row| row.into_iter().map(|span| span.text).collect())

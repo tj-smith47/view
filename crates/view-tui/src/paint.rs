@@ -2149,6 +2149,34 @@ mod tests {
             .flatten()
     }
 
+    /// How many rows the agent panel's composer currently paints, from the
+    /// rendered surface rather than from the panel's width arithmetic, so a
+    /// test drives the boundary the painter actually sees.
+    fn composer_row_count(model: &Model) -> usize {
+        view_surface::render(model)
+            .layers
+            .iter()
+            .find_map(|layer| match &layer.kind {
+                LayerKind::Ai(view) => Some(view.input.len()),
+                _ => None,
+            })
+            .unwrap_or(0)
+    }
+
+    /// Types into the composer until its first row is exactly full: one
+    /// character short of wrapping, so the keystroke after this one moves
+    /// the transcript boundary and nothing else does.
+    fn fill_composer_row(model: &mut Model) {
+        for _ in 0..256 {
+            if composer_row_count(model) > 1 {
+                type_key(model, "<BS>");
+                return;
+            }
+            type_key(model, "e");
+        }
+        panic!("the composer never wrapped");
+    }
+
     /// Sends one key through `update()`, which routes it to whatever holds
     /// focus -- the agent panel's composer, when the panel is open.
     fn type_key(model: &mut Model, notation: &str) {
@@ -3417,6 +3445,28 @@ mod tests {
                 "second composer keystroke",
                 Box::new(|m: &mut Model| type_key(m, "w")),
             ),
+            // a composer that wraps moves the boundary between itself and
+            // the transcript, so the rows that change are not the row that
+            // was typed into -- the one shape a per-row damage set gets
+            // wrong by under-damaging, and a stale row there looks exactly
+            // like an untouched one on screen
+            ("composer fills its first row", Box::new(fill_composer_row)),
+            (
+                "one more character wraps the composer",
+                Box::new(|m: &mut Model| type_key(m, "e")),
+            ),
+            (
+                "one backspace unwraps it",
+                Box::new(|m: &mut Model| type_key(m, "<BS>")),
+            ),
+            (
+                "composer clears",
+                Box::new(|m: &mut Model| {
+                    while !m.ai_panel().input.is_empty() {
+                        type_key(m, "<BS>");
+                    }
+                }),
+            ),
             (
                 "grid edit beside the open panel",
                 Box::new(|m: &mut Model| {
@@ -3448,6 +3498,7 @@ mod tests {
 
         let mut first = true;
         let mut row_wise_frames = 0_u32;
+        let mut boundary_frames = 0_u32;
         for (label, mutate) in steps {
             mutate(&mut model);
             let grid_damage = model.take_paint_damage();
@@ -3474,6 +3525,23 @@ mod tests {
                 );
                 row_wise_frames += 1;
             }
+            if matches!(
+                label,
+                "one more character wraps the composer" | "one backspace unwraps it"
+            ) {
+                let panel = agent_panel_rows(&surface).len();
+                assert!(
+                    overlay_damage.len() > 1,
+                    "{label} moved the transcript boundary, so more than the \
+                     typed row changed: {overlay_damage:?}"
+                );
+                assert!(
+                    overlay_damage.len() < panel,
+                    "{label} still damaged rows rather than the panel's whole \
+                     rect: {overlay_damage:?} of {panel}"
+                );
+                boundary_frames += 1;
+            }
             let damage =
                 Damage::from_frame(&grid_damage, model.chrome_rows(), &overlay_damage, first);
             first = false;
@@ -3486,6 +3554,10 @@ mod tests {
             );
         }
         assert_eq!(row_wise_frames, 2, "both row-wise frames were composited");
+        assert_eq!(
+            boundary_frames, 2,
+            "the composer grew and shrank by a row, and both frames were checked"
+        );
     }
 
     /// A double-width symbol occupies the cell to its right, so that cell

@@ -596,8 +596,12 @@ impl PaletteView {
 pub struct AiPanelView {
     /// The overlay's title, drawn into its top border.
     pub title: String,
-    /// The composer line's text as typed so far.
-    pub input: String,
+    /// The composer's painted rows: the prompt as typed so far, wrapped to
+    /// what one row of the panel holds and cut to its last rows, so the end
+    /// of the input -- where the next character lands -- is always the last
+    /// of them. Empty only for a view built without a composer at all,
+    /// which the framing draws as the empty prompt line.
+    pub input: Vec<String>,
     /// The transcript, oldest first, each entry already formatted as one
     /// row of spans.
     pub rows: Vec<Vec<Span>>,
@@ -643,11 +647,19 @@ impl AiPanelView {
         }
     }
 
-    /// The same panel with `input` on its composer line.
+    /// The same panel with `input` as its one composer row -- what a prompt
+    /// short enough to fit the panel's width comes out as.
     #[must_use]
     pub fn with_input(self, input: impl Into<String>) -> Self {
+        self.with_input_rows(vec![input.into()])
+    }
+
+    /// The same panel with `rows` as its composer, already wrapped and cut
+    /// by [`AiPanelState::view`](crate::native::ai_panel::AiPanelState::view).
+    #[must_use]
+    pub fn with_input_rows(self, rows: Vec<String>) -> Self {
         Self {
-            input: input.into(),
+            input: rows,
             ..self
         }
     }

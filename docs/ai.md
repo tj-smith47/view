@@ -27,6 +27,21 @@ Tool calls appear as they start and update in place as they finish. When
 the panel is open but not focused, it says so and names the way in
 (`:View ai focus`).
 
+The prompt you are composing sits under the header, and it wraps rather
+than running off the edge -- a prompt several sentences long grows the
+composer downward, indented under its own `>`, with the transcript giving
+up the rows:
+
+```
+> summarize the retry policy in the client, then rewrite it to
+  back off exponentially and cap at thirty seconds, and leave the
+  existing tests passing
+```
+
+The composer stops growing at half the panel and scrolls inside those rows
+after that, so the end of what you are typing is always the last row on
+screen and the transcript always keeps half the panel.
+
 The transcript follows its newest line, the way a terminal does, so a
 session hours long still shows you what just happened. To read back over
 it, the focused panel scrolls:

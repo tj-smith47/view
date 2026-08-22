@@ -180,9 +180,7 @@ pub fn rows(width: u16, height: u16, kind: &LayerKind, borders: BorderSet) -> Ro
     // rect is too narrow to spare it: padding that eats the last two cells
     // of content is worse than an unpadded box
     let pad = u16::from(width >= 6);
-    let text_width = width
-        .saturating_sub(2)
-        .saturating_sub(pad.saturating_mul(2));
+    let text_width = view_core::native::geometry::interior_text_width(width);
     let interior = height - 2;
     let laid = content_rows(kind, &body, text_width, interior, borders);
 
@@ -708,19 +706,17 @@ fn ai_body(view: &AiPanelView) -> Body {
     // Header order is truncation order, because `header_keep_tail` keeps
     // the tail: the first row here is the first sacrificed and the last is
     // the last standing. Session accounting first (it answers a question
-    // nobody is currently blocked on), then the composer line (context --
+    // nobody is currently blocked on), then the composer's rows (context --
     // what the user is typing survives in the state whether or not it is
-    // painted), then the
+    // painted, and the row the cursor is on is the last of them, so a
+    // truncated composer still shows where typing lands), then the
     // review's own summary, then a pending permission's question and
     // options, and the crash banner last of all. A dead session is the one
     // thing that explains why nothing else on this panel will ever answer,
     // so it outranks a review the user can still scroll to and a request
     // whose agent is already gone.
     let mut header: Vec<Line> = view.usage.iter().cloned().map(Line::Text).collect();
-    header.push(Line::Text(plain_spans(format!(
-        "{PROMPT_MARK} {}",
-        view.input
-    ))));
+    header.extend(composer_lines(&view.input));
     header.extend(view.review.iter().cloned().map(Line::Text));
     header.extend(view.pending_permission.iter().cloned().map(Line::Text));
     header.extend(view.local_error.iter().cloned().map(Line::Text));
@@ -740,6 +736,37 @@ fn ai_body(view: &AiPanelView) -> Body {
         items_keep_tail: true,
         rule: true,
     }
+}
+
+/// The composer's rows, the prompt mark on the first and an indent of the
+/// same width under it on every wrapped row after it -- so a wrapped prompt
+/// reads as one field rather than as a new prompt per row, and every row
+/// breaks at the column `AiPanelState::view` wrapped it to.
+///
+/// A view carrying no composer rows at all (one built straight from
+/// `AiPanelView::new`, never through the panel's own state) still draws the
+/// empty prompt line: the composer is chrome the panel always has, and a
+/// missing row would shift every header row under it.
+///
+/// Their order is truncation order, and it is the right one already: a
+/// short panel drops the composer's oldest rows first (see
+/// [`Body::header_keep_tail`]) and keeps the last, which is where the
+/// cursor is.
+fn composer_lines(rows: &[String]) -> Vec<Line> {
+    if rows.is_empty() {
+        return vec![Line::Text(plain_spans(format!("{PROMPT_MARK} ")))];
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(i, row)| {
+            let lead = if i == 0 {
+                format!("{PROMPT_MARK} ")
+            } else {
+                " ".repeat(view_core::native::ai_panel::PROMPT_COLS)
+            };
+            Line::Text(plain_spans(format!("{lead}{row}")))
+        })
+        .collect()
 }
 
 /// One palette row: the command's name, plus its binding as a second

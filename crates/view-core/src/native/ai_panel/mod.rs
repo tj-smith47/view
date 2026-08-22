@@ -12,6 +12,7 @@
 //! state into these types in place, rather than a live session replacing
 //! them with a shape of its own.
 
+use super::geometry::interior_text_width;
 use super::views::{AiPanelView, Span};
 
 mod permission;
@@ -75,7 +76,9 @@ pub struct AiPanelState {
     /// Agent output, folded per message id as chunks stream in, and tool
     /// calls folded per `tool_call_id` as their status advances.
     pub transcript: Transcript,
-    /// The panel's own prompt-composition line.
+    /// The panel's own prompt-composition line, as typed. Longer than one
+    /// painted row is ordinary: [`Self::view`] wraps it (see
+    /// [`composer_width`]), so this is never cut to what fits.
     pub input: String,
     /// A single slot by design, not a queue: ACP blocks the agent's own
     /// turn on the reply, so a conformant agent never has two outstanding
@@ -212,13 +215,22 @@ impl AiPanelState {
     }
 
     /// How many transcript rows a panel `panel_height` terminal rows tall
-    /// has room for, once the overlay's own chrome has had its share.
+    /// and `panel_width` columns wide has room for, once the overlay's own
+    /// chrome has had its share.
     ///
     /// This is the room, not the distance a page moves: a held window
     /// spends one of these rows on [`MORE_BELOW`], and paging by the room
     /// rather than by what was drawn would step over the line that row
     /// displaced. [`Self::scroll_transcript`] takes that off, in the one
     /// place both it and [`Self::view`] read.
+    ///
+    /// A composer wrapped over more than one row is subtracted, unlike the
+    /// header rows below, because a scroll key does reach the transcript
+    /// with a half-written prompt on the composer (`ai_scroll_for`'s keys
+    /// are exactly the ones the composer cannot type). A window left
+    /// counting rows the composer has taken would have its oldest rows cut
+    /// by the overlay instead, which slides a held window the user is
+    /// reading.
     ///
     /// A pending permission's rows and an open review's summary are
     /// deliberately not subtracted. Neither state lets a scroll key through
@@ -229,23 +241,56 @@ impl AiPanelState {
     /// Counting them here would instead have to be kept in step with
     /// `view-surface`'s own header assembly, which this crate cannot see.
     #[must_use]
-    pub fn transcript_viewport(&self, panel_height: usize) -> usize {
+    pub fn transcript_viewport(&self, panel_height: usize, panel_width: usize) -> usize {
+        self.transcript_rows(
+            panel_height,
+            self.composer_rows(panel_height, panel_width).len(),
+        )
+    }
+
+    /// [`Self::transcript_viewport`] for a caller that has already laid the
+    /// composer out, so a paint wraps the input once rather than twice.
+    /// [`CHROME_ROWS`] already counts the composer's first row.
+    fn transcript_rows(&self, panel_height: usize, composer_rows: usize) -> usize {
         panel_height
             .saturating_sub(CHROME_ROWS)
             .saturating_sub(usize::from(self.usage.is_some()))
             .saturating_sub(usize::from(self.local_error.is_some()))
+            .saturating_sub(composer_rows.saturating_sub(1))
+    }
+
+    /// The composer's painted rows: [`Self::input`] wrapped to what one row
+    /// of a `panel_width`-wide panel holds, cut to the last
+    /// [`composer_cap`] of them.
+    ///
+    /// The cut keeps the tail, never the head: the composer only appends
+    /// and backspaces, so the cursor is at the end of the input, and the
+    /// last row is where the next character lands. Cutting the other way is
+    /// the reported defect -- a prompt past the panel's width kept typing
+    /// into a row nothing painted.
+    fn composer_rows(&self, panel_height: usize, panel_width: usize) -> Vec<String> {
+        wrap(
+            &self.input,
+            composer_width(panel_width),
+            composer_cap(panel_height),
+        )
     }
 
     /// Moves the transcript window for one scroll key, reporting whether it
     /// moved -- which is what the caller marks the model dirty on.
     ///
-    /// Takes the panel's own height, the same number [`Self::view`] paints
-    /// from, so the distance a page moves and the rows a page drew are
-    /// derived from one input and cannot disagree: a page lands exactly
-    /// where the last one stopped, in either direction, skipping nothing
-    /// and repeating nothing.
-    pub fn scroll_transcript(&mut self, scroll: TranscriptScroll, panel_height: usize) -> bool {
-        let viewport = self.transcript_viewport(panel_height);
+    /// Takes the panel's own height and width, the same numbers
+    /// [`Self::view`] paints from, so the distance a page moves and the rows
+    /// a page drew are derived from one input and cannot disagree: a page
+    /// lands exactly where the last one stopped, in either direction,
+    /// skipping nothing and repeating nothing.
+    pub fn scroll_transcript(
+        &mut self,
+        scroll: TranscriptScroll,
+        panel_height: usize,
+        panel_width: usize,
+    ) -> bool {
+        let viewport = self.transcript_viewport(panel_height, panel_width);
         let page = viewport.saturating_sub(MARKER_ROWS);
         let distance = match scroll {
             TranscriptScroll::PageBack | TranscriptScroll::PageForward => page,
@@ -325,9 +370,11 @@ impl AiPanelState {
     /// state is not self-evident from geometry alone, so the border is the
     /// one always-visible place to say how to get back out.
     ///
-    /// `panel_height` is the overlay's own height in terminal rows;
-    /// [`Self::transcript_viewport`] turns it into the row budget this
-    /// frame renders and clones. Bounded because a transcript grows without
+    /// `panel_height` and `panel_width` are the overlay's own size in
+    /// terminal cells; [`Self::composer_rows`] turns the width into the
+    /// composer's painted rows and
+    /// [`Self::transcript_viewport`] turns what is left into the row budget
+    /// this frame renders and clones. Bounded because a transcript grows without
     /// limit over a session and rows past what the panel can paint are cut
     /// by the overlay anyway (see [`Transcript::rows_from`]). The window
     /// ends at the newest row unless a scroll key has held it elsewhere, in
@@ -339,8 +386,9 @@ impl AiPanelState {
     /// set of hunks the user scrolls through by cursor, so the window it
     /// needs is wherever that cursor is, not the first screenful.
     #[must_use]
-    pub fn view(&self, panel_height: usize) -> AiPanelView {
-        let visible_rows = self.transcript_viewport(panel_height);
+    pub fn view(&self, panel_height: usize, panel_width: usize) -> AiPanelView {
+        let composer = self.composer_rows(panel_height, panel_width);
+        let visible_rows = self.transcript_rows(panel_height, composer.len());
         // An open review takes over the scrolling rows rather than
         // appending to them: its scroll region is its own hunks and their
         // context, never the whole transcript with a diff somewhere in it
@@ -368,7 +416,7 @@ impl AiPanelState {
             }
         };
         let mut view = AiPanelView::new(if self.focused { FOCUSED_TITLE } else { TITLE })
-            .with_input(self.input.clone())
+            .with_input_rows(composer)
             .with_rows(rows);
         if let Some(usage) = &self.usage {
             view = view.with_usage(vec![Span::plain(usage.render())]);
@@ -428,6 +476,88 @@ const TITLE: &str = "AI Agent";
 /// [`AiPanelState::transcript_viewport`].
 const CHROME_ROWS: usize = 4;
 
+/// The cells the composer's prompt mark and the space after it take on its
+/// first row, and the matching indent every wrapped row after it carries --
+/// so every composer row breaks at the same column.
+///
+/// Named here, where the wrap is computed, rather than beside the mark
+/// `view-surface` paints: a wrap width and a paint width that disagree by
+/// one cell put a character past the frame's edge, which is the whole of
+/// the defect this exists to close. `view-surface`'s own framing tests
+/// measure its painted prefix against this.
+pub const PROMPT_COLS: usize = 2;
+
+/// The cells one composer row has for prompt text, on a panel `panel_width`
+/// terminal columns wide: the framed interior (see
+/// [`interior_text_width`]) less the prompt mark's own columns.
+///
+/// ```
+/// use view_core::native::ai_panel::composer_width;
+/// assert_eq!(composer_width(60), 54);
+/// ```
+#[must_use]
+pub fn composer_width(panel_width: usize) -> usize {
+    let panel = u16::try_from(panel_width).unwrap_or(u16::MAX);
+    usize::from(interior_text_width(panel)).saturating_sub(PROMPT_COLS)
+}
+
+/// The most rows the composer may grow to on a `panel_height`-row panel:
+/// half of it, so a prompt long enough to fill the panel still leaves the
+/// transcript the other half. A longer prompt scrolls inside those rows
+/// (see [`AiPanelState::composer_rows`]) rather than taking more.
+///
+/// Never zero, so the composer is painted at every panel height a frame
+/// can be drawn at.
+fn composer_cap(panel_height: usize) -> usize {
+    (panel_height / 2).max(1)
+}
+
+/// The last `keep` of the rows `input` breaks into at `width` cells each,
+/// in order, always at least one row.
+///
+/// Breaks at the cell rather than at a word boundary, the way a terminal
+/// wraps a long line. The row and column the next character lands on are
+/// then derivable from what has been typed alone, and no keystroke reflows
+/// a row the user has already read -- both of which a greedy word wrap
+/// gives up, for a composer that only ever appends and backspaces.
+///
+/// Cells are the ASCII-doubling upper bound this crate measures text with:
+/// one per ASCII character, two for anything else. Over-wide leaves a
+/// column unused at the frame's edge; under-wide would push a glyph past
+/// it, which is the failure that loses text.
+///
+/// `keep` bounds the allocation, not only the result: a row scrolling off
+/// the top is emptied and reused as the row opening at the bottom, so a
+/// prompt thousands of characters long costs `keep` strings per frame
+/// instead of one per row it would have had. It still walks the whole
+/// input, because where the breaks fall is what decides which rows the
+/// last ones are.
+fn wrap(input: &str, width: usize, keep: usize) -> Vec<String> {
+    let mut rows: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+    rows.push_back(String::new());
+    let mut used = 0_usize;
+    for ch in input.chars() {
+        let cells = 1 + usize::from(!ch.is_ascii());
+        // `used > 0` keeps a glyph wider than the whole row on a row of its
+        // own instead of opening an empty one ahead of it
+        if used > 0 && used + cells > width {
+            let mut next = if rows.len() >= keep {
+                rows.pop_front().unwrap_or_default()
+            } else {
+                String::new()
+            };
+            next.clear();
+            rows.push_back(next);
+            used = 0;
+        }
+        if let Some(row) = rows.back_mut() {
+            row.push(ch);
+        }
+        used += cells;
+    }
+    rows.into()
+}
+
 /// The held window's last row, standing in for the newest rows it is
 /// scrolled away from. It names the key that gets back rather than only
 /// reporting the state: a reader who cannot see the newest line needs the
@@ -480,6 +610,10 @@ mod tests {
     /// scrolling tests below can name the exact lines a page moves by.
     const TEN_ROW_PANEL: usize = 10 + CHROME_ROWS;
 
+    /// A panel wide enough that none of the transcript tests below wrap
+    /// their composer, so the row budget they name is the one they get.
+    const WIDE_PANEL: usize = 60;
+
     /// A panel holding `lines` one-row agent messages, `line 0` upward.
     fn panel_with_lines(lines: usize) -> AiPanelState {
         let mut state = AiPanelState::new();
@@ -495,7 +629,7 @@ mod tests {
 
     fn transcript_texts(state: &AiPanelState, panel_height: usize) -> Vec<String> {
         state
-            .view(panel_height)
+            .view(panel_height, WIDE_PANEL)
             .rows
             .into_iter()
             .map(|row| row.into_iter().map(|span| span.text).collect())
@@ -523,7 +657,7 @@ mod tests {
     #[test]
     fn a_scrolled_back_window_holds_while_the_agent_keeps_talking() {
         let mut state = panel_with_lines(50);
-        assert!(state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL));
+        assert!(state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL));
 
         let held = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(held.first().unwrap(), "Agent: line 31");
@@ -556,7 +690,7 @@ mod tests {
             "a following panel has nothing below it to point at"
         );
 
-        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
 
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
@@ -570,9 +704,9 @@ mod tests {
     #[test]
     fn scrolling_forward_onto_the_tail_starts_following_again() {
         let mut state = panel_with_lines(50);
-        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
 
-        assert!(state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL));
+        assert!(state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL, WIDE_PANEL));
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
             "Agent: line 49"
@@ -599,7 +733,7 @@ mod tests {
         let following = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(following.first().unwrap(), "Agent: line 40");
 
-        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
         let held = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(
             held.last().unwrap(),
@@ -612,7 +746,7 @@ mod tests {
             "the page must stop on the line directly above the one it came from"
         );
 
-        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
         let further = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(
             further[..further.len() - 1].last().unwrap(),
@@ -620,7 +754,7 @@ mod tests {
             "and so must the next one"
         );
 
-        state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageForward, TEN_ROW_PANEL, WIDE_PANEL);
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL),
             held,
@@ -633,7 +767,7 @@ mod tests {
     #[test]
     fn a_half_page_moves_half_of_what_a_page_moves() {
         let mut state = panel_with_lines(50);
-        state.scroll_transcript(TranscriptScroll::HalfPageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::HalfPageBack, TEN_ROW_PANEL, WIDE_PANEL);
 
         let held = transcript_texts(&state, TEN_ROW_PANEL);
         assert_eq!(held.first().unwrap(), "Agent: line 35");
@@ -647,7 +781,7 @@ mod tests {
     #[test]
     fn a_window_the_panel_grew_past_stops_claiming_there_is_more_below() {
         let mut state = panel_with_lines(20);
-        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL);
+        state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL);
         assert_eq!(
             transcript_texts(&state, TEN_ROW_PANEL).last().unwrap(),
             MORE_BELOW
@@ -661,7 +795,7 @@ mod tests {
             "the whole transcript fits now, so nothing is below it: {texts:?}"
         );
         assert!(
-            !state.scroll_transcript(TranscriptScroll::PageForward, grown),
+            !state.scroll_transcript(TranscriptScroll::PageForward, grown, WIDE_PANEL),
             "and the key that follows the tail again finds it already there"
         );
     }
@@ -673,7 +807,7 @@ mod tests {
     fn a_transcript_shorter_than_the_panel_keeps_following() {
         let mut state = panel_with_lines(3);
 
-        assert!(!state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL));
+        assert!(!state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL));
 
         state
             .transcript
@@ -690,17 +824,202 @@ mod tests {
     #[test]
     fn the_transcript_window_gives_up_a_row_to_the_usage_line_and_the_banner() {
         let mut state = AiPanelState::new();
-        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL), 10);
+        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL), 10);
 
         state.usage = Some(UsageStats {
             used: 1,
             size: 2,
             cost: None,
         });
-        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL), 9);
+        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL), 9);
 
         state.local_error = Some("gone".to_string());
-        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL), 8);
+        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL), 8);
+    }
+
+    /// Where the next character lands, as the composer's own rows say it:
+    /// the last row (the tail is never cut) and its width in cells.
+    fn cursor(rows: &[String]) -> (usize, usize) {
+        let last = rows.last().map(String::as_str).unwrap_or_default();
+        (
+            rows.len().saturating_sub(1),
+            last.chars().map(|ch| 1 + usize::from(!ch.is_ascii())).sum(),
+        )
+    }
+
+    /// The reported complaint, as an assertion: past the panel's width the
+    /// prompt stopped showing, so the user was typing into a row nothing
+    /// painted. Every character typed is now on a row, and the tail is on
+    /// the last of them.
+    #[test]
+    fn an_input_past_the_panels_width_keeps_every_character_and_its_tail() {
+        let width = composer_width(WIDE_PANEL);
+        let typed: String = (0..width * 3 + 7)
+            .map(|i| char::from(b'a' + (i % 26) as u8))
+            .collect();
+        let mut state = AiPanelState::new();
+        state.input.clone_from(&typed);
+
+        let rows = state.view(ROOM, WIDE_PANEL).input;
+
+        assert_eq!(rows.concat(), typed, "no character is dropped by the wrap");
+        assert!(rows.len() > 1, "a prompt past the width takes more rows");
+        assert!(
+            rows.iter().all(|row| row.chars().count() <= width),
+            "no row is wider than the panel paints: {rows:?}"
+        );
+        assert!(
+            rows.last()
+                .is_some_and(|last| typed.ends_with(last.as_str())),
+            "the last row holds the tail: {rows:?}"
+        );
+        assert_eq!(cursor(&rows), (3, 7), "the cursor is past the tail");
+    }
+
+    /// The wrap boundary itself, where an off-by-one puts the cursor on a
+    /// row that is not there: a row exactly full keeps the cursor on its
+    /// own last column, and the next character opens the next row.
+    #[test]
+    fn the_composers_cursor_tracks_the_input_across_the_wrap_boundary() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = AiPanelState::new();
+
+        state.input = "x".repeat(width - 1);
+        assert_eq!(cursor(&state.view(ROOM, WIDE_PANEL).input), (0, width - 1));
+
+        state.input = "x".repeat(width);
+        assert_eq!(
+            cursor(&state.view(ROOM, WIDE_PANEL).input),
+            (0, width),
+            "a row exactly full is still one row"
+        );
+
+        state.input = "x".repeat(width + 1);
+        assert_eq!(
+            cursor(&state.view(ROOM, WIDE_PANEL).input),
+            (1, 1),
+            "the character past it opens the next row"
+        );
+    }
+
+    /// A wide glyph is measured as two cells on the way in, so a row of
+    /// them breaks at half the count rather than painting past the frame's
+    /// right edge. Over-wide is the safe direction and the one this crate
+    /// takes everywhere it measures text without a width table.
+    #[test]
+    fn a_wide_glyph_composer_row_never_measures_past_the_frame() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = AiPanelState::new();
+        state.input = "界".repeat(width);
+
+        let rows = state.view(ROOM, WIDE_PANEL).input;
+
+        assert_eq!(rows.concat(), state.input, "no glyph is dropped");
+        for row in &rows {
+            let cells: usize = row.chars().map(|ch| 1 + usize::from(!ch.is_ascii())).sum();
+            assert!(cells <= width, "a row measured {cells} cells over {width}");
+        }
+    }
+
+    /// The composer's own ceiling: a prompt long enough to fill the panel
+    /// takes at most half of it and scrolls inside those rows, so the
+    /// transcript is never squeezed to nothing and the tail stays last.
+    #[test]
+    fn a_very_long_prompt_stops_at_half_the_panel_and_scrolls_inside_it() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = AiPanelState::new();
+        // a repeating pattern rather than one character, so a row carrying
+        // anything but its own share of the input is visible in the joined
+        // text rather than hidden by every character matching
+        state.input = (0..width * TEN_ROW_PANEL * 2)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect();
+
+        let rows = state.view(TEN_ROW_PANEL, WIDE_PANEL).input;
+
+        assert_eq!(rows.len(), TEN_ROW_PANEL / 2, "capped at half the panel");
+        assert!(
+            state.input.ends_with(&rows.concat()),
+            "the rows kept are the last ones, so the cursor is still on screen"
+        );
+        assert!(
+            rows.iter().all(|row| row.chars().count() == width),
+            "and each of them is a full row of the wrap: {rows:?}"
+        );
+        assert!(
+            state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL) > 0,
+            "and the transcript still has room"
+        );
+    }
+
+    /// A composer that grew takes its rows from the transcript's window,
+    /// not from the panel's frame: a window still counting them would have
+    /// its oldest rows cut by the overlay instead, which is a scroll
+    /// nobody asked for.
+    #[test]
+    fn a_grown_composer_costs_the_transcript_window_its_rows() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = panel_with_lines(50);
+        assert_eq!(state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL), 10);
+
+        state.input = "z".repeat(width * 2 + 1);
+        assert_eq!(
+            state.transcript_viewport(TEN_ROW_PANEL, WIDE_PANEL),
+            8,
+            "three composer rows cost the two the frame did not already count"
+        );
+
+        let texts = transcript_texts(&state, TEN_ROW_PANEL);
+        assert_eq!(texts.len(), 8);
+        assert_eq!(
+            texts.last().unwrap(),
+            "Agent: line 49",
+            "a following panel still ends on its newest line"
+        );
+    }
+
+    /// A held window is the user's own position, and a composer growing
+    /// under it must not move it: the rows it drops are the newest, the
+    /// same end a shorter panel drops, never the top the reader is on.
+    #[test]
+    fn a_held_window_does_not_jump_when_the_composer_grows() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = panel_with_lines(50);
+        assert!(state.scroll_transcript(TranscriptScroll::PageBack, TEN_ROW_PANEL, WIDE_PANEL));
+        let held_top = transcript_texts(&state, TEN_ROW_PANEL)
+            .first()
+            .cloned()
+            .unwrap();
+
+        state.input = "z".repeat(width * 2 + 1);
+        let grown = transcript_texts(&state, TEN_ROW_PANEL);
+
+        assert_eq!(
+            grown.first().unwrap(),
+            &held_top,
+            "the row the reader is on is still the window's first"
+        );
+        assert_eq!(grown.len(), 8, "the window shrank by the composer's rows");
+        assert_eq!(
+            grown.last().unwrap(),
+            MORE_BELOW,
+            "and still says it is held"
+        );
+    }
+
+    /// The composer shrinking gives the rows back, so a cleared prompt
+    /// leaves the transcript exactly the window it had before anything was
+    /// typed.
+    #[test]
+    fn clearing_the_composer_gives_the_transcript_its_rows_back() {
+        let width = composer_width(WIDE_PANEL);
+        let mut state = panel_with_lines(50);
+        let before = transcript_texts(&state, TEN_ROW_PANEL);
+
+        state.input = "z".repeat(width * 2 + 1);
+        state.input.clear();
+
+        assert_eq!(transcript_texts(&state, TEN_ROW_PANEL), before);
     }
 
     #[test]
@@ -720,9 +1039,9 @@ mod tests {
     fn an_empty_panel_views_as_an_empty_transcript_with_the_typed_input() {
         let mut state = AiPanelState::new();
         state.input = "hello".to_string();
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(view.title, TITLE);
-        assert_eq!(view.input, "hello");
+        assert_eq!(view.input, vec!["hello".to_string()]);
         assert!(view.rows.is_empty());
         assert!(
             view.pending_permission.is_empty(),
@@ -742,7 +1061,7 @@ mod tests {
     fn a_local_error_renders_as_the_panels_own_banner_row() {
         let mut state = AiPanelState::new();
         state.local_error = Some("the agent exited (signal: 9)".to_string());
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(
             view.local_error,
             vec![vec![Span::plain(format!(
@@ -761,14 +1080,14 @@ mod tests {
         state.local_error = Some("gone".to_string());
         state.focused = true;
         assert_eq!(
-            state.view(ROOM).local_error,
+            state.view(ROOM, WIDE_PANEL).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone -- {DISMISS_KEY_HINT}"
             ))]]
         );
         state.focused = false;
         assert_eq!(
-            state.view(ROOM).local_error,
+            state.view(ROOM, WIDE_PANEL).local_error,
             vec![vec![Span::plain(format!(
                 "Error: gone -- {DISMISS_VERB_HINT}"
             ))]]
@@ -782,9 +1101,9 @@ mod tests {
     #[test]
     fn an_entered_panel_announces_itself_in_its_title_even_while_idle() {
         let mut state = AiPanelState::new();
-        assert_eq!(state.view(ROOM).title, TITLE);
+        assert_eq!(state.view(ROOM, WIDE_PANEL).title, TITLE);
         state.focused = true;
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(view.title, FOCUSED_TITLE);
         assert!(
             view.title.contains("Esc"),
@@ -812,7 +1131,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(
             view.pending_permission,
             vec![
@@ -840,7 +1159,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(
             view.pending_permission.last(),
             Some(&vec![Span::plain(ENTER_HINT)]),
@@ -866,7 +1185,7 @@ mod tests {
                 kind: crate::native::ai_event::PermissionOptionKind::AllowOnce,
             }],
         ));
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert!(
             view.pending_permission
                 .iter()
@@ -880,7 +1199,7 @@ mod tests {
     fn what_the_session_has_spent_is_on_the_panel_once_the_agent_reports_it() {
         let mut state = AiPanelState::new();
         assert!(
-            state.view(ROOM).usage.is_empty(),
+            state.view(ROOM, WIDE_PANEL).usage.is_empty(),
             "nothing is claimed about a session that has reported nothing"
         );
 
@@ -894,7 +1213,7 @@ mod tests {
         });
 
         assert_eq!(
-            state.view(ROOM).usage,
+            state.view(ROOM, WIDE_PANEL).usage,
             vec![vec![Span::plain("context 100/1000, cost 0.05 USD")]]
         );
     }
@@ -908,7 +1227,7 @@ mod tests {
         state
             .transcript
             .append_or_extend(Some("2"), "hello", TranscriptRole::Agent);
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(view.rows.len(), 2);
         assert_eq!(view.rows[0], vec![Span::plain("You: hi")]);
         assert_eq!(view.rows[1], vec![Span::plain("Agent: hello")]);
@@ -923,7 +1242,7 @@ mod tests {
             ToolCallStatus::InProgress,
             None,
         );
-        let view = state.view(ROOM);
+        let view = state.view(ROOM, WIDE_PANEL);
         assert_eq!(view.rows, vec![vec![Span::plain("running: Read file")]]);
     }
 }

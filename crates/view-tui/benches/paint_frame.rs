@@ -398,9 +398,10 @@ fn bench_paint_frame_agent_composer(c: &mut Criterion) {
     let mut typed = 0_u32;
     let composer_frame =
         |model: &mut Model, shadow: &mut Shadow, backend: &mut _, typed: &mut u32| {
-            // the composer does not wrap, so the input is cleared before it
-            // reaches the panel's width rather than changing the shape of
-            // the frame being measured
+            // the input is cleared before it reaches the panel's width, so
+            // every measured frame is the one-row composer edit this row
+            // exists to price rather than a wrap moving the transcript
+            // boundary
             *typed += 1;
             if (*typed).is_multiple_of(20) {
                 model.ai_panel_mut().input.clear();

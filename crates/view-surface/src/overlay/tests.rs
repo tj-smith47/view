@@ -465,7 +465,7 @@ fn the_painted_ai_panel_keeps_the_newest_transcript_row_at_every_height() {
     }
 
     for height in [6_u16, 9, 12, 24, 40] {
-        let kind = LayerKind::Ai(state.view(usize::from(height)));
+        let kind = LayerKind::Ai(state.view(usize::from(height), 60));
         let text: Vec<String> = rows(60, height, &kind, BorderSet::ASCII)
             .lines
             .iter()
@@ -495,7 +495,7 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         rows(
             60,
             height,
-            &LayerKind::Ai(state.view(usize::from(height))),
+            &LayerKind::Ai(state.view(usize::from(height), 60)),
             BorderSet::ASCII,
         )
         .lines
@@ -516,11 +516,11 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
         }
 
         let mut back = transcript_lines(&state, height);
-        while state.scroll_transcript(TranscriptScroll::PageBack, usize::from(height)) {
+        while state.scroll_transcript(TranscriptScroll::PageBack, usize::from(height), 60) {
             back.extend(transcript_lines(&state, height));
         }
         let mut forward = transcript_lines(&state, height);
-        while state.scroll_transcript(TranscriptScroll::PageForward, usize::from(height)) {
+        while state.scroll_transcript(TranscriptScroll::PageForward, usize::from(height), 60) {
             forward.extend(transcript_lines(&state, height));
         }
 
@@ -542,6 +542,64 @@ fn paging_a_held_ai_panel_reaches_every_line_at_every_height() {
             "paging all the way down ends on the newest line, following again"
         );
     }
+}
+
+/// The composer half of the same path the dogfood complaint travelled: a
+/// prompt longer than the panel is wide reaches the painted frame whole,
+/// wrapped under its own prompt mark, with its tail on the last of its
+/// rows. Painted across a range of widths because the panel wraps at the
+/// column this module frames to -- a wrap a cell out from the paint is
+/// exactly how the tail goes missing again.
+#[test]
+fn a_painted_ai_panel_wraps_a_long_prompt_and_keeps_its_tail() {
+    use view_core::native::ai_panel::AiPanelState;
+    for width in [20_u16, 40, 60, 120] {
+        let typed: String = (0..usize::from(width) * 3)
+            .map(|i| char::from(b'a' + u8::try_from(i % 26).unwrap_or(0)))
+            .collect();
+        let mut state = AiPanelState::new();
+        state.input.clone_from(&typed);
+
+        let view = state.view(24, usize::from(width));
+        let tail = view.input.last().cloned().unwrap_or_default();
+        let kind = LayerKind::Ai(view);
+        let text: Vec<String> = rows(width, 24, &kind, BorderSet::ASCII)
+            .lines
+            .iter()
+            .map(|line| line_text(line))
+            .collect();
+
+        // the top edge carries the title, whose own letters are not typed
+        let painted: String = text
+            .iter()
+            .skip(1)
+            .flat_map(|line| line.chars().filter(char::is_ascii_lowercase))
+            .collect();
+        assert_eq!(
+            painted, typed,
+            "a {width}-wide panel painted every character typed: {text:?}"
+        );
+        assert!(
+            typed.ends_with(&tail) && !tail.is_empty(),
+            "the composer's last row is the prompt's own tail"
+        );
+        assert!(
+            text.iter().any(|line| line.contains(&tail)),
+            "a {width}-wide panel paints that tail, cursor and all: {text:?}"
+        );
+    }
+}
+
+/// The prompt mark this module paints and the columns `view-core` wraps the
+/// composer to are the same two cells. They are named in different crates
+/// (the wrap needs the number, the paint needs the glyph), and a pair that
+/// drifted would break every composer row one cell from where it is drawn.
+#[test]
+fn the_painted_prompt_mark_is_as_wide_as_the_composer_wrap_reserves() {
+    assert_eq!(
+        format!("{PROMPT_MARK} ").chars().count(),
+        view_core::native::ai_panel::PROMPT_COLS
+    );
 }
 
 /// The header rows the panel's own window arithmetic deliberately does not
@@ -572,7 +630,7 @@ fn a_permission_prompt_costs_the_transcripts_oldest_rows_not_its_newest() {
         }],
     ));
 
-    let kind = LayerKind::Ai(state.view(24));
+    let kind = LayerKind::Ai(state.view(24, 60));
     let text: Vec<String> = rows(60, 24, &kind, BorderSet::ASCII)
         .lines
         .iter()

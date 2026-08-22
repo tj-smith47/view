@@ -743,7 +743,7 @@ fn speculated_layer(model: &Model, grid: (u16, u16), offset: u16) -> Option<Laye
 /// the terminal's own tier, resolved once here rather than per painter.
 fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
     let cells = model.overlay_rect(open);
-    let kind = layer_kind(model, &open.kind, cells.height)?;
+    let kind = layer_kind(model, &open.kind, cells.height, cells.width)?;
     Some(Layer::new(
         Rect::new(cells.row, cells.col, cells.width, cells.height),
         kind,
@@ -764,7 +764,7 @@ fn native_layer(model: &Model, open: &Overlay) -> Option<Layer> {
 /// a unit marker, not a payload: the session state it renders lives in
 /// [`Model::ai_panel`] instead, so that arm is the one place this function
 /// reaches past the overlay stack for what to paint.
-fn layer_kind(model: &Model, kind: &OverlayKind, height: u16) -> Option<LayerKind> {
+fn layer_kind(model: &Model, kind: &OverlayKind, height: u16, width: u16) -> Option<LayerKind> {
     match kind {
         OverlayKind::Prompt(state) => Some(LayerKind::Prompt(state.view())),
         OverlayKind::Picker(state) => Some(LayerKind::Picker(state.view())),
@@ -777,10 +777,16 @@ fn layer_kind(model: &Model, kind: &OverlayKind, height: u16) -> Option<LayerKin
         // the confirm prompt's own layer already draws; the busy modal
         // carries no field that shape does not
         OverlayKind::EngineBusy(state) => Some(LayerKind::Prompt(state.view())),
-        // The panel's own resolved height, not the terminal's: the panel
-        // derives its transcript window from it, and a window sized to the
-        // whole terminal would page past rows the panel never showed.
-        OverlayKind::Ai => Some(LayerKind::Ai(model.ai_panel().view(usize::from(height)))),
+        // The panel's own resolved size, not the terminal's: the panel
+        // derives its transcript window from the height, and a window sized
+        // to the whole terminal would page past rows the panel never
+        // showed. The width is what its composer wraps at, and one taken
+        // from the terminal would break the prompt past the frame's edge.
+        OverlayKind::Ai => Some(LayerKind::Ai(
+            model
+                .ai_panel()
+                .view(usize::from(height), usize::from(width)),
+        )),
         _ => None,
     }
 }
